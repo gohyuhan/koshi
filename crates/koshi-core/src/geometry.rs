@@ -97,6 +97,59 @@ impl Size {
             row_count: self.row_count.min(other_size.row_count),
         }
     }
+
+    /// Whether `self` fits inside `container_size`: each axis of `self` is at
+    /// most the same axis of `container_size`. `22×10` fits inside `22×10` and
+    /// `80×22`, and does not fit inside `21×40` or `80×9`.
+    #[must_use]
+    pub fn can_fit_inside(self, container_size: Size) -> bool {
+        self.column_count <= container_size.column_count
+            && self.row_count <= container_size.row_count
+    }
+}
+
+/// The cells a layout needs on each axis. An axis can be larger than
+/// `u16::MAX`, the largest axis a [`Size`] holds: a `65534`-column pane
+/// minimum plus a 2-column border needs `65536` columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequiredSize {
+    /// Columns needed.
+    pub column_count: u32,
+    /// Rows needed.
+    pub row_count: u32,
+}
+
+impl RequiredSize {
+    /// The per-axis sum of the two sizes. `20×6 plus 2×4` → `22×10`, and
+    /// `65534×6 plus 2×4` → `65536×10`.
+    #[must_use]
+    pub fn from_size_sum(first_size: Size, second_size: Size) -> RequiredSize {
+        RequiredSize {
+            column_count: u32::from(first_size.column_count) + u32::from(second_size.column_count),
+            row_count: u32::from(first_size.row_count) + u32::from(second_size.row_count),
+        }
+    }
+
+    /// `self` as a [`Size`] when each axis of `self` is at most the same axis
+    /// of `container_size`, else `None`. `22×10` inside `80×22` →
+    /// `Some(22×10)`, and `65536×10` inside `65535×22` → `None`.
+    #[must_use]
+    pub fn fit_inside(self, container_size: Size) -> Option<Size> {
+        let fitted_size = Size {
+            column_count: u16::try_from(self.column_count).ok()?,
+            row_count: u16::try_from(self.row_count).ok()?,
+        };
+        fitted_size
+            .can_fit_inside(container_size)
+            .then_some(fitted_size)
+    }
+
+    /// Whether each axis of `self` is at most the same axis of
+    /// `container_size`: [`fit_inside`](Self::fit_inside) gives a size.
+    #[must_use]
+    pub fn can_fit_inside(self, container_size: Size) -> bool {
+        self.fit_inside(container_size).is_some()
+    }
 }
 
 /// The pane region a client reports for the tab it views.
@@ -166,6 +219,14 @@ impl AxisPercent {
     pub fn get_percent(self) -> u8 {
         self.0
     }
+}
+
+/// The cells that `percent` percent of an axis `axis_cell_count` cells long
+/// takes, rounded down. A `percent` above `100` counts as `100`. The result is
+/// at most `axis_cell_count`. `60` percent of `22` cells → `13`.
+#[must_use]
+pub fn compute_percent_cell_count(axis_cell_count: u16, percent: u8) -> u16 {
+    (u32::from(axis_cell_count) * u32::from(percent.min(100)) / 100) as u16
 }
 
 /// The size a floating pane asks for: one [`FloatingPaneDimension`] per axis.

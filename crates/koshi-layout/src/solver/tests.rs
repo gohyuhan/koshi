@@ -1246,7 +1246,7 @@ fn border_inclusive_min_adds_one_cell_per_side() {
     };
     assert_eq!(
         compute_border_inclusive_minimum(content_minimum_size),
-        Size {
+        RequiredSize {
             column_count: 4,
             row_count: 3
         }
@@ -1351,7 +1351,7 @@ fn an_empty_directional_split_solves_to_no_panes_without_panicking() {
     assert!(!layout_result.is_every_pane_suppressed);
     assert_eq!(
         compute_minimum_size(&empty_layout_tree, build_pane_sizing(0)),
-        Size {
+        RequiredSize {
             column_count: 0,
             row_count: 0
         }
@@ -1369,7 +1369,7 @@ fn an_empty_stack_solves_to_no_panes_without_panicking() {
     assert!(layout_result.stack_headers.is_empty());
     assert_eq!(
         compute_minimum_size(&empty_layout_tree, build_pane_sizing(0)),
-        Size {
+        RequiredSize {
             column_count: 0,
             row_count: 0
         }
@@ -1473,18 +1473,45 @@ fn fits_accepts_a_zero_rect_for_an_empty_split() {
 }
 
 #[test]
-fn border_inclusive_min_saturates_at_u16_max() {
+fn border_inclusive_min_counts_past_u16_max() {
     let content_minimum_size = Size {
         column_count: u16::MAX,
         row_count: u16::MAX,
     };
     assert_eq!(
         compute_border_inclusive_minimum(content_minimum_size),
-        Size {
-            column_count: u16::MAX,
-            row_count: u16::MAX,
+        RequiredSize {
+            column_count: 65_537,
+            row_count: 65_537,
         }
     );
+}
+
+#[test]
+fn a_leaf_whose_bordered_minimum_passes_u16_max_is_suppressed_in_the_widest_tab() {
+    let pane_id = PaneId::new();
+    let layout_tree = LayoutNode::Pane(pane_id);
+    let widest_tab_rect = build_cell_rect(0, 0, u16::MAX, 24);
+    let pane_sizing = PaneSizing {
+        minimum_size: Size {
+            column_count: u16::MAX - 1,
+            row_count: 1,
+        },
+        gap_cell_count: 0,
+    };
+
+    // 65534 content columns plus a 2-column border need 65536 columns.
+    assert!(!is_layout_within_rect(
+        &layout_tree,
+        widest_tab_rect,
+        pane_sizing
+    ));
+    let layout_result = solve_layout_with_sizing(&layout_tree, widest_tab_rect, pane_sizing);
+    assert_eq!(
+        layout_result.pane_rects,
+        vec![(pane_id, Rect::build_empty_at_origin())]
+    );
+    assert_eq!(layout_result.suppressed_pane_ids, vec![pane_id]);
 }
 
 #[test]
@@ -2333,8 +2360,8 @@ fn min_size_and_fits_count_the_gap() {
     for gap_cell_count in [0u16, 2] {
         assert_eq!(
             compute_minimum_size(&layout_tree, build_pane_sizing(gap_cell_count)),
-            Size {
-                column_count: 8 + gap_cell_count,
+            RequiredSize {
+                column_count: 8 + u32::from(gap_cell_count),
                 row_count: 3,
             }
         );
@@ -2432,7 +2459,7 @@ fn a_stack_places_no_gap_between_its_members() {
 }
 
 #[test]
-fn min_size_saturates_when_the_gap_fills_the_axis() {
+fn min_size_counts_every_gap_cell_past_u16_max() {
     let (left_pane_id, middle_pane_id, right_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
     let layout_tree = build_equal_split_node(
@@ -2440,13 +2467,20 @@ fn min_size_saturates_when_the_gap_fills_the_axis() {
         &[left_pane_id, middle_pane_id, right_pane_id],
     );
 
+    // Three bordered panes need four columns each, and two gaps of 65535 sit
+    // between them: 12 + 131070.
     assert_eq!(
         compute_minimum_size(&layout_tree, build_pane_sizing(u16::MAX)),
-        Size {
-            column_count: u16::MAX,
+        RequiredSize {
+            column_count: 131_082,
             row_count: 3,
         }
     );
+    assert!(!is_layout_within_rect(
+        &layout_tree,
+        build_cell_rect(0, 0, u16::MAX, 24),
+        build_pane_sizing(u16::MAX)
+    ));
 }
 
 #[test]
@@ -2765,7 +2799,7 @@ fn min_size_of_a_stack_counts_one_header_row_per_collapsed_member() {
     // plus the active member's three rows make five.
     assert_eq!(
         compute_minimum_size(&layout_tree, build_pane_sizing(0)),
-        Size {
+        RequiredSize {
             column_count: 4,
             row_count: 5
         }
@@ -2788,7 +2822,7 @@ fn min_size_of_a_stack_counts_one_header_row_per_collapsed_member() {
     // A stack places no gap between its members.
     assert_eq!(
         compute_minimum_size(&layout_tree, build_pane_sizing(2)),
-        Size {
+        RequiredSize {
             column_count: 4,
             row_count: 5
         }

@@ -300,6 +300,42 @@ fn a_shrink_mirrors_the_neighbors_grow_on_the_same_border() {
 }
 
 #[test]
+fn a_donor_whose_floor_passes_u16_max_has_no_spare_cell() {
+    let (left_pane_id, right_pane_id) = (PaneId::new(), PaneId::new());
+    let layout_tree = build_two_pane_split(SplitDirection::Horizontal, left_pane_id, right_pane_id);
+    let widest_layout_area = Rect::from_size_at_origin(Size {
+        column_count: u16::MAX,
+        row_count: 24,
+    });
+    let pane_sizing = PaneSizing {
+        minimum_size: Size {
+            column_count: u16::MAX - 1,
+            row_count: 1,
+        },
+        gap_cell_count: 0,
+    };
+
+    // Each pane needs 65536 columns with its border: the right pane donates
+    // from a floor of 65536.
+    let resize_error = resize_layout_with_sizing(
+        &layout_tree,
+        widest_layout_area,
+        left_pane_id,
+        Direction::Right,
+        1,
+        pane_sizing,
+    )
+    .unwrap_err();
+    assert_eq!(
+        resize_error,
+        ResizeError::MinimumSizeExceeded {
+            requested_cell_count: 1,
+            spare_cell_count: 0,
+        }
+    );
+}
+
+#[test]
 fn shrink_blocked_by_the_panes_own_floor() {
     let (left_pane_id, right_pane_id) = (PaneId::new(), PaneId::new());
     let layout_tree = build_two_pane_split(SplitDirection::Horizontal, left_pane_id, right_pane_id);

@@ -3364,8 +3364,11 @@ fn fetch_session_description(
 
 /// Read the endpoint file of the session `session_id` of this user's in
 /// `runtime_directory`, and ask the session at the address and with the token
-/// it names, ending the exchange by `answer_deadline`. Hands back the endpoint
-/// file read, and the answer. An endpoint file that is gone answers
+/// it names, ending the exchange by `answer_deadline`. A session that refuses
+/// that token is asked once more, as
+/// [`run_session_exchange_with_token_wait`](ipc_client::run_session_exchange_with_token_wait)
+/// states. Hands back the endpoint file the last ask used, and the answer. An
+/// endpoint file that is gone answers
 /// [`CliError::SessionNotFound`]. The endpoint file a koshi 0.1.0 window wrote
 /// is removed while
 /// [`is_koshi_0_1_0_window_closed`](ipc_client::is_koshi_0_1_0_window_closed)
@@ -3379,12 +3382,21 @@ fn fetch_own_session_description(
 ) -> (Option<EndpointFile>, Result<SessionOverview, CliError>) {
     match load_session_endpoint_file(runtime_directory, session_id) {
         Ok(Some(endpoint_file)) => {
-            let description_answer = ipc_client::fetch_session_overview_from_endpoint(
-                &endpoint_file,
-                session_id,
-                Some(answer_deadline),
-            );
-            (Some(endpoint_file), description_answer)
+            let (described_endpoint_file, description_answer) =
+                ipc_client::run_session_exchange_with_token_wait(
+                    runtime_directory,
+                    session_id,
+                    endpoint_file,
+                    Some(answer_deadline),
+                    |session_endpoint| {
+                        ipc_client::fetch_session_overview_from_endpoint(
+                            session_endpoint,
+                            session_id,
+                            Some(answer_deadline),
+                        )
+                    },
+                );
+            (Some(described_endpoint_file), description_answer)
         }
         Ok(None) => (
             None,

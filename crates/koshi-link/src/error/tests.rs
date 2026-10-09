@@ -64,6 +64,13 @@ fn list_every_error_class() -> Vec<(CliError, &'static str, i32)> {
             4,
         ),
         (
+            CliError::ConnectionTokenRefused {
+                detail: "the token presented does not match the router's".into(),
+            },
+            "IPC unavailable: the token presented does not match the router's",
+            4,
+        ),
+        (
             CliError::PreviousReleaseServer {
                 detail: "the server answered in the format of koshi 0.4.0 or older, which this \
                          koshi cannot talk to"

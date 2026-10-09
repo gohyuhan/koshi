@@ -18,7 +18,7 @@
 use std::collections::{HashMap, HashSet};
 
 use koshi_core::command::PanePlacementAnchor;
-use koshi_core::geometry::{Direction, Point, Rect, Size, SplitDirection};
+use koshi_core::geometry::{Direction, Point, Rect, RequiredSize, Size, SplitDirection};
 use koshi_core::ids::PaneId;
 use thiserror::Error;
 
@@ -93,7 +93,7 @@ pub enum PlacementError {
         available_size.row_count
     )]
     DestinationTooSmall {
-        required_size: Size,
+        required_size: RequiredSize,
         available_size: Size,
     },
 }

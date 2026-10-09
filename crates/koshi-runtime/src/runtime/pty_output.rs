@@ -49,6 +49,13 @@ impl Server {
     /// any device-query replies the chunk produced back into the pane's PTY,
     /// and mark the screen stale.
     ///
+    /// Before the chunk is read, the engine takes the cell size of the tab
+    /// that holds `pane_id`
+    /// ([`Session::get_tab_cell_size`](koshi_session::session::state::Session::get_tab_cell_size)),
+    /// or the session's floating cell size when `pane_id` is a floating pane
+    /// ([`Session::get_floating_cell_size`](koshi_session::session::state::Session::get_floating_cell_size)).
+    /// With no such cell size, the engine keeps its own.
+    ///
     /// A `pane_id` with no engine — the pane closed while the chunk waited in
     /// the inbox — is ignored: no engine is touched, nothing is published, and
     /// nothing is invalidated. A reply write that fails is logged at error
@@ -70,11 +77,13 @@ impl Server {
     /// Shell-integration facts become command lifecycle events in marker order.
     pub fn handle_pty_output(&mut self, pane_id: PaneId, output_bytes: &[u8]) {
         let terminal_cell_size = self.session_by_id.values().find_map(|session| {
-            let tab = session
-                .tabs
-                .values()
-                .find(|tab| tab.get_layout_tree().has_pane(pane_id))?;
-            session.get_tab_cell_size(tab.get_tab_id())
+            if let Some(tab) = session.find_tab_by_pane_id(pane_id) {
+                return session.get_tab_cell_size(tab.get_tab_id());
+            }
+            if session.floating_set.has_pane(pane_id) {
+                return session.get_floating_cell_size();
+            }
+            None
         });
         let Some(terminal_engine) = self.terminal_engine_by_pane_id.get_mut(&pane_id) else {
             return;

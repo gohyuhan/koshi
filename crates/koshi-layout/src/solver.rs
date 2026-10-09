@@ -27,7 +27,9 @@
 //! each: a 101-column 50/50 split solves to 50 and 51. When no flexible child
 //! exists to absorb slack, the last child takes it.
 
-use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
+use koshi_core::geometry::{
+    compute_percent_cell_count, Point, Rect, RequiredSize, Size, SplitDirection,
+};
 use koshi_core::ids::PaneId;
 use serde::{Deserialize, Serialize};
 
@@ -229,18 +231,19 @@ pub fn is_layout_within_rect(
     layout_rect: Rect,
     pane_sizing: PaneSizing,
 ) -> bool {
-    let minimum_size = compute_minimum_size(layout_tree, pane_sizing);
-    minimum_size.column_count <= layout_rect.size.column_count
-        && minimum_size.row_count <= layout_rect.size.row_count
+    compute_minimum_size(layout_tree, pane_sizing).can_fit_inside(layout_rect.size)
 }
 
-/// `content_minimum_size` plus one border cell per side on each axis,
-/// saturating at `u16::MAX`. A 2 by 1 content minimum is 4 by 3.
-fn compute_border_inclusive_minimum(content_minimum_size: Size) -> Size {
-    Size {
-        column_count: content_minimum_size.column_count.saturating_add(2),
-        row_count: content_minimum_size.row_count.saturating_add(2),
-    }
+/// `content_minimum_size` plus one border cell per side on each axis. A 2 by
+/// 1 content minimum is 4 by 3, and a 65534 by 1 one is 65536 by 3.
+fn compute_border_inclusive_minimum(content_minimum_size: Size) -> RequiredSize {
+    RequiredSize::from_size_sum(
+        content_minimum_size,
+        Size {
+            column_count: 2,
+            row_count: 2,
+        },
+    )
 }
 
 /// The smallest rectangle this subtree can be solved into.
@@ -252,9 +255,11 @@ fn compute_border_inclusive_minimum(content_minimum_size: Size) -> Size {
 /// largest child floor across it; a slot's declared floor (`Minimum` primary
 /// or `minimum_cell_count` overlay) raises that child's share of the sum. A stack needs its
 /// widest member, one header row per collapsed member, plus the active
-/// member's rows, and places no gap. Every sum saturates at `u16::MAX`.
+/// member's rows, and places no gap. Every sum saturates at `u32::MAX`. A
+/// minimum with an axis above `u16::MAX` fits no rect: three 2 by 1 panes
+/// side by side with a gap of 65535 need 131082 columns.
 #[must_use]
-pub fn compute_minimum_size(layout_node: &LayoutNode, pane_sizing: PaneSizing) -> Size {
+pub fn compute_minimum_size(layout_node: &LayoutNode, pane_sizing: PaneSizing) -> RequiredSize {
     match layout_node {
         LayoutNode::Pane(_) => compute_border_inclusive_minimum(pane_sizing.minimum_size),
         LayoutNode::Split(split) => match split.direction {
@@ -262,11 +267,13 @@ pub fn compute_minimum_size(layout_node: &LayoutNode, pane_sizing: PaneSizing) -
                 let is_horizontal_split = split.direction == SplitDirection::Horizontal;
                 // Floors sum along the split axis; the cross axis takes the
                 // largest child minimum.
-                let mut split_axis_cell_count: u16 = 0;
-                let mut cross_axis_cell_count: u16 = 0;
+                let mut split_axis_cell_count: u32 = 0;
+                let mut cross_axis_cell_count: u32 = 0;
                 for (child_index, child) in split.children.iter().enumerate() {
+                    let child_minimum_size = compute_minimum_size(child, pane_sizing);
                     let (axis_minimum, cross_minimum) = split_axis_and_cross_cell_counts(
-                        compute_minimum_size(child, pane_sizing),
+                        child_minimum_size.column_count,
+                        child_minimum_size.row_count,
                         is_horizontal_split,
                     );
                     split_axis_cell_count = split_axis_cell_count
@@ -274,17 +281,18 @@ pub fn compute_minimum_size(layout_node: &LayoutNode, pane_sizing: PaneSizing) -
                     cross_axis_cell_count = cross_axis_cell_count.max(cross_minimum);
                 }
                 // One gap sits between each pair of children.
-                let gap_cell_count = pane_sizing
-                    .gap_cell_count
-                    .saturating_mul(split.children.len().saturating_sub(1) as u16);
-                split_axis_cell_count = split_axis_cell_count.saturating_add(gap_cell_count);
+                let gap_count =
+                    u32::try_from(split.children.len().saturating_sub(1)).unwrap_or(u32::MAX);
+                let gap_cell_total =
+                    u32::from(pane_sizing.gap_cell_count).saturating_mul(gap_count);
+                split_axis_cell_count = split_axis_cell_count.saturating_add(gap_cell_total);
                 if is_horizontal_split {
-                    Size {
+                    RequiredSize {
                         column_count: split_axis_cell_count,
                         row_count: cross_axis_cell_count,
                     }
                 } else {
-                    Size {
+                    RequiredSize {
                         column_count: cross_axis_cell_count,
                         row_count: split_axis_cell_count,
                     }
@@ -298,10 +306,14 @@ pub fn compute_minimum_size(layout_node: &LayoutNode, pane_sizing: PaneSizing) -
 /// The smallest rectangle a stack can be solved into: its widest member by
 /// one header row per collapsed member plus the active member's rows. A
 /// stack places no gap between its members; an empty stack needs 0 by 0.
-pub(crate) fn compute_stack_minimum_size(split: &SplitNode, pane_sizing: PaneSizing) -> Size {
+/// Every sum saturates at `u32::MAX`.
+pub(crate) fn compute_stack_minimum_size(
+    split: &SplitNode,
+    pane_sizing: PaneSizing,
+) -> RequiredSize {
     let active_member_index = split.get_active_child_index();
-    let mut maximum_column_count: u16 = 0;
-    let mut active_row_count: u16 = 0;
+    let mut maximum_column_count: u32 = 0;
+    let mut active_row_count: u32 = 0;
     for (child_index, child) in split.children.iter().enumerate() {
         let child_minimum_size = compute_minimum_size(child, pane_sizing);
         maximum_column_count = maximum_column_count.max(child_minimum_size.column_count);
@@ -309,8 +321,9 @@ pub(crate) fn compute_stack_minimum_size(split: &SplitNode, pane_sizing: PaneSiz
             active_row_count = child_minimum_size.row_count;
         }
     }
-    let header_row_count = split.children.len().saturating_sub(1) as u16;
-    Size {
+    let header_row_count =
+        u32::try_from(split.children.len().saturating_sub(1)).unwrap_or(u32::MAX);
+    RequiredSize {
         column_count: maximum_column_count,
         row_count: header_row_count.saturating_add(active_row_count),
     }
@@ -324,19 +337,20 @@ pub(crate) fn compute_slot_floor(
     child_index: usize,
     is_horizontal_split: bool,
     pane_sizing: PaneSizing,
-) -> u16 {
+) -> u32 {
     let child_minimum_size = split.children.get(child_index).map_or(
-        Size {
+        RequiredSize {
             column_count: 0,
             row_count: 0,
         },
         |child| compute_minimum_size(child, pane_sizing),
     );
-    compute_child_floor(
-        split,
-        child_index,
-        split_axis_and_cross_cell_counts(child_minimum_size, is_horizontal_split).0,
-    )
+    let (axis_minimum, _) = split_axis_and_cross_cell_counts(
+        child_minimum_size.column_count,
+        child_minimum_size.row_count,
+        is_horizontal_split,
+    );
+    compute_child_floor(split, child_index, axis_minimum)
 }
 
 /// The cell count of `rect`: columns × rows. A 40 by 24 rect gives 960.
@@ -344,13 +358,18 @@ pub(crate) fn compute_cell_area(rect: Rect) -> u64 {
     u64::from(rect.size.column_count) * u64::from(rect.size.row_count)
 }
 
-/// The `size` measures along the split axis and across it: columns then rows
-/// for a horizontal split, rows then columns for a vertical one.
-fn split_axis_and_cross_cell_counts(size: Size, is_horizontal_split: bool) -> (u16, u16) {
+/// `column_count` and `row_count` ordered along the split axis, then across
+/// it: columns then rows for a horizontal split, rows then columns for a
+/// vertical one.
+fn split_axis_and_cross_cell_counts<CellCount>(
+    column_count: CellCount,
+    row_count: CellCount,
+    is_horizontal_split: bool,
+) -> (CellCount, CellCount) {
     if is_horizontal_split {
-        (size.column_count, size.row_count)
+        (column_count, row_count)
     } else {
-        (size.row_count, size.column_count)
+        (row_count, column_count)
     }
 }
 
@@ -358,7 +377,7 @@ fn split_axis_and_cross_cell_counts(size: Size, is_horizontal_split: bool) -> (u
 /// subtree's own minimum and any floor its weight declares (`Minimum`
 /// primary or `minimum_cell_count` overlay). A missing weight declares no
 /// floor.
-fn compute_child_floor(split: &SplitNode, child_index: usize, subtree_axis_minimum: u16) -> u16 {
+fn compute_child_floor(split: &SplitNode, child_index: usize, subtree_axis_minimum: u32) -> u32 {
     let weight_floor = split.weights.get(child_index).map_or(0, |size_weight| {
         let primary_floor = match size_weight.primary_constraint {
             SizeConstraint::Minimum(minimum_cell_count) => minimum_cell_count,
@@ -366,16 +385,14 @@ fn compute_child_floor(split: &SplitNode, child_index: usize, subtree_axis_minim
         };
         primary_floor.max(size_weight.minimum_cell_count.unwrap_or(0))
     });
-    subtree_axis_minimum.max(weight_floor)
+    subtree_axis_minimum.max(u32::from(weight_floor))
 }
 
 /// `true` when `rect` holds one leaf pane: it meets the border-inclusive
-/// floor of `pane_sizing.minimum_size` on both axes. A 3 by 3
-/// rect holds a leaf at the 2 by 1 default minimum; a 3 by 2 rect does not.
+/// floor of `pane_sizing.minimum_size` on both axes. A 4 by 3 rect holds a
+/// leaf at the 2 by 1 default minimum; a 3 by 3 and a 4 by 2 rect do not.
 pub(crate) fn is_leaf_within_minimum(rect: Rect, pane_sizing: PaneSizing) -> bool {
-    let minimum_size = compute_border_inclusive_minimum(pane_sizing.minimum_size);
-    rect.size.column_count >= minimum_size.column_count
-        && rect.size.row_count >= minimum_size.row_count
+    compute_border_inclusive_minimum(pane_sizing.minimum_size).can_fit_inside(rect.size)
 }
 
 /// `true` when `pane_id` shows its own content at `pane_rect`: the rect covers
@@ -458,8 +475,11 @@ pub(crate) fn compute_directional_child_rects(
     pane_sizing: PaneSizing,
 ) -> Vec<Rect> {
     let is_horizontal_split = split.direction == SplitDirection::Horizontal;
-    let (available_cell_count, available_cross_axis_cell_count) =
-        split_axis_and_cross_cell_counts(split_rect.size, is_horizontal_split);
+    let (available_cell_count, available_cross_axis_cell_count) = split_axis_and_cross_cell_counts(
+        split_rect.size.column_count,
+        split_rect.size.row_count,
+        is_horizontal_split,
+    );
     let gap_cell_count = pane_sizing.gap_cell_count;
 
     // Decide who fits: per-child cross-axis check, then trailing suppression
@@ -472,12 +492,14 @@ pub(crate) fn compute_directional_child_rects(
     let mut can_keep_children = true;
     let mut claimed_cell_count: u32 = 0;
     for (child_index, child) in split.children.iter().enumerate() {
+        let child_minimum_size = compute_minimum_size(child, pane_sizing);
         let (axis_minimum, cross_minimum) = split_axis_and_cross_cell_counts(
-            compute_minimum_size(child, pane_sizing),
+            child_minimum_size.column_count,
+            child_minimum_size.row_count,
             is_horizontal_split,
         );
         let child_floor = compute_child_floor(split, child_index, axis_minimum);
-        if cross_minimum > available_cross_axis_cell_count {
+        if cross_minimum > u32::from(available_cross_axis_cell_count) {
             continue;
         }
         // Every kept child after the first is preceded by one gap.
@@ -486,14 +508,16 @@ pub(crate) fn compute_directional_child_rects(
         } else {
             u32::from(gap_cell_count)
         };
-        if can_keep_children
-            && claimed_cell_count + leading_gap_cell_count + u32::from(child_floor)
-                <= u32::from(available_cell_count)
-        {
+        let claimed_cell_count_with_child = claimed_cell_count
+            .saturating_add(leading_gap_cell_count)
+            .saturating_add(child_floor);
+        if can_keep_children && claimed_cell_count_with_child <= u32::from(available_cell_count) {
             is_child_kept[child_index] = true;
-            claimed_cell_count += leading_gap_cell_count + u32::from(child_floor);
+            claimed_cell_count = claimed_cell_count_with_child;
             kept_weights.push(split.weights.get(child_index).copied().unwrap_or_default());
-            kept_floors.push(child_floor);
+            kept_floors.push(
+                u16::try_from(child_floor).expect("a kept child's floor is at most the split axis"),
+            );
         } else {
             can_keep_children = false;
         }
@@ -565,10 +589,7 @@ pub(crate) fn compute_stacked_child_rects(
     if member_count == 0 {
         return Vec::new();
     }
-    let minimum_size = compute_stack_minimum_size(split, pane_sizing);
-    if split_rect.size.row_count < minimum_size.row_count
-        || split_rect.size.column_count < minimum_size.column_count
-    {
+    if !compute_stack_minimum_size(split, pane_sizing).can_fit_inside(split_rect.size) {
         return vec![Rect::build_empty_at_origin(); member_count];
     }
 
@@ -676,7 +697,7 @@ fn distribute_axis_cells(
     for (child_index, weight) in weights.iter().enumerate() {
         if let SizeConstraint::Percent(percent_value) = weight.primary_constraint {
             let requested_cell_count =
-                (u32::from(available_cell_count) * u32::from(percent_value.min(100)) / 100) as u16;
+                compute_percent_cell_count(available_cell_count, percent_value);
             child_cell_counts[child_index] = requested_cell_count.min(remaining_cell_count);
             remaining_cell_count -= child_cell_counts[child_index];
         }

@@ -172,6 +172,19 @@ pub fn build_peer_refusal_error(refusal: &IpcErrorPayload) -> CliError {
     }
 }
 
+/// A refused Hello, carrying `refusal.message` filtered by
+/// [`sanitize_reported_text`]: [`CliError::ConnectionTokenRefused`] for
+/// [`IpcErrorCode::BadToken`], and what [`build_peer_refusal_error`] gives for
+/// every other code.
+pub fn build_hello_refusal_error(refusal: &IpcErrorPayload) -> CliError {
+    if refusal.code == IpcErrorCode::BadToken {
+        return CliError::ConnectionTokenRefused {
+            detail: sanitize_reported_text(&refusal.message),
+        };
+    }
+    build_peer_refusal_error(refusal)
+}
+
 /// The version a session settled on and the build it named in its Hello
 /// answer, once the version is checked against the range this build sent.
 ///
@@ -182,11 +195,13 @@ pub fn build_peer_refusal_error(refusal: &IpcErrorPayload) -> CliError {
 /// `"\u{1b}[2J0.3.0"` comes back as `"[2J0.3.0"`.
 ///
 /// # Errors
-/// - A refused Hello: what [`build_peer_refusal_error`] gives, which is
-///   [`CliError::ProtocolVersionRefused`] for a refused protocol version.
+/// - A refused Hello: what [`build_hello_refusal_error`] gives, which is
+///   [`CliError::ProtocolVersionRefused`] for a refused protocol version,
+///   [`CliError::ConnectionTokenRefused`] for a refused connection token, and
+///   [`CliError::IpcUnavailable`] for every other refusal.
 /// - [`CliError::IpcUnavailable`] when the session settled on a version outside
 ///   the range this build asked for, or answered anything other than a Hello.
-pub(crate) fn parse_session_hello_version(
+pub fn parse_session_hello_version(
     incoming_response: IncomingResponse,
 ) -> Result<(u32, String), CliError> {
     match SESSION_PEER_WORDS.take_response_result(incoming_response)? {
@@ -197,7 +212,7 @@ pub(crate) fn parse_session_hello_version(
             SESSION_PEER_WORDS.validate_settled_protocol_version(protocol_version)?;
             Ok((protocol_version, sanitize_reported_text(&build_version)))
         }
-        IpcResult::Error(refusal) => Err(build_peer_refusal_error(&refusal)),
+        IpcResult::Error(refusal) => Err(build_hello_refusal_error(&refusal)),
         unexpected_result => {
             Err(SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))
         }
@@ -208,8 +223,10 @@ pub(crate) fn parse_session_hello_version(
 /// [`sanitize_reported_text`], once the version it settled on is checked.
 ///
 /// # Errors
-/// - A refused Hello: what [`build_peer_refusal_error`] gives, which is
-///   [`CliError::ProtocolVersionRefused`] for a refused protocol version.
+/// - A refused Hello: what [`build_hello_refusal_error`] gives, which is
+///   [`CliError::ProtocolVersionRefused`] for a refused protocol version,
+///   [`CliError::ConnectionTokenRefused`] for a refused connection token, and
+///   [`CliError::IpcUnavailable`] for every other refusal.
 /// - [`CliError::IpcUnavailable`] when the router settled on a version outside
 ///   the range this build asked for, or answered anything other than a Hello.
 pub(crate) fn parse_router_hello_version(
@@ -223,7 +240,7 @@ pub(crate) fn parse_router_hello_version(
             ROUTER_PEER_WORDS.validate_settled_protocol_version(protocol_version)?;
             Ok(sanitize_reported_text(&build_version))
         }
-        RouterResult::Error(refusal) => Err(build_peer_refusal_error(&refusal)),
+        RouterResult::Error(refusal) => Err(build_hello_refusal_error(&refusal)),
         unexpected_result => {
             Err(ROUTER_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))
         }

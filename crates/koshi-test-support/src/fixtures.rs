@@ -11,7 +11,8 @@ use koshi_core::key::{
     BindingModifierFlags, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
 };
 use koshi_ipc::endpoint::{compute_socket_address, EndpointFile};
-use koshi_ipc::protocol::ConnectionToken;
+use koshi_ipc::handshake::{Handshake, Peer};
+use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
 use koshi_ipc::router::{compute_router_socket_address, resolve_router_endpoint_path};
 use koshi_ipc::transport::{Connection, Listener};
 use serde_json::value::RawValue;
@@ -310,6 +311,107 @@ fn spawn_previous_release_server(
         }
         request_texts_by_connection
     })
+}
+
+/// Serve the session `session_id` in `runtime_directory` as a session that
+/// listens before it writes its endpoint file, on a thread of its own:
+///
+/// 1. Bind the session's socket, and write its endpoint file under the token
+///    made from `stale_connection_secret`. Both are done before this returns.
+/// 2. Refuse the first caller's Hello with `BadToken`: the session holds the
+///    token made from `connection_secret`.
+/// 3. Wait 200 ms after the first caller hangs up, then write the endpoint
+///    file under the token made from `connection_secret`.
+/// 4. Accept the second caller's Hello and answer it with build `9.9.9`.
+///    Answer each request after it with what `answer_request` gives for its
+///    kind.
+///
+/// A request behind a refused Hello gets the `HelloRequired` refusal. Each
+/// connection ends when its caller hangs up, and the thread ends after the
+/// second. The endpoint file names this test process.
+///
+/// # Panics
+///
+/// Panics when the socket cannot be bound, an endpoint file cannot be
+/// written, or a caller cannot be accepted.
+pub fn spawn_session_listening_before_it_advertises(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    stale_connection_secret: &str,
+    connection_secret: &str,
+    mut answer_request: impl FnMut(&IpcRequestKind) -> IpcResult + Send + 'static,
+) -> JoinHandle<()> {
+    let session_listener = Listener::bind(&compute_socket_address(runtime_directory, session_id))
+        .expect("bind the stand-in session");
+    write_session_endpoint_file(
+        runtime_directory,
+        session_id,
+        stale_connection_secret,
+        std::process::id(),
+    );
+    let advertising_runtime_directory = runtime_directory.to_path_buf();
+    let session_connection_secret = connection_secret.to_string();
+    std::thread::spawn(move || {
+        let session_connection_token = ConnectionToken::from_secret(&session_connection_secret);
+        answer_session_requests(
+            &session_listener,
+            session_connection_token.clone(),
+            &mut answer_request,
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        write_session_endpoint_file(
+            &advertising_runtime_directory,
+            session_id,
+            &session_connection_secret,
+            std::process::id(),
+        );
+        answer_session_requests(
+            &session_listener,
+            session_connection_token,
+            &mut answer_request,
+        );
+    })
+}
+
+/// Accept one caller on `session_listener` and answer each request it sends
+/// until it hangs up, behind the gate a session holding
+/// `session_connection_token` keeps for a caller of its own user. An accepted
+/// Hello gets build `9.9.9`, a refused request gets the gate's refusal, and
+/// every other request gets what `answer_request` gives for its kind.
+fn answer_session_requests(
+    session_listener: &Listener,
+    session_connection_token: ConnectionToken,
+    answer_request: &mut impl FnMut(&IpcRequestKind) -> IpcResult,
+) {
+    let mut session_connection = session_listener.accept().expect("accept the caller");
+    let mut session_handshake = Handshake::from_expected_token_and_peer(
+        session_connection_token,
+        Peer::Local {
+            is_same_user: true,
+            is_other_user_access_allowed: false,
+        },
+    );
+    while let Ok(ipc_request) = session_connection.recv::<IpcRequest>() {
+        let answer_result = match session_handshake.validate_request_kind(&ipc_request.request_kind)
+        {
+            Err(refusal) => IpcResult::Error(refusal),
+            Ok(()) => match &ipc_request.request_kind {
+                IpcRequestKind::Hello { .. } => IpcResult::Hello {
+                    protocol_version: session_handshake
+                        .get_agreed_protocol_version()
+                        .expect("an accepted Hello settles a version"),
+                    build_version: "9.9.9".to_string(),
+                },
+                request_kind => answer_request(request_kind),
+            },
+        };
+        // A send to a caller that has hung up fails, and the failure is
+        // dropped.
+        let _ = session_connection.send(&IpcResponse {
+            request_id: Some(ipc_request.request_id),
+            answer_result,
+        });
+    }
 }
 
 /// Advertise a router in `runtime_directory` under the token made from

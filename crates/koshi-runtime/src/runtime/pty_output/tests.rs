@@ -1,20 +1,26 @@
 //! Tests for PTY output handling: bytes reach only the owning pane's engine,
 //! a decode carries across chunks, output schedules a render, shell-integration
 //! markers publish command lifecycle events, device-query replies are written
-//! back to the pane's PTY, and bytes for a pane with no engine are dropped.
+//! back to the pane's PTY, bytes for a pane with no engine are dropped, and a
+//! cell pixel size query answers with the cell size of the pane's tab, or with
+//! the floating cell size in a floating pane.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::event::{Event, PaneCommandFinished, PaneCommandStarted};
-use koshi_core::ids::ClientId;
+use koshi_core::geometry::{FloatingPaneDimension, FloatingPaneSize, PixelCellSize, Size};
+use koshi_core::ids::{ClientId, SessionId, TabId};
 use koshi_core::process::{PtySize, ShellKind, SpawnSpec};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::error::PtyError;
 use koshi_renderer::snapshot::Delivery;
+use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
+use koshi_session::session::state::{FloatingMember, FloatingPaneSizeSolve, Session, Tab};
 use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::style::{Color, Style};
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -82,6 +88,120 @@ fn get_pane_cell_character(
         .get_cell(row_index, column_index)
         .expect("cell in bounds")
         .get_character()
+}
+
+/// A local client of `session_id` attached at `attached_at`, viewing
+/// `active_tab_id` and reporting `pixel_width` by `pixel_height` px cells.
+fn build_measured_client(
+    session_id: SessionId,
+    active_tab_id: TabId,
+    attached_at: SystemTime,
+    pixel_width: u16,
+    pixel_height: u16,
+) -> Client {
+    let mut client = Client::from_attachment(
+        ClientId::new(),
+        session_id,
+        attached_at,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        None,
+        active_tab_id,
+        ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
+    );
+    client.update_cell_size(PixelCellSize::from_pixel_dimensions(
+        pixel_width,
+        pixel_height,
+    ));
+    client
+}
+
+#[test]
+fn a_cell_pixel_size_query_answers_with_the_tab_cell_size_or_the_floating_cell_size() {
+    let (mut runtime, fake_pty_backend) = build_test_server();
+    let tiled_pane_id = insert_test_terminal_engine(&mut runtime);
+    let floating_pane_id = insert_test_terminal_engine(&mut runtime);
+    let stray_pane_id = insert_test_terminal_engine(&mut runtime);
+    for pane_id in [tiled_pane_id, floating_pane_id, stray_pane_id] {
+        spawn_test_pane(&fake_pty_backend, pane_id);
+    }
+    let (db_tab_id, web_tab_id) = (TabId::new(), TabId::new());
+    let mut session = Session::from_identity_and_client_registry(
+        SessionId::new(),
+        "s".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
+    session.tabs.insert(
+        db_tab_id,
+        Tab::from_root_pane(db_tab_id, "db".to_owned(), 0, PaneId::new()),
+    );
+    session.tabs.insert(
+        web_tab_id,
+        Tab::from_root_pane(web_tab_id, "web".to_owned(), 1, tiled_pane_id),
+    );
+    let forty_cells = FloatingPaneDimension::Cells(NonZeroU16::new(40).expect("40 is nonzero"));
+    session
+        .floating_set
+        .add_member(FloatingMember {
+            pane_id: floating_pane_id,
+            desired_size: FloatingPaneSize {
+                width: forty_cells,
+                height: forty_cells,
+            },
+            solved_size: FloatingPaneSizeSolve::Sized(Size {
+                column_count: 40,
+                row_count: 40,
+            }),
+        })
+        .expect("the floating set is empty");
+    // alice attaches first and views `db` with 10x20 px cells; bob views
+    // `web` with 8x16 px cells.
+    let alice_client = build_measured_client(
+        session.session_id,
+        db_tab_id,
+        SystemTime::UNIX_EPOCH,
+        10,
+        20,
+    );
+    let bob_client = build_measured_client(
+        session.session_id,
+        web_tab_id,
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        8,
+        16,
+    );
+    session.attach_client(alice_client);
+    session.attach_client(bob_client);
+    runtime.session_by_id.insert(session.session_id, session);
+
+    // XTWINOPS 16: report the cell size in pixels.
+    for pane_id in [tiled_pane_id, floating_pane_id, stray_pane_id] {
+        runtime.handle_pty_output(pane_id, b"\x1b[16t");
+    }
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(tiled_pane_id)
+            .unwrap(),
+        vec![b"\x1b[6;16;8t".to_vec()]
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(floating_pane_id)
+            .unwrap(),
+        vec![b"\x1b[6;20;10t".to_vec()]
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(stray_pane_id)
+            .unwrap(),
+        Vec::<Vec<u8>>::new()
+    );
 }
 
 #[test]

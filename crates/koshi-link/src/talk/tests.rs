@@ -18,6 +18,16 @@ fn extract_ipc_unavailable_detail(cli_error: CliError) -> String {
     }
 }
 
+/// The sentence a refusal of the connection token carries, for asserting on it
+/// exactly. Panics on any [`CliError`] variant other than
+/// [`CliError::ConnectionTokenRefused`].
+fn extract_connection_token_refused_detail(cli_error: CliError) -> String {
+    match cli_error {
+        CliError::ConnectionTokenRefused { detail } => detail,
+        unexpected_error => panic!("expected ConnectionTokenRefused, got {unexpected_error:?}"),
+    }
+}
+
 #[test]
 fn a_version_inside_the_range_this_build_sent_is_accepted() {
     SESSION_PEER_WORDS
@@ -221,6 +231,50 @@ fn a_protocol_refusal_carries_the_sentence_the_peer_sent() {
 }
 
 #[test]
+fn a_hello_refused_for_its_token_is_a_connection_token_refusal() {
+    let refusal = IpcErrorPayload {
+        code: IpcErrorCode::BadToken,
+        message: "the token presented does not match\u{1b}[2J the router's".to_string(),
+    };
+
+    assert_eq!(
+        extract_connection_token_refused_detail(build_hello_refusal_error(&refusal)),
+        "the token presented does not match[2J the router's"
+    );
+}
+
+#[test]
+fn a_hello_refused_for_its_version_is_a_protocol_version_refusal() {
+    let refusal = IpcErrorPayload {
+        code: IpcErrorCode::UnsupportedVersion,
+        message: "this session speaks protocol versions 2..2; the caller speaks 3..3".to_string(),
+    };
+
+    let hello_refusal_error = build_hello_refusal_error(&refusal);
+
+    let CliError::ProtocolVersionRefused { detail } = hello_refusal_error else {
+        panic!("expected ProtocolVersionRefused, got {hello_refusal_error:?}");
+    };
+    assert_eq!(
+        detail,
+        "this session speaks protocol versions 2..2; the caller speaks 3..3"
+    );
+}
+
+#[test]
+fn a_hello_refused_for_any_other_reason_is_an_unavailable_peer() {
+    let refusal = IpcErrorPayload {
+        code: IpcErrorCode::MalformedRequest,
+        message: "the bytes received are not a request".to_string(),
+    };
+
+    assert_eq!(
+        extract_ipc_unavailable_detail(build_hello_refusal_error(&refusal)),
+        "the bytes received are not a request"
+    );
+}
+
+#[test]
 fn a_version_refusal_is_protocol_version_refused_with_the_sentence_the_peer_sent() {
     let refusal = IpcErrorPayload {
         code: IpcErrorCode::UnsupportedVersion,
@@ -351,7 +405,7 @@ fn a_session_refusing_the_hello_stops_the_exchange_with_its_own_sentence() {
         parse_session_hello_version(incoming_response).expect_err("a refused Hello opens nothing");
 
     assert_eq!(
-        extract_ipc_unavailable_detail(refusal),
+        extract_connection_token_refused_detail(refusal),
         "the token presented does not match this Koshi's"
     );
 }
@@ -443,7 +497,7 @@ fn a_router_refusing_the_hello_stops_the_exchange_with_its_own_sentence() {
         parse_router_hello_version(incoming_response).expect_err("a refused Hello opens nothing");
 
     assert_eq!(
-        extract_ipc_unavailable_detail(refusal),
+        extract_connection_token_refused_detail(refusal),
         "the token presented does not match the router's"
     );
 }

@@ -116,12 +116,17 @@ pub fn resize_layout_with_sizing(
     } else {
         donating_pane_rect.size.row_count
     };
-    let spare_cell_count = donating_cell_count.saturating_sub(compute_slot_floor(
+    let donating_slot_floor = compute_slot_floor(
         split_node,
         donating_child_index,
         is_horizontal_split,
         pane_sizing,
-    ));
+    );
+    // A floor above `u16::MAX` leaves no spare cell.
+    let spare_cell_count = match u16::try_from(donating_slot_floor) {
+        Ok(donating_slot_floor) => donating_cell_count.saturating_sub(donating_slot_floor),
+        Err(_) => 0,
+    };
     if requested_cell_count > spare_cell_count {
         return Err(ResizeError::MinimumSizeExceeded {
             requested_cell_count,

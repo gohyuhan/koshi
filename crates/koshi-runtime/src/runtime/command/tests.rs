@@ -2,8 +2,9 @@
 //! the match, a command that passes validation but has no handler yet routes
 //! to a clean labelled rejection, and every handler the match reaches is
 //! exercised — panes, tabs, clients, highlights, fullscreen, detach and the
-//! session switch — together with child exits, client attach and detach, and
-//! the working directory a new pane opens in.
+//! session switch — together with child exits, client attach and detach, the
+//! floating pane sizes and cell size those client changes set, and the working
+//! directory a new pane opens in.
 //!
 //! Rejection cases (no context) run against an empty runtime. Cases that need
 //! populated state — explicit/default/focused target resolution, in-session-CLI
@@ -12,6 +13,7 @@
 //! that need a live child use [`build_runtime_with_fake`], which hands back the
 //! fake backend so spawns, resizes, writes and kills can be read back.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Barrier};
@@ -26,7 +28,10 @@ use koshi_core::command::{
     WriteToPaneArgs,
 };
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
-use koshi_core::geometry::{Direction, PaneArea, PixelCellSize, Size, SplitDirection};
+use koshi_core::geometry::{
+    AxisPercent, Direction, FloatingPaneDimension, FloatingPaneSize, PaneArea, PixelCellSize, Size,
+    SplitDirection,
+};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::{ExitStatus, PtySize, ShellKind, SpawnSpec};
 use koshi_layout::edit::split_leaf;
@@ -39,7 +44,7 @@ use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::error::PtyError;
 use koshi_session::client::{compute_default_pane_area_size, Client, ClientRegistry};
 use koshi_session::session::pane_ops::NewPaneSpec;
-use koshi_session::session::state::{Session, Tab};
+use koshi_session::session::state::{FloatingMember, FloatingPaneSizeSolve, Session, Tab};
 use koshi_session::session::tab_ops;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -10001,7 +10006,7 @@ fn new_tab_spawns_creates_and_focuses_for_the_issuer() {
     let new_tab = session
         .tabs
         .values()
-        .find(|tab_id| tab_id.get_tab_id() != tab_id_a)
+        .find(|tab| tab.get_tab_id() != tab_id_a)
         .expect("the created tab");
     assert!(
         new_tab.get_tab_name().starts_with("T-"),
@@ -10064,7 +10069,7 @@ fn new_tab_root_pane_carries_the_in_session_identity_env() {
     let new_tab = session
         .tabs
         .values()
-        .find(|tab_id| tab_id.get_tab_id() != tab_id_a)
+        .find(|tab| tab.get_tab_id() != tab_id_a)
         .expect("the created tab");
     let new_pane_id = new_tab.get_layout_tree().list_leaf_pane_ids()[0];
     let mut expected_spawn_spec = runtime.build_default_shell_spec(None, BTreeMap::new());
@@ -10107,13 +10112,49 @@ fn new_tab_generates_a_free_name() {
     let new_tab = session
         .tabs
         .values()
-        .find(|tab_id| tab_id.get_tab_id() != tab_id_a)
+        .find(|tab| tab.get_tab_id() != tab_id_a)
         .expect("the created tab");
-    let pieces: Vec<&str> = new_tab.get_tab_name().split('-').collect();
-    assert_eq!(pieces.len(), 3, "{}", new_tab.get_tab_name());
-    assert_eq!(pieces[0], "T");
-    assert!(!pieces[1].is_empty() && !pieces[2].is_empty());
+    let tab_name_parts: Vec<&str> = new_tab.get_tab_name().split('-').collect();
+    assert_eq!(tab_name_parts.len(), 3, "{}", new_tab.get_tab_name());
+    assert_eq!(tab_name_parts[0], "T");
+    assert!(!tab_name_parts[1].is_empty() && !tab_name_parts[2].is_empty());
     assert_ne!(new_tab.get_tab_name(), "t");
+}
+
+/// With every plain tab name taken, the generated name is a plain name with
+/// the wrap number `-2`.
+#[test]
+fn generate_tab_name_skips_every_name_a_tab_of_the_session_holds() {
+    // A walk that counts every plain name as taken asks about each plain tab
+    // name once before it reaches a `-2` name.
+    let plain_tab_names = RefCell::new(Vec::new());
+    let _ = generate_name(NameKind::Tab, |candidate_tab_name| {
+        let is_plain_tab_name = !candidate_tab_name.ends_with("-2");
+        if is_plain_tab_name {
+            plain_tab_names
+                .borrow_mut()
+                .push(candidate_tab_name.to_owned());
+        }
+        is_plain_tab_name
+    });
+    let plain_tab_names = plain_tab_names.into_inner();
+    let mut session = build_bare_session(SessionId::new());
+    for (tab_index, plain_tab_name) in plain_tab_names.iter().enumerate() {
+        let tab_id = TabId::new();
+        session.tabs.insert(
+            tab_id,
+            Tab::from_root_pane(tab_id, plain_tab_name.clone(), tab_index, PaneId::new()),
+        );
+    }
+
+    let generated_tab_name = generate_tab_name(&session);
+
+    let generated_plain_tab_name = generated_tab_name
+        .strip_suffix("-2")
+        .expect("every plain tab name is taken");
+    assert!(plain_tab_names
+        .iter()
+        .any(|plain_tab_name| plain_tab_name == generated_plain_tab_name));
 }
 
 #[test]
@@ -10146,7 +10187,7 @@ fn new_tab_spawn_failure_commits_nothing() {
         }
     );
 
-    // Nothing was committed: no tab, no pane pane record, no view moved, no handle.
+    // Nothing was committed: no tab, no pane record, no view moved, no handle.
     let session = &runtime.session_by_id[&session_id];
     assert_eq!(session.tabs.len(), 1);
     assert_eq!(session.panes.count_pane_records(), 1);
@@ -10189,7 +10230,7 @@ fn new_tab_explicit_client_wins_over_the_issuer() {
     let new_tab_id = session
         .tabs
         .values()
-        .find(|tab_id| tab_id.get_tab_id() != tab_id_a)
+        .find(|tab| tab.get_tab_id() != tab_id_a)
         .expect("the created tab")
         .get_tab_id();
     assert_eq!(
@@ -10269,7 +10310,7 @@ fn new_tab_external_source_defaults_to_the_sole_client() {
     let new_tab_id = session
         .tabs
         .values()
-        .find(|tab_id| tab_id.get_tab_id() != tab_id_a)
+        .find(|tab| tab.get_tab_id() != tab_id_a)
         .expect("the created tab")
         .get_tab_id();
     assert_eq!(
@@ -10441,7 +10482,7 @@ fn new_tab_reflows_the_vacated_tab_for_its_remaining_viewer() {
     let new_tab = runtime.session_by_id[&session_id]
         .tabs
         .values()
-        .find(|tab_id| tab_id.get_tab_id() != existing_tab_id)
+        .find(|tab| tab.get_tab_id() != existing_tab_id)
         .expect("the created tab");
     let created_pane_id = new_tab.get_layout_tree().list_leaf_pane_ids()[0];
     assert_eq!(
@@ -13414,6 +13455,631 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
     );
 }
 
+/// One session seeded for alice, holding a tiled pane and one live floating
+/// pane.
+struct FloatingPaneFixture {
+    runtime: Server,
+    fake_pty_backend: Arc<FakePtyBackend>,
+    session_id: SessionId,
+    alice_client_id: ClientId,
+    tab_id: TabId,
+    tiled_pane_id: PaneId,
+    floating_pane_id: PaneId,
+}
+
+/// A session seeded by [`Server::bootstrap_local`] for alice, attached at
+/// `UNIX_EPOCH` with a `120x42` viewport: pane area `120x40`, tiled pane PTY
+/// `118x38`. It also holds one live floating pane asking for 60% by 60%,
+/// solved for alice alone: outer `72x24`, PTY `70x20`.
+fn build_floating_pane_fixture() -> FloatingPaneFixture {
+    let (mut runtime, fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
+    let alice_client_id = runtime
+        .bootstrap_local(
+            SessionId::new(),
+            Size {
+                column_count: 120,
+                row_count: 42,
+            },
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect("bootstrap alice");
+    let (session_id, tab_id, tiled_pane_id) = get_only_session_slot(&runtime);
+    let floating_pane_id = PaneId::new();
+    let session = runtime
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the seeded session");
+    register_pane_record(session, floating_pane_id);
+    let sixty_percent =
+        FloatingPaneDimension::Percent(AxisPercent::try_from(60).expect("60 is a percent"));
+    session
+        .floating_set
+        .add_member(FloatingMember {
+            pane_id: floating_pane_id,
+            desired_size: FloatingPaneSize {
+                width: sixty_percent,
+                height: sixty_percent,
+            },
+            solved_size: FloatingPaneSizeSolve::Sized(Size {
+                column_count: 72,
+                row_count: 24,
+            }),
+        })
+        .expect("the floating set is empty");
+    let floating_pty_size = PtySize {
+        column_count: 70,
+        row_count: 20,
+    };
+    fake_pty_backend
+        .spawn_pane(floating_pane_id, build_spawn_spec(), floating_pty_size)
+        .expect("spawn the floating pane");
+    runtime.park_pane_pty(floating_pane_id, floating_pty_size);
+    FloatingPaneFixture {
+        runtime,
+        fake_pty_backend,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        floating_pane_id,
+    }
+}
+
+/// What the last size solve gave the floating pane `pane_id` of `session_id`.
+fn get_floating_solved_size(
+    runtime: &Server,
+    session_id: SessionId,
+    pane_id: PaneId,
+) -> FloatingPaneSizeSolve {
+    runtime.session_by_id[&session_id]
+        .floating_set
+        .list_members()
+        .iter()
+        .find(|floating_member| floating_member.pane_id == pane_id)
+        .expect("the pane floats")
+        .solved_size
+}
+
+/// `PtyResized` for `pane_id` at `column_count` by `row_count`.
+fn build_pty_resized(pane_id: PaneId, column_count: u16, row_count: u16) -> Event {
+    Event::PtyResized(PtyResized {
+        pane_id,
+        pty_size: PtySize {
+            column_count,
+            row_count,
+        },
+    })
+}
+
+#[test]
+fn a_smaller_client_shrinks_every_floating_pane_and_its_detach_regrows_them() {
+    let FloatingPaneFixture {
+        mut runtime,
+        session_id,
+        tab_id,
+        tiled_pane_id,
+        floating_pane_id,
+        ..
+    } = build_floating_pane_fixture();
+    assert_eq!(
+        runtime.pty_size_by_pane_id[&tiled_pane_id],
+        PtySize {
+            column_count: 118,
+            row_count: 38,
+        }
+    );
+    let bob_client_id = ClientId::new();
+
+    // bob's 80x24 viewport gives an 80x22 pane area: 60% of it is 48x13.
+    let attach_events = runtime.handle_client_attach(
+        session_id,
+        bob_client_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        None,
+        tab_id,
+        None,
+        SystemTime::now(),
+        false,
+    );
+
+    assert_eq!(
+        attach_events,
+        vec![
+            Event::PaneFocused(PaneFocused {
+                client_id: bob_client_id,
+                tab_id,
+                pane_id: tiled_pane_id,
+                previous_pane_id: None,
+            }),
+            build_pty_resized(tiled_pane_id, 78, 20),
+            build_pty_resized(floating_pane_id, 46, 9),
+        ]
+    );
+    assert_eq!(
+        get_floating_solved_size(&runtime, session_id, floating_pane_id),
+        FloatingPaneSizeSolve::Sized(Size {
+            column_count: 48,
+            row_count: 13,
+        })
+    );
+
+    let detach_events = runtime.handle_client_detach(bob_client_id);
+
+    assert_eq!(
+        detach_events,
+        vec![
+            build_pty_resized(tiled_pane_id, 118, 38),
+            build_pty_resized(floating_pane_id, 70, 20),
+        ]
+    );
+    assert_eq!(
+        get_floating_solved_size(&runtime, session_id, floating_pane_id),
+        FloatingPaneSizeSolve::Sized(Size {
+            column_count: 72,
+            row_count: 24,
+        })
+    );
+}
+
+#[test]
+fn dropping_a_client_that_did_not_attach_again_regrows_every_floating_pane() {
+    let FloatingPaneFixture {
+        mut runtime,
+        session_id,
+        tab_id,
+        tiled_pane_id,
+        floating_pane_id,
+        ..
+    } = build_floating_pane_fixture();
+    let bob_client_id = ClientId::new();
+    runtime.handle_client_attach(
+        session_id,
+        bob_client_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        None,
+        tab_id,
+        None,
+        SystemTime::now(),
+        false,
+    );
+    // bob's record came across an update, and bob does not attach again.
+    runtime.client_ids_awaiting_reconnect.insert(bob_client_id);
+
+    let emitted_events = runtime.handle_drop_unclaimed_clients(Instant::now());
+
+    assert_eq!(
+        emitted_events,
+        vec![
+            build_pty_resized(tiled_pane_id, 118, 38),
+            build_pty_resized(floating_pane_id, 70, 20),
+        ]
+    );
+    assert_eq!(
+        get_floating_solved_size(&runtime, session_id, floating_pane_id),
+        FloatingPaneSizeSolve::Sized(Size {
+            column_count: 72,
+            row_count: 24,
+        })
+    );
+}
+
+#[test]
+fn a_client_too_small_for_the_floating_minimum_suppresses_the_pane_and_keeps_its_pty() {
+    let FloatingPaneFixture {
+        mut runtime,
+        fake_pty_backend,
+        session_id,
+        tab_id,
+        tiled_pane_id,
+        floating_pane_id,
+        ..
+    } = build_floating_pane_fixture();
+    // `pane { min-cols 20 min-rows 6 }`: the floating minimum is 22x10.
+    runtime.config.pane.minimum_column_count = 20;
+    runtime.config.pane.minimum_row_count = 6;
+    let bob_client_id = ClientId::new();
+    runtime.handle_client_attach(
+        session_id,
+        bob_client_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        None,
+        tab_id,
+        None,
+        SystemTime::now(),
+        false,
+    );
+    let floating_pane_size_count = fake_pty_backend
+        .list_pane_sizes(floating_pane_id)
+        .expect("the floating pane spawned")
+        .len();
+
+    // A 21-column pane area cannot hold the 22-column floating minimum, and
+    // cannot hold the tiled pane's 22-column outer minimum either.
+    let shrink_events = runtime.handle_client_resize(
+        bob_client_id,
+        Size {
+            column_count: 21,
+            row_count: 32,
+        },
+        Some(PaneArea::Reported(Size {
+            column_count: 21,
+            row_count: 30,
+        })),
+        None,
+    );
+
+    assert_eq!(shrink_events, Vec::new());
+    assert_eq!(
+        get_floating_solved_size(&runtime, session_id, floating_pane_id),
+        FloatingPaneSizeSolve::Suppressed
+    );
+    assert_eq!(
+        runtime.pty_size_by_pane_id[&floating_pane_id],
+        PtySize {
+            column_count: 46,
+            row_count: 9,
+        }
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_sizes(floating_pane_id)
+            .expect("the floating pane spawned")
+            .len(),
+        floating_pane_size_count
+    );
+    // A suppressed floating pane's output is still read.
+    runtime.handle_pty_output(floating_pane_id, b"top");
+    let floating_grid = runtime.list_terminal_engines()[&floating_pane_id]
+        .get_terminal_state()
+        .get_active_grid();
+    assert_eq!(
+        [0, 1, 2].map(|column_index| floating_grid
+            .get_cell(0, column_index)
+            .expect("cell in bounds")
+            .get_character()),
+        ['t', 'o', 'p']
+    );
+
+    // 60% of a 100x30 pane area is 60x18.
+    let regrow_events = runtime.handle_client_resize(
+        bob_client_id,
+        Size {
+            column_count: 100,
+            row_count: 32,
+        },
+        Some(PaneArea::Reported(Size {
+            column_count: 100,
+            row_count: 30,
+        })),
+        None,
+    );
+
+    assert_eq!(
+        regrow_events,
+        vec![
+            build_pty_resized(tiled_pane_id, 98, 28),
+            build_pty_resized(floating_pane_id, 58, 14),
+        ]
+    );
+    let sixty_percent =
+        FloatingPaneDimension::Percent(AxisPercent::try_from(60).expect("60 is a percent"));
+    let floating_member = runtime.session_by_id[&session_id]
+        .floating_set
+        .list_members()[0];
+    assert_eq!(
+        floating_member.solved_size,
+        FloatingPaneSizeSolve::Sized(Size {
+            column_count: 60,
+            row_count: 18,
+        })
+    );
+    assert_eq!(
+        floating_member.desired_size,
+        FloatingPaneSize {
+            width: sixty_percent,
+            height: sixty_percent,
+        }
+    );
+}
+
+#[test]
+fn a_starving_client_beside_a_roomy_one_leaves_every_floating_pane_as_it_is() {
+    let FloatingPaneFixture {
+        mut runtime,
+        session_id,
+        tab_id,
+        tiled_pane_id,
+        floating_pane_id,
+        ..
+    } = build_floating_pane_fixture();
+    let bob_client_id = ClientId::new();
+
+    let attach_events = runtime.handle_client_attach(
+        session_id,
+        bob_client_id,
+        Size {
+            column_count: 10,
+            row_count: 3,
+        },
+        Some(PaneArea::Starving),
+        tab_id,
+        None,
+        SystemTime::now(),
+        false,
+    );
+
+    assert_eq!(
+        attach_events,
+        vec![Event::PaneFocused(PaneFocused {
+            client_id: bob_client_id,
+            tab_id,
+            pane_id: tiled_pane_id,
+            previous_pane_id: None,
+        })]
+    );
+    assert_eq!(
+        get_floating_solved_size(&runtime, session_id, floating_pane_id),
+        FloatingPaneSizeSolve::Sized(Size {
+            column_count: 72,
+            row_count: 24,
+        })
+    );
+}
+
+#[test]
+fn every_client_starving_freezes_every_floating_pane_until_one_reports_room() {
+    let FloatingPaneFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tiled_pane_id,
+        floating_pane_id,
+        ..
+    } = build_floating_pane_fixture();
+    let alice_viewport_size = Size {
+        column_count: 120,
+        row_count: 42,
+    };
+
+    let starving_events = runtime.handle_client_resize(
+        alice_client_id,
+        alice_viewport_size,
+        Some(PaneArea::Starving),
+        None,
+    );
+
+    assert_eq!(starving_events, Vec::new());
+    assert_eq!(
+        get_floating_solved_size(&runtime, session_id, floating_pane_id),
+        FloatingPaneSizeSolve::Sized(Size {
+            column_count: 72,
+            row_count: 24,
+        })
+    );
+
+    let roomy_events = runtime.handle_client_resize(
+        alice_client_id,
+        alice_viewport_size,
+        Some(PaneArea::Reported(Size {
+            column_count: 80,
+            row_count: 22,
+        })),
+        None,
+    );
+
+    assert_eq!(
+        roomy_events,
+        vec![
+            build_pty_resized(tiled_pane_id, 78, 20),
+            build_pty_resized(floating_pane_id, 46, 9),
+        ]
+    );
+}
+
+#[test]
+fn detaching_the_last_client_freezes_every_floating_pane_until_a_client_attaches() {
+    let FloatingPaneFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        floating_pane_id,
+        ..
+    } = build_floating_pane_fixture();
+
+    let detach_events = runtime.handle_client_detach(alice_client_id);
+
+    assert_eq!(detach_events, Vec::new());
+    assert_eq!(
+        get_floating_solved_size(&runtime, session_id, floating_pane_id),
+        FloatingPaneSizeSolve::Sized(Size {
+            column_count: 72,
+            row_count: 24,
+        })
+    );
+
+    let bob_client_id = ClientId::new();
+    let attach_events = runtime.handle_client_attach(
+        session_id,
+        bob_client_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        None,
+        tab_id,
+        None,
+        SystemTime::now(),
+        false,
+    );
+
+    assert_eq!(
+        attach_events,
+        vec![
+            Event::PaneFocused(PaneFocused {
+                client_id: bob_client_id,
+                tab_id,
+                pane_id: tiled_pane_id,
+                previous_pane_id: None,
+            }),
+            build_pty_resized(tiled_pane_id, 78, 20),
+            build_pty_resized(floating_pane_id, 46, 9),
+        ]
+    );
+}
+
+#[test]
+fn a_client_viewing_another_tab_still_shrinks_every_floating_pane() {
+    let FloatingPaneFixture {
+        mut runtime,
+        session_id,
+        floating_pane_id,
+        ..
+    } = build_floating_pane_fixture();
+    let (other_tab_id, other_pane_id) = (TabId::new(), PaneId::new());
+    let session = runtime
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the seeded session");
+    register_pane_record(session, other_pane_id);
+    register_session_tab(session, other_tab_id, other_pane_id);
+
+    // The other tab records no focus, so bob lands on no pane, and its pane
+    // has no PTY to resize.
+    let attach_events = runtime.handle_client_attach(
+        session_id,
+        ClientId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        None,
+        other_tab_id,
+        None,
+        SystemTime::now(),
+        false,
+    );
+
+    assert_eq!(
+        attach_events,
+        vec![build_pty_resized(floating_pane_id, 46, 9)]
+    );
+}
+
+#[test]
+fn a_floating_pane_takes_the_cell_size_of_the_earliest_attached_client_on_any_tab() {
+    let FloatingPaneFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        floating_pane_id,
+        ..
+    } = build_floating_pane_fixture();
+    let read_floating_cell_size = |runtime: &Server| {
+        runtime.list_terminal_engines()[&floating_pane_id]
+            .get_terminal_state()
+            .get_cell_size()
+    };
+    let (other_tab_id, other_pane_id) = (TabId::new(), PaneId::new());
+    let session = runtime
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the seeded session");
+    register_pane_record(session, other_pane_id);
+    register_session_tab(session, other_tab_id, other_pane_id);
+    let alice_cell_size =
+        PixelCellSize::from_pixel_dimensions(10, 20).expect("positive cell dimensions");
+    let bob_cell_size =
+        PixelCellSize::from_pixel_dimensions(8, 16).expect("positive cell dimensions");
+    assert_eq!(read_floating_cell_size(&runtime), None);
+
+    runtime.handle_client_cell_size(alice_client_id, alice_cell_size);
+    assert_eq!(read_floating_cell_size(&runtime), Some(alice_cell_size));
+
+    // bob attaches after alice and views another tab.
+    runtime.handle_client_attach(
+        session_id,
+        ClientId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        None,
+        other_tab_id,
+        Some(bob_cell_size),
+        SystemTime::now(),
+        false,
+    );
+    assert_eq!(read_floating_cell_size(&runtime), Some(alice_cell_size));
+
+    runtime.handle_client_detach(alice_client_id);
+    assert_eq!(read_floating_cell_size(&runtime), Some(bob_cell_size));
+}
+
+#[test]
+fn a_client_moving_to_another_session_regrows_the_floating_panes_it_left() {
+    let FloatingPaneFixture {
+        mut runtime,
+        session_id,
+        tab_id,
+        tiled_pane_id,
+        floating_pane_id,
+        ..
+    } = build_floating_pane_fixture();
+    let bob_client_id = ClientId::new();
+    let bob_viewport_size = Size {
+        column_count: 80,
+        row_count: 24,
+    };
+    runtime.handle_client_attach(
+        session_id,
+        bob_client_id,
+        bob_viewport_size,
+        None,
+        tab_id,
+        None,
+        SystemTime::now(),
+        false,
+    );
+    let mut other_session = build_bare_session(SessionId::new());
+    let (other_tab_id, other_pane_id) = (TabId::new(), PaneId::new());
+    register_pane_record(&mut other_session, other_pane_id);
+    register_session_tab(&mut other_session, other_tab_id, other_pane_id);
+    let other_session_id = other_session.session_id;
+    runtime
+        .session_by_id
+        .insert(other_session_id, other_session);
+
+    let move_events = runtime.handle_client_attach(
+        other_session_id,
+        bob_client_id,
+        bob_viewport_size,
+        None,
+        other_tab_id,
+        None,
+        SystemTime::now(),
+        false,
+    );
+
+    assert_eq!(
+        move_events,
+        vec![
+            build_pty_resized(tiled_pane_id, 118, 38),
+            build_pty_resized(floating_pane_id, 70, 20),
+        ]
+    );
+}
+
 #[test]
 fn attach_applies_cell_measurement_before_reflow_and_resize_can_clear_it() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
@@ -14363,7 +15029,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
     let tab_id_2 = runtime.session_by_id[&session_id]
         .tabs
         .values()
-        .find(|tab_id| tab_id.get_tab_id() != tab_id_1)
+        .find(|tab| tab.get_tab_id() != tab_id_1)
         .expect("the created tab")
         .get_tab_id();
 

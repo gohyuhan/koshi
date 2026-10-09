@@ -18,10 +18,10 @@ use koshi_ipc::transport::Listener;
 use koshi_layout::tree::LayoutNode;
 use koshi_test_support::fixtures::{
     build_test_runtime_directory, close_connection_after_peer_hangs_up,
-    spawn_previous_release_session, write_koshi_0_1_0_window_endpoint_file,
-    write_session_endpoint_file, KOSHI_0_2_0_HELLO_ANSWER_TEXT, KOSHI_0_2_0_RESTART_REFUSAL_TEXT,
-    KOSHI_0_4_0_HELLO_ANSWER_TEXT, KOSHI_0_4_0_RESTARTING_ANSWER_TEXT,
-    PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT,
+    spawn_previous_release_session, spawn_session_listening_before_it_advertises,
+    write_koshi_0_1_0_window_endpoint_file, write_session_endpoint_file,
+    KOSHI_0_2_0_HELLO_ANSWER_TEXT, KOSHI_0_2_0_RESTART_REFUSAL_TEXT, KOSHI_0_4_0_HELLO_ANSWER_TEXT,
+    KOSHI_0_4_0_RESTARTING_ANSWER_TEXT, PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT,
 };
 
 use super::*;
@@ -452,13 +452,13 @@ fn the_endpoint_file_of_an_open_koshi_0_1_0_window_names_that_window() {
 }
 
 #[test]
-fn a_refused_hello_reports_ipc_unavailable() {
+fn a_session_refusing_the_token_of_two_endpoint_files_in_a_row_reports_the_refusal() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
-    let (session_server_thread, _submitted_envelopes) = spawn_fake_session(
+    let (session_server_thread, submitted_envelopes) = spawn_fake_session(
         runtime_directory.path(),
         session_id,
-        vec![SessionScript::RefuseHello],
+        vec![SessionScript::RefuseHello, SessionScript::RefuseHello],
     );
 
     let command_error = submit_command_via_runtime_directory(
@@ -466,13 +466,50 @@ fn a_refused_hello_reports_ipc_unavailable() {
         &build_in_session_context(session_id),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
-    .expect_err("the hello is refused");
-    let CliError::IpcUnavailable { detail } = command_error else {
-        panic!("expected IpcUnavailable, got {command_error:?}");
+    .expect_err("both hellos are refused");
+    let CliError::ConnectionTokenRefused { detail } = command_error else {
+        panic!("expected ConnectionTokenRefused, got {command_error:?}");
     };
     assert_eq!(detail, "the token presented does not match this Koshi's");
+    assert_eq!(submitted_envelopes.try_iter().count(), 2);
 
     session_server_thread.join().expect("fake session exits");
+}
+
+#[test]
+fn a_command_refused_for_its_token_is_applied_once_the_session_advertises_another() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let (session_server_thread, submitted_envelopes) = spawn_fake_session(
+        runtime_directory.path(),
+        session_id,
+        vec![SessionScript::RefuseHello, SessionScript::AcceptAndApply],
+    );
+
+    let command_result = submit_external_command_via_runtime_directory(
+        runtime_directory.path(),
+        None,
+        session_id,
+        None,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
+    )
+    .expect("the second hello presents the session's own token");
+
+    session_server_thread.join().expect("fake session exits");
+    let refused_envelope = submitted_envelopes
+        .recv()
+        .expect("the refusing connection read one command");
+    let command_envelope = submitted_envelopes
+        .recv()
+        .expect("the accepting connection read one command");
+    assert_eq!(refused_envelope.command, command_envelope.command);
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id: command_envelope.command_id,
+            emitted_events: Vec::new(),
+        },
+    );
 }
 
 #[test]
@@ -1152,6 +1189,31 @@ fn a_running_session_reports_the_build_its_hello_named() {
         Err(mpsc::RecvError),
         "reading the build sends nothing besides the Hello",
     );
+}
+
+#[test]
+fn a_session_refusing_its_old_token_reports_the_build_once_it_advertises_its_own() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let session_server_thread = spawn_session_listening_before_it_advertises(
+        runtime_directory.path(),
+        session_id,
+        OLD_CONNECTION_TOKEN,
+        NEW_CONNECTION_TOKEN,
+        |request_kind| {
+            panic!(
+                "reading the build sends no {} after the Hello",
+                request_kind.get_request_kind_name()
+            )
+        },
+    );
+
+    let session_version =
+        find_running_session_version(runtime_directory.path(), None, session_id, None)
+            .expect("the second Hello is answered");
+
+    assert_eq!(session_version, Some("9.9.9".to_string()));
+    session_server_thread.join().expect("fake session exits");
 }
 
 #[test]
@@ -3584,6 +3646,21 @@ fn wait_for_new_session_endpoint_reads_past_an_endpoint_file_this_build_cannot_r
 }
 
 #[test]
+fn a_poll_pause_is_the_poll_interval_or_the_time_left_when_less_is_left() {
+    assert_eq!(
+        compute_poll_pause_duration(Instant::now() + Duration::from_secs(3600)),
+        RESTART_POLL_INTERVAL_DURATION
+    );
+    assert_eq!(compute_poll_pause_duration(Instant::now()), Duration::ZERO);
+
+    let wait_deadline = Instant::now() + Duration::from_millis(10);
+    let poll_pause_duration = compute_poll_pause_duration(wait_deadline);
+    let computed_at = Instant::now();
+    assert!(poll_pause_duration <= Duration::from_millis(10));
+    assert!(poll_pause_duration >= wait_deadline.saturating_duration_since(computed_at));
+}
+
+#[test]
 fn a_session_of_koshi_0_4_0_names_restart_servers_without_waiting_for_a_restart() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
@@ -3840,6 +3917,111 @@ fn a_session_refusing_this_builds_protocol_version_is_asked_again_once_it_restar
             emitted_events: Vec::new(),
         },
     );
+}
+
+/// The refusal a session sends to a Hello whose connection token it does not
+/// hold.
+fn build_connection_token_refusal() -> CliError {
+    CliError::ConnectionTokenRefused {
+        detail: "the token presented does not match this Koshi's".to_string(),
+    }
+}
+
+#[test]
+fn a_token_refusal_from_another_users_session_comes_back_at_once() {
+    let runtime_directory = build_test_runtime_directory();
+    let foreign_endpoint = build_foreign_session_endpoint("/home/user/shared.sock".to_string());
+    let mut exchange_count = 0;
+    let wait_started_at = Instant::now();
+
+    let (exchanged_endpoint, exchange_result) = run_session_exchange_with_token_wait(
+        runtime_directory.path(),
+        SessionId::new(),
+        foreign_endpoint.clone(),
+        None,
+        |_| -> Result<(), CliError> {
+            exchange_count += 1;
+            Err(build_connection_token_refusal())
+        },
+    );
+
+    let Err(CliError::ConnectionTokenRefused { detail }) = exchange_result else {
+        panic!("expected ConnectionTokenRefused, got {exchange_result:?}");
+    };
+    assert_eq!(detail, "the token presented does not match this Koshi's");
+    assert_eq!(exchanged_endpoint, foreign_endpoint);
+    assert_eq!(exchange_count, 1);
+    assert!(wait_started_at.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn a_token_refusal_whose_endpoint_file_keeps_its_token_comes_back_at_the_answer_deadline() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let refused_endpoint = write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        OLD_CONNECTION_TOKEN,
+        5000,
+    );
+    let mut exchange_count = 0;
+    let wait_started_at = Instant::now();
+
+    let (exchanged_endpoint, exchange_result) = run_session_exchange_with_token_wait(
+        runtime_directory.path(),
+        session_id,
+        refused_endpoint.clone(),
+        Some(Instant::now()),
+        |_| -> Result<(), CliError> {
+            exchange_count += 1;
+            Err(build_connection_token_refusal())
+        },
+    );
+
+    let Err(CliError::ConnectionTokenRefused { detail }) = exchange_result else {
+        panic!("expected ConnectionTokenRefused, got {exchange_result:?}");
+    };
+    assert_eq!(detail, "the token presented does not match this Koshi's");
+    assert_eq!(exchanged_endpoint, refused_endpoint);
+    assert_eq!(exchange_count, 1);
+    assert!(wait_started_at.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn a_token_refusal_comes_back_without_a_second_exchange_once_the_answer_deadline_is_reached() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let refused_endpoint = write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        OLD_CONNECTION_TOKEN,
+        5000,
+    );
+    write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        NEW_CONNECTION_TOKEN,
+        5000,
+    );
+    let mut exchange_count = 0;
+
+    let (exchanged_endpoint, exchange_result) = run_session_exchange_with_token_wait(
+        runtime_directory.path(),
+        session_id,
+        refused_endpoint.clone(),
+        Some(Instant::now()),
+        |_| -> Result<(), CliError> {
+            exchange_count += 1;
+            Err(build_connection_token_refusal())
+        },
+    );
+
+    let Err(CliError::ConnectionTokenRefused { detail }) = exchange_result else {
+        panic!("expected ConnectionTokenRefused, got {exchange_result:?}");
+    };
+    assert_eq!(detail, "the token presented does not match this Koshi's");
+    assert_eq!(exchanged_endpoint, refused_endpoint);
+    assert_eq!(exchange_count, 1);
 }
 
 #[test]

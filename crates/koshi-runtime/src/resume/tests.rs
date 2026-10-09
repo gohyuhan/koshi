@@ -2457,11 +2457,9 @@ fn a_pane_a_session_holds_that_nothing_drives_closes_and_the_others_stay() {
         None,
         "the pane nothing drives leaves the registry"
     );
-    assert!(
-        session
-            .tabs
-            .values()
-            .all(|tab| !tab.get_layout_tree().has_pane(undriven_pane_id)),
+    assert_eq!(
+        session.find_tab_by_pane_id(undriven_pane_id),
+        None,
         "and every layout"
     );
     assert!(!resumed_server
