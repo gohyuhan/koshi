@@ -3646,6 +3646,21 @@ fn wait_for_new_session_endpoint_reads_past_an_endpoint_file_this_build_cannot_r
 }
 
 #[test]
+fn a_poll_pause_is_the_poll_interval_or_the_time_left_when_less_is_left() {
+    assert_eq!(
+        compute_poll_pause_duration(Instant::now() + Duration::from_secs(3600)),
+        RESTART_POLL_INTERVAL_DURATION
+    );
+    assert_eq!(compute_poll_pause_duration(Instant::now()), Duration::ZERO);
+
+    let wait_deadline = Instant::now() + Duration::from_millis(10);
+    let poll_pause_duration = compute_poll_pause_duration(wait_deadline);
+    let computed_at = Instant::now();
+    assert!(poll_pause_duration <= Duration::from_millis(10));
+    assert!(poll_pause_duration >= wait_deadline.saturating_duration_since(computed_at));
+}
+
+#[test]
 fn a_session_of_koshi_0_4_0_names_restart_servers_without_waiting_for_a_restart() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
@@ -3970,6 +3985,43 @@ fn a_token_refusal_whose_endpoint_file_keeps_its_token_comes_back_at_the_answer_
     assert_eq!(exchanged_endpoint, refused_endpoint);
     assert_eq!(exchange_count, 1);
     assert!(wait_started_at.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn a_token_refusal_comes_back_without_a_second_exchange_once_the_answer_deadline_is_reached() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let refused_endpoint = write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        OLD_CONNECTION_TOKEN,
+        5000,
+    );
+    write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        NEW_CONNECTION_TOKEN,
+        5000,
+    );
+    let mut exchange_count = 0;
+
+    let (exchanged_endpoint, exchange_result) = run_session_exchange_with_token_wait(
+        runtime_directory.path(),
+        session_id,
+        refused_endpoint.clone(),
+        Some(Instant::now()),
+        |_| -> Result<(), CliError> {
+            exchange_count += 1;
+            Err(build_connection_token_refusal())
+        },
+    );
+
+    let Err(CliError::ConnectionTokenRefused { detail }) = exchange_result else {
+        panic!("expected ConnectionTokenRefused, got {exchange_result:?}");
+    };
+    assert_eq!(detail, "the token presented does not match this Koshi's");
+    assert_eq!(exchanged_endpoint, refused_endpoint);
+    assert_eq!(exchange_count, 1);
 }
 
 #[test]

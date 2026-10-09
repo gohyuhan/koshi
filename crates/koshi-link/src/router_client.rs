@@ -18,7 +18,8 @@
 //! Three asks never start one: restarting the running router, reading its
 //! build version, and counting the connections it holds from another machine.
 //! Each opens one connection, or a second one after a Hello refused for its
-//! connection token, and reports back when no router was running.
+//! connection token, and reports back when the last connect finds no router
+//! running.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -36,8 +37,8 @@ use koshi_ipc::transport::Connection;
 
 use crate::error::CliError;
 use crate::ipc_client::{
-    REFUSED_SERVER_RESTART_START_WAIT_DURATION, REFUSED_TOKEN_ADVERTISE_WAIT_DURATION,
-    RESTART_POLL_INTERVAL_DURATION,
+    compute_poll_pause_duration, REFUSED_SERVER_RESTART_START_WAIT_DURATION,
+    REFUSED_TOKEN_ADVERTISE_WAIT_DURATION, RESTART_POLL_INTERVAL_DURATION,
 };
 use crate::server_build::{find_refusing_server_build, RefusingServerBuild};
 use crate::talk::{self, build_ipc_unavailable_error};
@@ -70,8 +71,9 @@ type RouterExchangeOutcome<RouterAnswer> = (EndpointFile, Result<RouterAnswer, C
 ///
 /// Tries the exchange once. With no router running it starts one detached and
 /// retries every 100 milliseconds until the router answers or 5 seconds pass.
-/// Nothing is sent on an attempt that finds no router: a retried request
-/// reaches a router exactly once.
+/// No router runs the request on an attempt that finds no router: that attempt
+/// sent nothing, or the router refused the Hello in front of the request. A
+/// retried request runs once at most.
 ///
 /// A router that refuses this build's protocol version is waited for when
 /// [`RefusingServerBuild::is_restart_expected`] holds for its program file.
@@ -223,7 +225,8 @@ fn start_router_and_exchange<RouterAnswer>(
 /// it sends one more when the endpoint file carries another token or cannot be
 /// read, or after [`REFUSED_TOKEN_ADVERTISE_WAIT_DURATION`]. A router refuses
 /// the Restart behind a refused Hello. Never starts a router. `Ok(false)`
-/// means no router was running, so nothing restarted.
+/// means the last connect found no router running, and no router ran the
+/// Restart.
 ///
 /// A router that refuses the request is [`CliError::IpcUnavailable`] carrying
 /// the sentence the router sent, filtered by [`sanitize_reported_text`]. A
@@ -358,7 +361,8 @@ fn exchange_router_hello(
 ///
 /// A file with another token ends the wait, and so does a file this build
 /// cannot read. A missing file and a file with the same token are read again
-/// every [`RESTART_POLL_INTERVAL_DURATION`]. The first read happens before the
+/// every [`RESTART_POLL_INTERVAL_DURATION`], and before `restart_deadline` no
+/// pause runs past `restart_deadline`. The first read happens before the
 /// deadline is checked: with a deadline already passed, that one read still
 /// sees a file that already changed. Example: a `koshi update` that restarts
 /// sessions for 50 seconds before it restarts the router holds the lock all
@@ -409,15 +413,17 @@ fn wait_for_router_endpoint_change(
         if Instant::now() >= wait_deadline {
             return false;
         }
-        std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
+        std::thread::sleep(compute_poll_pause_duration(wait_deadline));
     }
 }
 
 /// Read the router's endpoint file in `runtime_directory`, connect to the
 /// address it names, and run `router_exchange` on that connection with that
 /// file. Gives back the file the last run used, with what that run gave.
-/// `Ok(None)` means no router is running — the endpoint file is missing, or
-/// nothing listens at the address it names — and nothing was sent.
+/// `Ok(None)` means the last connect found no router running: the endpoint
+/// file is missing, or nothing listens at the address it names. When that is
+/// the first connect, nothing was sent. When it is the second, the router
+/// refused the first run's Hello and ran none of the requests behind it.
 ///
 /// A run that gives [`CliError::ConnectionTokenRefused`] met a router that
 /// does not accept the token the file carries. This then waits with
@@ -480,8 +486,8 @@ fn connect_to_running_router(
 /// One exchange with a running router: [`exchange_router_request_on_connection`]
 /// run through [`run_router_exchange`].
 ///
-/// `Ok(None)` means no router is running — the endpoint file is missing, or
-/// nothing listens at the address it names — and nothing was sent.
+/// `Ok(None)` means the last connect found no router running, as
+/// [`run_router_exchange`] states, and no router ran `request_kind`.
 fn exchange_router_request(
     runtime_directory: &Path,
     request_kind: &RouterRequestKind,

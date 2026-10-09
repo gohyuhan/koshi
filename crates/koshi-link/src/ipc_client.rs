@@ -932,9 +932,10 @@ pub fn list_own_sessions(runtime_directory: &Path) -> Result<Vec<SessionId>, Unr
 /// in the file is not compared; on Unix, `execvp` keeps it.
 ///
 /// The file is read every [`RESTART_POLL_INTERVAL_DURATION`] until the
-/// deadline, and a missing or unreadable file is read again. The first read
-/// happens before the deadline is checked: with a deadline already passed,
-/// that one read still takes a session that is already back.
+/// deadline, and the last pause ends at the deadline. A missing or unreadable
+/// file is read again. The first read happens before the deadline is checked:
+/// with a deadline already passed, that one read still takes a session that is
+/// already back.
 #[must_use]
 pub fn wait_for_new_session_endpoint(
     runtime_directory: &Path,
@@ -952,7 +953,7 @@ pub fn wait_for_new_session_endpoint(
         if Instant::now() >= restart_deadline {
             return None;
         }
-        std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
+        std::thread::sleep(compute_poll_pause_duration(restart_deadline));
     }
 }
 
@@ -1040,7 +1041,7 @@ pub fn wait_for_refused_session_restart(
         if Instant::now() >= start_deadline {
             break;
         }
-        std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
+        std::thread::sleep(compute_poll_pause_duration(start_deadline));
     }
     Err(build_refusal_error(&find_refusing_server_build(
         &program_file_path,
@@ -1104,12 +1105,13 @@ pub fn run_session_exchange_with_restart_wait<ExchangeAnswer>(
 /// that [`is_replacing_its_image`] accepts, this waits with
 /// [`wait_for_new_session_endpoint`] for an endpoint file under another token,
 /// for up to [`REFUSED_TOKEN_ADVERTISE_WAIT_DURATION`] and at most until
-/// `answer_deadline`, then runs `make_exchange` once more over that file. The
-/// refusal of another user's session, and a refusal whose wait ends with the
-/// token unchanged, are handed back as they are. Example: a session that
-/// restarted in place accepts its fresh token before it writes its endpoint
-/// file; a command that read the file before the write is refused, then runs
-/// once more under the fresh token.
+/// `answer_deadline`, then runs `make_exchange` once more over that file when
+/// 1 ms or more is left until `answer_deadline`. The refusal of another user's
+/// session, a refusal whose wait ends with the token unchanged, and a refusal
+/// whose wait ends with less than 1 ms left until `answer_deadline` are handed
+/// back as they are. Example: a session that restarted in place accepts its
+/// fresh token before it writes its endpoint file; a command that read the file
+/// before the write is refused, then runs once more under the fresh token.
 pub fn run_session_exchange_with_token_wait<ExchangeAnswer>(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -1135,11 +1137,11 @@ pub fn run_session_exchange_with_token_wait<ExchangeAnswer>(
         &session_endpoint.connection_token,
         advertise_deadline,
     ) {
-        Some(advertised_endpoint) => {
+        Some(advertised_endpoint) if !is_answer_deadline_reached(answer_deadline) => {
             let exchange_result = make_exchange(&advertised_endpoint);
             (advertised_endpoint, exchange_result)
         }
-        None => (session_endpoint, exchange_result),
+        Some(_) | None => (session_endpoint, exchange_result),
     }
 }
 
@@ -1163,6 +1165,14 @@ pub(crate) fn bound_by_answer_deadline(
         Some(answer_deadline) => wait_end.min(answer_deadline),
         None => wait_end,
     }
+}
+
+/// The pause before a wait reads its endpoint file again:
+/// [`RESTART_POLL_INTERVAL_DURATION`], or the time left until `wait_deadline`
+/// when less is left. `0` once `wait_deadline` has passed. Example: with 10 ms
+/// left, the pause is 10 ms.
+pub(crate) fn compute_poll_pause_duration(wait_deadline: Instant) -> Duration {
+    RESTART_POLL_INTERVAL_DURATION.min(wait_deadline.saturating_duration_since(Instant::now()))
 }
 
 /// The failure an exchange with the session `session_id` ends in while that
