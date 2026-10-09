@@ -6,6 +6,7 @@
 
 use super::*;
 
+use koshi_core::compat::{CONTROL_PROTOCOL, SESSION_PROTOCOL};
 use koshi_core::event::RejectReason;
 use koshi_ipc::protocol::{IpcErrorCode, IpcResult};
 
@@ -28,52 +29,85 @@ fn extract_connection_token_refused_detail(cli_error: CliError) -> String {
     }
 }
 
+/// The refusal a session gives for `settled_protocol_version`, naming the
+/// range of [`SESSION_PROTOCOL`].
+fn format_session_version_refusal(settled_protocol_version: u32) -> String {
+    format!(
+        "the session settled on protocol version {settled_protocol_version}, which is outside \
+         the {} to {} this koshi asked for",
+        SESSION_PROTOCOL.minimum_version, SESSION_PROTOCOL.maximum_version
+    )
+}
+
+/// The refusal a router gives for `settled_protocol_version`, naming the
+/// range of [`CONTROL_PROTOCOL`].
+fn format_router_version_refusal(settled_protocol_version: u32) -> String {
+    format!(
+        "the router settled on control-plane protocol version {settled_protocol_version}, which \
+         is outside the {} to {} this koshi asked for",
+        CONTROL_PROTOCOL.minimum_version, CONTROL_PROTOCOL.maximum_version
+    )
+}
+
 #[test]
 fn a_version_inside_the_range_this_build_sent_is_accepted() {
-    SESSION_PEER_WORDS
-        .validate_settled_protocol_version(4)
-        .expect("4 is the only session version");
-    ROUTER_PEER_WORDS
-        .validate_settled_protocol_version(3)
-        .expect("3 is the router floor and ceiling");
+    for settled_protocol_version in [
+        SESSION_PROTOCOL.minimum_version,
+        SESSION_PROTOCOL.maximum_version,
+    ] {
+        SESSION_PEER_WORDS
+            .validate_settled_protocol_version(settled_protocol_version)
+            .expect("a session version inside the range opens");
+    }
+    for settled_protocol_version in [
+        CONTROL_PROTOCOL.minimum_version,
+        CONTROL_PROTOCOL.maximum_version,
+    ] {
+        ROUTER_PEER_WORDS
+            .validate_settled_protocol_version(settled_protocol_version)
+            .expect("a router version inside the range opens");
+    }
 }
 
 #[test]
 fn a_session_version_above_the_range_names_both_the_version_and_the_range() {
+    let settled_protocol_version = SESSION_PROTOCOL.maximum_version + 1;
+
     let refusal = SESSION_PEER_WORDS
-        .validate_settled_protocol_version(5)
-        .expect_err("5 is outside the 4 to 4 this build speaks");
+        .validate_settled_protocol_version(settled_protocol_version)
+        .expect_err("a version above the range is refused");
 
     assert_eq!(
         extract_ipc_unavailable_detail(refusal),
-        "the session settled on protocol version 5, which is outside the 4 to 4 this koshi \
-         asked for"
+        format_session_version_refusal(settled_protocol_version)
     );
 }
 
 #[test]
 fn a_router_version_above_the_range_names_the_control_plane_in_its_own_words() {
+    let settled_protocol_version = CONTROL_PROTOCOL.maximum_version + 1;
+
     let refusal = ROUTER_PEER_WORDS
-        .validate_settled_protocol_version(4)
-        .expect_err("4 is outside the 3 to 3 this build speaks");
+        .validate_settled_protocol_version(settled_protocol_version)
+        .expect_err("a version above the range is refused");
 
     assert_eq!(
         extract_ipc_unavailable_detail(refusal),
-        "the router settled on control-plane protocol version 4, which is outside the 3 to 3 \
-         this koshi asked for"
+        format_router_version_refusal(settled_protocol_version)
     );
 }
 
 #[test]
 fn a_version_below_the_floor_is_refused_the_same_way() {
+    let settled_protocol_version = SESSION_PROTOCOL.minimum_version - 1;
+
     let refusal = SESSION_PEER_WORDS
-        .validate_settled_protocol_version(3)
-        .expect_err("3 is below the floor of 4");
+        .validate_settled_protocol_version(settled_protocol_version)
+        .expect_err("a version below the floor is refused");
 
     assert_eq!(
         extract_ipc_unavailable_detail(refusal),
-        "the session settled on protocol version 3, which is outside the 4 to 4 this koshi \
-         asked for"
+        format_session_version_refusal(settled_protocol_version)
     );
 }
 
@@ -81,12 +115,11 @@ fn a_version_below_the_floor_is_refused_the_same_way() {
 fn a_router_version_below_the_floor_names_the_control_plane_range() {
     let refusal = ROUTER_PEER_WORDS
         .validate_settled_protocol_version(0)
-        .expect_err("0 is below the router floor of 3");
+        .expect_err("0 is below the router floor");
 
     assert_eq!(
         extract_ipc_unavailable_detail(refusal),
-        "the router settled on control-plane protocol version 0, which is outside the 3 to 3 \
-         this koshi asked for"
+        format_router_version_refusal(0)
     );
 }
 
@@ -94,12 +127,11 @@ fn a_router_version_below_the_floor_names_the_control_plane_range() {
 fn the_largest_version_a_peer_can_name_is_outside_the_range() {
     let refusal = SESSION_PEER_WORDS
         .validate_settled_protocol_version(u32::MAX)
-        .expect_err("4294967295 is outside the 4 to 4 this build speaks");
+        .expect_err("4294967295 is above the range");
 
     assert_eq!(
         extract_ipc_unavailable_detail(refusal),
-        "the session settled on protocol version 4294967295, which is outside the 4 to 4 this \
-         koshi asked for"
+        format_session_version_refusal(u32::MAX)
     );
 }
 
@@ -353,44 +385,42 @@ fn build_router_response(router_result: RouterResult) -> IncomingRouterResponse 
 #[test]
 fn a_session_hello_hands_back_the_build_the_session_named() {
     let incoming_response = build_session_response(IpcResult::Hello {
-        protocol_version: 4,
+        protocol_version: SESSION_PROTOCOL.maximum_version,
         build_version: "0.9.9".to_string(),
     });
 
     assert_eq!(
-        parse_session_hello_version(incoming_response)
-            .expect("4 is the only version this build speaks"),
-        (4, "0.9.9".to_string())
+        parse_session_hello_version(incoming_response).expect("a version inside the range opens"),
+        (SESSION_PROTOCOL.maximum_version, "0.9.9".to_string())
     );
 }
 
 #[test]
 fn a_session_hello_with_an_empty_build_version_hands_back_an_empty_string() {
     let incoming_response = build_session_response(IpcResult::Hello {
-        protocol_version: 4,
+        protocol_version: SESSION_PROTOCOL.maximum_version,
         build_version: String::new(),
     });
 
     assert_eq!(
         parse_session_hello_version(incoming_response).expect("an empty build version still opens"),
-        (4, String::new())
+        (SESSION_PROTOCOL.maximum_version, String::new())
     );
 }
 
 #[test]
 fn a_session_hello_naming_a_version_outside_the_range_stops_the_exchange() {
     let incoming_response = build_session_response(IpcResult::Hello {
-        protocol_version: 5,
+        protocol_version: SESSION_PROTOCOL.maximum_version + 1,
         build_version: "0.9.9".to_string(),
     });
 
-    let refusal =
-        parse_session_hello_version(incoming_response).expect_err("5 is outside the 4 to 4");
+    let refusal = parse_session_hello_version(incoming_response)
+        .expect_err("a version above the range is refused");
 
     assert_eq!(
         extract_ipc_unavailable_detail(refusal),
-        "the session settled on protocol version 5, which is outside the 4 to 4 this koshi \
-         asked for"
+        format_session_version_refusal(SESSION_PROTOCOL.maximum_version + 1)
     );
 }
 
@@ -444,13 +474,12 @@ fn a_hello_answer_this_build_cannot_name_stops_the_exchange() {
 #[test]
 fn a_router_hello_hands_back_the_build_the_router_named() {
     let incoming_response = build_router_response(RouterResult::Hello {
-        protocol_version: 3,
+        protocol_version: CONTROL_PROTOCOL.maximum_version,
         build_version: "0.9.9".to_string(),
     });
 
     assert_eq!(
-        parse_router_hello_version(incoming_response)
-            .expect("3 is inside the 3 to 3 this build speaks"),
+        parse_router_hello_version(incoming_response).expect("a version inside the range opens"),
         "0.9.9"
     );
 }
@@ -458,13 +487,12 @@ fn a_router_hello_hands_back_the_build_the_router_named() {
 #[test]
 fn a_router_hello_build_loses_its_control_characters() {
     let incoming_response = build_router_response(RouterResult::Hello {
-        protocol_version: 3,
+        protocol_version: CONTROL_PROTOCOL.maximum_version,
         build_version: "0.9.9\u{1b}]0;title\u{7}".to_string(),
     });
 
     assert_eq!(
-        parse_router_hello_version(incoming_response)
-            .expect("3 is inside the 3 to 3 this build speaks"),
+        parse_router_hello_version(incoming_response).expect("a version inside the range opens"),
         "0.9.9]0;title"
     );
 }
@@ -472,17 +500,16 @@ fn a_router_hello_build_loses_its_control_characters() {
 #[test]
 fn a_router_hello_naming_a_version_outside_the_range_stops_the_exchange() {
     let incoming_response = build_router_response(RouterResult::Hello {
-        protocol_version: 4,
+        protocol_version: CONTROL_PROTOCOL.maximum_version + 1,
         build_version: "0.9.9".to_string(),
     });
 
-    let refusal =
-        parse_router_hello_version(incoming_response).expect_err("4 is outside the 3 to 3");
+    let refusal = parse_router_hello_version(incoming_response)
+        .expect_err("a version above the range is refused");
 
     assert_eq!(
         extract_ipc_unavailable_detail(refusal),
-        "the router settled on control-plane protocol version 4, which is outside the 3 to 3 \
-         this koshi asked for"
+        format_router_version_refusal(CONTROL_PROTOCOL.maximum_version + 1)
     );
 }
 
@@ -576,16 +603,17 @@ fn a_rejections_hint_is_filtered_and_an_applied_result_is_left_alone() {
 
 #[test]
 fn a_session_hello_filters_the_build_it_named() {
-    // `koshi server-version` prints this string, and the session that answered
-    // is another user's process or another machine's.
+    // The control characters of the build version are dropped.
     let incoming_response = build_session_response(IpcResult::Hello {
-        protocol_version: 4,
+        protocol_version: SESSION_PROTOCOL.maximum_version,
         build_version: "\u{1b}]0;pwned\u{7}0.9.9".to_string(),
     });
 
     assert_eq!(
-        parse_session_hello_version(incoming_response)
-            .expect("4 is the only version this build speaks"),
-        (4, "]0;pwned0.9.9".to_string())
+        parse_session_hello_version(incoming_response).expect("a version inside the range opens"),
+        (
+            SESSION_PROTOCOL.maximum_version,
+            "]0;pwned0.9.9".to_string()
+        )
     );
 }

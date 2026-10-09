@@ -22,6 +22,7 @@ use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_layout::tree::LayoutNode;
 
 use crate::client::Client;
+use crate::session::cascade::remove_floating_pane;
 use crate::session::lifecycle::SessionLifecycleEvent;
 use crate::session::pane_ops::{register_running_pane, NewPaneSpec};
 use crate::session::state::{Session, Tab};
@@ -82,7 +83,7 @@ pub fn commit_new_tab(
     emitted_events.push(Event::TabCreated(TabCreated { tab_id: new_tab_id }));
     emitted_events.push(Event::PaneCreated(PaneCreated {
         pane_id: new_pane_id,
-        tab_id: new_tab_id,
+        tab_id: Some(new_tab_id),
     }));
 
     // A `focus_client_id` that is no longer attached moves no view and reports no
@@ -102,7 +103,7 @@ pub fn commit_new_tab(
             let previous_pane_id = client.update_focused_pane(new_tab_id, new_pane_id);
             emitted_events.push(Event::PaneFocused(PaneFocused {
                 client_id,
-                tab_id: new_tab_id,
+                tab_id: Some(new_tab_id),
                 pane_id: new_pane_id,
                 previous_pane_id,
             }));
@@ -192,7 +193,7 @@ pub fn commit_profile_tab(
     for pane_id in &pane_ids {
         emitted_events.push(Event::PaneCreated(PaneCreated {
             pane_id: *pane_id,
-            tab_id,
+            tab_id: Some(tab_id),
         }));
     }
 
@@ -211,7 +212,7 @@ pub fn commit_profile_tab(
                 }));
                 emitted_events.push(Event::PaneFocused(PaneFocused {
                     client_id,
-                    tab_id,
+                    tab_id: Some(tab_id),
                     pane_id: focused_pane_id,
                     previous_pane_id,
                 }));
@@ -241,7 +242,10 @@ pub fn close_tab(session: &mut Session, tab_id: TabId) -> Vec<Event> {
     for pane_id in tab_pane_ids {
         let _ = session.panes.remove_pane_record(pane_id);
         emitted_events.push(Event::PaneClosing(PaneClosing { pane_id }));
-        emitted_events.push(Event::PaneRemoved(PaneRemoved { pane_id, tab_id }));
+        emitted_events.push(Event::PaneRemoved(PaneRemoved {
+            pane_id,
+            tab_id: Some(tab_id),
+        }));
     }
 
     emitted_events.extend(close_and_refocus_tab(session, tab_id, None));
@@ -343,7 +347,7 @@ fn land_focus(
     }
     emitted_events.push(Event::PaneFocused(PaneFocused {
         client_id,
-        tab_id,
+        tab_id: Some(tab_id),
         pane_id,
         previous_pane_id: None,
     }));
@@ -445,11 +449,13 @@ pub fn move_tab(session: &mut Session, target_tab_id: TabId, new_tab_index: usiz
 /// pane focus and the zoom it held there, and sending any client that was
 /// viewing it to the nearest surviving tab with [`Event::TabFocused`] and, for
 /// a client holding no pane focus there, [`Event::PaneFocused`] on that tab's
-/// landing pane — renumbers the survivors densely, and emits [`Event::Quit`]
-/// with [`QuitCause::LastTabClosed`] naming `tab_id` and `pane_exit` when no
-/// tabs remain. `pane_exit` is the child exit that emptied the tab, and `None`
-/// when a command closed the pane or the tab. With no surviving tab to move
-/// to, a viewer's `active_tab` keeps naming the removed tab. Shared by
+/// landing pane — renumbers the survivors densely. When no tabs remain, it
+/// removes every floating pane in creation order ([`remove_floating_pane`]:
+/// [`Event::PaneClosing`] and [`Event::PaneRemoved`] with `tab_id: None` for
+/// each), then emits [`Event::Quit`] with [`QuitCause::LastTabClosed`] naming
+/// `tab_id` and `pane_exit`. `pane_exit` is the child exit that emptied the
+/// tab, and `None` when a command closed the pane or the tab. With no surviving tab to move
+/// to, a viewer's `active_tab_id` keeps naming the removed tab. Shared by
 /// [`close_tab`] and the close/quit cascade's empty-tab path. The caller
 /// removes the tab's panes first (if any); this handles the tab and above.
 #[must_use]
@@ -494,6 +500,15 @@ pub(crate) fn close_and_refocus_tab(
     reindex_tabs_by_display_index(session);
 
     if session.tabs.is_empty() {
+        let floating_pane_ids: Vec<PaneId> = session
+            .floating_set
+            .list_members()
+            .iter()
+            .map(|floating_member| floating_member.pane_id)
+            .collect();
+        for floating_pane_id in floating_pane_ids {
+            emitted_events.extend(remove_floating_pane(session, floating_pane_id));
+        }
         // An already `Stopping` or `Stopped` session keeps the state it has;
         // `Quit` is emitted either way.
         let _ = session.update_lifecycle(SessionLifecycleEvent::StopRequested);

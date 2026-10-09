@@ -6,8 +6,7 @@
 //! session from `Starting` to `Stopped`, and pin the stored form of every
 //! session state and session event to its bare variant name.
 
-use super::{SessionLifecycle, SessionLifecycleEvent};
-use crate::error::InvalidTransition;
+use super::*;
 
 /// Every session lifecycle state and event, for exhaustive sweeps.
 const SESSION_LIFECYCLE_STATES: [SessionLifecycle; 5] = [
@@ -180,13 +179,13 @@ fn every_state_and_event_pair_has_a_fixed_outcome() {
 
 #[test]
 fn a_stop_request_is_rejected_once_the_session_is_already_stopping() {
-    let stopping = SessionLifecycle::Running
+    let stopping_lifecycle = SessionLifecycle::Running
         .transition(SessionLifecycleEvent::StopRequested)
         .expect("a running session accepts a stop request");
-    assert_eq!(stopping, SessionLifecycle::Stopping);
+    assert_eq!(stopping_lifecycle, SessionLifecycle::Stopping);
 
     assert_eq!(
-        stopping.transition(SessionLifecycleEvent::StopRequested),
+        stopping_lifecycle.transition(SessionLifecycleEvent::StopRequested),
         Err(InvalidTransition {
             previous_lifecycle: SessionLifecycle::Stopping,
             lifecycle_event: SessionLifecycleEvent::StopRequested,

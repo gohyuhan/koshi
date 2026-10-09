@@ -51,7 +51,7 @@ mod common;
 #[cfg(unix)]
 use common::resolve_config_directory_under_home;
 use common::session_connection::{
-    build_pane, send_session_request, submit_session_command, wait_for_session_connection,
+    create_pane, send_session_request, submit_session_command, wait_for_session_connection,
 };
 use common::{
     build_koshi_command_at, build_no_such_session_result, build_shell_spawn_spec,
@@ -719,13 +719,13 @@ fn a_restart_keeps_every_pane_its_child_its_screen_and_its_scrollback() {
     let (mut control_connection, _) =
         wait_for_session_connection(runtime_directory.path(), session_id);
     let seeded_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
-    let left_pane_id = build_pane(
+    let left_pane_id = create_pane(
         &mut control_connection,
         session_id,
         attached_client_stream.client_id,
         Some(build_burst_spawn_spec("left", 30)),
     );
-    let right_pane_id = build_pane(
+    let right_pane_id = create_pane(
         &mut control_connection,
         session_id,
         attached_client_stream.client_id,
@@ -907,7 +907,7 @@ fn output_written_across_the_swap_arrives_once_and_in_order() {
         );
     let (mut control_connection, _) =
         wait_for_session_connection(runtime_directory.path(), session_id);
-    let output_pane_id = build_pane(
+    let output_pane_id = create_pane(
         &mut control_connection,
         session_id,
         attached_client_stream.client_id,
@@ -977,7 +977,7 @@ fn input_sent_after_the_clients_are_told_still_reaches_its_pane() {
     let seeded_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
     // A child that ends the moment it reads one line: the panes the session
     // holds after the swap show whether the line reached it.
-    let input_pane_id = build_pane(
+    let input_pane_id = create_pane(
         &mut control_connection,
         session_id,
         attached_client_stream.client_id,
@@ -1126,7 +1126,7 @@ fn a_pane_a_running_session_opened_prints_what_its_child_wrote() {
         wait_for_session_connection(runtime_directory.path(), session_id);
     // One line, then a child that stays alive: the last row the pane shows is
     // that line.
-    let output_pane_id = build_pane(
+    let output_pane_id = create_pane(
         &mut control_connection,
         session_id,
         attached_client_stream.client_id,
@@ -1170,7 +1170,7 @@ fn a_pane_whose_child_never_exits_does_not_hold_the_swap_up() {
         wait_for_session_connection(runtime_directory.path(), session_id);
     let seeded_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
     // A child that never exits and prints nothing for its reader to read.
-    let output_pane_id = build_pane(
+    let output_pane_id = create_pane(
         &mut control_connection,
         session_id,
         attached_client_stream.client_id,
@@ -1227,7 +1227,7 @@ fn a_client_that_comes_back_keeps_its_id_its_focus_and_its_zoom() {
     );
     let (mut control_connection, _) =
         wait_for_session_connection(runtime_directory.path(), session_id);
-    let focused_pane_id = build_pane(
+    let focused_pane_id = create_pane(
         &mut control_connection,
         session_id,
         initial_client_stream.client_id,
@@ -1349,7 +1349,7 @@ fn a_second_caller_naming_a_client_already_streaming_is_given_a_client_of_its_ow
         );
     let (mut control_connection, _) =
         wait_for_session_connection(runtime_directory.path(), session_id);
-    let focused_pane_id = build_pane(
+    let focused_pane_id = create_pane(
         &mut control_connection,
         session_id,
         original_client_stream.client_id,
@@ -1533,7 +1533,7 @@ fn a_restart_into_a_binary_that_cannot_run_is_refused_and_the_session_keeps_serv
     let (mut control_connection, _) =
         wait_for_session_connection(runtime_directory.path(), session_id);
     let seeded_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
-    let output_pane_id = build_pane(
+    let output_pane_id = create_pane(
         &mut control_connection,
         session_id,
         attached_client_stream.client_id,
@@ -1740,7 +1740,7 @@ fn a_restart_whose_config_migration_fails_still_swaps_and_keeps_every_pane() {
     let (mut control_connection, _) =
         wait_for_session_connection(runtime_directory.path(), session_id);
     let seeded_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
-    let output_pane_id = build_pane(
+    let output_pane_id = create_pane(
         &mut control_connection,
         session_id,
         attached_client_stream.client_id,
@@ -1821,7 +1821,7 @@ fn a_swap_that_cannot_write_its_state_leaves_the_session_serving_with_live_reade
     // Two shells: each pane is asked for output of its own after the swap
     // fails.
     let seeded_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
-    let opened_pane_id = build_pane(
+    let opened_pane_id = create_pane(
         &mut control_connection,
         session_id,
         initial_client_stream.client_id,
@@ -1931,7 +1931,7 @@ fn a_pane_child_that_exits_around_the_swap_is_reported_exactly_once() {
     let (mut control_connection, _) =
         wait_for_session_connection(runtime_directory.path(), session_id);
     let seeded_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
-    let input_pane_id = build_pane(
+    let input_pane_id = create_pane(
         &mut control_connection,
         session_id,
         initial_client_stream.client_id,

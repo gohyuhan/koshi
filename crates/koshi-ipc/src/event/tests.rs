@@ -140,17 +140,23 @@ fn list_test_events() -> Vec<SessionEvent> {
 
     vec![
         SessionEvent::ImageCacheReset,
-        SessionEvent::PaneCreated { pane_id, tab_id },
+        SessionEvent::PaneCreated {
+            pane_id,
+            tab_id: Some(tab_id),
+        },
         SessionEvent::PaneProcessExited {
             pane_id,
             exit_code: Some(130),
             signal: None,
         },
         SessionEvent::PaneClosing { pane_id },
-        SessionEvent::PaneRemoved { pane_id, tab_id },
+        SessionEvent::PaneRemoved {
+            pane_id,
+            tab_id: Some(tab_id),
+        },
         SessionEvent::PaneFocused {
             client_id,
-            tab_id,
+            tab_id: Some(tab_id),
             pane_id,
             previous_pane_id: Some(pane_id),
         },
@@ -158,8 +164,8 @@ fn list_test_events() -> Vec<SessionEvent> {
         SessionEvent::PanePlacementCommitted {
             command_id,
             source_pane_id: pane_id,
-            source_tab_id: tab_id,
-            destination_tab_id: tab_id,
+            source_tab_id: Some(tab_id),
+            destination_tab_id: Some(tab_id),
             placement_target: PanePlacementTarget::Split {
                 destination_tab_id: tab_id,
                 anchor: PanePlacementAnchor::Pane(pane_id),
@@ -446,7 +452,7 @@ fn an_absent_optional_field_round_trips_as_absent() {
         },
         SessionEvent::PaneFocused {
             client_id: ClientId::from_uuid(build_fixed_test_uuid()),
-            tab_id: TabId::from_uuid(build_fixed_test_uuid()),
+            tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
             pane_id,
             previous_pane_id: None,
         },
@@ -462,17 +468,8 @@ fn an_absent_optional_field_round_trips_as_absent() {
 
 #[test]
 fn the_event_wire_shape_belongs_to_this_protocol_version() {
-    // Every structure frame an attached client reads, pinned. A client at the
-    // old shape passes the handshake, attaches, and then fails to decode the
-    // stream, which reads to the user as a session that stops updating.
-    //
-    // So a change here — add, remove, rename, or retype anything below — turns
-    // this red. Renaming or retyping a field also moves `PROTOCOL_VERSION` in
-    // the same commit; adding a whole frame, which an older client skips as
-    // unknown and keeps reading past, does not.
-    //
-    // Shape as of protocol version 4. Round-trip tests cannot catch this: one
-    // build encoding and decoding its own structs always agrees with itself.
+    // The exact encoding of every structure frame an attached client reads,
+    // at protocol version 5.
     let wire_identifier = "00000000-0000-0000-0000-000000000001";
 
     assert_eq!(
@@ -824,4 +821,127 @@ fn a_frame_this_build_has_reads_as_known() {
             dropped_event_count: 4,
         })
     );
+}
+
+#[test]
+fn a_floating_pane_event_writes_a_null_tab_id_and_reads_it_back() {
+    let wire_identifier = "00000000-0000-0000-0000-000000000001";
+    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
+    let floating_pane_events = [
+        (
+            SessionEvent::PaneCreated {
+                pane_id,
+                tab_id: None,
+            },
+            json!({ "PaneCreated": { "pane_id": wire_identifier, "tab_id": null } }),
+        ),
+        (
+            SessionEvent::PaneRemoved {
+                pane_id,
+                tab_id: None,
+            },
+            json!({ "PaneRemoved": { "pane_id": wire_identifier, "tab_id": null } }),
+        ),
+        (
+            SessionEvent::PaneFocused {
+                client_id: ClientId::from_uuid(build_fixed_test_uuid()),
+                tab_id: None,
+                pane_id,
+                previous_pane_id: None,
+            },
+            json!({ "PaneFocused": {
+                "client_id": wire_identifier,
+                "tab_id": null,
+                "pane_id": wire_identifier,
+                "previous_pane_id": null
+            } }),
+        ),
+        (
+            SessionEvent::PanePlacementCommitted {
+                command_id: CommandId::from_uuid(build_fixed_test_uuid()),
+                source_pane_id: pane_id,
+                source_tab_id: None,
+                destination_tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
+                placement_target: PanePlacementTarget::Split {
+                    destination_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
+                    anchor: PanePlacementAnchor::Tab,
+                    direction: Direction::Right,
+                },
+            },
+            json!({ "PanePlacementCommitted": {
+                "command_id": wire_identifier,
+                "source_pane_id": wire_identifier,
+                "source_tab_id": null,
+                "destination_tab_id": wire_identifier,
+                "placement_target": {
+                    "Split": {
+                        "destination_tab_id": wire_identifier,
+                        "anchor": "Tab",
+                        "direction": "Right"
+                    }
+                }
+            } }),
+        ),
+    ];
+
+    for (event, expected_json) in floating_pane_events {
+        assert_eq!(
+            serde_json::to_value(&event).expect("event encodes"),
+            expected_json
+        );
+        assert_eq!(
+            serde_json::from_value::<SessionEvent>(expected_json).expect("event decodes"),
+            event
+        );
+    }
+}
+
+#[test]
+fn an_event_missing_a_tab_id_field_is_refused() {
+    let wire_identifier = "00000000-0000-0000-0000-000000000001";
+    let incomplete_events = [
+        (
+            json!({ "PaneCreated": { "pane_id": wire_identifier } }),
+            "tab_id",
+        ),
+        (
+            json!({ "PaneRemoved": { "pane_id": wire_identifier } }),
+            "tab_id",
+        ),
+        (
+            json!({ "PaneFocused": {
+                "client_id": wire_identifier,
+                "pane_id": wire_identifier,
+                "previous_pane_id": null
+            } }),
+            "tab_id",
+        ),
+        (
+            json!({ "PanePlacementCommitted": {
+                "command_id": wire_identifier,
+                "source_pane_id": wire_identifier,
+                "destination_tab_id": null,
+                "placement_target": { "Swap": { "target_pane_id": wire_identifier } }
+            } }),
+            "source_tab_id",
+        ),
+        (
+            json!({ "PanePlacementCommitted": {
+                "command_id": wire_identifier,
+                "source_pane_id": wire_identifier,
+                "source_tab_id": null,
+                "placement_target": { "Swap": { "target_pane_id": wire_identifier } }
+            } }),
+            "destination_tab_id",
+        ),
+    ];
+
+    for (incomplete_event_json, missing_field_name) in incomplete_events {
+        assert_eq!(
+            serde_json::from_value::<SessionEvent>(incomplete_event_json)
+                .expect_err("an event without the field is refused")
+                .to_string(),
+            format!("missing field `{missing_field_name}`")
+        );
+    }
 }

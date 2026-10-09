@@ -165,7 +165,7 @@ fn is_backup_program_file_name_accepts_the_two_backup_shapes_of_the_stem_alone()
         ("koshiold", false),
         ("Koshi.old", false),
         ("notes.old", false),
-        ("koshi-update-5000.exe", false),
+        ("koshi-staged-5000.exe", false),
         ("", false),
     ];
     for (file_name, is_expected_backup) in name_checks {

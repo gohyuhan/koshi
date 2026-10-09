@@ -42,12 +42,14 @@ followed:
 
 When `koshi update` replaces the file in place, it first writes the new release
 beside it: `<name>.koshi-update-<process id>` on Linux and macOS, such as
-`koshi.koshi-update-5000`, and `koshi-update-<process id>.exe` on Windows. Then
+`koshi.koshi-update-5000`, and `koshi-staged-<process id>.exe` on Windows. Then
 it renames that copy into place. `install.sh` and `install.ps1` name their
 copies the same way. An update or install that is killed between the two steps
-leaves its copy. The next `koshi update` deletes each such copy first. A copy
-stays while a process with the process id in its name runs. `koshi update` of
-koshi 0.5.0 or older deletes no such copy.
+leaves its copy. The next `koshi update` deletes each such copy first. On
+Windows, it also deletes each `koshi-update-<process id>.exe` copy that
+`koshi update` of koshi 0.5.0 left. A copy stays while a process with the
+process id in its name runs. `koshi update` of koshi 0.5.0 or older deletes no
+such copy.
 
 Before the rename, `koshi update` runs that copy with `--version`. If it does
 not print `koshi <release version>` within 70 seconds, the update stops with
@@ -80,7 +82,7 @@ old release or the complete new one.
 On Windows, the replacement renames the running `koshi.exe` to `koshi.old`, or
 to `koshi.1.old`, `koshi.2.old` and onward while a koshi still runs from an
 older backup. `install.ps1` does the same: it first moves the new `koshi.exe` to
-`koshi-update-<process id>.exe` beside the installed one, runs it with
+`koshi-staged-<process id>.exe` beside the installed one, runs it with
 `--version`, and stops when it does not print `koshi <release version>`. Each
 interactive launch removes the backups that no koshi runs from. `koshi update`
 of koshi 0.5.0 or older stops with `Access is denied` while a koshi still runs
@@ -544,13 +546,20 @@ in `koshi.kdl`, which ends it once the last terminal leaves.
 | `koshi new-pane` | `--direction`, `--stacked`, `--pane`, `--tab`, `--session`, `--client` | Open a shell pane |
 | `koshi run -- <COMMAND>...` | Same placement flags as `new-pane` | Open a pane running the command |
 | `koshi close-pane` | `--pane`, `--force` | Close a pane |
-| `koshi resize-pane` | `--direction`, `--size`, `--pane` | Move one border by signed cell count |
+| `koshi resize-pane` | `--direction`, `--size`, `--pane`, `--client` | Move one border by signed cell count |
+| `koshi move-pane` | `--direction`, `--pane` | Swap a pane with its visible neighbor in one step |
+| `koshi place-pane` | `--pane`, `--tab`, `--direction`, `--client` | Insert a pane at one side of another tab's tiled layout |
+| `koshi scroll-pane` | `--lines`, `--pane`, `--client` | Scroll one client's view of a pane by signed line count |
 | `koshi focus-pane` | `--pane`, `--client` | Focus a pane |
 | `koshi toggle-pane-fullscreen` | `--client <CLIENT_ID>` | Toggle the focused pane's fullscreen view |
 | `koshi input "<TEXT>"` | `--pane`, `--no-enter` | Type text; Enter follows unless held back |
 
 Directions: `right`, `down`, `left`, `up`. A positive resize grows toward the
-direction; a negative resize shrinks from that side.
+direction; a negative resize shrinks from that side. On a floating pane,
+`--client` names the client whose view keeps the edge opposite the moved border
+in place. With no `--client`, the issuing client acts, else the session's only
+attached client. With several attached clients and no `--client`, the resize is
+refused. A positive `scroll-pane --lines` moves toward history.
 
 Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 `git status` at that pane's prompt without running it.

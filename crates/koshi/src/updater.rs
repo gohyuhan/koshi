@@ -1902,10 +1902,10 @@ fn list_backup_executable_paths(executable_path: &Path) -> Vec<PathBuf> {
 ///
 /// Example: the process `5000` names its copy of `/usr/local/bin/koshi`
 /// `koshi.koshi-update-5000` on Linux and macOS, and its copy of
-/// `C:\koshi\koshi.exe` `koshi-update-5000.exe` on Windows.
+/// `C:\koshi\koshi.exe` `koshi-staged-5000.exe` on Windows.
 struct StagedCopyName {
     /// `<program file name>.koshi-update-` on Linux and macOS, with `koshi` for
-    /// a program file name that is not UTF-8. `koshi-update-` on Windows.
+    /// a program file name that is not UTF-8. `koshi-staged-` on Windows.
     name_prefix: String,
     /// Empty on Linux and macOS. `.exe` on Windows.
     name_suffix: &'static str,
@@ -1916,7 +1916,7 @@ impl StagedCopyName {
     fn from_program_path(executable_path: &Path) -> StagedCopyName {
         if cfg!(windows) {
             return StagedCopyName {
-                name_prefix: "koshi-update-".to_string(),
+                name_prefix: "koshi-staged-".to_string(),
                 name_suffix: ".exe",
             };
         }
@@ -1958,13 +1958,17 @@ impl StagedCopyName {
 /// Lists each staged copy beside the program file at `executable_path` that
 /// an update which no longer runs left: each entry of its directory whose name
 /// [`StagedCopyName::parse_process_id`] reads a process id from, when
-/// [`process_tree::is_process_id_free`] finds no process with that id. The
-/// copy of a running process is left out, and so is every other entry. A
-/// directory that cannot be read lists nothing. A symbolic link with a staged
-/// copy name is listed under the same rule.
+/// [`process_tree::is_process_id_free`] finds no process with that id. On
+/// Windows, a name is read as [`StagedCopyName::from_program_path`] gives it,
+/// and as `koshi-update-<process id>.exe`, the name `koshi update` of koshi
+/// 0.5.0 gives its copy. The copy of a running process is left out, and so is
+/// every other entry. A directory that cannot be read lists nothing. A symbolic
+/// link with a staged copy name is listed under the same rule.
 ///
 /// Example: beside `koshi`, `koshi.koshi-update-5000` is listed when no
-/// process has the id `5000`, and left out while process `5000` runs.
+/// process has the id `5000`, and left out while process `5000` runs. Beside
+/// `koshi.exe`, `koshi-staged-5000.exe` and `koshi-update-5000.exe` are each
+/// listed under the same rule.
 fn list_staged_copies_of_ended_updates(executable_path: &Path) -> Vec<PathBuf> {
     let Some(program_directory) = executable_path.parent() else {
         return Vec::new();
@@ -1972,14 +1976,24 @@ fn list_staged_copies_of_ended_updates(executable_path: &Path) -> Vec<PathBuf> {
     let Ok(directory_entries) = fs::read_dir(program_directory) else {
         return Vec::new();
     };
-    let staged_copy_name = StagedCopyName::from_program_path(executable_path);
+    let mut staged_copy_names = vec![StagedCopyName::from_program_path(executable_path)];
+    if cfg!(windows) {
+        staged_copy_names.push(StagedCopyName {
+            name_prefix: "koshi-update-".to_string(),
+            name_suffix: ".exe",
+        });
+    }
     let mut ended_staged_copy_paths = Vec::new();
     for directory_entry in directory_entries.filter_map(Result::ok) {
         let entry_path = directory_entry.path();
         let Some(writer_process_id) = entry_path
             .file_name()
             .and_then(|entry_name| entry_name.to_str())
-            .and_then(|entry_name| staged_copy_name.parse_process_id(entry_name))
+            .and_then(|entry_name| {
+                staged_copy_names
+                    .iter()
+                    .find_map(|staged_copy_name| staged_copy_name.parse_process_id(entry_name))
+            })
         else {
             continue;
         };
@@ -2085,7 +2099,7 @@ fn swap_executable(
 ///
 /// Deletes the staged copies that updates which no longer run left beside that
 /// file, as [`delete_staged_copies_of_ended_updates`] states. Then copies
-/// `new_binary` beside that file as `koshi-update-<pid>.exe`, checks that the
+/// `new_binary` beside that file as `koshi-staged-<pid>.exe`, checks that the
 /// copy prints the version of `release_tag`, as [`validate_release_binary`]
 /// states, and puts the copy in place of the file, as
 /// [`replace_program_file_with_staged_copy`] states. A failed copy, check, or
@@ -2128,7 +2142,7 @@ fn swap_executable(
 /// and [`delete_stale_backups`] removes it at the first interactive launch
 /// after that process ends. Every failure leaves the copy where it is.
 ///
-/// Example: `C:\koshi\koshi-update-5000.exe` and `C:\koshi\koshi.exe` leave
+/// Example: `C:\koshi\koshi-staged-5000.exe` and `C:\koshi\koshi.exe` leave
 /// `C:\koshi\koshi.exe` with the bytes of the copy, and no `koshi.old`.
 ///
 /// # Errors

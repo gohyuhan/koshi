@@ -1,12 +1,7 @@
 //! Tests for the pane metadata pane record: creation defaults, lifecycle
 //! ownership through `update_lifecycle`, and the serialized form.
 
-use koshi_core::ids::PaneId;
-
-use super::PaneRecord;
-use crate::error::InvalidTransitionError;
-use crate::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
-use crate::pane::policy::PaneClosePolicy;
+use super::*;
 
 /// The JSON form of a fresh terminal pane record with the nil uuid as its id.
 const FRESH_TERMINAL_RECORD_JSON: &str = r#"{"pane_id":"00000000-0000-0000-0000-000000000000","spawn_spec":null,"working_directory":null,"close_policy":{"Graceful":{"timeout_duration":3}},"lifecycle":"Spawning"}"#;

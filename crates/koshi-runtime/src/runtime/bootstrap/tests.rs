@@ -2,29 +2,19 @@
 //! caller-chosen id, and a `--profile` template opening its tabs and panes,
 //! focusing the pane the profile marks, and starting its first client locked.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use super::*;
+
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc};
-use std::time::SystemTime;
+use std::sync::mpsc;
 
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_config::layer::{PartialKoshiConfig, PartialLayoutDefaults};
 use koshi_config::profile::parse_profile;
 use koshi_core::event::{Event, InputModeChanged};
-use koshi_core::geometry::{Direction, Size, SplitDirection};
-use koshi_core::ids::{ClientId, PaneId, SessionId};
-use koshi_core::lock::LockMode;
-use koshi_core::process::PtySize;
-use koshi_layout::template::{ProfileTemplate, TemplateError};
-use koshi_layout::tree::LayoutNode;
-use koshi_pty::error::PtyError;
-use koshi_session::client::ClientOrigin;
+use koshi_core::geometry::{Direction, SplitDirection};
 use koshi_session::session::lifecycle::SessionLifecycle;
 use koshi_test_support::fake_pty::FakePtyBackend;
-
-use crate::runtime::spawn_env::build_koshi_environment;
-
-use super::{ProfileLaunchError, Server};
 
 /// A runtime backed by a fake PTY, with no session yet.
 fn build_test_runtime() -> (Server, Arc<FakePtyBackend>) {
@@ -37,8 +27,8 @@ fn build_test_runtime() -> (Server, Arc<FakePtyBackend>) {
 }
 
 /// Parse a profile from KDL text, panicking on error.
-fn parse_test_profile_template(kdl: &str) -> ProfileTemplate {
-    parse_profile(Path::new("profile/test.kdl"), kdl).expect("valid profile")
+fn parse_test_profile_template(profile_kdl_text: &str) -> ProfileTemplate {
+    parse_profile(Path::new("profile/test.kdl"), profile_kdl_text).expect("valid profile")
 }
 
 fn build_test_viewport_size() -> Size {
@@ -106,10 +96,10 @@ fn a_profile_keeps_the_split_direction_it_declares() {
 
     let session = server.session_by_id.values().next().expect("one session");
     let tab = session.tabs.values().next().expect("one tab");
-    let LayoutNode::Split(split) = tab.get_layout_tree() else {
+    let LayoutNode::Split(split_node) = tab.get_layout_tree() else {
         panic!("the tab's root is the profile's split");
     };
-    assert_eq!(split.direction, SplitDirection::Vertical);
+    assert_eq!(split_node.direction, SplitDirection::Vertical);
 }
 
 #[test]
@@ -1021,7 +1011,7 @@ fn a_profile_default_shell_pane_records_no_command() {
 fn list_mode_changes(emitted_events: &[Event]) -> Vec<InputModeChanged> {
     emitted_events
         .iter()
-        .filter_map(|runtime_event| match runtime_event {
+        .filter_map(|emitted_event| match emitted_event {
             Event::InputModeChanged(input_mode_change) => Some(*input_mode_change),
             _ => None,
         })
@@ -1056,9 +1046,9 @@ fn panes_restored_without_their_layout_each_get_a_tab_in_order_showing_the_notic
     let session = &server.session_by_id[&session_id];
     assert_eq!(session.session_name, "restored");
     assert_eq!(session.clients.count_clients(), 0);
-    let mut tabs: Vec<_> = session.tabs.values().collect();
-    tabs.sort_by_key(|tab| tab.get_tab_index());
-    let tab_pane_ids: Vec<Vec<PaneId>> = tabs
+    let mut restored_tabs: Vec<_> = session.tabs.values().collect();
+    restored_tabs.sort_by_key(|tab| tab.get_tab_index());
+    let tab_pane_ids: Vec<Vec<PaneId>> = restored_tabs
         .iter()
         .map(|tab| tab.get_layout_tree().list_leaf_pane_ids())
         .collect();

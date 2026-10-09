@@ -176,62 +176,113 @@ impl FloatingSet {
             .any(|floating_member| floating_member.pane_id == pane_id)
     }
 
+    /// Whether the set holds [`MAX_FLOATING_PANES_PER_SESSION`] members or
+    /// more, so [`FloatingSet::add_member`] refuses a new one.
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.members.len() >= MAX_FLOATING_PANES_PER_SESSION
+    }
+
     /// Append `floating_member` as the newest member.
     ///
     /// # Errors
     ///
     /// [`FloatingSetError::DuplicatePane`] when the set already holds
     /// `floating_member.pane_id`, else [`FloatingSetError::TooManyPanes`] when
-    /// the set holds [`MAX_FLOATING_PANES_PER_SESSION`] members or more. The set
-    /// does not change on an error.
+    /// [`FloatingSet::is_full`]. The set does not change on an error.
     pub fn add_member(&mut self, floating_member: FloatingMember) -> Result<(), FloatingSetError> {
         if self.has_pane(floating_member.pane_id) {
             return Err(FloatingSetError::DuplicatePane {
                 pane_id: floating_member.pane_id,
             });
         }
-        if self.members.len() >= MAX_FLOATING_PANES_PER_SESSION {
+        if self.is_full() {
             return Err(FloatingSetError::TooManyPanes);
         }
         self.members.push(floating_member);
         Ok(())
     }
 
-    /// Solve every member's outer size against `shared_floating_viewport`,
-    /// with `pane_minimum_size` as the smallest content size. Writes only
-    /// `solved_size`.
-    ///
-    /// The floating minimum is `pane_minimum_size` plus
-    /// [`FLOATING_PANE_CHROME_SIZE`]: `20x6` → `22x10`, and `65534x6` →
-    /// `65536x10`. When `shared_floating_viewport` is smaller than the floating
-    /// minimum on either axis, every member is
-    /// [`FloatingPaneSizeSolve::Suppressed`]. Otherwise each axis of a member's
-    /// `desired_size` resolves to cells against the same axis of
-    /// `shared_floating_viewport`, a percent rounding down, then is cut to that
-    /// axis and raised to the floating minimum: `Percent(60)` by `Percent(60)`
-    /// on `80x22` → `Sized(48x13)`.
+    /// Solve every member's outer size against `shared_floating_viewport`
+    /// with [`solve_floating_pane_size`]. Writes only `solved_size`.
     pub fn update_member_sizes(&mut self, shared_floating_viewport: Size, pane_minimum_size: Size) {
-        let fitting_floating_pane_minimum_size =
-            RequiredSize::from_size_sum(pane_minimum_size, FLOATING_PANE_CHROME_SIZE)
-                .fit_inside(shared_floating_viewport);
         for floating_member in &mut self.members {
-            floating_member.solved_size = match fitting_floating_pane_minimum_size {
-                Some(floating_pane_minimum_size) => FloatingPaneSizeSolve::Sized(Size {
-                    column_count: solve_floating_pane_axis(
-                        floating_member.desired_size.width,
-                        shared_floating_viewport.column_count,
-                        floating_pane_minimum_size.column_count,
-                    ),
-                    row_count: solve_floating_pane_axis(
-                        floating_member.desired_size.height,
-                        shared_floating_viewport.row_count,
-                        floating_pane_minimum_size.row_count,
-                    ),
-                }),
-                None => FloatingPaneSizeSolve::Suppressed,
-            };
+            floating_member.solved_size = solve_floating_pane_size(
+                floating_member.desired_size,
+                shared_floating_viewport,
+                pane_minimum_size,
+            );
         }
     }
+
+    /// Set the desired size of the member holding `pane_id`. Its solved size
+    /// changes at the next [`FloatingSet::update_member_sizes`]. Returns
+    /// `false`, changing nothing, when no member holds `pane_id`.
+    pub fn update_member_desired_size(
+        &mut self,
+        pane_id: PaneId,
+        desired_size: FloatingPaneSize,
+    ) -> bool {
+        let Some(floating_member) = self
+            .members
+            .iter_mut()
+            .find(|floating_member| floating_member.pane_id == pane_id)
+        else {
+            return false;
+        };
+        floating_member.desired_size = desired_size;
+        true
+    }
+}
+
+/// The floating minimum, `pane_minimum_size` plus
+/// [`FLOATING_PANE_CHROME_SIZE`], when it fits inside
+/// `shared_floating_viewport`; `None` when the viewport is smaller on either
+/// axis. `20x6` in `80x22` → `Some(22x10)`; `20x6` in `80x9` → `None`;
+/// `65534x6` → `None` in every viewport (its floating minimum is `65536x10`).
+#[must_use]
+pub fn compute_floating_pane_minimum_size(
+    pane_minimum_size: Size,
+    shared_floating_viewport: Size,
+) -> Option<Size> {
+    RequiredSize::from_size_sum(pane_minimum_size, FLOATING_PANE_CHROME_SIZE)
+        .fit_inside(shared_floating_viewport)
+}
+
+/// Solve one floating pane's outer size: `desired_size` against
+/// `shared_floating_viewport`, with `pane_minimum_size` as the smallest content
+/// size.
+///
+/// When the floating minimum ([`compute_floating_pane_minimum_size`]) does not
+/// fit inside `shared_floating_viewport`, the result is
+/// [`FloatingPaneSizeSolve::Suppressed`]. Otherwise
+/// each axis of `desired_size` resolves to cells against the same axis of
+/// `shared_floating_viewport`, a percent rounding down, then is cut to that
+/// axis and raised to the floating minimum: `Percent(60)` by `Percent(60)` on
+/// `80x22` → `Sized(48x13)`.
+#[must_use]
+pub fn solve_floating_pane_size(
+    desired_size: FloatingPaneSize,
+    shared_floating_viewport: Size,
+    pane_minimum_size: Size,
+) -> FloatingPaneSizeSolve {
+    let Some(floating_pane_minimum_size) =
+        compute_floating_pane_minimum_size(pane_minimum_size, shared_floating_viewport)
+    else {
+        return FloatingPaneSizeSolve::Suppressed;
+    };
+    FloatingPaneSizeSolve::Sized(Size {
+        column_count: solve_floating_pane_axis(
+            desired_size.width,
+            shared_floating_viewport.column_count,
+            floating_pane_minimum_size.column_count,
+        ),
+        row_count: solve_floating_pane_axis(
+            desired_size.height,
+            shared_floating_viewport.row_count,
+            floating_pane_minimum_size.row_count,
+        ),
+    })
 }
 
 /// The cells `floating_pane_dimension` takes on an axis `axis_cell_count`
@@ -819,4 +870,4 @@ fn find_earliest_reported_cell_size<'a>(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -15,7 +15,7 @@ fn build_system_time_at_seconds(elapsed_seconds: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(elapsed_seconds)
 }
 
-/// A client with `client_id`, viewing `active_tab`, with no focused pane, no
+/// A client with `client_id`, viewing `active_tab_id`, with no focused pane, no
 /// zoomed pane and no pane scrolled up.
 fn build_client(client_id: ClientId, active_tab_id: TabId) -> Client {
     Client::from_attachment(
@@ -36,33 +36,33 @@ fn build_client(client_id: ClientId, active_tab_id: TabId) -> Client {
 
 #[test]
 fn a_minted_token_takes_back_every_part_of_the_saved_view() {
-    let tab = TabId::new();
-    let other_tab = TabId::new();
+    let tab_id = TabId::new();
+    let other_tab_id = TabId::new();
     let focused_pane_id = PaneId::new();
     let zoomed_pane_id = PaneId::new();
     let scrolled_pane_id = PaneId::new();
 
-    let mut client = build_client(ClientId::new(), tab);
-    client.update_focused_pane(tab, focused_pane_id);
-    client.update_focused_pane(other_tab, zoomed_pane_id);
-    client.zoom_pane(other_tab, zoomed_pane_id);
+    let mut client = build_client(ClientId::new(), tab_id);
+    client.update_focused_pane(tab_id, focused_pane_id);
+    client.update_focused_pane(other_tab_id, zoomed_pane_id);
+    client.zoom_pane(other_tab_id, zoomed_pane_id);
     client.set_scroll_offset(scrolled_pane_id, 7);
 
     let mut saved_view_store = SavedViewStore::default();
-    let token = saved_view_store.mint_resume_token(client.get_client_id());
+    let resume_token = saved_view_store.mint_resume_token(client.get_client_id());
     saved_view_store.save_client_view(&client, build_system_time_at_seconds(100));
 
     let saved_view = saved_view_store
-        .take_saved_view(&token, build_system_time_at_seconds(101))
+        .take_saved_view(&resume_token, build_system_time_at_seconds(101))
         .expect("the filed view");
-    assert_eq!(saved_view.active_tab_id, tab);
+    assert_eq!(saved_view.active_tab_id, tab_id);
     assert_eq!(
         saved_view.focused_pane_id_by_tab_id,
-        HashMap::from([(tab, focused_pane_id), (other_tab, zoomed_pane_id)])
+        HashMap::from([(tab_id, focused_pane_id), (other_tab_id, zoomed_pane_id)])
     );
     assert_eq!(
         saved_view.zoomed_pane_id_by_tab_id,
-        HashMap::from([(other_tab, zoomed_pane_id)])
+        HashMap::from([(other_tab_id, zoomed_pane_id)])
     );
     assert_eq!(
         saved_view.scroll_offset_by_pane_id,
@@ -72,20 +72,20 @@ fn a_minted_token_takes_back_every_part_of_the_saved_view() {
 
 #[test]
 fn presenting_the_same_token_twice_takes_the_view_back_once() {
-    let tab = TabId::new();
-    let client = build_client(ClientId::new(), tab);
+    let tab_id = TabId::new();
+    let client = build_client(ClientId::new(), tab_id);
     let mut saved_view_store = SavedViewStore::default();
-    let token = saved_view_store.mint_resume_token(client.get_client_id());
+    let resume_token = saved_view_store.mint_resume_token(client.get_client_id());
     saved_view_store.save_client_view(&client, build_system_time_at_seconds(100));
 
     assert_eq!(
         saved_view_store
-            .take_saved_view(&token, build_system_time_at_seconds(101))
+            .take_saved_view(&resume_token, build_system_time_at_seconds(101))
             .map(|saved_view| saved_view.active_tab_id),
-        Some(tab)
+        Some(tab_id)
     );
     assert_eq!(
-        saved_view_store.take_saved_view(&token, build_system_time_at_seconds(102)),
+        saved_view_store.take_saved_view(&resume_token, build_system_time_at_seconds(102)),
         None
     );
 }
@@ -97,33 +97,33 @@ fn a_token_nobody_minted_takes_back_nothing() {
     saved_view_store.mint_resume_token(client.get_client_id());
     saved_view_store.save_client_view(&client, build_system_time_at_seconds(100));
 
-    let stranger = ConnectionToken::generate();
+    let unminted_resume_token = ConnectionToken::generate();
     assert_eq!(
-        saved_view_store.take_saved_view(&stranger, build_system_time_at_seconds(101)),
+        saved_view_store.take_saved_view(&unminted_resume_token, build_system_time_at_seconds(101)),
         None
     );
 }
 
 #[test]
 fn a_filed_view_stands_for_one_hundred_and_twenty_seconds() {
-    let tab = TabId::new();
-    let client = build_client(ClientId::new(), tab);
+    let tab_id = TabId::new();
+    let client = build_client(ClientId::new(), tab_id);
 
     let mut standing_view_store = SavedViewStore::default();
-    let token = standing_view_store.mint_resume_token(client.get_client_id());
+    let resume_token = standing_view_store.mint_resume_token(client.get_client_id());
     standing_view_store.save_client_view(&client, build_system_time_at_seconds(100));
     assert_eq!(
         standing_view_store
-            .take_saved_view(&token, build_system_time_at_seconds(219))
+            .take_saved_view(&resume_token, build_system_time_at_seconds(219))
             .map(|saved_view| saved_view.active_tab_id),
-        Some(tab)
+        Some(tab_id)
     );
 
     let mut expired_view_store = SavedViewStore::default();
-    let token = expired_view_store.mint_resume_token(client.get_client_id());
+    let resume_token = expired_view_store.mint_resume_token(client.get_client_id());
     expired_view_store.save_client_view(&client, build_system_time_at_seconds(100));
     assert_eq!(
-        expired_view_store.take_saved_view(&token, build_system_time_at_seconds(221)),
+        expired_view_store.take_saved_view(&resume_token, build_system_time_at_seconds(221)),
         None
     );
 }
@@ -134,10 +134,10 @@ fn filing_a_thirty_third_view_drops_the_first_one_filed() {
     let mut resume_tokens = Vec::new();
     let mut tab_ids = Vec::new();
     for _ in 0..33 {
-        let tab = TabId::new();
-        let client = build_client(ClientId::new(), tab);
+        let tab_id = TabId::new();
+        let client = build_client(ClientId::new(), tab_id);
         resume_tokens.push(saved_view_store.mint_resume_token(client.get_client_id()));
-        tab_ids.push(tab);
+        tab_ids.push(tab_id);
         saved_view_store.save_client_view(&client, build_system_time_at_seconds(100));
     }
     assert_eq!(saved_view_store.saved_view_records.len(), 32);
@@ -179,11 +179,11 @@ fn a_second_save_for_one_client_files_nothing() {
 
 #[test]
 fn minting_again_for_one_client_leaves_the_earlier_token_taking_back_nothing() {
-    let tab = TabId::new();
-    let client = build_client(ClientId::new(), tab);
+    let tab_id = TabId::new();
+    let client = build_client(ClientId::new(), tab_id);
     let mut saved_view_store = SavedViewStore::default();
-    let earlier = saved_view_store.mint_resume_token(client.get_client_id());
-    let latest = saved_view_store.mint_resume_token(client.get_client_id());
+    let earlier_resume_token = saved_view_store.mint_resume_token(client.get_client_id());
+    let latest_resume_token = saved_view_store.mint_resume_token(client.get_client_id());
     saved_view_store.save_client_view(&client, build_system_time_at_seconds(100));
 
     assert_eq!(
@@ -192,14 +192,14 @@ fn minting_again_for_one_client_leaves_the_earlier_token_taking_back_nothing() {
         "one save files one record"
     );
     assert_eq!(
-        saved_view_store.take_saved_view(&earlier, build_system_time_at_seconds(101)),
+        saved_view_store.take_saved_view(&earlier_resume_token, build_system_time_at_seconds(101)),
         None
     );
     assert_eq!(
         saved_view_store
-            .take_saved_view(&latest, build_system_time_at_seconds(101))
+            .take_saved_view(&latest_resume_token, build_system_time_at_seconds(101))
             .map(|saved_view| saved_view.active_tab_id),
-        Some(tab)
+        Some(tab_id)
     );
 }
 
@@ -207,14 +207,14 @@ fn minting_again_for_one_client_leaves_the_earlier_token_taking_back_nothing() {
 fn forgetting_a_client_leaves_its_minted_token_taking_back_nothing() {
     let client = build_client(ClientId::new(), TabId::new());
     let mut saved_view_store = SavedViewStore::default();
-    let token = saved_view_store.mint_resume_token(client.get_client_id());
+    let resume_token = saved_view_store.mint_resume_token(client.get_client_id());
 
     saved_view_store.forget_client_resume_token(client.get_client_id());
     saved_view_store.save_client_view(&client, build_system_time_at_seconds(100));
 
     assert!(saved_view_store.saved_view_records.is_empty());
     assert_eq!(
-        saved_view_store.take_saved_view(&token, build_system_time_at_seconds(101)),
+        saved_view_store.take_saved_view(&resume_token, build_system_time_at_seconds(101)),
         None
     );
 }
@@ -247,7 +247,7 @@ fn a_clock_too_near_its_end_to_hold_the_lifetime_files_nothing_and_drops_the_has
 
     let client = build_client(ClientId::new(), TabId::new());
     let mut saved_view_store = SavedViewStore::default();
-    let token = saved_view_store.mint_resume_token(client.get_client_id());
+    let resume_token = saved_view_store.mint_resume_token(client.get_client_id());
     saved_view_store.save_client_view(&client, clock_end);
 
     assert!(saved_view_store.saved_view_records.is_empty());
@@ -255,23 +255,23 @@ fn a_clock_too_near_its_end_to_hold_the_lifetime_files_nothing_and_drops_the_has
         .connection_token_hash_by_client_id
         .is_empty());
     assert_eq!(
-        saved_view_store.take_saved_view(&token, build_system_time_at_seconds(100)),
+        saved_view_store.take_saved_view(&resume_token, build_system_time_at_seconds(100)),
         None
     );
 }
 
 #[test]
 fn a_client_that_touched_nothing_takes_back_its_tab_and_three_empty_maps() {
-    let tab = TabId::new();
-    let client = build_client(ClientId::new(), tab);
+    let tab_id = TabId::new();
+    let client = build_client(ClientId::new(), tab_id);
     let mut saved_view_store = SavedViewStore::default();
-    let token = saved_view_store.mint_resume_token(client.get_client_id());
+    let resume_token = saved_view_store.mint_resume_token(client.get_client_id());
     saved_view_store.save_client_view(&client, build_system_time_at_seconds(100));
 
     assert_eq!(
-        saved_view_store.take_saved_view(&token, build_system_time_at_seconds(101)),
+        saved_view_store.take_saved_view(&resume_token, build_system_time_at_seconds(101)),
         Some(SavedView {
-            active_tab_id: tab,
+            active_tab_id: tab_id,
             focused_pane_id_by_tab_id: HashMap::new(),
             zoomed_pane_id_by_tab_id: HashMap::new(),
             scroll_offset_by_pane_id: HashMap::new(),
@@ -283,11 +283,11 @@ fn a_client_that_touched_nothing_takes_back_its_tab_and_three_empty_maps() {
 fn a_view_taken_at_the_exact_second_it_stops_standing_takes_back_nothing() {
     let client = build_client(ClientId::new(), TabId::new());
     let mut saved_view_store = SavedViewStore::default();
-    let token = saved_view_store.mint_resume_token(client.get_client_id());
+    let resume_token = saved_view_store.mint_resume_token(client.get_client_id());
     saved_view_store.save_client_view(&client, build_system_time_at_seconds(100));
 
     assert_eq!(
-        saved_view_store.take_saved_view(&token, build_system_time_at_seconds(220)),
+        saved_view_store.take_saved_view(&resume_token, build_system_time_at_seconds(220)),
         None
     );
     assert_eq!(saved_view_store.saved_view_records.len(), 0);
@@ -295,25 +295,25 @@ fn a_view_taken_at_the_exact_second_it_stops_standing_takes_back_nothing() {
 
 #[test]
 fn filing_a_view_drops_the_records_that_stopped_standing() {
-    let stale = build_client(ClientId::new(), TabId::new());
-    let fresh_tab = TabId::new();
-    let fresh = build_client(ClientId::new(), fresh_tab);
+    let stale_client = build_client(ClientId::new(), TabId::new());
+    let fresh_tab_id = TabId::new();
+    let fresh_client = build_client(ClientId::new(), fresh_tab_id);
     let mut saved_view_store = SavedViewStore::default();
 
-    let stale_token = saved_view_store.mint_resume_token(stale.get_client_id());
-    saved_view_store.save_client_view(&stale, build_system_time_at_seconds(100));
-    let fresh_token = saved_view_store.mint_resume_token(fresh.get_client_id());
-    saved_view_store.save_client_view(&fresh, build_system_time_at_seconds(300));
+    let stale_resume_token = saved_view_store.mint_resume_token(stale_client.get_client_id());
+    saved_view_store.save_client_view(&stale_client, build_system_time_at_seconds(100));
+    let fresh_resume_token = saved_view_store.mint_resume_token(fresh_client.get_client_id());
+    saved_view_store.save_client_view(&fresh_client, build_system_time_at_seconds(300));
 
     assert_eq!(saved_view_store.saved_view_records.len(), 1);
     assert_eq!(
-        saved_view_store.take_saved_view(&stale_token, build_system_time_at_seconds(300)),
+        saved_view_store.take_saved_view(&stale_resume_token, build_system_time_at_seconds(300)),
         None
     );
     assert_eq!(
         saved_view_store
-            .take_saved_view(&fresh_token, build_system_time_at_seconds(300))
+            .take_saved_view(&fresh_resume_token, build_system_time_at_seconds(300))
             .map(|saved_view| saved_view.active_tab_id),
-        Some(fresh_tab)
+        Some(fresh_tab_id)
     );
 }

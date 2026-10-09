@@ -18,7 +18,7 @@ use koshi_host::process_tree::{self, ProcessRecord};
 mod common;
 
 use common::session_connection::{
-    attach_client_on_connection, build_pane, open_session_connection,
+    attach_client_on_connection, create_pane, open_session_connection,
 };
 #[cfg(unix)]
 use common::RunningProcess;
@@ -122,7 +122,7 @@ fn start_session_with_scripted_pane(pane_shell_script: &str) -> SessionWithScrip
         let mut client_connection = open_session_connection(&session_endpoint);
         let client_id = attach_client_on_connection(&mut client_connection, session_id);
         let mut control_connection = open_session_connection(&session_endpoint);
-        build_pane(
+        create_pane(
             &mut control_connection,
             session_id,
             client_id,

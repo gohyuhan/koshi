@@ -1,17 +1,10 @@
 //! Tests for [`parse_kdl`], its [`ConfigParseDiagnostic`] error, the shared
 //! field-value readers, and the unknown-key suggestion.
 
-use std::path::Path;
+use super::*;
 
-use kdl::{KdlDocument, KdlNode};
-use miette::{Diagnostic, SourceSpan};
+use miette::Diagnostic;
 
-use super::{
-    find_first_brace_past_depth_limit, find_string_end_offset, format_unknown_key,
-    parse_boolean_kdl_value, parse_integer_kdl_value, parse_kdl, parse_nonempty_string_kdl_value,
-    parse_single_kdl_value, parse_string_kdl_value, parse_u16_kdl_value, parse_u32_kdl_value,
-    parse_version_argument, set_parsed_field, MAX_BLOCK_DEPTH,
-};
 use crate::error::ConfigError;
 
 /// Parse a single-node `kdl_text` and hand back that one node, so a reader can be
@@ -401,8 +394,7 @@ fn format_unknown_key_names_the_nearest_allowed_key() {
 
 #[test]
 fn format_unknown_key_picks_by_edit_distance_not_by_length() {
-    // `xyz1` is one insertion away; `abc` is the same length but shares no
-    // character. A length-based guess would answer `abc`.
+    // `xyz1` is one insertion away from `xyz`; `abc` is three substitutions away.
     assert_eq!(
         format_unknown_key("xyz", &["abc", "xyz1"]),
         "unknown key `xyz`; did you mean `xyz1`?"
@@ -411,9 +403,8 @@ fn format_unknown_key_picks_by_edit_distance_not_by_length() {
 
 #[test]
 fn format_unknown_key_counts_distance_in_characters_not_bytes() {
-    // `é` is one character but two bytes. Counted in characters it is one
-    // substitution from `e` and two edits from `ab`, so `e` wins. Counted in
-    // bytes both are two edits, and the earlier `ab` would win the tie.
+    // `é` is one character and two bytes. Counted in characters it is one
+    // substitution from `e` and two edits from `ab`.
     assert_eq!(
         format_unknown_key("é", &["ab", "e"]),
         "unknown key `é`; did you mean `e`?"

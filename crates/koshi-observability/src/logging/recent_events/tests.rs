@@ -33,7 +33,7 @@ fn lock_recent_events_for_test() -> MutexGuard<'static, ()> {
 fn build_pane_created_event() -> Event {
     Event::PaneCreated(PaneCreated {
         pane_id: PaneId::new(),
-        tab_id: TabId::new(),
+        tab_id: Some(TabId::new()),
     })
 }
 
@@ -72,7 +72,10 @@ fn a_record_carries_the_ids_its_event_named() {
     let pane_id = PaneId::new();
     let tab_id = TabId::new();
 
-    record_event(&Event::PaneCreated(PaneCreated { pane_id, tab_id }));
+    record_event(&Event::PaneCreated(PaneCreated {
+        pane_id,
+        tab_id: Some(tab_id),
+    }));
 
     let recent_events = list_recent_events();
     assert_eq!(recent_events.len(), 1);
@@ -99,11 +102,11 @@ fn a_full_ring_drops_exactly_the_oldest_record() {
 
     record_event(&Event::PaneCreated(PaneCreated {
         pane_id: oldest_pane_id,
-        tab_id: TabId::new(),
+        tab_id: Some(TabId::new()),
     }));
     record_event(&Event::PaneCreated(PaneCreated {
         pane_id: second_pane_id,
-        tab_id: TabId::new(),
+        tab_id: Some(TabId::new()),
     }));
     for _ in 2..MAX_RECENT_EVENT_COUNT {
         record_event(&build_pane_created_event());
@@ -113,7 +116,7 @@ fn a_full_ring_drops_exactly_the_oldest_record() {
 
     record_event(&Event::PaneCreated(PaneCreated {
         pane_id: newest_pane_id,
-        tab_id: TabId::new(),
+        tab_id: Some(TabId::new()),
     }));
 
     let recent_events = list_recent_events();

@@ -19,8 +19,9 @@ use crate::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 /// One event as the recent-events ring remembers it.
 ///
 /// Every id field is `None` when the event's payload names no id of that kind.
-/// [`Event::PaneCreated`] fills [`pane_id`](Self::pane_id) and [`tab_id`](Self::tab_id) and
-/// leaves the other three empty.
+/// [`Event::PaneCreated`] fills [`pane_id`](Self::pane_id), fills
+/// [`tab_id`](Self::tab_id) for a tiled pane and leaves it empty for a floating
+/// one, and leaves the other three empty.
 ///
 /// One id per kind. An event naming two ids of one kind records the one it
 /// changed to: [`Event::PaneFocused`] records the pane focused and not its
@@ -78,7 +79,7 @@ pub fn record_event(event: &Event, occurred_at: SystemTime) -> RecentEvent {
     match event {
         Event::PaneCreated(pane_created) => RecentEvent {
             pane_id: Some(pane_created.pane_id),
-            tab_id: Some(pane_created.tab_id),
+            tab_id: pane_created.tab_id,
             ..recent_event_without_entity_ids
         },
         Event::PaneProcessExited(pane_process_exited) => RecentEvent {
@@ -91,12 +92,12 @@ pub fn record_event(event: &Event, occurred_at: SystemTime) -> RecentEvent {
         },
         Event::PaneRemoved(pane_removed) => RecentEvent {
             pane_id: Some(pane_removed.pane_id),
-            tab_id: Some(pane_removed.tab_id),
+            tab_id: pane_removed.tab_id,
             ..recent_event_without_entity_ids
         },
         Event::PaneFocused(pane_focused) => RecentEvent {
             client_id: Some(pane_focused.client_id),
-            tab_id: Some(pane_focused.tab_id),
+            tab_id: pane_focused.tab_id,
             pane_id: Some(pane_focused.pane_id),
             ..recent_event_without_entity_ids
         },
@@ -109,7 +110,7 @@ pub fn record_event(event: &Event, occurred_at: SystemTime) -> RecentEvent {
             ..recent_event_without_entity_ids
         },
         Event::PanePlacementCommitted(pane_placement_committed) => RecentEvent {
-            tab_id: Some(pane_placement_committed.destination_tab_id),
+            tab_id: pane_placement_committed.destination_tab_id,
             pane_id: Some(pane_placement_committed.source_pane_id),
             command_id: Some(pane_placement_committed.command_id),
             ..recent_event_without_entity_ids

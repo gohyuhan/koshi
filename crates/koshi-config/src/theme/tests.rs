@@ -1,12 +1,8 @@
 //! Tests for the `themes/<name>.kdl` color-theme parser.
 
-use std::path::Path;
+use super::*;
 
-use crate::error::ConfigError;
-use crate::layer::{PartialColorPalette, PartialThemeConfig};
-use crate::types::{RgbColor, SCHEMA_VERSION};
-
-use super::parse_theme;
+use crate::types::SCHEMA_VERSION;
 
 /// Parses `theme_text` as a theme file, panicking on error.
 fn parse_theme_text(theme_text: &str) -> (PartialThemeConfig, Vec<String>) {

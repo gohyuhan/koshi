@@ -5,17 +5,14 @@
 //! Also validates the eligibility rule — a pane must sit in the visible layout order and
 //! hold a registry pane record in any state but `Removed` — and the two no-pane verdicts.
 
+use super::*;
+
 use std::time::SystemTime;
 
-use koshi_core::ids::{PaneId, TabId};
-use koshi_layout::focus::FocusCandidates;
-use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
+use koshi_core::ids::TabId;
+use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::policy::PaneClosePolicy;
 use koshi_pane::pane::state::PaneRecord;
-use koshi_pane::registry::PaneRegistry;
-
-use super::{repair_focus, FocusRepairResult};
-use crate::session::state::Tab;
 
 /// A tab whose only leaf is `root_pane_id`, with no focus history recorded yet.
 fn build_tab_with_root(root_pane_id: PaneId) -> Tab {

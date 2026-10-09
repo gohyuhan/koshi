@@ -79,7 +79,8 @@ where
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaintedFrame {
     /// Whether the statusline shows that the session restarted with a new
-    /// shell. An older peer that sends no field means no notice.
+    /// shell. The field is left off the wire when no notice shows, and a frame
+    /// with no field means no notice.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_recovery_notice_visible: bool,
     /// The session being viewed: its identity, its solved active tab, and its
@@ -99,7 +100,6 @@ pub struct FrameSession {
     /// The session's stable id.
     pub session_id: SessionId,
     /// The session's committed layout, membership, and shared-sizing revision.
-    #[serde(default)]
     pub session_revision: u64,
     /// The session's display name.
     pub session_name: String,
@@ -136,9 +136,8 @@ pub struct FrameTab {
     /// the client fills the whole frame with the "terminal too small" overlay.
     pub is_every_pane_suppressed: bool,
     /// Blank cells between two panes that meet along a horizontal or
-    /// vertical split, in the [`pane_slots`](Self::pane_slots) space. A frame from a
-    /// server without this field reads as `0`, and so does a value that is
-    /// not a cell count.
+    /// vertical split, in the [`pane_slots`](Self::pane_slots) space. A frame with
+    /// no field, and a value that is not a cell count, read as `0`.
     #[serde(default, deserialize_with = "crate::wire::deserialize_or_default")]
     pub gap_cell_count: u16,
 }
@@ -223,7 +222,6 @@ impl<'de> Deserialize<'de> for FrameImagePlacement {
             cell_geometry: Option<koshi_core::geometry::ImageCellGeometry>,
             #[serde(default)]
             image_record: Option<FrameImageRecordHeader>,
-            #[serde(default = "is_image_available_by_default")]
             is_available: bool,
             anchor_cell: (u16, u16),
             column_count: u16,
@@ -275,10 +273,6 @@ impl<'de> Deserialize<'de> for FrameImagePlacement {
             row_count: placement_fields.row_count,
         })
     }
-}
-
-const fn is_image_available_by_default() -> bool {
-    true
 }
 
 /// Image metadata sent before its RGBA bytes arrive in chunks.
@@ -565,7 +559,6 @@ pub struct FrameClient {
     /// The client's stable id.
     pub client_id: ClientId,
     /// The client's committed geometry and view revision.
-    #[serde(default)]
     pub client_revision: u64,
     /// The client's terminal size in cells.
     pub viewport_size: Size,

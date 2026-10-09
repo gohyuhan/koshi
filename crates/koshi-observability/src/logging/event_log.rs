@@ -41,8 +41,13 @@ use koshi_core::event::{Event, QuitCause};
 pub fn log_event(runtime_event: &Event) {
     match runtime_event {
         // --- pane and tab lifecycle: one line per fact a person can point at.
+        // A floating pane has no tab: its `tab_id` writes no field.
         Event::PaneCreated(event_payload) => {
-            tracing::info!(pane_id = %event_payload.pane_id, tab_id = %event_payload.tab_id, "pane created");
+            tracing::info!(
+                pane_id = %event_payload.pane_id,
+                tab_id = event_payload.tab_id.map(tracing::field::display),
+                "pane created"
+            );
         }
         Event::PaneProcessExited(event_payload) => {
             // Exactly one of `exit_code` and `signal` is `Some`; a `None`
@@ -65,12 +70,16 @@ pub fn log_event(runtime_event: &Event) {
             }
         }
         Event::PaneRemoved(event_payload) => {
-            tracing::info!(pane_id = %event_payload.pane_id, tab_id = %event_payload.tab_id, "pane removed");
+            tracing::info!(
+                pane_id = %event_payload.pane_id,
+                tab_id = event_payload.tab_id.map(tracing::field::display),
+                "pane removed"
+            );
         }
         Event::PaneFocused(event_payload) => {
             tracing::info!(
                 client_id = %event_payload.client_id,
-                tab_id = %event_payload.tab_id,
+                tab_id = event_payload.tab_id.map(tracing::field::display),
                 pane_id = %event_payload.pane_id,
                 "pane focused"
             );
@@ -79,8 +88,8 @@ pub fn log_event(runtime_event: &Event) {
             tracing::info!(
                 command_id = %event_payload.command_id,
                 source_pane_id = %event_payload.source_pane_id,
-                source_tab_id = %event_payload.source_tab_id,
-                destination_tab_id = %event_payload.destination_tab_id,
+                source_tab_id = event_payload.source_tab_id.map(tracing::field::display),
+                destination_tab_id = event_payload.destination_tab_id.map(tracing::field::display),
                 placement_target = ?event_payload.placement_target,
                 "pane placement committed"
             );
@@ -142,7 +151,6 @@ pub fn log_event(runtime_event: &Event) {
             );
         }
 
-        // --- delivery failures koshi has an answer for.
         // --- session end: `cause` is `requested` or `last-tab-closed`. A
         // last-tab close names its tab, and the pane exit that emptied it when
         // one did. Only a close that followed a failed exit logs at warn.

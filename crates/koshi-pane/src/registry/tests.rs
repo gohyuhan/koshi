@@ -1,18 +1,15 @@
 //! Tests for `PaneRegistry`: insertion, lookup, removal, in-place edits, and
 //! serialization round-trips of records and of the registry itself.
 
-use std::collections::BTreeMap;
+use super::*;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use koshi_core::ids::PaneId;
 use koshi_core::process::{ShellKind, SpawnSpec};
 
-use super::PaneRegistry;
-use crate::error::PaneRegistryError;
 use crate::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use crate::pane::policy::PaneClosePolicy;
-use crate::pane::state::PaneRecord;
 
 /// A terminal pane record for `pane_id` with `close_policy = Force`.
 fn build_terminal_pane_record(pane_id: PaneId) -> PaneRecord {

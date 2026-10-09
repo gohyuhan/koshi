@@ -14,7 +14,9 @@ use koshi_config::conflict::KeymapVerdict;
 use koshi_config::layer::{PartialKeybindingsConfig, PartialKoshiConfig, PartialLayoutDefaults};
 use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::action::ActionReference;
-use koshi_core::command::{Command, CommandResult, FocusPaneArgs, FocusTarget, NewPaneArgs};
+use koshi_core::command::{
+    Command, CommandResult, FocusPaneArgs, FocusTarget, NewPaneArgs, NewPanePlacement,
+};
 use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::SessionId;
 use koshi_core::key::{
@@ -1832,10 +1834,10 @@ fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
         &mut server,
         first_client_id,
         Command::NewPane(NewPaneArgs {
-            source_pane_id: Some(original_pane_id),
-            tab_id: None,
-            direction: Direction::Right,
-            should_stack: true,
+            placement: NewPanePlacement::Stacked {
+                source_pane_id: Some(original_pane_id),
+                tab_id: None,
+            },
             working_directory: None,
             spawn_spec: None,
             client_id: Some(first_client_id),

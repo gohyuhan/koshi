@@ -50,10 +50,8 @@ impl ImageCellGeometry {
     pub fn is_visible_size_contained(self, visible_size: Size) -> bool {
         visible_size.column_count > 0
             && visible_size.row_count > 0
-            && u32::from(self.cell_offset.column) + u32::from(visible_size.column_count)
-                <= u32::from(self.full_size.column_count)
-            && u32::from(self.cell_offset.row) + u32::from(visible_size.row_count)
-                <= u32::from(self.full_size.row_count)
+            && Rect::from_origin_and_size(self.cell_offset, visible_size)
+                .is_inside_rect(Rect::from_size_at_origin(self.full_size))
     }
 }
 
@@ -238,6 +236,13 @@ pub struct FloatingPaneSize {
     pub height: FloatingPaneDimension,
 }
 
+/// The size a new floating pane asks for when its command names none: 60% of
+/// each axis.
+pub const DEFAULT_FLOATING_PANE_SIZE: FloatingPaneSize = FloatingPaneSize {
+    width: FloatingPaneDimension::Percent(AxisPercent(60)),
+    height: FloatingPaneDimension::Percent(AxisPercent(60)),
+};
+
 /// A rectangular region of cells, anchored at `origin` with the given cell size.
 ///
 /// ```text
@@ -340,6 +345,21 @@ impl Rect {
     #[must_use]
     fn get_bottom_edge(&self) -> u32 {
         u32::from(self.origin.row) + u32::from(self.size.row_count)
+    }
+
+    /// `true` when no cell of this rect lies outside `outer_rect`: the origin
+    /// is at or past `outer_rect`'s origin on both axes, and the right and
+    /// bottom edges stop at or before `outer_rect`'s. An empty rect within
+    /// those bounds is inside.
+    ///
+    /// Example: the rect at column `2`, row `1`, `3` by `2` cells, is inside
+    /// the rect at `(0, 0)`, `5` by `3` cells; at column `3`, it is not.
+    #[must_use]
+    pub fn is_inside_rect(&self, outer_rect: Rect) -> bool {
+        self.origin.column >= outer_rect.origin.column
+            && self.origin.row >= outer_rect.origin.row
+            && self.get_right_edge() <= outer_rect.get_right_edge()
+            && self.get_bottom_edge() <= outer_rect.get_bottom_edge()
     }
 
     /// `true` when `point` lies within the half-open rect. An empty rect

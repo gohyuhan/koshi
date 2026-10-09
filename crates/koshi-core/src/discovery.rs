@@ -120,11 +120,9 @@ pub struct ClientDiscovery {
     pub lock_mode: LockMode,
     /// Where the client connected from. `None` when the row carries no
     /// `origin` field; `None` is not [`ClientOrigin::Local`].
-    #[serde(default)]
     pub origin: Option<ClientOrigin>,
     /// The pane region the client reported, exactly as it arrived, or `None`
     /// from a client that reported none.
-    #[serde(default)]
     pub pane_area: Option<PaneArea>,
 }
 

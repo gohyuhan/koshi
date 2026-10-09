@@ -108,7 +108,10 @@ fn a_pane_created_records_its_pane_and_tab_and_nothing_else() {
     let tab_id = TabId::new();
 
     let recorded_event = record_event(
-        &Event::PaneCreated(PaneCreated { pane_id, tab_id }),
+        &Event::PaneCreated(PaneCreated {
+            pane_id,
+            tab_id: Some(tab_id),
+        }),
         build_occurred_at(),
     );
 
@@ -127,6 +130,32 @@ fn a_pane_created_records_its_pane_and_tab_and_nothing_else() {
 }
 
 #[test]
+fn a_floating_pane_created_records_its_pane_and_no_tab() {
+    let pane_id = PaneId::new();
+
+    let recorded_event = record_event(
+        &Event::PaneCreated(PaneCreated {
+            pane_id,
+            tab_id: None,
+        }),
+        build_occurred_at(),
+    );
+
+    assert_eq!(
+        recorded_event,
+        RecentEvent {
+            occurred_at: build_occurred_at(),
+            event_name: Cow::Borrowed("PaneCreated"),
+            session_id: None,
+            client_id: None,
+            tab_id: None,
+            pane_id: Some(pane_id),
+            command_id: None,
+        }
+    );
+}
+
+#[test]
 fn a_pane_focused_records_its_client_tab_and_pane_but_not_the_pane_it_left() {
     let client_id = ClientId::new();
     let tab_id = TabId::new();
@@ -136,7 +165,7 @@ fn a_pane_focused_records_its_client_tab_and_pane_but_not_the_pane_it_left() {
     let recorded_event = record_event(
         &Event::PaneFocused(PaneFocused {
             client_id,
-            tab_id,
+            tab_id: Some(tab_id),
             pane_id,
             previous_pane_id: Some(previous_pane_id),
         }),
@@ -250,17 +279,26 @@ fn a_record_survives_the_wire_with_an_owned_name() {
     let pane_id = PaneId::new();
     let tab_id = TabId::new();
     let recorded_event = record_event(
-        &Event::PaneCreated(PaneCreated { pane_id, tab_id }),
+        &Event::PaneCreated(PaneCreated {
+            pane_id,
+            tab_id: Some(tab_id),
+        }),
         build_occurred_at(),
     );
-    assert!(matches!(recorded_event.event_name, Cow::Borrowed(_)));
+    assert!(matches!(
+        recorded_event.event_name,
+        Cow::Borrowed("PaneCreated")
+    ));
 
     let decoded_recent_event: RecentEvent =
         serde_json::from_str(&serde_json::to_string(&recorded_event).unwrap())
             .expect("a record this build wrote reads back");
 
     assert_eq!(decoded_recent_event, recorded_event);
-    assert!(matches!(decoded_recent_event.event_name, Cow::Owned(_)));
+    assert!(matches!(
+        decoded_recent_event.event_name,
+        Cow::Owned(ref event_name) if event_name == "PaneCreated"
+    ));
 }
 
 #[test]

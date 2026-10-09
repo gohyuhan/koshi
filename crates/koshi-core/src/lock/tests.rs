@@ -1,6 +1,6 @@
 //! Tests for client lock mode.
 
-use super::LockMode;
+use super::*;
 
 #[test]
 fn the_default_lock_mode_is_normal() {
@@ -45,9 +45,8 @@ fn a_lock_mode_survives_a_serde_round_trip() {
 
 #[test]
 fn serde_wire_form_is_the_pascal_case_variant_not_the_keymap_name() {
-    // The wire form comes from the derive (variant name, e.g. `Locked`), which
-    // is distinct from `get_keymap_name()` (the keymap grouping key, e.g. `locked`). A
-    // caller must not conflate the two.
+    // The wire form is the variant name, `Locked`. `get_keymap_name()` gives the
+    // keymap name, `locked`.
     assert_eq!(
         serde_json::to_string(&LockMode::Locked).expect("serialize"),
         "\"Locked\""

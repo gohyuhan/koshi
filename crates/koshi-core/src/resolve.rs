@@ -19,8 +19,7 @@
 //! struct reads as "the focused one". Resolution is a pure function of the
 //! reference, the registry, the caller's own split direction, and the
 //! caller's scroll line count: the caller passes in its
-//! `layout.new-pane-direction`, and a pane-opening action that names no side
-//! of its own is built with it.
+//! `layout.new-pane-direction`, and `core:new-pane` builds its split with it.
 //!
 //! # Routes
 //!
@@ -33,7 +32,8 @@ use std::fmt;
 use crate::action::{ActionHandlerReference, ActionReference, ClientActionKind};
 use crate::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    NewPaneArgs, NewTabArgs, ResizePaneArgs, ScrollPaneArgs, TabTarget, ToggleLockModeArgs,
+    NewPaneArgs, NewPanePlacement, NewTabArgs, ResizePaneArgs, ScrollPaneArgs, TabTarget,
+    ToggleLockModeArgs,
 };
 use crate::geometry::Direction;
 use crate::registry::ActionRegistry;
@@ -88,8 +88,7 @@ impl std::error::Error for ResolveError {}
 /// Turn an action reference into the plan that runs it.
 ///
 /// `new_pane_direction` is the caller's own `layout.new-pane-direction`
-/// setting. Actions that open a pane without naming a direction —
-/// `core:new-pane` and `core:new-pane-stacked` — build their command with it.
+/// setting. `core:new-pane` builds its split with it.
 /// The scroll actions scroll [`DEFAULT_SCROLL_LINE_COUNT`] lines.
 ///
 /// # Errors
@@ -156,10 +155,10 @@ fn resolve_core_action(
         "new-pane-up" => build_new_pane_command(Direction::Up),
         "new-pane-right" => build_new_pane_command(Direction::Right),
         "new-pane-stacked" => Command::NewPane(NewPaneArgs {
-            source_pane_id: None,
-            tab_id: None,
-            direction: new_pane_direction,
-            should_stack: true,
+            placement: NewPanePlacement::Stacked {
+                source_pane_id: None,
+                tab_id: None,
+            },
             working_directory: None,
             spawn_spec: None,
             client_id: None,
@@ -225,10 +224,11 @@ fn resolve_core_action(
 /// and open the new one toward `direction`.
 fn build_new_pane_command(direction: Direction) -> Command {
     Command::NewPane(NewPaneArgs {
-        source_pane_id: None,
-        tab_id: None,
-        direction,
-        should_stack: false,
+        placement: NewPanePlacement::Split {
+            source_pane_id: None,
+            tab_id: None,
+            direction,
+        },
         working_directory: None,
         spawn_spec: None,
         client_id: None,

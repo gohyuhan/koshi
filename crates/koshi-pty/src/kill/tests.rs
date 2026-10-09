@@ -2,17 +2,16 @@
 //! delivery to a short-lived child this test spawns and reaps itself.
 //!
 //! Every test owns the child it signals and never touches a process it did not
-//! spawn. Group-kill happy paths (`tree`/`request_process_tree_stop`) are not exercised
-//! against a spawned child: a plain `Command` child shares the test runner's
-//! process group, so a real `killpg` on it would signal the test harness. Those
-//! paths only work against a session-leader child, which the backend arranges in
-//! production but a unit test cannot create safely.
+//! spawn. On Unix, each group request names a pid that leads no process group,
+//! or a pid that the control refuses before any call. On Windows,
+//! `force_kill_process_tree` ends the per-child job of a spawned child.
+
+use super::*;
 
 #[cfg(unix)]
 mod unix {
-    use crate::error::PtyError;
-    use crate::kill::{PtyChildKillControl, StopRequest};
-    use nix::errno::Errno;
+    use super::*;
+
     use std::os::unix::process::ExitStatusExt;
     use std::process::Command;
 
@@ -46,8 +45,8 @@ mod unix {
         assert_eq!(kill_control.request_child_stop(), StopRequest::Delivered);
 
         let child_exit_status = child_process.wait().expect("reap child");
-        // SIGTERM = 15; sleep does not catch it, so it dies by that signal and
-        // carries no exit code.
+        // SIGTERM = 15. `sleep` does not catch it: the child dies by signal 15
+        // and carries no exit code.
         assert_eq!(child_exit_status.signal(), Some(15));
         assert_eq!(child_exit_status.code(), None);
     }
@@ -59,7 +58,7 @@ mod unix {
         child_process.kill().expect("kill the child");
         child_process.wait().expect("reap child");
 
-        // The pid is gone, so `kill` answers ESRCH and nothing was signalled.
+        // The pid is gone: `kill` answers ESRCH and signals nothing.
         let kill_control = PtyChildKillControl::from_process_id(process_id);
         assert_eq!(kill_control.request_child_stop(), StopRequest::NotDelivered);
     }
@@ -71,7 +70,7 @@ mod unix {
         child_process.kill().expect("kill the child");
         child_process.wait().expect("reap child");
 
-        // The pid is gone and never led a group, so `killpg` answers ESRCH.
+        // The pid is gone and never led a group: `killpg` answers ESRCH.
         let kill_control = PtyChildKillControl::from_process_id(process_id);
         assert_eq!(
             kill_control.request_process_tree_stop(),
@@ -112,9 +111,8 @@ mod unix {
         let mut child_process = spawn_sleeper();
         let kill_control = PtyChildKillControl::from_process_id(child_process.id());
 
-        // The child is not a process-group leader, so no group carries its pid
-        // and `killpg` answers ESRCH. It signals nothing, so the child is still
-        // alive to clean up below.
+        // The child leads no process group: `killpg` answers ESRCH and signals
+        // nothing. The child is still alive for the clean-up below.
         assert_eq!(
             kill_control.request_process_tree_stop(),
             StopRequest::NotDelivered
@@ -145,9 +143,9 @@ mod unix {
         let mut child_process = spawn_sleeper();
         let kill_control = PtyChildKillControl::from_process_id(child_process.id());
 
-        // The child is not a process-group leader, so no group has its pid;
-        // `killpg` finds nothing (ESRCH) and the failure maps to `Signal`. It
-        // kills nothing, so the child is still alive to clean up below.
+        // The child leads no process group: `killpg` answers ESRCH, which maps
+        // to `Signal`, and kills nothing. The child is still alive for the
+        // clean-up below.
         assert_eq!(
             kill_control.force_kill_process_tree(),
             Err(build_no_such_process_error())
@@ -163,8 +161,8 @@ mod unix {
     #[test]
     fn a_pid_that_names_no_child_process_is_never_signalled() {
         // Pid 0 names the caller's own process group, and a pid above
-        // `i32::MAX` wraps to a negative id naming an arbitrary group. Both
-        // would signal the test runner, so both are refused before any call.
+        // `i32::MAX` wraps to a negative id that names a group. The control
+        // refuses both before any call.
         for process_id in [0, 2_147_483_648, u32::MAX] {
             let kill_control = PtyChildKillControl::from_process_id(process_id);
 
@@ -198,7 +196,8 @@ mod unix {
 
 #[cfg(windows)]
 mod windows {
-    use crate::kill::{PtyChildKillControl, StopRequest};
+    use super::*;
+
     use std::os::windows::io::AsRawHandle;
     use std::process::Command;
 
@@ -227,7 +226,7 @@ mod windows {
             .expect("terminate the child");
 
         let child_exit_status = child_process.wait().expect("reap child");
-        // `force` passes exit code 137 to `TerminateProcess`.
+        // `force_kill_child` passes exit code 137 to `TerminateProcess`.
         assert_eq!(child_exit_status.code(), Some(137));
     }
 
@@ -251,7 +250,7 @@ mod windows {
             .force_kill_process_tree()
             .expect("terminate the job");
         let child_exit_status = child_process.wait().expect("reap child");
-        // `tree` passes exit code 137 to `TerminateJobObject`.
+        // `force_kill_process_tree` passes exit code 137 to `TerminateJobObject`.
         assert_eq!(child_exit_status.code(), Some(137));
     }
 }

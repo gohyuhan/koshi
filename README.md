@@ -149,7 +149,7 @@ powershell -c "irm https://github.com/gohyuhan/koshi/releases/latest/download/in
 
 Run the same command to upgrade, also while Koshi runs. The script first moves
 the new `koshi.exe` beside the installed one, as
-`koshi-update-<process id>.exe`, and runs it with `--version`. If it does not
+`koshi-staged-<process id>.exe`, and runs it with `--version`. If it does not
 print the version of the release, the script deletes it and stops, and the
 installed `koshi.exe` stays as it was. The script then renames the installed
 `koshi.exe` to `koshi.old`, or to `koshi.1.old` and onward while a Koshi still
@@ -418,7 +418,10 @@ Outside Koshi, give a target unless exactly one running session can be chosen.
 | `koshi new-pane [--direction right\|down\|left\|up \| --stacked] [--pane <PANE_ID>] [--tab <NAME_OR_ID>] [--session <NAME_OR_ID>] [--client <CLIENT_ID>]` | Open a shell pane |
 | `koshi run [new-pane options] -- <COMMAND>...` | Open a pane running one command |
 | `koshi close-pane [--pane <PANE_ID>] [--force]` | Close a pane |
-| `koshi resize-pane --direction <DIRECTION> [--size <SIZE>] [--pane <PANE_ID>]` | Move one pane border |
+| `koshi resize-pane --direction <DIRECTION> [--size <SIZE>] [--pane <PANE_ID>] [--client <CLIENT_ID>]` | Move one pane border |
+| `koshi move-pane --direction <DIRECTION> [--pane <PANE_ID>]` | Swap a pane with its visible neighbor |
+| `koshi place-pane --pane <PANE_ID> --tab <NAME_OR_ID> --direction <DIRECTION> [--client <CLIENT_ID>]` | Insert a pane into another tab |
+| `koshi scroll-pane --lines <LINES> [--pane <PANE_ID>] [--client <CLIENT_ID>]` | Scroll one client's view of a pane |
 | `koshi focus-pane --pane <PANE_ID> [--client <CLIENT_ID>]` | Focus a pane |
 | `koshi toggle-pane-fullscreen [--client <CLIENT_ID>]` | Toggle the focused pane's fullscreen view |
 | `koshi input [--pane <PANE_ID>] [--no-enter] "<TEXT>"` | Send text to a pane |
@@ -552,7 +555,7 @@ installed build and run `koshi attach workspace` to reattach to a session named
 Saved state carries a format number. Koshi applies the required conversion
 steps in order as the updated build opens it. This also works when an update
 skips a release. For example, a resume file at format `2` passes through `3`
-before Koshi loads it as format `4`. No migration command is needed.
+and `4` before Koshi loads it as format `5`. No migration command is needed.
 
 If a session cannot read its restart record, it opens one new shell and the
 previous panes are unavailable. Koshi shows `Restore failed` in the statusline

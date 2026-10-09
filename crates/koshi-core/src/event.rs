@@ -35,7 +35,7 @@ pub enum Event {
     PaneProcessExited(PaneProcessExited),
     /// A pane's close transaction started.
     PaneClosing(PaneClosing),
-    /// A pane leaf left the layout and registry.
+    /// A pane left the registry, and its tab's layout or the floating set.
     PaneRemoved(PaneRemoved),
     /// Focus moved to a pane.
     PaneFocused(PaneFocused),
@@ -150,8 +150,10 @@ pub enum QuitCause {
 pub struct PaneCreated {
     /// The new pane.
     pub pane_id: PaneId,
-    /// The tab it belongs to.
-    pub tab_id: TabId,
+    /// The tab it belongs to; `None` when the pane floats. A message without
+    /// `tab_id` is refused.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub tab_id: Option<TabId>,
 }
 
 /// Payload for [`Event::PaneProcessExited`].
@@ -164,8 +166,7 @@ pub struct PaneProcessExited {
     /// The signal number that terminated the process; `None` when the process
     /// exited with a code. Exactly one of `exit_code` and `signal` is `Some`.
     /// Always `None` on Windows. `Some(0)` is a signal whose number the
-    /// platform did not report. Absent from serialized input decodes as `None`.
-    #[serde(default)]
+    /// platform did not report.
     pub signal: Option<i32>,
 }
 
@@ -190,10 +191,13 @@ pub struct PaneClosing {
 /// Payload for [`Event::PaneRemoved`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneRemoved {
-    /// The pane removed from the layout and registry.
+    /// The pane removed from the registry, and from its tab's layout or the
+    /// session's floating set.
     pub pane_id: PaneId,
-    /// The tab it was removed from.
-    pub tab_id: TabId,
+    /// The tab it was removed from; `None` when the pane floated. A message
+    /// without `tab_id` is refused.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub tab_id: Option<TabId>,
 }
 
 /// Payload for [`Event::PaneFocused`].
@@ -201,8 +205,10 @@ pub struct PaneRemoved {
 pub struct PaneFocused {
     /// The client whose focus moved.
     pub client_id: ClientId,
-    /// The tab the focus moved in.
-    pub tab_id: TabId,
+    /// The tab the focus moved in; `None` when the newly focused pane floats.
+    /// A message without `tab_id` is refused.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub tab_id: Option<TabId>,
     /// The newly focused pane.
     pub pane_id: PaneId,
     /// The pane that held this client's focus in the tab before, if any.
@@ -232,10 +238,14 @@ pub struct PanePlacementCommitted {
     pub command_id: CommandId,
     /// The pane placed in the destination layout.
     pub source_pane_id: PaneId,
-    /// The tab that owned the pane before the placement.
-    pub source_tab_id: TabId,
-    /// The tab that owns the pane after the placement.
-    pub destination_tab_id: TabId,
+    /// The tab that owned the pane before the placement; `None` when the pane
+    /// floated. A message without `source_tab_id` is refused.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub source_tab_id: Option<TabId>,
+    /// The tab that owns the pane after the placement; `None` when the pane
+    /// floats. A message without `destination_tab_id` is refused.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub destination_tab_id: Option<TabId>,
     /// The checked swap or insertion target used by the committed transaction.
     pub placement_target: PanePlacementTarget,
 }
@@ -281,10 +291,9 @@ pub struct TabMoved {
 }
 
 /// Why a client has no visible pane area.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TerminalTooSmallCause {
     /// The client's viewport cannot fit the built-in chrome and pane minimum.
-    #[default]
     Terminal,
     /// The client's own edge regions leave no pane area.
     Regions,
@@ -300,10 +309,8 @@ pub struct TerminalTooSmallEntered {
     /// The viewport size that could not fit any pane.
     pub viewport_size: Size,
     /// The pane area the client reported, or `None` when it reported no area.
-    #[serde(default)]
     pub pane_area: Option<PaneArea>,
     /// The reason the client has no visible pane area.
-    #[serde(default)]
     pub cause: TerminalTooSmallCause,
 }
 

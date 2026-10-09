@@ -3,10 +3,9 @@
 //! the events that drive them (ProcessStarted, ProcessExited, CloseRequested,
 //! Cleaned).
 
-use std::time::{Duration, SystemTime};
+use super::*;
 
-use super::{PaneLifecycle, PaneLifecycleEvent};
-use crate::error::InvalidTransitionError;
+use std::time::Duration;
 
 /// One instance of each lifecycle state. The payloads differ from the ones in
 /// `list_lifecycle_events()`: `Exited` carries `exit_code: Some(7)` and
@@ -127,14 +126,14 @@ fn a_running_pane_starts_closing_on_request() {
 
 #[test]
 fn a_held_exited_pane_can_later_be_closed() {
-    let exited = PaneLifecycle::Exited {
+    let exited_lifecycle = PaneLifecycle::Exited {
         exit_code: Some(0),
         exited_at: SystemTime::UNIX_EPOCH,
     };
     let close_requested_at = SystemTime::UNIX_EPOCH + Duration::from_secs(4);
 
     let transition_result =
-        exited.transition(PaneLifecycleEvent::CloseRequested { close_requested_at });
+        exited_lifecycle.transition(PaneLifecycleEvent::CloseRequested { close_requested_at });
 
     // `Closing` carries the request time, not the exit time.
     assert_eq!(
@@ -145,30 +144,29 @@ fn a_held_exited_pane_can_later_be_closed() {
 
 #[test]
 fn a_closing_pane_is_removed_once_cleaned() {
-    let closing = PaneLifecycle::Closing {
+    let closing_lifecycle = PaneLifecycle::Closing {
         close_requested_at: SystemTime::UNIX_EPOCH,
     };
 
     assert_eq!(
-        closing.transition(PaneLifecycleEvent::Cleaned),
+        closing_lifecycle.transition(PaneLifecycleEvent::Cleaned),
         Ok(PaneLifecycle::Removed)
     );
 }
 
 #[test]
 fn a_dead_pane_never_returns_to_a_live_state() {
-    let exited = PaneLifecycle::Exited {
+    let exited_lifecycle = PaneLifecycle::Exited {
         exit_code: Some(1),
         exited_at: SystemTime::UNIX_EPOCH,
     };
 
-    // `CloseRequested` is the only way out of `Exited`. Restarting the child in
-    // place is rejected, so the exit code and time stay readable until the
-    // close.
+    // `CloseRequested` is the only way out of `Exited`. `ProcessStarted` is
+    // rejected, and the exit code and time stay readable until the close.
     assert_eq!(
-        exited.transition(PaneLifecycleEvent::ProcessStarted),
+        exited_lifecycle.transition(PaneLifecycleEvent::ProcessStarted),
         Err(InvalidTransitionError {
-            previous_lifecycle: exited,
+            previous_lifecycle: exited_lifecycle,
             lifecycle_event: PaneLifecycleEvent::ProcessStarted,
         })
     );
@@ -178,10 +176,13 @@ fn a_dead_pane_never_returns_to_a_live_state() {
 fn a_close_during_spawn_wins_over_a_late_child_exit() {
     // The pane is closed while `Spawning`; the child then exits anyway.
     let close_requested_at = SystemTime::UNIX_EPOCH;
-    let closing = PaneLifecycle::Spawning
+    let closing_lifecycle = PaneLifecycle::Spawning
         .transition(PaneLifecycleEvent::CloseRequested { close_requested_at })
         .unwrap();
-    assert_eq!(closing, PaneLifecycle::Closing { close_requested_at });
+    assert_eq!(
+        closing_lifecycle,
+        PaneLifecycle::Closing { close_requested_at }
+    );
 
     // The late exit is rejected; the state stays `Closing`.
     let late_exit = PaneLifecycleEvent::ProcessExited {
@@ -189,23 +190,23 @@ fn a_close_during_spawn_wins_over_a_late_child_exit() {
         exited_at: close_requested_at,
     };
     assert_eq!(
-        closing.transition(late_exit),
+        closing_lifecycle.transition(late_exit),
         Err(InvalidTransitionError {
-            previous_lifecycle: closing,
+            previous_lifecycle: closing_lifecycle,
             lifecycle_event: late_exit,
         })
     );
 
     // The close still completes to `Removed`.
     assert_eq!(
-        closing.transition(PaneLifecycleEvent::Cleaned),
+        closing_lifecycle.transition(PaneLifecycleEvent::Cleaned),
         Ok(PaneLifecycle::Removed)
     );
 }
 
 #[test]
 fn a_second_close_request_while_closing_is_rejected() {
-    let closing = PaneLifecycle::Closing {
+    let closing_lifecycle = PaneLifecycle::Closing {
         close_requested_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
     };
     let lifecycle_event = PaneLifecycleEvent::CloseRequested {
@@ -213,9 +214,9 @@ fn a_second_close_request_while_closing_is_rejected() {
     };
 
     assert_eq!(
-        closing.transition(lifecycle_event),
+        closing_lifecycle.transition(lifecycle_event),
         Err(InvalidTransitionError {
-            previous_lifecycle: closing,
+            previous_lifecycle: closing_lifecycle,
             lifecycle_event,
         })
     );
@@ -417,20 +418,20 @@ fn unit_lifecycle_states_serialize_as_their_variant_names() {
 
 #[test]
 fn payload_lifecycle_states_serialize_their_fields_with_times_as_seconds_and_nanos() {
-    let exited = PaneLifecycle::Exited {
+    let exited_lifecycle = PaneLifecycle::Exited {
         exit_code: None,
         exited_at: SystemTime::UNIX_EPOCH + Duration::new(5, 400),
     };
-    let closing = PaneLifecycle::Closing {
+    let closing_lifecycle = PaneLifecycle::Closing {
         close_requested_at: SystemTime::UNIX_EPOCH,
     };
 
     assert_eq!(
-        serde_json::to_string(&exited).expect("serialize"),
+        serde_json::to_string(&exited_lifecycle).expect("serialize"),
         r#"{"Exited":{"exit_code":null,"exited_at":{"secs_since_epoch":5,"nanos_since_epoch":400}}}"#
     );
     assert_eq!(
-        serde_json::to_string(&closing).expect("serialize"),
+        serde_json::to_string(&closing_lifecycle).expect("serialize"),
         r#"{"Closing":{"close_requested_at":{"secs_since_epoch":0,"nanos_since_epoch":0}}}"#
     );
 }

@@ -201,7 +201,7 @@ pub fn commit_cross_tab_placement(
     if acting_previous_pane_id != Some(source_pane_id) {
         emitted_events.push(Event::PaneFocused(PaneFocused {
             client_id: acting_client_id,
-            tab_id: destination_tab_id,
+            tab_id: Some(destination_tab_id),
             pane_id: source_pane_id,
             previous_pane_id: acting_previous_pane_id,
         }));
@@ -217,12 +217,6 @@ pub fn commit_cross_tab_placement(
             source_tab_id,
             &source_pane_ids_after,
             &mut emitted_events,
-        );
-        clear_invalid_client_zoom(
-            session,
-            acting_client_id,
-            source_tab_id,
-            &source_pane_ids_after,
         );
     }
 
@@ -246,15 +240,6 @@ pub fn commit_cross_tab_placement(
                 &mut emitted_events,
             );
         }
-        clear_invalid_client_zoom(
-            session,
-            client_id,
-            destination_tab_id,
-            &destination_pane_ids_after,
-        );
-        if !is_source_tab_closing {
-            clear_invalid_client_zoom(session, client_id, source_tab_id, &source_pane_ids_after);
-        }
     }
 
     if is_source_tab_closing {
@@ -271,11 +256,7 @@ fn repair_client_tab_focus(
     valid_pane_ids: &HashSet<PaneId>,
     emitted_events: &mut Vec<Event>,
 ) {
-    let should_clear_zoom = session
-        .clients
-        .get_client_by_id(client_id)
-        .and_then(|client| client.get_zoomed_pane_id(tab_id))
-        .is_some_and(|pane_id| !valid_pane_ids.contains(&pane_id));
+    clear_invalid_client_zoom(session, client_id, tab_id, valid_pane_ids);
     let Some(previous_pane_id) = session
         .clients
         .get_client_by_id(client_id)
@@ -296,7 +277,7 @@ fn repair_client_tab_focus(
                 client.update_focused_pane(tab_id, next_pane_id);
                 emitted_events.push(Event::PaneFocused(PaneFocused {
                     client_id,
-                    tab_id,
+                    tab_id: Some(tab_id),
                     pane_id: next_pane_id,
                     previous_pane_id: Some(previous_pane_id),
                 }));
@@ -313,11 +294,6 @@ fn repair_client_tab_focus(
     if let Some(selected_pane_id) = selected_pane_id {
         if let Some(tab) = session.tabs.get_mut(&tab_id) {
             tab.record_focus_mru(selected_pane_id);
-        }
-    }
-    if should_clear_zoom {
-        if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
-            client.clear_zoom(tab_id);
         }
     }
 }

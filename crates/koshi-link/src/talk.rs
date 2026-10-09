@@ -60,9 +60,9 @@ impl PeerWords {
     /// The peer picks from the range the Hello named. A version outside that
     /// range stops the exchange.
     ///
-    /// Example — this build asks for 4 to 4 and the reply names 5, so the verb
-    /// fails with `the session settled on protocol version 5, which is outside
-    /// the 4 to 4 this koshi asked for`.
+    /// Example — this build asks for 5 to 5 and the reply names 6, so the verb
+    /// fails with `the session settled on protocol version 6, which is outside
+    /// the 5 to 5 this koshi asked for`.
     pub fn validate_settled_protocol_version(&self, protocol_version: u32) -> Result<(), CliError> {
         let minimum_protocol_version = self.protocol_surface.minimum_version;
         let maximum_protocol_version = self.protocol_surface.maximum_version;

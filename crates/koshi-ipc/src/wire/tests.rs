@@ -557,8 +557,8 @@ fn every_wire_enum_lists_the_variants_it_writes() {
         }
     }
 
-    assert_listed(sample_request_kinds());
-    assert_listed(sample_results());
+    assert_listed(crate::protocol::tests::list_every_request_kind());
+    assert_listed(crate::protocol::tests::list_all_ipc_results());
     assert_listed(sample_events());
     assert_listed(sample_router_kinds());
     assert_listed(sample_router_results());
@@ -704,130 +704,6 @@ fn sample_supervisor_events() -> Vec<SupervisorEvent> {
     ]
 }
 
-/// One value per [`IpcRequestKind`] variant.
-fn sample_request_kinds() -> Vec<IpcRequestKind> {
-    use koshi_core::geometry::Size;
-
-    vec![
-        IpcRequestKind::Hello {
-            minimum_protocol_version: 2,
-            maximum_protocol_version: 2,
-            connection_token: ConnectionToken::from_secret("t"),
-            is_remote: false,
-        },
-        IpcRequestKind::Attach {
-            viewport_size: Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            resume_client_id: None,
-            resume_token: None,
-            pane_area: None,
-            graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
-            cell_size: None,
-        },
-        IpcRequestKind::Keyboard {
-            key_input: koshi_core::key::KeyInput {
-                key: koshi_core::key::KeyIdentity::Key(koshi_core::key::Key::Char('a')),
-                key_event_kind: koshi_core::key::KeyEventKind::Press,
-                shifted_key: None,
-                base_layout_key: None,
-                associated_text: "a".to_string(),
-                modifier_flags: koshi_core::key::KeyModifierFlags::NONE,
-            },
-        },
-        IpcRequestKind::Resize {
-            viewport_size: Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            pane_area: None,
-            cell_size: None,
-        },
-        IpcRequestKind::CellSize {
-            cell_size: koshi_core::geometry::PixelCellSize::from_pixel_dimensions(10, 20)
-                .expect("nonzero cell size"),
-        },
-        IpcRequestKind::Paste {
-            pasted_text: String::new(),
-        },
-        IpcRequestKind::Mouse(Vec::new()),
-        IpcRequestKind::SubmitCommand(Box::new(koshi_core::command::CommandEnvelope::from_parts(
-            koshi_core::ids::CommandId::new(),
-            koshi_core::command::CommandSource::ExternalCli {
-                session_id: None,
-                target_client_id: None,
-            },
-            koshi_core::command::Command::ToggleLockMode(
-                koshi_core::command::ToggleLockModeArgs::default(),
-            ),
-        ))),
-        IpcRequestKind::Discovery,
-        IpcRequestKind::Layout { tab_id: None },
-        IpcRequestKind::ReadPanePlacement {
-            pane_id: koshi_core::ids::PaneId::new(),
-            destination_tab_id: koshi_core::ids::TabId::new(),
-        },
-        IpcRequestKind::RecentEvents,
-        IpcRequestKind::Restart,
-        IpcRequestKind::Leaving,
-    ]
-}
-
-/// One value per [`IpcResult`] variant.
-fn sample_results() -> Vec<IpcResult> {
-    vec![
-        IpcResult::Hello {
-            protocol_version: 2,
-            build_version: String::new(),
-        },
-        IpcResult::Attached {
-            client_id: koshi_core::ids::ClientId::new(),
-            session_id: koshi_core::ids::SessionId::new(),
-            session_structure: crate::attach::AttachedSessionStructureSnapshot {
-                session_id: koshi_core::ids::SessionId::new(),
-                session_name: String::new(),
-                tabs: Vec::new(),
-            },
-            resume_token: None,
-            pane_area: None,
-        },
-        IpcResult::CommandResult(koshi_core::command::CommandResult::Ok {
-            command_id: koshi_core::ids::CommandId::new(),
-            emitted_events: Vec::new(),
-        }),
-        IpcResult::Overview(koshi_core::discovery::SessionOverview {
-            session: build_test_session_discovery(),
-            tabs: Vec::new(),
-            panes: Vec::new(),
-            clients: Vec::new(),
-        }),
-        IpcResult::Layout(crate::layout::SessionLayout {
-            session_id: koshi_core::ids::SessionId::new(),
-            session_name: String::new(),
-            tabs: Vec::new(),
-            clients: Vec::new(),
-        }),
-        IpcResult::RecentEvents(Vec::new()),
-        IpcResult::Restarting,
-        IpcResult::Error(crate::protocol::IpcErrorPayload {
-            code: crate::protocol::IpcErrorCode::BadToken,
-            message: String::new(),
-        }),
-    ]
-}
-
-/// The smallest session record a discovery answer can carry.
-fn build_test_session_discovery() -> koshi_core::discovery::SessionDiscovery {
-    koshi_core::discovery::SessionDiscovery {
-        session_id: koshi_core::ids::SessionId::new(),
-        session_name: String::new(),
-        created_at: std::time::UNIX_EPOCH,
-        attached_client_ids: Vec::new(),
-        pane_count: 0,
-    }
-}
-
 /// One value per [`SessionEvent`] variant.
 fn sample_events() -> Vec<SessionEvent> {
     use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
@@ -881,8 +757,8 @@ fn sample_events() -> Vec<SessionEvent> {
         SessionEvent::PanePlacementCommitted {
             command_id,
             source_pane_id,
-            source_tab_id,
-            destination_tab_id,
+            source_tab_id: Some(source_tab_id),
+            destination_tab_id: Some(destination_tab_id),
             placement_target: PanePlacementTarget::Split {
                 destination_tab_id,
                 anchor: PanePlacementAnchor::Pane(target_pane_id),
@@ -891,7 +767,7 @@ fn sample_events() -> Vec<SessionEvent> {
         },
         SessionEvent::PaneCreated {
             pane_id: PaneId::new(),
-            tab_id: TabId::new(),
+            tab_id: Some(TabId::new()),
         },
         SessionEvent::PaneProcessExited {
             pane_id: PaneId::new(),
@@ -903,11 +779,11 @@ fn sample_events() -> Vec<SessionEvent> {
         },
         SessionEvent::PaneRemoved {
             pane_id: PaneId::new(),
-            tab_id: TabId::new(),
+            tab_id: Some(TabId::new()),
         },
         SessionEvent::PaneFocused {
             client_id: ClientId::new(),
-            tab_id: TabId::new(),
+            tab_id: Some(TabId::new()),
             pane_id: PaneId::new(),
             previous_pane_id: None,
         },
@@ -1180,8 +1056,7 @@ fn build_test_painted_frame() -> crate::frame::PaintedFrame {
 
 #[test]
 fn an_unknown_name_is_filtered_as_it_is_read() {
-    // The name is quoted back in a refusal and written on a log line, and the
-    // peer that chose it may be another local user or another machine.
+    // The control characters of an unknown name are dropped as it is read.
     let decoded: MaybeKnown<Sample> =
         serde_json::from_str("{\"\\u001b[2JAdded\":{\"pane\":3}}").unwrap();
     assert_eq!(

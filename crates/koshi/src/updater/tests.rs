@@ -359,10 +359,13 @@ fn a_router_refusing_this_builds_protocol_version_gives_protocol_version_refused
     let router_restart =
         restart_advertised_router(runtime_directory.path(), "3.3.3", Duration::from_secs(5));
 
-    let Err(CliError::ProtocolVersionRefused { detail }) = router_restart else {
+    let Err(CliError::ProtocolVersionRefused {
+        detail: refusal_detail,
+    }) = router_restart
+    else {
         panic!("expected ProtocolVersionRefused, got {router_restart:?}");
     };
-    assert_eq!(detail, VERSION_REFUSAL_SENTENCE);
+    assert_eq!(refusal_detail, VERSION_REFUSAL_SENTENCE);
     router_thread
         .join()
         .expect("the stand-in served its connection");
@@ -1817,7 +1820,7 @@ fn a_windows_swap_whose_staged_copy_cannot_run_keeps_the_program_file_and_takes_
     fs::write(
         program_directory
             .path()
-            .join(format!("koshi-update-{FREE_PROCESS_ID}.exe")),
+            .join(format!("koshi-staged-{FREE_PROCESS_ID}.exe")),
         b"stray-binary",
     )
     .expect("write the stray staged copy");
@@ -1833,7 +1836,7 @@ fn a_windows_swap_whose_staged_copy_cannot_run_keeps_the_program_file_and_takes_
         .expect_err("bytes that are no program do not start");
     let staged_binary_path = fs::canonicalize(&program_path)
         .expect("canonicalize the program file")
-        .with_file_name(format!("koshi-update-{}.exe", std::process::id()));
+        .with_file_name(format!("koshi-staged-{}.exe", std::process::id()));
 
     let swap_result = swap_executable(&new_binary_path, &program_path, "v9.9.9");
 
@@ -1862,7 +1865,7 @@ fn replacing_the_program_file_with_the_staged_copy_leaves_its_bytes_and_no_backu
         .tempdir()
         .expect("program directory");
     let executable_path = test_directory.path().join("koshi.exe");
-    let staged_binary_path = test_directory.path().join("koshi-update-5000.exe");
+    let staged_binary_path = test_directory.path().join("koshi-staged-5000.exe");
     fs::write(&executable_path, b"old-binary").expect("write the old executable");
     fs::write(&staged_binary_path, b"new-binary").expect("write the staged copy");
 
@@ -1894,7 +1897,7 @@ fn a_windows_replacement_takes_the_next_backup_name_while_a_process_runs_from_th
     fs::rename(&executable_path, &first_backup_path)
         .expect("rename the running executable to the first backup name");
     fs::write(&executable_path, b"installed-binary").expect("write the installed executable");
-    let staged_binary_path = test_directory.path().join("koshi-update-5000.exe");
+    let staged_binary_path = test_directory.path().join("koshi-staged-5000.exe");
     fs::write(&staged_binary_path, b"new-binary").expect("write the staged copy");
 
     let replace_result =
@@ -1918,7 +1921,7 @@ fn replacing_the_program_file_waits_while_another_install_holds_the_install_lock
         .tempdir()
         .expect("program directory");
     let executable_path = test_directory.path().join("koshi.exe");
-    let staged_binary_path = test_directory.path().join("koshi-update-5000.exe");
+    let staged_binary_path = test_directory.path().join("koshi-staged-5000.exe");
     fs::write(&executable_path, b"old-binary").expect("write the old executable");
     fs::write(&staged_binary_path, b"new-binary").expect("write the staged copy");
     let holding_lock_file =
@@ -1959,7 +1962,7 @@ fn replacing_the_program_file_with_a_missing_staged_copy_renames_the_backup_back
         .tempdir()
         .expect("program directory");
     let executable_path = test_directory.path().join("koshi.exe");
-    let missing_staged_binary_path = test_directory.path().join("koshi-update-5000.exe");
+    let missing_staged_binary_path = test_directory.path().join("koshi-staged-5000.exe");
     fs::write(&executable_path, b"old-binary").expect("write the old executable");
     let rename_error = fs::rename(
         &missing_staged_binary_path,
@@ -1988,7 +1991,7 @@ fn replacing_the_program_file_changes_nothing_when_the_install_lock_cannot_be_ta
         .tempdir()
         .expect("program directory");
     let executable_path = test_directory.path().join("koshi.exe");
-    let staged_binary_path = test_directory.path().join("koshi-update-5000.exe");
+    let staged_binary_path = test_directory.path().join("koshi-staged-5000.exe");
     let install_lock_path = test_directory.path().join("koshi.lock");
     fs::write(&executable_path, b"old-binary").expect("write the old executable");
     fs::write(&staged_binary_path, b"new-binary").expect("write the staged copy");
@@ -2080,7 +2083,7 @@ fn the_backup_list_names_only_the_backups_of_the_program_file() {
         "koshi..old",
         "koshi.old.txt",
         "notes.old",
-        "koshi-update-5000.exe",
+        "koshi-staged-5000.exe",
     ] {
         fs::write(test_directory.path().join(entry_name), b"").expect("write a directory entry");
     }
@@ -2323,9 +2326,9 @@ fn the_install_ps1_lock_call_fails_with_lock_violation_while_the_install_lock_is
 }
 
 /// The line of `install.ps1` that names the staged copy of the new
-/// `koshi.exe`: `koshi-update-<process id>.exe` beside the installed one.
+/// `koshi.exe`: `koshi-staged-<process id>.exe` beside the installed one.
 const INSTALL_SCRIPT_STAGED_COPY_LINE: &str =
-    r#"$staged_binary_path = Join-Path $installation_directory "koshi-update-$PID.exe""#;
+    r#"$staged_binary_path = Join-Path $installation_directory "koshi-staged-$PID.exe""#;
 
 /// The lines of `install.ps1` that move the new `koshi.exe`, whose `FileInfo`
 /// `$binary_file` holds, to `$staged_binary_path`, run it there with
@@ -2383,7 +2386,7 @@ fn install_ps1_runs_the_staged_copy_before_the_install_lock_and_moves_it_in_afte
 /// Runs [`INSTALL_SCRIPT_VERSION_CHECK_LINES`] in Windows PowerShell under
 /// `$ErrorActionPreference = 'Stop'`, with `$release_version_number` set to
 /// `9.9.9`, `$binary_file` naming a `koshi.cmd` that prints `printed_line`, and
-/// `$staged_binary_path` naming `koshi-update-5000.cmd` beside it, which runs
+/// `$staged_binary_path` naming `koshi-staged-5000.cmd` beside it, which runs
 /// as the batch file it holds. Hands back what the run prints on standard
 /// output, trimmed: `installed` once the check passes, or the message of the
 /// error that stops it.
@@ -2402,7 +2405,7 @@ fn run_install_ps1_version_check(printed_line: &str) -> String {
     let escaped_new_binary_path = new_binary_path.display().to_string().replace('\'', "''");
     let escaped_staged_binary_path = test_directory
         .path()
-        .join("koshi-update-5000.cmd")
+        .join("koshi-staged-5000.cmd")
         .display()
         .to_string()
         .replace('\'', "''");
@@ -2532,7 +2535,9 @@ fn a_release_list_deserializes_every_tag_in_order() {
 #[test]
 fn update_error_wraps_detail_in_cli_update_error() {
     match build_update_error("boom") {
-        CliError::Update { detail } => assert_eq!(detail, "boom"),
+        CliError::Update {
+            detail: error_detail,
+        } => assert_eq!(error_detail, "boom"),
         unexpected_error => panic!("expected CliError::Update, got {unexpected_error:?}"),
     }
 }
@@ -2782,7 +2787,7 @@ fn an_extracted_binary_is_left_runnable() {
 /// higher one wherever it sits in the list.
 #[test]
 fn highest_release_version_picks_semver_order_not_list_order() {
-    let releases = |release_tags: &[&str]| -> Vec<Release> {
+    let build_releases = |release_tags: &[&str]| -> Vec<Release> {
         release_tags
             .iter()
             .map(|release_tag| Release {
@@ -2792,18 +2797,18 @@ fn highest_release_version_picks_semver_order_not_list_order() {
     };
 
     assert_eq!(
-        find_highest_release_version(releases(&["v0.3.0-rc.2", "v0.3.0-rc.10", "v0.2.0",]))
+        find_highest_release_version(build_releases(&["v0.3.0-rc.2", "v0.3.0-rc.10", "v0.2.0",]))
             .unwrap(),
         "v0.3.0-rc.10"
     );
     // List order plays no part: the highest wins from the front too.
     assert_eq!(
-        find_highest_release_version(releases(&["v0.4.0", "v0.3.0"])).unwrap(),
+        find_highest_release_version(build_releases(&["v0.4.0", "v0.3.0"])).unwrap(),
         "v0.4.0"
     );
     // A tag that is not a version is skipped, not an error.
     assert_eq!(
-        find_highest_release_version(releases(&["nightly", "v0.1.0"])).unwrap(),
+        find_highest_release_version(build_releases(&["nightly", "v0.1.0"])).unwrap(),
         "v0.1.0"
     );
     assert_eq!(
@@ -2812,7 +2817,7 @@ fn highest_release_version_picks_semver_order_not_list_order() {
     );
     // A list where no tag is a version reads the same as an empty one.
     assert_eq!(
-        find_highest_release_version(releases(&["nightly", "edge"])).unwrap_err(),
+        find_highest_release_version(build_releases(&["nightly", "edge"])).unwrap_err(),
         "no releases found"
     );
 }
@@ -3073,7 +3078,7 @@ const FREE_PROCESS_ID: u32 = 2_147_483_647;
 fn a_staged_copy_name_gives_back_the_process_id_it_was_formatted_with() {
     let staged_copy_name = StagedCopyName::from_program_path(Path::new("/opt/koshi/koshi"));
     let expected_file_name = if cfg!(windows) {
-        "koshi-update-5000.exe"
+        "koshi-staged-5000.exe"
     } else {
         "koshi.koshi-update-5000"
     };
@@ -3090,12 +3095,12 @@ fn a_name_that_is_not_a_staged_copy_name_gives_no_process_id() {
     let staged_copy_name = StagedCopyName::from_program_path(Path::new("/opt/koshi/koshi"));
     let other_entry_names = if cfg!(windows) {
         [
-            "koshi-update-.exe",
-            "koshi-update-+5.exe",
-            "koshi-update-5x.exe",
-            "koshi-update-4294967296.exe",
-            "koshi-update-5000.exe.old",
-            "koshi-update-5000",
+            "koshi-staged-.exe",
+            "koshi-staged-+5.exe",
+            "koshi-staged-5x.exe",
+            "koshi-staged-4294967296.exe",
+            "koshi-staged-5000.exe.old",
+            "koshi-staged-5000",
             "koshi.old",
         ]
     } else {
@@ -3145,6 +3150,34 @@ fn staged_copies_of_ended_updates_are_deleted_and_the_copy_of_a_running_process_
         running_staged_copy_file_name,
         "notes.txt".to_string(),
     ];
+    expected_entry_names.sort();
+    assert_eq!(
+        list_sorted_entry_names(program_directory.path()),
+        expected_entry_names
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_copy_that_koshi_0_5_0_staged_for_an_ended_update_is_deleted_and_the_copy_of_a_running_process_stays(
+) {
+    let program_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let program_path = program_directory.path().join("koshi.exe");
+    let running_staged_copy_file_name = format!("koshi-update-{}.exe", std::process::id());
+    for entry_name in [
+        "koshi.exe".to_string(),
+        format!("koshi-update-{FREE_PROCESS_ID}.exe"),
+        running_staged_copy_file_name.clone(),
+    ] {
+        fs::write(program_directory.path().join(entry_name), b"").expect("write a directory entry");
+    }
+
+    delete_staged_copies_of_ended_updates(&program_path);
+
+    let mut expected_entry_names = vec!["koshi.exe".to_string(), running_staged_copy_file_name];
     expected_entry_names.sort();
     assert_eq!(
         list_sorted_entry_names(program_directory.path()),

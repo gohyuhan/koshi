@@ -158,7 +158,7 @@ fn the_table_pins_every_surface_by_name_and_numbers() {
     assert_eq!(
         surface_versions,
         [
-            ("session protocol", 4, 4, Some(4)),
+            ("session protocol", 5, 5, Some(4)),
             ("control plane", 3, 3, Some(3)),
             ("supervisor link", 2, 2, Some(2)),
             ("token store format", 1, 2, Some(2)),

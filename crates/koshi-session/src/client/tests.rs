@@ -5,18 +5,9 @@
 //! highlights, floating pane views) and registry operations (attach, detach,
 //! lookup, mutation).
 
-use std::collections::HashMap;
-use std::time::SystemTime;
+use super::*;
 
-use koshi_core::command::{GridPosition, Selection, SelectionKind};
-use koshi_core::geometry::{PaneArea, Point, Size};
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_core::lock::LockMode;
-use koshi_layout::mode::LayoutMode;
-
-use super::{
-    compute_default_pane_area_size, Client, ClientOrigin, ClientRegistry, FloatingPaneView,
-};
+use koshi_core::command::{GridPosition, SelectionKind};
 
 /// A local test client with id `client_id` on an 80x24 viewport, viewing
 /// `active_tab_id` and reporting `pane_area`.
@@ -1541,13 +1532,14 @@ fn focusing_a_floating_pane_moves_exactly_that_pane_to_the_top() {
 }
 
 #[test]
-fn pinning_a_floating_pane_keeps_the_focus_order_and_unpinning_drops_its_stored_view() {
+fn pinning_a_floating_pane_keeps_the_focus_order_and_unpinning_keeps_its_cell() {
     let mut client = build_test_client(TabId::new());
     let (pinned_pane_id, focused_pane_id) = (PaneId::new(), PaneId::new());
+    let pinned_cell = Point { column: 3, row: 4 };
     assert!(client.focus_floating_pane(pinned_pane_id));
     assert!(client.focus_floating_pane(focused_pane_id));
 
-    client.set_floating_pane_pinned(pinned_pane_id, true);
+    client.pin_floating_pane(pinned_pane_id, pinned_cell);
 
     assert_eq!(
         client.list_floating_pane_focus_order(),
@@ -1557,15 +1549,24 @@ fn pinning_a_floating_pane_keeps_the_focus_order_and_unpinning_drops_its_stored_
     assert_eq!(
         client.get_floating_pane_view(pinned_pane_id),
         FloatingPaneView {
-            placement: None,
-            is_pinned: true,
+            position: FloatingPanePosition::Pinned(pinned_cell),
             is_minimized: false,
         }
     );
 
-    client.set_floating_pane_pinned(pinned_pane_id, false);
+    client.unpin_floating_pane(pinned_pane_id);
+    client.unpin_floating_pane(focused_pane_id);
 
-    assert_eq!(client.list_floating_pane_views(), &HashMap::new());
+    assert_eq!(
+        client.list_floating_pane_views(),
+        &HashMap::from([(
+            pinned_pane_id,
+            FloatingPaneView {
+                position: FloatingPanePosition::Moved(pinned_cell),
+                is_minimized: false,
+            },
+        )])
+    );
     assert_eq!(
         client.list_floating_pane_focus_order(),
         [pinned_pane_id, focused_pane_id]
@@ -1589,8 +1590,7 @@ fn minimizing_the_focused_floating_pane_clears_the_focus_and_keeps_the_order() {
     assert_eq!(
         client.get_floating_pane_view(top_pane_id),
         FloatingPaneView {
-            placement: None,
-            is_pinned: false,
+            position: FloatingPanePosition::Default,
             is_minimized: true,
         }
     );
@@ -1628,8 +1628,7 @@ fn focusing_a_minimized_floating_pane_is_refused_and_changes_nothing() {
         &HashMap::from([(
             minimized_pane_id,
             FloatingPaneView {
-                placement: None,
-                is_pinned: false,
+                position: FloatingPanePosition::Default,
                 is_minimized: true,
             },
         )])
@@ -1679,12 +1678,11 @@ fn restoring_a_floating_pane_this_client_never_focused_appends_and_focuses_it() 
 }
 
 #[test]
-fn restoring_a_floating_pane_keeps_its_placement_and_its_pin() {
+fn restoring_a_floating_pane_keeps_its_pinned_cell() {
     let mut client = build_test_client(TabId::new());
     let pane_id = PaneId::new();
-    let placement = Point { column: 3, row: 4 };
-    assert!(client.set_floating_pane_placement(pane_id, placement));
-    client.set_floating_pane_pinned(pane_id, true);
+    let pinned_cell = Point { column: 3, row: 4 };
+    client.pin_floating_pane(pane_id, pinned_cell);
     client.minimize_floating_pane(pane_id);
 
     client.restore_floating_pane(pane_id);
@@ -1692,38 +1690,36 @@ fn restoring_a_floating_pane_keeps_its_placement_and_its_pin() {
     assert_eq!(
         client.get_floating_pane_view(pane_id),
         FloatingPaneView {
-            placement: Some(placement),
-            is_pinned: true,
+            position: FloatingPanePosition::Pinned(pinned_cell),
             is_minimized: false,
         }
     );
 }
 
 #[test]
-fn a_pinned_floating_pane_refuses_a_placement_and_an_unpinned_one_accepts_it() {
+fn a_pinned_floating_pane_refuses_a_new_position_and_an_unpinned_one_accepts_it() {
     let mut client = build_test_client(TabId::new());
     let pane_id = PaneId::new();
-    let placement = Point { column: 3, row: 4 };
-    client.set_floating_pane_pinned(pane_id, true);
+    let pinned_cell = Point { column: 3, row: 4 };
+    let moved_cell = Point { column: 7, row: 1 };
+    client.pin_floating_pane(pane_id, pinned_cell);
 
-    assert!(!client.set_floating_pane_placement(pane_id, placement));
+    assert!(!client.set_floating_pane_position(pane_id, moved_cell));
     assert_eq!(
         client.get_floating_pane_view(pane_id),
         FloatingPaneView {
-            placement: None,
-            is_pinned: true,
+            position: FloatingPanePosition::Pinned(pinned_cell),
             is_minimized: false,
         }
     );
 
-    client.set_floating_pane_pinned(pane_id, false);
+    client.unpin_floating_pane(pane_id);
 
-    assert!(client.set_floating_pane_placement(pane_id, placement));
+    assert!(client.set_floating_pane_position(pane_id, moved_cell));
     assert_eq!(
         client.get_floating_pane_view(pane_id),
         FloatingPaneView {
-            placement: Some(placement),
-            is_pinned: false,
+            position: FloatingPanePosition::Moved(moved_cell),
             is_minimized: false,
         }
     );
@@ -1735,8 +1731,9 @@ fn remove_floating_pane_view_drops_the_view_the_order_entry_and_a_matching_focus
     let (lower_pane_id, top_pane_id) = (PaneId::new(), PaneId::new());
     assert!(client.focus_floating_pane(lower_pane_id));
     assert!(client.focus_floating_pane(top_pane_id));
-    client.set_floating_pane_pinned(lower_pane_id, true);
-    client.set_floating_pane_pinned(top_pane_id, true);
+    let top_pinned_cell = Point { column: 5, row: 6 };
+    client.pin_floating_pane(lower_pane_id, Point { column: 1, row: 2 });
+    client.pin_floating_pane(top_pane_id, top_pinned_cell);
 
     client.remove_floating_pane_view(lower_pane_id);
 
@@ -1747,8 +1744,7 @@ fn remove_floating_pane_view_drops_the_view_the_order_entry_and_a_matching_focus
         &HashMap::from([(
             top_pane_id,
             FloatingPaneView {
-                placement: None,
-                is_pinned: true,
+                position: FloatingPanePosition::Pinned(top_pinned_cell),
                 is_minimized: false,
             },
         )])
@@ -1770,20 +1766,28 @@ fn a_client_floating_view_survives_a_serde_round_trip() {
     let (minimized_pane_id, placed_pane_id) = (PaneId::new(), PaneId::new());
     assert!(client.focus_floating_pane(minimized_pane_id));
     assert!(client.focus_floating_pane(placed_pane_id));
-    assert!(client.set_floating_pane_placement(placed_pane_id, Point { column: 3, row: 4 }));
-    client.set_floating_pane_pinned(placed_pane_id, true);
+    client.pin_floating_pane(placed_pane_id, Point { column: 3, row: 4 });
     client.minimize_floating_pane(minimized_pane_id);
 
     let client_json = serde_json::to_value(&client).expect("the client encodes");
     let placed_pane_key = serde_json::to_value(placed_pane_id).expect("the pane id encodes");
+    let minimized_pane_key = serde_json::to_value(minimized_pane_id).expect("the pane id encodes");
     assert_eq!(
         client_json["floating_pane_view_by_pane_id"][placed_pane_key
             .as_str()
             .expect("a pane id encodes as a string")],
         serde_json::json!({
-            "placement": {"column": 3, "row": 4},
-            "is_pinned": true,
+            "position": {"Pinned": {"column": 3, "row": 4}},
             "is_minimized": false
+        })
+    );
+    assert_eq!(
+        client_json["floating_pane_view_by_pane_id"][minimized_pane_key
+            .as_str()
+            .expect("a pane id encodes as a string")],
+        serde_json::json!({
+            "position": "Default",
+            "is_minimized": true
         })
     );
     assert_eq!(
@@ -1838,8 +1842,8 @@ fn one_clients_floating_view_changes_leave_another_clients_bytes_unchanged() {
     let moving_client = client_registry
         .get_client_mut_by_id(moving_client_id)
         .expect("the client is attached");
-    assert!(moving_client.set_floating_pane_placement(pane_id, Point { column: 1, row: 2 }));
-    moving_client.set_floating_pane_pinned(pane_id, true);
+    assert!(moving_client.set_floating_pane_position(pane_id, Point { column: 1, row: 2 }));
+    moving_client.pin_floating_pane(pane_id, Point { column: 1, row: 2 });
     moving_client.minimize_floating_pane(pane_id);
 
     assert_eq!(
@@ -1857,8 +1861,7 @@ fn one_clients_floating_view_changes_leave_another_clients_bytes_unchanged() {
     assert_eq!(
         moving_client.get_floating_pane_view(pane_id),
         FloatingPaneView {
-            placement: Some(Point { column: 1, row: 2 }),
-            is_pinned: true,
+            position: FloatingPanePosition::Pinned(Point { column: 1, row: 2 }),
             is_minimized: true,
         }
     );
@@ -1895,4 +1898,139 @@ fn floating_view_fields_are_required_and_a_missing_floating_focus_decodes_as_non
         .expect("a client without a floating focus decodes");
 
     assert_eq!(decoded_client.get_focused_floating_pane_id(), None);
+}
+
+#[test]
+fn place_floating_pane_centers_a_default_pane_and_steps_it_down_the_cascade() {
+    let client_viewport = Size {
+        column_count: 80,
+        row_count: 22,
+    };
+    let pane_size = Size {
+        column_count: 48,
+        row_count: 13,
+    };
+
+    // 48x13 on 80x22 leaves 32x9 free: centered at (16, 4), with room for
+    // min(16 / 2, 5) = 5 cascade steps before the order wraps.
+    assert_eq!(
+        [0, 1, 5, 6].map(|cascade_index| {
+            place_floating_pane(
+                FloatingPanePosition::Default,
+                pane_size,
+                cascade_index,
+                client_viewport,
+            )
+            .origin
+        }),
+        [
+            Point { column: 16, row: 4 },
+            Point { column: 18, row: 5 },
+            Point { column: 26, row: 9 },
+            Point { column: 16, row: 4 },
+        ]
+    );
+    assert_eq!(
+        place_floating_pane(
+            FloatingPanePosition::Default,
+            Size {
+                column_count: 40,
+                row_count: 12,
+            },
+            0,
+            client_viewport,
+        ),
+        Rect {
+            origin: Point { column: 20, row: 5 },
+            size: Size {
+                column_count: 40,
+                row_count: 12,
+            },
+        }
+    );
+}
+
+#[test]
+fn place_floating_pane_keeps_a_stored_cell_and_moves_it_back_inside_the_viewport() {
+    let client_viewport = Size {
+        column_count: 80,
+        row_count: 22,
+    };
+    let pane_size = Size {
+        column_count: 20,
+        row_count: 10,
+    };
+
+    assert_eq!(
+        place_floating_pane(
+            FloatingPanePosition::Moved(Point { column: 3, row: 4 }),
+            pane_size,
+            7,
+            client_viewport,
+        ),
+        Rect {
+            origin: Point { column: 3, row: 4 },
+            size: pane_size,
+        }
+    );
+    assert_eq!(
+        place_floating_pane(
+            FloatingPanePosition::Moved(Point { column: 70, row: 2 }),
+            pane_size,
+            0,
+            client_viewport,
+        ),
+        Rect {
+            origin: Point { column: 60, row: 2 },
+            size: pane_size,
+        }
+    );
+    assert_eq!(
+        place_floating_pane(
+            FloatingPanePosition::Pinned(Point { column: 5, row: 30 }),
+            pane_size,
+            0,
+            client_viewport,
+        ),
+        Rect {
+            origin: Point { column: 5, row: 12 },
+            size: pane_size,
+        }
+    );
+}
+
+#[test]
+fn place_floating_pane_starts_a_pane_larger_than_the_viewport_at_zero_on_that_axis() {
+    let client_viewport = Size {
+        column_count: 80,
+        row_count: 22,
+    };
+    let wide_pane_size = Size {
+        column_count: 100,
+        row_count: 10,
+    };
+
+    // No free column leaves no cascade step: every index lands at (0, 6).
+    assert_eq!(
+        [0, 2].map(|cascade_index| {
+            place_floating_pane(
+                FloatingPanePosition::Default,
+                wide_pane_size,
+                cascade_index,
+                client_viewport,
+            )
+            .origin
+        }),
+        [Point { column: 0, row: 6 }, Point { column: 0, row: 6 }]
+    );
+    assert_eq!(
+        place_floating_pane(
+            FloatingPanePosition::Moved(Point { column: 7, row: 3 }),
+            wide_pane_size,
+            0,
+            client_viewport,
+        )
+        .origin,
+        Point { column: 0, row: 3 }
+    );
 }

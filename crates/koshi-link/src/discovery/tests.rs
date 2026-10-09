@@ -28,7 +28,7 @@ fn build_complete_discovery(session_overviews: Vec<SessionOverview>) -> Discover
     }
 }
 
-/// A partial discovery missing `unasked` sessions: running and listening, but unable to
+/// A partial discovery missing `unasked_session_count` sessions: running and listening, but unable to
 /// say what they hold.
 fn build_partial_discovery(
     session_overviews: Vec<SessionOverview>,
@@ -182,21 +182,21 @@ fn build_session_overview(
 
 #[test]
 fn session_rows_are_one_row_per_session() {
-    let overviews = vec![
+    let session_overviews = vec![
         build_session_overview("quiet-lake", &[]),
         build_session_overview("amber-fox", &[]),
     ];
-    let session_rows = build_session_rows(&overviews);
+    let session_rows = build_session_rows(&session_overviews);
     assert_eq!(
         session_rows,
         vec![
             SessionRow {
-                session_id: overviews[0].session.session_id,
+                session_id: session_overviews[0].session.session_id,
                 session_name: "quiet-lake".to_string(),
                 server_name_or_address: None,
             },
             SessionRow {
-                session_id: overviews[1].session.session_id,
+                session_id: session_overviews[1].session.session_id,
                 session_name: "amber-fox".to_string(),
                 server_name_or_address: None,
             },
@@ -206,30 +206,30 @@ fn session_rows_are_one_row_per_session() {
 
 #[test]
 fn tab_rows_span_every_session_in_bar_order() {
-    let overviews = vec![
+    let session_overviews = vec![
         build_session_overview("quiet-lake", &[("editor", 1), ("logs", 1)]),
         build_session_overview("amber-fox", &[("shell", 1)]),
     ];
-    let tab_rows = build_tab_rows(&overviews);
+    let tab_rows = build_tab_rows(&session_overviews);
     assert_eq!(
         tab_rows,
         vec![
             TabRow {
-                tab_id: overviews[0].tabs[0].tab_id,
+                tab_id: session_overviews[0].tabs[0].tab_id,
                 tab_name: "editor".to_string(),
-                session_id: overviews[0].session.session_id,
+                session_id: session_overviews[0].session.session_id,
                 session_name: "quiet-lake".to_string(),
             },
             TabRow {
-                tab_id: overviews[0].tabs[1].tab_id,
+                tab_id: session_overviews[0].tabs[1].tab_id,
                 tab_name: "logs".to_string(),
-                session_id: overviews[0].session.session_id,
+                session_id: session_overviews[0].session.session_id,
                 session_name: "quiet-lake".to_string(),
             },
             TabRow {
-                tab_id: overviews[1].tabs[0].tab_id,
+                tab_id: session_overviews[1].tabs[0].tab_id,
                 tab_name: "shell".to_string(),
-                session_id: overviews[1].session.session_id,
+                session_id: session_overviews[1].session.session_id,
                 session_name: "amber-fox".to_string(),
             },
         ]
@@ -238,36 +238,36 @@ fn tab_rows_span_every_session_in_bar_order() {
 
 #[test]
 fn pane_rows_carry_the_tab_and_session_they_belong_to() {
-    let overviews = vec![
+    let session_overviews = vec![
         build_session_overview("quiet-lake", &[("editor", 2)]),
         build_session_overview("amber-fox", &[("shell", 1)]),
     ];
-    let pane_rows = build_pane_rows(&overviews);
+    let pane_rows = build_pane_rows(&session_overviews);
     assert_eq!(
         pane_rows,
         vec![
             PaneRow {
-                pane_id: overviews[0].panes[0].pane_id,
+                pane_id: session_overviews[0].panes[0].pane_id,
                 pane_name: Some("editor-0".to_string()),
-                tab_id: overviews[0].tabs[0].tab_id,
+                tab_id: session_overviews[0].tabs[0].tab_id,
                 tab_name: "editor".to_string(),
-                session_id: overviews[0].session.session_id,
+                session_id: session_overviews[0].session.session_id,
                 session_name: "quiet-lake".to_string(),
             },
             PaneRow {
-                pane_id: overviews[0].panes[1].pane_id,
+                pane_id: session_overviews[0].panes[1].pane_id,
                 pane_name: Some("editor-1".to_string()),
-                tab_id: overviews[0].tabs[0].tab_id,
+                tab_id: session_overviews[0].tabs[0].tab_id,
                 tab_name: "editor".to_string(),
-                session_id: overviews[0].session.session_id,
+                session_id: session_overviews[0].session.session_id,
                 session_name: "quiet-lake".to_string(),
             },
             PaneRow {
-                pane_id: overviews[1].panes[0].pane_id,
+                pane_id: session_overviews[1].panes[0].pane_id,
                 pane_name: Some("shell-0".to_string()),
-                tab_id: overviews[1].tabs[0].tab_id,
+                tab_id: session_overviews[1].tabs[0].tab_id,
                 tab_name: "shell".to_string(),
-                session_id: overviews[1].session.session_id,
+                session_id: session_overviews[1].session.session_id,
                 session_name: "amber-fox".to_string(),
             },
         ]
@@ -276,19 +276,19 @@ fn pane_rows_carry_the_tab_and_session_they_belong_to() {
 
 #[test]
 fn a_pane_whose_tab_is_not_listed_produces_no_row() {
-    let mut overviews = vec![build_session_overview("quiet-lake", &[("editor", 1)])];
-    overviews[0].tabs.clear();
-    assert_eq!(build_pane_rows(&overviews), Vec::new());
+    let mut session_overviews = vec![build_session_overview("quiet-lake", &[("editor", 1)])];
+    session_overviews[0].tabs.clear();
+    assert_eq!(build_pane_rows(&session_overviews), Vec::new());
 }
 
 #[test]
 fn client_rows_name_the_session_they_are_attached_to() {
-    let overviews = vec![build_session_overview("quiet-lake", &[("editor", 1)])];
+    let session_overviews = vec![build_session_overview("quiet-lake", &[("editor", 1)])];
     assert_eq!(
-        build_client_rows(&overviews),
+        build_client_rows(&session_overviews),
         vec![ClientRow {
-            client_id: overviews[0].clients[0].client_id,
-            session_id: overviews[0].session.session_id,
+            client_id: session_overviews[0].clients[0].client_id,
+            session_id: session_overviews[0].session.session_id,
             session_name: "quiet-lake".to_string(),
         }]
     );
@@ -296,32 +296,34 @@ fn client_rows_name_the_session_they_are_attached_to() {
 
 #[test]
 fn client_rows_are_one_row_per_attached_client_across_sessions() {
-    let mut overviews = vec![
+    let mut session_overviews = vec![
         build_session_overview("quiet-lake", &[("editor", 1)]),
         build_session_overview("amber-fox", &[("shell", 1)]),
     ];
-    let second_client = ClientDiscovery {
+    let second_client_discovery = ClientDiscovery {
         client_id: ClientId::new(),
-        ..overviews[0].clients[0].clone()
+        ..session_overviews[0].clients[0].clone()
     };
-    overviews[0].clients.push(second_client.clone());
+    session_overviews[0]
+        .clients
+        .push(second_client_discovery.clone());
 
     assert_eq!(
-        build_client_rows(&overviews),
+        build_client_rows(&session_overviews),
         vec![
             ClientRow {
-                client_id: overviews[0].clients[0].client_id,
-                session_id: overviews[0].session.session_id,
+                client_id: session_overviews[0].clients[0].client_id,
+                session_id: session_overviews[0].session.session_id,
                 session_name: "quiet-lake".to_string(),
             },
             ClientRow {
-                client_id: second_client.client_id,
-                session_id: overviews[0].session.session_id,
+                client_id: second_client_discovery.client_id,
+                session_id: session_overviews[0].session.session_id,
                 session_name: "quiet-lake".to_string(),
             },
             ClientRow {
-                client_id: overviews[1].clients[0].client_id,
-                session_id: overviews[1].session.session_id,
+                client_id: session_overviews[1].clients[0].client_id,
+                session_id: session_overviews[1].session.session_id,
                 session_name: "amber-fox".to_string(),
             },
         ]
@@ -330,9 +332,9 @@ fn client_rows_are_one_row_per_attached_client_across_sessions() {
 
 #[test]
 fn a_session_with_no_client_attached_contributes_no_client_row() {
-    let mut overviews = vec![build_session_overview("quiet-lake", &[("editor", 1)])];
-    overviews[0].clients.clear();
-    assert_eq!(build_client_rows(&overviews), Vec::new());
+    let mut session_overviews = vec![build_session_overview("quiet-lake", &[("editor", 1)])];
+    session_overviews[0].clients.clear();
+    assert_eq!(build_client_rows(&session_overviews), Vec::new());
 }
 
 #[test]
@@ -346,31 +348,31 @@ fn every_listing_over_no_sessions_is_empty() {
 
 #[test]
 fn a_tab_holding_no_panes_is_listed_and_contributes_no_pane_row() {
-    let overviews = vec![build_session_overview("quiet-lake", &[("empty", 0)])];
+    let session_overviews = vec![build_session_overview("quiet-lake", &[("empty", 0)])];
     assert_eq!(
-        build_tab_rows(&overviews),
+        build_tab_rows(&session_overviews),
         vec![TabRow {
-            tab_id: overviews[0].tabs[0].tab_id,
+            tab_id: session_overviews[0].tabs[0].tab_id,
             tab_name: "empty".to_string(),
-            session_id: overviews[0].session.session_id,
+            session_id: session_overviews[0].session.session_id,
             session_name: "quiet-lake".to_string(),
         }]
     );
-    assert_eq!(build_pane_rows(&overviews), Vec::new());
+    assert_eq!(build_pane_rows(&session_overviews), Vec::new());
 }
 
 #[test]
 fn a_pane_whose_child_set_no_title_yields_a_row_with_no_name() {
-    let mut overviews = vec![build_session_overview("quiet-lake", &[("editor", 1)])];
-    overviews[0].panes[0].pane_title = None;
+    let mut session_overviews = vec![build_session_overview("quiet-lake", &[("editor", 1)])];
+    session_overviews[0].panes[0].pane_title = None;
     assert_eq!(
-        build_pane_rows(&overviews),
+        build_pane_rows(&session_overviews),
         vec![PaneRow {
-            pane_id: overviews[0].panes[0].pane_id,
+            pane_id: session_overviews[0].panes[0].pane_id,
             pane_name: None,
-            tab_id: overviews[0].tabs[0].tab_id,
+            tab_id: session_overviews[0].tabs[0].tab_id,
             tab_name: "editor".to_string(),
-            session_id: overviews[0].session.session_id,
+            session_id: session_overviews[0].session.session_id,
             session_name: "quiet-lake".to_string(),
         }]
     );
@@ -378,16 +380,20 @@ fn a_pane_whose_child_set_no_title_yields_a_row_with_no_name() {
 
 #[test]
 fn sorting_a_census_orders_by_name_then_id() {
-    let zulu = build_session_overview("zulu", &[]);
-    let first_alpha = build_session_overview("alpha", &[]);
-    let second_alpha = build_session_overview("alpha", &[]);
-    let mut alpha_ids = [
-        first_alpha.session.session_id,
-        second_alpha.session.session_id,
+    let zulu_session_overview = build_session_overview("zulu_session_overview", &[]);
+    let first_alpha_session_overview = build_session_overview("alpha", &[]);
+    let second_alpha_session_overview = build_session_overview("alpha", &[]);
+    let mut alpha_session_ids = [
+        first_alpha_session_overview.session.session_id,
+        second_alpha_session_overview.session.session_id,
     ];
-    alpha_ids.sort();
+    alpha_session_ids.sort();
 
-    let mut discovery = build_complete_discovery(vec![zulu.clone(), first_alpha, second_alpha]);
+    let mut discovery = build_complete_discovery(vec![
+        zulu_session_overview.clone(),
+        first_alpha_session_overview,
+        second_alpha_session_overview,
+    ]);
     discovery.sort_sessions();
 
     assert_eq!(
@@ -396,7 +402,11 @@ fn sorting_a_census_orders_by_name_then_id() {
             .iter()
             .map(|session_overview| session_overview.session.session_id)
             .collect::<Vec<_>>(),
-        vec![alpha_ids[0], alpha_ids[1], zulu.session.session_id]
+        vec![
+            alpha_session_ids[0],
+            alpha_session_ids[1],
+            zulu_session_overview.session.session_id
+        ]
     );
 }
 
@@ -436,7 +446,7 @@ fn inspecting_an_unknown_pane_reports_the_target_as_not_found() {
                 Some(format!("no running session has pane {missing_pane_id}"))
             );
         }
-        other => panic!("unexpected error: {other}"),
+        unexpected_error => panic!("unexpected error: {unexpected_error}"),
     }
 }
 
@@ -451,7 +461,7 @@ fn inspecting_an_unknown_tab_or_client_reports_the_target_as_not_found() {
             assert_eq!(reason, RejectReason::TargetNotFound);
             assert_eq!(help, Some(format!("no running session has tab {tab_id}")));
         }
-        other => panic!("unexpected error: {other}"),
+        unexpected_error => panic!("unexpected error: {unexpected_error}"),
     }
 
     let client_id = ClientId::new();
@@ -463,7 +473,7 @@ fn inspecting_an_unknown_tab_or_client_reports_the_target_as_not_found() {
                 Some(format!("no running session has client {client_id}"))
             );
         }
-        other => panic!("unexpected error: {other}"),
+        unexpected_error => panic!("unexpected error: {unexpected_error}"),
     }
 }
 
@@ -483,7 +493,7 @@ fn two_sessions_unasked_are_counted_in_the_plural() {
                  (2 running sessions did not answer)"
             )
         ),
-        other => panic!("unexpected error: {other}"),
+        unexpected_error => panic!("unexpected error: {unexpected_error}"),
     }
 }
 
@@ -505,7 +515,7 @@ fn inspecting_with_a_session_unasked_reports_the_gap_not_a_miss() {
                  (1 running session did not answer)"
             )
         ),
-        other => panic!("unexpected error: {other}"),
+        unexpected_error => panic!("unexpected error: {unexpected_error}"),
     }
 }
 
@@ -516,7 +526,7 @@ fn a_session_no_answering_session_matched_is_reported_as_not_running() {
 
     match discovery.build_missing_session_error("amber-fox") {
         CliError::SessionNotFound { session_name } => assert_eq!(session_name, "amber-fox"),
-        other => panic!("unexpected error: {other}"),
+        unexpected_error => panic!("unexpected error: {unexpected_error}"),
     }
 }
 
@@ -534,7 +544,7 @@ fn a_session_missed_while_one_went_unasked_reports_the_gap_not_a_miss() {
             "`amber-fox` is not among the sessions that answered \
              (1 running session did not answer)"
         ),
-        other => panic!("unexpected error: {other}"),
+        unexpected_error => panic!("unexpected error: {unexpected_error}"),
     }
 }
 
@@ -573,7 +583,7 @@ fn a_listing_missing_a_session_reports_the_gap() {
             detail,
             "this listing is incomplete (2 running sessions did not answer)"
         ),
-        other => panic!("unexpected error: {other}"),
+        unexpected_error => panic!("unexpected error: {unexpected_error}"),
     }
 }
 
@@ -586,7 +596,7 @@ fn an_unanswered_failure_over_a_complete_census_counts_zero_sessions() {
             detail,
             "nothing was asked (0 running sessions did not answer)"
         ),
-        other => panic!("unexpected error: {other}"),
+        unexpected_error => panic!("unexpected error: {unexpected_error}"),
     }
 }
 
@@ -937,7 +947,7 @@ fn a_live_session_is_listed_while_a_stale_endpoint_beside_it_is_swept() {
     let overview_server_thread =
         spawn_overview_server(runtime_directory.path(), quiet_session_overview);
     let gone_session_id = SessionId::new();
-    let stale_path = write_endpoint_file(
+    let stale_endpoint_path = write_endpoint_file(
         runtime_directory.path(),
         gone_session_id,
         koshi_ipc::endpoint::compute_socket_address(runtime_directory.path(), gone_session_id),
@@ -961,7 +971,7 @@ fn a_live_session_is_listed_while_a_stale_endpoint_beside_it_is_swept() {
         vec![quiet_session_id]
     );
     assert!(
-        !stale_path.exists(),
+        !stale_endpoint_path.exists(),
         "the endpoint file of the session that is gone is removed"
     );
 }
@@ -975,14 +985,16 @@ fn two_running_sessions_merge_into_one_listing() {
     let amber_session_overview = build_session_overview("amber-fox", &[("shell", 1)]);
     let quiet_session_id = quiet_session_overview.session.session_id;
     let amber_session_id = amber_session_overview.session.session_id;
-    let first_server = spawn_overview_server(runtime_directory.path(), quiet_session_overview);
-    let second_server = spawn_overview_server(runtime_directory.path(), amber_session_overview);
+    let first_overview_server_thread =
+        spawn_overview_server(runtime_directory.path(), quiet_session_overview);
+    let second_overview_server_thread =
+        spawn_overview_server(runtime_directory.path(), amber_session_overview);
 
     let discovery = fetch_all_session_overviews(runtime_directory.path(), None);
-    first_server
+    first_overview_server_thread
         .join()
         .expect("the first stand-in session finishes");
-    second_server
+    second_overview_server_thread
         .join()
         .expect("the second stand-in session finishes");
     assert!(discovery.is_complete(), "both sessions answered");
@@ -1008,7 +1020,7 @@ fn two_running_sessions_merge_into_one_listing() {
     assert_eq!(
         pane_rows
             .iter()
-            .map(|pane| (pane.session_id, pane.pane_name.clone()))
+            .map(|pane_row| (pane_row.session_id, pane_row.pane_name.clone()))
             .collect::<Vec<_>>(),
         vec![
             (amber_session_id, Some("shell-0".to_string())),
@@ -1078,7 +1090,7 @@ fn fetching_one_session_that_is_gone_reports_it_as_not_running() {
         CliError::SessionNotFound { session_name } => {
             assert_eq!(session_name, session_id.to_string());
         }
-        other => panic!("unexpected error: {other}"),
+        unexpected_error => panic!("unexpected error: {unexpected_error}"),
     }
 }
 
@@ -1333,7 +1345,7 @@ fn the_census_counts_a_shared_directory_whose_read_fails() {
             detail,
             "this listing is incomplete (1 path could not be read)"
         ),
-        other => panic!("expected an incomplete listing, got {other:?}"),
+        unexpected_listing => panic!("expected an incomplete listing, got {unexpected_listing:?}"),
     }
 }
 
@@ -1386,49 +1398,49 @@ fn a_runtime_directory_that_cannot_be_read_is_one_unread_path_in_the_census() {
 
 #[test]
 fn an_unanswered_failure_names_the_paths_that_could_not_be_read() {
-    let unread_path_only = Discovered {
+    let discovery_with_unread_paths_only = Discovered {
         unread_path_count: 2,
         ..Discovered::default()
     };
-    let both_gaps = Discovered {
+    let discovery_with_both_gaps = Discovered {
         unasked_session_count: 1,
         unread_path_count: 1,
         ..Discovered::default()
     };
 
-    match unread_path_only.build_unanswered_error("this listing is incomplete") {
+    match discovery_with_unread_paths_only.build_unanswered_error("this listing is incomplete") {
         CliError::IpcUnavailable { detail } => assert_eq!(
             detail,
             "this listing is incomplete (2 paths could not be read)"
         ),
-        other => panic!("unexpected error: {other}"),
+        unexpected_error => panic!("unexpected error: {unexpected_error}"),
     }
-    match both_gaps.build_unanswered_error("this listing is incomplete") {
+    match discovery_with_both_gaps.build_unanswered_error("this listing is incomplete") {
         CliError::IpcUnavailable { detail } => assert_eq!(
             detail,
             "this listing is incomplete (1 running session did not answer; 1 path could not be \
              read)"
         ),
-        other => panic!("unexpected error: {other}"),
+        unexpected_error => panic!("unexpected error: {unexpected_error}"),
     }
-    assert!(!unread_path_only.is_complete());
+    assert!(!discovery_with_unread_paths_only.is_complete());
 }
 
 // --- Hiding pane command arguments ------------------------------------------
 
 #[test]
 fn redacting_pane_commands_keeps_each_program_and_hides_its_arguments() {
-    let mut overviews = vec![build_session_overview("quiet-lake", &[("editor", 1)])];
-    overviews[0].panes[0].command_argv = Some(vec![
+    let mut session_overviews = vec![build_session_overview("quiet-lake", &[("editor", 1)])];
+    session_overviews[0].panes[0].command_argv = Some(vec![
         "mysql".to_string(),
         "-pHUNTER2".to_string(),
         "--host=db.internal".to_string(),
     ]);
 
-    redact_pane_commands(&mut overviews);
+    redact_pane_commands(&mut session_overviews);
 
     assert_eq!(
-        overviews[0].panes[0].command_argv,
+        session_overviews[0].panes[0].command_argv,
         Some(vec![
             "mysql".to_string(),
             "***".to_string(),
@@ -1439,54 +1451,57 @@ fn redacting_pane_commands_keeps_each_program_and_hides_its_arguments() {
 
 #[test]
 fn redacting_pane_commands_leaves_a_pane_with_no_command_absent() {
-    let mut overviews = vec![build_session_overview("quiet-lake", &[("editor", 1)])];
+    let mut session_overviews = vec![build_session_overview("quiet-lake", &[("editor", 1)])];
     assert_eq!(
-        overviews[0].panes[0].command_argv, None,
+        session_overviews[0].panes[0].command_argv, None,
         "the fixture has none"
     );
 
-    redact_pane_commands(&mut overviews);
+    redact_pane_commands(&mut session_overviews);
 
-    assert_eq!(overviews[0].panes[0].command_argv, None);
+    assert_eq!(session_overviews[0].panes[0].command_argv, None);
 }
 
 #[test]
 fn redacting_pane_commands_reaches_every_pane_of_every_session() {
-    let mut overviews = vec![
+    let mut session_overviews = vec![
         build_session_overview("quiet-lake", &[("editor", 2)]),
         build_session_overview("amber-fox", &[("shell", 1)]),
     ];
-    overviews[0].panes[0].command_argv = Some(vec!["vim".to_string(), "secret.txt".to_string()]);
-    overviews[0].panes[1].command_argv =
+    session_overviews[0].panes[0].command_argv =
+        Some(vec!["vim".to_string(), "secret.txt".to_string()]);
+    session_overviews[0].panes[1].command_argv =
         Some(vec!["psql".to_string(), "postgres://u:p@db".to_string()]);
-    overviews[1].panes[0].command_argv = Some(vec!["ssh".to_string(), "root@10.0.0.1".to_string()]);
+    session_overviews[1].panes[0].command_argv =
+        Some(vec!["ssh".to_string(), "root@10.0.0.1".to_string()]);
 
-    redact_pane_commands(&mut overviews);
+    redact_pane_commands(&mut session_overviews);
 
     assert_eq!(
-        overviews[0].panes[0].command_argv,
+        session_overviews[0].panes[0].command_argv,
         Some(vec!["vim".to_string(), "***".to_string()]),
     );
     assert_eq!(
-        overviews[0].panes[1].command_argv,
+        session_overviews[0].panes[1].command_argv,
         Some(vec!["psql".to_string(), "***".to_string()]),
     );
     assert_eq!(
-        overviews[1].panes[0].command_argv,
+        session_overviews[1].panes[0].command_argv,
         Some(vec!["ssh".to_string(), "***".to_string()]),
     );
 }
 
 #[test]
 fn redacting_pane_commands_changes_nothing_but_the_command() {
-    let mut overviews = vec![build_session_overview("quiet-lake", &[("editor", 1)])];
-    overviews[0].panes[0].working_directory = Some(PathBuf::from("/home/user"));
-    overviews[0].panes[0].command_argv = Some(vec!["vim".to_string(), "secret.txt".to_string()]);
-    let original_overview = overviews[0].clone();
+    let mut session_overviews = vec![build_session_overview("quiet-lake", &[("editor", 1)])];
+    session_overviews[0].panes[0].working_directory = Some(PathBuf::from("/home/user"));
+    session_overviews[0].panes[0].command_argv =
+        Some(vec!["vim".to_string(), "secret.txt".to_string()]);
+    let original_overview = session_overviews[0].clone();
 
-    redact_pane_commands(&mut overviews);
+    redact_pane_commands(&mut session_overviews);
 
-    let redacted_overview = &overviews[0];
+    let redacted_overview = &session_overviews[0];
     assert_eq!(redacted_overview.session, original_overview.session);
     assert_eq!(redacted_overview.tabs, original_overview.tabs);
     assert_eq!(redacted_overview.clients, original_overview.clients);
@@ -1522,26 +1537,26 @@ fn redacting_pane_commands_changes_nothing_but_the_command() {
 
 #[test]
 fn redacting_a_command_with_no_arguments_leaves_it_as_it_is() {
-    let mut overviews = vec![build_session_overview("quiet-lake", &[("editor", 2)])];
-    overviews[0].panes[0].command_argv = Some(vec!["htop".to_string()]);
-    overviews[0].panes[1].command_argv = Some(Vec::new());
+    let mut session_overviews = vec![build_session_overview("quiet-lake", &[("editor", 2)])];
+    session_overviews[0].panes[0].command_argv = Some(vec!["htop".to_string()]);
+    session_overviews[0].panes[1].command_argv = Some(Vec::new());
 
-    redact_pane_commands(&mut overviews);
+    redact_pane_commands(&mut session_overviews);
 
     assert_eq!(
-        overviews[0].panes[0].command_argv,
+        session_overviews[0].panes[0].command_argv,
         Some(vec!["htop".to_string()])
     );
-    assert_eq!(overviews[0].panes[1].command_argv, Some(Vec::new()));
+    assert_eq!(session_overviews[0].panes[1].command_argv, Some(Vec::new()));
 }
 
 #[test]
 fn redacting_pane_commands_across_no_sessions_is_a_noop() {
-    let mut overviews: Vec<SessionOverview> = Vec::new();
+    let mut session_overviews: Vec<SessionOverview> = Vec::new();
 
-    redact_pane_commands(&mut overviews);
+    redact_pane_commands(&mut session_overviews);
 
-    assert!(overviews.is_empty());
+    assert!(session_overviews.is_empty());
 }
 
 #[test]
@@ -1558,20 +1573,20 @@ fn display_rows_filter_names_while_the_overview_keeps_them_raw() {
     );
     assert_eq!(unfiltered_session_overview.tabs[0].tab_name, "ta\u{202e}b");
 
-    let sessions = build_session_rows(std::slice::from_ref(&unfiltered_session_overview));
-    assert_eq!(sessions[0].session_name, "websrv");
+    let session_rows = build_session_rows(std::slice::from_ref(&unfiltered_session_overview));
+    assert_eq!(session_rows[0].session_name, "websrv");
 
-    let tabs = build_tab_rows(std::slice::from_ref(&unfiltered_session_overview));
-    assert_eq!(tabs[0].tab_name, "tab");
-    assert_eq!(tabs[0].session_name, "websrv");
+    let tab_rows = build_tab_rows(std::slice::from_ref(&unfiltered_session_overview));
+    assert_eq!(tab_rows[0].tab_name, "tab");
+    assert_eq!(tab_rows[0].session_name, "websrv");
 
     let pane_rows = build_pane_rows(std::slice::from_ref(&unfiltered_session_overview));
     assert_eq!(pane_rows[0].pane_name.as_deref(), Some("title"));
     assert_eq!(pane_rows[0].tab_name, "tab");
     assert_eq!(pane_rows[0].session_name, "websrv");
 
-    let clients = build_client_rows(std::slice::from_ref(&unfiltered_session_overview));
-    assert_eq!(clients[0].session_name, "websrv");
+    let client_rows = build_client_rows(std::slice::from_ref(&unfiltered_session_overview));
+    assert_eq!(client_rows[0].session_name, "websrv");
 }
 
 #[test]
@@ -1650,7 +1665,7 @@ fn filter_reported_text_filters_every_string_the_answering_session_chose() {
     let pane_ids: Vec<PaneId> = answered_session_overview
         .panes
         .iter()
-        .map(|pane| pane.pane_id)
+        .map(|pane_discovery| pane_discovery.pane_id)
         .collect();
 
     filter_session_overview_text(&mut answered_session_overview);
@@ -1673,7 +1688,7 @@ fn filter_reported_text_filters_every_string_the_answering_session_chose() {
         answered_session_overview
             .panes
             .iter()
-            .map(|pane| pane.pane_id)
+            .map(|pane_discovery| pane_discovery.pane_id)
             .collect::<Vec<_>>(),
         pane_ids,
         "ids are carried, never altered"

@@ -1001,9 +1001,11 @@ impl<B: Backend> Screen<B> {
 
     /// Record the tabs another viewer's accepted pane placement changed. The
     /// next session frame whose active tab is one of `tab_ids` slides from the
-    /// tab this screen drew.
-    fn note_committed_placement(&mut self, tab_ids: [TabId; 2]) {
-        self.committed_placement_tab_ids.extend(tab_ids);
+    /// tab this screen drew. A `None` names the floating side of a placement
+    /// and records no tab.
+    fn note_committed_placement(&mut self, tab_ids: [Option<TabId>; 2]) {
+        self.committed_placement_tab_ids
+            .extend(tab_ids.into_iter().flatten());
     }
 
     /// Drop the placement preview this screen holds when `client` holds none,
@@ -3157,10 +3159,10 @@ fn lookup_session_address(
         RouterResult::Error(refusal) => Err(CliError::IpcUnavailable {
             detail: refusal.message,
         }),
-        other => Err(CliError::IpcUnavailable {
+        unexpected_result => Err(CliError::IpcUnavailable {
             detail: format!(
                 "the router answered an attach lookup with {}",
-                other.get_wire_name()
+                unexpected_result.get_wire_name()
             ),
         }),
     }

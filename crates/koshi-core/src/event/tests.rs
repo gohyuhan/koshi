@@ -25,7 +25,7 @@ where
 fn event_lifecycle_variants_round_trip_through_json() {
     assert_json_roundtrip(&Event::PaneCreated(PaneCreated {
         pane_id: PaneId::new(),
-        tab_id: TabId::new(),
+        tab_id: Some(TabId::new()),
     }));
     assert_json_roundtrip(&Event::PaneProcessExited(PaneProcessExited {
         pane_id: PaneId::new(),
@@ -34,7 +34,7 @@ fn event_lifecycle_variants_round_trip_through_json() {
     }));
     assert_json_roundtrip(&Event::PaneRemoved(PaneRemoved {
         pane_id: PaneId::new(),
-        tab_id: TabId::new(),
+        tab_id: Some(TabId::new()),
     }));
     assert_json_roundtrip(&Event::PtyResized(PtyResized {
         pane_id: PaneId::new(),
@@ -97,29 +97,67 @@ fn terminal_too_small_causes_round_trip_through_json() {
 }
 
 #[test]
-fn terminal_too_small_event_uses_defaults_for_missing_fields() {
-    let client_id = ClientId::new();
+fn an_event_missing_a_tab_id_field_is_refused() {
+    let wire_identifier = "00000000-0000-0000-0000-000000000001";
+    let incomplete_events = [
+        (
+            serde_json::json!({ "PaneCreated": { "pane_id": wire_identifier } }),
+            "tab_id",
+        ),
+        (
+            serde_json::json!({ "PaneRemoved": { "pane_id": wire_identifier } }),
+            "tab_id",
+        ),
+        (
+            serde_json::json!({ "PaneFocused": {
+                "client_id": wire_identifier,
+                "pane_id": wire_identifier,
+                "previous_pane_id": null
+            } }),
+            "tab_id",
+        ),
+        (
+            serde_json::json!({ "PanePlacementCommitted": {
+                "command_id": wire_identifier,
+                "source_pane_id": wire_identifier,
+                "destination_tab_id": null,
+                "placement_target": { "Swap": { "target_pane_id": wire_identifier } }
+            } }),
+            "source_tab_id",
+        ),
+        (
+            serde_json::json!({ "PanePlacementCommitted": {
+                "command_id": wire_identifier,
+                "source_pane_id": wire_identifier,
+                "source_tab_id": null,
+                "placement_target": { "Swap": { "target_pane_id": wire_identifier } }
+            } }),
+            "destination_tab_id",
+        ),
+    ];
+
+    for (incomplete_event_json, missing_field_name) in incomplete_events {
+        assert_eq!(
+            serde_json::from_value::<Event>(incomplete_event_json)
+                .expect_err("an event without the field is refused")
+                .to_string(),
+            format!("missing field `{missing_field_name}`")
+        );
+    }
+}
+
+#[test]
+fn terminal_too_small_event_without_a_cause_fails_to_decode() {
     let partial_terminal_too_small_event_json = serde_json::json!({
-        "client_id": client_id,
-        "viewport_size": { "column_count": 80, "row_count": 24 }
+        "client_id": ClientId::new(),
+        "viewport_size": { "column_count": 80, "row_count": 24 },
+        "pane_area": null
     });
 
-    let terminal_too_small_event: TerminalTooSmallEntered =
-        serde_json::from_value(partial_terminal_too_small_event_json)
-            .expect("missing optional fields use defaults");
-    assert_eq!(terminal_too_small_event.client_id, client_id);
-    assert_eq!(
-        terminal_too_small_event.viewport_size,
-        Size {
-            column_count: 80,
-            row_count: 24,
-        }
-    );
-    assert_eq!(terminal_too_small_event.pane_area, None);
-    assert_eq!(
-        terminal_too_small_event.cause,
-        TerminalTooSmallCause::Terminal
-    );
+    let decode_error =
+        serde_json::from_value::<TerminalTooSmallEntered>(partial_terminal_too_small_event_json)
+            .expect_err("a missing cause is refused");
+    assert_eq!(decode_error.to_string(), "missing field `cause`");
 }
 
 #[test]
@@ -156,13 +194,13 @@ fn remaining_event_variants_survive_a_json_round_trip() {
     }));
     assert_json_roundtrip(&Event::PaneFocused(PaneFocused {
         client_id: ClientId::new(),
-        tab_id: TabId::new(),
+        tab_id: Some(TabId::new()),
         pane_id: PaneId::new(),
         previous_pane_id: Some(PaneId::new()),
     }));
     assert_json_roundtrip(&Event::PaneFocused(PaneFocused {
         client_id: ClientId::new(),
-        tab_id: TabId::new(),
+        tab_id: Some(TabId::new()),
         pane_id: PaneId::new(),
         previous_pane_id: None,
     }));
@@ -172,8 +210,8 @@ fn remaining_event_variants_survive_a_json_round_trip() {
     assert_json_roundtrip(&Event::PanePlacementCommitted(PanePlacementCommitted {
         command_id: CommandId::new(),
         source_pane_id: PaneId::new(),
-        source_tab_id: TabId::new(),
-        destination_tab_id,
+        source_tab_id: Some(TabId::new()),
+        destination_tab_id: Some(destination_tab_id),
         placement_target: PanePlacementTarget::Split {
             destination_tab_id,
             anchor: PanePlacementAnchor::Pane(PaneId::new()),
@@ -205,28 +243,6 @@ fn remaining_event_variants_survive_a_json_round_trip() {
         }),
     }));
     assert_json_roundtrip(&Event::Restarting);
-}
-
-// A serialized exit from before the field existed carries no `signal`.
-#[test]
-fn a_pane_exit_without_a_signal_field_decodes_with_no_signal() {
-    let pane_id = PaneId::new();
-    let exit_event_json = format!(
-        r#"{{"PaneProcessExited":{{"pane_id":"{}","exit_code":127}}}}"#,
-        pane_id.get_uuid()
-    );
-
-    let decoded_event: Event =
-        serde_json::from_str(&exit_event_json).expect("decodes without signal");
-
-    assert_eq!(
-        decoded_event,
-        Event::PaneProcessExited(PaneProcessExited {
-            pane_id,
-            exit_code: Some(127),
-            signal: None,
-        })
-    );
 }
 
 // `is_failure` is `false` for exit code `0` with no signal, and `true` for
@@ -279,7 +295,7 @@ pub(crate) fn list_event_cases() -> [(Event, &'static str); 21] {
         (
             Event::PaneCreated(PaneCreated {
                 pane_id: PaneId::new(),
-                tab_id: TabId::new(),
+                tab_id: Some(TabId::new()),
             }),
             "PaneCreated",
         ),
@@ -300,14 +316,14 @@ pub(crate) fn list_event_cases() -> [(Event, &'static str); 21] {
         (
             Event::PaneRemoved(PaneRemoved {
                 pane_id: PaneId::new(),
-                tab_id: TabId::new(),
+                tab_id: Some(TabId::new()),
             }),
             "PaneRemoved",
         ),
         (
             Event::PaneFocused(PaneFocused {
                 client_id: ClientId::new(),
-                tab_id: TabId::new(),
+                tab_id: Some(TabId::new()),
                 pane_id: PaneId::new(),
                 previous_pane_id: None,
             }),
@@ -346,8 +362,8 @@ pub(crate) fn list_event_cases() -> [(Event, &'static str); 21] {
             Event::PanePlacementCommitted(PanePlacementCommitted {
                 command_id: CommandId::new(),
                 source_pane_id: PaneId::new(),
-                source_tab_id: TabId::new(),
-                destination_tab_id: TabId::new(),
+                source_tab_id: Some(TabId::new()),
+                destination_tab_id: Some(TabId::new()),
                 placement_target: PanePlacementTarget::Swap {
                     target_pane_id: PaneId::new(),
                 },
@@ -481,14 +497,6 @@ fn events_encode_externally_tagged() {
         serde_json::to_string(&TerminalTooSmallCause::OtherClient(other_client_id))
             .expect("serialize"),
         format!(r#"{{"OtherClient":"{}"}}"#, other_client_id.get_uuid())
-    );
-}
-
-#[test]
-fn too_small_cause_defaults_to_terminal() {
-    assert_eq!(
-        TerminalTooSmallCause::default(),
-        TerminalTooSmallCause::Terminal
     );
 }
 

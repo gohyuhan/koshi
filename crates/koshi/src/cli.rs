@@ -24,8 +24,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use koshi_core::action::ActionReference;
 use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    MovePaneArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, PanePlacementAnchor, PanePlacementTarget,
-    PlacePaneArgs, ResizePaneArgs, RunCommandPaneArgs, ScrollPaneArgs, TabTarget,
+    MovePaneArgs, MoveTabArgs, NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor,
+    PanePlacementTarget, PlacePaneArgs, ResizePaneArgs, ScrollPaneArgs, TabTarget,
     ToggleLockModeArgs, WriteToPaneArgs,
 };
 use koshi_core::geometry::Direction;
@@ -253,6 +253,44 @@ pub enum OutputFormat {
     Json,
 }
 
+/// The flags `new-pane` and `run` share: where the new pane opens, and the
+/// client that shows it.
+#[derive(Debug, PartialEq, Eq, clap::Args)]
+pub struct NewPaneFlags {
+    /// Split direction; omitted follows your `layout.new-pane-direction`
+    /// setting.
+    #[arg(
+        long = "direction",
+        value_enum,
+        value_name = "DIRECTION",
+        conflicts_with = "should_stack"
+    )]
+    direction: Option<DirectionArgument>,
+    /// Stack the new pane onto the source pane instead of splitting.
+    #[arg(long = "stacked")]
+    should_stack: bool,
+    /// Pane to split from; defaults to the focused pane.
+    #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
+    pane_id: Option<PaneId>,
+    /// Session receiving the pane, by id or name; defaults to the current
+    /// session, else the only running one.
+    #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
+    session_reference: Option<SessionReference>,
+    /// Tab receiving the pane, by id or name; the split anchors on that
+    /// tab's most recently focused pane. Defaults to the source pane's tab.
+    #[arg(
+        long = "tab",
+        value_parser = parse_tab_reference,
+        value_name = "TAB",
+        conflicts_with = "pane_id"
+    )]
+    tab_reference: Option<TabReference>,
+    /// Client that shows and focuses the new pane; defaults to the
+    /// issuing client, else the session's only attached one.
+    #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+    client_id: Option<ClientId>,
+}
+
 /// The `koshi` subcommand tree.
 ///
 /// Lifecycle commands (`list-sessions`, `kill-session`, `attach`, `detach`,
@@ -325,38 +363,8 @@ pub enum CliCommand {
     /// Open a new pane running a shell; its working directory and
     /// environment come from the issuing terminal.
     NewPane {
-        /// Split direction; omitted follows your `layout.new-pane-direction`
-        /// setting.
-        #[arg(
-            long = "direction",
-            value_enum,
-            value_name = "DIRECTION",
-            conflicts_with = "should_stack"
-        )]
-        direction: Option<DirectionArgument>,
-        /// Stack the new pane onto the source pane instead of splitting.
-        #[arg(long = "stacked")]
-        should_stack: bool,
-        /// Pane to split from; defaults to the focused pane.
-        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
-        pane_id: Option<PaneId>,
-        /// Session receiving the pane, by id or name; defaults to the current
-        /// session, else the only running one.
-        #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
-        session_reference: Option<SessionReference>,
-        /// Tab receiving the pane, by id or name; the split anchors on that
-        /// tab's most recently focused pane. Defaults to the source pane's tab.
-        #[arg(
-            long = "tab",
-            value_parser = parse_tab_reference,
-            value_name = "TAB",
-            conflicts_with = "pane_id"
-        )]
-        tab_reference: Option<TabReference>,
-        /// Client that shows and focuses the new pane; defaults to the
-        /// issuing client, else the session's only attached one.
-        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
-        client_id: Option<ClientId>,
+        #[command(flatten)]
+        new_pane_flags: NewPaneFlags,
     },
     /// Close a pane.
     ClosePane {
@@ -384,6 +392,11 @@ pub enum CliCommand {
         /// Pane to resize; defaults to the focused pane.
         #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
         pane_id: Option<PaneId>,
+        /// Client whose view of a floating pane keeps the edge opposite the
+        /// moved border in place; defaults to the issuing client, else the
+        /// session's only attached one.
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
     },
     /// Swap a pane with its visible neighbor in one step, with no preview and
     /// no confirm.
@@ -658,38 +671,8 @@ pub enum CliCommand {
     /// Open a new pane running the command given after `--`; its working
     /// directory and environment come from the issuing terminal.
     Run {
-        /// Split direction; omitted follows your `layout.new-pane-direction`
-        /// setting.
-        #[arg(
-            long = "direction",
-            value_enum,
-            value_name = "DIRECTION",
-            conflicts_with = "should_stack"
-        )]
-        direction: Option<DirectionArgument>,
-        /// Stack the new pane onto the source pane instead of splitting.
-        #[arg(long = "stacked")]
-        should_stack: bool,
-        /// Pane to split from; defaults to the focused pane.
-        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
-        pane_id: Option<PaneId>,
-        /// Session receiving the pane, by id or name; defaults to the current
-        /// session, else the only running one.
-        #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
-        session_reference: Option<SessionReference>,
-        /// Tab receiving the pane, by id or name; the split anchors on that
-        /// tab's most recently focused pane. Defaults to the source pane's tab.
-        #[arg(
-            long = "tab",
-            value_parser = parse_tab_reference,
-            value_name = "TAB",
-            conflicts_with = "pane_id"
-        )]
-        tab_reference: Option<TabReference>,
-        /// Client that shows and focuses the new pane; defaults to the
-        /// issuing client, else the session's only attached one.
-        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
-        client_id: Option<ClientId>,
+        #[command(flatten)]
+        new_pane_flags: NewPaneFlags,
         /// The command and its arguments, given after `--`.
         #[arg(last = true, required = true, value_name = "COMMAND")]
         command_arguments: Vec<String>,
@@ -1179,26 +1162,13 @@ impl CliCommand {
         new_pane_direction: Direction,
     ) -> Option<(ActionReference, Command)> {
         let (action_name, command) = match self {
-            CliCommand::NewPane {
-                direction,
-                should_stack,
-                pane_id,
-                session_reference: _,
-                tab_reference,
-                client_id,
-            } => (
+            CliCommand::NewPane { new_pane_flags } => (
                 "new-pane",
-                Command::NewPane(NewPaneArgs {
-                    source_pane_id: *pane_id,
-                    tab_id: resolved_targets
-                        .tab_id
-                        .or(resolve_tab_reference_id(tab_reference)),
-                    direction: direction.map(Direction::from).unwrap_or(new_pane_direction),
-                    should_stack: *should_stack,
-                    working_directory: None,
-                    spawn_spec: None,
-                    client_id: *client_id,
-                }),
+                Command::NewPane(new_pane_flags.build_new_pane_args(
+                    resolved_targets.tab_id,
+                    new_pane_direction,
+                    None,
+                )),
             ),
             CliCommand::ClosePane {
                 pane_id,
@@ -1215,6 +1185,7 @@ impl CliCommand {
                 direction,
                 resize_amount_cells,
                 pane_id,
+                client_id: _,
             } => (
                 "resize-pane",
                 Command::ResizePane(ResizePaneArgs {
@@ -1388,26 +1359,15 @@ impl CliCommand {
                 }),
             ),
             CliCommand::Run {
-                direction,
-                should_stack,
-                pane_id,
-                session_reference: _,
-                tab_reference,
-                client_id,
+                new_pane_flags,
                 command_arguments,
             } => (
                 "run",
-                Command::RunCommandPane(RunCommandPaneArgs {
-                    spawn_spec: build_spawn_spec_from_arguments(command_arguments),
-                    working_directory: None,
-                    source_pane_id: *pane_id,
-                    tab_id: resolved_targets
-                        .tab_id
-                        .or(resolve_tab_reference_id(tab_reference)),
-                    direction: direction.map(Direction::from).unwrap_or(new_pane_direction),
-                    should_stack: *should_stack,
-                    client_id: *client_id,
-                }),
+                Command::NewPane(new_pane_flags.build_new_pane_args(
+                    resolved_targets.tab_id,
+                    new_pane_direction,
+                    Some(build_spawn_spec_from_arguments(command_arguments)),
+                )),
             ),
             CliCommand::ListSessions { .. }
             | CliCommand::KillSession { .. }
@@ -1444,13 +1404,10 @@ impl CliCommand {
     #[must_use]
     pub fn get_target_session_reference(&self) -> Option<&SessionReference> {
         match self {
-            CliCommand::NewPane {
-                session_reference, ..
+            CliCommand::NewPane { new_pane_flags } | CliCommand::Run { new_pane_flags, .. } => {
+                new_pane_flags.session_reference.as_ref()
             }
-            | CliCommand::Run {
-                session_reference, ..
-            }
-            | CliCommand::NewTab {
+            CliCommand::NewTab {
                 session_reference, ..
             }
             | CliCommand::CloseTab {
@@ -1466,9 +1423,10 @@ impl CliCommand {
     #[must_use]
     pub fn get_target_tab_reference(&self) -> Option<&TabReference> {
         match self {
-            CliCommand::NewPane { tab_reference, .. }
-            | CliCommand::Run { tab_reference, .. }
-            | CliCommand::CloseTab { tab_reference, .. }
+            CliCommand::NewPane { new_pane_flags } | CliCommand::Run { new_pane_flags, .. } => {
+                new_pane_flags.tab_reference.as_ref()
+            }
+            CliCommand::CloseTab { tab_reference, .. }
             | CliCommand::MoveTab { tab_reference, .. }
             | CliCommand::FocusTab { tab_reference, .. } => tab_reference.as_ref(),
             CliCommand::PlacePane { tab_reference, .. } => Some(tab_reference),
@@ -1481,9 +1439,10 @@ impl CliCommand {
     #[must_use]
     pub fn get_target_pane_id(&self) -> Option<PaneId> {
         match self {
-            CliCommand::NewPane { pane_id, .. }
-            | CliCommand::Run { pane_id, .. }
-            | CliCommand::ClosePane { pane_id, .. }
+            CliCommand::NewPane { new_pane_flags } | CliCommand::Run { new_pane_flags, .. } => {
+                new_pane_flags.pane_id
+            }
+            CliCommand::ClosePane { pane_id, .. }
             | CliCommand::ResizePane { pane_id, .. }
             | CliCommand::ScrollPane { pane_id, .. }
             | CliCommand::Input { pane_id, .. } => *pane_id,
@@ -1500,9 +1459,10 @@ impl CliCommand {
     #[must_use]
     pub fn get_target_client_id(&self) -> Option<ClientId> {
         match self {
-            CliCommand::NewPane { client_id, .. }
-            | CliCommand::Run { client_id, .. }
-            | CliCommand::NewTab { client_id, .. }
+            CliCommand::NewPane { new_pane_flags } | CliCommand::Run { new_pane_flags, .. } => {
+                new_pane_flags.client_id
+            }
+            CliCommand::NewTab { client_id, .. }
             | CliCommand::NextTab { client_id }
             | CliCommand::PreviousTab { client_id }
             | CliCommand::FocusTab { client_id, .. }
@@ -1512,6 +1472,7 @@ impl CliCommand {
             | CliCommand::ToggleLock { client_id }
             | CliCommand::TogglePaneFullscreen { client_id }
             | CliCommand::ScrollPane { client_id, .. }
+            | CliCommand::ResizePane { client_id, .. }
             | CliCommand::PlacePane { client_id, .. } => *client_id,
             _ => None,
         }
@@ -1520,9 +1481,10 @@ impl CliCommand {
     /// The client this invocation names that no [`Command`] carries; it rides
     /// on the command's source instead
     /// ([`CommandSource::ExternalCli`](koshi_core::command::CommandSource::ExternalCli)).
-    /// `toggle-pane-fullscreen` and `scroll-pane` answer `Some`: every other
-    /// client-taking verb puts its client in the command's own arguments, which travel on
-    /// both routes.
+    /// `toggle-pane-fullscreen`, `scroll-pane`, `resize-pane` and `place-pane`
+    /// answer their `--client` value; every other verb answers `None`, and a
+    /// client-taking one puts its client in the command's own arguments, which
+    /// travel on both routes.
     /// [`CommandSource::InSessionCli`](koshi_core::command::CommandSource::InSessionCli)
     /// carries no client, and a command with one here never takes the
     /// in-session route ([`crate::targeting::resolve_command_route`]).
@@ -1531,6 +1493,7 @@ impl CliCommand {
         match self {
             CliCommand::TogglePaneFullscreen { client_id }
             | CliCommand::ScrollPane { client_id, .. }
+            | CliCommand::ResizePane { client_id, .. }
             | CliCommand::PlacePane { client_id, .. } => *client_id,
             _ => None,
         }
@@ -1582,6 +1545,46 @@ fn resolve_tab_reference_id(tab_reference: &Option<TabReference>) -> Option<TabI
     match tab_reference {
         Some(TabReference::TabId(tab_id)) => Some(*tab_id),
         _ => None,
+    }
+}
+
+impl NewPaneFlags {
+    /// The `NewPane` arguments these flags ask for, running `spawn_spec`, or
+    /// the shell when it is `None`.
+    ///
+    /// The new pane joins the stack of `--pane` with `--stacked`, else `--pane`
+    /// splits toward `--direction`, or toward `new_pane_direction` when
+    /// `--direction` is absent. The tab is `resolved_tab_id`, else the id a
+    /// `--tab` flag gives directly. The working directory stays empty.
+    fn build_new_pane_args(
+        &self,
+        resolved_tab_id: Option<TabId>,
+        new_pane_direction: Direction,
+        spawn_spec: Option<SpawnSpec>,
+    ) -> NewPaneArgs {
+        let source_pane_id = self.pane_id;
+        let tab_id = resolved_tab_id.or(resolve_tab_reference_id(&self.tab_reference));
+        let placement = if self.should_stack {
+            NewPanePlacement::Stacked {
+                source_pane_id,
+                tab_id,
+            }
+        } else {
+            NewPanePlacement::Split {
+                source_pane_id,
+                tab_id,
+                direction: self
+                    .direction
+                    .map(Direction::from)
+                    .unwrap_or(new_pane_direction),
+            }
+        };
+        NewPaneArgs {
+            placement,
+            working_directory: None,
+            spawn_spec,
+            client_id: self.client_id,
+        }
     }
 }
 

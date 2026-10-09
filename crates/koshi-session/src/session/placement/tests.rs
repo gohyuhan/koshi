@@ -143,7 +143,7 @@ fn transferring_a_sole_source_pane_closes_only_the_empty_tab() {
             }),
             Event::PaneFocused(PaneFocused {
                 client_id,
-                tab_id: destination_tab_id,
+                tab_id: Some(destination_tab_id),
                 pane_id: source_pane_id,
                 previous_pane_id: None,
             }),
@@ -159,10 +159,13 @@ fn transferring_a_sole_source_pane_closes_only_the_empty_tab() {
             .list_leaf_pane_ids(),
         vec![destination_pane_id, source_pane_id]
     );
-    assert!(session
-        .panes
-        .get_pane_record_by_id(source_pane_id)
-        .is_some());
+    assert_eq!(
+        session
+            .panes
+            .get_pane_record_by_id(source_pane_id)
+            .map(PaneRecord::get_pane_id),
+        Some(source_pane_id)
+    );
     let client = session
         .clients
         .get_client_by_id(client_id)
@@ -257,7 +260,7 @@ fn transfer_repairs_a_background_clients_source_focus_and_zoom() {
                 **event
                     == Event::PaneFocused(PaneFocused {
                         client_id: background_client_id,
-                        tab_id: source_tab_id,
+                        tab_id: Some(source_tab_id),
                         pane_id: surviving_source_pane_id,
                         previous_pane_id: Some(source_pane_id),
                     })
@@ -350,7 +353,7 @@ fn transfer_records_layout_fallback_in_tab_focus_history() {
                 **event
                     == Event::PaneFocused(PaneFocused {
                         client_id: background_client_id,
-                        tab_id: source_tab_id,
+                        tab_id: Some(source_tab_id),
                         pane_id: surviving_source_pane_id,
                         previous_pane_id: Some(source_pane_id),
                     })
