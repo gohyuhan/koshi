@@ -171,6 +171,11 @@ pub fn record_event(event: &Event, occurred_at: SystemTime) -> RecentEvent {
             pane_id: Some(pane_pin_changed.pane_id),
             ..recent_event_without_entity_ids
         },
+        Event::PaneMinimizedChanged(pane_minimized_changed) => RecentEvent {
+            client_id: Some(pane_minimized_changed.client_id),
+            pane_id: Some(pane_minimized_changed.pane_id),
+            ..recent_event_without_entity_ids
+        },
         Event::Quit(_) | Event::Restarting => recent_event_without_entity_ids,
     }
 }

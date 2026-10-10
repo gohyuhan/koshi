@@ -564,9 +564,11 @@ pub struct FrameClient {
     pub viewport_size: Size,
     /// The tab the client is viewing.
     pub active_tab_id: TabId,
-    /// The client's focused pane in the active tab, or `None` when the tab has
-    /// no focusable pane. The client highlights the pane whose
-    /// [`FrameSlot::pane_id`] matches, and places the cursor there.
+    /// The pane that takes the client's input: its focused floating pane,
+    /// else its focused pane in the active tab. `None` when the client focuses
+    /// neither. The client highlights the pane whose [`FrameSlot::pane_id`]
+    /// matches, and places the cursor there. A floating pane matches no
+    /// [`FrameSlot`].
     pub focused_pane_id: Option<PaneId>,
     /// The client's input mode, as the session has it.
     pub lock_mode: LockMode,

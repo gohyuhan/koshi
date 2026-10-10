@@ -13,12 +13,22 @@ use std::{
 pub use koshi_core::client::ClientOrigin;
 use koshi_core::{
     command::Selection,
+    constant::FLOATING_PANE_CHROME_SIZE,
     geometry::{PaneArea, PixelCellSize, Point, Rect, Size},
     ids::{ClientId, PaneId, SessionId, TabId},
     lock::LockMode,
 };
-use koshi_layout::mode::LayoutMode;
+use koshi_layout::{mode::LayoutMode, solver::MIN_PANE_SIZE};
 use serde::{Deserialize, Serialize};
+
+/// The smallest outer size of a floating pane: [`MIN_PANE_SIZE`] of content
+/// plus [`FLOATING_PANE_CHROME_SIZE`], `4x5`. A client whose pane area is
+/// smaller on either axis has no floating viewport
+/// ([`Client::get_floating_viewport`]).
+pub const MIN_FLOATING_PANE_SIZE: Size = Size {
+    column_count: MIN_PANE_SIZE.column_count + FLOATING_PANE_CHROME_SIZE.column_count,
+    row_count: MIN_PANE_SIZE.row_count + FLOATING_PANE_CHROME_SIZE.row_count,
+};
 
 /// The pane region of a client that reported none: the full viewport minus
 /// one top tabline row and one bottom key-hint row. `80x24` → `80x22`; a
@@ -41,8 +51,9 @@ pub struct FloatingPaneView {
     /// Where this client draws the pane.
     /// [`Client::set_floating_pane_position`] refuses a pinned pane.
     pub position: FloatingPanePosition,
-    /// Whether this client minimized the pane.
-    /// [`Client::focus_floating_pane`] refuses a minimized pane.
+    /// Whether this client minimized the pane. A minimized pane is in this
+    /// client's floating focus order. [`Client::focus_floating_pane`] refuses
+    /// a minimized pane.
     pub is_minimized: bool,
 }
 
@@ -138,6 +149,8 @@ pub struct Client {
     /// Which palette entry paints this client's identity in the UI, chosen by
     /// the caller at attach.
     color_index: u8,
+    /// The pane this client focused in each tab. The active tab's entry takes
+    /// this client's input while no floating pane is focused.
     focused_pane_id_by_tab_id: HashMap<TabId, PaneId>,
     lock_mode: LockMode,
     /// Whether this client grabs the mouse for text selection: while on, a drag
@@ -186,7 +199,9 @@ pub struct Client {
     /// The floating pane that holds this client's focus, or `None` when no
     /// floating pane does. A set value is the last entry of
     /// `floating_pane_focus_order` and names a pane this client has not
-    /// minimized.
+    /// minimized. A set value takes this client's input instead of the pane
+    /// this client focused in its active tab
+    /// ([`get_active_focused_pane_id`](Self::get_active_focused_pane_id)).
     focused_floating_pane_id: Option<PaneId>,
 }
 
@@ -329,6 +344,15 @@ impl Client {
     #[must_use]
     pub fn get_focused_pane_id(&self, tab_id: TabId) -> Option<PaneId> {
         self.focused_pane_id_by_tab_id.get(&tab_id).copied()
+    }
+
+    /// The pane that takes this client's input: the focused floating pane,
+    /// else the pane this client focused in its active tab. `None` when
+    /// neither is set.
+    #[must_use]
+    pub fn get_active_focused_pane_id(&self) -> Option<PaneId> {
+        self.focused_floating_pane_id
+            .or_else(|| self.get_focused_pane_id(self.active_tab_id))
     }
 
     /// Every focused pane this client remembers, keyed by tab id.
@@ -481,11 +505,31 @@ impl Client {
     /// moves to the newly focused pane: the zoomed view swaps its content and
     /// stays on. Every path that moves focus — a keybinding, a `focus-pane`
     /// command, focus repair after a close — runs through here.
+    ///
+    /// A focused floating pane keeps this client's input.
+    /// [`focus_tiled_pane`](Self::focus_tiled_pane) also takes the input.
     pub fn update_focused_pane(&mut self, tab_id: TabId, pane_id: PaneId) -> Option<PaneId> {
         if let Some(zoomed_pane_id) = self.zoomed_pane_id_by_tab_id.get_mut(&tab_id) {
             *zoomed_pane_id = pane_id;
         }
         self.focused_pane_id_by_tab_id.insert(tab_id, pane_id)
+    }
+
+    /// Focus `pane_id` in `tab_id` for this client, as
+    /// [`update_focused_pane`](Self::update_focused_pane) does. When `tab_id`
+    /// is this client's active tab, this client's input also leaves the
+    /// floating pane that held it: no floating pane is focused afterwards.
+    ///
+    /// Returns the floating pane that held this client's input when the input
+    /// left it, else the pane this client focused in `tab_id` before.
+    pub fn focus_tiled_pane(&mut self, tab_id: TabId, pane_id: PaneId) -> Option<PaneId> {
+        let previous_floating_pane_id = if tab_id == self.active_tab_id {
+            self.focused_floating_pane_id.take()
+        } else {
+            None
+        };
+        let previous_tab_pane_id = self.update_focused_pane(tab_id, pane_id);
+        previous_floating_pane_id.or(previous_tab_pane_id)
     }
 
     /// Forget the pane this client focused in `tab_id`, and leave any zoom in
@@ -530,6 +574,17 @@ impl Client {
         self.pane_area
     }
 
+    /// The pane region this client positions floating panes in: its
+    /// [`get_pane_area`](Self::get_pane_area) when that holds
+    /// [`MIN_FLOATING_PANE_SIZE`] on both axes. `None` when this client
+    /// reported [`PaneArea::Starving`], or a pane area smaller than `4x5` on
+    /// either axis. `80x22` → `Some(80x22)`; `3x40` → `None`.
+    #[must_use]
+    pub fn get_floating_viewport(&self) -> Option<Size> {
+        self.get_pane_area()
+            .filter(|pane_area| MIN_FLOATING_PANE_SIZE.can_fit_inside(*pane_area))
+    }
+
     /// Replace this client's reported pane region with `pane_area`, `None`
     /// included.
     pub fn update_pane_area(&mut self, pane_area: Option<PaneArea>) {
@@ -571,6 +626,15 @@ impl Client {
         self.focused_floating_pane_id
     }
 
+    /// Whether this client shows the floating pane `pane_id`: the pane is in
+    /// this client's floating focus order and this client has not minimized
+    /// it.
+    #[must_use]
+    pub fn is_floating_pane_shown(&self, pane_id: PaneId) -> bool {
+        self.floating_pane_focus_order.contains(&pane_id)
+            && !self.get_floating_pane_view(pane_id).is_minimized
+    }
+
     /// Focus `pane_id` for this client and move it to the end of the floating
     /// focus order, appending it when absent. `[a, b, c]` focusing `b` →
     /// `[a, c, b]`. Does not check that `pane_id` is a floating pane.
@@ -585,27 +649,47 @@ impl Client {
         true
     }
 
-    /// Minimize `pane_id` for this client. The pane keeps its place in the
-    /// floating focus order. A floating focus on `pane_id` clears. Does not
-    /// check that `pane_id` is a floating pane.
-    pub fn minimize_floating_pane(&mut self, pane_id: PaneId) {
+    /// Minimize `pane_id` for this client when this client shows it
+    /// ([`is_floating_pane_shown`](Self::is_floating_pane_shown)). The pane
+    /// keeps its place in the floating focus order. A floating focus on
+    /// `pane_id` moves to the floating pane this client focused or restored
+    /// most recently among those it still shows, which moves to the end of the
+    /// floating focus order; with none shown, no floating pane is focused.
+    /// `[a, b, c]` with `c` focused gives `[a, c, b]` with `b` focused. Does
+    /// not check that `pane_id` is a floating pane.
+    ///
+    /// Returns `false`, changing nothing, when this client does not show
+    /// `pane_id`.
+    #[must_use]
+    pub fn minimize_floating_pane(&mut self, pane_id: PaneId) -> bool {
+        if !self.is_floating_pane_shown(pane_id) {
+            return false;
+        }
         let mut floating_pane_view = self.get_floating_pane_view(pane_id);
         floating_pane_view.is_minimized = true;
         self.set_floating_pane_view(pane_id, floating_pane_view);
         if self.focused_floating_pane_id == Some(pane_id) {
-            self.focused_floating_pane_id = None;
+            self.recover_floating_focus();
         }
+        true
     }
 
-    /// Restore `pane_id` for this client: clear its minimized state, focus it
-    /// and move it to the end of the floating focus order. A pane this client
-    /// never focused is appended. Does not check that `pane_id` is a floating
-    /// pane.
-    pub fn restore_floating_pane(&mut self, pane_id: PaneId) {
+    /// Restore `pane_id` for this client when this client does not show it:
+    /// clear its minimized state, focus it and move it to the end of the
+    /// floating focus order. A pane this client never focused is appended.
+    /// Does not check that `pane_id` is a floating pane.
+    ///
+    /// Returns `false`, changing nothing, when this client shows `pane_id`.
+    #[must_use]
+    pub fn restore_floating_pane(&mut self, pane_id: PaneId) -> bool {
+        if self.is_floating_pane_shown(pane_id) {
+            return false;
+        }
         let mut floating_pane_view = self.get_floating_pane_view(pane_id);
         floating_pane_view.is_minimized = false;
         self.set_floating_pane_view(pane_id, floating_pane_view);
         self.raise_and_focus_floating_pane(pane_id);
+        true
     }
 
     /// Pin `pane_id` for this client at `top_left_cell`, counted from this
@@ -646,15 +730,15 @@ impl Client {
         true
     }
 
-    /// Drop `pane_id` from this client's floating view: its stored view, its
-    /// floating focus order entry, and the floating focus when it names
-    /// `pane_id`.
+    /// Drop `pane_id` from this client's floating view: its stored view and
+    /// its floating focus order entry. A floating focus on `pane_id` moves as
+    /// [`minimize_floating_pane`](Self::minimize_floating_pane) moves it.
     pub(crate) fn remove_floating_pane_view(&mut self, pane_id: PaneId) {
         self.floating_pane_view_by_pane_id.remove(&pane_id);
         self.floating_pane_focus_order
             .retain(|&ordered_pane_id| ordered_pane_id != pane_id);
         if self.focused_floating_pane_id == Some(pane_id) {
-            self.focused_floating_pane_id = None;
+            self.recover_floating_focus();
         }
     }
 
@@ -665,6 +749,22 @@ impl Client {
             .retain(|&ordered_pane_id| ordered_pane_id != pane_id);
         self.floating_pane_focus_order.push(pane_id);
         self.focused_floating_pane_id = Some(pane_id);
+    }
+
+    /// Focus the floating pane this client focused or restored most recently
+    /// among those it has not minimized, and move it to the end of the
+    /// floating focus order. With none left, no floating pane is focused.
+    fn recover_floating_focus(&mut self) {
+        let recovered_pane_id = self
+            .floating_pane_focus_order
+            .iter()
+            .rev()
+            .copied()
+            .find(|&ordered_pane_id| !self.get_floating_pane_view(ordered_pane_id).is_minimized);
+        match recovered_pane_id {
+            Some(recovered_pane_id) => self.raise_and_focus_floating_pane(recovered_pane_id),
+            None => self.focused_floating_pane_id = None,
+        }
     }
 
     /// Store `floating_pane_view` as this client's view of `pane_id`, or drop

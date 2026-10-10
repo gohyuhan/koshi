@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::event::tests::list_event_cases;
 use crate::event::{
     ConfigReloaded, FloatingPaneMoved, PaneCommandFinished, PaneCreated, PaneFocused,
-    PanePinChanged, QuitCause, TabFocused,
+    PaneMinimizedChanged, PanePinChanged, QuitCause, TabFocused,
 };
 use crate::geometry::Point;
 
@@ -166,6 +166,17 @@ fn floating_pane_view_events_record_their_client_and_pane_and_nothing_else() {
             build_occurred_at(),
         ),
         build_floating_view_record("PanePinChanged")
+    );
+    assert_eq!(
+        record_event(
+            &Event::PaneMinimizedChanged(PaneMinimizedChanged {
+                client_id,
+                pane_id,
+                is_minimized: true,
+            }),
+            build_occurred_at(),
+        ),
+        build_floating_view_record("PaneMinimizedChanged")
     );
 }
 

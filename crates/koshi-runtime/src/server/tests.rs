@@ -137,11 +137,25 @@ fn close_undriven_panes_removes_a_floating_pane_whose_child_is_gone() {
     else {
         panic!("a floating PaneCreated comes first, got {emitted_events:?}");
     };
+    let booted_client = server
+        .list_sessions()
+        .values()
+        .next()
+        .expect("the booted session")
+        .clients
+        .get_client_by_id(client_id)
+        .expect("the booted client");
+    let tab_id = booted_client.get_active_tab_id();
+    let tiled_pane_id = booted_client
+        .get_focused_pane_id(tab_id)
+        .expect("the booted client focuses the tab's pane");
     server.live_pane_ids.remove(&floating_pane_id);
 
     let exit_events =
         server.close_undriven_panes(HashSet::from([floating_pane_id]), HashMap::new());
 
+    // The floating pane took the client's input when it opened; its removal
+    // returns the input to the tiled pane.
     assert_eq!(
         exit_events,
         vec![
@@ -156,6 +170,12 @@ fn close_undriven_panes_removes_a_floating_pane_whose_child_is_gone() {
             Event::PaneRemoved(PaneRemoved {
                 pane_id: floating_pane_id,
                 tab_id: None,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: Some(tab_id),
+                pane_id: tiled_pane_id,
+                previous_pane_id: Some(floating_pane_id),
             }),
         ]
     );

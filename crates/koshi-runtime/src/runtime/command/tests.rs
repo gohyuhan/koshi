@@ -45,7 +45,7 @@ use koshi_session::client::{
     compute_default_pane_area_size, Client, ClientRegistry, FloatingPaneView,
 };
 use koshi_session::session::pane_ops::NewPaneSpec;
-use koshi_session::session::state::{FloatingMember, FloatingPaneSizeSolve, Session, Tab};
+use koshi_session::session::state::{FloatingMember, Session, Tab};
 use koshi_session::session::tab_ops;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -388,12 +388,13 @@ fn build_command_matrix_server(client_origin: ClientOrigin) -> CommandMatrixFixt
 
 /// How many [`Command`] variants this build has. [`build_every_command`] lists one
 /// command of each.
-const COMMAND_VARIANT_COUNT: usize = 23;
+const COMMAND_VARIANT_COUNT: usize = 25;
 
 /// One command of every variant, aimed at `tab_id` and `pane_id` — the tab and pane the
 /// acting client of [`build_command_matrix_server`] views. `SwitchSession` names a session
 /// id no runtime holds, `MoveFloatingPane` names a pane id no runtime holds, and
-/// `SetPanePinned` names no pane, so each resolves the same way on every runtime.
+/// `SetPanePinned` and `SetPaneMinimized` name no pane, so each resolves the same way on
+/// every runtime.
 fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
     vec![
         Command::NewPane(build_new_pane_args()),
@@ -464,6 +465,13 @@ fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
             pane_id: None,
             is_pinned: true,
         }),
+        Command::SetPaneMinimized(SetPaneMinimizedArgs {
+            pane_id: None,
+            is_minimized: true,
+        }),
+        Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs {
+            is_minimized: true,
+        }),
         Command::Quit,
         Command::Detach(DetachArgs { client_id: None }),
         Command::DetachAll,
@@ -497,6 +505,8 @@ fn get_command_name(command: &Command) -> &'static str {
         Command::ScrollPane(_) => "ScrollPane",
         Command::MoveFloatingPane(_) => "MoveFloatingPane",
         Command::SetPanePinned(_) => "SetPanePinned",
+        Command::SetPaneMinimized(_) => "SetPaneMinimized",
+        Command::SetAllFloatingPanesMinimized(_) => "SetAllFloatingPanesMinimized",
         Command::Quit => "Quit",
         Command::Detach(_) => "Detach",
         Command::DetachAll => "DetachAll",
@@ -521,6 +531,26 @@ fn get_command_outcome(
         CommandResult::Ok { emitted_events, .. } => Ok(list_event_names(emitted_events)),
         CommandResult::Rejected { reason, help, .. } => Err((*reason, help.as_deref())),
     }
+}
+
+/// The PTY size `pane_id` takes when tab `tab_id` of `session_id` solves at
+/// `tab_size` with the default pane sizing ([`compute_pane_spawn_sizes`]).
+fn compute_solved_pty_size(
+    runtime: &Server,
+    session_id: SessionId,
+    tab_id: TabId,
+    tab_size: Size,
+    pane_id: PaneId,
+) -> PtySize {
+    compute_pane_spawn_sizes(
+        runtime.session_by_id[&session_id].tabs[&tab_id].get_layout_tree(),
+        tab_size,
+        PaneSizing::default(),
+    )
+    .into_iter()
+    .find(|(solved_pane_id, _)| *solved_pane_id == pane_id)
+    .map(|(_, pty_size)| pty_size)
+    .expect("the pane is solved")
 }
 
 /// Every session the runtime holds, in session-id order, encoded as one json
@@ -904,12 +934,12 @@ fn every_command_answers_a_remote_client_the_same_as_a_local_one() {
     }
 
     // The commands that reach their handler on this fixture, so the comparison
-    // above is not two matching refusals every time. The six missing commands
+    // above is not two matching refusals every time. The seven missing commands
     // are refused by the fixture or by command admission, identically on both
     // sides: a resize has no border to move in a single-pane tab, a move has
-    // no neighbor, a floating move names no pane the runtime holds, a pin finds
-    // no focused floating pane, a write has no running child, and the switch
-    // has no connected viewer to receive the move.
+    // no neighbor, a floating move names no pane the runtime holds, a pin and a
+    // minimize find no focused floating pane, a write has no running child,
+    // and the switch has no connected viewer to receive the move.
     assert_eq!(
         applied_command_names,
         vec![
@@ -927,6 +957,7 @@ fn every_command_answers_a_remote_client_the_same_as_a_local_one() {
             "MoveTab",
             "PlacePane",
             "ScrollPane",
+            "SetAllFloatingPanesMinimized",
             "Quit",
             "Detach",
             "DetachAll",
@@ -1288,12 +1319,7 @@ fn write_to_pane_via_in_session_cli_defaults_to_the_issuing_pane() {
 
     // Issued from inside `split_pane_id` with no explicit target: the captured
     // issuing pane is the target.
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(client_id),
-        split_pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, Some(client_id), split_pane_id);
     let command_envelope = build_command_envelope(
         command_source,
         Command::WriteToPane(WriteToPaneArgs {
@@ -2228,12 +2254,7 @@ fn in_session_cli_close_defaults_to_its_source_pane() {
     // No explicit pane: an in-session CLI closes the pane it was issued from.
     // The captured pane is the split one, so the root survives and inherits
     // focus — PaneClosing + PaneRemoved + LayoutChanged + PaneFocused.
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(client_id),
-        new_pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, Some(client_id), new_pane_id);
     let command_envelope =
         build_command_envelope(command_source, Command::ClosePane(ClosePaneArgs::default()));
     let command_id = command_envelope.command_id;
@@ -2281,12 +2302,7 @@ fn in_session_cli_with_missing_source_pane_is_gone() {
 
     // The source pane has since closed; the command issued from it is refused
     // before any target resolution.
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(client_id),
-        PaneId::new(),
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, Some(client_id), PaneId::new());
     let command_envelope =
         build_command_envelope(command_source, Command::ClosePane(ClosePaneArgs::default()));
     let command_id = command_envelope.command_id;
@@ -3896,12 +3912,8 @@ fn in_session_cli_source_pane_in_another_session_is_gone() {
         .session_by_id
         .insert(other_session.session_id, other_session);
 
-    let command_source = CommandSource::from_in_session_cli(
-        claimed_session_id,
-        Some(client_id),
-        other_session_pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source =
+        build_in_session_source(claimed_session_id, Some(client_id), other_session_pane_id);
     let command_envelope =
         build_command_envelope(command_source, Command::ClosePane(ClosePaneArgs::default()));
     let command_id = command_envelope.command_id;
@@ -3948,8 +3960,7 @@ fn in_session_cli_pane_command_without_a_client_succeeds() {
     // pane-scoped, so no client is needed: the pane closes, and the attached
     // client's focus falls back to the root — PaneClosing + PaneRemoved +
     // LayoutChanged + PaneFocused.
-    let command_source =
-        CommandSource::from_in_session_cli(session_id, None, new_pane_id, PathBuf::from("/sock"));
+    let command_source = build_in_session_source(session_id, None, new_pane_id);
     let command_envelope =
         build_command_envelope(command_source, Command::ClosePane(ClosePaneArgs::default()));
     let command_id = command_envelope.command_id;
@@ -4003,12 +4014,7 @@ fn in_session_cli_pane_command_with_a_detached_client_succeeds() {
     // The client that spawned the pane is long gone (never attached here).
     // The pane outlives it: a pane-scoped command from that pane still works.
     let stranger_client_id = ClientId::new();
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(stranger_client_id),
-        new_pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, Some(stranger_client_id), new_pane_id);
     let command_envelope =
         build_command_envelope(command_source, Command::ClosePane(ClosePaneArgs::default()));
     assert_eq!(
@@ -4039,8 +4045,7 @@ fn in_session_cli_client_scoped_with_no_attached_client_is_stale() {
 
     // Lock mode is one client's own state, and no client is attached to stand
     // in for the one this pane never had.
-    let command_source =
-        CommandSource::from_in_session_cli(session_id, None, root_pane_id, PathBuf::from("/sock"));
+    let command_source = build_in_session_source(session_id, None, root_pane_id);
     let command_envelope = build_command_envelope(
         command_source,
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
@@ -4076,8 +4081,7 @@ fn in_session_cli_from_a_closing_pane_is_gone() {
         .expect("spawning pane accepts a close request");
     runtime.session_by_id.insert(session_id, session);
 
-    let command_source =
-        CommandSource::from_in_session_cli(session_id, None, root_pane_id, PathBuf::from("/sock"));
+    let command_source = build_in_session_source(session_id, None, root_pane_id);
     let command_envelope = build_command_envelope(
         command_source,
         Command::MoveTab(MoveTabArgs {
@@ -4124,8 +4128,7 @@ fn in_session_cli_from_an_exited_pane_is_a_valid_source() {
     }
     runtime.session_by_id.insert(session_id, session);
 
-    let command_source =
-        CommandSource::from_in_session_cli(session_id, None, root_pane_id, PathBuf::from("/sock"));
+    let command_source = build_in_session_source(session_id, None, root_pane_id);
     let command_envelope = build_command_envelope(
         command_source,
         Command::MoveTab(MoveTabArgs {
@@ -4149,12 +4152,8 @@ fn mouse_select_cannot_be_issued_from_the_cli() {
     // The CLI has no mouse-select verb; the command is refused before any
     // state is read, so even an empty runtime answers.
     let (mut runtime, _runtime_event_sender) = build_runtime();
-    let command_source = CommandSource::from_in_session_cli(
-        SessionId::new(),
-        Some(ClientId::new()),
-        PaneId::new(),
-        PathBuf::from("/sock"),
-    );
+    let command_source =
+        build_in_session_source(SessionId::new(), Some(ClientId::new()), PaneId::new());
     let command_envelope = build_command_envelope(command_source, Command::ToggleMouseSelect);
     let command_id = command_envelope.command_id;
     assert_eq!(
@@ -4191,12 +4190,8 @@ fn mouse_select_is_refused_from_the_source_a_control_connection_stamps() {
 #[test]
 fn copy_cannot_be_issued_from_the_cli() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
-    let command_source = CommandSource::from_in_session_cli(
-        SessionId::new(),
-        Some(ClientId::new()),
-        PaneId::new(),
-        PathBuf::from("/sock"),
-    );
+    let command_source =
+        build_in_session_source(SessionId::new(), Some(ClientId::new()), PaneId::new());
     let command_envelope = build_command_envelope(
         command_source,
         Command::Visual(VisualCommand::Copy(CopyArgs {
@@ -4218,12 +4213,8 @@ fn copy_cannot_be_issued_from_the_cli() {
 #[test]
 fn quit_cannot_be_issued_from_inside_a_pane() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
-    let command_source = CommandSource::from_in_session_cli(
-        SessionId::new(),
-        Some(ClientId::new()),
-        PaneId::new(),
-        PathBuf::from("/sock"),
-    );
+    let command_source =
+        build_in_session_source(SessionId::new(), Some(ClientId::new()), PaneId::new());
     let command_envelope = build_command_envelope(command_source, Command::Quit);
     let command_id = command_envelope.command_id;
     assert_eq!(
@@ -4260,12 +4251,8 @@ fn quit_from_an_external_cli_is_accepted() {
 fn in_session_cli_with_an_unknown_session_is_not_found() {
     // The source names a session that this runtime does not run.
     let (mut runtime, _runtime_event_sender) = build_runtime();
-    let command_source = CommandSource::from_in_session_cli(
-        SessionId::new(),
-        Some(ClientId::new()),
-        PaneId::new(),
-        PathBuf::from("/sock"),
-    );
+    let command_source =
+        build_in_session_source(SessionId::new(), Some(ClientId::new()), PaneId::new());
     let command_envelope =
         build_command_envelope(command_source, Command::ClosePane(ClosePaneArgs::default()));
     let command_id = command_envelope.command_id;
@@ -4409,12 +4396,8 @@ fn in_session_cli_session_id_is_authoritative_over_a_mismatched_client() {
         .session_by_id
         .insert(attached_session.session_id, attached_session);
 
-    let command_source = CommandSource::from_in_session_cli(
-        claimed_session_id,
-        Some(client_id),
-        source_pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source =
+        build_in_session_source(claimed_session_id, Some(client_id), source_pane_id);
     let command_envelope = build_command_envelope(
         command_source,
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
@@ -4549,12 +4532,7 @@ fn in_session_cli_tab_default_uses_the_source_pane_tab() {
 
     // CloseTab with no explicit tab: an in-session CLI source resolves to the
     // tab that holds `first_pane_id`, not to the client's active tab.
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(client_id),
-        first_pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, Some(client_id), first_pane_id);
     let command_result = runtime.dispatch(build_command_envelope(
         command_source,
         Command::CloseTab(CloseTabArgs::default()),
@@ -4595,12 +4573,7 @@ fn in_session_cli_tab_default_with_removed_source_pane_is_gone() {
 
     // The source pane_id doesn't exist in the registry (nor any tab layout).
     let stale_pane_id = PaneId::new();
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(client_id),
-        stale_pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, Some(client_id), stale_pane_id);
     let command_envelope =
         build_command_envelope(command_source, Command::CloseTab(CloseTabArgs::default()));
     let command_id = command_envelope.command_id;
@@ -5641,6 +5614,20 @@ fn new_pane_adoption_reflows_a_stale_sized_background_sibling() {
         .unwrap()
         .last()
         .unwrap();
+    // The narrow viewer's 40x10 terminal minus its two chrome rows.
+    assert_eq!(
+        narrow_pane_size,
+        compute_solved_pty_size(
+            &runtime,
+            session_id,
+            back_tab_id,
+            Size {
+                column_count: 40,
+                row_count: 8,
+            },
+            split_pane_id,
+        )
+    );
 
     // The narrow viewer leaves the back tab, which is now unviewed; its PTYs keep
     // the stale 40-wide size.
@@ -5672,9 +5659,19 @@ fn new_pane_adoption_reflows_a_stale_sized_background_sibling() {
         .unwrap()
         .last()
         .unwrap();
-    assert!(
-        wide_pane_size.column_count > narrow_pane_size.column_count,
-        "stale background sibling was reflowed to the larger viewport (was {narrow_pane_size:?}, now {wide_pane_size:?})"
+    // The wide viewer's 100x50 terminal minus its two chrome rows.
+    assert_eq!(
+        wide_pane_size,
+        compute_solved_pty_size(
+            &runtime,
+            session_id,
+            back_tab_id,
+            Size {
+                column_count: 100,
+                row_count: 48,
+            },
+            split_pane_id,
+        )
     );
 }
 
@@ -9523,12 +9520,7 @@ fn resize_pane_via_in_session_cli_defaults_to_the_issuing_pane() {
 
     // Issued from inside root's pane with no explicit target: root grows
     // right by 3, so its neighbor A donates 3 columns.
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(client_id),
-        root_pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, Some(client_id), root_pane_id);
     let command_envelope = build_command_envelope(
         command_source,
         Command::ResizePane(ResizePaneArgs {
@@ -11432,12 +11424,7 @@ fn in_session_cli_move_tab_defaults_to_the_source_pane_tab() {
 
     // MoveTab with no explicit tab: an in-session CLI source resolves to the
     // tab that holds `first_pane_id`, not to the client's active tab.
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(client_id),
-        first_pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, Some(client_id), first_pane_id);
     let command_result = runtime.dispatch(build_command_envelope(
         command_source,
         Command::MoveTab(MoveTabArgs {
@@ -12274,12 +12261,7 @@ fn toggle_fullscreen_from_the_issuing_pane_moves_the_acting_focus() {
 
     // Issued from inside root's pane while the client's focus is on the
     // split pane: root is promoted and the focus follows it.
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(client_id),
-        root_pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, Some(client_id), root_pane_id);
     let command_envelope = build_command_envelope(command_source, Command::TogglePaneFullscreen);
     match runtime.dispatch(command_envelope) {
         CommandResult::Ok { emitted_events, .. } => {
@@ -12337,12 +12319,7 @@ fn toggle_fullscreen_on_an_unviewed_tab_is_rejected() {
 
     // Issued from inside the pane of the tab that no client views: the toggle
     // is refused, and the tab stays tiled.
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(client_id),
-        second_pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, Some(client_id), second_pane_id);
     let command_envelope = build_command_envelope(command_source, Command::TogglePaneFullscreen);
     let command_id = command_envelope.command_id;
     assert_eq!(
@@ -13834,10 +13811,10 @@ fn build_floating_pane_fixture() -> FloatingPaneFixture {
         .add_member(FloatingMember {
             pane_id: floating_pane_id,
             desired_size: build_sixty_percent_floating_pane_size(),
-            solved_size: FloatingPaneSizeSolve::Sized(Size {
+            solved_size: Size {
                 column_count: 72,
                 row_count: 24,
-            }),
+            },
         })
         .expect("the floating set is empty");
     let floating_pty_size = PtySize {
@@ -13919,10 +13896,10 @@ fn a_smaller_client_shrinks_every_floating_pane_and_its_detach_regrows_them() {
     );
     assert_eq!(
         get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
-        FloatingPaneSizeSolve::Sized(Size {
+        Size {
             column_count: 48,
             row_count: 13,
-        })
+        }
     );
 
     let detach_events = runtime.handle_client_detach(bob_client_id);
@@ -13936,10 +13913,10 @@ fn a_smaller_client_shrinks_every_floating_pane_and_its_detach_regrows_them() {
     );
     assert_eq!(
         get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
-        FloatingPaneSizeSolve::Sized(Size {
+        Size {
             column_count: 72,
             row_count: 24,
-        })
+        }
     );
 }
 
@@ -13981,15 +13958,15 @@ fn dropping_a_client_that_did_not_attach_again_regrows_every_floating_pane() {
     );
     assert_eq!(
         get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
-        FloatingPaneSizeSolve::Sized(Size {
+        Size {
             column_count: 72,
             row_count: 24,
-        })
+        }
     );
 }
 
 #[test]
-fn a_client_too_small_for_the_floating_minimum_suppresses_the_pane_and_keeps_its_pty() {
+fn a_client_too_small_for_the_floating_minimum_shrinks_the_pane_to_its_pane_area() {
     let FloatingPaneFixture {
         mut runtime,
         fake_pty_backend,
@@ -14016,13 +13993,10 @@ fn a_client_too_small_for_the_floating_minimum_suppresses_the_pane_and_keeps_its
         SystemTime::now(),
         false,
     );
-    let floating_pane_size_count = fake_pty_backend
-        .list_pane_sizes(floating_pane_id)
-        .expect("the floating pane spawned")
-        .len();
 
-    // A 21-column pane area cannot hold the 22-column floating minimum, and
-    // cannot hold the tiled pane's 22-column outer minimum either.
+    // A 21-column pane area cuts the 22-column floating minimum to 21
+    // columns: outer 21x18, PTY 19x14. The tiled pane's 22-column outer
+    // minimum does not fit either, so the tiled pane keeps its PTY.
     let shrink_events = runtime.handle_client_resize(
         bob_client_id,
         Size {
@@ -14036,36 +14010,33 @@ fn a_client_too_small_for_the_floating_minimum_suppresses_the_pane_and_keeps_its
         None,
     );
 
-    assert_eq!(shrink_events, Vec::new());
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
-        FloatingPaneSizeSolve::Suppressed
+        shrink_events,
+        vec![build_pty_resized(floating_pane_id, 19, 14)]
     );
     assert_eq!(
-        runtime.pty_size_by_pane_id[&floating_pane_id],
-        PtySize {
-            column_count: 46,
-            row_count: 9,
+        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        Size {
+            column_count: 21,
+            row_count: 18,
         }
     );
     assert_eq!(
         fake_pty_backend
             .list_pane_sizes(floating_pane_id)
             .expect("the floating pane spawned")
-            .len(),
-        floating_pane_size_count
+            .last(),
+        Some(&PtySize {
+            column_count: 19,
+            row_count: 14,
+        })
     );
-    // A suppressed floating pane's output is still read.
-    runtime.handle_pty_output(floating_pane_id, b"top");
-    let floating_grid = runtime.list_terminal_engines()[&floating_pane_id]
-        .get_terminal_state()
-        .get_active_grid();
     assert_eq!(
-        [0, 1, 2].map(|column_index| floating_grid
-            .get_cell(0, column_index)
-            .expect("cell in bounds")
-            .get_character()),
-        ['t', 'o', 'p']
+        runtime.pty_size_by_pane_id[&tiled_pane_id],
+        PtySize {
+            column_count: 78,
+            row_count: 20,
+        }
     );
 
     // 60% of a 100x30 pane area is 60x18.
@@ -14094,10 +14065,10 @@ fn a_client_too_small_for_the_floating_minimum_suppresses_the_pane_and_keeps_its
         .list_members()[0];
     assert_eq!(
         floating_member.solved_size,
-        FloatingPaneSizeSolve::Sized(Size {
+        Size {
             column_count: 60,
             row_count: 18,
-        })
+        }
     );
     assert_eq!(
         floating_member.desired_size,
@@ -14142,10 +14113,10 @@ fn a_starving_client_beside_a_roomy_one_leaves_every_floating_pane_as_it_is() {
     );
     assert_eq!(
         get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
-        FloatingPaneSizeSolve::Sized(Size {
+        Size {
             column_count: 72,
             row_count: 24,
-        })
+        }
     );
 }
 
@@ -14174,10 +14145,10 @@ fn every_client_starving_freezes_every_floating_pane_until_one_reports_room() {
     assert_eq!(starving_events, Vec::new());
     assert_eq!(
         get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
-        FloatingPaneSizeSolve::Sized(Size {
+        Size {
             column_count: 72,
             row_count: 24,
-        })
+        }
     );
 
     let roomy_events = runtime.handle_client_resize(
@@ -14216,10 +14187,10 @@ fn detaching_the_last_client_freezes_every_floating_pane_until_a_client_attaches
     assert_eq!(detach_events, Vec::new());
     assert_eq!(
         get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
-        FloatingPaneSizeSolve::Sized(Size {
+        Size {
             column_count: 72,
             row_count: 24,
-        })
+        }
     );
 
     let bob_client_id = ClientId::new();
@@ -15074,12 +15045,7 @@ fn a_detach_command_ends_the_session_under_auto_close() {
     // The client detaches itself: the command path lands in the same handler a
     // connection drop does.
     let command_envelope = build_command_envelope(
-        CommandSource::from_in_session_cli(
-            session_id,
-            Some(client_id),
-            pane_id,
-            PathBuf::from("/sock"),
-        ),
+        build_in_session_source(session_id, Some(client_id), pane_id),
         Command::Detach(DetachArgs { client_id: None }),
     );
     let command_id = command_envelope.command_id;
@@ -15866,9 +15832,19 @@ fn new_pane_split_rewraps_the_sibling_grid_content() {
         Command::NewPane(build_new_pane_args()),
     ));
     let narrow_pane_pty_size = runtime.pty_size_by_pane_id[&split_pane_id];
-    assert!(
-        narrow_pane_pty_size.column_count < wide_pane_pty_size.column_count,
-        "narrow {narrow_pane_pty_size:?} wide {wide_pane_pty_size:?}"
+    // The client's 80x24 terminal minus its two chrome rows.
+    assert_eq!(
+        narrow_pane_pty_size,
+        compute_solved_pty_size(
+            &runtime,
+            session_id,
+            tab_id,
+            Size {
+                column_count: 80,
+                row_count: 22,
+            },
+            split_pane_id,
+        )
     );
     let grid = runtime.terminal_engine_by_pane_id[&split_pane_id]
         .get_terminal_state()
@@ -15921,7 +15897,7 @@ fn bootstrap_root_pane_rewraps_on_first_split() {
             SystemTime::now(),
         )
         .expect("bootstrap");
-    let (_, _, root_pane_id) = get_only_session_slot(&runtime);
+    let (session_id, tab_id, root_pane_id) = get_only_session_slot(&runtime);
     let wide_pane_pty_size = runtime.pty_size_by_pane_id[&root_pane_id];
     let written_line: String = "A".repeat(wide_pane_pty_size.column_count as usize - 2);
     let _ = runtime
@@ -15935,9 +15911,19 @@ fn bootstrap_root_pane_rewraps_on_first_split() {
         Command::NewPane(build_new_pane_args()),
     ));
     let narrow_pane_pty_size = runtime.pty_size_by_pane_id[&root_pane_id];
-    assert!(
-        narrow_pane_pty_size.column_count < wide_pane_pty_size.column_count,
-        "narrow {narrow_pane_pty_size:?} wide {wide_pane_pty_size:?}"
+    // The client's 80x24 terminal minus its two chrome rows.
+    assert_eq!(
+        narrow_pane_pty_size,
+        compute_solved_pty_size(
+            &runtime,
+            session_id,
+            tab_id,
+            Size {
+                column_count: 80,
+                row_count: 22,
+            },
+            root_pane_id,
+        )
     );
     let grid = runtime.terminal_engine_by_pane_id[&root_pane_id]
         .get_terminal_state()
@@ -16574,12 +16560,7 @@ fn lock_from_a_pane_whose_client_detached_locks_the_sole_client() {
 
     // The pane's own client is detached, and exactly one client is attached:
     // `koshi lock` acts on that client.
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(detached_client_id),
-        pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, Some(detached_client_id), pane_id);
     let command_envelope = build_command_envelope(
         command_source,
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
@@ -16603,8 +16584,7 @@ fn lock_from_a_clientless_pane_locks_the_sole_client() {
 
     // A pane spawned with no designated client names none. It reads the same
     // as a client that has gone: the sole attached client stands in.
-    let command_source =
-        CommandSource::from_in_session_cli(session_id, None, pane_id, PathBuf::from("/sock"));
+    let command_source = build_in_session_source(session_id, None, pane_id);
     let command_envelope = build_command_envelope(
         command_source,
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
@@ -16631,12 +16611,7 @@ fn lock_from_a_detached_client_with_two_attached_is_ambiguous() {
 
     // Two windows are attached and the issuer is not one of them, so there is
     // no single window to lock. Neither is guessed at.
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(detached_client_id),
-        pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, Some(detached_client_id), pane_id);
     let command_envelope = build_command_envelope(
         command_source,
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
@@ -16672,12 +16647,7 @@ fn lock_from_an_attached_client_ignores_the_sole_client_fallback() {
 
     // The issuer is attached: the lock acts on the issuer, with two clients
     // attached.
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(issuer_client_id),
-        pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, Some(issuer_client_id), pane_id);
     let command_envelope = build_command_envelope(
         command_source,
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
@@ -16709,8 +16679,7 @@ fn fullscreen_from_a_clientless_pane_zooms_the_sole_client() {
 
     // The zoom is per-client state; with one client attached, the pane the CLI
     // was issued from fills that client's view.
-    let command_source =
-        CommandSource::from_in_session_cli(session_id, None, split_pane_id, PathBuf::from("/sock"));
+    let command_source = build_in_session_source(session_id, None, split_pane_id);
     let command_envelope = build_command_envelope(command_source, Command::TogglePaneFullscreen);
     assert_eq!(
         get_command_outcome(&runtime.dispatch(command_envelope)),
@@ -17010,12 +16979,7 @@ fn focus_tab_from_a_detached_client_falls_back_to_the_sole_client() {
 
     // A named-but-gone client falls back exactly as a source naming none does:
     // the switch lands on the one attached window.
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(detached_client_id),
-        pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, Some(detached_client_id), pane_id);
     let command_envelope = build_command_envelope(
         command_source,
         Command::FocusTab(FocusTabArgs {
@@ -17052,12 +17016,7 @@ fn an_explicit_client_outranks_the_sole_client_fallback() {
 
     // `--client` names the window outright: the issuing client is attached and
     // still does not win, and two attached clients are not ambiguous.
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(issuer_client_id),
-        pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, Some(issuer_client_id), pane_id);
     let command_envelope = build_command_envelope(
         command_source,
         Command::FocusTab(FocusTabArgs {
@@ -17103,8 +17062,7 @@ fn an_explicit_client_that_is_not_attached_never_falls_back() {
     // Naming a window that is not there is an error, not an invitation to pick
     // the one that is: a command aimed at a specific client never lands on
     // another one.
-    let command_source =
-        CommandSource::from_in_session_cli(session_id, None, pane_id, PathBuf::from("/sock"));
+    let command_source = build_in_session_source(session_id, None, pane_id);
     let command_envelope = build_command_envelope(
         command_source,
         Command::FocusTab(FocusTabArgs {
@@ -17145,12 +17103,7 @@ fn fullscreen_from_a_pane_on_a_tab_nobody_views_is_refused() {
     // The fallback client is a real client, but it is looking at another tab.
     // Zooming changes what a client draws, and nobody draws this pane's tab, so
     // there is no view to change and nothing is mutated.
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        None,
-        background_pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, None, background_pane_id);
     let command_envelope = build_command_envelope(command_source, Command::TogglePaneFullscreen);
     let command_id = command_envelope.command_id;
     assert_eq!(
@@ -17180,12 +17133,7 @@ fn lock_from_a_pane_on_a_background_tab_still_locks_the_sole_client() {
 
     // Lock mode is the client's own state with no pane or tab in it, so which
     // tab the issuing pane sits on does not matter.
-    let command_source = CommandSource::from_in_session_cli(
-        session_id,
-        None,
-        background_pane_id,
-        PathBuf::from("/sock"),
-    );
+    let command_source = build_in_session_source(session_id, None, background_pane_id);
     let command_envelope = build_command_envelope(
         command_source,
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
@@ -18311,12 +18259,7 @@ fn a_switch_puts_the_session_to_join_on_the_clients_queue() {
     let target_session_id = SessionId::new();
 
     let command_envelope = build_command_envelope(
-        CommandSource::from_in_session_cli(
-            session_id,
-            Some(client_id),
-            pane_id,
-            PathBuf::from("/sock"),
-        ),
+        build_in_session_source(session_id, Some(client_id), pane_id),
         Command::SwitchSession(SwitchSessionArgs {
             client_id: None,
             session_id: target_session_id,
@@ -18359,12 +18302,7 @@ fn a_switch_into_the_session_the_client_is_already_in_is_refused() {
     let delivery_receiver = runtime.subscribe(client_id);
 
     let command_envelope = build_command_envelope(
-        CommandSource::from_in_session_cli(
-            session_id,
-            Some(client_id),
-            pane_id,
-            PathBuf::from("/sock"),
-        ),
+        build_in_session_source(session_id, Some(client_id), pane_id),
         Command::SwitchSession(SwitchSessionArgs {
             client_id: None,
             session_id,
@@ -18405,12 +18343,7 @@ fn a_switch_naming_a_client_that_is_not_attached_is_refused() {
     let stranger_client_id = ClientId::new();
 
     let command_envelope = build_command_envelope(
-        CommandSource::from_in_session_cli(
-            session_id,
-            Some(client_id),
-            pane_id,
-            PathBuf::from("/sock"),
-        ),
+        build_in_session_source(session_id, Some(client_id), pane_id),
         Command::SwitchSession(SwitchSessionArgs {
             client_id: Some(stranger_client_id),
             session_id: SessionId::new(),
@@ -18448,12 +18381,7 @@ fn a_client_that_switched_away_ends_the_session_under_auto_close() {
     let _delivery_receiver = runtime.subscribe(client_id);
 
     let command_envelope = build_command_envelope(
-        CommandSource::from_in_session_cli(
-            session_id,
-            Some(client_id),
-            pane_id,
-            PathBuf::from("/sock"),
-        ),
+        build_in_session_source(session_id, Some(client_id), pane_id),
         Command::SwitchSession(SwitchSessionArgs {
             client_id: None,
             session_id: SessionId::new(),
@@ -18560,12 +18488,7 @@ fn a_switch_is_refused_when_the_clients_queue_is_full() {
     runtime.publish_events(&queued_events);
 
     let command_envelope = build_command_envelope(
-        CommandSource::from_in_session_cli(
-            session_id,
-            Some(client_id),
-            pane_id,
-            PathBuf::from("/sock"),
-        ),
+        build_in_session_source(session_id, Some(client_id), pane_id),
         Command::SwitchSession(SwitchSessionArgs {
             client_id: None,
             session_id: SessionId::new(),
@@ -18897,20 +18820,19 @@ fn a_new_pane_for_a_starving_client_uses_the_other_viewers_size() {
         .expect("the split pane");
 
     // The sizing client's 80x24 terminal minus its two chrome rows.
-    let solved_pane_sizes = compute_pane_spawn_sizes(
-        runtime.session_by_id[&session_id].tabs[&tab_id].get_layout_tree(),
-        Size {
-            column_count: 80,
-            row_count: 22,
-        },
-        PaneSizing::default(),
+    assert_eq!(
+        runtime.pty_size_by_pane_id[&new_pane_id],
+        compute_solved_pty_size(
+            &runtime,
+            session_id,
+            tab_id,
+            Size {
+                column_count: 80,
+                row_count: 22,
+            },
+            new_pane_id,
+        )
     );
-    let expected_pty_size = solved_pane_sizes
-        .iter()
-        .find(|(pane_id, _)| *pane_id == new_pane_id)
-        .map(|(_, pane_size)| *pane_size)
-        .expect("the split pane is solved");
-    assert_eq!(runtime.pty_size_by_pane_id[&new_pane_id], expected_pty_size);
 }
 
 /// A resize that reports a pane area smaller than the terminal reflows every
@@ -18943,17 +18865,8 @@ fn a_resize_reporting_a_smaller_pane_area_resizes_each_pane_once() {
         None,
     );
 
-    let solved_pane_sizes = compute_pane_spawn_sizes(
-        runtime.session_by_id[&session_id].tabs[&tab_id].get_layout_tree(),
-        reported_pane_size,
-        PaneSizing::default(),
-    );
-    let get_solved_pane_size = |wanted_pane_id: PaneId| {
-        solved_pane_sizes
-            .iter()
-            .find(|(pane_id, _)| *pane_id == wanted_pane_id)
-            .map(|(_, size)| *size)
-            .expect("the pane is solved")
+    let get_solved_pane_size = |pane_id: PaneId| {
+        compute_solved_pty_size(&runtime, session_id, tab_id, reported_pane_size, pane_id)
     };
     assert_eq!(
         emitted_events,
@@ -19080,17 +18993,8 @@ fn a_client_reporting_a_size_after_starving_resizes_each_pane_again() {
         None,
     );
 
-    let solved_pane_sizes = compute_pane_spawn_sizes(
-        runtime.session_by_id[&session_id].tabs[&tab_id].get_layout_tree(),
-        reported_pane_size,
-        PaneSizing::default(),
-    );
-    let get_solved_pane_size = |wanted_pane_id: PaneId| {
-        solved_pane_sizes
-            .iter()
-            .find(|(pane_id, _)| *pane_id == wanted_pane_id)
-            .map(|(_, size)| *size)
-            .expect("the pane is solved")
+    let get_solved_pane_size = |pane_id: PaneId| {
+        compute_solved_pty_size(&runtime, session_id, tab_id, reported_pane_size, pane_id)
     };
     assert_eq!(
         emitted_events,
@@ -19493,7 +19397,7 @@ fn get_floating_member(runtime: &Server, session_id: SessionId, pane_id: PaneId)
 }
 
 #[test]
-fn a_floating_new_pane_spawns_unfocused_at_the_default_size() {
+fn a_floating_new_pane_spawns_at_the_default_size_and_takes_the_issuers_input() {
     let FloatingCommandFixture {
         mut runtime,
         fake_pty_backend,
@@ -19523,6 +19427,12 @@ fn a_floating_new_pane_spawns_unfocused_at_the_default_size() {
                     pane_id: floating_pane_id,
                     tab_id: None,
                 }),
+                Event::PaneFocused(PaneFocused {
+                    client_id: alice_client_id,
+                    tab_id: None,
+                    pane_id: floating_pane_id,
+                    previous_pane_id: Some(tiled_pane_id),
+                }),
                 build_pty_resized(floating_pane_id, 46, 9),
             ],
         }
@@ -19533,10 +19443,10 @@ fn a_floating_new_pane_spawns_unfocused_at_the_default_size() {
         [FloatingMember {
             pane_id: floating_pane_id,
             desired_size: DEFAULT_FLOATING_PANE_SIZE,
-            solved_size: FloatingPaneSizeSolve::Sized(Size {
+            solved_size: Size {
                 column_count: 48,
                 row_count: 13,
-            }),
+            },
         }]
     );
     assert_eq!(
@@ -19558,9 +19468,16 @@ fn a_floating_new_pane_spawns_unfocused_at_the_default_size() {
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
         alice_client.list_floating_pane_focus_order(),
-        Vec::<PaneId>::new()
+        [floating_pane_id]
     );
-    assert_eq!(alice_client.get_focused_floating_pane_id(), None);
+    assert_eq!(
+        alice_client.get_focused_floating_pane_id(),
+        Some(floating_pane_id)
+    );
+    assert_eq!(
+        alice_client.get_active_focused_pane_id(),
+        Some(floating_pane_id)
+    );
     assert_eq!(
         alice_client.get_floating_pane_view(floating_pane_id),
         FloatingPaneView::default()
@@ -19569,7 +19486,7 @@ fn a_floating_new_pane_spawns_unfocused_at_the_default_size() {
         alice_client.get_focused_pane_id(tab_id),
         Some(tiled_pane_id)
     );
-    assert_eq!(alice_client.get_placement_revision(), alice_revision);
+    assert_eq!(alice_client.get_placement_revision(), alice_revision + 1);
     assert_eq!(
         fake_pty_backend
             .list_pane_sizes(floating_pane_id)
@@ -19770,7 +19687,7 @@ fn a_floating_new_pane_whose_child_cannot_launch_commits_nothing() {
 }
 
 #[test]
-fn a_floating_new_pane_with_no_client_attached_starts_suppressed_and_cannot_be_placed() {
+fn a_floating_new_pane_with_no_client_attached_takes_the_floating_minimum_and_cannot_be_placed() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
     let tab_id = TabId::new();
     let tiled_pane_id = PaneId::new();
@@ -19781,10 +19698,10 @@ fn a_floating_new_pane_with_no_client_attached_starts_suppressed_and_cannot_be_p
     runtime.session_by_id.insert(session_id, session);
     let command_source = CommandSource::from_external_cli(Some(session_id), None);
 
-    for (at, is_pinned) in [(Some(Point { column: 5, row: 2 }), false), (None, true)] {
+    for (top_left_cell, is_pinned) in [(Some(Point { column: 5, row: 2 }), false), (None, true)] {
         let command_envelope = build_command_envelope(
             command_source.clone(),
-            Command::NewPane(build_floating_new_pane_args(None, at, is_pinned)),
+            Command::NewPane(build_floating_new_pane_args(None, top_left_cell, is_pinned)),
         );
         let command_id = command_envelope.command_id;
         assert_eq!(
@@ -19828,7 +19745,10 @@ fn a_floating_new_pane_with_no_client_attached_starts_suppressed_and_cannot_be_p
     );
     assert_eq!(
         get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
-        FloatingPaneSizeSolve::Suppressed
+        Size {
+            column_count: 4,
+            row_count: 5,
+        }
     );
 }
 
@@ -19932,14 +19852,15 @@ fn closing_a_floating_pane_removes_it_from_every_client_and_kills_its_child() {
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, Some(Point { column: 5, row: 2 }), false),
     );
-    runtime
+    let bob_client = runtime
         .session_by_id
         .get_mut(&session_id)
         .expect("the seeded session")
         .clients
         .get_client_mut_by_id(bob_client_id)
-        .expect("bob is attached")
-        .minimize_floating_pane(floating_pane_id);
+        .expect("bob is attached");
+    assert!(bob_client.focus_floating_pane(floating_pane_id));
+    assert!(bob_client.minimize_floating_pane(floating_pane_id));
     let session_revision_before = runtime.session_by_id[&session_id].get_placement_revision();
     let client_revisions = [alice_client_id, bob_client_id].map(|client_id| {
         get_attached_client(&runtime, session_id, client_id).get_placement_revision()
@@ -19954,6 +19875,8 @@ fn closing_a_floating_pane_removes_it_from_every_client_and_kills_its_child() {
     );
     let command_id = command_envelope.command_id;
 
+    // The new pane took alice's input; closing it returns the input to
+    // alice's tiled pane. bob had minimized it, so bob's input stays.
     assert_eq!(
         runtime.dispatch(command_envelope),
         CommandResult::Ok {
@@ -19965,6 +19888,12 @@ fn closing_a_floating_pane_removes_it_from_every_client_and_kills_its_child() {
                 Event::PaneRemoved(PaneRemoved {
                     pane_id: floating_pane_id,
                     tab_id: None,
+                }),
+                Event::PaneFocused(PaneFocused {
+                    client_id: alice_client_id,
+                    tab_id: Some(tab_id),
+                    pane_id: tiled_pane_id,
+                    previous_pane_id: Some(floating_pane_id),
                 }),
             ],
         }
@@ -19992,6 +19921,8 @@ fn closing_a_floating_pane_removes_it_from_every_client_and_kills_its_child() {
             client.get_floating_pane_view(floating_pane_id),
             FloatingPaneView::default()
         );
+        assert_eq!(client.list_floating_pane_focus_order(), []);
+        assert_eq!(client.get_active_focused_pane_id(), Some(tiled_pane_id));
         assert_eq!(client.get_placement_revision(), client_revision + 1);
     }
     assert_eq!(runtime.live_pane_ids, HashSet::from([tiled_pane_id]));
@@ -20020,12 +19951,8 @@ fn a_split_or_a_stack_from_a_floating_pane_is_refused() {
         build_floating_new_pane_args(None, None, false),
     );
     let expected_help = format!("{floating_pane_id} is floating and has no split to divide");
-    let in_session_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(alice_client_id),
-        floating_pane_id,
-        PathBuf::from("/run/koshi/session.sock"),
-    );
+    let in_session_source =
+        build_in_session_source(session_id, Some(alice_client_id), floating_pane_id);
     let refused_requests = [
         (
             CommandSource::from_key_binding(alice_client_id),
@@ -20178,12 +20105,8 @@ fn a_tab_command_or_a_zoom_from_a_floating_panes_shell_is_refused() {
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    let in_session_source = CommandSource::from_in_session_cli(
-        session_id,
-        Some(alice_client_id),
-        floating_pane_id,
-        PathBuf::from("/run/koshi/session.sock"),
-    );
+    let in_session_source =
+        build_in_session_source(session_id, Some(alice_client_id), floating_pane_id);
     let refused_commands = [
         (
             Command::CloseTab(CloseTabArgs::default()),
@@ -20224,14 +20147,24 @@ fn scrolling_a_floating_pane_needs_it_shown_on_the_client() {
         tab_id,
         ..
     } = build_floating_command_fixture();
+    // The new pane takes alice's input, so alice shows it.
     let floating_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    let dispatch_scroll = |runtime: &mut Server| {
+    let bob_client_id = attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+    );
+    let dispatch_scroll = |runtime: &mut Server, client_id: ClientId| {
         let command_envelope = build_command_envelope(
-            CommandSource::from_key_binding(alice_client_id),
+            CommandSource::from_key_binding(client_id),
             Command::ScrollPane(ScrollPaneArgs {
                 pane_id: Some(floating_pane_id),
                 scroll_line_count: 3,
@@ -20241,7 +20174,16 @@ fn scrolling_a_floating_pane_needs_it_shown_on_the_client() {
         (command_id, runtime.dispatch(command_envelope))
     };
 
-    let (command_id, command_result) = dispatch_scroll(&mut runtime);
+    let (command_id, command_result) = dispatch_scroll(&mut runtime, alice_client_id);
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+
+    let (command_id, command_result) = dispatch_scroll(&mut runtime, bob_client_id);
     assert_eq!(
         command_result,
         CommandResult::Rejected {
@@ -20258,54 +20200,14 @@ fn scrolling_a_floating_pane_needs_it_shown_on_the_client() {
         .clients
         .get_client_mut_by_id(alice_client_id)
         .expect("alice is attached");
-    assert!(alice_client.focus_floating_pane(floating_pane_id));
-    let (command_id, command_result) = dispatch_scroll(&mut runtime);
-    assert_eq!(
-        command_result,
-        CommandResult::Ok {
-            command_id,
-            emitted_events: Vec::new(),
-        }
-    );
-
-    runtime
-        .session_by_id
-        .get_mut(&session_id)
-        .expect("the seeded session")
-        .clients
-        .get_client_mut_by_id(alice_client_id)
-        .expect("alice is attached")
-        .minimize_floating_pane(floating_pane_id);
-    let (command_id, command_result) = dispatch_scroll(&mut runtime);
+    assert!(alice_client.minimize_floating_pane(floating_pane_id));
+    let (command_id, command_result) = dispatch_scroll(&mut runtime, alice_client_id);
     assert_eq!(
         command_result,
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::InvalidState,
             help: Some(format!("{floating_pane_id} is minimized")),
-        }
-    );
-
-    // bob's 3x3 terminal leaves no room for the floating minimum.
-    attach_bob(
-        &mut runtime,
-        session_id,
-        tab_id,
-        Size {
-            column_count: 3,
-            row_count: 3,
-        },
-    );
-    let (command_id, command_result) = dispatch_scroll(&mut runtime);
-    assert_eq!(
-        command_result,
-        CommandResult::Rejected {
-            command_id,
-            reason: RejectReason::InvalidState,
-            help: Some(format!(
-                "{floating_pane_id} is suppressed; the smallest attached terminal has no room \
-                 for it"
-            )),
         }
     );
 }
@@ -20875,7 +20777,7 @@ fn a_floating_pane_resize_past_the_minimum_or_the_smallest_terminal_is_refused()
 }
 
 #[test]
-fn a_suppressed_floating_pane_refuses_a_resize() {
+fn a_client_below_the_floating_minimum_does_not_limit_a_floating_resize() {
     let FloatingCommandFixture {
         mut runtime,
         session_id,
@@ -20888,7 +20790,8 @@ fn a_suppressed_floating_pane_refuses_a_resize() {
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    // bob's 3x3 terminal leaves no room for the floating minimum.
+    // bob's 3x3 terminal gives a 3x1 pane area, below the 4x5 floating
+    // minimum: bob has no floating viewport.
     attach_bob(
         &mut runtime,
         session_id,
@@ -20899,6 +20802,8 @@ fn a_suppressed_floating_pane_refuses_a_resize() {
         },
     );
 
+    // 48x13 on alice's 80x22 pane area, grown right by 1: outer 49x13, PTY
+    // 47x9.
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
@@ -20909,13 +20814,16 @@ fn a_suppressed_floating_pane_refuses_a_resize() {
 
     assert_eq!(
         command_result,
-        CommandResult::Rejected {
+        CommandResult::Ok {
             command_id,
-            reason: RejectReason::InvalidState,
-            help: Some(format!(
-                "{floating_pane_id} is suppressed; the smallest attached terminal has no room for \
-                 it"
-            )),
+            emitted_events: vec![build_pty_resized(floating_pane_id, 47, 9)],
+        }
+    );
+    assert_eq!(
+        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        Size {
+            column_count: 49,
+            row_count: 13,
         }
     );
 }
@@ -21010,34 +20918,25 @@ fn an_external_floating_pane_resize_acts_for_the_named_client() {
 }
 
 #[test]
-fn a_floating_pane_whose_child_exits_leaves_at_once_and_a_suppressed_one_stays() {
+fn a_floating_pane_whose_child_exits_leaves_at_once_and_its_input_moves_to_the_other_one() {
     let FloatingCommandFixture {
         mut runtime,
         fake_pty_backend,
         session_id,
         alice_client_id,
-        tab_id,
         tiled_pane_id,
+        ..
     } = build_floating_command_fixture();
-    let exiting_pane_id = create_floating_pane(
-        &mut runtime,
-        CommandSource::from_key_binding(alice_client_id),
-        build_floating_new_pane_args(None, Some(Point { column: 5, row: 2 }), false),
-    );
     let staying_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    // bob's 3x3 terminal leaves no room: both floating panes are suppressed.
-    attach_bob(
+    // The second pane takes over alice's input from the first.
+    let exiting_pane_id = create_floating_pane(
         &mut runtime,
-        session_id,
-        tab_id,
-        Size {
-            column_count: 3,
-            row_count: 3,
-        },
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, Some(Point { column: 5, row: 2 }), false),
     );
     let session_revision_before = runtime.session_by_id[&session_id].get_placement_revision();
     let alice_revision =
@@ -21060,6 +20959,12 @@ fn a_floating_pane_whose_child_exits_leaves_at_once_and_a_suppressed_one_stays()
                 pane_id: exiting_pane_id,
                 tab_id: None,
             }),
+            Event::PaneFocused(PaneFocused {
+                client_id: alice_client_id,
+                tab_id: None,
+                pane_id: staying_pane_id,
+                previous_pane_id: Some(exiting_pane_id),
+            }),
         ]
     );
     let session = &runtime.session_by_id[&session_id];
@@ -21068,7 +20973,10 @@ fn a_floating_pane_whose_child_exits_leaves_at_once_and_a_suppressed_one_stays()
         [FloatingMember {
             pane_id: staying_pane_id,
             desired_size: DEFAULT_FLOATING_PANE_SIZE,
-            solved_size: FloatingPaneSizeSolve::Suppressed,
+            solved_size: Size {
+                column_count: 48,
+                row_count: 13,
+            },
         }]
     );
     assert!(session
@@ -21090,6 +20998,14 @@ fn a_floating_pane_whose_child_exits_leaves_at_once_and_a_suppressed_one_stays()
     assert_eq!(
         alice_client.get_floating_pane_view(exiting_pane_id),
         FloatingPaneView::default()
+    );
+    assert_eq!(
+        alice_client.list_floating_pane_focus_order(),
+        [staying_pane_id]
+    );
+    assert_eq!(
+        alice_client.get_focused_floating_pane_id(),
+        Some(staying_pane_id)
     );
     assert_eq!(alice_client.get_placement_revision(), alice_revision + 1);
     assert_eq!(
@@ -21264,13 +21180,12 @@ fn a_pinned_floating_new_pane_the_issuer_does_not_draw_is_refused_and_spawns_not
         mut runtime,
         fake_pty_backend,
         session_id,
-        alice_client_id,
         tab_id,
         ..
     } = build_floating_command_fixture();
-    // A 3x3 terminal for bob leaves no room: the new floating pane is not drawn
-    // on bob's screen.
-    attach_bob(
+    // bob's 3x3 terminal gives a 3x1 pane area, below the 4x5 floating
+    // minimum: the new floating pane is not drawn on bob's screen.
+    let bob_client_id = attach_bob(
         &mut runtime,
         session_id,
         tab_id,
@@ -21281,7 +21196,7 @@ fn a_pinned_floating_new_pane_the_issuer_does_not_draw_is_refused_and_spawns_not
     );
     let spawned_pane_ids = fake_pty_backend.list_spawned_pane_ids();
     let command_envelope = build_command_envelope(
-        CommandSource::from_key_binding(alice_client_id),
+        CommandSource::from_key_binding(bob_client_id),
         Command::NewPane(build_floating_new_pane_args(None, None, true)),
     );
     let command_id = command_envelope.command_id;
@@ -21517,18 +21432,22 @@ fn a_floating_new_pane_opens_in_the_directory_of_the_pane_it_was_asked_from() {
     // The shell of a floating pane opens it where that shell is.
     let second_floating_pane_id = create_floating_pane(
         &mut runtime,
-        CommandSource::from_in_session_cli(
-            session_id,
-            Some(alice_client_id),
-            first_floating_pane_id,
-            PathBuf::from("/run/koshi/session.sock"),
-        ),
+        build_in_session_source(session_id, Some(alice_client_id), first_floating_pane_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    fake_pty_backend.set_live_working_directory(second_floating_pane_id, "/home/user/notes");
+    // The second floating pane took alice's input, so a key binding opens the
+    // third where the second one's shell is.
+    let third_floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
 
     for (floating_pane_id, expected_working_directory) in [
         (first_floating_pane_id, "/home/user/project"),
         (second_floating_pane_id, "/home/user/logs"),
+        (third_floating_pane_id, "/home/user/notes"),
     ] {
         assert_eq!(
             fake_pty_backend
@@ -21596,15 +21515,15 @@ fn serialize_client_record(runtime: &Server, session_id: SessionId, client_id: C
 }
 
 /// An in-session CLI source issued from the shell of `pane_id`, whose pane was
-/// spawned for `client_id`.
+/// spawned for `client_id`. `None` names a pane spawned for no client.
 fn build_in_session_source(
     session_id: SessionId,
-    client_id: ClientId,
+    client_id: Option<ClientId>,
     pane_id: PaneId,
 ) -> CommandSource {
     CommandSource::from_in_session_cli(
         session_id,
-        Some(client_id),
+        client_id,
         pane_id,
         PathBuf::from("/run/koshi/session.sock"),
     )
@@ -21734,7 +21653,7 @@ fn a_cell_past_the_pane_area_is_stored_as_given_and_a_repeated_move_changes_noth
     };
     assert_eq!(
         get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
-        FloatingPaneSizeSolve::Sized(outer_size)
+        outer_size
     );
     let alice_position =
         get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
@@ -22093,7 +22012,7 @@ fn a_pin_of_a_pinned_pane_and_an_unpin_of_an_unpinned_pane_change_nothing() {
 }
 
 #[test]
-fn a_suppressed_pane_refuses_a_pin_but_moves_and_unpins() {
+fn a_client_below_the_floating_minimum_cannot_pin_and_does_not_stop_another_clients_pin() {
     let FloatingCommandFixture {
         mut runtime,
         session_id,
@@ -22101,28 +22020,15 @@ fn a_suppressed_pane_refuses_a_pin_but_moves_and_unpins() {
         tab_id,
         ..
     } = build_floating_command_fixture();
-    let pinned_pane_id = create_floating_pane(
+    let floating_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    let (_, command_result) = dispatch_set_pane_pinned(
-        &mut runtime,
-        CommandSource::from_key_binding(alice_client_id),
-        Some(pinned_pane_id),
-        true,
-    );
-    assert_eq!(
-        get_command_outcome(&command_result),
-        Ok(vec!["PanePinChanged"])
-    );
-    let unpinned_pane_id = create_floating_pane(
-        &mut runtime,
-        CommandSource::from_key_binding(alice_client_id),
-        build_floating_new_pane_args(None, None, false),
-    );
-    // bob's 3x3 terminal leaves no room for the floating minimum.
-    attach_bob(
+    // bob's 3x3 terminal gives a 3x1 pane area, below the 4x5 floating
+    // minimum: bob has no floating viewport, and alice's 80x22 pane area alone
+    // sizes the pane.
+    let bob_client_id = attach_bob(
         &mut runtime,
         session_id,
         tab_id,
@@ -22131,18 +22037,19 @@ fn a_suppressed_pane_refuses_a_pin_but_moves_and_unpins() {
             row_count: 3,
         },
     );
-    for floating_pane_id in [pinned_pane_id, unpinned_pane_id] {
-        assert_eq!(
-            get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
-            FloatingPaneSizeSolve::Suppressed
-        );
-    }
+    assert_eq!(
+        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        Size {
+            column_count: 48,
+            row_count: 13,
+        }
+    );
     let session_records_before = serialize_session_records(&runtime);
 
     let (command_id, command_result) = dispatch_set_pane_pinned(
         &mut runtime,
-        CommandSource::from_key_binding(alice_client_id),
-        Some(unpinned_pane_id),
+        CommandSource::from_key_binding(bob_client_id),
+        Some(floating_pane_id),
         true,
     );
     assert_eq!(
@@ -22151,8 +22058,8 @@ fn a_suppressed_pane_refuses_a_pin_but_moves_and_unpins() {
             command_id,
             reason: RejectReason::InvalidState,
             help: Some(format!(
-                "{unpinned_pane_id} is suppressed; the smallest attached terminal has no room \
-                 for it"
+                "{floating_pane_id} is not drawn on the client's screen, so it has no position \
+                 to pin"
             )),
         }
     );
@@ -22161,8 +22068,8 @@ fn a_suppressed_pane_refuses_a_pin_but_moves_and_unpins() {
     let (command_id, command_result) = dispatch_set_pane_pinned(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        Some(pinned_pane_id),
-        false,
+        Some(floating_pane_id),
+        true,
     );
     assert_eq!(
         command_result,
@@ -22170,38 +22077,15 @@ fn a_suppressed_pane_refuses_a_pin_but_moves_and_unpins() {
             command_id,
             emitted_events: vec![Event::PanePinChanged(PanePinChanged {
                 client_id: alice_client_id,
-                pane_id: pinned_pane_id,
-                is_pinned: false,
+                pane_id: floating_pane_id,
+                is_pinned: true,
             })],
         }
     );
     assert_eq!(
-        get_client_floating_pane_view(&runtime, session_id, alice_client_id, pinned_pane_id)
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
             .position,
-        FloatingPanePosition::Moved(Point { column: 16, row: 4 })
-    );
-
-    let (command_id, command_result) = dispatch_move_floating_pane(
-        &mut runtime,
-        CommandSource::from_key_binding(alice_client_id),
-        unpinned_pane_id,
-        Point { column: 2, row: 1 },
-    );
-    assert_eq!(
-        command_result,
-        CommandResult::Ok {
-            command_id,
-            emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
-                client_id: alice_client_id,
-                pane_id: unpinned_pane_id,
-                top_left_cell: Point { column: 2, row: 1 },
-            })],
-        }
-    );
-    assert_eq!(
-        get_client_floating_pane_view(&runtime, session_id, alice_client_id, unpinned_pane_id)
-            .position,
-        FloatingPanePosition::Moved(Point { column: 2, row: 1 })
+        FloatingPanePosition::Pinned(Point { column: 16, row: 4 })
     );
 }
 
@@ -22240,10 +22124,10 @@ fn a_pin_for_a_client_that_reports_no_pane_area_is_refused() {
     // bob's pane area still sizes the pane.
     assert_eq!(
         get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
-        FloatingPaneSizeSolve::Sized(Size {
+        Size {
             column_count: 40,
             row_count: 12,
-        })
+        }
     );
     let session_records_before = serialize_session_records(&runtime);
 
@@ -22281,14 +22165,14 @@ fn a_minimized_pane_pins_and_moves_and_stays_minimized() {
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    runtime
+    assert!(runtime
         .session_by_id
         .get_mut(&session_id)
         .expect("the fixture's session")
         .clients
         .get_client_mut_by_id(alice_client_id)
         .expect("alice is attached")
-        .minimize_floating_pane(floating_pane_id);
+        .minimize_floating_pane(floating_pane_id));
 
     let (_, command_result) = dispatch_set_pane_pinned(
         &mut runtime,
@@ -22343,12 +22227,25 @@ fn a_pin_naming_no_pane_takes_the_acting_clients_focused_floating_pane() {
         mut runtime,
         session_id,
         alice_client_id,
+        tiled_pane_id,
         ..
     } = build_floating_command_fixture();
     let floating_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
+    );
+    // The focused tiled pane takes over alice's input from the new floating pane.
+    let focus_command_result = runtime.dispatch(build_command_envelope(
+        CommandSource::from_key_binding(alice_client_id),
+        Command::FocusPane(FocusPaneArgs {
+            focus_target: FocusTarget::Pane(tiled_pane_id),
+            client_id: None,
+        }),
+    ));
+    assert_eq!(
+        get_command_outcome(&focus_command_result),
+        Ok(vec!["PaneFocused"])
     );
     let session_records_before = serialize_session_records(&runtime);
 
@@ -22415,7 +22312,7 @@ fn an_in_session_move_and_pin_act_on_the_pane_they_were_issued_from() {
         build_floating_new_pane_args(None, None, false),
     );
     let floating_shell_source =
-        build_in_session_source(session_id, alice_client_id, floating_pane_id);
+        build_in_session_source(session_id, Some(alice_client_id), floating_pane_id);
 
     let (command_id, command_result) = dispatch_move_floating_pane(
         &mut runtime,
@@ -22456,7 +22353,7 @@ fn an_in_session_move_and_pin_act_on_the_pane_they_were_issued_from() {
     let session_records_before = serialize_session_records(&runtime);
     let (command_id, command_result) = dispatch_set_pane_pinned(
         &mut runtime,
-        build_in_session_source(session_id, alice_client_id, tiled_pane_id),
+        build_in_session_source(session_id, Some(alice_client_id), tiled_pane_id),
         None,
         true,
     );
@@ -22657,6 +22554,14 @@ fn a_key_or_mouse_of_a_client_in_another_session_changes_nothing_there() {
     );
     assert_eq!(command_result, build_not_attached_rejection(command_id));
 
+    let (command_id, command_result) = dispatch_set_pane_minimized(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(other_floating_pane_id),
+        true,
+    );
+    assert_eq!(command_result, build_not_attached_rejection(command_id));
+
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
@@ -22693,6 +22598,7 @@ fn a_view_change_past_the_maximum_client_revision_is_refused_and_a_no_op_still_s
         mut runtime,
         session_id,
         alice_client_id,
+        tiled_pane_id,
         ..
     } = build_floating_command_fixture();
     let floating_pane_id = create_floating_pane(
@@ -22767,5 +22673,1146 @@ fn a_view_change_past_the_maximum_client_revision_is_refused_and_a_no_op_still_s
             emitted_events: Vec::new(),
         }
     );
+
+    // The new floating pane takes alice's input and is shown: a minimize and a
+    // focus elsewhere are refused, and a restore or a focus of it changes
+    // nothing.
+    for (command, is_refused) in [
+        (
+            Command::SetPaneMinimized(SetPaneMinimizedArgs {
+                pane_id: Some(floating_pane_id),
+                is_minimized: true,
+            }),
+            true,
+        ),
+        (
+            Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs {
+                is_minimized: true,
+            }),
+            true,
+        ),
+        (
+            Command::FocusPane(FocusPaneArgs {
+                focus_target: FocusTarget::Pane(tiled_pane_id),
+                client_id: None,
+            }),
+            true,
+        ),
+        (
+            Command::SetPaneMinimized(SetPaneMinimizedArgs {
+                pane_id: Some(floating_pane_id),
+                is_minimized: false,
+            }),
+            false,
+        ),
+        (
+            Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs {
+                is_minimized: false,
+            }),
+            false,
+        ),
+        (
+            Command::FocusPane(FocusPaneArgs {
+                focus_target: FocusTarget::Pane(floating_pane_id),
+                client_id: None,
+            }),
+            false,
+        ),
+    ] {
+        let command_envelope =
+            build_command_envelope(CommandSource::from_key_binding(alice_client_id), command);
+        let command_id = command_envelope.command_id;
+        let expected_command_result = if is_refused {
+            build_revision_exhausted_rejection(command_id)
+        } else {
+            CommandResult::Ok {
+                command_id,
+                emitted_events: Vec::new(),
+            }
+        };
+        assert_eq!(runtime.dispatch(command_envelope), expected_command_result);
+    }
     assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+// --- Minimizing, restoring and focusing a floating pane -----------------------
+
+/// Dispatch a minimize (`is_minimized: true`) or a restore of `pane_id` from
+/// `command_source`, and return the command id with the result.
+fn dispatch_set_pane_minimized(
+    runtime: &mut Server,
+    command_source: CommandSource,
+    pane_id: Option<PaneId>,
+    is_minimized: bool,
+) -> (CommandId, CommandResult) {
+    let command_envelope = build_command_envelope(
+        command_source,
+        Command::SetPaneMinimized(SetPaneMinimizedArgs {
+            pane_id,
+            is_minimized,
+        }),
+    );
+    let command_id = command_envelope.command_id;
+    (command_id, runtime.dispatch(command_envelope))
+}
+
+/// Dispatch a minimize (`is_minimized: true`) or a restore of every floating
+/// pane from `command_source`, and return the command id with the result.
+fn dispatch_set_all_floating_panes_minimized(
+    runtime: &mut Server,
+    command_source: CommandSource,
+    is_minimized: bool,
+) -> (CommandId, CommandResult) {
+    let command_envelope = build_command_envelope(
+        command_source,
+        Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs { is_minimized }),
+    );
+    let command_id = command_envelope.command_id;
+    (command_id, runtime.dispatch(command_envelope))
+}
+
+/// Dispatch a focus of `focus_target` from `command_source`, naming no client,
+/// and return the command id with the result.
+fn dispatch_focus_pane(
+    runtime: &mut Server,
+    command_source: CommandSource,
+    focus_target: FocusTarget,
+) -> (CommandId, CommandResult) {
+    let command_envelope = build_command_envelope(
+        command_source,
+        Command::FocusPane(FocusPaneArgs {
+            focus_target,
+            client_id: None,
+        }),
+    );
+    let command_id = command_envelope.command_id;
+    (command_id, runtime.dispatch(command_envelope))
+}
+
+/// `PaneMinimizedChanged` for `client_id`'s view of `pane_id`.
+fn build_pane_minimized_changed(client_id: ClientId, pane_id: PaneId, is_minimized: bool) -> Event {
+    Event::PaneMinimizedChanged(PaneMinimizedChanged {
+        client_id,
+        pane_id,
+        is_minimized,
+    })
+}
+
+/// `PaneFocused` for `client_id`: `pane_id` takes over the client's input
+/// from `previous_pane_id`. `tab_id` is `None` for a floating pane.
+fn build_pane_focused(
+    client_id: ClientId,
+    tab_id: Option<TabId>,
+    pane_id: PaneId,
+    previous_pane_id: Option<PaneId>,
+) -> Event {
+    Event::PaneFocused(PaneFocused {
+        client_id,
+        tab_id,
+        pane_id,
+        previous_pane_id,
+    })
+}
+
+#[test]
+fn minimizing_the_focused_floating_pane_returns_the_input_to_the_tab_and_a_restore_takes_it_back() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let session_revision = runtime.session_by_id[&session_id].get_placement_revision();
+    let alice_revision =
+        get_attached_client(&runtime, session_id, alice_client_id).get_placement_revision();
+
+    // A minimize naming no pane takes the focused floating pane.
+    let (command_id, command_result) = dispatch_set_pane_minimized(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        None,
+        true,
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                build_pane_minimized_changed(alice_client_id, floating_pane_id, true),
+                build_pane_focused(
+                    alice_client_id,
+                    Some(tab_id),
+                    tiled_pane_id,
+                    Some(floating_pane_id)
+                ),
+            ],
+        }
+    );
+    let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
+    assert_eq!(
+        alice_client.get_floating_pane_view(floating_pane_id),
+        FloatingPaneView {
+            position: FloatingPanePosition::Default,
+            is_minimized: true,
+        }
+    );
+    assert_eq!(
+        alice_client.list_floating_pane_focus_order(),
+        [floating_pane_id]
+    );
+    assert_eq!(alice_client.get_focused_floating_pane_id(), None);
+    assert_eq!(
+        alice_client.get_active_focused_pane_id(),
+        Some(tiled_pane_id)
+    );
+    assert_eq!(alice_client.get_placement_revision(), alice_revision + 1);
+
+    // With no floating pane focused, a restore names its pane.
+    let session_records_before = serialize_session_records(&runtime);
+    let (command_id, command_result) = dispatch_set_pane_minimized(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        None,
+        false,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("no floating pane is focused".to_string()),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+
+    let (command_id, command_result) = dispatch_set_pane_minimized(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(floating_pane_id),
+        false,
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                build_pane_minimized_changed(alice_client_id, floating_pane_id, false),
+                build_pane_focused(alice_client_id, None, floating_pane_id, Some(tiled_pane_id)),
+            ],
+        }
+    );
+    let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
+    assert_eq!(
+        alice_client.get_floating_pane_view(floating_pane_id),
+        FloatingPaneView::default()
+    );
+    assert_eq!(
+        alice_client.get_focused_floating_pane_id(),
+        Some(floating_pane_id)
+    );
+    assert_eq!(alice_client.get_placement_revision(), alice_revision + 2);
+    assert_eq!(
+        runtime.session_by_id[&session_id].get_placement_revision(),
+        session_revision
+    );
+}
+
+#[test]
+fn a_minimize_of_a_pane_the_client_does_not_show_or_a_restore_of_a_shown_pane_changes_nothing() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let bob_client_id = attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+    );
+    // The new pane takes alice's input; bob never focused it.
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let session_records_before = serialize_session_records(&runtime);
+
+    for (client_id, is_minimized) in [(alice_client_id, false), (bob_client_id, true)] {
+        let (command_id, command_result) = dispatch_set_pane_minimized(
+            &mut runtime,
+            CommandSource::from_key_binding(client_id),
+            Some(floating_pane_id),
+            is_minimized,
+        );
+        assert_eq!(
+            command_result,
+            CommandResult::Ok {
+                command_id,
+                emitted_events: Vec::new(),
+            }
+        );
+    }
+    let (command_id, command_result) = dispatch_set_pane_minimized(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(tiled_pane_id),
+        true,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(format!(
+                "{tiled_pane_id} is tiled; only a floating pane minimizes"
+            )),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
+fn restoring_a_floating_pane_the_client_never_focused_shows_it_and_takes_the_input() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let bob_client_id = attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+    );
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let bob_revision =
+        get_attached_client(&runtime, session_id, bob_client_id).get_placement_revision();
+
+    // bob never minimized the pane, so no minimized state changes.
+    let (command_id, command_result) = dispatch_set_pane_minimized(
+        &mut runtime,
+        CommandSource::from_key_binding(bob_client_id),
+        Some(floating_pane_id),
+        false,
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![build_pane_focused(
+                bob_client_id,
+                None,
+                floating_pane_id,
+                Some(tiled_pane_id)
+            )],
+        }
+    );
+    let bob_client = get_attached_client(&runtime, session_id, bob_client_id);
+    assert_eq!(
+        bob_client.list_floating_pane_focus_order(),
+        [floating_pane_id]
+    );
+    assert_eq!(
+        bob_client.get_focused_floating_pane_id(),
+        Some(floating_pane_id)
+    );
+    assert_eq!(bob_client.get_placement_revision(), bob_revision + 1);
+}
+
+#[test]
+fn minimizing_every_floating_pane_then_restoring_every_one_keeps_their_focus_order() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_ids: [PaneId; 3] = std::array::from_fn(|_| {
+        create_floating_pane(
+            &mut runtime,
+            CommandSource::from_key_binding(alice_client_id),
+            build_floating_new_pane_args(None, None, false),
+        )
+    });
+    let [first_pane_id, second_pane_id, third_pane_id] = floating_pane_ids;
+    let alice_revision =
+        get_attached_client(&runtime, session_id, alice_client_id).get_placement_revision();
+
+    let (command_id, command_result) = dispatch_set_all_floating_panes_minimized(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        true,
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                build_pane_minimized_changed(alice_client_id, first_pane_id, true),
+                build_pane_minimized_changed(alice_client_id, second_pane_id, true),
+                build_pane_minimized_changed(alice_client_id, third_pane_id, true),
+                build_pane_focused(
+                    alice_client_id,
+                    Some(tab_id),
+                    tiled_pane_id,
+                    Some(third_pane_id)
+                ),
+            ],
+        }
+    );
+    let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
+    assert_eq!(
+        alice_client.list_floating_pane_focus_order(),
+        floating_pane_ids
+    );
+    assert_eq!(
+        floating_pane_ids.map(|pane_id| alice_client.get_floating_pane_view(pane_id).is_minimized),
+        [true; 3]
+    );
+    assert_eq!(
+        alice_client.get_active_focused_pane_id(),
+        Some(tiled_pane_id)
+    );
+    assert_eq!(alice_client.get_placement_revision(), alice_revision + 1);
+
+    let session_records_before = serialize_session_records(&runtime);
+    let (command_id, command_result) = dispatch_set_all_floating_panes_minimized(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        true,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+
+    let (command_id, command_result) = dispatch_set_all_floating_panes_minimized(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        false,
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                build_pane_minimized_changed(alice_client_id, first_pane_id, false),
+                build_pane_minimized_changed(alice_client_id, second_pane_id, false),
+                build_pane_minimized_changed(alice_client_id, third_pane_id, false),
+                build_pane_focused(alice_client_id, None, third_pane_id, Some(tiled_pane_id)),
+            ],
+        }
+    );
+    let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
+    assert_eq!(
+        alice_client.list_floating_pane_focus_order(),
+        floating_pane_ids
+    );
+    assert_eq!(
+        floating_pane_ids.map(|pane_id| alice_client.get_floating_pane_view(pane_id)),
+        [FloatingPaneView::default(); 3]
+    );
+    assert_eq!(
+        alice_client.get_focused_floating_pane_id(),
+        Some(third_pane_id)
+    );
+    assert_eq!(alice_client.get_placement_revision(), alice_revision + 2);
+}
+
+#[test]
+fn a_floating_pane_created_after_minimizing_every_pane_is_shown_and_focused() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let alice_source = CommandSource::from_key_binding(alice_client_id);
+    let minimized_pane_id = create_floating_pane(
+        &mut runtime,
+        alice_source.clone(),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let (command_id, command_result) =
+        dispatch_set_all_floating_panes_minimized(&mut runtime, alice_source.clone(), true);
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                build_pane_minimized_changed(alice_client_id, minimized_pane_id, true),
+                build_pane_focused(
+                    alice_client_id,
+                    Some(tab_id),
+                    tiled_pane_id,
+                    Some(minimized_pane_id)
+                ),
+            ],
+        }
+    );
+
+    let new_pane_id = create_floating_pane(
+        &mut runtime,
+        alice_source,
+        build_floating_new_pane_args(None, None, false),
+    );
+
+    let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
+    assert_eq!(
+        alice_client.get_floating_pane_view(new_pane_id),
+        FloatingPaneView::default()
+    );
+    assert_eq!(
+        alice_client.list_floating_pane_focus_order(),
+        [minimized_pane_id, new_pane_id]
+    );
+    assert_eq!(
+        alice_client.get_focused_floating_pane_id(),
+        Some(new_pane_id)
+    );
+}
+
+#[test]
+fn an_external_minimize_acts_for_the_named_client_only() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let bob_client_id = attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 120,
+            row_count: 42,
+        },
+    );
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    assert!(runtime
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the fixture's session")
+        .clients
+        .get_client_mut_by_id(bob_client_id)
+        .expect("bob is attached")
+        .focus_floating_pane(floating_pane_id));
+    let alice_record_before = serialize_client_record(&runtime, session_id, alice_client_id);
+
+    let session_records_before = serialize_session_records(&runtime);
+    let (command_id, command_result) = dispatch_set_all_floating_panes_minimized(
+        &mut runtime,
+        CommandSource::from_external_cli(Some(session_id), None),
+        true,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetAmbiguous,
+            help: Some("several clients are attached; name the target client".to_string()),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+
+    let bob_source = CommandSource::from_external_cli(Some(session_id), Some(bob_client_id));
+    let (command_id, command_result) =
+        dispatch_set_all_floating_panes_minimized(&mut runtime, bob_source.clone(), true);
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                build_pane_minimized_changed(bob_client_id, floating_pane_id, true),
+                build_pane_focused(
+                    bob_client_id,
+                    Some(tab_id),
+                    tiled_pane_id,
+                    Some(floating_pane_id)
+                ),
+            ],
+        }
+    );
+    let (command_id, command_result) =
+        dispatch_set_pane_minimized(&mut runtime, bob_source, Some(floating_pane_id), false);
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                build_pane_minimized_changed(bob_client_id, floating_pane_id, false),
+                build_pane_focused(bob_client_id, None, floating_pane_id, Some(tiled_pane_id)),
+            ],
+        }
+    );
+    assert_eq!(
+        serialize_client_record(&runtime, session_id, alice_client_id),
+        alice_record_before
+    );
+}
+
+#[test]
+fn focusing_a_floating_pane_takes_the_input_also_when_pinned_and_a_minimized_one_is_refused() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let first_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let second_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let (command_id, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(first_pane_id),
+        true,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+                client_id: alice_client_id,
+                pane_id: first_pane_id,
+                is_pinned: true,
+            })],
+        }
+    );
+    let alice_revision =
+        get_attached_client(&runtime, session_id, alice_client_id).get_placement_revision();
+
+    let (command_id, command_result) = dispatch_focus_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        FocusTarget::Pane(first_pane_id),
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![build_pane_focused(
+                alice_client_id,
+                None,
+                first_pane_id,
+                Some(second_pane_id)
+            )],
+        }
+    );
+    let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
+    assert_eq!(
+        alice_client.list_floating_pane_focus_order(),
+        [second_pane_id, first_pane_id]
+    );
+    assert_eq!(alice_client.get_placement_revision(), alice_revision + 1);
+
+    let session_records_before = serialize_session_records(&runtime);
+    let (command_id, command_result) = dispatch_focus_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        FocusTarget::Pane(first_pane_id),
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+
+    // The minimize moves alice's input back to the second pane.
+    let (command_id, command_result) = dispatch_set_pane_minimized(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(first_pane_id),
+        true,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                build_pane_minimized_changed(alice_client_id, first_pane_id, true),
+                build_pane_focused(alice_client_id, None, second_pane_id, Some(first_pane_id)),
+            ],
+        }
+    );
+    let session_records_before = serialize_session_records(&runtime);
+    let (command_id, command_result) = dispatch_focus_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        FocusTarget::Pane(first_pane_id),
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(format!("{first_pane_id} is minimized")),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
+fn next_and_previous_floating_pane_step_through_the_shown_panes_in_creation_order() {
+    let FloatingCommandFixture {
+        mut runtime,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let [first_pane_id, second_pane_id, third_pane_id] = std::array::from_fn(|_| {
+        create_floating_pane(
+            &mut runtime,
+            CommandSource::from_key_binding(alice_client_id),
+            build_floating_new_pane_args(None, None, false),
+        )
+    });
+    let alice_source = CommandSource::from_key_binding(alice_client_id);
+    // The second pane is minimized, so only the first and the third are shown.
+    // The first pane is pinned, and the steps still reach it.
+    let (command_id, command_result) = dispatch_set_pane_minimized(
+        &mut runtime,
+        alice_source.clone(),
+        Some(second_pane_id),
+        true,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![build_pane_minimized_changed(
+                alice_client_id,
+                second_pane_id,
+                true
+            )],
+        }
+    );
+    let (command_id, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        alice_source.clone(),
+        Some(first_pane_id),
+        true,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+                client_id: alice_client_id,
+                pane_id: first_pane_id,
+                is_pinned: true,
+            })],
+        }
+    );
+
+    for (focus_target, expected_pane_id, expected_previous_pane_id) in [
+        (FocusTarget::NextFloatingPane, first_pane_id, third_pane_id),
+        (FocusTarget::NextFloatingPane, third_pane_id, first_pane_id),
+        (
+            FocusTarget::PreviousFloatingPane,
+            first_pane_id,
+            third_pane_id,
+        ),
+        (
+            FocusTarget::PreviousFloatingPane,
+            third_pane_id,
+            first_pane_id,
+        ),
+    ] {
+        let (command_id, command_result) =
+            dispatch_focus_pane(&mut runtime, alice_source.clone(), focus_target);
+        assert_eq!(
+            command_result,
+            CommandResult::Ok {
+                command_id,
+                emitted_events: vec![build_pane_focused(
+                    alice_client_id,
+                    None,
+                    expected_pane_id,
+                    Some(expected_previous_pane_id)
+                )],
+            },
+            "{focus_target:?}"
+        );
+    }
+
+    // From the tiled pane, next is the first shown pane and previous the last.
+    // A focus of the tiled pane names the floating pane focused before it as
+    // `previous_pane_id`.
+    for (focus_target, expected_pane_id, focused_floating_pane_id) in [
+        (FocusTarget::NextFloatingPane, first_pane_id, third_pane_id),
+        (
+            FocusTarget::PreviousFloatingPane,
+            third_pane_id,
+            first_pane_id,
+        ),
+    ] {
+        let (command_id, command_result) = dispatch_focus_pane(
+            &mut runtime,
+            alice_source.clone(),
+            FocusTarget::Pane(tiled_pane_id),
+        );
+        assert_eq!(
+            command_result,
+            CommandResult::Ok {
+                command_id,
+                emitted_events: vec![build_pane_focused(
+                    alice_client_id,
+                    Some(tab_id),
+                    tiled_pane_id,
+                    Some(focused_floating_pane_id)
+                )],
+            },
+            "{focus_target:?}"
+        );
+        let (command_id, command_result) =
+            dispatch_focus_pane(&mut runtime, alice_source.clone(), focus_target);
+        assert_eq!(
+            command_result,
+            CommandResult::Ok {
+                command_id,
+                emitted_events: vec![build_pane_focused(
+                    alice_client_id,
+                    None,
+                    expected_pane_id,
+                    Some(tiled_pane_id)
+                )],
+            },
+            "{focus_target:?}"
+        );
+    }
+
+    let (command_id, command_result) =
+        dispatch_set_all_floating_panes_minimized(&mut runtime, alice_source.clone(), true);
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                build_pane_minimized_changed(alice_client_id, first_pane_id, true),
+                build_pane_minimized_changed(alice_client_id, third_pane_id, true),
+                build_pane_focused(
+                    alice_client_id,
+                    Some(tab_id),
+                    tiled_pane_id,
+                    Some(third_pane_id)
+                ),
+            ],
+        }
+    );
+    let session_records_before = serialize_session_records(&runtime);
+    for focus_target in [
+        FocusTarget::NextFloatingPane,
+        FocusTarget::PreviousFloatingPane,
+    ] {
+        let (command_id, command_result) =
+            dispatch_focus_pane(&mut runtime, alice_source.clone(), focus_target);
+        assert_eq!(
+            command_result,
+            CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::TargetNotFound,
+                help: Some("no floating pane is visible".to_string()),
+            },
+            "{focus_target:?}"
+        );
+    }
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
+fn a_directional_focus_from_a_floating_pane_returns_the_input_to_the_tabs_focused_pane() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let alice_source = CommandSource::from_key_binding(alice_client_id);
+    // The split opens a pane right of the tiled pane, which takes alice's
+    // focus in the tab.
+    let split_command_result = runtime.dispatch(build_command_envelope(
+        alice_source.clone(),
+        Command::NewPane(build_new_pane_args()),
+    ));
+    assert_eq!(
+        get_command_outcome(&split_command_result),
+        Ok(vec![
+            "PaneCreated",
+            "LayoutChanged",
+            "PaneFocused",
+            "PtyResized",
+            "PtyResized"
+        ])
+    );
+    let right_pane_id = find_other_pane_id(&runtime, session_id, &[tiled_pane_id]);
+    assert_eq!(
+        get_attached_client(&runtime, session_id, alice_client_id).get_focused_pane_id(tab_id),
+        Some(right_pane_id)
+    );
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        alice_source.clone(),
+        build_floating_new_pane_args(None, None, false),
+    );
+
+    // Left of the floating pane is not the left neighbor of the right pane:
+    // the input returns to the right pane, the tab's focused pane.
+    let (command_id, command_result) = dispatch_focus_pane(
+        &mut runtime,
+        alice_source.clone(),
+        FocusTarget::Direction(Direction::Left),
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![build_pane_focused(
+                alice_client_id,
+                Some(tab_id),
+                right_pane_id,
+                Some(floating_pane_id)
+            )],
+        }
+    );
+
+    let (command_id, command_result) = dispatch_focus_pane(
+        &mut runtime,
+        alice_source,
+        FocusTarget::Direction(Direction::Left),
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![build_pane_focused(
+                alice_client_id,
+                Some(tab_id),
+                tiled_pane_id,
+                Some(right_pane_id)
+            )],
+        }
+    );
+}
+
+#[test]
+fn a_pane_command_naming_no_pane_acts_on_the_focused_floating_pane() {
+    let FloatingCommandFixture {
+        mut runtime,
+        fake_pty_backend,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+    } = build_floating_command_fixture();
+    let alice_source = CommandSource::from_key_binding(alice_client_id);
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        alice_source.clone(),
+        build_floating_new_pane_args(None, None, false),
+    );
+
+    let write_command_result = runtime.dispatch(build_command_envelope(
+        alice_source.clone(),
+        Command::WriteToPane(WriteToPaneArgs {
+            pane_id: None,
+            pane_input_bytes: b"ls\r".to_vec(),
+        }),
+    ));
+    assert_eq!(get_command_outcome(&write_command_result), Ok(Vec::new()));
+    assert_eq!(
+        fake_pty_backend.list_pane_write_bytes(floating_pane_id),
+        Ok(vec![b"ls\r".to_vec()])
+    );
+    assert_eq!(
+        fake_pty_backend.list_pane_write_bytes(tiled_pane_id),
+        Ok(Vec::new())
+    );
+
+    // A split and a fullscreen act on the focused pane, and a floating pane
+    // has neither.
+    let session_records_before = serialize_session_records(&runtime);
+    for (command, expected_help) in [
+        (
+            Command::NewPane(build_new_pane_args()),
+            format!("{floating_pane_id} is floating and has no split to divide"),
+        ),
+        (
+            Command::TogglePaneFullscreen,
+            format!("{floating_pane_id} is floating; fullscreen fills a tab"),
+        ),
+    ] {
+        let command_envelope = build_command_envelope(alice_source.clone(), command);
+        let command_id = command_envelope.command_id;
+        assert_eq!(
+            runtime.dispatch(command_envelope),
+            CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::InvalidState,
+                help: Some(expected_help),
+            }
+        );
+    }
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+
+    let command_envelope =
+        build_command_envelope(alice_source, Command::ClosePane(ClosePaneArgs::default()));
+    let command_id = command_envelope.command_id;
+    assert_eq!(
+        runtime.dispatch(command_envelope),
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                Event::PaneClosing(PaneClosing {
+                    pane_id: floating_pane_id,
+                }),
+                Event::PaneRemoved(PaneRemoved {
+                    pane_id: floating_pane_id,
+                    tab_id: None,
+                }),
+                build_pane_focused(
+                    alice_client_id,
+                    Some(tab_id),
+                    tiled_pane_id,
+                    Some(floating_pane_id)
+                ),
+            ],
+        }
+    );
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(session.floating_set.list_members(), []);
+    assert_eq!(
+        session.tabs[&tab_id].get_layout_tree(),
+        &LayoutNode::Pane(tiled_pane_id)
+    );
+}
+
+#[test]
+fn every_view_of_a_client_names_the_floating_pane_that_takes_its_input() {
+    let FloatingCommandFixture {
+        mut runtime,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+
+    assert_eq!(
+        runtime
+            .build_snapshot(alice_client_id)
+            .expect("alice's frame")
+            .client_snapshot
+            .focused_pane_id,
+        Some(floating_pane_id)
+    );
+    assert_eq!(
+        runtime
+            .build_frame_layout(alice_client_id)
+            .expect("alice's frame layout")
+            .client_snapshot
+            .focused_pane_id,
+        Some(floating_pane_id)
+    );
+    assert_eq!(
+        runtime
+            .build_placement_snapshot(alice_client_id, tiled_pane_id, tab_id)
+            .expect("alice's placement preview")
+            .client_snapshot
+            .client_snapshot
+            .focused_pane_id,
+        Some(floating_pane_id)
+    );
+    let session_overview = runtime.build_overview().expect("the session overview");
+    assert_eq!(
+        session_overview
+            .clients
+            .iter()
+            .map(|client_discovery| client_discovery.focused_pane_id)
+            .collect::<Vec<Option<PaneId>>>(),
+        vec![Some(floating_pane_id)]
+    );
+    assert_eq!(
+        session_overview
+            .panes
+            .iter()
+            .map(|pane_discovery| (
+                pane_discovery.pane_id,
+                pane_discovery.focused_by_client_ids.clone()
+            ))
+            .collect::<Vec<(PaneId, Vec<ClientId>)>>(),
+        vec![(tiled_pane_id, Vec::new())]
+    );
+    assert_eq!(
+        runtime
+            .build_session_layout(None)
+            .expect("the session layout")
+            .clients
+            .iter()
+            .map(|client_focus| client_focus.focused_pane_id)
+            .collect::<Vec<Option<PaneId>>>(),
+        vec![Some(floating_pane_id)]
+    );
 }

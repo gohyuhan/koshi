@@ -60,7 +60,7 @@ impl Server {
                 attached_at: client.get_attached_at(),
                 viewport_size: client.get_viewport_size(),
                 active_tab_id: client.get_active_tab_id(),
-                focused_pane_id: client.get_focused_pane_id(client.get_active_tab_id()),
+                focused_pane_id: client.get_active_focused_pane_id(),
                 lock_mode: client.get_lock_mode(),
                 origin: Some(client.get_origin()),
                 pane_area: client.get_reported_pane_area(),
@@ -113,9 +113,7 @@ fn list_pane_discoveries(
             let focused_by_client_ids = session
                 .clients
                 .list_attached_clients()
-                .filter(|client| {
-                    client.get_focused_pane_id(client.get_active_tab_id()) == Some(pane_id)
-                })
+                .filter(|client| client.get_active_focused_pane_id() == Some(pane_id))
                 .map(|client| client.get_client_id())
                 .collect();
             pane_discoveries.push(PaneDiscovery {

@@ -45,6 +45,11 @@ pub enum PlacementCommitError {
 /// installed. The commit verifies unique ownership, exact pane-set conservation,
 /// and that only the source pane leaves the source tree. The pane registry and
 /// every per-pane view remain attached to the pane id.
+///
+/// The acting client moves to the destination tab and focuses the source pane,
+/// which takes its input: no floating pane stays focused for it. Its
+/// [`Event::PaneFocused`] names as `previous_pane_id` the floating pane that
+/// held its input, else the pane it focused in the destination tab before.
 pub fn commit_cross_tab_placement(
     session: &mut Session,
     source_tab_id: TabId,
@@ -97,10 +102,6 @@ pub fn commit_cross_tab_placement(
         .get_client_by_id(acting_client_id)
         .map(|client| client.get_active_tab_id())
         .ok_or(PlacementCommitError::ActingClientNotFound)?;
-    let acting_previous_pane_id = session
-        .clients
-        .get_client_by_id(acting_client_id)
-        .and_then(|client| client.get_focused_pane_id(destination_tab_id));
 
     let source_pane_ids_before: HashSet<PaneId> =
         source_leaf_pane_ids_before.iter().copied().collect();
@@ -186,10 +187,12 @@ pub fn commit_cross_tab_placement(
         }));
     }
 
+    let mut acting_previous_pane_id = None;
     if let Some(acting_client) = session.clients.get_client_mut_by_id(acting_client_id) {
         acting_client.clear_zoom(destination_tab_id);
         acting_client.update_active_tab_id(destination_tab_id);
-        acting_client.update_focused_pane(destination_tab_id, source_pane_id);
+        acting_previous_pane_id =
+            acting_client.focus_tiled_pane(destination_tab_id, source_pane_id);
     }
     if acting_previous_tab_id != destination_tab_id {
         emitted_events.push(Event::TabFocused(TabFocused {

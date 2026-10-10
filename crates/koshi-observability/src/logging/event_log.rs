@@ -151,7 +151,8 @@ pub fn log_event(runtime_event: &Event) {
             );
         }
 
-        // --- floating pane view: one client's move or pin of a floating pane.
+        // --- floating pane view: one client's move, pin or minimize of a
+        // floating pane.
         Event::FloatingPaneMoved(event_payload) => {
             tracing::info!(
                 client_id = %event_payload.client_id,
@@ -167,6 +168,14 @@ pub fn log_event(runtime_event: &Event) {
                 pane_id = %event_payload.pane_id,
                 is_pinned = event_payload.is_pinned,
                 "floating pane pin changed"
+            );
+        }
+        Event::PaneMinimizedChanged(event_payload) => {
+            tracing::info!(
+                client_id = %event_payload.client_id,
+                pane_id = %event_payload.pane_id,
+                is_minimized = event_payload.is_minimized,
+                "floating pane minimize changed"
             );
         }
 

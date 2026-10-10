@@ -4,6 +4,8 @@
 //! spatial neighbor, absorbed pane, and finally the first visible pane in layout order.
 //! Also validates the eligibility rule — a pane must sit in the visible layout order and
 //! hold a registry pane record in any state but `Removed` — and the two no-pane verdicts.
+//! Then checks the `PaneFocused` event `build_pane_focused_event` drafts for a move of a
+//! client's input into, out of, and between floating panes.
 
 use super::*;
 
@@ -533,4 +535,103 @@ fn ineligible_spatial_and_absorbed_candidates_fall_through_to_layout_order() {
         focus_repair_result,
         FocusRepairResult::Focused(live_pane_id)
     );
+}
+
+/// A client viewing `active_tab_id` on an `80x24` viewport, focusing nothing.
+fn build_client_on(active_tab_id: TabId) -> Client {
+    Client::from_attachment(
+        koshi_core::ids::ClientId::new(),
+        koshi_core::ids::SessionId::new(),
+        SystemTime::UNIX_EPOCH,
+        koshi_core::geometry::Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        None,
+        active_tab_id,
+        crate::client::ClientOrigin::Local,
+        "C-test-client".to_string(),
+        0,
+    )
+}
+
+#[test]
+fn a_move_into_a_floating_pane_reports_no_tab_and_the_pane_it_left() {
+    let tab_id = TabId::new();
+    let (vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new());
+    let mut client = build_client_on(tab_id);
+    client.update_focused_pane(tab_id, vim_pane_id);
+    let previous_focused_pane_id = client.get_active_focused_pane_id();
+    assert!(client.focus_floating_pane(htop_pane_id));
+
+    assert_eq!(
+        build_pane_focused_event(&client, previous_focused_pane_id),
+        Some(Event::PaneFocused(PaneFocused {
+            client_id: client.get_client_id(),
+            tab_id: None,
+            pane_id: htop_pane_id,
+            previous_pane_id: Some(vim_pane_id),
+        }))
+    );
+}
+
+#[test]
+fn a_move_out_of_the_floating_panes_reports_the_active_tab_and_its_focused_pane() {
+    let tab_id = TabId::new();
+    let (vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new());
+    let mut client = build_client_on(tab_id);
+    client.update_focused_pane(tab_id, vim_pane_id);
+    assert!(client.focus_floating_pane(htop_pane_id));
+    let previous_focused_pane_id = client.get_active_focused_pane_id();
+    assert!(client.minimize_floating_pane(htop_pane_id));
+
+    assert_eq!(
+        build_pane_focused_event(&client, previous_focused_pane_id),
+        Some(Event::PaneFocused(PaneFocused {
+            client_id: client.get_client_id(),
+            tab_id: Some(tab_id),
+            pane_id: vim_pane_id,
+            previous_pane_id: Some(htop_pane_id),
+        }))
+    );
+}
+
+#[test]
+fn a_move_between_floating_panes_reports_no_tab_and_the_floating_pane_it_left() {
+    let tab_id = TabId::new();
+    let (vim_pane_id, htop_pane_id, btop_pane_id) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut client = build_client_on(tab_id);
+    client.update_focused_pane(tab_id, vim_pane_id);
+    assert!(client.focus_floating_pane(htop_pane_id));
+    let previous_focused_pane_id = client.get_active_focused_pane_id();
+    assert!(client.focus_floating_pane(btop_pane_id));
+
+    assert_eq!(
+        build_pane_focused_event(&client, previous_focused_pane_id),
+        Some(Event::PaneFocused(PaneFocused {
+            client_id: client.get_client_id(),
+            tab_id: None,
+            pane_id: btop_pane_id,
+            previous_pane_id: Some(htop_pane_id),
+        }))
+    );
+}
+
+#[test]
+fn an_unchanged_input_and_no_pane_to_type_into_report_nothing() {
+    let tab_id = TabId::new();
+    let (vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new());
+    let mut client = build_client_on(tab_id);
+
+    assert_eq!(build_pane_focused_event(&client, None), None);
+    assert!(client.focus_floating_pane(htop_pane_id));
+    let previous_focused_pane_id = client.get_active_focused_pane_id();
+    assert!(client.minimize_floating_pane(htop_pane_id));
+    assert_eq!(
+        build_pane_focused_event(&client, previous_focused_pane_id),
+        None
+    );
+
+    client.update_focused_pane(tab_id, vim_pane_id);
+    assert_eq!(build_pane_focused_event(&client, Some(vim_pane_id)), None);
 }
