@@ -13,6 +13,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::Path,
     sync::{mpsc::Receiver, Arc},
+    thread::JoinHandle,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -199,6 +200,10 @@ pub struct Server {
     /// Every pane whose child the backend drives. The backend's sink pushes
     /// each one's child output and exit into the inbox.
     pub(crate) live_pane_ids: HashSet<PaneId>,
+    /// The threads killing the children of panes that left the session, one
+    /// per pane, each running [`PtyBackend::kill_pane`] under that pane's kill
+    /// policy. [`Server::wait_for_pane_kills`] joins them.
+    pub(crate) pane_kill_threads: Vec<JoinHandle<()>>,
     /// The last size each live pane's PTY was set to, keyed by pane id. Every
     /// path that resizes a PTY writes the new size here. A reflow resizes, and
     /// emits [`Event::PtyResized`], only for the panes whose solved size
@@ -295,6 +300,7 @@ impl Server {
             pty_backend,
             terminal_engine_by_pane_id: HashMap::new(),
             live_pane_ids: HashSet::new(),
+            pane_kill_threads: Vec::new(),
             pty_size_by_pane_id: HashMap::new(),
             event_bus: EventBus::new(),
             subscriptions: Vec::new(),

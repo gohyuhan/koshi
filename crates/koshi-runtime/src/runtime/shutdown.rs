@@ -2,10 +2,12 @@
 //!
 //! The event loop calls [`Server::shutdown`] once it exits. A quit with no
 //! issuing client — `kill-session` — group-kills immediately; every other
-//! ending group-kills gracefully. Stages 1–2 run here; stages 3 (restore the
-//! outer terminal) and 4 (flush logs) run after this returns, as the binary's
-//! cleanup guard and tracing guard drop in that order. The panic path does not
-//! come here — it takes the abrupt [`Server::kill_all_panes`].
+//! ending group-kills gracefully. Either way, the kills of panes that left the
+//! session earlier end before [`Server::shutdown`] returns. Stages 1–2 run
+//! here; stages 3 (restore the outer terminal) and 4 (flush logs) run after
+//! this returns, as the binary's cleanup guard and tracing guard drop in that
+//! order. The panic path does not come here — it takes the abrupt
+//! [`Server::kill_all_panes`].
 
 use std::sync::Arc;
 use std::thread;
@@ -19,7 +21,8 @@ impl Server {
     /// Tear the process down in a fixed staged order:
     /// 1. stop the control socket and withdraw its endpoint file,
     /// 2. group-kill immediately for a quit with no issuing client, otherwise
-    ///    graceful kill.
+    ///    graceful kill, then wait for the kills of panes that left the
+    ///    session earlier ([`Self::wait_for_pane_kills`]).
     ///
     /// Stages 3–4 (restore terminal, flush logs) are left to the caller's
     /// guards, which drop in that order after this returns.
@@ -37,6 +40,17 @@ impl Server {
             self.kill_all_panes();
         } else {
             self.kill_all_panes_gracefully();
+        }
+        self.wait_for_pane_kills();
+    }
+
+    /// Join every thread in `pane_kill_threads`, each one killing the child of
+    /// a pane that left the session, and empty that list. Each thread waits at
+    /// most its kill policy's grace window for the child to exit before it
+    /// force-kills it.
+    pub fn wait_for_pane_kills(&mut self) {
+        for pane_kill_thread in self.pane_kill_threads.drain(..) {
+            let _ = pane_kill_thread.join();
         }
     }
 

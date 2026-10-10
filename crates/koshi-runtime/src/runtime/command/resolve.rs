@@ -272,8 +272,9 @@ impl Server {
                     ));
                 }
                 match (pane_target.tab_id, command_source.get_target_client_id()) {
-                    // A tiled resize changes every client's view alike; a
-                    // client it names must still be attached.
+                    // A tiled resize changes every client's layout alike and
+                    // drops the zoom of the client it names, which must still
+                    // be attached.
                     (Some(_), Some(target_client_id)) => Self::resolve_view_client(
                         Some(target_client_id),
                         command_source,
@@ -800,7 +801,7 @@ impl Server {
 
     /// Resolve a [`Command::ResizePane`] on the floating pane `pane_target`
     /// names: the pane's desired size after the resize, and the acting client's
-    /// stored top-left cell after it. Shared by validation and
+    /// top-left cell after it. Shared by validation and
     /// [`Self::handle_resize_pane`].
     ///
     /// The acting client is the target client the command source names, else
@@ -809,15 +810,23 @@ impl Server {
     /// for `Left` and `Right` and the height for `Up` and `Down`: the solved
     /// outer size plus `resize_amount_cells`, kept between the floating minimum
     /// (the pane minimum plus [`FLOATING_PANE_CHROME_SIZE`]) and the shared
-    /// floating viewport, and stored as cells. A shrink never grows the axis
+    /// floating viewport, and stored as cells. A growth also stops at the edge
+    /// of the acting client's pane area on the moved side, so the edge
+    /// opposite the moved border keeps its cell. A shrink never grows the axis
     /// and a growth never shrinks it, also for an axis outside that range. A
-    /// `40`-column pane grown by `3` asks for `Cells(43)`.
+    /// `40`-column pane grown by `3` asks for `Cells(43)`; drawn at column
+    /// `20` of an `80`-column pane area and grown right by `30`, it asks for
+    /// `Cells(60)`.
     ///
     /// The acting client's top-left cell is where it draws the pane before the
     /// resize ([`place_floating_pane`]), moved left or up by the cells the
     /// pane grew for `Left` or `Up`: the edge opposite the moved border keeps
-    /// its cell.
-    /// A client with no pane area keeps its view.
+    /// its cell. A pane the acting client pinned keeps its pinned cell: a
+    /// `40`-column pane pinned at column `20` and drawn at column `10` of a
+    /// `50`-column pane area is drawn at column `13` once its width shrinks by
+    /// `3`.
+    /// A client with no pane area keeps its view, and only the shared floating
+    /// viewport limits the growth.
     ///
     /// Refusals, each changing nothing:
     /// - a suppressed pane: [`RejectReason::InvalidState`] `<pane> is
@@ -832,7 +841,12 @@ impl Server {
     ///   [`RejectReason::MinimumSize`] with no spare cells;
     /// - a growth of an axis at the shared floating viewport:
     ///   [`RejectReason::InvalidState`] `<pane> already spans the smallest
-    ///   attached terminal on that axis`.
+    ///   attached terminal on that axis`;
+    /// - a growth of an axis narrower than the shared floating viewport whose
+    ///   moved edge already reaches the acting client's pane area edge:
+    ///   [`RejectReason::InvalidState`] `<pane> already reaches the <side>
+    ///   edge of the pane area`, `<side>` being `right`, `bottom`, `left` or
+    ///   `top`.
     pub(super) fn resolve_floating_pane_resize(
         &self,
         command_args: &ResizePaneArgs,
@@ -895,13 +909,32 @@ impl Server {
                 shared_floating_viewport.row_count,
             )
         };
-        let resized_cell_count =
+        let client_viewport = client.get_pane_area();
+        let drawn_rect = client_viewport.map(|client_viewport| {
+            place_floating_pane(client_position, outer_size, cascade_index, client_viewport)
+        });
+        // The cells from the edge that stays to the acting client's pane area
+        // edge on the moved side.
+        let room_cell_count =
+            client_viewport
+                .zip(drawn_rect)
+                .map(|(client_viewport, drawn_rect)| match direction {
+                    Direction::Right => client_viewport.column_count - drawn_rect.origin.column,
+                    Direction::Down => client_viewport.row_count - drawn_rect.origin.row,
+                    Direction::Left => drawn_rect.origin.column + drawn_rect.size.column_count,
+                    Direction::Up => drawn_rect.origin.row + drawn_rect.size.row_count,
+                });
+        let maximum_cell_count = room_cell_count
+            .map_or(viewport_cell_count, |room_cell_count| {
+                viewport_cell_count.min(room_cell_count)
+            })
+            .max(current_cell_count);
+        let clamped_cell_count =
             (i32::from(current_cell_count) + i32::from(command_args.resize_amount_cells)).clamp(
                 i32::from(minimum_cell_count.min(current_cell_count)),
-                i32::from(viewport_cell_count.max(current_cell_count)),
+                i32::from(maximum_cell_count),
             );
-        let grown_cell_count = resized_cell_count - i32::from(current_cell_count);
-        if grown_cell_count == 0 {
+        if clamped_cell_count == i32::from(current_cell_count) {
             if command_args.resize_amount_cells < 0 {
                 return Err(Rejection {
                     reason: RejectReason::MinimumSize,
@@ -909,39 +942,44 @@ impl Server {
                     spare_cell_count: Some(0),
                 });
             }
+            if current_cell_count < viewport_cell_count {
+                let side_name = match direction {
+                    Direction::Right => "right",
+                    Direction::Down => "bottom",
+                    Direction::Left => "left",
+                    Direction::Up => "top",
+                };
+                return Err(Rejection::from_reason_and_help(
+                    RejectReason::InvalidState,
+                    &format!("{pane_id} already reaches the {side_name} edge of the pane area"),
+                ));
+            }
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
                 &format!("{pane_id} already spans the smallest attached terminal on that axis"),
             ));
         }
-        let resized_dimension = u16::try_from(resized_cell_count)
+        let resized_cell_count = u16::try_from(clamped_cell_count)
             .ok()
             .and_then(NonZeroU16::new)
-            .map(FloatingPaneDimension::Cells)
             .ok_or_else(|| Rejection::from_reason(RejectReason::InvalidState))?;
         let mut desired_size = floating_member.desired_size;
         if is_width {
-            desired_size.width = resized_dimension;
+            desired_size.width = FloatingPaneDimension::Cells(resized_cell_count);
         } else {
-            desired_size.height = resized_dimension;
+            desired_size.height = FloatingPaneDimension::Cells(resized_cell_count);
         }
-        let client_origin = client.get_pane_area().map(|client_viewport| {
-            let drawn_origin =
-                place_floating_pane(client_position, outer_size, cascade_index, client_viewport)
-                    .origin;
-            let move_back =
-                |coordinate: u16| (i32::from(coordinate) - grown_cell_count).max(0) as u16;
-            match direction {
-                Direction::Left => Point {
-                    column: move_back(drawn_origin.column),
-                    row: drawn_origin.row,
-                },
-                Direction::Up => Point {
-                    column: drawn_origin.column,
-                    row: move_back(drawn_origin.row),
-                },
-                Direction::Right | Direction::Down => drawn_origin,
-            }
+        let client_origin = drawn_rect.map(|drawn_rect| match direction {
+            Direction::Left => Point {
+                column: drawn_rect.origin.column + drawn_rect.size.column_count
+                    - resized_cell_count.get(),
+                row: drawn_rect.origin.row,
+            },
+            Direction::Up => Point {
+                column: drawn_rect.origin.column,
+                row: drawn_rect.origin.row + drawn_rect.size.row_count - resized_cell_count.get(),
+            },
+            Direction::Right | Direction::Down => drawn_rect.origin,
         });
         Ok(FloatingPaneResize {
             session_id: pane_target.session_id,

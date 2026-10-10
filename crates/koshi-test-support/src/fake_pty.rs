@@ -8,6 +8,7 @@
 //! `list_pane_sizes`, and `list_pane_kill_policies`. They drive child output with `push_output` and
 //! child exit with `trigger_child_exit`, which deliver to the
 //! [`PtySink`](koshi_pty::backend::state::PtySink) the backend was built with.
+//! `hold_kills_at` makes every subsequent kill wait at a barrier first.
 //! [`fake_pty::PaneDeliveryRecorder`] is a sink that keeps those deliveries for
 //! a test to take.
 //!
@@ -21,7 +22,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 
 use koshi_core::ids::PaneId;
 use koshi_core::process::{KillPolicy, PtySize, SpawnSpec};
@@ -69,6 +70,9 @@ struct FakePtyBackendState {
     /// [`find_live_working_directory`](FakePtyBackend::find_live_working_directory). An
     /// absent entry returns `None`.
     live_working_directories: HashMap<PaneId, PathBuf>,
+    /// When set, every [`kill_pane`](FakePtyBackend::kill_pane) waits at this
+    /// barrier, outside the lock, before it records the kill.
+    kill_barrier: Option<Arc<Barrier>>,
 }
 
 /// An in-memory [`PtyBackend`] that records calls and lets tests drive output
@@ -89,6 +93,12 @@ impl FakePtyBackend {
             backend_state: Mutex::default(),
             pty_sink,
         }
+    }
+
+    /// Make every subsequent [`kill_pane`](Self::kill_pane) wait at `kill_barrier`
+    /// before it records the kill. A second call replaces the stored barrier.
+    pub fn hold_kills_at(&self, kill_barrier: Arc<Barrier>) {
+        self.backend_state.lock().unwrap().kill_barrier = Some(kill_barrier);
     }
 
     /// Set `spawn_error` as the result of every subsequent [`spawn_pane`](Self::spawn_pane).
@@ -310,6 +320,9 @@ impl PtyBackend for FakePtyBackend {
 
     /// Record a kill request and mark the pane as not live.
     ///
+    /// Waits first at the barrier that [`hold_kills_at`](Self::hold_kills_at)
+    /// set, when one is set.
+    ///
     /// Appends `kill_policy` to the kill history. Subsequent `kill_pane` calls return
     /// [`PtyError::UnknownPane`]. `resize_pane` and `write_pane_input` return a configured failure
     /// first and otherwise return [`PtyError::UnknownPane`]. [`spawn_pane`](Self::spawn_pane) can
@@ -323,6 +336,10 @@ impl PtyBackend for FakePtyBackend {
     /// Returns [`PtyError::UnknownPane`] if the pane was never spawned or was
     /// already killed.
     fn kill_pane(&self, pane_id: PaneId, kill_policy: KillPolicy) -> Result<(), PtyError> {
+        let kill_barrier = self.backend_state.lock().unwrap().kill_barrier.clone();
+        if let Some(kill_barrier) = kill_barrier {
+            kill_barrier.wait();
+        }
         let mut backend_state = self.backend_state.lock().unwrap();
         let pane_record = backend_state
             .pane_record_by_id

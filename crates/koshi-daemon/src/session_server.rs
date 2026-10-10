@@ -1644,7 +1644,10 @@ fn restore_session_serving(mut session_server: Server, pty_owner: &Arc<PtyOwner>
 ///    The wait ends after [`CLIENTS_LEFT_WAIT_DURATION`] even when a client
 ///    that stopped reading its socket has not left. The intake then closes,
 ///    ending the connections that are left, and a last pass applies what they
-///    had already handed over. Nothing arrives after that pass.
+///    had already handed over. Nothing arrives after that pass. Then wait for
+///    the kills of panes that left the session
+///    ([`Server::wait_for_pane_kills`]): every way out of the swap after this
+///    point holds no kill.
 /// 4. Carry the state out and wait for every pane's writer again: no byte the
 ///    session took for a child — a typed key, a paste, a reply to a device
 ///    query — is still queued in a writer thread. Then write the carried state,
@@ -1746,6 +1749,11 @@ fn swap_session_image(
     // over.
     ipc_server.close_intake();
     apply_queued_runtime_events(&mut session_server, DetachPolicy::Skip);
+
+    // Every kill of a pane that left the session ends here. No command is
+    // applied after the pass above: no kill starts after this wait, and no
+    // killed pane is among the carried panes listed below.
+    session_server.wait_for_pane_kills();
 
     // A `core:quit` applied by the pass above rides the swap out in the carried
     // state, with its kind; the session does not end here. The next image

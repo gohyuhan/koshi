@@ -559,7 +559,11 @@ direction; a negative resize shrinks from that side. On a floating pane,
 `--client` names the client whose view keeps the edge opposite the moved border
 in place. With no `--client`, the issuing client acts, else the session's only
 attached client. With several attached clients and no `--client`, the resize is
-refused. A positive `scroll-pane --lines` moves toward history.
+refused. A floating pane grows only up to that client's pane area edge on the
+moved side: a 40-column pane at column 20 of 80 columns, grown right by 30,
+becomes 60 columns wide. A pane that client pinned keeps its pinned cell. On a
+tiled pane, the resize ends the fullscreen view of the client `--client` names.
+A positive `scroll-pane --lines` moves toward history.
 
 Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 `git status` at that pane's prompt without running it.

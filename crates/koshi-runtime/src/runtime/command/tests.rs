@@ -10728,37 +10728,6 @@ fn close_tab_removes_state_kills_children_and_moves_viewers() {
     );
 }
 
-/// A backend whose `kill` waits on a shared barrier, then calls the wrapped
-/// fake. No kill passes the barrier until every expected kill reaches it.
-struct BarrierKillBackend {
-    inner: Arc<FakePtyBackend>,
-    barrier: Barrier,
-}
-
-impl PtyBackend for BarrierKillBackend {
-    fn spawn_pane(
-        &self,
-        pane_id: PaneId,
-        spawn_spec: SpawnSpec,
-        pty_size: PtySize,
-    ) -> Result<(), PtyError> {
-        self.inner.spawn_pane(pane_id, spawn_spec, pty_size)
-    }
-    fn resize_pane(&self, pane_id: PaneId, pty_size: PtySize) -> Result<(), PtyError> {
-        self.inner.resize_pane(pane_id, pty_size)
-    }
-    fn write_pane_input(&self, pane_id: PaneId, input_bytes: &[u8]) -> Result<(), PtyError> {
-        self.inner.write_pane_input(pane_id, input_bytes)
-    }
-    fn kill_pane(&self, pane_id: PaneId, kill_policy: KillPolicy) -> Result<(), PtyError> {
-        self.barrier.wait();
-        self.inner.kill_pane(pane_id, kill_policy)
-    }
-    fn find_live_working_directory(&self, pane_id: PaneId) -> Option<PathBuf> {
-        self.inner.find_live_working_directory(pane_id)
-    }
-}
-
 #[test]
 fn close_tab_kills_every_pane_concurrently() {
     // The doomed tab holds three panes (the PTY-less root plus two spawned
@@ -10767,10 +10736,8 @@ fn close_tab_kills_every_pane_concurrently() {
     let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(runtime_event_sender),
     )));
-    let pty_backend: Arc<dyn PtyBackend> = Arc::new(BarrierKillBackend {
-        inner: fake_pty_backend.clone(),
-        barrier: Barrier::new(3),
-    });
+    fake_pty_backend.hold_kills_at(Arc::new(Barrier::new(3)));
+    let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
     let mut runtime = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
 
     let client_id = ClientId::new();
@@ -10842,6 +10809,53 @@ fn close_tab_kills_every_pane_concurrently() {
         vec![KillPolicy::Graceful {
             timeout_duration: GRACEFUL_TIMEOUT_DURATION
         }]
+    );
+}
+
+#[test]
+fn shutdown_returns_only_after_a_pane_kill_already_started_ends() {
+    let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
+    let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(runtime_event_sender),
+    )));
+    let kill_barrier = Arc::new(Barrier::new(2));
+    fake_pty_backend.hold_kills_at(kill_barrier.clone());
+    let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
+    let mut runtime = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let pane_id = PaneId::new();
+    fake_pty_backend
+        .spawn_pane(
+            pane_id,
+            SpawnSpec::build_default_shell(None, BTreeMap::new()),
+            PtySize {
+                column_count: 80,
+                row_count: 24,
+            },
+        )
+        .expect("spawn");
+    runtime.kill_pane_off_thread(pane_id, KillPolicy::Force);
+
+    let (shutdown_done_sender, shutdown_done_receiver) = mpsc::channel();
+    let shutdown_thread = thread::spawn(move || {
+        runtime.shutdown();
+        shutdown_done_sender
+            .send(())
+            .expect("the test waits for the shutdown");
+    });
+
+    // The kill waits at the barrier, so the shutdown cannot end yet.
+    assert_eq!(
+        shutdown_done_receiver.recv_timeout(Duration::from_millis(200)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    );
+    kill_barrier.wait();
+    shutdown_done_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the shutdown ends once the kill ends");
+    shutdown_thread.join().expect("the shutdown thread ends");
+    assert_eq!(
+        fake_pty_backend.list_pane_kill_policies(pane_id),
+        Ok(vec![KillPolicy::Force])
     );
 }
 
@@ -12865,6 +12879,63 @@ fn resize_pane_drops_the_resizing_clients_zoom() {
     assert_eq!(
         runtime.pty_size_by_pane_id[&split_pane_id],
         expected_pty_size
+    );
+}
+
+#[test]
+fn resize_pane_from_outside_drops_the_zoom_of_the_client_it_names() {
+    let ResizeFixture {
+        mut runtime,
+        session_id,
+        client_id,
+        split_pane_id,
+        split_pane_pty_size,
+        ..
+    } = build_fullscreen_fixture();
+    let tab_id = get_only_tab_id(&runtime, session_id);
+    let resize_pane_command = Command::ResizePane(ResizePaneArgs {
+        pane_id: Some(split_pane_id),
+        direction: Direction::Left,
+        resize_amount_cells: 5,
+    });
+
+    // Naming no client: the client keeps its zoom, and the zoomed pane keeps
+    // the whole tab.
+    let command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        resize_pane_command.clone(),
+    );
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(command_envelope)),
+        Ok(vec!["LayoutChanged"])
+    );
+    assert_eq!(
+        get_client_layout_mode(&runtime, session_id, client_id, tab_id),
+        LayoutMode::Fullscreen {
+            focused_pane_id: split_pane_id,
+        }
+    );
+
+    // Naming the client: its zoom drops, and the pane takes its tiled size,
+    // grown by both resizes.
+    let command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), Some(client_id)),
+        resize_pane_command,
+    );
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(command_envelope)),
+        Ok(vec!["LayoutChanged", "PtyResized"])
+    );
+    assert_eq!(
+        get_client_layout_mode(&runtime, session_id, client_id, tab_id),
+        LayoutMode::Tiled
+    );
+    assert_eq!(
+        runtime.pty_size_by_pane_id[&split_pane_id],
+        PtySize {
+            column_count: split_pane_pty_size.column_count + 10,
+            row_count: split_pane_pty_size.row_count,
+        }
     );
 }
 
@@ -20482,6 +20553,250 @@ fn a_pinned_floating_pane_refuses_its_left_and_top_edges_and_stays_pinned_on_the
         }
     );
     assert_eq!(alice_client.get_placement_revision(), alice_revision);
+}
+
+#[test]
+fn growing_a_pinned_floating_pane_stops_at_the_pane_area_edge_and_keeps_its_pinned_cell() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(
+            Some(build_cells_floating_pane_size(40, 12)),
+            Some(Point { column: 20, row: 5 }),
+            true,
+        ),
+    );
+
+    // Column 20 of an 80-column pane area leaves room for 60 columns.
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        floating_pane_id,
+        Direction::Right,
+        30,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![build_pty_resized(floating_pane_id, 58, 8)],
+        }
+    );
+    assert_eq!(
+        get_floating_member(&runtime, session_id, floating_pane_id).desired_size,
+        build_cells_floating_pane_size(60, 12)
+    );
+
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        floating_pane_id,
+        Direction::Down,
+        1,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![build_pty_resized(floating_pane_id, 58, 9)],
+        }
+    );
+    assert_eq!(
+        get_floating_member(&runtime, session_id, floating_pane_id).desired_size,
+        build_cells_floating_pane_size(60, 13)
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, alice_client_id)
+            .get_floating_pane_view(floating_pane_id),
+        FloatingPaneView {
+            position: FloatingPanePosition::Pinned(Point { column: 20, row: 5 }),
+            is_minimized: false,
+        }
+    );
+}
+
+#[test]
+fn resizing_a_pinned_floating_pane_in_a_narrower_pane_area_keeps_its_pinned_cell() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(
+            Some(build_cells_floating_pane_size(40, 12)),
+            Some(Point { column: 20, row: 5 }),
+            true,
+        ),
+    );
+    let narrow_pane_area_size = Size {
+        column_count: 50,
+        row_count: 22,
+    };
+    let _ = runtime.handle_client_resize(
+        alice_client_id,
+        Size {
+            column_count: 50,
+            row_count: 24,
+        },
+        Some(PaneArea::Reported(narrow_pane_area_size)),
+        None,
+    );
+    let pinned_view = FloatingPaneView {
+        position: FloatingPanePosition::Pinned(Point { column: 20, row: 5 }),
+        is_minimized: false,
+    };
+    let alice_revision =
+        get_attached_client(&runtime, session_id, alice_client_id).get_placement_revision();
+
+    // The 50-column pane area draws the pane at column 10.
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        floating_pane_id,
+        Direction::Down,
+        1,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![build_pty_resized(floating_pane_id, 38, 9)],
+        }
+    );
+    let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
+    assert_eq!(
+        alice_client.get_floating_pane_view(floating_pane_id),
+        pinned_view
+    );
+    assert_eq!(alice_client.get_placement_revision(), alice_revision);
+
+    // The 37-column pane is drawn nearer its pinned cell, at column 13.
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        floating_pane_id,
+        Direction::Right,
+        -3,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![build_pty_resized(floating_pane_id, 35, 9)],
+        }
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, alice_client_id)
+            .get_floating_pane_view(floating_pane_id),
+        pinned_view
+    );
+    assert_eq!(
+        place_floating_pane(
+            pinned_view.position,
+            Size {
+                column_count: 37,
+                row_count: 13,
+            },
+            0,
+            narrow_pane_area_size,
+        )
+        .origin,
+        Point { column: 13, row: 5 }
+    );
+}
+
+#[test]
+fn a_floating_pane_growth_stops_at_the_pane_area_edge_on_the_moved_side() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let left_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(
+            Some(build_cells_floating_pane_size(40, 12)),
+            Some(Point { column: 2, row: 5 }),
+            false,
+        ),
+    );
+    let right_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(
+            Some(build_cells_floating_pane_size(40, 12)),
+            Some(Point { column: 40, row: 5 }),
+            false,
+        ),
+    );
+
+    // The right edge stays at column 42, so the pane grows by 2 to column 0.
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        left_pane_id,
+        Direction::Left,
+        5,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![build_pty_resized(left_pane_id, 40, 8)],
+        }
+    );
+    assert_eq!(
+        get_floating_member(&runtime, session_id, left_pane_id).desired_size,
+        build_cells_floating_pane_size(42, 12)
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, alice_client_id)
+            .get_floating_pane_view(left_pane_id),
+        FloatingPaneView {
+            position: FloatingPanePosition::Moved(Point { column: 0, row: 5 }),
+            is_minimized: false,
+        }
+    );
+
+    // Columns 40 to 79 already reach the right edge of the pane area.
+    let session_revision_before = runtime.session_by_id[&session_id].get_placement_revision();
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        right_pane_id,
+        Direction::Right,
+        3,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(format!(
+                "{right_pane_id} already reaches the right edge of the pane area"
+            )),
+        }
+    );
+    assert_eq!(
+        get_floating_member(&runtime, session_id, right_pane_id).desired_size,
+        build_cells_floating_pane_size(40, 12)
+    );
+    assert_eq!(
+        runtime.session_by_id[&session_id].get_placement_revision(),
+        session_revision_before
+    );
 }
 
 #[test]

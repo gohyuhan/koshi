@@ -383,7 +383,8 @@ struct NewFloatingPaneTarget {
 struct FloatingPaneResize {
     session_id: SessionId,
     pane_id: PaneId,
-    /// The client whose stored top-left cell the resize writes.
+    /// The client whose stored top-left cell the resize writes. A client that
+    /// pinned the pane keeps its pinned cell.
     client_id: ClientId,
     /// The pane's desired size after the resize.
     desired_size: FloatingPaneSize,
@@ -1142,28 +1143,31 @@ impl Server {
     }
 }
 
-/// End `pane_id`'s child under `kill_policy` on a thread of its own.
-///
-/// A graceful kill sleeps out its grace window on that thread while the
-/// dispatcher keeps draining. The kill also purges the backend's own entry for
-/// the pane, even when the child already exited.
-///
-/// When the operating system starts no thread, such as at the process's thread
-/// limit, the kill runs on this thread and blocks the dispatcher for the grace
-/// window.
-pub(super) fn kill_off_thread(
-    backend: &Arc<dyn PtyBackend>,
-    pane_id: PaneId,
-    kill_policy: KillPolicy,
-) {
-    let thread_backend = Arc::clone(backend);
-    let is_thread_started = thread::Builder::new()
-        .spawn(move || {
-            let _ = thread_backend.kill_pane(pane_id, kill_policy);
-        })
-        .is_ok();
-    if !is_thread_started {
-        let _ = backend.kill_pane(pane_id, kill_policy);
+impl Server {
+    /// End `pane_id`'s child under `kill_policy` on a thread of its own, and
+    /// keep that thread in `pane_kill_threads` until
+    /// [`Self::wait_for_pane_kills`] joins it. The threads that already ended
+    /// leave `pane_kill_threads` first.
+    ///
+    /// A graceful kill sleeps out its grace window on that thread while the
+    /// dispatcher keeps draining. The kill also purges the backend's own entry
+    /// for the pane, even when the child already exited.
+    ///
+    /// When the operating system starts no thread, such as at the process's
+    /// thread limit, the kill runs on this thread and blocks the dispatcher for
+    /// the grace window.
+    pub(super) fn kill_pane_off_thread(&mut self, pane_id: PaneId, kill_policy: KillPolicy) {
+        self.pane_kill_threads
+            .retain(|pane_kill_thread| !pane_kill_thread.is_finished());
+        let pty_backend = Arc::clone(self.get_pty_backend());
+        match thread::Builder::new().spawn(move || {
+            let _ = pty_backend.kill_pane(pane_id, kill_policy);
+        }) {
+            Ok(pane_kill_thread) => self.pane_kill_threads.push(pane_kill_thread),
+            Err(_) => {
+                let _ = self.get_pty_backend().kill_pane(pane_id, kill_policy);
+            }
+        }
     }
 }
 

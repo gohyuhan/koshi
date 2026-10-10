@@ -290,9 +290,9 @@ impl Server {
         // One kill thread per pane; every child receives its stop request at
         // once.
         for (pane_id, kill_policy) in pane_kill_policies {
-            super::kill_off_thread(&pty_backend, pane_id, kill_policy);
+            self.kill_pane_off_thread(pane_id, kill_policy);
         }
-        self.end_removed_floating_panes(session_id, &pty_backend, floating_pane_kill_policies);
+        self.end_removed_floating_panes(session_id, floating_pane_kill_policies);
 
         Ok(Self::commit_events(
             &mut self.event_bus,

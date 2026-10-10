@@ -3,9 +3,10 @@
 //! bind a real control socket inside a runtime directory created for the test.
 //!
 //! The image swap tests cover when the loop ends into a swap, what a restart is
-//! refused for, which arguments the new image is started with, and what the
+//! refused for, which arguments the new image is started with, what the
 //! carried state restores, over pseudoterminal masters this test binary opens
-//! itself. The ready line and the process image replacement are tested in
+//! itself, and that a swap waits for the kill of a pane closed before it. The
+//! ready line and the process image replacement are tested in
 //! `crates/koshi/tests`.
 //!
 //! The tests of a start or a swap that fails run real `/bin/sh` panes, and
@@ -13,10 +14,16 @@
 
 use super::*;
 
+#[cfg(unix)]
+use koshi_core::command::{ClosePaneArgs, NewPaneArgs, NewPanePlacement};
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, CopyArgs, GridPosition, Selection,
     SelectionKind, SetSelectionArgs, VisualCommand, WriteToPaneArgs,
 };
+#[cfg(unix)]
+use koshi_core::event::{Event, PaneCreated};
+#[cfg(unix)]
+use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, CommandId};
 use koshi_core::process::ExitStatus;
 #[cfg(unix)]
@@ -2029,6 +2036,121 @@ fn a_swap_whose_new_image_never_starts_hands_the_session_back_on_a_rebound_socke
         !resume_file_path.exists(),
         "the resume file must not be left on the disk"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_swap_starts_no_new_image_before_the_kill_of_a_pane_closed_earlier_ends() {
+    // The new image is a path with nothing at it: the session comes back in
+    // this process once the held kill has ended.
+    let runtime_directory_fixture = build_short_runtime_directory();
+    let mut session_start = build_test_session_start(runtime_directory_fixture.path(), false);
+    session_start.executable_watch = Arc::new(ExecutableWatch::new(
+        runtime_directory_fixture
+            .path()
+            .join("koshi-that-is-not-there"),
+        "1.0.0",
+    ));
+    assert_swap_waits_for_the_held_kill_of_a_closed_pane(session_start);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_swap_whose_state_cannot_be_written_waits_for_the_kill_of_a_pane_closed_earlier() {
+    // A directory stands at the resume file path: the session keeps its socket
+    // and comes back in this process once the held kill has ended.
+    let runtime_directory_fixture = build_short_runtime_directory();
+    let session_start = build_test_session_start(runtime_directory_fixture.path(), false);
+    std::fs::create_dir(resolve_resume_file_path(
+        &session_start.runtime_directory,
+        session_start.session_id,
+    ))
+    .expect("a directory stands at the resume file path");
+    assert_swap_waits_for_the_held_kill_of_a_closed_pane(session_start);
+}
+
+/// Close a pane whose kill the fake backend holds at a barrier, then run
+/// [`swap_session_image`] with `session_start` on a thread. Checks that the
+/// swap comes back in this process only after the held kill ends, and that the
+/// closed pane's child was killed once with [`KillPolicy::Force`].
+#[cfg(unix)]
+fn assert_swap_waits_for_the_held_kill_of_a_closed_pane(session_start: SessionStart) {
+    let (mut server, fake_pty_backend, runtime_event_sender) = build_test_server();
+    let kill_barrier = Arc::new(std::sync::Barrier::new(2));
+    fake_pty_backend.hold_kills_at(kill_barrier.clone());
+    seed_test_session(&mut server);
+    let client_id = attach_test_client(&mut server).client_id;
+    let CommandResult::Ok { emitted_events, .. } =
+        server.submit_command(CommandEnvelope::from_parts(
+            CommandId::new(),
+            CommandSource::from_key_binding(client_id),
+            Command::NewPane(NewPaneArgs {
+                placement: NewPanePlacement::Split {
+                    source_pane_id: None,
+                    tab_id: None,
+                    direction: Direction::Right,
+                },
+                working_directory: None,
+                spawn_spec: None,
+                client_id: None,
+            }),
+        ))
+    else {
+        panic!("the split is accepted");
+    };
+    let closed_pane_id = emitted_events
+        .iter()
+        .find_map(|emitted_event| match emitted_event {
+            Event::PaneCreated(PaneCreated { pane_id, .. }) => Some(*pane_id),
+            _ => None,
+        })
+        .expect("the split creates a pane");
+    let _ = server.submit_command(CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::from_key_binding(client_id),
+        Command::ClosePane(ClosePaneArgs {
+            pane_id: Some(closed_pane_id),
+            should_force_close: true,
+            should_kill_process_tree: false,
+        }),
+    ));
+    let session_socket =
+        bind_session_socket(&session_start, &runtime_event_sender).expect("the address binds");
+    let pty_owner = Arc::new(PortablePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(runtime_event_sender.clone()),
+    )));
+
+    let (kill_record_sender, kill_record_receiver) = mpsc::channel();
+    let swap_fake_pty_backend = fake_pty_backend.clone();
+    let swap_thread = std::thread::spawn(move || {
+        let (mut rebuilt_server, _rebound_session_socket) = swap_session_image(
+            server,
+            session_socket,
+            &pty_owner,
+            &session_start,
+            &runtime_event_sender,
+        )
+        .expect("a swap that could not start puts the session back")
+        .expect("the session runs in this process, not another one");
+        kill_record_sender
+            .send(swap_fake_pty_backend.list_pane_kill_policies(closed_pane_id))
+            .expect("the test waits for the swap");
+        rebuilt_server.kill_all_panes();
+    });
+
+    assert_eq!(
+        kill_record_receiver.recv_timeout(Duration::from_millis(200)),
+        Err(mpsc::RecvTimeoutError::Timeout),
+        "the swap waits for the held kill"
+    );
+    kill_barrier.wait();
+    assert_eq!(
+        kill_record_receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the swap ends once the kill ends"),
+        Ok(vec![KillPolicy::Force])
+    );
+    swap_thread.join().expect("the swap thread ends");
 }
 
 #[cfg(unix)]

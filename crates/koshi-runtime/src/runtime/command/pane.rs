@@ -501,12 +501,8 @@ impl Server {
             &mut emitted_events,
         );
 
-        super::kill_off_thread(&pty_backend, pane_target.pane_id, kill_policy);
-        self.end_removed_floating_panes(
-            pane_target.session_id,
-            &pty_backend,
-            floating_pane_kill_policies,
-        );
+        self.kill_pane_off_thread(pane_target.pane_id, kill_policy);
+        self.end_removed_floating_panes(pane_target.session_id, floating_pane_kill_policies);
 
         Ok(Self::commit_events(
             &mut self.event_bus,
@@ -559,7 +555,6 @@ impl Server {
         session_id: SessionId,
         pane_id: PaneId,
     ) -> Result<CommandResult, Rejection> {
-        let pty_backend = Arc::clone(self.get_pty_backend());
         let session = self
             .session_by_id
             .get_mut(&session_id)
@@ -583,7 +578,7 @@ impl Server {
         advance_client_placement_revisions(session, &affected_client_ids);
 
         self.release_pane_bookkeeping(session_id, pane_id);
-        super::kill_off_thread(&pty_backend, pane_id, kill_policy);
+        self.kill_pane_off_thread(pane_id, kill_policy);
         Ok(Self::commit_events(
             &mut self.event_bus,
             command_id,
@@ -593,14 +588,13 @@ impl Server {
 
     /// End each floating pane `floating_pane_kill_policies` names that the
     /// session `session_id` does not hold: release its runtime bookkeeping
-    /// ([`Self::release_pane_bookkeeping`]), then kill its child on a thread of
-    /// its own under its listed policy. A last-tab quit removes every floating
-    /// pane; a removal that quit nothing leaves every floating pane in place,
-    /// and this ends none.
+    /// ([`Self::release_pane_bookkeeping`]), then kill its child under its
+    /// listed policy ([`Self::kill_pane_off_thread`]). A last-tab quit removes
+    /// every floating pane; a removal that quit nothing leaves every floating
+    /// pane in place, and this ends none.
     pub(super) fn end_removed_floating_panes(
         &mut self,
         session_id: SessionId,
-        pty_backend: &Arc<dyn PtyBackend>,
         floating_pane_kill_policies: Vec<(PaneId, KillPolicy)>,
     ) {
         for (pane_id, kill_policy) in floating_pane_kill_policies {
@@ -612,7 +606,7 @@ impl Server {
                 continue;
             }
             self.release_pane_bookkeeping(session_id, pane_id);
-            super::kill_off_thread(pty_backend, pane_id, kill_policy);
+            self.kill_pane_off_thread(pane_id, kill_policy);
         }
     }
 
@@ -771,7 +765,7 @@ impl Server {
         // sends no leader signal after its watcher reaps the child. An undriven
         // carried pane has no backend entry and returns UnknownPane.
         let _ = pty_backend.kill_pane(pane_id, KillPolicy::Force);
-        self.end_removed_floating_panes(session_id, &pty_backend, floating_pane_kill_policies);
+        self.end_removed_floating_panes(session_id, floating_pane_kill_policies);
 
         self.render_scheduler.invalidate();
 
@@ -791,10 +785,12 @@ impl Server {
     /// against that tab size ([`Session::get_tab_size`]), and the donating
     /// side's spare cells are measured against it. A tab no viewer contributes
     /// a pane area to rejects.
-    /// On success the tab's tree is swapped in, the resizing client's zoom
-    /// drops, any other client's zoom stands, [`Event::LayoutChanged`] is
+    /// On success the tab's tree is swapped in, [`Event::LayoutChanged`] is
     /// emitted, and every live PTY whose solved size changed is resized through
-    /// the shared reflow path, one [`Event::PtyResized`] each.
+    /// the shared reflow path, one [`Event::PtyResized`] each. The resizing
+    /// client's zoom drops: the client the command source names
+    /// ([`CommandSource::get_target_client_id`]), else the issuing client. Any
+    /// other client's zoom stands.
     ///
     /// A floating pane has no sibling: it resizes through
     /// [`Self::resolve_floating_pane_resize`] and
@@ -848,8 +844,11 @@ impl Server {
             other_resize_error => Err(other_resize_error),
         })
         .map_err(|resize_error| Self::resize_rejection(&resize_error))?;
+        let resizing_client_id = command_source
+            .get_target_client_id()
+            .or(command_source.get_client_id());
         let affected_client_ids =
-            list_clients_affected_by_tabs(session, &[tab_id], command_source.get_client_id());
+            list_clients_affected_by_tabs(session, &[tab_id], resizing_client_id);
         ensure_session_placement_revision_capacity(session)?;
         ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
 
@@ -859,12 +858,12 @@ impl Server {
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
         tab_state.update_layout(resized_layout_tree);
 
-        // Resizing drops the zoom of the client that resized, and of that client
-        // only; it returns to the tiled view and sees the moved border. Another
+        // Resizing drops the zoom of the resizing client, and of that client
+        // only: the client the command source names, else the issuing client.
+        // It returns to the tiled view and sees the moved border. Another
         // client zoomed on a pane of this tab keeps its zoom.
-        if let Some(client) = command_source
-            .get_client_id()
-            .and_then(|client_id| session.clients.get_client_mut_by_id(client_id))
+        if let Some(client) =
+            resizing_client_id.and_then(|client_id| session.clients.get_client_mut_by_id(client_id))
         {
             client.clear_zoom(tab_id);
         }
@@ -890,10 +889,10 @@ impl Server {
 
     /// Apply a floating pane resize that
     /// [`Self::resolve_floating_pane_resize`] resolved: store the pane's
-    /// desired size and the acting client's top-left cell — pinned again at
-    /// that cell for a client that pinned the pane — then re-solve every
-    /// floating pane and resize each PTY whose size changed
-    /// ([`Self::reflow_floating_panes`]). No other client's view changes.
+    /// desired size and the acting client's top-left cell as a moved cell,
+    /// then re-solve every floating pane and resize each PTY whose size
+    /// changed ([`Self::reflow_floating_panes`]). A client that pinned the pane
+    /// keeps its pinned cell. No other client's view changes.
     ///
     /// The session's placement revision advances, and so does the acting
     /// client's when its stored position changed. Emits one
@@ -931,12 +930,7 @@ impl Server {
             client_origin,
             session.clients.get_client_mut_by_id(client_id),
         ) {
-            match previous_position {
-                FloatingPanePosition::Pinned(_) => client.pin_floating_pane(pane_id, client_origin),
-                FloatingPanePosition::Default | FloatingPanePosition::Moved(_) => {
-                    let _ = client.set_floating_pane_position(pane_id, client_origin);
-                }
-            }
+            let _ = client.set_floating_pane_position(pane_id, client_origin);
             if client.get_floating_pane_view(pane_id).position != previous_position {
                 let _ = client.advance_placement_revision();
             }
