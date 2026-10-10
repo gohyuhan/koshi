@@ -1,11 +1,7 @@
 //! Tests for pane close and exit policies: defaults, policy-to-kill-policy
 //! mapping, and serialization round-trips.
 
-use std::time::Duration;
-
-use koshi_core::process::KillPolicy;
-
-use super::PaneClosePolicy;
+use super::*;
 
 #[test]
 fn the_default_close_policy_is_a_three_second_graceful_close() {

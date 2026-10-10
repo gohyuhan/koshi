@@ -268,38 +268,50 @@ fn recovery_notice_reads_from_painted_frame_and_absent_field_means_hidden() {
 }
 
 #[test]
-fn an_old_frame_without_placement_revisions_reads_zero_generations() {
-    let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("the frame encodes");
-    encoded_json["session_snapshot"]
-        .as_object_mut()
-        .expect("the session snapshot is an object")
-        .remove("session_revision")
-        .expect("the session revision is present");
-    encoded_json["client_snapshot"]
-        .as_object_mut()
-        .expect("the client snapshot is an object")
-        .remove("client_revision")
-        .expect("the client revision is present");
+fn a_frame_without_a_placement_revision_is_refused() {
+    let encoded_json = serde_json::to_value(build_painted_frame()).expect("the frame encodes");
+    for (snapshot_name, revision_name) in [
+        ("session_snapshot", "session_revision"),
+        ("client_snapshot", "client_revision"),
+    ] {
+        let mut frame_json_without_revision = encoded_json.clone();
+        frame_json_without_revision[snapshot_name]
+            .as_object_mut()
+            .expect("the snapshot is an object")
+            .remove(revision_name)
+            .expect("the revision is present");
 
-    let received: PaintedFrame =
-        serde_json::from_str(&encoded_json.to_string()).expect("an old frame decodes");
-
-    assert_eq!(received.session_snapshot.session_revision, 0);
-    assert_eq!(received.client_snapshot.client_revision, 0);
+        let decode_error =
+            serde_json::from_str::<PaintedFrame>(&frame_json_without_revision.to_string())
+                .expect_err("a frame without the revision is refused");
+        assert_eq!(
+            decode_error.to_string(),
+            format!(
+                "missing field `{revision_name}` at line 1 column {}",
+                decode_error.column()
+            )
+        );
+    }
 }
 
 #[test]
-fn an_image_placement_without_availability_expects_its_record() {
+fn an_image_placement_without_availability_is_refused() {
     let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("the frame encodes");
     encoded_json["pane_snapshots"][0]["image_placement_snapshots"][0]
         .as_object_mut()
         .expect("the image placement is an object")
-        .remove("is_available");
+        .remove("is_available")
+        .expect("the availability is present");
 
-    let received: PaintedFrame =
-        serde_json::from_str(&encoded_json.to_string()).expect("the frame decodes");
-
-    assert!(received.pane_snapshots[0].image_placement_snapshots[0].is_available);
+    let decode_error = serde_json::from_str::<PaintedFrame>(&encoded_json.to_string())
+        .expect_err("an image placement without availability is refused");
+    assert_eq!(
+        decode_error.to_string(),
+        format!(
+            "missing field `is_available` at line 1 column {}",
+            decode_error.column()
+        )
+    );
 }
 
 #[test]
@@ -371,7 +383,8 @@ fn an_image_placement_cannot_cross_the_cell_coordinate_limit() {
         "image_content_id": 2,
         "anchor_cell": [65535, 0],
         "column_count": 1,
-        "row_count": 2
+        "row_count": 2,
+        "is_available": true
     }))
     .expect_err("two rows cannot start at the last u16 row");
     assert_eq!(
@@ -384,7 +397,8 @@ fn an_image_placement_cannot_cross_the_cell_coordinate_limit() {
         "image_content_id": 2,
         "anchor_cell": [0, 65535],
         "column_count": 2,
-        "row_count": 1
+        "row_count": 1,
+        "is_available": true
     }))
     .expect_err("two columns cannot start at the last u16 column");
     assert_eq!(
@@ -397,7 +411,8 @@ fn an_image_placement_cannot_cross_the_cell_coordinate_limit() {
         "image_content_id": 2,
         "anchor_cell": [65535, 65535],
         "column_count": 1,
-        "row_count": 1
+        "row_count": 1,
+        "is_available": true
     }))
     .expect("one cell may occupy the last row and column");
     assert_eq!(edge.anchor_cell, (u16::MAX, u16::MAX));
@@ -483,12 +498,9 @@ fn image_transfer_dimensions_accept_the_limits_and_refuse_the_next_value() {
 
 #[test]
 fn a_frame_encodes_to_the_shape_a_client_decodes() {
-    // A client and a server only agree on a frame if both were built at this
-    // shape. Add, remove or rename anything below and every client older than
-    // the change stops decoding the frames it is sent.
-    //
-    // A default cell carries no `combining`, no `underline_color` and no set
-    // attribute, so those names are absent from the encoding below.
+    // The exact encoding of a frame at this protocol version. A default cell
+    // carries no `combining_characters`, no `underline_color` and no set
+    // attribute: those names are absent from the encoding below.
     let plain_cell = json!({
         "character": "h",
         "cell_width": 1,
@@ -595,8 +607,7 @@ fn a_frame_carrying_an_unknown_field_ignores_it() {
         .expect("a pane encodes as an object")
         .insert("zoomed".to_string(), serde_json::Value::Bool(true));
 
-    // Decoded from text, the way the transport does it: the frame arrives as
-    // bytes on a socket, never as an already-built value.
+    // Decoded from text, as the transport decodes it.
     let decoded: PaintedFrame = serde_json::from_str(&encoded_json.to_string())
         .expect("a field this build does not know is ignored");
 
@@ -607,8 +618,8 @@ fn a_frame_carrying_an_unknown_field_ignores_it() {
     );
 }
 
-/// A frame from a server that sends no `gap` reads as `0`, and a frame that
-/// sends one reads back the value it was written with.
+/// A frame with no `gap_cell_count` reads as `0`, and a frame that carries one
+/// reads back the value it was written with.
 #[test]
 fn a_frame_without_a_gap_reads_as_zero() {
     let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("frame encodes");
@@ -638,7 +649,7 @@ fn a_frame_without_a_gap_reads_as_zero() {
 }
 
 /// A value enum this build has no name for falls back to its plainest value,
-/// so one unfamiliar colour or underline never costs the whole frame.
+/// and the rest of the frame decodes.
 #[test]
 fn a_cell_value_this_build_has_no_name_for_falls_back() {
     let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("frame encodes");
@@ -675,10 +686,8 @@ fn a_cell_value_this_build_has_no_name_for_falls_back() {
     );
 }
 
-/// A frame row that soft-wrapped must arrive soft-wrapped. A viewer that reads a
-/// soft wrap as a hard one breaks the logical line when its text is copied
-/// out, and the wire form leaves the default off, so only the two wrapped
-/// endings travel at all.
+/// A frame row that soft-wrapped arrives soft-wrapped. The wire form leaves
+/// the default ending off: only the two wrapped endings travel.
 #[test]
 fn a_wrapped_row_carries_its_ending_and_an_ended_row_leaves_it_off() {
     let encoded_json = |end| {
@@ -749,7 +758,7 @@ fn a_cursor_shape_and_an_underline_colour_with_no_name_here_read_as_none() {
     );
 }
 
-/// A `gap` that is not a cell count — negative, or a string — reads as `0`
+/// A `gap_cell_count` that is not a cell count — negative, or a string — reads as `0`
 /// and leaves the rest of the frame intact.
 #[test]
 fn a_frame_whose_gap_is_not_a_count_reads_as_zero() {

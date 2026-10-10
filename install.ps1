@@ -34,11 +34,11 @@ $archive_path = Join-Path $staging_directory "koshi-$PID-$archive_file_name"
 $extraction_directory = Join-Path $staging_directory "koshi-extract-$PID"
 
 # Installation paths. The new koshi.exe waits beside the installed one as
-# koshi-update-<process id of this run>.exe until it replaces it. The finally
+# koshi-staged-<process id of this run>.exe until it replaces it. The finally
 # block at the end removes that copy when the install stops before then.
 $installation_directory = Join-Path $env:LOCALAPPDATA "koshi"
 $binary_path = Join-Path $installation_directory "koshi.exe"
-$staged_binary_path = Join-Path $installation_directory "koshi-update-$PID.exe"
+$staged_binary_path = Join-Path $installation_directory "koshi-staged-$PID.exe"
 $install_lock_path = Join-Path $installation_directory "koshi.lock"
 
 $install_lock = $null

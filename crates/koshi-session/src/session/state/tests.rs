@@ -18,7 +18,7 @@ use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 
-use crate::client::{ClientOrigin, FloatingPaneView};
+use crate::client::{ClientOrigin, FloatingPanePosition, FloatingPaneView};
 use crate::session::pane_ops::NewPaneSpec;
 use crate::session::tab_ops::{close_tab, commit_new_tab};
 
@@ -2156,43 +2156,6 @@ fn a_zoom_on_the_focused_pane_is_consistent() {
 }
 
 #[test]
-fn a_focus_on_a_ghost_pane_in_a_real_tab_reports_both_missing_record_and_missing_target() {
-    // Focus pointing at a pane with no record, inside a tab that *does* exist,
-    // trips two independent checks at once: the registry has no such pane
-    // (`FocusPaneNotInRegistry`), and the tab's layout does not hold it either
-    // (`FocusTargetMissing`). Both name the same client, tab, and pane.
-    let mut session = build_empty_session();
-    let emitted_events = commit_test_tab(&mut session, "code".to_owned());
-    let tab_id = get_created_tab_id(&emitted_events);
-
-    let ghost_pane_id = PaneId::new();
-    let client_id = attach_viewer(&mut session, tab_id, 80, 24);
-    session
-        .clients
-        .get_client_mut_by_id(client_id)
-        .expect("the client was just attached")
-        .update_focused_pane(tab_id, ghost_pane_id);
-
-    // Exactly those two: the real tab, its real pane, and the session-matched
-    // client add nothing else.
-    assert_eq!(
-        session.validate_session_consistency(),
-        Err(vec![
-            SessionConsistencyError::FocusPaneNotInRegistry {
-                client_id,
-                tab_id,
-                pane_id: ghost_pane_id,
-            },
-            SessionConsistencyError::FocusTargetMissing {
-                client_id,
-                tab_id,
-                pane_id: ghost_pane_id,
-            },
-        ])
-    );
-}
-
-#[test]
 fn a_zoom_on_a_pane_with_no_record_is_reported() {
     // A zoom naming a pane the registry has never heard of is not a live leaf:
     // it is reported even though the tab it is keyed under is real. The
@@ -2372,6 +2335,19 @@ fn a_restored_focus_history_longer_than_the_cap_still_evicts() {
     );
 }
 
+/// A floating member for `pane_id` asking for the default size, solved to
+/// `48x13`.
+pub(crate) fn build_default_floating_member(pane_id: PaneId) -> FloatingMember {
+    FloatingMember {
+        pane_id,
+        desired_size: koshi_core::geometry::DEFAULT_FLOATING_PANE_SIZE,
+        solved_size: FloatingPaneSizeSolve::Sized(Size {
+            column_count: 48,
+            row_count: 13,
+        }),
+    }
+}
+
 /// A floating member for `pane_id` asking for 40x10 cells and solved to 40x10.
 fn build_floating_member(pane_id: PaneId) -> FloatingMember {
     FloatingMember {
@@ -2490,11 +2466,13 @@ fn add_member_refuses_a_member_past_the_session_limit() {
         .map(|_| PaneId::new())
         .collect();
     for &pane_id in &pane_ids {
+        assert!(!floating_set.is_full());
         floating_set
             .add_member(build_floating_member(pane_id))
             .expect("the floating set has room");
     }
 
+    assert!(floating_set.is_full());
     assert_eq!(
         floating_set.add_member(build_floating_member(PaneId::new())),
         Err(FloatingSetError::TooManyPanes)
@@ -2837,7 +2815,7 @@ fn remove_floating_member_keeps_the_order_of_the_rest_and_clears_every_client_vi
     assert!(focusing_client.focus_floating_pane(removed_pane_id));
     let pinning_client = get_attached_client_mut(&mut session, pinning_client_id);
     assert!(pinning_client.focus_floating_pane(removed_pane_id));
-    pinning_client.set_floating_pane_pinned(removed_pane_id, true);
+    pinning_client.pin_floating_pane(removed_pane_id, Point { column: 3, row: 4 });
     pinning_client.minimize_floating_pane(last_pane_id);
 
     assert_eq!(
@@ -2869,8 +2847,7 @@ fn remove_floating_member_keeps_the_order_of_the_rest_and_clears_every_client_vi
         &HashMap::from([(
             last_pane_id,
             FloatingPaneView {
-                placement: None,
-                is_pinned: false,
+                position: FloatingPanePosition::Default,
                 is_minimized: true,
             },
         )])
@@ -2905,7 +2882,7 @@ fn a_floating_member_with_no_layout_leaf_is_consistent() {
     let client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
     let client = get_attached_client_mut(&mut session, client_id);
     assert!(client.focus_floating_pane(floating_pane_id));
-    assert!(client.set_floating_pane_placement(floating_pane_id, Point { column: 2, row: 1 }));
+    assert!(client.set_floating_pane_position(floating_pane_id, Point { column: 2, row: 1 }));
 
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
@@ -3021,7 +2998,7 @@ fn client_views_of_panes_that_are_not_floating_are_reported_in_pane_id_order() {
     let mut stray_pane_ids: [PaneId; 8] = std::array::from_fn(|_| PaneId::new());
     let client = get_attached_client_mut(&mut session, client_id);
     for stray_pane_id in stray_pane_ids {
-        client.set_floating_pane_pinned(stray_pane_id, true);
+        client.pin_floating_pane(stray_pane_id, Point { column: 0, row: 0 });
     }
     stray_pane_ids.sort();
 
@@ -3220,4 +3197,96 @@ fn a_session_json_without_a_floating_set_is_refused() {
             .to_string(),
         "missing field `floating_set`"
     );
+}
+
+/// A floating pane size of `column_count` by `row_count` cells.
+fn build_cells_size(column_count: u16, row_count: u16) -> FloatingPaneSize {
+    FloatingPaneSize {
+        width: FloatingPaneDimension::Cells(
+            NonZeroU16::new(column_count).expect("a nonzero column count"),
+        ),
+        height: FloatingPaneDimension::Cells(
+            NonZeroU16::new(row_count).expect("a nonzero row count"),
+        ),
+    }
+}
+
+#[test]
+fn solve_floating_pane_size_cuts_to_the_viewport_and_raises_to_the_floating_minimum() {
+    let shared_floating_viewport = Size {
+        column_count: 80,
+        row_count: 22,
+    };
+    let pane_minimum_size = Size {
+        column_count: 2,
+        row_count: 1,
+    };
+    let sixty_percent =
+        FloatingPaneDimension::Percent(AxisPercent::try_from(60).expect("60 is a percent"));
+
+    assert_eq!(
+        solve_floating_pane_size(
+            FloatingPaneSize {
+                width: sixty_percent,
+                height: sixty_percent,
+            },
+            shared_floating_viewport,
+            pane_minimum_size,
+        ),
+        FloatingPaneSizeSolve::Sized(Size {
+            column_count: 48,
+            row_count: 13,
+        })
+    );
+    assert_eq!(
+        solve_floating_pane_size(
+            build_cells_size(100, 30),
+            shared_floating_viewport,
+            pane_minimum_size,
+        ),
+        FloatingPaneSizeSolve::Sized(shared_floating_viewport)
+    );
+    assert_eq!(
+        solve_floating_pane_size(
+            build_cells_size(1, 1),
+            shared_floating_viewport,
+            pane_minimum_size,
+        ),
+        FloatingPaneSizeSolve::Sized(Size {
+            column_count: 4,
+            row_count: 5,
+        })
+    );
+    assert_eq!(
+        solve_floating_pane_size(
+            build_cells_size(40, 10),
+            Size {
+                column_count: 3,
+                row_count: 22,
+            },
+            pane_minimum_size,
+        ),
+        FloatingPaneSizeSolve::Suppressed
+    );
+}
+
+#[test]
+fn update_member_desired_size_changes_a_member_and_refuses_any_other_pane() {
+    let mut session = build_empty_session();
+    let pane_id = register_floating_pane(&mut session);
+    let resized_desired_size = build_cells_size(43, 10);
+
+    assert!(session
+        .floating_set
+        .update_member_desired_size(pane_id, resized_desired_size));
+    let resized_member = FloatingMember {
+        desired_size: resized_desired_size,
+        ..build_floating_member(pane_id)
+    };
+    assert_eq!(session.floating_set.list_members(), [resized_member]);
+
+    assert!(!session
+        .floating_set
+        .update_member_desired_size(PaneId::new(), build_cells_size(9, 9)));
+    assert_eq!(session.floating_set.list_members(), [resized_member]);
 }

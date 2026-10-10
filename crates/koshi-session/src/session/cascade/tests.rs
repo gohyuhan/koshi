@@ -1,31 +1,27 @@
 //! Tests for pane lifecycle cascades: removal, focus repair, and tab closure.
 //!
-//! These tests verify that pane removal (via exit or user action) correctly
-//! cascades: focus is repaired on all clients, sibling panes inherit focus,
-//! emptying a tab closes it under `CloseTab`, and the session quits when no
-//! tabs remain. Also tests the inverse — on child
-//! process exit, the exit policy (`CloseOnExit`) decides
-//! whether a pane is removed or restarted — and which of the terminal, the
-//! client's own regions, or another viewer is named when no pane fits.
+//! These tests verify that pane removal (via exit or user action) cascades:
+//! focus is repaired on all clients, sibling panes inherit focus, emptying a
+//! tab closes it, and the session quits when no tabs remain. They also verify
+//! which of the terminal, the client's own regions, or another viewer is named
+//! when no pane fits.
+
+use super::*;
 
 use std::time::SystemTime;
 
-use koshi_core::event::{
-    Event, LayoutChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved, QuitCause,
-    TabClosed, TerminalTooSmallCause,
-};
-use koshi_core::geometry::{PaneArea, Rect, Size, SplitDirection};
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_layout::mode::LayoutMode;
-use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
+use koshi_core::event::{QuitCause, TabClosed};
+use koshi_core::geometry::{Point, Size, SplitDirection};
+use koshi_core::ids::SessionId;
+use koshi_layout::solver::MIN_PANE_SIZE;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::policy::PaneClosePolicy;
 use koshi_pane::pane::state::PaneRecord;
 
-use super::{apply_child_exit, remove_pane_cascade, resolve_terminal_too_small_cause};
-use crate::client::{Client, ClientOrigin, ClientRegistry};
-use crate::session::state::{Session, Tab};
+use crate::client::{Client, ClientOrigin, ClientRegistry, FloatingPaneView};
+use crate::session::state::tests::build_default_floating_member;
+use crate::session::state::Tab;
 
 /// Standard terminal size (80×24) used across all test fixtures.
 const TEST_VIEWPORT_SIZE: Size = Size {
@@ -126,7 +122,7 @@ fn build_two_pane_tab(tab_id: TabId, left_pane_id: PaneId, right_pane_id: PaneId
 }
 
 /// Creates a client viewing the given tab with the given pane focused.
-/// The client carries `session_id`, which [`Session::validate`] checks against
+/// The client carries `session_id`, which [`Session::validate_session_consistency`] checks against
 /// the session's own id.
 fn build_focused_client(session_id: SessionId, tab_id: TabId, focused_pane_id: PaneId) -> Client {
     let mut client = Client::from_attachment(
@@ -234,12 +230,12 @@ fn removing_a_focused_pane_focuses_a_survivor() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: removed_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::LayoutChanged(LayoutChanged { tab_id }),
             Event::PaneFocused(PaneFocused {
                 client_id,
-                tab_id,
+                tab_id: Some(tab_id),
                 pane_id: surviving_pane_id,
                 previous_pane_id: Some(removed_pane_id),
             }),
@@ -309,11 +305,11 @@ fn removing_a_pane_missing_from_the_layout_still_repairs_focus_and_zoom() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: removed_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::PaneFocused(PaneFocused {
                 client_id,
-                tab_id,
+                tab_id: Some(tab_id),
                 pane_id: surviving_pane_id,
                 previous_pane_id: Some(removed_pane_id),
             }),
@@ -366,7 +362,7 @@ fn removing_a_nonfocused_pane_leaves_focus_untouched() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: removed_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::LayoutChanged(LayoutChanged { tab_id }),
         ]
@@ -411,7 +407,7 @@ fn collapsing_a_multi_pane_tab_emits_layout_changed() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: removed_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::LayoutChanged(LayoutChanged { tab_id }),
         ]
@@ -514,14 +510,14 @@ fn focus_repair_reaches_a_client_viewing_another_tab() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: removed_pane_id,
-                tab_id: removed_tab_id,
+                tab_id: Some(removed_tab_id),
             }),
             Event::LayoutChanged(LayoutChanged {
                 tab_id: removed_tab_id,
             }),
             Event::PaneFocused(PaneFocused {
                 client_id,
-                tab_id: removed_tab_id,
+                tab_id: Some(removed_tab_id),
                 pane_id: surviving_pane_id,
                 previous_pane_id: Some(removed_pane_id),
             }),
@@ -877,7 +873,7 @@ fn removing_the_last_pane_closes_the_tab_and_quits() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: only_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::TabClosed(TabClosed { tab_id }),
             Event::Quit(QuitCause::LastTabClosed {
@@ -923,7 +919,7 @@ fn removing_the_last_pane_a_client_focuses_leaves_a_consistent_session() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: only_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::TabClosed(TabClosed { tab_id }),
             Event::Quit(QuitCause::LastTabClosed {
@@ -994,7 +990,7 @@ fn closing_the_last_pane_of_one_tab_among_several_does_not_quit() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: first_pane_id,
-                tab_id: first_tab_id,
+                tab_id: Some(first_tab_id),
             }),
             Event::TabClosed(TabClosed {
                 tab_id: first_tab_id
@@ -1087,9 +1083,8 @@ fn removing_an_unknown_pane_emits_nothing() {
     );
 }
 
-/// A tab id the session does not hold, with a pane id it does: the pane's
-/// registry pane record is dropped and the cascade stops there, so the tab that
-/// really holds the pane keeps a leaf with no pane record behind it.
+/// A tab id the session does not hold, with a pane id it does: nothing is
+/// removed and no event is emitted.
 #[test]
 fn removing_a_pane_under_an_unknown_tab_changes_nothing_and_emits_nothing() {
     let tab_id = TabId::new();
@@ -1174,7 +1169,10 @@ fn a_close_on_exit_pane_runs_the_removal_cascade() {
                 signal: None,
             }),
             Event::PaneClosing(PaneClosing { pane_id }),
-            Event::PaneRemoved(PaneRemoved { pane_id, tab_id }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id,
+                tab_id: Some(tab_id)
+            }),
             Event::TabClosed(TabClosed { tab_id }),
             Event::Quit(QuitCause::LastTabClosed {
                 tab_id,
@@ -1339,7 +1337,10 @@ fn closing_the_last_tab_prunes_client_focus_and_quits() {
         emitted_events,
         vec![
             Event::PaneClosing(PaneClosing { pane_id }),
-            Event::PaneRemoved(PaneRemoved { pane_id, tab_id }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id,
+                tab_id: Some(tab_id)
+            }),
             Event::TabClosed(TabClosed { tab_id }),
             Event::Quit(QuitCause::LastTabClosed {
                 tab_id,
@@ -1398,7 +1399,7 @@ fn removing_a_hidden_pane_leaves_a_zoomed_client_zoomed() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: removed_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::LayoutChanged(LayoutChanged { tab_id }),
         ]
@@ -1505,7 +1506,7 @@ fn a_registry_pane_missing_from_the_layout_is_dropped_without_touching_the_tab()
             Event::PaneClosing(PaneClosing { pane_id: ghost }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: ghost,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
         ]
     );
@@ -1541,9 +1542,8 @@ fn a_registry_pane_missing_from_the_layout_is_dropped_without_touching_the_tab()
     );
 }
 
-/// A second exit report for a pane already recorded as `Exited`. The removal
-/// cascade reads the policy, not the lifecycle, so the pane is removed and its
-/// last tab closes exactly as on the first report.
+/// A second exit report for a pane already recorded as `Exited` removes the
+/// pane and closes its last tab, as the first report does.
 #[test]
 fn a_repeated_exit_still_removes_the_pane() {
     let tab_id = TabId::new();
@@ -1586,5 +1586,96 @@ fn a_repeated_exit_still_removes_the_pane() {
     assert_eq!(
         session.tabs.keys().copied().collect::<Vec<TabId>>(),
         Vec::new()
+    );
+}
+
+#[test]
+fn remove_floating_pane_drops_the_record_the_member_and_every_client_view() {
+    let tab_id = TabId::new();
+    let tiled_pane_id = PaneId::new();
+    let floating_pane_id = PaneId::new();
+    let mut session = build_session_with(
+        vec![build_single_pane_tab(tab_id, tiled_pane_id)],
+        vec![
+            build_pane_record(tiled_pane_id, PaneLifecycle::Running),
+            build_pane_record(floating_pane_id, PaneLifecycle::Running),
+        ],
+    );
+    session
+        .floating_set
+        .add_member(build_default_floating_member(floating_pane_id))
+        .expect("the floating set is empty");
+    let mut focusing_client = build_focused_client(session.session_id, tab_id, tiled_pane_id);
+    assert!(focusing_client.focus_floating_pane(floating_pane_id));
+    let focusing_client_id = focusing_client.get_client_id();
+    session.attach_client(focusing_client);
+    let mut pinning_client = build_focused_client(session.session_id, tab_id, tiled_pane_id);
+    pinning_client.pin_floating_pane(floating_pane_id, Point { column: 3, row: 4 });
+    let pinning_client_id = pinning_client.get_client_id();
+    session.attach_client(pinning_client);
+
+    let emitted_events = remove_floating_pane(&mut session, floating_pane_id);
+
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::PaneClosing(PaneClosing {
+                pane_id: floating_pane_id,
+            }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: floating_pane_id,
+                tab_id: None,
+            }),
+        ]
+    );
+    assert_eq!(session.floating_set.list_members(), []);
+    assert!(session
+        .panes
+        .get_pane_record_by_id(floating_pane_id)
+        .is_none());
+    for client_id in [focusing_client_id, pinning_client_id] {
+        let client = session
+            .clients
+            .get_client_by_id(client_id)
+            .expect("the client is attached");
+        assert_eq!(
+            client.get_floating_pane_view(floating_pane_id),
+            FloatingPaneView::default()
+        );
+        assert_eq!(
+            client.list_floating_pane_focus_order(),
+            Vec::<PaneId>::new()
+        );
+        assert_eq!(client.get_focused_floating_pane_id(), None);
+        assert_eq!(client.get_focused_pane_id(tab_id), Some(tiled_pane_id));
+    }
+    assert_eq!(
+        session.tabs[&tab_id].get_layout_tree(),
+        &LayoutNode::Pane(tiled_pane_id)
+    );
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+}
+
+#[test]
+fn remove_floating_pane_of_a_tiled_pane_changes_nothing() {
+    let tab_id = TabId::new();
+    let tiled_pane_id = PaneId::new();
+    let mut session = build_session_with(
+        vec![build_single_pane_tab(tab_id, tiled_pane_id)],
+        vec![build_pane_record(tiled_pane_id, PaneLifecycle::Running)],
+    );
+
+    assert_eq!(remove_floating_pane(&mut session, tiled_pane_id), vec![]);
+
+    assert_eq!(
+        session
+            .panes
+            .get_pane_record_by_id(tiled_pane_id)
+            .map(PaneRecord::get_pane_id),
+        Some(tiled_pane_id)
+    );
+    assert_eq!(
+        session.tabs[&tab_id].get_layout_tree(),
+        &LayoutNode::Pane(tiled_pane_id)
     );
 }

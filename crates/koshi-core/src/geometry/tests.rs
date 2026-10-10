@@ -24,7 +24,7 @@ fn build_rect(column_index: u16, row_index: u16, column_count: u16, row_count: u
 
 #[test]
 fn image_geometry_validates_the_visible_crop_without_overflow() {
-    let geometry = ImageCellGeometry {
+    let image_cell_geometry = ImageCellGeometry {
         full_size: Size {
             column_count: 4,
             row_count: 5,
@@ -76,7 +76,7 @@ fn image_geometry_validates_the_visible_crop_without_overflow() {
         ),
     ] {
         assert_eq!(
-            geometry.is_visible_size_contained(visible_size),
+            image_cell_geometry.is_visible_size_contained(visible_size),
             expected_is_contained,
             "{visible_size:?}"
         );
@@ -104,10 +104,14 @@ fn pixel_cell_dimensions_are_nonzero_and_round_trip_exactly() {
         serde_json::from_value::<PixelCellSize>(pixel_cell_size_json).expect("restore"),
         pixel_cell_size
     );
-    assert!(serde_json::from_value::<PixelCellSize>(
-        serde_json::json!({"pixel_width": 0, "pixel_height": 20})
-    )
-    .is_err());
+    assert_eq!(
+        serde_json::from_value::<PixelCellSize>(
+            serde_json::json!({"pixel_width": 0, "pixel_height": 20})
+        )
+        .expect_err("a zero width is refused")
+        .to_string(),
+        "invalid value: integer `0`, expected a nonzero u16"
+    );
 }
 
 #[test]
@@ -140,6 +144,29 @@ fn rect_contains_points_only_inside_half_open_bounds() {
             rect.is_point_inside(point),
             expected_is_inside,
             "contains {point:?}"
+        );
+    }
+}
+
+#[test]
+fn a_rect_is_inside_another_only_when_every_edge_stays_within_it() {
+    let outer_rect = build_rect(1, 1, 5, 3);
+    let inside_checks = [
+        (build_rect(1, 1, 5, 3), true),
+        (build_rect(3, 2, 3, 2), true),
+        (build_rect(6, 4, 0, 0), true),
+        (build_rect(4, 2, 3, 2), false),
+        (build_rect(3, 3, 3, 2), false),
+        (build_rect(0, 1, 2, 2), false),
+        (build_rect(1, 0, 2, 2), false),
+        (build_rect(u16::MAX, u16::MAX, u16::MAX, u16::MAX), false),
+    ];
+
+    for (inner_rect, is_expected_inside) in inside_checks {
+        assert_eq!(
+            inner_rect.is_inside_rect(outer_rect),
+            is_expected_inside,
+            "{inner_rect:?}"
         );
     }
 }
@@ -219,12 +246,12 @@ fn intersection_is_symmetric() {
 #[test]
 fn contains_at_the_grid_maximum_does_not_overflow() {
     // The right edge is one past u16::MAX.
-    let corner = build_rect(u16::MAX, u16::MAX, 1, 1);
-    assert!(corner.is_point_inside(Point {
+    let corner_rect = build_rect(u16::MAX, u16::MAX, 1, 1);
+    assert!(corner_rect.is_point_inside(Point {
         column: u16::MAX,
         row: u16::MAX
     }));
-    assert!(!corner.is_point_inside(Point {
+    assert!(!corner_rect.is_point_inside(Point {
         column: u16::MAX - 1,
         row: u16::MAX
     }));

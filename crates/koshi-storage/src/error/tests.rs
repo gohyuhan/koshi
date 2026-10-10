@@ -1,6 +1,6 @@
 //! Tests for the `Display` wording of every [`StorageError`] variant.
 
-use super::StorageError;
+use super::*;
 
 #[test]
 fn io_error_display_carries_the_detail() {

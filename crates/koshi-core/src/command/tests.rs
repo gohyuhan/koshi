@@ -5,16 +5,19 @@
 
 use super::*;
 use crate::event::{Event, QuitCause, RejectReason};
+use crate::geometry::{AxisPercent, FloatingPaneDimension};
 use crate::ids::{ClientId, CommandId, PaneId, SessionId};
 use serde_json::json;
+use std::num::NonZeroU16;
 
 /// A `new-pane` request with nothing chosen: the focused pane splits rightward.
 fn build_new_pane_args() -> NewPaneArgs {
     NewPaneArgs {
-        source_pane_id: None,
-        tab_id: None,
-        direction: Direction::Right,
-        should_stack: false,
+        placement: NewPanePlacement::Split {
+            source_pane_id: None,
+            tab_id: None,
+            direction: Direction::Right,
+        },
         working_directory: None,
         spawn_spec: None,
         client_id: None,
@@ -44,8 +47,32 @@ fn unit_command_variants_round_trip_through_json() {
 #[test]
 fn pane_command_variants_round_trip_through_json() {
     assert_json_roundtrip(&Command::NewPane(NewPaneArgs {
-        direction: Direction::Left,
+        placement: NewPanePlacement::Split {
+            source_pane_id: Some(PaneId::new()),
+            tab_id: Some(TabId::new()),
+            direction: Direction::Left,
+        },
         client_id: Some(ClientId::new()),
+        ..build_new_pane_args()
+    }));
+    assert_json_roundtrip(&Command::NewPane(NewPaneArgs {
+        placement: NewPanePlacement::Stacked {
+            source_pane_id: Some(PaneId::new()),
+            tab_id: None,
+        },
+        ..build_new_pane_args()
+    }));
+    assert_json_roundtrip(&Command::NewPane(NewPaneArgs {
+        placement: NewPanePlacement::Floating {
+            size: Some(FloatingPaneSize {
+                width: FloatingPaneDimension::Cells(NonZeroU16::new(40).expect("40 is nonzero")),
+                height: FloatingPaneDimension::Percent(
+                    AxisPercent::try_from(60).expect("60 is a percent"),
+                ),
+            }),
+            at: Some(Point { column: 5, row: 2 }),
+            is_pinned: true,
+        },
         ..build_new_pane_args()
     }));
     assert_json_roundtrip(&Command::ClosePane(ClosePaneArgs {
@@ -125,19 +152,20 @@ fn pane_command_variants_round_trip_through_json() {
             }
         })
     );
-    assert_json_roundtrip(&Command::RunCommandPane(RunCommandPaneArgs {
-        spawn_spec: SpawnSpec {
+    assert_json_roundtrip(&Command::NewPane(NewPaneArgs {
+        placement: NewPanePlacement::Split {
+            source_pane_id: Some(PaneId::new()),
+            tab_id: Some(TabId::new()),
+            direction: Direction::Down,
+        },
+        working_directory: None,
+        spawn_spec: Some(SpawnSpec {
             program: std::path::PathBuf::from("htop"),
             arguments: vec!["-d".to_string()],
             working_directory: None,
             environment_variables: std::collections::BTreeMap::new(),
             shell_kind: crate::process::ShellKind::Other("htop".to_string()),
-        },
-        working_directory: None,
-        source_pane_id: Some(PaneId::new()),
-        tab_id: Some(TabId::new()),
-        direction: Direction::Down,
-        should_stack: false,
+        }),
         client_id: Some(ClientId::new()),
     }));
     assert_json_roundtrip(&Command::FocusPane(FocusPaneArgs {
@@ -263,24 +291,6 @@ fn command_variant_names_are_canonical() {
             "SetLockMode",
         ),
         (
-            Command::RunCommandPane(RunCommandPaneArgs {
-                spawn_spec: SpawnSpec {
-                    program: std::path::PathBuf::from("ls"),
-                    arguments: vec![],
-                    working_directory: None,
-                    environment_variables: std::collections::BTreeMap::new(),
-                    shell_kind: crate::process::ShellKind::Other("x".to_string()),
-                },
-                working_directory: None,
-                source_pane_id: None,
-                tab_id: None,
-                direction: Direction::Right,
-                should_stack: false,
-                client_id: None,
-            }),
-            "RunCommandPane",
-        ),
-        (
             Command::Visual(VisualCommand::ClearSelection(ClearSelectionArgs {
                 pane_id: PaneId::new(),
             })),
@@ -330,7 +340,7 @@ fn command_variant_names_are_canonical() {
             "SwitchSession",
         ),
     ];
-    assert_eq!(command_cases.len(), 22);
+    assert_eq!(command_cases.len(), 21);
     for (command, command_name) in &command_cases {
         assert_eq!(&format_debug_variant_name(command), command_name);
     }
@@ -661,68 +671,6 @@ fn cli_exit_codes_match_spec() {
 }
 
 #[test]
-fn toggle_pane_fullscreen_is_a_bare_wire_string() {
-    // The byte shape a still-running 0.3.0 session decodes: a unit variant
-    // carries no object, only its name.
-    assert_eq!(
-        serde_json::to_string(&Command::TogglePaneFullscreen).unwrap(),
-        "\"TogglePaneFullscreen\""
-    );
-    assert_eq!(
-        serde_json::from_str::<Command>("\"TogglePaneFullscreen\"").unwrap(),
-        Command::TogglePaneFullscreen
-    );
-}
-
-#[test]
-fn an_external_cli_source_without_a_client_still_decodes() {
-    // JSON carrying no `target_client_id` field decodes with it `None`.
-    assert_eq!(
-        serde_json::from_str::<CommandSource>(r#"{"ExternalCli":{"session_id":null}}"#).unwrap(),
-        CommandSource::ExternalCli {
-            session_id: None,
-            target_client_id: None,
-        }
-    );
-
-    let session_id = SessionId::new();
-    let session_uuid = session_id.get_uuid();
-    let source_json = format!(r#"{{"ExternalCli":{{"session_id":"{session_uuid}"}}}}"#);
-    assert_eq!(
-        serde_json::from_str::<CommandSource>(&source_json).unwrap(),
-        CommandSource::ExternalCli {
-            session_id: Some(session_id),
-            target_client_id: None,
-        }
-    );
-}
-
-#[test]
-fn older_external_cli_source_ignores_target_client_id() {
-    /// The `ExternalCli` shape 0.3.0 decodes: a session target and nothing else.
-    #[derive(Deserialize, PartialEq, Debug)]
-    enum ExternalCliSessionOnlySource {
-        ExternalCli { session_id: Option<SessionId> },
-    }
-
-    let session_id = SessionId::new();
-    let client_id = ClientId::new();
-    let serialized_command_source = serde_json::to_string(&CommandSource::from_external_cli(
-        Some(session_id),
-        Some(client_id),
-    ))
-    .expect("serialize");
-
-    assert_eq!(
-        serde_json::from_str::<ExternalCliSessionOnlySource>(&serialized_command_source)
-            .expect("deserialize"),
-        ExternalCliSessionOnlySource::ExternalCli {
-            session_id: Some(session_id),
-        }
-    );
-}
-
-#[test]
 fn the_target_client_is_never_the_acting_client() {
     let session_id = SessionId::new();
     let client_id = ClientId::new();
@@ -764,25 +712,6 @@ fn the_target_client_is_never_the_acting_client() {
     command_envelope
         .validate_command_envelope()
         .expect("a source naming a target client is a well-formed envelope");
-}
-
-/// The `RunCommandPane` request that spawns `ls` with nothing else chosen.
-fn build_run_ls_command_args() -> RunCommandPaneArgs {
-    RunCommandPaneArgs {
-        spawn_spec: SpawnSpec {
-            program: std::path::PathBuf::from("ls"),
-            arguments: vec![],
-            working_directory: None,
-            environment_variables: std::collections::BTreeMap::new(),
-            shell_kind: crate::process::ShellKind::Other("ls".to_string()),
-        },
-        working_directory: None,
-        source_pane_id: None,
-        tab_id: None,
-        direction: Direction::Right,
-        should_stack: false,
-        client_id: None,
-    }
 }
 
 #[test]
@@ -1096,33 +1025,22 @@ fn write_to_pane_carries_every_byte_value() {
 }
 
 #[test]
-fn command_args_decode_when_defaulted_fields_are_missing() {
-    let client_id = ClientId::new();
-    let session_id = SessionId::new();
-    let client_id_json = serde_json::to_value(client_id).expect("serialize");
-    let session_id_json = serde_json::to_value(session_id).expect("serialize");
-
+fn a_command_written_in_the_protocol_four_shape_is_refused() {
     assert_eq!(
         serde_json::from_value::<ClosePaneArgs>(
             json!({"pane_id": null, "should_force_close": true})
         )
-        .expect("deserialize"),
-        ClosePaneArgs {
-            pane_id: None,
-            should_force_close: true,
-            should_kill_process_tree: false,
-        }
+        .expect_err("a close without the process tree choice is refused")
+        .to_string(),
+        "missing field `should_kill_process_tree`"
     );
     assert_eq!(
         serde_json::from_value::<CloseTabArgs>(
             json!({"tab_id": null, "should_force_close": false})
         )
-        .expect("deserialize"),
-        CloseTabArgs {
-            tab_id: None,
-            should_force_close: false,
-            should_kill_process_tree: false,
-        }
+        .expect_err("a close without the process tree choice is refused")
+        .to_string(),
+        "missing field `should_kill_process_tree`"
     );
     assert_eq!(
         serde_json::from_value::<NewPaneArgs>(json!({
@@ -1134,62 +1052,10 @@ fn command_args_decode_when_defaulted_fields_are_missing() {
             "spawn_spec": null,
             "client_id": null
         }))
-        .expect("deserialize"),
-        build_new_pane_args()
+        .expect_err("a new pane without a placement is refused")
+        .to_string(),
+        "missing field `placement`"
     );
-    assert_eq!(
-        serde_json::from_value::<LockModeArgs>(json!({"is_locked": true})).expect("deserialize"),
-        LockModeArgs {
-            is_locked: true,
-            client_id: None,
-        }
-    );
-    assert_eq!(
-        serde_json::from_value::<ToggleLockModeArgs>(json!({})).expect("deserialize"),
-        ToggleLockModeArgs { client_id: None }
-    );
-    assert_eq!(
-        serde_json::from_value::<DetachArgs>(json!({})).expect("deserialize"),
-        DetachArgs { client_id: None }
-    );
-    assert_eq!(
-        serde_json::from_value::<SwitchSessionArgs>(json!({"session_id": session_id_json}))
-            .expect("deserialize"),
-        SwitchSessionArgs {
-            client_id: None,
-            session_id,
-        }
-    );
-    assert_eq!(
-        serde_json::from_value::<LockModeArgs>(
-            json!({"is_locked": false, "client_id": client_id_json})
-        )
-        .expect("deserialize"),
-        LockModeArgs {
-            is_locked: false,
-            client_id: Some(client_id),
-        }
-    );
-}
-
-#[test]
-fn run_command_pane_args_written_without_tab_and_client_still_decode() {
-    let mut command_args_json =
-        serde_json::to_value(build_run_ls_command_args()).expect("serialize");
-    let run_command_pane_args_fields = command_args_json
-        .as_object_mut()
-        .expect("args are a JSON object");
-    run_command_pane_args_fields
-        .remove("tab_id")
-        .expect("the args carry a `tab_id` field to remove");
-    run_command_pane_args_fields
-        .remove("client_id")
-        .expect("the args carry a `client_id` field to remove");
-
-    let decoded_run_command_args: RunCommandPaneArgs =
-        serde_json::from_value(command_args_json).expect("deserialize");
-
-    assert_eq!(decoded_run_command_args, build_run_ls_command_args());
 }
 
 #[test]
@@ -1198,7 +1064,7 @@ fn a_command_with_an_unknown_variant_name_is_rejected() {
 
     assert_eq!(
         parse_error.to_string(),
-        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `RunCommandPane`, `Visual`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `PlacePane`, `ScrollPane`, `Quit`, `Detach`, `DetachAll`, `SwitchSession`"
+        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `Visual`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `PlacePane`, `ScrollPane`, `Quit`, `Detach`, `DetachAll`, `SwitchSession`"
     );
 }
 

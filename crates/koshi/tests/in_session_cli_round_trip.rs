@@ -302,12 +302,12 @@ fn new_pane_over_the_socket_splits_and_reports_success() {
         [
             Event::PaneCreated(PaneCreated {
                 pane_id: created_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::LayoutChanged(LayoutChanged { tab_id }),
             Event::PaneFocused(PaneFocused {
                 client_id: client.client_id,
-                tab_id,
+                tab_id: Some(tab_id),
                 pane_id: created_pane_id,
                 previous_pane_id: Some(root_pane_id),
             }),
@@ -333,12 +333,12 @@ fn new_pane_over_the_socket_splits_and_reports_success() {
         vec![
             SessionEvent::PaneCreated {
                 pane_id: created_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             },
             SessionEvent::LayoutChanged { tab_id },
             SessionEvent::PaneFocused {
                 client_id: client.client_id,
-                tab_id,
+                tab_id: Some(tab_id),
                 pane_id: created_pane_id,
                 previous_pane_id: Some(root_pane_id),
             },
@@ -371,12 +371,12 @@ fn close_pane_over_the_socket_kills_the_child_and_removes_the_pane() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: created_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::LayoutChanged(LayoutChanged { tab_id }),
             Event::PaneFocused(PaneFocused {
                 client_id: client.client_id,
-                tab_id,
+                tab_id: Some(tab_id),
                 pane_id: root_pane_id,
                 previous_pane_id: Some(created_pane_id),
             }),
@@ -397,12 +397,12 @@ fn close_pane_over_the_socket_kills_the_child_and_removes_the_pane() {
             },
             SessionEvent::PaneRemoved {
                 pane_id: created_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             },
             SessionEvent::LayoutChanged { tab_id },
             SessionEvent::PaneFocused {
                 client_id: client.client_id,
-                tab_id,
+                tab_id: Some(tab_id),
                 pane_id: root_pane_id,
                 previous_pane_id: Some(created_pane_id),
             },

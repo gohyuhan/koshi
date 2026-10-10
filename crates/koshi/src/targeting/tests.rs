@@ -263,7 +263,9 @@ fn no_answer_at_all_is_not_reported_as_no_sessions() {
         select_target_session(None, None, None, None, &build_incomplete_discovery([], 1))
             .expect_err("census empty");
     assert!(
-        matches!(selection_error, CliError::IpcUnavailable { .. }),
+        matches!(&selection_error, CliError::IpcUnavailable { detail }
+            if detail == "cannot tell which session to target; name one with \
+                          --session <name-or-id> (1 running session did not answer)"),
         "got {selection_error:?}"
     );
 }
@@ -280,20 +282,32 @@ fn an_unasked_session_does_not_turn_an_explicit_target_into_not_found() {
         )],
         1,
     );
+    let pane_id = PaneId::new();
     let selection_error =
-        select_target_session(None, Some(PaneId::new()), None, None, &discovered_sessions)
+        select_target_session(None, Some(pane_id), None, None, &discovered_sessions)
             .expect_err("the pane may be in the session that stayed silent");
     assert!(
-        matches!(selection_error, CliError::IpcUnavailable { .. }),
+        matches!(&selection_error, CliError::IpcUnavailable { detail }
+        if *detail == format!(
+            "pane {pane_id} is in none of the sessions that answered \
+             (1 running session did not answer)"
+        )),
         "got {selection_error:?}"
     );
 
-    let session_ref = SessionReference::SessionName("blue-owl".to_string());
-    let selection_error =
-        select_target_session(Some(&session_ref), None, None, None, &discovered_sessions)
-            .expect_err("the name may belong to the session that stayed silent");
+    let session_reference = SessionReference::SessionName("blue-owl".to_string());
+    let selection_error = select_target_session(
+        Some(&session_reference),
+        None,
+        None,
+        None,
+        &discovered_sessions,
+    )
+    .expect_err("the name may belong to the session that stayed silent");
     assert!(
-        matches!(selection_error, CliError::IpcUnavailable { .. }),
+        matches!(&selection_error, CliError::IpcUnavailable { detail }
+            if detail == "`blue-owl` is not among the sessions that answered \
+                          (1 running session did not answer)"),
         "got {selection_error:?}"
     );
 }
@@ -312,10 +326,15 @@ fn a_session_name_with_one_match_is_refused_while_a_session_is_unasked() {
         )],
         1,
     );
-    let session_ref = SessionReference::SessionName("amber-fox".to_string());
-    let selection_error =
-        select_target_session(Some(&session_ref), None, None, None, &discovered_sessions)
-            .expect_err("the unasked session may share the name");
+    let session_reference = SessionReference::SessionName("amber-fox".to_string());
+    let selection_error = select_target_session(
+        Some(&session_reference),
+        None,
+        None,
+        None,
+        &discovered_sessions,
+    )
+    .expect_err("the unasked session may share the name");
     assert!(
         matches!(&selection_error, CliError::IpcUnavailable { detail }
             if detail
@@ -393,10 +412,15 @@ fn session_name_matches_exactly_one() {
         build_session_overview("amber-fox", SessionId::new(), &[], &[], &[]),
         build_session_overview("blue-owl", target_session_id, &[], &[], &[]),
     ]);
-    let session_ref = SessionReference::SessionName("blue-owl".to_string());
-    let selected_session_overview =
-        select_target_session(Some(&session_ref), None, None, None, &discovered_sessions)
-            .expect("unique name");
+    let session_reference = SessionReference::SessionName("blue-owl".to_string());
+    let selected_session_overview = select_target_session(
+        Some(&session_reference),
+        None,
+        None,
+        None,
+        &discovered_sessions,
+    )
+    .expect("unique name");
     assert_eq!(
         selected_session_overview.session.session_id,
         target_session_id
@@ -412,10 +436,15 @@ fn unknown_session_name_is_not_running() {
         &[],
         &[],
     )]);
-    let session_ref = SessionReference::SessionName("blue-owl".to_string());
-    let selection_error =
-        select_target_session(Some(&session_ref), None, None, None, &discovered_sessions)
-            .expect_err("no match");
+    let session_reference = SessionReference::SessionName("blue-owl".to_string());
+    let selection_error = select_target_session(
+        Some(&session_reference),
+        None,
+        None,
+        None,
+        &discovered_sessions,
+    )
+    .expect_err("no match");
     assert!(
         matches!(&selection_error, CliError::SessionNotFound { session_name } if session_name == "blue-owl"),
         "got {selection_error:?}"
@@ -430,10 +459,15 @@ fn duplicate_session_name_is_ambiguous() {
         build_session_overview("amber-fox", first_session_id, &[], &[], &[]),
         build_session_overview("amber-fox", second_session_id, &[], &[], &[]),
     ]);
-    let session_ref = SessionReference::SessionName("amber-fox".to_string());
-    let selection_error =
-        select_target_session(Some(&session_ref), None, None, None, &discovered_sessions)
-            .expect_err("two match");
+    let session_reference = SessionReference::SessionName("amber-fox".to_string());
+    let selection_error = select_target_session(
+        Some(&session_reference),
+        None,
+        None,
+        None,
+        &discovered_sessions,
+    )
+    .expect_err("two match");
     assert_eq!(
         read_rejection_reason(&selection_error),
         RejectReason::TargetAmbiguous
@@ -456,10 +490,15 @@ fn session_id_not_advertised_is_not_running() {
         &[],
     )]);
     let missing_session_id = SessionId::new();
-    let session_ref = SessionReference::SessionId(missing_session_id);
-    let selection_error =
-        select_target_session(Some(&session_ref), None, None, None, &discovered_sessions)
-            .expect_err("not running");
+    let session_reference = SessionReference::SessionId(missing_session_id);
+    let selection_error = select_target_session(
+        Some(&session_reference),
+        None,
+        None,
+        None,
+        &discovered_sessions,
+    )
+    .expect_err("not running");
     assert!(
         matches!(&selection_error, CliError::SessionNotFound { session_name } if *session_name == missing_session_id.to_string()),
         "got {selection_error:?}"
@@ -523,9 +562,9 @@ fn explicit_session_with_a_pane_from_another_session_refuses() {
             &[],
         ),
     ]);
-    let session_ref = SessionReference::SessionName("amber-fox".to_string());
+    let session_reference = SessionReference::SessionName("amber-fox".to_string());
     let selection_error = select_target_session(
-        Some(&session_ref),
+        Some(&session_reference),
         Some(foreign_pane_id),
         None,
         None,
@@ -601,9 +640,9 @@ fn a_client_from_another_session_is_not_retargeted() {
             &[foreign_client_id],
         ),
     ]);
-    let session_ref = SessionReference::SessionName("amber-fox".to_string());
+    let session_reference = SessionReference::SessionName("amber-fox".to_string());
     let selection_error = select_target_session(
-        Some(&session_ref),
+        Some(&session_reference),
         None,
         None,
         Some(foreign_client_id),
@@ -687,9 +726,9 @@ fn tab_id_picks_its_owning_session() {
         build_session_overview("amber-fox", SessionId::new(), &[], &[], &[]),
         build_session_overview("blue-owl", target_session_id, &[(tab_id, "one")], &[], &[]),
     ]);
-    let tab_ref = TabReference::TabId(tab_id);
+    let tab_reference = TabReference::TabId(tab_id);
     let selected_session_overview =
-        select_target_session(None, None, Some(&tab_ref), None, &discovered_sessions)
+        select_target_session(None, None, Some(&tab_reference), None, &discovered_sessions)
             .expect("owner found");
     assert_eq!(
         selected_session_overview.session.session_id,
@@ -717,9 +756,9 @@ fn tab_name_owned_by_two_sessions_is_ambiguous() {
             &[],
         ),
     ]);
-    let tab_ref = TabReference::TabName("logs".to_string());
+    let tab_reference = TabReference::TabName("logs".to_string());
     let selection_error =
-        select_target_session(None, None, Some(&tab_ref), None, &discovered_sessions)
+        select_target_session(None, None, Some(&tab_reference), None, &discovered_sessions)
             .expect_err("two owners");
     assert_eq!(
         read_rejection_reason(&selection_error),
@@ -749,14 +788,14 @@ fn two_tabs_of_one_session_sharing_a_name_are_ambiguous() {
         &[],
         &[],
     )]);
-    let tab_ref = TabReference::TabName("logs".to_string());
+    let tab_reference = TabReference::TabName("logs".to_string());
 
     let selected_session_overview =
-        select_target_session(None, None, Some(&tab_ref), None, &discovered_sessions)
+        select_target_session(None, None, Some(&tab_reference), None, &discovered_sessions)
             .expect("one owning session");
     assert_eq!(selected_session_overview.session.session_id, session_id);
 
-    let tab_resolution_error = resolve_target_tab(selected_session_overview, &tab_ref)
+    let tab_resolution_error = resolve_target_tab(selected_session_overview, &tab_reference)
         .expect_err("two tabs share the name");
     assert_eq!(
         read_rejection_reason(&tab_resolution_error),
@@ -825,9 +864,9 @@ fn duplicate_tabs_spanning_sessions_still_offer_the_session_flag() {
             &[],
         ),
     ]);
-    let tab_ref = TabReference::TabName("logs".to_string());
+    let tab_reference = TabReference::TabName("logs".to_string());
     let selection_error =
-        select_target_session(None, None, Some(&tab_ref), None, &discovered_sessions)
+        select_target_session(None, None, Some(&tab_reference), None, &discovered_sessions)
             .expect_err("three tabs");
     assert_eq!(
         read_rejection_reason(&selection_error),
@@ -852,9 +891,9 @@ fn a_tab_name_no_session_holds_is_not_found() {
         &[],
         &[],
     )]);
-    let tab_ref = TabReference::TabName("logs".to_string());
+    let tab_reference = TabReference::TabName("logs".to_string());
     let selection_error =
-        select_target_session(None, None, Some(&tab_ref), None, &discovered_sessions)
+        select_target_session(None, None, Some(&tab_reference), None, &discovered_sessions)
             .expect_err("nowhere");
     assert_eq!(
         read_rejection_reason(&selection_error),
@@ -1100,11 +1139,11 @@ fn a_named_client_leaves_the_home_route() {
         client_id: None,
         pane_id: PaneId::new(),
     };
-    let bare = CliCommand::TogglePaneFullscreen { client_id: None };
+    let bare_command = CliCommand::TogglePaneFullscreen { client_id: None };
     let home_route = resolve_command_route_in_runtime_directory(
         runtime_directory.path(),
         None,
-        &bare,
+        &bare_command,
         Some(&in_session_context),
     )
     .expect("no flag needs no lookup");
@@ -1259,8 +1298,11 @@ fn an_explicit_session_id_asks_that_one_remote_session_and_no_other() {
         remote_session_rows,
     );
 
-    assert_eq!(probed_remote_session_rows.len(), 1, "one dial, not three");
-    assert_eq!(probed_remote_session_rows[0].session_id, target_session_id);
+    assert_eq!(
+        probed_remote_session_rows,
+        vec![build_remote_session_row(target_session_id, "S-wanted")],
+        "one dial, not three"
+    );
 }
 
 #[test]

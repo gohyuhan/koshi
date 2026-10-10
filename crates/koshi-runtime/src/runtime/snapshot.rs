@@ -9,10 +9,10 @@
 //! — and copies no cells; the next write to that pane clones its buffer once (copy-on-write). A
 //! pane the client has scrolled back in carries a grid composed for that window instead.
 //!
-//! The snapshot is per-client, not session-global: `session.active_tab` holds
-//! *this* client's viewed tab, and always names the same tab as
-//! `client.active_tab`, while `session.session_name`/`tabs_metadata` are the true
-//! session-wide data.
+//! The snapshot is per-client, not session-global:
+//! `session_snapshot.active_tab_snapshot` holds *this* client's viewed tab, and
+//! always names the same tab as `client_snapshot.active_tab_id`, while
+//! `session_snapshot.session_name`/`tabs_metadata` are the session-wide data.
 //!
 //! `Server::build_layout` is the same work stopping short of the panes: it
 //! yields the [`OwnedFrameLayout`] that says where every surface sits, with no
@@ -133,7 +133,8 @@ impl Server {
     /// Freeze the world the way `client_id` sees it into a [`RenderSnapshot`].
     ///
     /// Returns `None` when no attached client has that id, or its viewed tab has
-    /// gone — the caller skips the frame. On success, `session.active_tab` is the
+    /// gone — the caller skips the frame. On success,
+    /// `session_snapshot.active_tab_snapshot` is the
     /// client's own viewed tab, solved over the tab size (the
     /// per-axis-minimum pane area across every client viewing it), so the
     /// renderer letterboxes it (centers it with padding) into this client's
@@ -171,6 +172,10 @@ impl Server {
     /// Freeze the source pane and selected destination tab for one read-only
     /// placement preview. This method reads live state only; it never changes
     /// a tab, a client, a pane, focus, membership, or terminal size.
+    ///
+    /// A floating source pane is refused with
+    /// [`PlacementSnapshotErrorCode::NotFound`] `<pane> is floating and holds
+    /// no tiled slot`.
     pub(crate) fn build_placement_snapshot(
         &self,
         client_id: ClientId,
@@ -183,9 +188,15 @@ impl Server {
         let client = session.clients.get_client_by_id(client_id).ok_or_else(|| {
             build_placement_not_found_error("the requesting client is not attached")
         })?;
-        let source_tab = session
-            .find_tab_by_pane_id(source_pane_id)
-            .ok_or_else(|| build_placement_not_found_error("the source pane does not exist"))?;
+        let source_tab = session.find_tab_by_pane_id(source_pane_id).ok_or_else(|| {
+            if session.floating_set.has_pane(source_pane_id) {
+                build_placement_not_found_error(&format!(
+                    "{source_pane_id} is floating and holds no tiled slot"
+                ))
+            } else {
+                build_placement_not_found_error("the source pane does not exist")
+            }
+        })?;
         let destination_tab = session
             .tabs
             .get(&destination_tab_id)
@@ -340,7 +351,7 @@ impl Server {
         let session = self.get_session_for_client(client_id)?;
         let client = session.clients.get_client_by_id(client_id)?;
         let active_tab_id = client.get_active_tab_id();
-        let tab_record = session.tabs.get(&active_tab_id)?;
+        let tab = session.tabs.get(&active_tab_id)?;
 
         // Solve the active tab's layout over a rect at origin (0, 0) sized to the
         // shared tab size; the renderer offsets it into the client viewport.
@@ -356,11 +367,11 @@ impl Server {
         });
         let layout_mode = client.get_layout_mode(active_tab_id);
         let pane_sizing = self.get_pane_sizing();
-        let layout_solve = solve_tab_layout(tab_record, layout_mode, tab_size, pane_sizing);
+        let layout_solve = solve_tab_layout(tab, layout_mode, tab_size, pane_sizing);
 
         let active_tab_snapshot = TabSnapshot {
-            tab_id: tab_record.get_tab_id(),
-            tab_name: tab_record.get_tab_name().to_owned(),
+            tab_id: tab.get_tab_id(),
+            tab_name: tab.get_tab_name().to_owned(),
             pane_slots: list_pane_slots(&layout_solve),
             tab_size,
             stack_headers: layout_solve.stack_headers,
@@ -373,11 +384,11 @@ impl Server {
         let mut tabs_metadata: Vec<TabMetadata> = session
             .tabs
             .values()
-            .map(|tab_record| TabMetadata {
-                tab_id: tab_record.get_tab_id(),
-                tab_name: tab_record.get_tab_name().to_owned(),
-                tab_index: tab_record.get_tab_index(),
-                is_active: tab_record.get_tab_id() == active_tab_id,
+            .map(|tab| TabMetadata {
+                tab_id: tab.get_tab_id(),
+                tab_name: tab.get_tab_name().to_owned(),
+                tab_index: tab.get_tab_index(),
+                is_active: tab.get_tab_id() == active_tab_id,
             })
             .collect();
         tabs_metadata.sort_by_key(|tab_metadata| tab_metadata.tab_index);
@@ -413,7 +424,7 @@ impl Server {
     /// from absolute line numbers to the rows this frame actually shows.
     ///
     /// A pane with no terminal engine — one not yet spawned — gets
-    /// `grid_view = None`, a hidden cursor, and no mouse mode at all: the
+    /// `terminal_grid_view = None`, a hidden cursor, and no mouse mode at all: the
     /// renderer draws no cells for it, and a wheel over it asks nothing of a
     /// program.
     #[allow(clippy::needless_pass_by_value)]
@@ -604,12 +615,12 @@ fn build_placement_resource_limit_error(message: &str) -> PlacementSnapshotError
     }
 }
 
-/// Solve `tab`'s current layout in `layout_mode` over an `tab_size`-sized rect at origin
+/// Solve `tab`'s current layout in `layout_mode` over a `tab_size`-sized rect at origin
 /// `(0, 0)` — the space `PaneSlot`/content rects live in.
 ///
-/// `mode` is a viewing client's, never the tab's: the tab holds only the tree,
-/// and whether a pane is zoomed is a fact about one client's view. Two clients
-/// on this tab can pass different modes for the same tree in the same frame.
+/// `layout_mode` is a viewing client's, never the tab's: the tab holds only the
+/// tree. Two clients on this tab can pass different modes for the same tree in
+/// the same frame.
 pub(crate) fn solve_tab_layout(
     tab: &Tab,
     layout_mode: LayoutMode,

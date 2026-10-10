@@ -114,8 +114,6 @@ fn a_tiny_visible_pane_stays_some_with_a_zero_area_content_rect() {
         content_rect_entries,
         vec![(pane_id, Some(build_cell_rect(6, 6, 0, 0)))],
     );
-    assert!(content_rect_entries[0].1.is_some());
-    assert!(content_rect_entries[0].1.unwrap().is_empty());
 }
 
 #[test]

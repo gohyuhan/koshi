@@ -6,7 +6,7 @@
 
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 
-use koshi_core::geometry::{PaneArea, Rect, Size, SplitDirection};
+use koshi_core::geometry::{PaneArea, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::size::SizeConstraint;
@@ -174,12 +174,10 @@ pub struct PanePlacementClientSnapshot {
     /// The client's outer terminal size.
     pub viewport_size: Size,
     /// The pane area reported by the client, if any.
-    #[serde(default)]
     pub pane_area: Option<PaneArea>,
     /// The tab the client viewed when it requested the preview.
     pub active_tab_id: TabId,
     /// The pane focused in the active tab, if any.
-    #[serde(default)]
     pub focused_pane_id: Option<PaneId>,
 }
 
@@ -278,13 +276,12 @@ fn validate_tab_snapshot(
         return Err(PanePlacementSnapshotValidationError::PaneSnapshotMismatch);
     }
 
+    let tab_rect = Rect::from_size_at_origin(tab_snapshot.tab_size);
     for pane_slot in &tab_snapshot.pane_slots {
-        if !is_rect_within_size(pane_slot.outer_rect, tab_snapshot.tab_size)
+        if !pane_slot.outer_rect.is_inside_rect(tab_rect)
             || pane_slot.is_visible != pane_slot.content_rect.is_some()
             || pane_slot.content_rect.is_some_and(|content_rect| {
-                content_rect.is_empty()
-                    || !is_rect_within_rect(content_rect, pane_slot.outer_rect)
-                    || !is_rect_within_size(content_rect, tab_snapshot.tab_size)
+                content_rect.is_empty() || !content_rect.is_inside_rect(pane_slot.outer_rect)
             })
             || (pane_slot.is_suppressed && pane_slot.is_visible)
         {
@@ -404,7 +401,9 @@ fn validate_stack_headers(
             || !header_pane_ids.insert(stack_header.pane_id)
             || stack_header.member_count < 2
             || stack_header.member_index >= stack_header.member_count
-            || !is_rect_within_size(stack_header.header_rect, tab_snapshot.tab_size)
+            || !stack_header
+                .header_rect
+                .is_inside_rect(Rect::from_size_at_origin(tab_snapshot.tab_size))
         {
             return Err(PanePlacementSnapshotValidationError::LayoutMismatch);
         }
@@ -509,14 +508,19 @@ fn validate_image_placement(
         column_count: image_placement.column_count,
         row_count: image_placement.row_count,
     };
-    if !is_cell_rect_within(
-        image_placement.anchor_cell,
+    let (anchor_row, anchor_column) = image_placement.anchor_cell;
+    let image_rect = Rect::from_origin_and_size(
+        Point {
+            column: anchor_column,
+            row: anchor_row,
+        },
         image_size,
-        terminal_window_size,
-    ) || image_placement
-        .image_record
-        .as_ref()
-        .is_some_and(|image_record| image_record.image_action == FrameImageAction::Transmit)
+    );
+    if !image_rect.is_inside_rect(Rect::from_size_at_origin(terminal_window_size))
+        || image_placement
+            .image_record
+            .as_ref()
+            .is_some_and(|image_record| image_record.image_action == FrameImageAction::Transmit)
     {
         return Err(PanePlacementSnapshotValidationError::ImagePlacementMismatch);
     }
@@ -549,27 +553,6 @@ fn validate_image_placement(
         }
     }
     Ok(())
-}
-
-fn is_rect_within_size(rect: Rect, size: Size) -> bool {
-    u32::from(rect.origin.column) + u32::from(rect.size.column_count)
-        <= u32::from(size.column_count)
-        && u32::from(rect.origin.row) + u32::from(rect.size.row_count) <= u32::from(size.row_count)
-}
-
-fn is_rect_within_rect(inner_rect: Rect, outer_rect: Rect) -> bool {
-    inner_rect.origin.column >= outer_rect.origin.column
-        && inner_rect.origin.row >= outer_rect.origin.row
-        && u32::from(inner_rect.origin.column) + u32::from(inner_rect.size.column_count)
-            <= u32::from(outer_rect.origin.column) + u32::from(outer_rect.size.column_count)
-        && u32::from(inner_rect.origin.row) + u32::from(inner_rect.size.row_count)
-            <= u32::from(outer_rect.origin.row) + u32::from(outer_rect.size.row_count)
-}
-
-fn is_cell_rect_within(anchor_cell: (u16, u16), rect_size: Size, content_size: Size) -> bool {
-    u32::from(anchor_cell.0) + u32::from(rect_size.row_count) <= u32::from(content_size.row_count)
-        && u32::from(anchor_cell.1) + u32::from(rect_size.column_count)
-            <= u32::from(content_size.column_count)
 }
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ use crate::server::Server;
 use koshi_config::layer::{PartialKoshiConfig, PartialScrollbackConfig};
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTarget,
-    GridPosition, NewPaneArgs, NewTabArgs, Selection, SelectionKind,
+    GridPosition, NewPaneArgs, NewPanePlacement, NewTabArgs, Selection, SelectionKind,
 };
 use koshi_core::geometry::{Direction, PixelCellSize, Size};
 use koshi_core::ids::{ClientId, CommandId, TabId};
@@ -1013,10 +1013,11 @@ fn build_populated_server() -> PopulatedServer {
             &mut server,
             first_client_id,
             Command::NewPane(NewPaneArgs {
-                source_pane_id: None,
-                tab_id: None,
-                direction,
-                should_stack: false,
+                placement: NewPanePlacement::Split {
+                    source_pane_id: None,
+                    tab_id: None,
+                    direction,
+                },
                 working_directory: None,
                 spawn_spec: None,
                 client_id: None,

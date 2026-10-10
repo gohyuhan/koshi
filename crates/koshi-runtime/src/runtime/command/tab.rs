@@ -67,8 +67,8 @@ impl Server {
         // the session is borrowed mutably.
         let pty_backend = Arc::clone(self.get_pty_backend());
         let pane_sizing = self.get_pane_sizing();
-        // The root pane runs the default shell in the requested directory.
-        // Built before the session is borrowed, reading `self.config.terminal`.
+        // The root pane runs the default shell in the requested directory,
+        // built from `self.config.terminal` before the session is borrowed.
         let mut spawn_spec =
             self.build_default_shell_spec(command_args.working_directory.clone(), BTreeMap::new());
         // No directory was asked for: the tab opens where the designated
@@ -117,8 +117,8 @@ impl Server {
         ensure_session_placement_revision_capacity(session)?;
         ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
 
-        // Resolve the tab's name before the spawn: a generated one no
-        // existing tab in the session already uses.
+        // The tab's name is generated before the spawn: a name no existing
+        // tab in the session uses.
         let tab_name = generate_tab_name(session);
 
         let launch_working_directory = spawn_spec.working_directory.clone();
@@ -200,9 +200,12 @@ impl Server {
     /// and still lets a busy `ConfirmIfBusy` pane reject the close. The
     /// removal itself is [`tab_ops::close_tab`]: pane records drop, the tab
     /// goes, viewers move to the nearest surviving tab, and closing the last
-    /// tab quits the session. The kills run on one detached thread per pane —
-    /// a graceful kill can sleep out its grace window, every child gets its
-    /// stop request immediately, and the dispatcher keeps draining.
+    /// tab removes every floating pane and quits the session. `--force` and
+    /// `--tree` apply to those floating panes too, and a busy `ConfirmIfBusy`
+    /// floating pane never refuses the quit. The kills run on one detached
+    /// thread per pane — a graceful kill can sleep out its grace window, every
+    /// child gets its stop request immediately, and the dispatcher keeps
+    /// draining.
     ///
     /// After the removal, the tab the displaced viewers landed on reflows to
     /// its new tab size (it now counts the movers). A destination with no
@@ -214,7 +217,7 @@ impl Server {
         command_args: &CloseTabArgs,
     ) -> Result<CommandResult, Rejection> {
         // An owned handle on the shared backend. Each kill thread takes its own
-        // clone of it, and no `&self` borrow crosses the commit below.
+        // clone of it.
         let pty_backend = Arc::clone(self.get_pty_backend());
 
         let (tab_id, session) =
@@ -253,6 +256,11 @@ impl Server {
         );
         ensure_session_placement_revision_capacity(session)?;
         ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
+        let floating_pane_kill_policies = list_floating_pane_kill_policies(
+            session,
+            command_args.should_force_close,
+            command_args.should_kill_process_tree,
+        );
 
         // Commit the state removal: pane records drop, the tab goes, viewers
         // move to the nearest surviving tab, last-tab close quits the session.
@@ -279,11 +287,12 @@ impl Server {
             );
         }
 
-        // One thread per pane, so every child receives its stop request
-        // immediately.
+        // One kill thread per pane; every child receives its stop request at
+        // once.
         for (pane_id, kill_policy) in pane_kill_policies {
-            super::kill_off_thread(&pty_backend, pane_id, kill_policy);
+            self.kill_pane_off_thread(pane_id, kill_policy);
         }
+        self.end_removed_floating_panes(session_id, floating_pane_kill_policies);
 
         Ok(Self::commit_events(
             &mut self.event_bus,
@@ -324,16 +333,15 @@ impl Server {
             .clients
             .get_client_by_id(tab_target.client_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
-        let prior_tab_id = client.get_active_tab_id();
+        let previous_tab_id = client.get_active_tab_id();
 
-        // Already viewing it — nothing to do, and no events: events are
-        // completed facts.
-        if prior_tab_id == tab_target.tab_id {
+        // Already viewing it: nothing changes, and no event is emitted.
+        if previous_tab_id == tab_target.tab_id {
             return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
         }
         let affected_client_ids = list_clients_affected_by_tabs(
             session,
-            &[tab_target.tab_id, prior_tab_id],
+            &[tab_target.tab_id, previous_tab_id],
             Some(tab_target.client_id),
         );
         ensure_session_placement_revision_capacity(session)?;
@@ -350,7 +358,7 @@ impl Server {
         // Both tabs' viewer sets changed: the target tab gained the arriving
         // viewer, the left tab lost it. Reflow each that still has a viewer;
         // a tab with no viewer has no tab size and keeps its sizes.
-        for tab_id in [tab_target.tab_id, prior_tab_id] {
+        for tab_id in [tab_target.tab_id, previous_tab_id] {
             self.reflow_tab_if_viewed(
                 pty_backend.as_ref(),
                 tab_target.session_id,

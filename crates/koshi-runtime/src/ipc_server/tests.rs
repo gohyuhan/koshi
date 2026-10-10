@@ -73,19 +73,11 @@ fn delete_test_directory(runtime_directory: &Path) {
     let _ = std::fs::remove_dir_all(runtime_directory);
 }
 
-/// A fresh directory to stand in for the machine-wide shared directory:
-/// `/tmp/koshi-shared-<process id>-<directory_tag>` on Unix, and the same name
-/// under the temporary directory on Windows. [`IpcServer::start`] creates it
-/// and this user's directory inside it.
+/// A fresh directory to stand in for the machine-wide shared directory: the
+/// [`build_test_runtime_directory`] path for `shared-<directory_tag>`.
+/// [`IpcServer::start`] creates it and this user's directory inside it.
 fn build_test_shared_directory(directory_tag: &str) -> PathBuf {
-    #[cfg(unix)]
-    let base_directory = PathBuf::from("/tmp");
-    #[cfg(windows)]
-    let base_directory = std::env::temp_dir();
-    base_directory.join(format!(
-        "koshi-shared-{}-{directory_tag}",
-        std::process::id()
-    ))
+    build_test_runtime_directory(&format!("shared-{directory_tag}"))
 }
 
 /// A stand-in for the dispatcher thread: drains the inbox, answers every
@@ -123,6 +115,27 @@ fn build_attached_structure(session_id: SessionId) -> AttachedSessionStructureSn
         session_id,
         session_name: "attachable".to_string(),
         tabs: Vec::new(),
+    }
+}
+
+/// The attach answer a stand-in dispatcher sends: `client_id` in `session_id`,
+/// with the structure [`build_attached_structure`] gives, `deliveries` as the
+/// client's queue, `ending_notice`, the [`MINTED_CONNECTION_TOKEN`] resume
+/// token, and no pane area.
+fn build_attach_accepted(
+    client_id: ClientId,
+    session_id: SessionId,
+    deliveries: Receiver<Delivery>,
+    ending_notice: Arc<EndingNotice>,
+) -> AttachAccepted {
+    AttachAccepted {
+        client_id,
+        session_id,
+        session_structure: build_attached_structure(session_id),
+        deliveries,
+        ending_notice,
+        resume_token: ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN),
+        pane_area: None,
     }
 }
 
@@ -251,15 +264,12 @@ fn spawn_attaching_dispatcher(
                 } => {
                     let (delivery_sender, delivery_receiver) = mpsc::channel();
                     delivery_senders.push(delivery_sender);
-                    let _ = response_sender.send(Some(AttachAccepted {
+                    let _ = response_sender.send(Some(build_attach_accepted(
                         client_id,
                         session_id,
-                        session_structure: build_attached_structure(session_id),
-                        deliveries: delivery_receiver,
-                        ending_notice: Arc::clone(&ending_notice),
-                        resume_token: ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN),
-                        pane_area: None,
-                    }));
+                        delivery_receiver,
+                        Arc::clone(&ending_notice),
+                    )));
                 }
                 detached_event @ RuntimeEvent::ClientDetached { .. } => {
                     delivery_senders.clear();
@@ -321,26 +331,35 @@ fn answer_first_attach(
         let Some(delivery_receiver) = unanswered_delivery_receiver.take() else {
             continue;
         };
-        let _ = response_sender.send(Some(AttachAccepted {
+        let _ = response_sender.send(Some(build_attach_accepted(
             client_id,
             session_id,
-            session_structure: build_attached_structure(session_id),
-            deliveries: delivery_receiver,
-            ending_notice: Arc::clone(&ending_notice),
-            resume_token: ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN),
-            pane_area: None,
-        }));
+            delivery_receiver,
+            Arc::clone(&ending_notice),
+        )));
     }
 }
 
 /// Wait up to 5 seconds until no client writing thread is left on
 /// `ending_notice`, and return how many are left.
 fn wait_for_running_writer_count(ending_notice: &EndingNotice) -> usize {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while ending_notice.count_running_writers() > 0 && std::time::Instant::now() < deadline {
+    wait_until(Duration::from_secs(5), || {
+        ending_notice.count_running_writers() == 0
+    });
+    ending_notice.count_running_writers()
+}
+
+/// Call `is_done` every 5 milliseconds until it returns `true` or
+/// `timeout_duration` passes. Returns the last answer of `is_done`.
+fn wait_until(timeout_duration: Duration, mut is_done: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout_duration;
+    while !is_done() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
         std::thread::sleep(Duration::from_millis(5));
     }
-    ending_notice.count_running_writers()
+    true
 }
 
 /// Serve a socket whose stand-in dispatcher answers the first attach with
@@ -529,12 +548,7 @@ fn attach_test_client_with_graphics(
     client_id: ClientId,
     graphics_capabilities: GraphicsCapabilities,
 ) -> Connection {
-    let mut connection = connect_to_session_socket(runtime_directory, session_id);
-    connection
-        .send(&build_hello_request(runtime_directory, session_id))
-        .expect("send hello");
-    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
+    let mut connection = connect_greeted_connection(runtime_directory, session_id);
 
     connection
         .send(&IpcRequest {
@@ -606,15 +620,12 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
     assert_eq!(cell_size, Some(measured_cell_size));
     let (delivery_sender, delivery_receiver) = mpsc::channel();
     response_sender
-        .send(Some(AttachAccepted {
+        .send(Some(build_attach_accepted(
             client_id,
             session_id,
-            session_structure: build_attached_structure(session_id),
-            deliveries: delivery_receiver,
-            ending_notice: Arc::new(EndingNotice::default()),
-            resume_token: ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN),
-            pane_area: None,
-        }))
+            delivery_receiver,
+            Arc::new(EndingNotice::default()),
+        )))
         .expect("the dispatcher receives the accepted attach");
     let _: IpcResponse = connection.recv().expect("attach reply");
 
@@ -1229,12 +1240,18 @@ fn start_reporting_test_server(
 /// and hand back the connection ready for the next request.
 fn connect_greeted_connection(runtime_directory: &Path, session_id: SessionId) -> Connection {
     let mut connection = connect_to_session_socket(runtime_directory, session_id);
+    greet_connection(&mut connection, runtime_directory, session_id);
+    connection
+}
+
+/// Send the Hello for `session_id` on `connection`, read its answer, and assert
+/// that the session accepted it.
+fn greet_connection(connection: &mut Connection, runtime_directory: &Path, session_id: SessionId) {
     connection
         .send(&build_hello_request(runtime_directory, session_id))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
     assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
-    connection
 }
 
 /// Submit `command_envelope` on `connection` and hand back the envelope the
@@ -1537,15 +1554,9 @@ fn a_submitted_command_round_trips_with_the_dispatchers_result() {
 fn a_request_kind_this_build_lacks_is_refused_by_name_and_the_connection_keeps_serving() {
     let (ipc_server, session_id, runtime_directory, dispatcher_thread) =
         start_test_server("unknown-kind", None);
-    let mut connection = connect_to_session_socket(&runtime_directory, session_id);
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
 
-    connection
-        .send(&build_hello_request(&runtime_directory, session_id))
-        .expect("send hello");
-    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
-
-    // A well-framed request naming a kind added by some later koshi.
+    // A well-framed request naming a kind that this build does not have.
     connection
         .send(&serde_json::json!({
             "request_id": 2,
@@ -1732,7 +1743,7 @@ fn a_peer_speaking_the_previous_protocol_is_refused_and_the_session_keeps_servin
     let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
         start_attachable_test_server("previous-protocol", client_id);
     // The protocol the last release speaks, written as a literal.
-    let previous_release_protocol_version = 3;
+    let previous_release_protocol_version = 4;
     let endpoint_file = load_test_endpoint_file(&runtime_directory, session_id);
 
     let mut old_peer = connect_to_session_socket(&runtime_directory, session_id);
@@ -1859,11 +1870,7 @@ fn a_request_before_hello_is_refused_and_the_connection_keeps_serving() {
     );
 
     // The same connection still serves: a Hello opens it.
-    connection
-        .send(&build_hello_request(&runtime_directory, session_id))
-        .expect("send hello");
-    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
+    greet_connection(&mut connection, &runtime_directory, session_id);
 
     drop(connection);
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
@@ -1939,12 +1946,7 @@ fn a_restart_advertises_a_fresh_token_and_refuses_the_old_one() {
         }),
     );
 
-    let mut accepted_connection = connect_to_session_socket(&runtime_directory, session_id);
-    accepted_connection
-        .send(&build_hello_request(&runtime_directory, session_id))
-        .expect("send hello with the new secret");
-    let hello_reply: IpcResponse = accepted_connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
+    let accepted_connection = connect_greeted_connection(&runtime_directory, session_id);
 
     drop(stale_connection);
     drop(accepted_connection);
@@ -1979,12 +1981,7 @@ fn a_detach_leaves_the_sessions_token_unchanged() {
         "the detached client's departure leaves the session's secret alone",
     );
 
-    let mut connection = connect_to_session_socket(&runtime_directory, session_id);
-    connection
-        .send(&build_hello_request(&runtime_directory, session_id))
-        .expect("send hello with the secret from before the detach");
-    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
+    let connection = connect_greeted_connection(&runtime_directory, session_id);
 
     drop(connection);
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
@@ -2009,11 +2006,7 @@ fn a_malformed_frame_is_answered_and_the_connection_keeps_serving() {
     );
 
     // The stream is still aligned: the same connection opens and serves.
-    connection
-        .send(&build_hello_request(&runtime_directory, session_id))
-        .expect("send hello");
-    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
+    greet_connection(&mut connection, &runtime_directory, session_id);
 
     drop(connection);
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
@@ -2236,7 +2229,7 @@ fn a_request_kind_this_build_lacks_on_an_attached_connection_is_dropped_and_the_
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
     let pressed_key_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('t'));
 
-    // A well-framed request naming a kind added by some later koshi.
+    // A well-framed request naming a kind that this build does not have.
     connection
         .send(&serde_json::json!({
             "request_id": 3,
@@ -2311,13 +2304,7 @@ fn a_malformed_frame_on_an_attached_connection_is_dropped_and_the_stream_goes_on
 fn a_keyboard_request_before_an_attach_closes_the_connection() {
     let (ipc_server, session_id, runtime_directory, dispatcher_thread) =
         start_test_server("key-unattached", None);
-    let mut connection = connect_to_session_socket(&runtime_directory, session_id);
-
-    connection
-        .send(&build_hello_request(&runtime_directory, session_id))
-        .expect("send hello");
-    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
 
     connection
         .send(&IpcRequest {
@@ -2346,13 +2333,7 @@ fn a_keyboard_request_before_an_attach_closes_the_connection() {
 fn a_mouse_round_before_an_attach_closes_the_connection() {
     let (ipc_server, session_id, runtime_directory, dispatcher_thread) =
         start_test_server("mouse-unattached", None);
-    let mut connection = connect_to_session_socket(&runtime_directory, session_id);
-
-    connection
-        .send(&build_hello_request(&runtime_directory, session_id))
-        .expect("send hello");
-    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
 
     connection
         .send(&IpcRequest {
@@ -2410,13 +2391,7 @@ fn discovery_answers_with_the_dispatchers_overview() {
 fn discovery_with_no_running_session_closes_the_connection() {
     let (ipc_server, session_id, runtime_directory, dispatcher_thread) =
         start_test_server("discovery-none", None);
-    let mut connection = connect_to_session_socket(&runtime_directory, session_id);
-
-    connection
-        .send(&build_hello_request(&runtime_directory, session_id))
-        .expect("send hello");
-    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
 
     connection
         .send(&IpcRequest {
@@ -2552,13 +2527,7 @@ fn a_layout_request_for_every_tab_names_no_tab_to_the_dispatcher() {
 fn a_layout_request_with_no_running_session_closes_the_connection() {
     let (ipc_server, session_id, runtime_directory, dispatcher_thread, _requested_tab_ids) =
         start_layout_test_server("layout-none", None);
-    let mut connection = connect_to_session_socket(&runtime_directory, session_id);
-
-    connection
-        .send(&build_hello_request(&runtime_directory, session_id))
-        .expect("send hello");
-    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
 
     connection
         .send(&IpcRequest {
@@ -2617,13 +2586,7 @@ fn a_gone_dispatcher_closes_the_connection_instead_of_answering() {
     drop(inbox_receiver);
     let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
         .expect("start serving");
-    let mut connection = connect_to_session_socket(&runtime_directory, session_id);
-
-    connection
-        .send(&build_hello_request(&runtime_directory, session_id))
-        .expect("send hello");
-    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
 
     connection
         .send(&IpcRequest {
@@ -2759,8 +2722,8 @@ fn a_second_start_on_the_same_session_is_refused_while_serving() {
 
 #[test]
 fn a_runtime_directory_that_cannot_be_created_refuses_to_start() {
-    // A file where the directory would go: creating the directory under it
-    // fails, and the start stops before it binds anything.
+    // A file sits at the directory path: creating the directory under it fails,
+    // and the start stops before it binds anything.
     let blocking_file_path = build_test_runtime_directory("runtime-dir-blocked");
     delete_test_directory(&blocking_file_path);
     std::fs::write(&blocking_file_path, b"").expect("plant a file where the directory would go");
@@ -3377,12 +3340,7 @@ fn send_restart_request(
     runtime_directory: &Path,
     session_id: SessionId,
 ) -> (Connection, IpcResult) {
-    let mut connection = connect_to_session_socket(runtime_directory, session_id);
-    connection
-        .send(&build_hello_request(runtime_directory, session_id))
-        .expect("send hello");
-    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
+    let mut connection = connect_greeted_connection(runtime_directory, session_id);
 
     connection
         .send(&IpcRequest {
@@ -3463,9 +3421,9 @@ fn a_restart_before_hello_is_refused_as_hello_required_and_the_connection_keeps_
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
 }
 
-/// A binary this machine could not run, written into `binary_directory`: on Unix a file
-/// with its execute permission dropped, elsewhere a path with nothing at it.
-/// Hands back the path and the sentence the check refuses it with.
+/// A binary that this machine cannot run, in `binary_directory`: on Unix a file
+/// without execute permission, elsewhere a path with nothing at it. Returns the
+/// path and the sentence the check refuses it with.
 fn build_unrunnable_binary(binary_directory: &Path) -> (PathBuf, String) {
     std::fs::create_dir_all(binary_directory).expect("the directory is created");
     let executable_path = binary_directory.join("koshi");
@@ -3625,12 +3583,9 @@ fn wait_for_attached_connection_count(
     ipc_server: &IpcServer,
     expected_attached_connection_count: usize,
 ) -> usize {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while ipc_server.count_attached_connections() != expected_attached_connection_count
-        && std::time::Instant::now() < deadline
-    {
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_until(Duration::from_secs(5), || {
+        ipc_server.count_attached_connections() == expected_attached_connection_count
+    });
     ipc_server.count_attached_connections()
 }
 
@@ -3757,12 +3712,7 @@ fn a_control_connection_that_leaves_is_closed_with_no_answer() {
     let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
         start_attachable_test_server("leaving-control", client_id);
 
-    let mut connection = connect_to_session_socket(&runtime_directory, session_id);
-    connection
-        .send(&build_hello_request(&runtime_directory, session_id))
-        .expect("send hello");
-    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
 
     connection
         .send(&IpcRequest {
@@ -3834,12 +3784,7 @@ fn a_rotated_token_is_advertised_and_the_one_before_it_is_refused() {
         }),
     );
 
-    let mut accepted_connection = connect_to_session_socket(&runtime_directory, session_id);
-    accepted_connection
-        .send(&build_hello_request(&runtime_directory, session_id))
-        .expect("send hello with the rotated secret");
-    let hello_reply: IpcResponse = accepted_connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
+    let accepted_connection = connect_greeted_connection(&runtime_directory, session_id);
 
     drop(stale_connection);
     drop(accepted_connection);
@@ -3859,12 +3804,7 @@ fn rotating_the_token_takes_connections_again_after_the_intake_closed() {
         .rotate_token()
         .expect("the fresh token is advertised");
 
-    let mut connection = connect_to_session_socket(&runtime_directory, session_id);
-    connection
-        .send(&build_hello_request(&runtime_directory, session_id))
-        .expect("send hello");
-    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
 
     // What this connection sends reaches the dispatcher again.
     let typed_key_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('r'));
@@ -4153,15 +4093,12 @@ fn spawn_origin_reporting_dispatcher(
                     if remote_flag_sender.send(is_remote).is_err() {
                         break;
                     }
-                    let _ = response_sender.send(Some(AttachAccepted {
+                    let _ = response_sender.send(Some(build_attach_accepted(
                         client_id,
                         session_id,
-                        session_structure: build_attached_structure(session_id),
-                        deliveries: delivery_receiver,
-                        ending_notice: Arc::clone(&ending_notice),
-                        resume_token: ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN),
-                        pane_area: None,
-                    }));
+                        delivery_receiver,
+                        Arc::clone(&ending_notice),
+                    )));
                 }
                 RuntimeEvent::ClientDetached { .. } => delivery_senders.clear(),
                 _ => {}
@@ -4475,14 +4412,12 @@ fn a_connection_to_a_session_whose_program_file_holds_its_own_version_restarts_n
     );
 
     let connection = connect_to_session_socket(&runtime_directory, session_id);
-    let run_wait_end = std::time::Instant::now() + Duration::from_secs(10);
-    while count_program_runs(&program_directory.path().join("runs")) == 0 {
-        assert!(
-            std::time::Instant::now() < run_wait_end,
-            "the program never ran"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            count_program_runs(&program_directory.path().join("runs")) > 0
+        }),
+        "the program never ran"
+    );
 
     assert_eq!(
         restart_report_receiver.recv_timeout(Duration::from_millis(500)),

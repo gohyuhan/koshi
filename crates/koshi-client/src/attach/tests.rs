@@ -474,7 +474,7 @@ fn every_other_frame_keeps_the_stream_reading() {
     let session_events = [
         SessionEvent::PaneCreated {
             pane_id: PaneId::new(),
-            tab_id,
+            tab_id: Some(tab_id),
         },
         SessionEvent::PaneProcessExited {
             pane_id: PaneId::new(),
@@ -486,11 +486,11 @@ fn every_other_frame_keeps_the_stream_reading() {
         },
         SessionEvent::PaneRemoved {
             pane_id: PaneId::new(),
-            tab_id,
+            tab_id: Some(tab_id),
         },
         SessionEvent::PaneFocused {
             client_id: ClientId::new(),
-            tab_id,
+            tab_id: Some(tab_id),
             pane_id: PaneId::new(),
             previous_pane_id: None,
         },
@@ -1412,10 +1412,10 @@ fn a_restart_whose_new_image_refuses_this_client_reports_the_refusal_and_the_att
     assert_eq!(CliExitCode::from(&ending_error), CliExitCode::RuntimeAction);
 }
 
-/// The sentence a session that speaks only protocol version 5 refuses a Hello
-/// for versions 4 to 4 with.
+/// The sentence a session that speaks only a newer protocol refuses this
+/// client's Hello with.
 const PROTOCOL_VERSION_REFUSAL_MESSAGE: &str =
-    "the client speaks protocol version 4 to 4, this session speaks 5 to 5";
+    "the client speaks an older protocol than this session";
 
 #[test]
 fn a_dial_refused_for_the_old_token_joins_once_the_session_advertises_its_own() {
@@ -5809,8 +5809,8 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
                 session_event_result: Ok(SessionEvent::PanePlacementCommitted {
                     command_id: placement_envelope.command_id,
                     source_pane_id,
-                    source_tab_id: active_tab_id,
-                    destination_tab_id: active_tab_id,
+                    source_tab_id: Some(active_tab_id),
+                    destination_tab_id: Some(active_tab_id),
                     placement_target: PanePlacementTarget::Swap { target_pane_id },
                 }),
             })
@@ -7293,7 +7293,7 @@ fn another_viewers_accepted_swap_slides_both_panes_to_their_new_rects() {
         .active_tab_snapshot
         .clone();
 
-    screen.note_committed_placement([active_tab_id, active_tab_id]);
+    screen.note_committed_placement([Some(active_tab_id), Some(active_tab_id)]);
     assert_eq!(
         screen.refresh_at(&mut client, Some(active_tab_id), started_at),
         None,
@@ -7420,7 +7420,7 @@ fn a_placement_notice_for_another_tab_draws_the_new_rects_at_once() {
         .active_tab_snapshot
         .clone();
 
-    screen.note_committed_placement([TabId::new(), TabId::new()]);
+    screen.note_committed_placement([Some(TabId::new()), Some(TabId::new())]);
     screen.pending_snapshot = Some(committed_snapshot);
     screen
         .commit_pending_snapshot(&mut client, started_at)
@@ -7449,7 +7449,7 @@ fn reduced_motion_draws_another_viewers_accepted_placement_at_once() {
         .active_tab_snapshot
         .clone();
 
-    screen.note_committed_placement([active_tab_id, active_tab_id]);
+    screen.note_committed_placement([Some(active_tab_id), Some(active_tab_id)]);
     screen.pending_snapshot = Some(committed_snapshot);
     screen
         .commit_pending_snapshot(&mut client, started_at)
@@ -7472,7 +7472,7 @@ fn a_frame_for_another_tab_during_a_committed_placement_slide_draws_that_tab_at_
     let started_at = Instant::now();
     let (active_tab_id, _, committed_snapshot) =
         paint_initial_swapped_pane_frame(&mut client, &mut screen, started_at);
-    screen.note_committed_placement([active_tab_id, active_tab_id]);
+    screen.note_committed_placement([Some(active_tab_id), Some(active_tab_id)]);
     screen.pending_snapshot = Some(committed_snapshot);
     screen
         .commit_pending_snapshot(&mut client, started_at)
@@ -7591,8 +7591,8 @@ fn run_attachment_with_committed_swap_notice(
         send_session_event(SessionEvent::PanePlacementCommitted {
             command_id: notice_command_id,
             source_pane_id: left_pane_id,
-            source_tab_id: active_tab_id,
-            destination_tab_id: active_tab_id,
+            source_tab_id: Some(active_tab_id),
+            destination_tab_id: Some(active_tab_id),
             placement_target: PanePlacementTarget::Swap {
                 target_pane_id: right_pane_id,
             },
@@ -7697,12 +7697,12 @@ fn a_connection_reset_ends_a_committed_placement_slide_and_drops_waiting_notices
         .session_snapshot
         .active_tab_snapshot
         .clone();
-    screen.note_committed_placement([active_tab_id, active_tab_id]);
+    screen.note_committed_placement([Some(active_tab_id), Some(active_tab_id)]);
     screen.pending_snapshot = Some(committed_snapshot);
     screen
         .commit_pending_snapshot(&mut client, started_at)
         .expect("the committed frame paints");
-    screen.note_committed_placement([active_tab_id, active_tab_id]);
+    screen.note_committed_placement([Some(active_tab_id), Some(active_tab_id)]);
 
     screen.reset_connection();
 
@@ -7733,7 +7733,7 @@ fn a_placement_notice_whose_frame_keeps_every_rect_starts_no_slide() {
     let (active_tab_id, initial_tab_snapshot, _) =
         paint_initial_swapped_pane_frame(&mut client, &mut screen, started_at);
 
-    screen.note_committed_placement([active_tab_id, active_tab_id]);
+    screen.note_committed_placement([Some(active_tab_id), Some(active_tab_id)]);
     screen.pending_snapshot = screen.last_snapshot.clone();
     screen
         .commit_pending_snapshot(&mut client, started_at)
@@ -7844,7 +7844,7 @@ fn a_placement_preview_ends_a_committed_placement_slide() {
         committed_tab_snapshot.clone(),
         committed_snapshot.session_snapshot.session_revision,
     );
-    screen.note_committed_placement([active_tab_id, active_tab_id]);
+    screen.note_committed_placement([Some(active_tab_id), Some(active_tab_id)]);
     screen.pending_snapshot = Some(committed_snapshot.clone());
     screen
         .commit_pending_snapshot(&mut client, started_at)
@@ -8034,7 +8034,7 @@ fn assert_committed_tab_change_starts_no_slide(
         .active_tab_snapshot
         .clone();
 
-    screen.note_committed_placement([active_tab_id, active_tab_id]);
+    screen.note_committed_placement([Some(active_tab_id), Some(active_tab_id)]);
     screen.pending_snapshot = Some(committed_snapshot);
     screen
         .commit_pending_snapshot(&mut client, started_at)
@@ -8068,4 +8068,15 @@ fn a_committed_frame_with_another_tab_size_layout_mode_or_no_room_starts_no_slid
     assert_committed_tab_change_starts_no_slide("every pane suppressed", |tab_snapshot| {
         tab_snapshot.is_every_pane_suppressed = true;
     });
+}
+
+#[test]
+fn a_committed_placement_records_only_the_tab_ids_it_names() {
+    let mut screen = build_test_screen();
+    let destination_tab_id = TabId::new();
+
+    screen.note_committed_placement([None, Some(destination_tab_id)]);
+    screen.note_committed_placement([None, None]);
+
+    assert_eq!(screen.committed_placement_tab_ids, vec![destination_tab_id]);
 }

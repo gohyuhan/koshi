@@ -15,6 +15,7 @@
 //! `pane`, `tab`, `client`, `visual`, with target resolution in `resolve`.
 
 use std::collections::{BTreeMap, HashMap};
+use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -28,8 +29,8 @@ use koshi_core::{
     command::{
         ClearSelectionArgs, ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult,
         CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
-        LockModeArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, PanePlacementAnchor,
-        PanePlacementTarget, PlacePaneArgs, ResizePaneArgs, RunCommandPaneArgs, ScrollPaneArgs,
+        LockModeArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs, NewPanePlacement, NewTabArgs,
+        PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, ResizePaneArgs, ScrollPaneArgs,
         Selection, SelectionKind, SetSelectionArgs, SwitchSessionArgs, TabTarget,
         ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
     },
@@ -38,7 +39,10 @@ use koshi_core::{
         Event, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused,
         PanePlacementCommitted, PaneProcessExited, PtyResized, RejectReason, SelectionChanged,
     },
-    geometry::{Direction, PaneArea, Rect, Size},
+    geometry::{
+        Direction, FloatingPaneDimension, FloatingPaneSize, PaneArea, Point, Rect, Size,
+        DEFAULT_FLOATING_PANE_SIZE,
+    },
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
     lock::LockMode,
     naming::{generate_name, NameKind},
@@ -58,13 +62,17 @@ use koshi_layout::{
 use koshi_pane::pane::{lifecycle::PaneLifecycle, policy::PaneClosePolicy, state::PaneRecord};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::resize::{compute_pty_size, resize_for_layout_change};
-use koshi_session::client::{Client, ClientOrigin};
+use koshi_session::client::{place_floating_pane, Client, ClientOrigin, FloatingPanePosition};
+use koshi_session::error::FloatingSetError;
 use koshi_session::session::{
-    cascade::{apply_child_exit, remove_pane_cascade},
+    cascade::{apply_child_exit, remove_floating_pane, remove_pane_cascade},
     lifecycle::SessionLifecycle,
     pane_ops::{self, NewPaneSpec},
     placement::commit_cross_tab_placement,
-    state::{FloatingPaneSizeSolve, Session},
+    state::{
+        compute_floating_pane_minimum_size, solve_floating_pane_size, FloatingMember,
+        FloatingPaneSizeSolve, Session,
+    },
     tab_ops,
 };
 
@@ -88,6 +96,88 @@ fn list_clients_affected_by_tabs(
         })
         .map(|client| client.get_client_id())
         .collect()
+}
+
+/// List every attached client whose floating view names `pane_id`: a stored
+/// view, or an entry in its floating focus order.
+fn list_clients_holding_floating_view(session: &Session, pane_id: PaneId) -> Vec<ClientId> {
+    session
+        .clients
+        .list_attached_clients()
+        .filter(|client| {
+            client.get_floating_pane_view(pane_id) != Default::default()
+                || client.list_floating_pane_focus_order().contains(&pane_id)
+        })
+        .map(|client| client.get_client_id())
+        .collect()
+}
+
+/// How `pane_record`'s child dies: `should_force_close` overrides the pane's own
+/// close policy with an immediate force-kill, and `should_kill_process_tree`
+/// widens the picked kill to the child's whole process group. Refuses nothing:
+/// [`Server::resolve_pane_kill_policy`] adds the busy-pane refusal.
+fn compute_pane_kill_policy(
+    pane_record: &PaneRecord,
+    should_force_close: bool,
+    should_kill_process_tree: bool,
+) -> KillPolicy {
+    let kill_policy = if should_force_close {
+        KillPolicy::Force
+    } else {
+        pane_record.close_policy.to_kill_policy()
+    };
+    if should_kill_process_tree {
+        kill_policy.apply_tree_scope()
+    } else {
+        kill_policy
+    }
+}
+
+/// Every floating pane of `session`, in creation order, with the kill policy
+/// a last-tab quit ends it with ([`compute_pane_kill_policy`]). A busy
+/// `ConfirmIfBusy` pane is listed like any other: a quit never waits on one.
+fn list_floating_pane_kill_policies(
+    session: &Session,
+    should_force_close: bool,
+    should_kill_process_tree: bool,
+) -> Vec<(PaneId, KillPolicy)> {
+    session
+        .floating_set
+        .list_members()
+        .iter()
+        .filter_map(|floating_member| {
+            let pane_record = session
+                .panes
+                .get_pane_record_by_id(floating_member.pane_id)?;
+            Some((
+                floating_member.pane_id,
+                compute_pane_kill_policy(pane_record, should_force_close, should_kill_process_tree),
+            ))
+        })
+        .collect()
+}
+
+/// The PTY size of a floating pane whose outer size is `outer_size`: the outer
+/// size less [`FLOATING_PANE_CHROME_SIZE`] on each axis, never below `0`.
+/// `40x12` → `38x8`.
+fn compute_floating_pane_content_size(outer_size: Size) -> Size {
+    Size {
+        column_count: outer_size
+            .column_count
+            .saturating_sub(FLOATING_PANE_CHROME_SIZE.column_count),
+        row_count: outer_size
+            .row_count
+            .saturating_sub(FLOATING_PANE_CHROME_SIZE.row_count),
+    }
+}
+
+/// [`RejectReason::InvalidState`] `<pane> is suppressed; the smallest attached
+/// terminal has no room for it`, for the floating pane `pane_id`.
+fn build_suppressed_floating_pane_rejection(pane_id: PaneId) -> Rejection {
+    Rejection::from_reason_and_help(
+        RejectReason::InvalidState,
+        &format!("{pane_id} is suppressed; the smallest attached terminal has no room for it"),
+    )
 }
 
 /// Refuse a transaction when its shared placement generation cannot advance.
@@ -259,7 +349,7 @@ impl Rejection {
 
 /// The resolved concrete target of a [`Command::NewPane`]: the session and tab
 /// the new pane joins, the command source pane it splits from, and the client to
-/// auto-focus it for (when one applies). All fields are `Copy`, so resolving
+/// auto-focus it for (when one applies). All fields are `Copy`: the target
 /// holds no borrow into the session map.
 struct NewPaneTarget {
     session_id: SessionId,
@@ -268,13 +358,57 @@ struct NewPaneTarget {
     focus_client_id: Option<ClientId>,
 }
 
+/// The resolved concrete target of a [`Command::NewPane`] with a floating
+/// placement: everything [`Server::handle_new_floating_pane`] spawns and
+/// commits. The `Ok` half of [`Server::resolve_new_floating_pane_target`].
+struct NewFloatingPaneTarget {
+    session_id: SessionId,
+    /// The client the pane is created for; `None` when no client is attached.
+    designated_client_id: Option<ClientId>,
+    /// The size the pane asks for.
+    desired_size: FloatingPaneSize,
+    /// The solve of `desired_size` against the shared floating viewport.
+    solved_size: FloatingPaneSizeSolve,
+    /// The size the pane's PTY spawns at.
+    pty_size: PtySize,
+    /// The designated client's position for the pane.
+    designated_position: FloatingPanePosition,
+    /// The pane whose working directory the new pane opens in when its
+    /// command names none.
+    working_directory_pane_id: Option<PaneId>,
+}
+
+/// The resolved resize of a floating pane. The `Ok` half of
+/// [`Server::resolve_floating_pane_resize`].
+struct FloatingPaneResize {
+    session_id: SessionId,
+    pane_id: PaneId,
+    /// The client whose stored top-left cell the resize writes. A client that
+    /// pinned the pane keeps its pinned cell.
+    client_id: ClientId,
+    /// The pane's desired size after the resize.
+    desired_size: FloatingPaneSize,
+    /// The client's top-left cell after the resize; `None` when the client
+    /// reports no pane area and keeps its view.
+    client_origin: Option<Point>,
+}
+
 /// The resolved concrete target of a pane-addressed command
 /// ([`Command::ClosePane`], [`Command::ResizePane`]): the owning session, the
-/// tab whose layout holds the pane, and the pane itself. All fields are
-/// `Copy`, so resolving holds no borrow into the session map.
+/// tab whose layout holds the pane (`None` when the pane floats), and the pane
+/// itself. All fields are `Copy`: the target holds no borrow into the session
+/// map.
 struct PaneTarget {
     session_id: SessionId,
-    tab_id: TabId,
+    tab_id: Option<TabId>,
+    pane_id: PaneId,
+}
+
+/// The resolved target of a [`Command::ScrollPane`]: the client whose view
+/// scrolls, and the pane, tiled or floating. The `Ok` half of
+/// [`Server::resolve_scroll_pane_target`].
+struct ScrollPaneTarget {
+    client_id: ClientId,
     pane_id: PaneId,
 }
 
@@ -283,7 +417,7 @@ struct PaneTarget {
 /// the owning session, the client whose view changes, that client's active
 /// tab, and the pane. The `Ok` half of both
 /// [`Server::resolve_focus_target`] and
-/// [`Server::resolve_fullscreen_target`]. All fields are `Copy`, so resolving
+/// [`Server::resolve_fullscreen_target`]. All fields are `Copy`: the target
 /// holds no borrow into the session map.
 struct ClientPaneTarget {
     session_id: SessionId,
@@ -388,10 +522,6 @@ impl Server {
             Command::ToggleMouseSelect => {
                 self.handle_toggle_mouse_select(command_id, &envelope.command_source)
             }
-            Command::RunCommandPane(command_args) => {
-                let new_pane_args = Self::run_command_new_pane_args(&command_args);
-                self.handle_new_pane(command_id, &envelope.command_source, &new_pane_args)
-            }
             Command::Visual(command) => {
                 self.handle_visual(command_id, &envelope.command_source, &command)
             }
@@ -424,12 +554,10 @@ impl Server {
     }
 
     /// The client a command came from, for commands that act on that client's
-    /// own state and can act on no other — a highlight belongs to the screen
-    /// that made it, so a command source whose client is gone has nothing to act on
-    /// and gets [`RejectReason::SourceClientStale`] rather than the
-    /// sole-attached-client stand-in [`Server::resolve_acting_client`] applies.
+    /// own state only, such as a highlight. A command source with no client
+    /// gets [`RejectReason::SourceClientStale`]; no other attached client
+    /// stands in for it.
     ///
-    /// This is the check itself, not an assertion about an earlier one:
     /// [`Self::resolve_target`] calls it for the selection commands, and the
     /// handlers call it again to get the id.
     fn resolve_issuing_client_id(command_source: &CommandSource) -> Result<ClientId, Rejection> {
@@ -542,24 +670,6 @@ impl Server {
                 environment_variables,
             ),
             None => SpawnSpec::build_default_shell(working_directory, environment_variables),
-        }
-    }
-
-    /// Map [`Command::RunCommandPane`] onto the [`NewPaneArgs`] that realize it:
-    /// its command is required (never the default shell), and its command source
-    /// pane, placement — split direction or stacking — and working directory
-    /// carry through to the new-pane transaction. [`Self::dispatch`] and
-    /// [`Self::resolve_target`] both call it, so the validation pre-check and
-    /// the handler read the same anchor pane.
-    fn run_command_new_pane_args(command_args: &RunCommandPaneArgs) -> NewPaneArgs {
-        NewPaneArgs {
-            source_pane_id: command_args.source_pane_id,
-            tab_id: command_args.tab_id,
-            direction: command_args.direction,
-            should_stack: command_args.should_stack,
-            working_directory: command_args.working_directory.clone(),
-            spawn_spec: Some(command_args.spawn_spec.clone()),
-            client_id: command_args.client_id,
         }
     }
 
@@ -730,14 +840,14 @@ impl Server {
         command_source: &CommandSource,
     ) -> Result<CommandResult, Rejection> {
         let session = Self::require_session(self.resolve_acting_session(command_source)?)?;
-        let clients: Vec<ClientId> = session
+        let client_ids: Vec<ClientId> = session
             .clients
             .list_attached_clients()
             .map(|client| client.get_client_id())
             .collect();
 
         let mut emitted_events = Vec::new();
-        for client_id in clients {
+        for client_id in client_ids {
             emitted_events.extend(self.handle_client_detach(client_id));
         }
         Ok(Self::commit_events(
@@ -751,13 +861,6 @@ impl Server {
     /// are attached, or several are so the caller must name one. `none_tail`
     /// completes "no attached client …"; `ambiguous_noun` completes "… name a
     /// target client for …".
-    ///
-    /// This answers which client should *view* something, and is separate from
-    /// [`Server::resolve_acting_client`], which answers which client a command
-    /// *acts on*: a session with no attached client cannot show a new tab
-    /// ([`RejectReason::InvalidState`]), while a command with no client to act
-    /// on came from a command source whose client is gone
-    /// ([`RejectReason::SourceClientStale`]).
     ///
     /// On a session with two clients,
     /// `resolve_sole_attached_client(s, "to view the new pane's tab", "the new pane")`
@@ -774,7 +877,7 @@ impl Server {
                 RejectReason::InvalidState,
                 &format!("no attached client {none_tail}"),
             )),
-            (Some(only), None) => Ok(only),
+            (Some(only_client), None) => Ok(only_client),
             (Some(_), Some(_)) => Err(Rejection::from_reason_and_help(
                 RejectReason::TargetAmbiguous,
                 &format!("multiple clients; name a target client for {ambiguous_noun}"),
@@ -927,9 +1030,9 @@ impl Server {
         let Some(tab_size) = session.get_tab_size(tab_id) else {
             return;
         };
-        let rects =
+        let content_rects =
             Self::compute_tab_content_rects(session, tab_id, tab_size, self.get_pane_sizing());
-        self.reflow_changed(backend, rects, None, emitted_events);
+        self.reflow_changed(backend, content_rects, None, emitted_events);
     }
 
     /// Solve every floating pane of `session_id` against the session's shared
@@ -980,16 +1083,9 @@ impl Server {
             .iter()
             .map(|floating_member| {
                 let content_rect = match floating_member.solved_size {
-                    FloatingPaneSizeSolve::Sized(outer_size) => {
-                        Some(Rect::from_size_at_origin(Size {
-                            column_count: outer_size
-                                .column_count
-                                .saturating_sub(FLOATING_PANE_CHROME_SIZE.column_count),
-                            row_count: outer_size
-                                .row_count
-                                .saturating_sub(FLOATING_PANE_CHROME_SIZE.row_count),
-                        }))
-                    }
+                    FloatingPaneSizeSolve::Sized(outer_size) => Some(Rect::from_size_at_origin(
+                        compute_floating_pane_content_size(outer_size),
+                    )),
                     FloatingPaneSizeSolve::Suppressed => None,
                 };
                 (floating_member.pane_id, content_rect)
@@ -1047,28 +1143,31 @@ impl Server {
     }
 }
 
-/// End `pane_id`'s child under `kill_policy` on a thread of its own.
-///
-/// A graceful kill sleeps out its grace window, so the dispatcher keeps
-/// draining while the kill runs. The kill also purges the backend's own entry
-/// for the pane, even when the child already exited.
-///
-/// A thread the operating system will not start — the process is at its thread
-/// limit — runs the kill on this thread instead, which blocks the dispatcher
-/// for the grace window rather than ending the process.
-pub(super) fn kill_off_thread(
-    backend: &Arc<dyn PtyBackend>,
-    pane_id: PaneId,
-    kill_policy: KillPolicy,
-) {
-    let off_thread = Arc::clone(backend);
-    let is_thread_started = thread::Builder::new()
-        .spawn(move || {
-            let _ = off_thread.kill_pane(pane_id, kill_policy);
-        })
-        .is_ok();
-    if !is_thread_started {
-        let _ = backend.kill_pane(pane_id, kill_policy);
+impl Server {
+    /// End `pane_id`'s child under `kill_policy` on a thread of its own, and
+    /// keep that thread in `pane_kill_threads` until
+    /// [`Self::wait_for_pane_kills`] joins it. The threads that already ended
+    /// leave `pane_kill_threads` first.
+    ///
+    /// A graceful kill sleeps out its grace window on that thread while the
+    /// dispatcher keeps draining. The kill also purges the backend's own entry
+    /// for the pane, even when the child already exited.
+    ///
+    /// When the operating system starts no thread, such as at the process's
+    /// thread limit, the kill runs on this thread and blocks the dispatcher for
+    /// the grace window.
+    pub(super) fn kill_pane_off_thread(&mut self, pane_id: PaneId, kill_policy: KillPolicy) {
+        self.pane_kill_threads
+            .retain(|pane_kill_thread| !pane_kill_thread.is_finished());
+        let pty_backend = Arc::clone(self.get_pty_backend());
+        match thread::Builder::new().spawn(move || {
+            let _ = pty_backend.kill_pane(pane_id, kill_policy);
+        }) {
+            Ok(pane_kill_thread) => self.pane_kill_threads.push(pane_kill_thread),
+            Err(_) => {
+                let _ = self.get_pty_backend().kill_pane(pane_id, kill_policy);
+            }
+        }
     }
 }
 

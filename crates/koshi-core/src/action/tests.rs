@@ -620,12 +620,7 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             Client,
             vec![ClientTarget],
         ),
-        (
-            "core:run",
-            CommandKind::RunCommandPane,
-            PaneSession,
-            vec![Pane],
-        ),
+        ("core:run", CommandKind::NewPane, PaneSession, vec![Pane]),
     ]
     .into_iter()
     .map(|(action_name, command_kind, action_scope, target_kinds)| {

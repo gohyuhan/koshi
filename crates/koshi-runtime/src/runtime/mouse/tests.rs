@@ -18,7 +18,8 @@ use koshi_client::Client as ViewerClient;
 use koshi_config::layer::{PartialKoshiConfig, PartialMouseConfig};
 use koshi_config::types::WheelScroll;
 use koshi_core::command::{
-    FocusTabArgs, GridPosition, NewPaneArgs, NewTabArgs, Selection, SelectionKind, TabTarget,
+    FocusTabArgs, GridPosition, NewPaneArgs, NewPanePlacement, NewTabArgs, Selection,
+    SelectionKind, TabTarget,
 };
 use koshi_core::geometry::{Direction, PaneArea, Point, Size};
 use koshi_core::ids::SessionId;
@@ -38,10 +39,11 @@ fn build_runtime() -> (Server, ClientId) {
 /// A `new-pane` request with nothing chosen: the focused pane splits rightward.
 fn build_new_pane_args() -> NewPaneArgs {
     NewPaneArgs {
-        source_pane_id: None,
-        tab_id: None,
-        direction: Direction::Right,
-        should_stack: false,
+        placement: NewPanePlacement::Split {
+            source_pane_id: None,
+            tab_id: None,
+            direction: Direction::Right,
+        },
         working_directory: None,
         spawn_spec: None,
         client_id: None,
@@ -866,7 +868,11 @@ fn split_focused_downward(server: &mut Server, client_id: ClientId) {
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
         Command::NewPane(NewPaneArgs {
-            direction: Direction::Down,
+            placement: NewPanePlacement::Split {
+                source_pane_id: None,
+                tab_id: None,
+                direction: Direction::Down,
+            },
             ..build_new_pane_args()
         }),
     );
@@ -2460,7 +2466,10 @@ fn stack_pane_onto_focused(server: &mut Server, client_id: ClientId) {
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
         Command::NewPane(NewPaneArgs {
-            should_stack: true,
+            placement: NewPanePlacement::Stacked {
+                source_pane_id: None,
+                tab_id: None,
+            },
             ..build_new_pane_args()
         }),
     );

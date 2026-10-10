@@ -3,6 +3,7 @@
 //! envelope and ignored on the payload, and the connection token prints as
 //! `***` and is equal only to a token holding the same bytes.
 
+use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,14 +15,16 @@ use crate::plane::Plane;
 use crate::router::RouterRequestKind;
 use crate::wire::{MaybeKnown, WireName, WireVariants};
 use koshi_core::command::{
-    Command, CommandSource, MovePaneArgs, NewPaneArgs, PanePlacementAnchor, PanePlacementTarget,
-    PlacePaneArgs, ScrollPaneArgs, ToggleLockModeArgs,
+    Command, CommandSource, MovePaneArgs, NewPaneArgs, NewPanePlacement, PanePlacementAnchor,
+    PanePlacementTarget, PlacePaneArgs, ScrollPaneArgs, ToggleLockModeArgs,
 };
 use koshi_core::discovery::{
     ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, TabDiscovery,
 };
 use koshi_core::event::RejectReason;
-use koshi_core::geometry::{Direction, PaneArea, Point, Rect, Size};
+use koshi_core::geometry::{
+    AxisPercent, Direction, FloatingPaneDimension, FloatingPaneSize, PaneArea, Point, Rect, Size,
+};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{
     BindingModifierFlags, Key, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
@@ -59,10 +62,10 @@ fn build_test_command_envelope() -> CommandEnvelope {
 /// ids. Encodes to the same bytes on every call.
 fn build_populated_test_command_envelope() -> CommandEnvelope {
     build_command_envelope_with_fixed_in_session_source(Command::NewPane(NewPaneArgs {
-        source_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
-        tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
-        direction: Direction::Down,
-        should_stack: true,
+        placement: NewPanePlacement::Stacked {
+            source_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
+            tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
+        },
         working_directory: Some(PathBuf::from("/home/user")),
         spawn_spec: Some(SpawnSpec {
             program: PathBuf::from("/bin/zsh"),
@@ -128,7 +131,7 @@ fn build_test_recent_event() -> RecentEvent {
     koshi_core::recent_event::record_event(
         &koshi_core::event::Event::PaneCreated(koshi_core::event::PaneCreated {
             pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
-            tab_id: TabId::from_uuid(build_fixed_test_uuid()),
+            tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
         }),
         std::time::SystemTime::UNIX_EPOCH,
     )
@@ -283,7 +286,7 @@ fn list_every_mouse_action() -> Vec<WireMouseAction> {
 }
 
 /// One request of every kind, in the order the enum declares them.
-fn list_every_request_kind() -> Vec<IpcRequestKind> {
+pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
     vec![
         IpcRequestKind::build_hello_request(build_test_connection_token()),
         IpcRequestKind::Attach {
@@ -330,7 +333,7 @@ fn list_every_request_kind() -> Vec<IpcRequestKind> {
 }
 
 /// One answer of every kind, in the order the enum declares them.
-fn list_all_ipc_results() -> Vec<IpcResult> {
+pub(crate) fn list_all_ipc_results() -> Vec<IpcResult> {
     vec![
         IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
@@ -392,13 +395,13 @@ fn get_variant_tag(encoded_json: &serde_json::Value) -> String {
 }
 
 #[test]
-fn the_protocol_version_this_build_speaks_is_four() {
-    assert_eq!(PROTOCOL_VERSION, 4);
+fn the_protocol_version_this_build_speaks_is_five() {
+    assert_eq!(PROTOCOL_VERSION, 5);
 }
 
 #[test]
-fn the_lowest_protocol_version_this_build_speaks_is_four() {
-    assert_eq!(MIN_PROTOCOL_VERSION, 4);
+fn the_lowest_protocol_version_this_build_speaks_is_five() {
+    assert_eq!(MIN_PROTOCOL_VERSION, 5);
 }
 
 #[test]
@@ -609,10 +612,12 @@ fn the_submit_command_wire_shape_belongs_to_this_protocol_version() {
                     "client_id": "00000000-0000-0000-0000-000000000001",
                     "command": {
                         "NewPane": {
-                            "source_pane_id": "00000000-0000-0000-0000-000000000001",
-                            "tab_id": "00000000-0000-0000-0000-000000000001",
-                            "direction": "Down",
-                            "should_stack": true,
+                            "placement": {
+                                "Stacked": {
+                                    "source_pane_id": "00000000-0000-0000-0000-000000000001",
+                                    "tab_id": "00000000-0000-0000-0000-000000000001"
+                                }
+                            },
                             "working_directory": "/home/user",
                             "spawn_spec": {
                                 "program": "/bin/zsh",
@@ -627,6 +632,46 @@ fn the_submit_command_wire_shape_belongs_to_this_protocol_version() {
                 }
             }
         })
+    );
+}
+
+#[test]
+fn the_new_pane_placement_wire_shapes_belong_to_this_protocol_version() {
+    assert_eq!(
+        serde_json::to_value(NewPanePlacement::Split {
+            source_pane_id: None,
+            tab_id: None,
+            direction: Direction::Right,
+        })
+        .expect("placement encodes"),
+        json!({ "Split": { "source_pane_id": null, "tab_id": null, "direction": "Right" } })
+    );
+    assert_eq!(
+        serde_json::to_value(NewPanePlacement::Floating {
+            size: Some(FloatingPaneSize {
+                width: FloatingPaneDimension::Cells(NonZeroU16::new(40).expect("40 is nonzero")),
+                height: FloatingPaneDimension::Percent(
+                    AxisPercent::try_from(60).expect("60 is a percent"),
+                ),
+            }),
+            at: Some(Point { column: 5, row: 2 }),
+            is_pinned: true,
+        })
+        .expect("placement encodes"),
+        json!({ "Floating": {
+            "size": { "width": { "Cells": 40 }, "height": { "Percent": 60 } },
+            "at": { "column": 5, "row": 2 },
+            "is_pinned": true
+        } })
+    );
+    assert_eq!(
+        serde_json::to_value(NewPanePlacement::Floating {
+            size: None,
+            at: None,
+            is_pinned: false,
+        })
+        .expect("placement encodes"),
+        json!({ "Floating": { "size": null, "at": null, "is_pinned": false } })
     );
 }
 
@@ -1083,34 +1128,6 @@ fn an_attach_request_naming_a_client_to_come_back_as_round_trips() {
 }
 
 #[test]
-fn an_attach_request_written_without_the_resume_fields_decodes_as_no_claim() {
-    // An attach written without `resume_client_id` and `resume_token` decodes with both
-    // `None`.
-    let decoded_wire_message: IpcRequest = serde_json::from_str(
-        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24}}}}"#,
-    )
-    .expect("an attach without the resume fields decodes");
-
-    assert_eq!(
-        decoded_wire_message,
-        IpcRequest {
-            request_id: 4,
-            request_kind: IpcRequestKind::Attach {
-                viewport_size: Size {
-                    column_count: 80,
-                    row_count: 24
-                },
-                resume_client_id: None,
-                resume_token: None,
-                pane_area: None,
-                graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
-                cell_size: None,
-            },
-        }
-    );
-}
-
-#[test]
 fn an_attach_request_carrying_a_resume_token_keeps_the_secret_whole() {
     let ipc_request = IpcRequest {
         request_id: 4,
@@ -1160,33 +1177,6 @@ fn an_attach_request_written_without_a_resume_token_beside_a_resume_decodes_as_n
                     row_count: 24
                 },
                 resume_client_id: Some(ClientId::from_uuid(build_fixed_test_uuid())),
-                resume_token: None,
-                pane_area: None,
-                graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
-                cell_size: None,
-            },
-        }
-    );
-}
-
-#[test]
-fn an_attach_request_written_without_a_pane_area_decodes_as_none() {
-    // An attach written without `pane_area` decodes with `pane_area: None`.
-    let decoded_wire_message: IpcRequest = serde_json::from_str(
-        r#"{"request_id":1,"request_kind":{"Attach":{"viewport_size":{"column_count":120,"row_count":40},"resume_client_id":null,"resume_token":null}}}"#,
-    )
-    .expect("an attach without the pane area field decodes");
-
-    assert_eq!(
-        decoded_wire_message,
-        IpcRequest {
-            request_id: 1,
-            request_kind: IpcRequestKind::Attach {
-                viewport_size: Size {
-                    column_count: 120,
-                    row_count: 40,
-                },
-                resume_client_id: None,
                 resume_token: None,
                 pane_area: None,
                 graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
@@ -1359,7 +1349,7 @@ fn an_attached_response_written_without_the_resume_token_decodes_as_no_token() {
     // An attached answer written without `resume_token` decodes with
     // `resume_token: None`.
     let decoded_wire_message: IpcResponse = serde_json::from_str(
-        r#"{"request_id":4,"answer_result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","session_structure":{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[],"panes":[]}}}}"#,
+        r#"{"request_id":4,"answer_result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","session_structure":{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[]}}}}"#,
     )
     .expect("an attached answer without the resume token field decodes");
 
@@ -1375,30 +1365,6 @@ fn an_attached_response_written_without_the_resume_token_decodes_as_no_token() {
                     session_name: "quiet-lake".to_string(),
                     tabs: Vec::new(),
                 },
-                resume_token: None,
-                pane_area: None,
-            },
-        }
-    );
-}
-
-#[test]
-fn an_attached_reply_written_without_a_pane_area_decodes_as_none() {
-    // An attached answer written without `pane_area` decodes with
-    // `pane_area: None`.
-    let decoded_wire_message: IpcResponse = serde_json::from_str(
-        r#"{"request_id":4,"answer_result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","session_structure":{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[{"tab_id":"00000000-0000-0000-0000-000000000001","tab_name":"editor","tab_index":0,"layout":{"Pane":"00000000-0000-0000-0000-000000000001"},"focus_mru":["00000000-0000-0000-0000-000000000001"]}]},"resume_token":null}}}"#,
-    )
-    .expect("an attached answer without the pane area field decodes");
-
-    assert_eq!(
-        decoded_wire_message,
-        IpcResponse {
-            request_id: Some(4),
-            answer_result: IpcResult::Attached {
-                client_id: ClientId::from_uuid(build_fixed_test_uuid()),
-                session_id: SessionId::from_uuid(build_fixed_test_uuid()),
-                session_structure: build_populated_structure(),
                 resume_token: None,
                 pane_area: None,
             },
@@ -1596,30 +1562,6 @@ fn a_resize_request_reporting_a_starving_pane_area_round_trips() {
 }
 
 #[test]
-fn a_resize_request_written_without_a_pane_area_decodes_as_none() {
-    // A resize written without `pane_area` decodes with `pane_area: None`.
-    let decoded_wire_message: IpcRequest = serde_json::from_str(
-        r#"{"request_id":6,"request_kind":{"Resize":{"viewport_size":{"column_count":120,"row_count":40}}}}"#,
-    )
-    .expect("a resize without the pane area field decodes");
-
-    assert_eq!(
-        decoded_wire_message,
-        IpcRequest {
-            request_id: 6,
-            request_kind: IpcRequestKind::Resize {
-                viewport_size: Size {
-                    column_count: 120,
-                    row_count: 40,
-                },
-                pane_area: None,
-                cell_size: None,
-            },
-        }
-    );
-}
-
-#[test]
 fn every_mouse_action_round_trips() {
     for mouse_action in list_every_mouse_action() {
         assert_eq!(round_trip_wire_message(&mouse_action), mouse_action);
@@ -1684,7 +1626,7 @@ fn a_mouse_action_carrying_an_unknown_field_ignores_it() {
 }
 
 #[test]
-fn pane_command_requests_round_trip_without_a_protocol_change() {
+fn pane_commands_round_trip_inside_a_submit_command_request() {
     let pane_commands = [
         Command::MovePane(MovePaneArgs {
             pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
@@ -2153,76 +2095,6 @@ fn a_response_to_unreadable_bytes_names_no_request() {
 }
 
 #[test]
-fn each_result_is_tagged_with_its_own_name() {
-    assert_eq!(
-        get_variant_tag(
-            &serde_json::to_value(IpcResult::Hello {
-                protocol_version: PROTOCOL_VERSION,
-                build_version: "0.3.0".to_string(),
-            })
-            .unwrap()
-        ),
-        "Hello"
-    );
-    assert_eq!(
-        get_variant_tag(
-            &serde_json::to_value(IpcResult::Attached {
-                client_id: ClientId::new(),
-                session_id: SessionId::new(),
-                session_structure: build_populated_structure(),
-                resume_token: None,
-                pane_area: None,
-            })
-            .unwrap()
-        ),
-        "Attached"
-    );
-    assert_eq!(
-        get_variant_tag(
-            &serde_json::to_value(IpcResult::CommandResult(CommandResult::Ok {
-                command_id: CommandId::new(),
-                emitted_events: Vec::new(),
-            }))
-            .unwrap()
-        ),
-        "CommandResult"
-    );
-    assert_eq!(
-        get_variant_tag(
-            &serde_json::to_value(IpcResult::Overview(build_empty_session_overview())).unwrap()
-        ),
-        "Overview"
-    );
-    assert_eq!(
-        get_variant_tag(
-            &serde_json::to_value(IpcResult::Layout(build_test_session_layout())).unwrap()
-        ),
-        "Layout"
-    );
-    assert_eq!(
-        get_variant_tag(
-            &serde_json::to_value(IpcResult::RecentEvents(vec![build_test_recent_event()]))
-                .unwrap()
-        ),
-        "RecentEvents"
-    );
-    assert_eq!(
-        serde_json::to_value(IpcResult::Restarting).unwrap(),
-        json!("Restarting")
-    );
-    assert_eq!(
-        get_variant_tag(
-            &serde_json::to_value(IpcResult::Error(IpcErrorPayload {
-                code: IpcErrorCode::BadToken,
-                message: "the token does not match".to_string(),
-            }))
-            .unwrap()
-        ),
-        "Error"
-    );
-}
-
-#[test]
 fn placement_request_uses_the_declared_wire_field_names() {
     let request_kind = IpcRequestKind::ReadPanePlacement {
         pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
@@ -2501,91 +2373,6 @@ fn nesting_a_token_in_a_request_keeps_it_out_of_debug_output() {
         "Envelope { request_id: 1, request_kind: Hello { minimum_protocol_version: 1, \
          maximum_protocol_version: 1, connection_token: ConnectionToken(***), is_remote: false } }"
     );
-}
-
-#[test]
-fn every_request_kind_names_itself_without_its_payload() {
-    assert_eq!(
-        IpcRequestKind::Hello {
-            minimum_protocol_version: 1,
-            maximum_protocol_version: 1,
-            connection_token: build_test_connection_token(),
-            is_remote: false,
-        }
-        .get_request_kind_name(),
-        "Hello"
-    );
-    assert_eq!(
-        IpcRequestKind::Attach {
-            viewport_size: Size {
-                column_count: 80,
-                row_count: 24
-            },
-            resume_client_id: None,
-            resume_token: None,
-            pane_area: None,
-            graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
-            cell_size: None,
-        }
-        .get_request_kind_name(),
-        "Attach"
-    );
-    assert_eq!(
-        IpcRequestKind::Keyboard {
-            key_input: build_control_c_key_input(),
-        }
-        .get_request_kind_name(),
-        "Keyboard"
-    );
-    assert_eq!(
-        IpcRequestKind::Resize {
-            viewport_size: Size {
-                column_count: 120,
-                row_count: 40,
-            },
-            pane_area: None,
-            cell_size: None,
-        }
-        .get_request_kind_name(),
-        "Resize"
-    );
-    assert_eq!(
-        IpcRequestKind::Paste {
-            pasted_text: String::from("hello\nworld"),
-        }
-        .get_request_kind_name(),
-        "Paste"
-    );
-    assert_eq!(
-        IpcRequestKind::Mouse(list_every_mouse_action()).get_request_kind_name(),
-        "Mouse"
-    );
-    assert_eq!(
-        IpcRequestKind::SubmitCommand(Box::new(build_test_command_envelope()))
-            .get_request_kind_name(),
-        "SubmitCommand"
-    );
-    assert_eq!(
-        IpcRequestKind::Discovery.get_request_kind_name(),
-        "Discovery"
-    );
-    assert_eq!(
-        IpcRequestKind::Layout { tab_id: None }.get_request_kind_name(),
-        "Layout"
-    );
-    assert_eq!(
-        IpcRequestKind::Layout {
-            tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
-        }
-        .get_request_kind_name(),
-        "Layout"
-    );
-    assert_eq!(
-        IpcRequestKind::RecentEvents.get_request_kind_name(),
-        "RecentEvents"
-    );
-    assert_eq!(IpcRequestKind::Restart.get_request_kind_name(), "Restart");
-    assert_eq!(IpcRequestKind::Leaving.get_request_kind_name(), "Leaving");
 }
 
 #[test]

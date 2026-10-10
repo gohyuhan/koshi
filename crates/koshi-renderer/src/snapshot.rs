@@ -164,7 +164,8 @@ pub struct PlacementClientSnapshot {
 /// The typed reasons a placement preview cannot be built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlacementSnapshotErrorCode {
-    /// The source pane or destination tab does not exist.
+    /// The requesting client is not attached, or the source pane, its tiled
+    /// slot, or the destination tab does not exist.
     NotFound,
     /// The requested preview exceeds a bounded resource limit.
     ResourceLimit,

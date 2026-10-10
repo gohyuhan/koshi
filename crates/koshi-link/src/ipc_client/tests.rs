@@ -1,19 +1,17 @@
 //! Tests for the CLI side of the control socket, against a scripted
 //! stand-in session serving a real socket.
 
-use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use koshi_core::command::{NewPaneArgs, NewTabArgs, RunCommandPaneArgs, ToggleLockModeArgs};
+use koshi_core::command::{NewPaneArgs, NewPanePlacement, NewTabArgs, ToggleLockModeArgs};
 use koshi_core::discovery::SessionDiscovery;
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{PaneId, SessionId};
-use koshi_core::process::SpawnSpec;
 use koshi_ipc::endpoint::RESTART_WINDOW_DURATION;
 use koshi_ipc::layout::TabLayout;
-use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcResponse};
+use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcResponse, MIN_PROTOCOL_VERSION};
 use koshi_ipc::transport::Listener;
 use koshi_layout::tree::LayoutNode;
 use koshi_test_support::fixtures::{
@@ -30,10 +28,11 @@ use koshi_ipc::protocol::{IpcErrorPayload, PROTOCOL_VERSION};
 /// A `new-pane` request with nothing chosen: the focused pane splits rightward.
 fn build_default_new_pane_args() -> NewPaneArgs {
     NewPaneArgs {
-        source_pane_id: None,
-        tab_id: None,
-        direction: Direction::Right,
-        should_stack: false,
+        placement: NewPanePlacement::Split {
+            source_pane_id: None,
+            tab_id: None,
+            direction: Direction::Right,
+        },
         working_directory: None,
         spawn_spec: None,
         client_id: None,
@@ -65,8 +64,7 @@ enum SessionScript {
 }
 
 /// The sentence a stand-in server refuses this build's protocol version with.
-const VERSION_REFUSAL_SENTENCE: &str =
-    "this server speaks protocol 3 to 4; the caller asked for 5 to 6";
+const VERSION_REFUSAL_SENTENCE: &str = "this server speaks an older protocol than the caller";
 
 /// Serve one scripted connection per entry of `session_scripts`, in order, for
 /// `session_id` at `runtime_directory`: write the endpoint file, accept one
@@ -2626,24 +2624,6 @@ fn a_pane_creating_command_gets_this_process_directory_at_send_time() {
         new_tab_arguments.working_directory,
         std::env::current_dir().ok()
     );
-
-    let command_with_current_directory =
-        apply_current_working_directory_to_command(Command::RunCommandPane(RunCommandPaneArgs {
-            spawn_spec: SpawnSpec::build_default_shell(None, BTreeMap::new()),
-            working_directory: None,
-            source_pane_id: None,
-            tab_id: None,
-            direction: Direction::Right,
-            should_stack: false,
-            client_id: None,
-        }));
-    let Command::RunCommandPane(run_command_pane_arguments) = command_with_current_directory else {
-        panic!("the variant must not change");
-    };
-    assert_eq!(
-        run_command_pane_arguments.working_directory,
-        std::env::current_dir().ok()
-    );
 }
 
 #[test]
@@ -2766,12 +2746,17 @@ fn spawn_settled_session(
 /// answers every request after the failed Hello with `HelloRequired`, and does
 /// not act on the command it read.
 #[test]
-fn a_session_speaking_three_refuses_the_caller_and_answers_no_command() {
+fn a_session_speaking_below_this_builds_floor_refuses_the_caller_and_answers_no_command() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let client_id = ClientId::new();
-    let (session_thread, received_requests) =
-        spawn_settled_session(runtime_directory.path(), session_id, 3, HelloTiming::AtOnce);
+    let refused_protocol_version = MIN_PROTOCOL_VERSION - 1;
+    let (session_thread, received_requests) = spawn_settled_session(
+        runtime_directory.path(),
+        session_id,
+        refused_protocol_version,
+        HelloTiming::AtOnce,
+    );
 
     let command_error = submit_external_command_via_runtime_directory(
         runtime_directory.path(),
@@ -2780,15 +2765,17 @@ fn a_session_speaking_three_refuses_the_caller_and_answers_no_command() {
         Some(client_id),
         Command::TogglePaneFullscreen,
     )
-    .expect_err("a session speaking 3 is below this build's floor of 4");
+    .expect_err("a session below this build's floor is refused");
 
     let CliError::IpcUnavailable { detail } = command_error else {
         panic!("expected IpcUnavailable, got {command_error:?}");
     };
     assert_eq!(
         detail,
-        "the session settled on protocol version 3, which is outside the 4 to 4 this koshi \
-         asked for"
+        format!(
+            "the session settled on protocol version {refused_protocol_version}, which is \
+             outside the {MIN_PROTOCOL_VERSION} to {PROTOCOL_VERSION} this koshi asked for"
+        )
     );
 
     session_thread.join().expect("fake session exits");
@@ -2821,7 +2808,7 @@ fn a_named_client_command_reaches_a_session_that_answers_the_hello_last() {
     let (session_thread, received_requests) = spawn_settled_session(
         runtime_directory.path(),
         session_id,
-        4,
+        5,
         HelloTiming::AfterTheNextRequest,
     );
 
@@ -2863,12 +2850,16 @@ fn a_named_client_command_reaches_a_session_that_answers_the_hello_last() {
 }
 
 #[test]
-fn a_named_client_reaches_a_session_that_speaks_four() {
+fn a_named_client_reaches_a_session_that_speaks_this_builds_protocol() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let client_id = ClientId::new();
-    let (session_thread, received_requests) =
-        spawn_settled_session(runtime_directory.path(), session_id, 4, HelloTiming::AtOnce);
+    let (session_thread, received_requests) = spawn_settled_session(
+        runtime_directory.path(),
+        session_id,
+        PROTOCOL_VERSION,
+        HelloTiming::AtOnce,
+    );
 
     let command_result = submit_external_command_via_runtime_directory(
         runtime_directory.path(),
@@ -2877,7 +2868,7 @@ fn a_named_client_reaches_a_session_that_speaks_four() {
         Some(client_id),
         Command::TogglePaneFullscreen,
     )
-    .expect("a session speaking 4 reads the target client");
+    .expect("a session speaking this build's protocol reads the target client");
 
     session_thread.join().expect("fake session exits");
     assert_eq!(

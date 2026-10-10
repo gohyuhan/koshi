@@ -130,7 +130,10 @@ fn get_created_tab_and_pane_ids(emitted_events: &[Event]) -> (TabId, PaneId) {
     emitted_events
         .iter()
         .find_map(|emitted_event| match emitted_event {
-            Event::PaneCreated(pane_created) => Some((pane_created.tab_id, pane_created.pane_id)),
+            Event::PaneCreated(pane_created) => Some((
+                pane_created.tab_id.expect("a new tab's pane is tiled"),
+                pane_created.pane_id,
+            )),
             _ => None,
         })
         .expect("the new tab reports its tab and its root pane")

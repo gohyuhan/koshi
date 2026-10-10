@@ -15,7 +15,7 @@ use koshi_client::Client as ViewerClient;
 use koshi_config::layer::{PartialCopyConfig, PartialKoshiConfig};
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, CopyArgs, GridPosition, NewPaneArgs,
-    NewTabArgs, Selection, SelectionKind, SetSelectionArgs, VisualCommand,
+    NewPanePlacement, NewTabArgs, Selection, SelectionKind, SetSelectionArgs, VisualCommand,
 };
 use koshi_core::event::{Event, SelectionChanged};
 use koshi_core::geometry::{Direction, Point, Rect, Size};
@@ -207,10 +207,11 @@ fn split_pane_rightward(server: &mut Server, client_id: ClientId) -> PaneId {
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
         Command::NewPane(NewPaneArgs {
-            source_pane_id: None,
-            tab_id: None,
-            direction: Direction::Right,
-            should_stack: false,
+            placement: NewPanePlacement::Split {
+                source_pane_id: None,
+                tab_id: None,
+                direction: Direction::Right,
+            },
             working_directory: None,
             spawn_spec: None,
             client_id: None,

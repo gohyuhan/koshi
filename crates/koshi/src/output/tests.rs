@@ -692,7 +692,7 @@ fn explain_run_omits_the_koshi_example() {
   "targets": [
     "pane"
   ],
-  "command": "RunCommandPane",
+  "command": "NewPane",
   "examples": [
     "core:run"
   ]
@@ -2142,7 +2142,7 @@ fn build_pane_created_event() -> RecentEvent {
     recent_event::record_event(
         &Event::PaneCreated(PaneCreated {
             pane_id: build_test_first_pane_id(),
-            tab_id: build_test_layout_tab_id(),
+            tab_id: Some(build_test_layout_tab_id()),
         }),
         build_fixed_test_time(),
     )
@@ -2235,7 +2235,7 @@ fn debug_events_table_lists_the_client_tab_and_pane_ids_in_that_order() {
     let focused_event = recent_event::record_event(
         &Event::PaneFocused(PaneFocused {
             client_id: build_test_layout_client_id(),
-            tab_id: build_test_layout_tab_id(),
+            tab_id: Some(build_test_layout_tab_id()),
             pane_id: build_test_first_pane_id(),
             previous_pane_id: None,
         }),
@@ -2347,7 +2347,7 @@ fn narrowing_by_time_and_name_together_keeps_only_what_passes_both() {
     let old_pane_event = recent_event::record_event(
         &Event::PaneCreated(PaneCreated {
             pane_id: build_test_first_pane_id(),
-            tab_id: build_test_layout_tab_id(),
+            tab_id: Some(build_test_layout_tab_id()),
         }),
         SystemTime::UNIX_EPOCH + Duration::from_secs(1233),
     );

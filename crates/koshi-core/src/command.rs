@@ -12,7 +12,7 @@
 //! identity is never a free-form `String`.
 
 use crate::event::{Event, RejectReason};
-use crate::geometry::Direction;
+use crate::geometry::{Direction, FloatingPaneSize, Point};
 use crate::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use crate::process::SpawnSpec;
 pub use crate::selection::{GridPosition, Selection, SelectionKind};
@@ -22,13 +22,15 @@ use std::path::PathBuf;
 /// A requested mutation the runtime can apply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
-    /// Split-create a pane; CLI `new-pane`.
+    /// Create a pane: a split, a stack member, or a floating pane
+    /// ([`NewPanePlacement`]); CLI `new-pane`.
     NewPane(NewPaneArgs),
     /// Close a pane (defaults to the focused one).
     ClosePane(ClosePaneArgs),
     /// Move one of a pane's borders by whole cells: a positive size moves
     /// it outward (the pane grows), a negative size moves it inward (the
-    /// pane shrinks and the neighbor gains the cells).
+    /// pane shrinks and the neighbor gains the cells). A floating pane has no
+    /// neighbor; its own size changes ([`ResizePaneArgs::resize_amount_cells`]).
     ResizePane(ResizePaneArgs),
     /// Move focus to a pane.
     FocusPane(FocusPaneArgs),
@@ -48,8 +50,6 @@ pub enum Command {
     /// While on, a drag highlights in koshi even over a program that asked
     /// for the mouse.
     ToggleMouseSelect,
-    /// Spawn a command in a new pane.
-    RunCommandPane(RunCommandPaneArgs),
     /// Selection and copy — the commands of visual mode.
     Visual(VisualCommand),
     /// Toggle fullscreen for the focused pane.
@@ -125,8 +125,6 @@ pub enum CommandKind {
     SetLockMode,
     /// Names [`Command::ToggleMouseSelect`].
     ToggleMouseSelect,
-    /// Names [`Command::RunCommandPane`].
-    RunCommandPane,
     /// Names [`Command::TogglePaneFullscreen`].
     TogglePaneFullscreen,
     /// Names [`Command::MoveTab`].
@@ -142,40 +140,69 @@ pub enum CommandKind {
 }
 
 /// Arguments for [`Command::NewPane`].
-///
-/// The dispatcher routes on `should_stack`: set, the new pane joins the source's
-/// stack, creating one if needed; unset, the source leaf splits
-/// directionally.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewPaneArgs {
-    /// Pane to split from; `None` uses the focused pane.
-    pub source_pane_id: Option<PaneId>,
-    /// Tab the new pane joins when no source pane names one: the split
-    /// anchor becomes that tab's most recently focused pane (its first pane
-    /// in layout order until one is focused). Ignored when `source_pane_id` is
-    /// set because that pane's own tab wins.
-    #[serde(default)]
-    pub tab_id: Option<TabId>,
-    /// Split direction, always named by the client that issues the command:
-    /// the direction its own `layout.new-pane-direction` setting resolves to,
-    /// or the one the action or CLI flag states outright. Unused when
-    /// `should_stack` is set — a stack has no direction.
-    pub direction: Direction,
-    /// Stack the new pane onto the source instead of splitting space.
-    pub should_stack: bool,
+    /// Where the new pane lives: a split of a tiled pane, a stack member, or a
+    /// floating pane.
+    pub placement: NewPanePlacement,
     /// Working directory; `None` inherits.
     pub working_directory: Option<PathBuf>,
     /// Spawn specification; `None` launches the default shell.
     pub spawn_spec: Option<SpawnSpec>,
-    /// Client to show the new pane on.
+    /// Client to show the new pane on: the client that views and focuses a
+    /// split or stacked pane, or the designated client whose view a
+    /// [`NewPanePlacement::Floating`] `at` and `is_pinned` write.
     ///
     /// - `Some(client)`: that client is targeted, even over an in-session
     ///   issuer. A client not attached to the target session is rejected;
     ///   there is no fallback.
     /// - `None`: the issuing client; for a source with no client, the
     ///   session's sole client. A session with several attached clients and
-    ///   no named target is rejected.
+    ///   no named target is rejected. A floating pane created while no client
+    ///   is attached has no designated client.
     pub client_id: Option<ClientId>,
+}
+
+/// Where a [`Command::NewPane`] puts the new pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NewPanePlacement {
+    /// Split a tiled leaf: the anchor leaf divides along `direction` and the
+    /// new pane takes one half.
+    Split {
+        /// Pane to split from; `None` uses the focused pane.
+        source_pane_id: Option<PaneId>,
+        /// Tab the new pane joins when `source_pane_id` names none: the split
+        /// anchor is that tab's most recently focused pane (its first pane in
+        /// layout order until one is focused). Ignored when `source_pane_id`
+        /// is set: that pane's own tab wins.
+        tab_id: Option<TabId>,
+        /// Split direction, always named by the client that issues the
+        /// command: the direction its own `layout.new-pane-direction` setting
+        /// resolves to, or the one the action or CLI flag states outright.
+        direction: Direction,
+    },
+    /// Join the anchor's stack, creating a stack when the anchor has none;
+    /// the new pane becomes the stack's open member.
+    Stacked {
+        /// Pane to stack onto; `None` uses the focused pane.
+        source_pane_id: Option<PaneId>,
+        /// Tab the new pane joins when `source_pane_id` names none, read
+        /// exactly as [`NewPanePlacement::Split`]'s `tab_id`.
+        tab_id: Option<TabId>,
+    },
+    /// Add a floating pane to the session's floating set.
+    Floating {
+        /// Desired size, one dimension per axis. `None` takes 60% x 60% of the
+        /// shared floating viewport.
+        size: Option<FloatingPaneSize>,
+        /// The designated client's position of the pane's top-left cell,
+        /// counted from that client's pane-area origin. `None` takes the
+        /// default placement. No other client's view is written.
+        at: Option<Point>,
+        /// `true` pins the new pane for the designated client only, at `at`
+        /// or at the drawn default placement.
+        is_pinned: bool,
+    },
 }
 
 /// Arguments for [`Command::ClosePane`].
@@ -188,7 +215,6 @@ pub struct ClosePaneArgs {
     /// Kill the child's whole process group: every descendant it spawned
     /// stops with it. Changes kill scope only; a `ConfirmIfBusy` pane still
     /// rejects the close while busy.
-    #[serde(default)]
     pub should_kill_process_tree: bool,
 }
 
@@ -203,6 +229,11 @@ pub struct ResizePaneArgs {
     /// the pane grows toward `direction` and the neighbor on that side
     /// donates the cells; negative moves it inward — the pane shrinks and
     /// that neighbor gains the cells. Zero is rejected at dispatch.
+    ///
+    /// A floating pane has no neighbor: its own size changes, and the acting
+    /// client's drawn position keeps the border opposite `direction` in
+    /// place. A `40`-column floating pane drawn at column `20`, resized
+    /// `Left` by `3`, is `43` columns wide and drawn at column `17`.
     pub resize_amount_cells: i16,
 }
 
@@ -289,7 +320,6 @@ pub struct CloseTabArgs {
     /// Kill each child's whole process group: every descendant stops with
     /// its pane. Changes kill scope only; a `ConfirmIfBusy` pane still
     /// rejects the close while busy.
-    #[serde(default)]
     pub should_kill_process_tree: bool,
 }
 
@@ -332,7 +362,6 @@ pub struct LockModeArgs {
     pub is_locked: bool,
     /// Client whose lock mode changes; resolved by the same rules as
     /// [`NewPaneArgs::client_id`].
-    #[serde(default)]
     pub client_id: Option<ClientId>,
 }
 
@@ -341,33 +370,6 @@ pub struct LockModeArgs {
 pub struct ToggleLockModeArgs {
     /// Client whose lock mode flips; resolved by the same rules as
     /// [`NewPaneArgs::client_id`].
-    #[serde(default)]
-    pub client_id: Option<ClientId>,
-}
-
-/// Arguments for [`Command::RunCommandPane`]. The pane's display name is not
-/// supplied by the caller — names are only ever system-generated.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunCommandPaneArgs {
-    /// The command to spawn.
-    pub spawn_spec: SpawnSpec,
-    /// Working directory; `None` inherits.
-    pub working_directory: Option<PathBuf>,
-    /// Pane to split from; `None` uses the focused pane.
-    pub source_pane_id: Option<PaneId>,
-    /// Tab the new pane joins when no source pane names one; resolved by the
-    /// same rules as [`NewPaneArgs::tab_id`].
-    #[serde(default)]
-    pub tab_id: Option<TabId>,
-    /// Split direction for the new pane, resolved by the issuing client the
-    /// same way [`NewPaneArgs::direction`] is. Unused when `should_stack` is set —
-    /// a stack has no direction.
-    pub direction: Direction,
-    /// Stack the new pane onto the source pane instead of splitting space.
-    pub should_stack: bool,
-    /// Client to show the new pane on; resolved by the same rules as
-    /// [`NewPaneArgs::client_id`].
-    #[serde(default)]
     pub client_id: Option<ClientId>,
 }
 
@@ -415,7 +417,6 @@ pub struct ScrollPaneArgs {
 pub struct DetachArgs {
     /// Client that detaches; resolved by the same rules as
     /// [`NewPaneArgs::client_id`].
-    #[serde(default)]
     pub client_id: Option<ClientId>,
 }
 
@@ -424,7 +425,6 @@ pub struct DetachArgs {
 pub struct SwitchSessionArgs {
     /// Client to move; `None` moves the issuing client. A session with several
     /// attached clients and no named target is rejected.
-    #[serde(default)]
     pub client_id: Option<ClientId>,
     /// Session the client moves to. The caller resolves it; this session never
     /// looks a name up.
@@ -539,7 +539,6 @@ pub enum CommandSource {
         /// none. Read by [`CommandSource::get_target_client_id`]. A source names this
         /// client and an issuing client separately, and this one is never the
         /// issuer.
-        #[serde(default)]
         target_client_id: Option<ClientId>,
     },
 }

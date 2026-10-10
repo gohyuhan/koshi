@@ -2,6 +2,15 @@
 
 use super::*;
 
+use std::sync::mpsc;
+use std::sync::Arc;
+
+use koshi_core::geometry::PixelCellSize;
+use koshi_core::ids::PaneId;
+use koshi_renderer::ImageCellState;
+use koshi_terminal::graphics::{ImageAction, ImageDisplay};
+use koshi_terminal::style::{Color, Style};
+
 impl OutputPaint {
     /// Replace this paint's placement key with `placement_key`.
     fn set_placement_key(&mut self, placement_key: ImagePlacementKey) {
@@ -238,10 +247,10 @@ fn one_cell_sixel_tiles_use_bounded_stack_space() {
             .unwrap();
             let actual_template_units = template_units
                 .into_iter()
-                .map(|unit| {
+                .map(|template_unit| {
                     (
-                        unit.tile_offset,
-                        decode_sixel_output_unit(&unit.output_bytes),
+                        template_unit.tile_offset,
+                        decode_sixel_output_unit(&template_unit.output_bytes),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -302,14 +311,14 @@ fn maximum_visible_placements_reach_the_worker_without_drops() {
         }
         let mut output_state = ImageOutputState::from_output_kind(None);
         output_state.output_kind = Some(output_kind);
-        let (sender, receiver) = mpsc::sync_channel(1);
-        output_state.worker_request_sender = Some(sender);
+        let (worker_request_sender, worker_request_receiver) = mpsc::sync_channel(1);
+        output_state.worker_request_sender = Some(worker_request_sender);
         output_state.prepare_frame(
             &output_paints,
             Some(Arc::new(build_blank_snapshot(Rect::new(0, 0, 64, 64)))),
             Some(PixelCellSize::from_pixel_dimensions(1, 1).unwrap()),
         );
-        let actual_output_paints = receiver.try_recv().map(|worker_request| {
+        let actual_output_paints = worker_request_receiver.try_recv().map(|worker_request| {
             worker_request
                 .output_paints
                 .into_iter()
@@ -330,15 +339,6 @@ fn maximum_visible_placements_reach_the_worker_without_drops() {
         );
     }
 }
-
-use std::sync::mpsc;
-use std::sync::Arc;
-
-use koshi_core::geometry::PixelCellSize;
-use koshi_core::ids::PaneId;
-use koshi_renderer::ImageCellState;
-use koshi_terminal::graphics::{ImageAction, ImageDisplay};
-use koshi_terminal::style::{Color, Style};
 
 fn build_output_paint(
     rgba_bytes: Vec<u8>,
@@ -783,8 +783,8 @@ fn kitty_background_layer_boundary_is_exact_for_native_host_protocols() {
 fn mixed_explicit_backgrounds_do_not_look_like_one_solid_color() {
     let layout_area = Rect::new(0, 0, 2, 1);
     let red_background_cells = build_solid_cell_snapshot(layout_area, [255, 0, 0]);
-    let mut second_style = Style::default();
-    second_style.set_background_color(Color::Rgb(0, 0, 255));
+    let mut blue_cell_style = Style::default();
+    blue_cell_style.set_background_color(Color::Rgb(0, 0, 255));
     let mixed_background_cells = build_image_cell_snapshot(
         layout_area,
         vec![
@@ -796,7 +796,7 @@ fn mixed_explicit_backgrounds_do_not_look_like_one_solid_color() {
                 ..ImageCellState::default()
             },
             ImageCellState {
-                style: second_style,
+                style: blue_cell_style,
                 ..ImageCellState::default()
             },
         ],
@@ -877,7 +877,7 @@ fn sixel_partial_alpha_reencodes_when_the_cell_background_changes() {
     ));
     let mut output_state = ImageOutputState::from_output_kind(None);
     output_state.output_kind = Some(output_kind);
-    let red_key = {
+    let red_encode_key = {
         let mut encode_key = build_output_encode_key(output_kind, cell_size, &output_paint);
         encode_key.composition_revision = output_state.update_composition_revisions(
             output_kind,
@@ -886,7 +886,7 @@ fn sixel_partial_alpha_reencodes_when_the_cell_background_changes() {
         )[0];
         encode_key
     };
-    let blue_key = {
+    let blue_encode_key = {
         let mut encode_key = build_output_encode_key(output_kind, cell_size, &output_paint);
         encode_key.composition_revision = output_state.update_composition_revisions(
             output_kind,
@@ -895,14 +895,14 @@ fn sixel_partial_alpha_reencodes_when_the_cell_background_changes() {
         )[0];
         encode_key
     };
-    assert_ne!(red_key, blue_key);
+    assert_ne!(red_encode_key, blue_encode_key);
 
     let red_image_plan = classify_output_paint(
         output_kind,
         &red_cells,
         &HashSet::new(),
         &output_paint,
-        red_key,
+        red_encode_key,
     )
     .expect("red background is encodable");
     let blue_image_plan = classify_output_paint(
@@ -910,7 +910,7 @@ fn sixel_partial_alpha_reencodes_when_the_cell_background_changes() {
         &blue_cells,
         &HashSet::new(),
         &output_paint,
-        blue_key,
+        blue_encode_key,
     )
     .expect("blue background is encodable");
     let build_worker_request = |cell_snapshot, encode_key| WorkerRequest {
@@ -925,7 +925,7 @@ fn sixel_partial_alpha_reencodes_when_the_cell_background_changes() {
         is_cancellation_requested: Arc::new(AtomicBool::new(false)),
     };
     let red_template_units = encode_sixel_template(
-        &build_worker_request(Arc::clone(&red_cells), red_key),
+        &build_worker_request(Arc::clone(&red_cells), red_encode_key),
         &red_image_plan,
         &[],
         2,
@@ -935,7 +935,7 @@ fn sixel_partial_alpha_reencodes_when_the_cell_background_changes() {
     )
     .expect("red output encodes");
     let blue_template_units = encode_sixel_template(
-        &build_worker_request(Arc::clone(&blue_cells), blue_key),
+        &build_worker_request(Arc::clone(&blue_cells), blue_encode_key),
         &blue_image_plan,
         &[],
         2,
@@ -966,27 +966,27 @@ fn sixel_overlapping_partial_alpha_is_composed_over_the_lower_image() {
         maximum_pixel_height: None,
     };
     let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size");
-    let lower_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
-    let upper_paint = build_output_paint(vec![0, 0, 255, 128], 1, 1, 1);
+    let lower_output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
+    let upper_output_paint = build_output_paint(vec![0, 0, 255, 128], 1, 1, 1);
     let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)));
-    let lower_key = build_output_encode_key(output_kind, cell_size, &lower_paint);
-    let upper_key = build_output_encode_key(output_kind, cell_size, &upper_paint);
+    let lower_encode_key = build_output_encode_key(output_kind, cell_size, &lower_output_paint);
+    let upper_encode_key = build_output_encode_key(output_kind, cell_size, &upper_output_paint);
     let lower_image_plan = classify_output_paint(
         output_kind,
         &cell_snapshot,
         &HashSet::new(),
-        &lower_paint,
-        lower_key,
+        &lower_output_paint,
+        lower_encode_key,
     )
     .expect("lower image is encodable");
     let mut covered_cell_positions = HashSet::new();
-    add_target_area_cells(lower_paint.target_area, &mut covered_cell_positions);
+    add_target_area_cells(lower_output_paint.target_area, &mut covered_cell_positions);
     let upper_image_plan = classify_output_paint(
         output_kind,
         &cell_snapshot,
         &covered_cell_positions,
-        &upper_paint,
-        upper_key,
+        &upper_output_paint,
+        upper_encode_key,
     )
     .expect("upper image remains in the output plan");
     let mut image_plans = vec![lower_image_plan, upper_image_plan];
@@ -1003,8 +1003,8 @@ fn sixel_overlapping_partial_alpha_is_composed_over_the_lower_image() {
         pixel_cell_size: cell_size,
         measured_pixel_cell_size: Some(cell_size),
         cell_snapshot: Some(cell_snapshot),
-        output_paints: vec![lower_paint.clone(), upper_paint.clone()],
-        encode_keys: vec![lower_key, upper_key],
+        output_paints: vec![lower_output_paint.clone(), upper_output_paint.clone()],
+        encode_keys: vec![lower_encode_key, upper_encode_key],
         kitty_paint_images: Vec::new(),
         is_cancellation_requested: Arc::new(AtomicBool::new(false)),
     };
@@ -1041,10 +1041,10 @@ fn sixel_terminal_background_requires_the_cell_background_under_opaque_lower_pix
     let output_paints = [lower_output_paint, upper_output_paint];
 
     let default_cells = Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)));
-    let default_plans =
+    let default_image_plans =
         classify_image_plans(output_kind, &default_cells, &output_paints, Some(cell_size));
     assert_eq!(
-        default_plans[1].image_compatibility,
+        default_image_plans[1].image_compatibility,
         ImageCompatibility {
             has_sixel_terminal_background_mismatch: true,
             ..ImageCompatibility::default()
@@ -1055,9 +1055,10 @@ fn sixel_terminal_background_requires_the_cell_background_under_opaque_lower_pix
         Rect::new(0, 0, 1, 1),
         [0, 255, 0],
     ));
-    let rgb_plans = classify_image_plans(output_kind, &rgb_cells, &output_paints, Some(cell_size));
+    let rgb_image_plans =
+        classify_image_plans(output_kind, &rgb_cells, &output_paints, Some(cell_size));
     assert_eq!(
-        rgb_plans[1].image_compatibility,
+        rgb_image_plans[1].image_compatibility,
         ImageCompatibility::default()
     );
     let worker_request = WorkerRequest {
@@ -1076,8 +1077,8 @@ fn sixel_terminal_background_requires_the_cell_background_under_opaque_lower_pix
     };
     let template_units = encode_sixel_template(
         &worker_request,
-        &rgb_plans[1],
-        &rgb_plans[..1],
+        &rgb_image_plans[1],
+        &rgb_image_plans[..1],
         2,
         None,
         None,
@@ -1352,7 +1353,7 @@ fn binary_alpha_sixel_output_can_keep_a_glyph_in_a_zero_bit() {
 }
 
 #[test]
-fn output_state_keeps_i_term_available_without_a_pixel_cell_query() {
+fn output_state_keeps_iterm_available_without_a_pixel_cell_query() {
     let output_state = ImageOutputState::from_output_kind(Some(ImageOutputKind::Iterm));
 
     assert_eq!(output_state.get_output_kind(), Some(ImageOutputKind::Iterm));
@@ -1363,9 +1364,9 @@ fn output_state_keeps_i_term_available_without_a_pixel_cell_query() {
 fn disconnected_worker_settles_each_distinct_frame_as_unavailable() {
     let mut output_state = ImageOutputState::from_output_kind(None);
     output_state.output_kind = Some(ImageOutputKind::Iterm);
-    let (sender, receiver) = mpsc::sync_channel(1);
-    drop(receiver);
-    output_state.worker_request_sender = Some(sender);
+    let (worker_request_sender, worker_request_receiver) = mpsc::sync_channel(1);
+    drop(worker_request_receiver);
+    output_state.worker_request_sender = Some(worker_request_sender);
     let cell_snapshot = Some(Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1))));
     let first_output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
     let first_image_paint = ImagePaint::from_image_placement(
@@ -1405,7 +1406,7 @@ fn disconnected_worker_settles_each_distinct_frame_as_unavailable() {
 }
 
 #[test]
-fn i_term_packet_accounting_uses_the_native_frame_limit() {
+fn iterm_packet_accounting_uses_the_native_frame_limit() {
     assert_eq!(
         compute_checked_output_byte_count(
             MAX_SIXEL_OUTPUT_BYTE_COUNT,
@@ -1415,12 +1416,14 @@ fn i_term_packet_accounting_uses_the_native_frame_limit() {
         .expect("the native frame limit is larger"),
         MAX_SIXEL_OUTPUT_BYTE_COUNT + 1
     );
-    assert!(compute_checked_output_byte_count(
-        MAX_NATIVE_FRAME_OUTPUT_BYTE_COUNT,
-        1,
-        MAX_NATIVE_FRAME_OUTPUT_BYTE_COUNT
-    )
-    .is_err());
+    assert!(matches!(
+        compute_checked_output_byte_count(
+            MAX_NATIVE_FRAME_OUTPUT_BYTE_COUNT,
+            1,
+            MAX_NATIVE_FRAME_OUTPUT_BYTE_COUNT
+        ),
+        Err(TemplateError::Failed)
+    ));
 }
 
 #[test]
@@ -1436,11 +1439,11 @@ fn placement_key_reuses_pixels_across_frame_record_wrappers() {
         build_output_encode_key(ImageOutputKind::Iterm, cell_size, &second_output_paint)
     );
 
-    let mut different_z_index = second_output_paint;
-    different_z_index.z_index = 1;
+    let mut raised_output_paint = second_output_paint;
+    raised_output_paint.z_index = 1;
     assert_ne!(
         build_output_encode_key(ImageOutputKind::Iterm, cell_size, &first_output_paint),
-        build_output_encode_key(ImageOutputKind::Iterm, cell_size, &different_z_index)
+        build_output_encode_key(ImageOutputKind::Iterm, cell_size, &raised_output_paint)
     );
 }
 
@@ -1467,11 +1470,12 @@ fn crop_image_uses_the_requested_source_rectangle() {
         pixel_height: 1,
     };
 
-    let cropped = crop_output_image(&source_output_paint, None).expect("source rectangle is valid");
+    let cropped_image =
+        crop_output_image(&source_output_paint, None).expect("source rectangle is valid");
 
-    assert_eq!(cropped.pixel_width, 1);
-    assert_eq!(cropped.pixel_height, 1);
-    assert_eq!(cropped.rgba_bytes, vec![0, 255, 0, 255]);
+    assert_eq!(cropped_image.pixel_width, 1);
+    assert_eq!(cropped_image.pixel_height, 1);
+    assert_eq!(cropped_image.rgba_bytes, vec![0, 255, 0, 255]);
 }
 
 #[test]
@@ -1495,7 +1499,7 @@ fn scaled_tile_samples_from_the_visible_crop_origin() {
         rgba_bytes: vec![255, 0, 0, 255, 0, 0, 255, 255],
     };
 
-    let scaled = scale_output_tile(
+    let scaled_image = scale_output_tile(
         &decoded_image,
         ImageSourceRect {
             pixel_x: 1,
@@ -1516,11 +1520,11 @@ fn scaled_tile_samples_from_the_visible_crop_origin() {
     )
     .expect("the crop is inside the source image");
 
-    assert_eq!(scaled.rgba_bytes, vec![0, 0, 255, 255]);
+    assert_eq!(scaled_image.rgba_bytes, vec![0, 0, 255, 255]);
 }
 
 #[test]
-fn worker_emits_one_complete_i_term_packet_for_one_opaque_pixel() {
+fn worker_emits_one_complete_iterm_packet_for_one_opaque_pixel() {
     let output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
     let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)));
     let output_kind = ImageOutputKind::Iterm;
@@ -1537,10 +1541,10 @@ fn worker_emits_one_complete_i_term_packet_for_one_opaque_pixel() {
         kitty_paint_images: Vec::new(),
         is_cancellation_requested: Arc::new(AtomicBool::new(false)),
     };
-    let (sender, receiver) = mpsc::sync_channel(8);
+    let (worker_message_sender, worker_message_receiver) = mpsc::sync_channel(8);
 
-    run_worker_job(&worker_request, &sender).expect("worker encodes the pixel");
-    let worker_messages = receiver.try_iter().collect::<Vec<_>>();
+    run_worker_job(&worker_request, &worker_message_sender).expect("worker encodes the pixel");
+    let worker_messages = worker_message_receiver.try_iter().collect::<Vec<_>>();
 
     assert_eq!(worker_messages.len(), 2);
     let WorkerMessage::Prepared { .. } = &worker_messages[0] else {
@@ -1575,10 +1579,10 @@ fn worker_emits_a_complete_bounded_sixel_tile() {
         kitty_paint_images: Vec::new(),
         is_cancellation_requested: Arc::new(AtomicBool::new(false)),
     };
-    let (sender, receiver) = mpsc::sync_channel(8);
+    let (worker_message_sender, worker_message_receiver) = mpsc::sync_channel(8);
 
-    run_worker_job(&worker_request, &sender).expect("worker encodes the pixel");
-    let worker_messages = receiver.try_iter().collect::<Vec<_>>();
+    run_worker_job(&worker_request, &worker_message_sender).expect("worker encodes the pixel");
+    let worker_messages = worker_message_receiver.try_iter().collect::<Vec<_>>();
 
     assert_eq!(worker_messages.len(), 2);
     let WorkerMessage::Unit(output_unit) = &worker_messages[1] else {
@@ -1593,7 +1597,7 @@ fn worker_emits_a_complete_bounded_sixel_tile() {
 #[test]
 fn worker_emits_shared_templates_in_original_paint_order() {
     let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size");
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     for output_kind in [
         ImageOutputKind::Iterm,
         ImageOutputKind::Sixel {
@@ -1603,12 +1607,12 @@ fn worker_emits_shared_templates_in_original_paint_order() {
         },
     ] {
         let mut first_output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
-        first_output_paint.set_placement_key((pane, 1));
+        first_output_paint.set_placement_key((pane_id, 1));
         let mut middle_output_paint = build_output_paint(vec![0, 0, 255, 255], 1, 1, 0);
-        middle_output_paint.set_placement_key((pane, 2));
+        middle_output_paint.set_placement_key((pane_id, 2));
         middle_output_paint.image_content_id = 2;
         let mut last_output_paint = first_output_paint.clone();
-        last_output_paint.set_placement_key((pane, 3));
+        last_output_paint.set_placement_key((pane_id, 3));
         let output_paints = vec![first_output_paint, middle_output_paint, last_output_paint];
         let worker_request = WorkerRequest {
             frame_generation: 1,
@@ -1624,13 +1628,14 @@ fn worker_emits_shared_templates_in_original_paint_order() {
             kitty_paint_images: Vec::new(),
             is_cancellation_requested: Arc::new(AtomicBool::new(false)),
         };
-        let (sender, receiver) = mpsc::sync_channel(16);
+        let (worker_message_sender, worker_message_receiver) = mpsc::sync_channel(16);
 
-        run_worker_job(&worker_request, &sender).expect("the worker encodes all paints");
-        let output_units = receiver
+        run_worker_job(&worker_request, &worker_message_sender)
+            .expect("the worker encodes all paints");
+        let output_units = worker_message_receiver
             .try_iter()
-            .filter_map(|message| match message {
-                WorkerMessage::Unit(unit) => Some(unit),
+            .filter_map(|worker_message| match worker_message {
+                WorkerMessage::Unit(output_unit) => Some(output_unit),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -1638,23 +1643,23 @@ fn worker_emits_shared_templates_in_original_paint_order() {
         assert_eq!(
             output_units
                 .iter()
-                .map(|unit| unit.placement_key)
+                .map(|output_unit| output_unit.placement_key)
                 .collect::<Vec<_>>(),
-            [(pane, 1), (pane, 2), (pane, 3)],
+            [(pane_id, 1), (pane_id, 2), (pane_id, 3)],
             "{output_kind:?}"
         );
         let decoded_pixels = output_units
             .iter()
-            .map(|unit| match output_kind {
+            .map(|output_unit| match output_kind {
                 ImageOutputKind::Iterm => {
                     decode_iterm_output_units(&[TemplateUnit {
-                        tile_offset: unit.tile_offset,
-                        output_bytes: Arc::clone(&unit.output_bytes),
+                        tile_offset: output_unit.tile_offset,
+                        output_bytes: Arc::clone(&output_unit.output_bytes),
                     }])
                     .rgba_bytes
                 }
                 ImageOutputKind::Sixel { .. } => {
-                    decode_sixel_output_unit(&unit.output_bytes).rgba_bytes
+                    decode_sixel_output_unit(&output_unit.output_bytes).rgba_bytes
                 }
                 ImageOutputKind::Kitty => unreachable!(),
             })
@@ -1674,7 +1679,7 @@ fn worker_emits_shared_templates_in_original_paint_order() {
 #[test]
 fn unavailable_paint_does_not_skip_independent_output() {
     let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size");
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     for output_kind in [
         ImageOutputKind::Iterm,
         ImageOutputKind::Sixel {
@@ -1683,14 +1688,14 @@ fn unavailable_paint_does_not_skip_independent_output() {
             maximum_pixel_height: None,
         },
     ] {
-        for unavailable_first in [true, false] {
+        for is_unavailable_paint_first in [true, false] {
             let mut unavailable_output_paint = build_output_paint(vec![255, 0, 0, 128], 1, 1, 0);
-            unavailable_output_paint.set_placement_key((pane, 1));
+            unavailable_output_paint.set_placement_key((pane_id, 1));
             unavailable_output_paint.target_area.x = 1;
             let mut available_output_paint = build_output_paint(vec![0, 0, 255, 255], 1, 1, 0);
-            available_output_paint.set_placement_key((pane, 2));
+            available_output_paint.set_placement_key((pane_id, 2));
             available_output_paint.image_content_id = 2;
-            let output_paints = if unavailable_first {
+            let output_paints = if is_unavailable_paint_first {
                 vec![unavailable_output_paint, available_output_paint]
             } else {
                 vec![available_output_paint, unavailable_output_paint]
@@ -1711,28 +1716,32 @@ fn unavailable_paint_does_not_skip_independent_output() {
                 kitty_paint_images: Vec::new(),
                 is_cancellation_requested: Arc::new(AtomicBool::new(false)),
             };
-            let (sender, receiver) = mpsc::sync_channel(16);
+            let (worker_message_sender, worker_message_receiver) = mpsc::sync_channel(16);
 
-            run_worker_job(&worker_request, &sender)
+            run_worker_job(&worker_request, &worker_message_sender)
                 .expect("the worker continues after an unavailable paint");
-            let worker_messages = receiver.try_iter().collect::<Vec<_>>();
+            let worker_messages = worker_message_receiver.try_iter().collect::<Vec<_>>();
             let unavailable_placement_keys = worker_messages
                 .iter()
-                .filter_map(|message| match message {
+                .filter_map(|worker_message| match worker_message {
                     WorkerMessage::Unavailable { placement_key, .. } => Some(*placement_key),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
             let available_placement_keys = worker_messages
                 .iter()
-                .filter_map(|message| match message {
-                    WorkerMessage::Unit(unit) => Some(unit.placement_key),
+                .filter_map(|worker_message| match worker_message {
+                    WorkerMessage::Unit(output_unit) => Some(output_unit.placement_key),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
 
-            assert_eq!(unavailable_placement_keys, [(pane, 1)], "{output_kind:?}");
-            assert_eq!(available_placement_keys, [(pane, 2)], "{output_kind:?}");
+            assert_eq!(
+                unavailable_placement_keys,
+                [(pane_id, 1)],
+                "{output_kind:?}"
+            );
+            assert_eq!(available_placement_keys, [(pane_id, 2)], "{output_kind:?}");
         }
     }
 }
@@ -1741,7 +1750,7 @@ fn unavailable_paint_does_not_skip_independent_output() {
 fn worker_stops_before_unique_templates_exceed_the_frame_bound() {
     let output_kind = ImageOutputKind::Iterm;
     let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size");
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let output_paints = (0u8..8)
         .map(|image_variant_index| {
             let mut output_paint = build_output_paint(
@@ -1750,7 +1759,7 @@ fn worker_stops_before_unique_templates_exceed_the_frame_bound() {
                 1,
                 0,
             );
-            output_paint.set_placement_key((pane, u64::from(image_variant_index) + 1));
+            output_paint.set_placement_key((pane_id, u64::from(image_variant_index) + 1));
             output_paint.image_content_id = u64::from(image_variant_index) + 1;
             output_paint
         })
@@ -1784,7 +1793,7 @@ fn worker_stops_before_unique_templates_exceed_the_frame_bound() {
     )
     .expect("first template encodes")
     .iter()
-    .map(|unit| unit.output_bytes.len())
+    .map(|template_unit| template_unit.output_bytes.len())
     .sum::<usize>();
     let second_template_byte_count = encode_iterm_template(
         &worker_request,
@@ -1794,27 +1803,27 @@ fn worker_stops_before_unique_templates_exceed_the_frame_bound() {
     )
     .expect("second template encodes")
     .iter()
-    .map(|unit| unit.output_bytes.len())
+    .map(|template_unit| template_unit.output_bytes.len())
     .sum::<usize>();
     let output_byte_limit = first_template_byte_count + second_template_byte_count - 1;
-    let (sender, receiver) = mpsc::sync_channel(32);
+    let (worker_message_sender, worker_message_receiver) = mpsc::sync_channel(32);
 
     assert_eq!(
-        run_worker_job_with_limit(&worker_request, &sender, output_byte_limit),
+        run_worker_job_with_limit(&worker_request, &worker_message_sender, output_byte_limit),
         Err(())
     );
-    let worker_messages = receiver.try_iter().collect::<Vec<_>>();
+    let worker_messages = worker_message_receiver.try_iter().collect::<Vec<_>>();
     assert_eq!(
         worker_messages
             .iter()
-            .filter(|message| matches!(message, WorkerMessage::Prepared { .. }))
+            .filter(|worker_message| matches!(worker_message, WorkerMessage::Prepared { .. }))
             .count(),
         1
     );
     assert_eq!(
         worker_messages
             .iter()
-            .filter(|message| matches!(message, WorkerMessage::Unit(_)))
+            .filter(|worker_message| matches!(worker_message, WorkerMessage::Unit(_)))
             .count(),
         1
     );
@@ -1825,8 +1834,8 @@ fn rejected_cumulative_worker_output_cancels_the_generation() {
     let output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
     let placement_key = output_paint.placement_key;
     let is_cancellation_requested = Arc::new(AtomicBool::new(false));
-    let (sender, receiver) = mpsc::sync_channel(2);
-    sender
+    let (worker_message_sender, worker_message_receiver) = mpsc::sync_channel(2);
+    worker_message_sender
         .send(WorkerMessage::Unit(OutputUnit {
             frame_generation: 1,
             placement_key,
@@ -1835,13 +1844,13 @@ fn rejected_cumulative_worker_output_cancels_the_generation() {
             output_bytes: Arc::from(&b"x"[..]),
         }))
         .expect("unit queues");
-    sender
+    worker_message_sender
         .send(WorkerMessage::Finished {
             frame_generation: 1,
             has_failed: false,
         })
         .expect("finish queues");
-    drop(sender);
+    drop(worker_message_sender);
     let mut output_state = ImageOutputState::from_output_kind(None);
     output_state.output_kind = Some(ImageOutputKind::Iterm);
     output_state.frame_generation = 1;
@@ -1851,7 +1860,7 @@ fn rejected_cumulative_worker_output_cancels_the_generation() {
         .prepared_placement_key_set
         .insert(placement_key);
     output_state.output_unit_byte_count = MAX_NATIVE_FRAME_OUTPUT_BYTE_COUNT;
-    output_state.worker_messages = Some(receiver);
+    output_state.worker_messages = Some(worker_message_receiver);
     output_state.active_job = Some(ActiveJob {
         frame_generation: 1,
         is_cancellation_requested: Arc::clone(&is_cancellation_requested),
@@ -1943,7 +1952,7 @@ fn one_cell_sixel_output_may_exceed_one_transport_chunk() {
 }
 
 #[test]
-fn i_term_unit_output_has_exact_position_payload_and_cursor_restore() {
+fn iterm_unit_output_has_exact_position_payload_and_cursor_restore() {
     let output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
     let mut output_state = ImageOutputState::from_output_kind(Some(ImageOutputKind::Iterm));
     output_state.latest_output_paints = vec![output_paint];
@@ -1988,10 +1997,13 @@ fn sixel_unit_output_has_exact_mode_boundaries_and_cursor_restore() {
     );
 }
 
-fn build_blank_snapshot(area: Rect) -> ImageCellSnapshot {
+fn build_blank_snapshot(layout_area: Rect) -> ImageCellSnapshot {
     ImageCellSnapshot::from_cell_states(
-        area,
-        vec![ImageCellState::default(); usize::from(area.width) * usize::from(area.height)],
+        layout_area,
+        vec![
+            ImageCellState::default();
+            usize::from(layout_area.width) * usize::from(layout_area.height)
+        ],
     )
     .expect("test cells fit area")
 }
@@ -1999,9 +2011,9 @@ fn build_blank_snapshot(area: Rect) -> ImageCellSnapshot {
 fn build_kitty_output_state() -> (ImageOutputState, mpsc::Receiver<WorkerRequest>) {
     let mut output_state = ImageOutputState::from_output_kind(None);
     output_state.output_kind = Some(ImageOutputKind::Kitty);
-    let (sender, receiver) = mpsc::sync_channel(4);
-    output_state.worker_request_sender = Some(sender);
-    (output_state, receiver)
+    let (worker_request_sender, worker_request_receiver) = mpsc::sync_channel(4);
+    output_state.worker_request_sender = Some(worker_request_sender);
+    (output_state, worker_request_receiver)
 }
 
 #[test]
@@ -2017,10 +2029,10 @@ fn kitty_transmits_one_image_once_and_replaces_it_after_it_moves() {
             0,
         )
     };
-    let (mut output_state, requests) = build_kitty_output_state();
+    let (mut output_state, worker_request_receiver) = build_kitty_output_state();
 
     assert!(!output_state.prepare_frame(&[build_image_paint_at_row(0)], None, None));
-    let first_worker_request = requests
+    let first_worker_request = worker_request_receiver
         .try_recv()
         .expect("the first frame reaches the worker");
     assert_eq!(
@@ -2034,7 +2046,7 @@ fn kitty_transmits_one_image_once_and_replaces_it_after_it_moves() {
     output_state.active_job = None;
 
     assert!(!output_state.prepare_frame(&[build_image_paint_at_row(5)], None, None));
-    let moved_worker_request = requests
+    let moved_worker_request = worker_request_receiver
         .try_recv()
         .expect("the moved frame reaches the worker");
     assert_eq!(
@@ -2062,10 +2074,10 @@ fn kitty_frees_one_image_number_after_its_content_leaves_the_frame() {
         source_output_paint.source_rect,
         0,
     );
-    let (mut output_state, requests) = build_kitty_output_state();
+    let (mut output_state, worker_request_receiver) = build_kitty_output_state();
 
     assert!(!output_state.prepare_frame(&[placed_image_paint], None, None));
-    requests
+    worker_request_receiver
         .try_recv()
         .expect("the first frame reaches the worker");
     output_state.commit_frame();
@@ -2099,10 +2111,10 @@ fn a_failed_kitty_frame_frees_every_image_the_host_holds() {
         source_output_paint.source_rect,
         0,
     );
-    let (mut output_state, requests) = build_kitty_output_state();
+    let (mut output_state, worker_request_receiver) = build_kitty_output_state();
 
     assert!(!output_state.prepare_frame(&[placed_image_paint], None, None));
-    requests
+    worker_request_receiver
         .try_recv()
         .expect("the first frame reaches the worker");
     output_state.commit_frame();
@@ -2155,13 +2167,16 @@ fn an_opaque_iterm_or_sixel_image_that_moves_reuses_its_encoded_output() {
         let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 8, 8)));
         let mut output_state = ImageOutputState::from_output_kind(Some(output_kind));
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let settle_deadline = Instant::now() + Duration::from_secs(5);
         while !output_state.prepare_frame(
             &[build_image_paint_at_row(0)],
             Some(Arc::clone(&cell_snapshot)),
             Some(cell_size),
         ) {
-            assert!(Instant::now() < deadline, "{output_kind:?} did not settle");
+            assert!(
+                Instant::now() < settle_deadline,
+                "{output_kind:?} did not settle"
+            );
             std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
         }
         let first_frame_output_bytes = output_state
@@ -2216,15 +2231,15 @@ fn a_partly_transparent_iterm_image_that_moves_encodes_again() {
     let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 8, 8)));
     let mut output_state = ImageOutputState::from_output_kind(None);
     output_state.output_kind = Some(ImageOutputKind::Iterm);
-    let (sender, requests) = mpsc::sync_channel(4);
-    output_state.worker_request_sender = Some(sender);
+    let (worker_request_sender, worker_request_receiver) = mpsc::sync_channel(4);
+    output_state.worker_request_sender = Some(worker_request_sender);
 
     assert!(!output_state.prepare_frame(
         &[build_image_paint_at_row(0)],
         Some(Arc::clone(&cell_snapshot)),
         Some(cell_size),
     ));
-    let first_worker_request = requests
+    let first_worker_request = worker_request_receiver
         .try_recv()
         .expect("the first frame reaches the worker");
     output_state.active_job = None;
@@ -2234,7 +2249,7 @@ fn a_partly_transparent_iterm_image_that_moves_encodes_again() {
         Some(cell_snapshot),
         Some(cell_size),
     ));
-    let moved_worker_request = requests
+    let moved_worker_request = worker_request_receiver
         .try_recv()
         .expect("the moved frame reaches the worker");
     assert_ne!(
@@ -2257,7 +2272,7 @@ fn a_new_image_under_one_content_identity_takes_a_new_kitty_number() {
             0,
         )
     };
-    let (mut output_state, requests) = build_kitty_output_state();
+    let (mut output_state, worker_request_receiver) = build_kitty_output_state();
 
     assert!(!output_state.prepare_frame(
         &[build_placed_image_paint(
@@ -2266,7 +2281,7 @@ fn a_new_image_under_one_content_identity_takes_a_new_kitty_number() {
         None,
         None
     ));
-    requests
+    worker_request_receiver
         .try_recv()
         .expect("the first frame reaches the worker");
     output_state.commit_frame();
@@ -2279,11 +2294,11 @@ fn a_new_image_under_one_content_identity_takes_a_new_kitty_number() {
         None,
         None
     ));
-    let replaced = requests
+    let replacing_worker_request = worker_request_receiver
         .try_recv()
         .expect("the replacing frame reaches the worker");
     assert_eq!(
-        replaced.kitty_paint_images,
+        replacing_worker_request.kitty_paint_images,
         vec![KittyPaintImage {
             kitty_image_number: 2,
             should_transmit_image: true,
@@ -2305,12 +2320,12 @@ fn a_failed_kitty_encode_transmits_its_pixels_again() {
             0,
         )
     };
-    let (mut output_state, requests) = build_kitty_output_state();
+    let (mut output_state, worker_request_receiver) = build_kitty_output_state();
     let (worker_message_sender, worker_messages) = mpsc::sync_channel(4);
     output_state.worker_messages = Some(worker_messages);
 
     assert!(!output_state.prepare_frame(&[build_placed_image_paint()], None, None));
-    let worker_request = requests
+    let worker_request = worker_request_receiver
         .try_recv()
         .expect("the first frame reaches the worker");
     assert_eq!(
@@ -2327,14 +2342,14 @@ fn a_failed_kitty_encode_transmits_its_pixels_again() {
         })
         .expect("the failure reaches the state");
 
-    // The failed job wrote nothing, so the host holds no image number.
+    // The failed job wrote nothing: the host holds no image number.
     output_state.poll();
     assert!(output_state.pending_kitty_images_by_content_id.is_empty());
     output_state.commit_frame();
     assert!(output_state.kitty_image_by_content_id.is_empty());
 
     assert!(!output_state.prepare_frame(&[build_placed_image_paint()], None, None,));
-    let retried_worker_request = requests
+    let retried_worker_request = worker_request_receiver
         .try_recv()
         .expect("the retried frame reaches the worker");
     assert_eq!(
@@ -2367,8 +2382,8 @@ fn a_failed_iterm_or_sixel_encode_retries_an_unchanged_frame() {
         );
         let mut output_state = ImageOutputState::from_output_kind(None);
         output_state.output_kind = Some(output_kind);
-        let (sender, requests) = mpsc::sync_channel(4);
-        output_state.worker_request_sender = Some(sender);
+        let (worker_request_sender, worker_request_receiver) = mpsc::sync_channel(4);
+        output_state.worker_request_sender = Some(worker_request_sender);
         let (worker_message_sender, worker_messages) = mpsc::sync_channel(4);
         output_state.worker_messages = Some(worker_messages);
         let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)));
@@ -2382,7 +2397,7 @@ fn a_failed_iterm_or_sixel_encode_retries_an_unchanged_frame() {
             ),
             "{output_kind:?} did not submit the first frame"
         );
-        let worker_request = requests
+        let worker_request = worker_request_receiver
             .try_recv()
             .expect("the first frame reaches the worker");
         worker_message_sender
@@ -2401,16 +2416,16 @@ fn a_failed_iterm_or_sixel_encode_retries_an_unchanged_frame() {
             ),
             "{output_kind:?} did not resubmit the unchanged frame"
         );
-        let retried = requests
+        let retried_worker_request = worker_request_receiver
             .try_recv()
             .expect("the unchanged frame reaches the worker again");
         assert_eq!(
-            retried.frame_generation,
+            retried_worker_request.frame_generation,
             worker_request.frame_generation + 2,
             "{output_kind:?}"
         );
         assert_eq!(
-            retried.encode_keys, worker_request.encode_keys,
+            retried_worker_request.encode_keys, worker_request.encode_keys,
             "{output_kind:?} changed the frame key"
         );
     }
@@ -2434,15 +2449,15 @@ fn an_unchanged_frame_after_a_commit_starts_no_work_and_commits_nothing() {
         let build_cell_snapshot = || Some(Arc::new(build_blank_snapshot(Rect::new(0, 0, 8, 8))));
         let mut output_state = ImageOutputState::from_output_kind(None);
         output_state.output_kind = Some(output_kind);
-        let (sender, requests) = mpsc::sync_channel(4);
-        output_state.worker_request_sender = Some(sender);
+        let (worker_request_sender, worker_request_receiver) = mpsc::sync_channel(4);
+        output_state.worker_request_sender = Some(worker_request_sender);
 
         assert!(!output_state.prepare_frame(
             &[build_placed_image_paint()],
             build_cell_snapshot(),
             Some(cell_size),
         ));
-        requests
+        worker_request_receiver
             .try_recv()
             .expect("the first frame reaches the worker");
         output_state.active_job = None;
@@ -2458,7 +2473,7 @@ fn an_unchanged_frame_after_a_commit_starts_no_work_and_commits_nothing() {
             "{output_kind:?}"
         );
         assert!(
-            requests.try_recv().is_err(),
+            worker_request_receiver.try_recv().is_err(),
             "{output_kind:?} started a job"
         );
         assert!(
@@ -2491,13 +2506,16 @@ fn text_written_under_an_opaque_iterm_image_rewrites_it_without_encoding_again()
     let layout_area = Rect::new(0, 0, 2, 1);
     let mut output_state = ImageOutputState::from_output_kind(Some(ImageOutputKind::Iterm));
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let settle_deadline = Instant::now() + Duration::from_secs(5);
     while !output_state.prepare_frame(
         &[build_placed_image_paint()],
         Some(Arc::new(build_blank_snapshot(layout_area))),
         Some(cell_size),
     ) {
-        assert!(Instant::now() < deadline, "the first frame did not settle");
+        assert!(
+            Instant::now() < settle_deadline,
+            "the first frame did not settle"
+        );
         std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
     }
     let first_frame_output_bytes = output_state
@@ -2505,7 +2523,7 @@ fn text_written_under_an_opaque_iterm_image_rewrites_it_without_encoding_again()
         .expect("the first frame writes");
     output_state.commit_frame();
 
-    let glyph_under_image = build_image_cell_snapshot(
+    let cell_snapshot_with_glyph = build_image_cell_snapshot(
         layout_area,
         vec![
             ImageCellState {
@@ -2517,7 +2535,7 @@ fn text_written_under_an_opaque_iterm_image_rewrites_it_without_encoding_again()
     );
     assert!(output_state.prepare_frame(
         &[build_placed_image_paint()],
-        Some(Arc::new(glyph_under_image)),
+        Some(Arc::new(cell_snapshot_with_glyph)),
         Some(cell_size),
     ));
     assert!(
@@ -2532,10 +2550,10 @@ fn text_written_under_an_opaque_iterm_image_rewrites_it_without_encoding_again()
         !output_state.needs_screen_reset,
         "an unmoved image reset the screen"
     );
-    let again = output_state
+    let repaired_frame_output_bytes = output_state
         .build_frame_output(None)
         .expect("the repaired frame writes");
-    assert_eq!(again, first_frame_output_bytes);
+    assert_eq!(repaired_frame_output_bytes, first_frame_output_bytes);
 }
 
 #[test]
@@ -2549,11 +2567,11 @@ fn a_host_resize_transmits_every_kitty_image_again() {
         source_output_paint.source_rect,
         0,
     );
-    let (mut output_state, requests) = build_kitty_output_state();
+    let (mut output_state, worker_request_receiver) = build_kitty_output_state();
     output_state.set_host_terminal_size(80, 24);
 
     assert!(!output_state.prepare_frame(std::slice::from_ref(&placed_image_paint), None, None,));
-    requests
+    worker_request_receiver
         .try_recv()
         .expect("the first frame reaches the worker");
     output_state.commit_frame();
@@ -2562,14 +2580,14 @@ fn a_host_resize_transmits_every_kitty_image_again() {
     output_state.set_host_terminal_size(80, 24);
     assert!(output_state.prepare_frame(std::slice::from_ref(&placed_image_paint), None, None,));
     assert!(
-        requests.try_recv().is_err(),
+        worker_request_receiver.try_recv().is_err(),
         "an unchanged size keeps the upload"
     );
 
     output_state.set_host_terminal_size(100, 24);
     assert!(output_state.should_free_all_kitty_images);
     assert!(!output_state.prepare_frame(&[placed_image_paint], None, None));
-    let resized_worker_request = requests
+    let resized_worker_request = worker_request_receiver
         .try_recv()
         .expect("the resized frame reaches the worker");
     assert_eq!(
@@ -2583,19 +2601,19 @@ fn a_host_resize_transmits_every_kitty_image_again() {
 
 #[test]
 fn an_iterm_reset_clears_the_screen_and_a_kitty_reset_does_not() {
-    let mut iterm = ImageOutputState::from_output_kind(None);
-    iterm.output_kind = Some(ImageOutputKind::Iterm);
-    iterm.needs_screen_reset = true;
+    let mut iterm_output_state = ImageOutputState::from_output_kind(None);
+    iterm_output_state.output_kind = Some(ImageOutputKind::Iterm);
+    iterm_output_state.needs_screen_reset = true;
     let mut iterm_frame_reset_bytes = Vec::new();
-    assert!(iterm
+    assert!(iterm_output_state
         .write_frame_reset(&mut iterm_frame_reset_bytes)
         .expect("the frame reset writes"));
     assert_eq!(iterm_frame_reset_bytes, b"\x1b[2J");
 
-    let (mut kitty, _requests) = build_kitty_output_state();
-    kitty.needs_screen_reset = true;
+    let (mut kitty_output_state, _worker_request_receiver) = build_kitty_output_state();
+    kitty_output_state.needs_screen_reset = true;
     let mut kitty_frame_reset_bytes = Vec::new();
-    assert!(!kitty
+    assert!(!kitty_output_state
         .write_frame_reset(&mut kitty_frame_reset_bytes)
         .expect("the frame reset writes"));
     assert_eq!(kitty_frame_reset_bytes, b"\x1b_Ga=d,d=a,q=2;\x1b\\");
@@ -2614,22 +2632,22 @@ fn a_kitty_paint_skips_the_alpha_scan_and_an_iterm_paint_runs_it() {
             0,
         )
     };
-    let (mut kitty, _requests) = build_kitty_output_state();
-    assert!(!kitty.prepare_frame(&[build_placed_image_paint()], None, None));
-    assert_eq!(kitty.latest_output_paints[0].alpha_stats, None);
+    let (mut kitty_output_state, _worker_request_receiver) = build_kitty_output_state();
+    assert!(!kitty_output_state.prepare_frame(&[build_placed_image_paint()], None, None));
+    assert_eq!(kitty_output_state.latest_output_paints[0].alpha_stats, None);
 
-    let mut iterm = ImageOutputState::from_output_kind(None);
-    iterm.output_kind = Some(ImageOutputKind::Iterm);
-    let (sender, _requests) = mpsc::sync_channel(4);
-    iterm.worker_request_sender = Some(sender);
+    let mut iterm_output_state = ImageOutputState::from_output_kind(None);
+    iterm_output_state.output_kind = Some(ImageOutputKind::Iterm);
+    let (worker_request_sender, _worker_request_receiver) = mpsc::sync_channel(4);
+    iterm_output_state.worker_request_sender = Some(worker_request_sender);
     let cell_snapshot = Some(Arc::new(build_blank_snapshot(Rect::new(0, 0, 8, 8))));
-    assert!(!iterm.prepare_frame(
+    assert!(!iterm_output_state.prepare_frame(
         &[build_placed_image_paint()],
         cell_snapshot,
         PixelCellSize::from_pixel_dimensions(1, 1)
     ));
     assert_eq!(
-        iterm.latest_output_paints[0].alpha_stats,
+        iterm_output_state.latest_output_paints[0].alpha_stats,
         Some(AlphaStats {
             has_zero: false,
             has_partial: true,
@@ -2648,10 +2666,10 @@ fn the_first_host_size_forgets_nothing() {
         source_output_paint.source_rect,
         0,
     );
-    let (mut output_state, requests) = build_kitty_output_state();
+    let (mut output_state, worker_request_receiver) = build_kitty_output_state();
 
     assert!(!output_state.prepare_frame(&[placed_image_paint], None, None));
-    requests
+    worker_request_receiver
         .try_recv()
         .expect("the first frame reaches the worker");
     output_state.commit_frame();
@@ -2681,7 +2699,7 @@ fn an_iterm_host_resize_frees_no_kitty_image_and_clears_no_key() {
 
 #[test]
 fn a_kitty_reset_with_only_departed_numbers_frees_them_and_keeps_the_placements() {
-    let (mut output_state, _requests) = build_kitty_output_state();
+    let (mut output_state, _worker_request_receiver) = build_kitty_output_state();
     output_state.kitty_image_numbers_to_delete = vec![3, 7];
     let mut frame_reset_bytes = Vec::new();
 
@@ -2715,14 +2733,16 @@ fn two_paints_of_one_image_in_one_frame_transmit_it_once() {
         image_paint.image_content_id = 1;
         image_paint
     };
-    let (mut output_state, requests) = build_kitty_output_state();
+    let (mut output_state, worker_request_receiver) = build_kitty_output_state();
 
     assert!(!output_state.prepare_frame(
         &[build_image_paint(1, 0), build_image_paint(2, 3)],
         None,
         None,
     ));
-    let worker_request = requests.try_recv().expect("the frame reaches the worker");
+    let worker_request = worker_request_receiver
+        .try_recv()
+        .expect("the frame reaches the worker");
 
     assert_eq!(
         worker_request.kitty_paint_images,
@@ -2754,7 +2774,7 @@ fn an_exhausted_kitty_number_space_frees_every_image_and_restarts_at_one() {
         source_output_paint.source_rect,
         0,
     );
-    let (mut output_state, requests) = build_kitty_output_state();
+    let (mut output_state, worker_request_receiver) = build_kitty_output_state();
     output_state.next_kitty_image_number = u32::MAX;
     output_state.kitty_image_by_content_id.insert(
         9,
@@ -2765,7 +2785,9 @@ fn an_exhausted_kitty_number_space_frees_every_image_and_restarts_at_one() {
     );
 
     assert!(!output_state.prepare_frame(&[placed_image_paint], None, None));
-    let worker_request = requests.try_recv().expect("the frame reaches the worker");
+    let worker_request = worker_request_receiver
+        .try_recv()
+        .expect("the frame reaches the worker");
 
     assert!(output_state.should_free_all_kitty_images);
     assert_eq!(

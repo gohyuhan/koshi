@@ -1,26 +1,25 @@
 //! Tests for building the discovery overview from live session state.
 
+use super::*;
+
 use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::client::ClientOrigin;
-use koshi_core::command::{Command, CommandEnvelope, CommandSource};
+use koshi_core::command::{Command, CommandEnvelope, CommandSource, NewPanePlacement};
 use koshi_core::discovery::PaneLifecycle;
 use koshi_core::geometry::{Direction, PaneArea, Size};
-use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, SessionId, TabId};
 use koshi_core::lock::LockMode;
-use koshi_core::process::{ShellKind, SpawnSpec};
+use koshi_core::process::ShellKind;
 use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_session::client::ClientRegistry;
-use koshi_session::session::state::{Session, Tab};
 use koshi_test_support::fake_pty::FakePtyBackend;
 use uuid::Uuid;
-
-use crate::server::Server;
 
 const VIEWPORT_SIZE: Size = Size {
     column_count: 80,
@@ -113,13 +112,14 @@ fn a_command_pane_reports_its_argv_program_first() {
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
-        Command::RunCommandPane(koshi_core::command::RunCommandPaneArgs {
-            spawn_spec,
+        Command::NewPane(koshi_core::command::NewPaneArgs {
+            placement: NewPanePlacement::Split {
+                source_pane_id: Some(root_pane_id),
+                tab_id: None,
+                direction: Direction::Right,
+            },
             working_directory: None,
-            source_pane_id: Some(root_pane_id),
-            tab_id: None,
-            direction: Direction::Right,
-            should_stack: false,
+            spawn_spec: Some(spawn_spec),
             client_id: None,
         }),
     );

@@ -6,7 +6,7 @@ use super::*;
 use koshi_core::action::{ActionReference, ClientActionKind};
 use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    NewPaneArgs, NewTabArgs, ResizePaneArgs, TabTarget,
+    NewPaneArgs, NewPanePlacement, NewTabArgs, ResizePaneArgs, TabTarget,
 };
 use koshi_core::geometry::Direction;
 use koshi_core::key::{
@@ -621,10 +621,11 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
     };
     let build_new_pane_command = |direction: Direction| {
         Command::NewPane(NewPaneArgs {
-            source_pane_id: None,
-            tab_id: None,
-            direction,
-            should_stack: false,
+            placement: NewPanePlacement::Split {
+                source_pane_id: None,
+                tab_id: None,
+                direction,
+            },
             working_directory: None,
             spawn_spec: None,
             client_id: None,
@@ -677,10 +678,10 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
             "<C-p> s",
             "new-pane-stacked",
             Ok(Command::NewPane(NewPaneArgs {
-                source_pane_id: None,
-                tab_id: None,
-                direction: CLIENT_SPLIT_DIRECTION,
-                should_stack: true,
+                placement: NewPanePlacement::Stacked {
+                    source_pane_id: None,
+                    tab_id: None,
+                },
                 working_directory: None,
                 spawn_spec: None,
                 client_id: None,

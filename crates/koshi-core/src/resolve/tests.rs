@@ -50,18 +50,18 @@ const CLIENT_ACTIONS: [&str; 14] = [
 ];
 
 /// The `layout.new-pane-direction` the resolving client holds throughout this
-/// module. It is not `Right`, so a row expecting it cannot pass on a hardcoded
-/// stock default.
-const CLIENT_SPLIT: Direction = Direction::Up;
+/// module: `Up`, which differs from the stock default `Right`.
+const CLIENT_SPLIT_DIRECTION: Direction = Direction::Up;
 
-/// A `new-pane` request carrying [`CLIENT_SPLIT`]: what `core:new-pane` builds
+/// A `new-pane` request carrying [`CLIENT_SPLIT_DIRECTION`]: what `core:new-pane` builds
 /// for a client on that setting.
 fn build_new_pane_args() -> NewPaneArgs {
     NewPaneArgs {
-        source_pane_id: None,
-        tab_id: None,
-        direction: CLIENT_SPLIT,
-        should_stack: false,
+        placement: NewPanePlacement::Split {
+            source_pane_id: None,
+            tab_id: None,
+            direction: CLIENT_SPLIT_DIRECTION,
+        },
         working_directory: None,
         spawn_spec: None,
         client_id: None,
@@ -79,10 +79,11 @@ fn build_bindable_action_table() -> Vec<(&'static str, Command)> {
         (
             "new-pane-left",
             Command::NewPane(NewPaneArgs {
-                source_pane_id: None,
-                tab_id: None,
-                direction: Direction::Left,
-                should_stack: false,
+                placement: NewPanePlacement::Split {
+                    source_pane_id: None,
+                    tab_id: None,
+                    direction: Direction::Left,
+                },
                 working_directory: None,
                 spawn_spec: None,
                 client_id: None,
@@ -91,10 +92,11 @@ fn build_bindable_action_table() -> Vec<(&'static str, Command)> {
         (
             "new-pane-down",
             Command::NewPane(NewPaneArgs {
-                source_pane_id: None,
-                tab_id: None,
-                direction: Direction::Down,
-                should_stack: false,
+                placement: NewPanePlacement::Split {
+                    source_pane_id: None,
+                    tab_id: None,
+                    direction: Direction::Down,
+                },
                 working_directory: None,
                 spawn_spec: None,
                 client_id: None,
@@ -103,10 +105,11 @@ fn build_bindable_action_table() -> Vec<(&'static str, Command)> {
         (
             "new-pane-up",
             Command::NewPane(NewPaneArgs {
-                source_pane_id: None,
-                tab_id: None,
-                direction: Direction::Up,
-                should_stack: false,
+                placement: NewPanePlacement::Split {
+                    source_pane_id: None,
+                    tab_id: None,
+                    direction: Direction::Up,
+                },
                 working_directory: None,
                 spawn_spec: None,
                 client_id: None,
@@ -115,10 +118,11 @@ fn build_bindable_action_table() -> Vec<(&'static str, Command)> {
         (
             "new-pane-right",
             Command::NewPane(NewPaneArgs {
-                source_pane_id: None,
-                tab_id: None,
-                direction: Direction::Right,
-                should_stack: false,
+                placement: NewPanePlacement::Split {
+                    source_pane_id: None,
+                    tab_id: None,
+                    direction: Direction::Right,
+                },
                 working_directory: None,
                 spawn_spec: None,
                 client_id: None,
@@ -127,10 +131,10 @@ fn build_bindable_action_table() -> Vec<(&'static str, Command)> {
         (
             "new-pane-stacked",
             Command::NewPane(NewPaneArgs {
-                source_pane_id: None,
-                tab_id: None,
-                direction: CLIENT_SPLIT,
-                should_stack: true,
+                placement: NewPanePlacement::Stacked {
+                    source_pane_id: None,
+                    tab_id: None,
+                },
                 working_directory: None,
                 spawn_spec: None,
                 client_id: None,
@@ -285,7 +289,7 @@ fn every_bindable_action_resolves_to_its_exact_command() {
         let plan = resolve_action(
             &build_core_action_reference(action_name),
             &registry,
-            CLIENT_SPLIT,
+            CLIENT_SPLIT_DIRECTION,
         )
         .unwrap_or_else(|resolve_error| {
             panic!("core:{action_name} must resolve, got {resolve_error}")
@@ -304,7 +308,11 @@ fn begin_pane_placement_resolves_to_the_viewer_local_action() {
     let begin_pane_placement_action = build_core_action_reference("begin-pane-placement");
 
     assert_eq!(
-        resolve_action(&begin_pane_placement_action, &registry, CLIENT_SPLIT),
+        resolve_action(
+            &begin_pane_placement_action,
+            &registry,
+            CLIENT_SPLIT_DIRECTION
+        ),
         Ok(DispatchPlan::ClientAction(
             ClientActionKind::BeginPanePlacement
         ))
@@ -319,7 +327,7 @@ fn scroll_actions_scroll_the_caller_line_count() {
         resolve_action_with_scroll_line_count(
             &build_core_action_reference("scroll-pane-up"),
             &registry,
-            CLIENT_SPLIT,
+            CLIENT_SPLIT_DIRECTION,
             11,
         ),
         Ok(DispatchPlan::Command(Box::new(Command::ScrollPane(
@@ -333,7 +341,7 @@ fn scroll_actions_scroll_the_caller_line_count() {
         resolve_action_with_scroll_line_count(
             &build_core_action_reference("scroll-pane-down"),
             &registry,
-            CLIENT_SPLIT,
+            CLIENT_SPLIT_DIRECTION,
             11,
         ),
         Ok(DispatchPlan::Command(Box::new(Command::ScrollPane(
@@ -359,7 +367,6 @@ fn find_command_kind(command: &Command) -> Option<CommandKind> {
         Command::ToggleLockMode(_) => Some(CommandKind::ToggleLockMode),
         Command::SetLockMode(_) => Some(CommandKind::SetLockMode),
         Command::ToggleMouseSelect => Some(CommandKind::ToggleMouseSelect),
-        Command::RunCommandPane(_) => Some(CommandKind::RunCommandPane),
         Command::TogglePaneFullscreen => Some(CommandKind::TogglePaneFullscreen),
         Command::MoveTab(_) => Some(CommandKind::MoveTab),
         Command::MovePane(_) => Some(CommandKind::MovePane),
@@ -385,7 +392,7 @@ fn resolved_command_kind_matches_the_seeded_handler() {
             panic!("core:{action_name} must dispatch a core command");
         };
         let Ok(DispatchPlan::Command(command)) =
-            resolve_action(&action_reference, &registry, CLIENT_SPLIT)
+            resolve_action(&action_reference, &registry, CLIENT_SPLIT_DIRECTION)
         else {
             panic!("core:{action_name} must resolve to a command");
         };
@@ -403,7 +410,7 @@ fn cli_only_actions_are_refused_as_needing_arguments() {
     for action_name in CLI_ONLY {
         let action_reference = build_core_action_reference(action_name);
         assert_eq!(
-            resolve_action(&action_reference, &registry, CLIENT_SPLIT),
+            resolve_action(&action_reference, &registry, CLIENT_SPLIT_DIRECTION),
             Err(ResolveError::ArgumentsRequired {
                 action_reference: action_reference.clone()
             }),
@@ -450,12 +457,12 @@ fn command_kind_alone_cannot_pick_the_command() {
         resolve_action(
             &build_core_action_reference("lock"),
             &registry,
-            CLIENT_SPLIT
+            CLIENT_SPLIT_DIRECTION
         ),
         resolve_action(
             &build_core_action_reference("unlock"),
             &registry,
-            CLIENT_SPLIT
+            CLIENT_SPLIT_DIRECTION
         ),
     );
 }
@@ -466,7 +473,7 @@ fn an_unseeded_action_is_unregistered() {
     let action_reference = build_core_action_reference("open-status");
 
     assert_eq!(
-        resolve_action(&action_reference, &registry, CLIENT_SPLIT,),
+        resolve_action(&action_reference, &registry, CLIENT_SPLIT_DIRECTION,),
         Err(ResolveError::Unregistered {
             action_reference: action_reference.clone()
         })

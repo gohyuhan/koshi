@@ -1,20 +1,12 @@
 //! Tests for the `koshi.kdl` app-config parser.
 
-use std::net::{Ipv6Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use super::*;
+
+use std::net::Ipv6Addr;
 
 use kdl::KdlDocument;
-use koshi_core::geometry::Direction;
-use koshi_core::key::ExtendedKeysMode;
-use koshi_core::log::{LogFormat, LogLevel};
 
-use crate::error::ConfigError;
-use crate::layer::{
-    PartialKoshiConfig, PartialPaneConfig, PartialScrollbackConfig, PartialUpdateConfig,
-};
-use crate::types::{ClientConfig, WheelScroll};
-
-use super::{parse_app_config, AppConfigFile};
+use crate::types::ClientConfig;
 
 /// Parses `config_source_text` as `koshi.kdl`, panicking on error, and drops
 /// warnings.

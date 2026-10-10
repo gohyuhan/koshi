@@ -2,33 +2,33 @@
 //! tabs, client, terminal grids) into a `RenderSnapshot`, the per-client
 //! invariants the renderer relies on, and the engine-less and dead-pane paths.
 
+use super::*;
+
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::runtime::pty_inbox::InboxSink;
-use koshi_core::command::{GridPosition, Selection, SelectionKind};
-use koshi_core::geometry::{PaneArea, Point, Rect, Size, SplitDirection};
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::command::GridPosition;
+use koshi_core::geometry::{PaneArea, Point, SplitDirection, DEFAULT_FLOATING_PANE_SIZE};
+use koshi_core::ids::SessionId;
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
-use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
-use koshi_session::session::state::{Session, Tab};
+use koshi_session::client::{ClientOrigin, ClientRegistry};
+use koshi_session::session::state::{FloatingMember, FloatingPaneSizeSolve};
 use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::state::CursorShape;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::runtime::event::RuntimeEvent;
-use crate::server::Server;
 
 fn build_test_runtime() -> Server {
-    let (sender, inbox_receiver) = mpsc::channel::<RuntimeEvent>();
+    let (runtime_event_sender, inbox_receiver) = mpsc::channel::<RuntimeEvent>();
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
-        InboxSink::from_event_sender(sender),
+        InboxSink::from_event_sender(runtime_event_sender),
     )));
     Server::from_runtime_parts(pty_backend, inbox_receiver)
 }
@@ -209,14 +209,11 @@ fn build_snapshot_maps_session_tab_and_client() {
         .expect("grid view");
     assert_eq!(grid_view.view_row_offset, 0);
     assert_eq!(grid_view.grid.get_grid_dimensions(), (24, 80));
-
-    // No sequence pends before a prefix key is pressed.
 }
 
 #[test]
 fn build_snapshot_carries_the_clients_lock_mode_and_mouse_select() {
-    // The viewer resolves its own hint bar from these two, so a frame that
-    // dropped either would paint the wrong labels.
+    // The snapshot carries the client's lock mode and its mouse-select flag.
     let mut server = build_test_runtime();
     let (session, session_id, _tab_id, _pane_id, client_id) = build_session_with_client(Size {
         column_count: 80,
@@ -311,7 +308,7 @@ fn build_snapshot_carries_the_live_terminal_grid_and_cursor() {
     assert!(!pane_snapshot.is_reverse_video);
     assert_eq!(pane_snapshot.scrollback_metadata.retained_line_count, 0);
 
-    // A shell that never sent DECSCUSR has asked for no shape at all.
+    // A shell that sent no DECSCUSR asks for no cursor shape.
     assert_eq!(pane_snapshot.cursor_snapshot.shape, None);
     assert!(!pane_snapshot.cursor_snapshot.is_blinking);
 }
@@ -319,8 +316,7 @@ fn build_snapshot_carries_the_live_terminal_grid_and_cursor() {
 #[test]
 fn build_snapshot_carries_the_cursor_style_the_pane_asked_for() {
     // The bytes vim writes on entering insert mode: DECSCUSR "blinking bar".
-    // They must reach the snapshot, which is what lets the app style the outer
-    // terminal's cursor to match — a block in normal mode, a bar in insert.
+    // The snapshot carries the bar shape and the blink flag.
     let mut server = build_test_runtime();
     let (session, session_id, _tab_id, pane_id, client_id) = build_session_with_client(Size {
         column_count: 80,
@@ -360,8 +356,8 @@ fn build_snapshot_carries_the_cursor_style_the_pane_asked_for() {
             .is_blinking
     );
 
-    // vim exiting: `CSI 0 SP q` undoes its cursor, and the pane is back to
-    // asking for nothing — the user's own terminal cursor stands again.
+    // vim exiting: `CSI 0 SP q` resets the cursor style, and the pane asks for
+    // no cursor shape.
     server.handle_pty_output(pane_id, b"\x1b[0 q");
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     assert_eq!(
@@ -402,27 +398,28 @@ fn a_frozen_snapshot_keeps_its_grid_when_the_engine_writes_again() {
         .expect("terminal engine")
         .process_pty_output(b"\rB");
 
-    // Copy-on-write: frame 1's shared grid still shows the pre-write glyph — the
-    // later `get_active_grid_mut` cloned the buffer instead of mutating the frozen one.
-    let grid1 = &first_render_snapshot.pane_snapshots[0]
+    // Copy-on-write: the first frame's shared grid still shows the glyph from
+    // before the write. `get_active_grid_mut` cloned the buffer and left the
+    // frozen one unchanged.
+    let first_grid = &first_render_snapshot.pane_snapshots[0]
         .terminal_grid_view
         .as_ref()
         .expect("grid view")
         .grid;
     assert_eq!(
-        grid1.get_cell(0, 0).map(|cell| cell.get_character()),
+        first_grid.get_cell(0, 0).map(|cell| cell.get_character()),
         Some('A')
     );
 
     // A fresh snapshot reflects the new write.
     let second_render_snapshot = server.build_snapshot(client_id).expect("snapshot");
-    let grid2 = &second_render_snapshot.pane_snapshots[0]
+    let second_grid = &second_render_snapshot.pane_snapshots[0]
         .terminal_grid_view
         .as_ref()
         .expect("grid view")
         .grid;
     assert_eq!(
-        grid2.get_cell(0, 0).map(|cell| cell.get_character()),
+        second_grid.get_cell(0, 0).map(|cell| cell.get_character()),
         Some('B')
     );
 }
@@ -584,15 +581,16 @@ fn placement_resource_count_adds_the_bytes_of_every_distinct_image() {
 #[test]
 fn effective_size_is_the_min_viewport_across_clients_not_the_requesters() {
     let mut server = build_test_runtime();
-    let (mut session, session_id, tab_id, pane_id, big_client) = build_session_with_client(Size {
-        column_count: 80,
-        row_count: 24,
-    });
+    let (mut session, session_id, tab_id, pane_id, big_client_id) =
+        build_session_with_client(Size {
+            column_count: 80,
+            row_count: 24,
+        });
 
     // A second client views the same tab at a smaller viewport.
-    let small_client = ClientId::new();
-    let mut client = Client::from_attachment(
-        small_client,
+    let small_client_id = ClientId::new();
+    let mut small_client = Client::from_attachment(
+        small_client_id,
         session_id,
         SystemTime::now(),
         Size {
@@ -605,11 +603,11 @@ fn effective_size_is_the_min_viewport_across_clients_not_the_requesters() {
         "C-test-client".to_string(),
         0,
     );
-    client.update_focused_pane(tab_id, pane_id);
-    session.attach_client(client);
+    small_client.update_focused_pane(tab_id, pane_id);
+    session.attach_client(small_client);
     server.session_by_id.insert(session_id, session);
 
-    let render_snapshot = server.build_snapshot(big_client).expect("snapshot");
+    let render_snapshot = server.build_snapshot(big_client_id).expect("snapshot");
     // The requesting client's own viewport is unchanged...
     assert_eq!(
         render_snapshot.client_snapshot.viewport_size,
@@ -723,10 +721,10 @@ fn build_snapshot_for_a_starving_sole_viewer_suppresses_every_pane() {
         },
         Some(PaneArea::Starving),
     );
-    let second_pane = PaneId::new();
+    let second_pane_id = PaneId::new();
     session
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(second_pane))
+        .register_pane_record(PaneRecord::from_terminal_pane(second_pane_id))
         .expect("unique pane id");
     session
         .tabs
@@ -734,7 +732,7 @@ fn build_snapshot_for_a_starving_sole_viewer_suppresses_every_pane() {
         .expect("tab")
         .update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
             SplitDirection::Horizontal,
-            vec![LayoutNode::Pane(pane_id), LayoutNode::Pane(second_pane)],
+            vec![LayoutNode::Pane(pane_id), LayoutNode::Pane(second_pane_id)],
         )));
     server.session_by_id.insert(session_id, session);
     server.terminal_engine_by_pane_id.insert(
@@ -745,7 +743,7 @@ fn build_snapshot_for_a_starving_sole_viewer_suppresses_every_pane() {
         }),
     );
     server.terminal_engine_by_pane_id.insert(
-        second_pane,
+        second_pane_id,
         TerminalEngine::from_pty_size(PtySize {
             column_count: 80,
             row_count: 24,
@@ -778,26 +776,70 @@ fn build_snapshot_for_a_starving_sole_viewer_suppresses_every_pane() {
             .active_tab_snapshot
             .is_every_pane_suppressed
     );
-    let slots: Vec<(PaneId, bool, bool, Option<Rect>)> = render_snapshot
+    let pane_slot_rows: Vec<(PaneId, bool, bool, Option<Rect>)> = render_snapshot
         .session_snapshot
         .active_tab_snapshot
         .pane_slots
         .iter()
-        .map(|slot| {
+        .map(|pane_slot| {
             (
-                slot.pane_id,
-                slot.is_suppressed,
-                slot.is_visible,
-                slot.content_rect,
+                pane_slot.pane_id,
+                pane_slot.is_suppressed,
+                pane_slot.is_visible,
+                pane_slot.content_rect,
             )
         })
         .collect();
     assert_eq!(
-        slots,
+        pane_slot_rows,
         vec![
             (pane_id, true, false, None),
-            (second_pane, true, false, None)
+            (second_pane_id, true, false, None)
         ]
+    );
+}
+
+#[test]
+fn a_placement_snapshot_of_a_floating_source_is_refused_naming_the_pane() {
+    let mut server = build_test_runtime();
+    let (mut session, session_id, tab_id, _, client_id) = build_session_with_client_reporting(
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        Some(PaneArea::Reported(Size {
+            column_count: 80,
+            row_count: 22,
+        })),
+    );
+    let floating_pane_id = PaneId::new();
+    session
+        .panes
+        .register_pane_record(PaneRecord::from_terminal_pane(floating_pane_id))
+        .expect("unique pane id");
+    session
+        .floating_set
+        .add_member(FloatingMember {
+            pane_id: floating_pane_id,
+            desired_size: DEFAULT_FLOATING_PANE_SIZE,
+            solved_size: FloatingPaneSizeSolve::Sized(Size {
+                column_count: 48,
+                row_count: 13,
+            }),
+        })
+        .expect("the set has room");
+    server.session_by_id.insert(session_id, session);
+
+    let placement_snapshot_error = server
+        .build_placement_snapshot(client_id, floating_pane_id, tab_id)
+        .expect_err("a floating pane holds no tiled slot");
+
+    assert_eq!(
+        placement_snapshot_error,
+        PlacementSnapshotError {
+            code: PlacementSnapshotErrorCode::NotFound,
+            message: format!("{floating_pane_id} is floating and holds no tiled slot"),
+        }
     );
 }
 
@@ -906,7 +948,7 @@ fn cross_tab_placement_snapshot_retains_a_suppressed_source_pane_for_transfer() 
 #[test]
 fn build_snapshot_for_a_starving_viewer_solves_at_the_other_viewers_pane_area() {
     let mut server = build_test_runtime();
-    let (mut session, session_id, tab_id, pane_id, starving_client) =
+    let (mut session, session_id, tab_id, pane_id, starving_client_id) =
         build_session_with_client_reporting(
             Size {
                 column_count: 80,
@@ -917,9 +959,9 @@ fn build_snapshot_for_a_starving_viewer_solves_at_the_other_viewers_pane_area() 
 
     // A second client views the same tab at a smaller viewport, reporting no
     // pane area of its own.
-    let sizing_client = ClientId::new();
-    let mut client = Client::from_attachment(
-        sizing_client,
+    let sizing_client_id = ClientId::new();
+    let mut sizing_client = Client::from_attachment(
+        sizing_client_id,
         session_id,
         SystemTime::now(),
         Size {
@@ -932,11 +974,11 @@ fn build_snapshot_for_a_starving_viewer_solves_at_the_other_viewers_pane_area() 
         "C-test-client".to_string(),
         0,
     );
-    client.update_focused_pane(tab_id, pane_id);
-    session.attach_client(client);
+    sizing_client.update_focused_pane(tab_id, pane_id);
+    session.attach_client(sizing_client);
     server.session_by_id.insert(session_id, session);
 
-    let render_snapshot = server.build_snapshot(starving_client).expect("snapshot");
+    let render_snapshot = server.build_snapshot(starving_client_id).expect("snapshot");
     // The requesting client's own viewport is unchanged...
     assert_eq!(
         render_snapshot.client_snapshot.viewport_size,
@@ -1035,8 +1077,8 @@ fn tabs_metadata_covers_every_tab_in_index_order_with_the_viewed_tab_active() {
         .session_snapshot
         .tabs_metadata
         .iter()
-        .filter(|meta| meta.is_active)
-        .map(|meta| meta.tab_id)
+        .filter(|tab_metadata| tab_metadata.is_active)
+        .map(|tab_metadata| tab_metadata.tab_id)
         .collect();
     assert_eq!(active_tab_ids, vec![first_tab_id]);
     assert_eq!(
@@ -1079,7 +1121,13 @@ fn tabs_metadata_is_ordered_by_index_not_by_tab_id() {
         .session_snapshot
         .tabs_metadata
         .iter()
-        .map(|meta| (meta.tab_id, meta.tab_index, meta.is_active))
+        .map(|tab_metadata| {
+            (
+                tab_metadata.tab_id,
+                tab_metadata.tab_index,
+                tab_metadata.is_active,
+            )
+        })
         .collect();
     assert_eq!(
         tab_metadata_rows,
@@ -1469,8 +1517,8 @@ fn a_block_dragged_leftward_still_covers_the_columns_between() {
 fn a_highlight_ending_on_a_wide_glyph_covers_its_whole_cell() {
     // `a世b`: the wide glyph is at column 1 and its blank half at column 2. A
     // selection ending on the glyph reaches its left column, and the renderer
-    // paints the 2-wide glyph from there while skipping the width-0 half — so
-    // the highlight covers the whole glyph and can never land on half of one.
+    // paints the 2-wide glyph from there and skips the width-0 half. The
+    // highlight covers the whole glyph.
     let (mut server, pane_id, client_id) = build_runtime_with_terminal_input("a世b".as_bytes());
     server
         .get_client_mut(client_id)
@@ -1687,18 +1735,10 @@ fn a_highlight_running_off_the_top_of_the_view_starts_at_the_first_visible_row()
             ),
         );
 
-    let visible_row_spans =
-        get_selection_row_spans(&server, client_id).expect("the visible part is drawn");
+    // Screen rows 0 and 1 are covered whole. Screen row 2 ends at column 5.
     assert_eq!(
-        visible_row_spans.first().copied(),
-        Some((0, 0, 79)),
-        "the first visible row starts at column 0, not the selection's own \
-         start column, which is above the view"
-    );
-    assert_eq!(
-        visible_row_spans.last().copied(),
-        Some((2, 0, 5)),
-        "and ends where it ends"
+        get_selection_row_spans(&server, client_id),
+        Some(vec![(0, 0, 79), (1, 0, 79), (2, 0, 5)])
     );
 }
 
@@ -1768,8 +1808,12 @@ fn format_display_path_is_bounded_and_filtered() {
     use super::format_display_path;
 
     let long_path = std::path::PathBuf::from(format!("/{}", "a".repeat(4_000)));
-    assert!(
-        format_display_path(&long_path).len() <= koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT
+    assert_eq!(
+        format_display_path(&long_path),
+        format!(
+            "/{}",
+            "a".repeat(koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT - 1)
+        )
     );
 
     let hostile_path = std::path::PathBuf::from("/tmp/a\u{7f}b\u{202e}c");

@@ -33,9 +33,6 @@ use koshi_session::session::tab_ops::close_tab;
 use koshi_test_support::event_assert::assert_events;
 use koshi_test_support::fake_pty::{ExitStatus, FakePtyBackend, PaneDeliveryRecorder, PtyBackend};
 
-/// A fixed epoch timestamp so every lifecycle transition stays deterministic.
-const UNIX_EPOCH_TIME: SystemTime = SystemTime::UNIX_EPOCH;
-
 /// The viewport every client and layout solve uses.
 const TEST_VIEWPORT_SIZE: Size = Size {
     column_count: 80,
@@ -134,12 +131,12 @@ fn build_two_pane_tab(tab_id: TabId, left_pane_id: PaneId, right_pane_id: PaneId
 /// A client of `session_id` viewing `tab_id` with `pane_id` focused there.
 ///
 /// The client stores `session_id` as its own, which is what
-/// `Session::validate` requires of every client in that session's registry.
+/// `Session::validate_session_consistency` requires of every client in that session's registry.
 fn build_focused_client(session_id: SessionId, tab_id: TabId, pane_id: PaneId) -> Client {
     let mut client = Client::from_attachment(
         ClientId::new(),
         session_id,
-        UNIX_EPOCH_TIME,
+        SystemTime::UNIX_EPOCH,
         TEST_VIEWPORT_SIZE,
         None,
         tab_id,
@@ -311,12 +308,12 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: exited_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::LayoutChanged(LayoutChanged { tab_id }),
             Event::PaneFocused(PaneFocused {
                 client_id,
-                tab_id,
+                tab_id: Some(tab_id),
                 pane_id: survivor_pane_id,
                 previous_pane_id: Some(exited_pane_id),
             }),
@@ -367,7 +364,7 @@ fn a_signal_killed_child_reports_the_signal_and_no_exit_code() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: exited_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::LayoutChanged(LayoutChanged { tab_id }),
         ],
@@ -481,7 +478,7 @@ fn child_exit_in_nonfocused_pane_leaves_focus_untouched() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: exited_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::LayoutChanged(LayoutChanged { tab_id }),
         ],
@@ -603,7 +600,7 @@ fn child_exit_with_no_room_to_refocus_clears_focus() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: exited_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::LayoutChanged(LayoutChanged { tab_id }),
             Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
@@ -658,7 +655,7 @@ fn last_pane_exit_closes_the_tab_and_quits() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: only_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::TabClosed(TabClosed { tab_id }),
             Event::Quit(QuitCause::LastTabClosed {
@@ -733,7 +730,7 @@ fn last_pane_exit_in_one_of_several_tabs_does_not_quit() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: closing_pane_id,
-                tab_id: closing_tab_id,
+                tab_id: Some(closing_tab_id),
             }),
             Event::TabClosed(TabClosed {
                 tab_id: closing_tab_id,
@@ -780,7 +777,7 @@ fn a_failing_last_pane_is_removed_and_the_session_quits() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: failed_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::TabClosed(TabClosed { tab_id }),
             Event::Quit(QuitCause::LastTabClosed {
@@ -862,12 +859,12 @@ fn closing_the_focused_pane_removes_it_and_refocuses_a_survivor() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: closed_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::LayoutChanged(LayoutChanged { tab_id }),
             Event::PaneFocused(PaneFocused {
                 client_id,
-                tab_id,
+                tab_id: Some(tab_id),
                 pane_id: survivor_pane_id,
                 previous_pane_id: Some(closed_pane_id),
             }),
@@ -944,14 +941,14 @@ fn closing_a_tab_removes_every_pane_without_killing_via_pty() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: first_tab_pane_id,
-                tab_id: multi_tab_id,
+                tab_id: Some(multi_tab_id),
             }),
             Event::PaneClosing(PaneClosing {
                 pane_id: second_tab_pane_id,
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: second_tab_pane_id,
-                tab_id: multi_tab_id,
+                tab_id: Some(multi_tab_id),
             }),
             Event::TabClosed(TabClosed {
                 tab_id: multi_tab_id,
@@ -1021,7 +1018,7 @@ fn child_exit_drops_the_pane_from_focus_history() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: exited_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::LayoutChanged(LayoutChanged { tab_id }),
         ],
@@ -1083,7 +1080,7 @@ fn output_for_a_removed_pane_is_dropped() {
             }),
             Event::PaneRemoved(PaneRemoved {
                 pane_id: removed_pane_id,
-                tab_id,
+                tab_id: Some(tab_id),
             }),
             Event::LayoutChanged(LayoutChanged { tab_id }),
         ],

@@ -87,11 +87,13 @@ pub enum SessionEvent {
     PaneCreated {
         /// The new pane.
         pane_id: PaneId,
-        /// The tab it belongs to.
-        tab_id: TabId,
+        /// The tab it belongs to; `None` when the pane floats. A message
+        /// without `tab_id` is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        tab_id: Option<TabId>,
     },
-    /// A pane's child process exited. The pane stays in the layout until it is
-    /// removed.
+    /// A pane's child process exited. The pane stays in its tab's layout or
+    /// the floating set until it is removed.
     PaneProcessExited {
         /// The pane whose process exited.
         pane_id: PaneId,
@@ -106,19 +108,24 @@ pub enum SessionEvent {
         /// The pane whose close transaction started.
         pane_id: PaneId,
     },
-    /// A pane leaf left the layout and registry.
+    /// A pane left the registry, and its tab's layout or the floating set.
     PaneRemoved {
-        /// The pane removed from the layout and registry.
+        /// The pane removed from the registry, and from its tab's layout or
+        /// the session's floating set.
         pane_id: PaneId,
-        /// The tab it was removed from.
-        tab_id: TabId,
+        /// The tab it was removed from; `None` when the pane floated. A
+        /// message without `tab_id` is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        tab_id: Option<TabId>,
     },
     /// Focus moved to a pane.
     PaneFocused {
         /// The client whose focus moved.
         client_id: ClientId,
-        /// The tab the focus moved in.
-        tab_id: TabId,
+        /// The tab the focus moved in; `None` when the newly focused pane
+        /// floats. A message without `tab_id` is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        tab_id: Option<TabId>,
         /// The newly focused pane.
         pane_id: PaneId,
         /// The pane that held this client's focus in the tab before, if any.
@@ -135,10 +142,14 @@ pub enum SessionEvent {
         command_id: CommandId,
         /// The pane placed in the destination layout.
         source_pane_id: PaneId,
-        /// The tab that owned the pane before the placement.
-        source_tab_id: TabId,
-        /// The tab that owns the pane after the placement.
-        destination_tab_id: TabId,
+        /// The tab that owned the pane before the placement; `None` when the
+        /// pane floated. A message without `source_tab_id` is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        source_tab_id: Option<TabId>,
+        /// The tab that owns the pane after the placement; `None` when the pane
+        /// floats. A message without `destination_tab_id` is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        destination_tab_id: Option<TabId>,
         /// The checked swap or insertion target used by the transaction.
         placement_target: PanePlacementTarget,
     },

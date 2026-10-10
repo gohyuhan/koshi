@@ -787,7 +787,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             "Spawn a command in a new pane",
             PaneSession,
             vec![Pane],
-            CoreCommand(CommandKind::RunCommandPane),
+            CoreCommand(CommandKind::NewPane),
         ),
     ];
 

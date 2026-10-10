@@ -3,8 +3,9 @@
 //!
 //! Like [`crate::session::tab_ops`], this layer edits state and drafts events
 //! only — it never spawns a process or touches a terminal. The runtime builds
-//! and validates the split, spawns the pane's process, and only then calls
-//! [`commit_new_pane`] to apply it.
+//! and validates the split or the floating pane, spawns the pane's process,
+//! and only then calls [`commit_new_pane`] or [`commit_new_floating_pane`] to
+//! apply it.
 
 use std::path::PathBuf;
 
@@ -15,7 +16,9 @@ use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 
-use crate::session::state::Session;
+use crate::client::{FloatingPanePosition, FloatingPaneView};
+use crate::error::FloatingSetError;
+use crate::session::state::{FloatingMember, Session};
 
 /// What to record on a freshly created pane: the working directory it launched
 /// in and the spawn specification behind it. Both land on the new pane's
@@ -143,18 +146,63 @@ pub fn commit_new_pane(
 
     emitted_events.push(Event::PaneCreated(PaneCreated {
         pane_id: new_pane_id,
-        tab_id,
+        tab_id: Some(tab_id),
     }));
     emitted_events.push(Event::LayoutChanged(LayoutChanged { tab_id }));
     if let Some(client_id) = focused_client_id {
         emitted_events.push(Event::PaneFocused(PaneFocused {
             client_id,
-            tab_id,
+            tab_id: Some(tab_id),
             pane_id: new_pane_id,
             previous_pane_id,
         }));
     }
     (previous_tab_id, emitted_events)
+}
+
+/// Apply an already-spawned floating pane: append `floating_member` to the
+/// session's floating set, register its pane as `Running` with `new_pane_spec`'s
+/// working directory and spawn specification, and store `designated_view`'s
+/// position as that client's view of the pane.
+///
+/// A `designated_view` naming a client that is not attached stores nothing,
+/// and neither does a [`FloatingPanePosition::Default`] position. No client's
+/// focus moves and no tab changes.
+///
+/// The caller (the runtime) has minted `floating_member.pane_id`: no tab
+/// holds it and the pane registry has no record of it. A registry record
+/// already under that id stays as it is.
+///
+/// Returns the one event to emit: [`Event::PaneCreated`] with `tab_id: None`.
+///
+/// # Errors
+///
+/// The [`FloatingSetError`] that [`FloatingSet::add_member`](crate::session::state::FloatingSet::add_member)
+/// returns when the set refuses the member. The session does not change.
+pub fn commit_new_floating_pane(
+    session: &mut Session,
+    floating_member: FloatingMember,
+    designated_view: Option<(ClientId, FloatingPanePosition)>,
+    new_pane_spec: NewPaneSpec,
+) -> Result<Vec<Event>, FloatingSetError> {
+    let new_pane_id = floating_member.pane_id;
+    session.floating_set.add_member(floating_member)?;
+    register_running_pane(session, new_pane_id, new_pane_spec);
+    if let Some((client_id, position)) = designated_view {
+        if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
+            client.set_floating_pane_view(
+                new_pane_id,
+                FloatingPaneView {
+                    position,
+                    is_minimized: false,
+                },
+            );
+        }
+    }
+    Ok(vec![Event::PaneCreated(PaneCreated {
+        pane_id: new_pane_id,
+        tab_id: None,
+    })])
 }
 
 #[cfg(test)]

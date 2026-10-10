@@ -268,9 +268,6 @@ fn apply_current_working_directory_to_command(mut command: Command) -> Command {
     let working_directory = match &mut command {
         Command::NewPane(new_pane_arguments) => &mut new_pane_arguments.working_directory,
         Command::NewTab(new_tab_arguments) => &mut new_tab_arguments.working_directory,
-        Command::RunCommandPane(run_command_pane_arguments) => {
-            &mut run_command_pane_arguments.working_directory
-        }
         _ => return command,
     };
     if working_directory.is_none() {

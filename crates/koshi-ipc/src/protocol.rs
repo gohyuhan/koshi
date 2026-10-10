@@ -45,8 +45,8 @@ pub const PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.maximum_version;
 /// below this one is refused with
 /// [`IpcErrorCode::UnsupportedVersion`].
 ///
-/// The floor is 4, the version this build speaks. Raising it drops support
-/// for every build below it.
+/// The floor equals [`PROTOCOL_VERSION`]: this build speaks one version.
+/// Raising it drops support for every build below it.
 pub const MIN_PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.minimum_version;
 
 /// The version two peers use, given the range each speaks: the highest both
@@ -78,9 +78,9 @@ pub fn compute_agreed_protocol_version(
 /// The secret leaves this type in two ways, and only two:
 ///
 /// - `Serialize` and [`expose_secret`](Self::expose_secret) write the **real secret**, for
-///   the endpoint file and the socket. `serde_json::to_string(&hello)` on the
-///   Hello [`hello`](IpcRequestKind::build_hello_request) builds yields
-///   `{"Hello":{"minimum_protocol_version":4,"maximum_protocol_version":4,
+///   the endpoint file and the socket.
+///   `serde_json::to_string(&IpcRequestKind::build_hello_request(connection_token))`
+///   yields `{"Hello":{"minimum_protocol_version":5,"maximum_protocol_version":5,
 ///   "connection_token":"k7Qx…","is_remote":false}}`, secret included.
 /// - `Debug` and `Display` write `***`. A token that reaches a log line, a
 ///   trace, or an error dump reveals nothing.
@@ -391,7 +391,6 @@ pub enum IpcRequestKind {
         /// The pane region the caller draws the tab's panes in, which the
         /// server records on the client. Absent, the server sizes the
         /// client as its viewport minus two rows.
-        #[serde(default)]
         pane_area: Option<PaneArea>,
         /// The native image protocols the caller's terminal proved it can
         /// receive. Left off the wire when it proved none; absent, it reads as
@@ -419,7 +418,6 @@ pub enum IpcRequestKind {
         viewport_size: Size,
         /// The pane region the client draws the tab's panes in at the new
         /// size; `None` replaces any earlier report.
-        #[serde(default)]
         pane_area: Option<PaneArea>,
         /// The cell dimensions measured for this resized viewport, or `None`
         /// to clear the client's previous measurement until a reply arrives.
@@ -621,7 +619,6 @@ pub enum IpcResult {
         resume_token: Option<ConnectionToken>,
         /// The pane region the server holds for this client, exactly as the
         /// attach reported it.
-        #[serde(default)]
         pane_area: Option<PaneArea>,
     },
     /// What dispatching the submitted command produced.
@@ -774,4 +771,4 @@ impl WireName for IpcResult {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

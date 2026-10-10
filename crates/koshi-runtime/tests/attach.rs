@@ -20,8 +20,8 @@ use common::{
 
 use koshi_core::command::{
     CloseTabArgs, Command, CommandEnvelope, CommandSource, DetachArgs, FocusPaneArgs, FocusTabArgs,
-    FocusTarget, NewPaneArgs, NewTabArgs, PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs,
-    PlacementRevision, TabTarget,
+    FocusTarget, NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor,
+    PanePlacementTarget, PlacePaneArgs, PlacementRevision, TabTarget,
 };
 use koshi_core::event::Event;
 use koshi_core::geometry::{Direction, Point, Size};
@@ -37,7 +37,7 @@ use koshi_ipc::protocol::{
 use koshi_ipc::transport::Connection;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::LayoutNode;
-use koshi_session::client::{compute_default_pane_area_size, ClientOrigin};
+use koshi_session::client::{compute_default_pane_area_size, Client, ClientOrigin};
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::build_key_input_for_chord;
 
@@ -144,10 +144,11 @@ fn create_right_split_pane(
     request_id: u64,
 ) -> PaneId {
     let command = Command::NewPane(NewPaneArgs {
-        source_pane_id: Some(source_pane_id),
-        tab_id: None,
-        direction: Direction::Right,
-        should_stack: false,
+        placement: NewPanePlacement::Split {
+            source_pane_id: Some(source_pane_id),
+            tab_id: None,
+            direction: Direction::Right,
+        },
         working_directory: None,
         spawn_spec: None,
         client_id: Some(client_id),
@@ -695,8 +696,14 @@ fn a_frame_this_build_cannot_read_costs_one_request_not_the_stream() {
         .list_sessions()
         .get(&session_id)
         .expect("session running");
-    assert_eq!(session.clients.count_clients(), 1);
-    assert!(session.clients.get_client_by_id(client_id).is_some());
+    assert_eq!(
+        session
+            .clients
+            .list_attached_clients()
+            .map(Client::get_client_id)
+            .collect::<Vec<_>>(),
+        vec![client_id]
+    );
     assert!(
         session.tabs.contains_key(&added_tab_id),
         "the request after the unreadable one applied"
@@ -1298,8 +1305,8 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
             let expected_commit_event = SessionEvent::PanePlacementCommitted {
                 command_id: placement_command_id,
                 source_pane_id,
-                source_tab_id: active_tab_id,
-                destination_tab_id: active_tab_id,
+                source_tab_id: Some(active_tab_id),
+                destination_tab_id: Some(active_tab_id),
                 placement_target: PanePlacementTarget::Swap { target_pane_id },
             };
             for committed_client_events in [

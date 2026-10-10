@@ -2,7 +2,7 @@
 //! which remote access file a failure names and the changed-certificate
 //! refusal.
 
-use super::{IpcError, RemoteFile};
+use super::*;
 
 #[test]
 fn transport_error_display_carries_the_detail() {

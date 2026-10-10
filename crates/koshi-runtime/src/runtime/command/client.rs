@@ -5,6 +5,7 @@ use super::*;
 
 use std::time::Instant;
 
+use koshi_core::geometry::PixelCellSize;
 use koshi_ipc::protocol::ConnectionToken;
 
 use crate::runtime::attach::build_session_structure_snapshot;
@@ -24,7 +25,7 @@ impl Server {
     pub(crate) fn handle_client_cell_size(
         &mut self,
         client_id: ClientId,
-        cell_size: koshi_core::geometry::PixelCellSize,
+        cell_size: PixelCellSize,
     ) {
         let Some(session_id) = self
             .get_session_for_client(client_id)
@@ -117,7 +118,7 @@ impl Server {
         resume_token: Option<ConnectionToken>,
         viewport_size: Size,
         pane_area: Option<PaneArea>,
-        cell_size: Option<koshi_core::geometry::PixelCellSize>,
+        cell_size: Option<PixelCellSize>,
         attached_at: SystemTime,
         is_remote: bool,
     ) -> Option<AttachAccepted> {
@@ -254,9 +255,9 @@ impl Server {
             let Some(client) = session.clients.get_client_mut_by_id(client_id) else {
                 return emitted_events;
             };
-            let focused_panes_before = client.list_focused_pane_ids().clone();
-            let zoomed_panes_before = client.list_zoomed_pane_ids().clone();
-            let prior_pane_id = client.get_focused_pane_id(active_tab_id);
+            let focused_pane_id_by_tab_id_before = client.list_focused_pane_ids().clone();
+            let zoomed_pane_id_by_tab_id_before = client.list_zoomed_pane_ids().clone();
+            let previous_pane_id = client.get_focused_pane_id(active_tab_id);
             for (&tab_id, &pane_id) in &saved_view.focused_pane_id_by_tab_id {
                 if tab_by_id.contains_key(&tab_id)
                     && pane_registry.get_pane_record_by_id(pane_id).is_some()
@@ -266,9 +267,9 @@ impl Server {
             }
             if let Some(pane_id) = client
                 .get_focused_pane_id(active_tab_id)
-                .filter(|&restored_pane_id| Some(restored_pane_id) != prior_pane_id)
+                .filter(|&restored_pane_id| Some(restored_pane_id) != previous_pane_id)
             {
-                focus_change = Some((pane_id, prior_pane_id));
+                focus_change = Some((pane_id, previous_pane_id));
             }
             for (&tab_id, &pane_id) in &saved_view.zoomed_pane_id_by_tab_id {
                 if tab_by_id.contains_key(&tab_id)
@@ -291,8 +292,9 @@ impl Server {
                     client.set_scroll_offset(pane_id, scroll_offset.min(retained_line_count));
                 }
             }
-            let has_client_view_changed = focused_panes_before != *client.list_focused_pane_ids()
-                || zoomed_panes_before != *client.list_zoomed_pane_ids();
+            let has_client_view_changed = focused_pane_id_by_tab_id_before
+                != *client.list_focused_pane_ids()
+                || zoomed_pane_id_by_tab_id_before != *client.list_zoomed_pane_ids();
             if has_client_view_changed {
                 advance_client_placement_revisions(session, &[client_id]);
             }
@@ -307,7 +309,7 @@ impl Server {
         if let Some((pane_id, previous_pane_id)) = focus_change {
             emitted_events.push(Event::PaneFocused(PaneFocused {
                 client_id,
-                tab_id: active_tab_id,
+                tab_id: Some(active_tab_id),
                 pane_id,
                 previous_pane_id,
             }));
@@ -365,7 +367,7 @@ impl Server {
         viewport_size: Size,
         pane_area: Option<PaneArea>,
         active_tab_id: TabId,
-        cell_size: Option<koshi_core::geometry::PixelCellSize>,
+        cell_size: Option<PixelCellSize>,
         attached_at: SystemTime,
         is_remote: bool,
     ) -> Vec<Event> {
@@ -385,7 +387,7 @@ impl Server {
             Some(session) if session.tabs.contains_key(&active_tab_id) => {}
             _ => return Vec::new(),
         }
-        let target_client_was_existing = self
+        let is_client_in_session = self
             .session_by_id
             .get(&session_id)
             .is_some_and(|session| session.clients.get_client_by_id(client_id).is_some());
@@ -431,7 +433,8 @@ impl Server {
         // A same-session re-attach updates the view in place, preserving the
         // client's accumulated state and yielding the tab it moved off of; a
         // fresh id is registered anew and has no prior tab.
-        let prior_tab_id = if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
+        let previous_tab_id = if let Some(client) = session.clients.get_client_mut_by_id(client_id)
+        {
             let previous_tab_id = client.get_active_tab_id();
             client.update_viewport_size(viewport_size);
             client.update_pane_area(pane_area);
@@ -440,18 +443,18 @@ impl Server {
             client.update_origin(client_origin);
             Some(previous_tab_id)
         } else {
-            let label = generate_name(NameKind::Client, |candidate| {
+            let label = generate_name(NameKind::Client, |candidate_label| {
                 session
                     .clients
                     .list_attached_clients()
-                    .any(|client| client.get_label() == candidate)
+                    .any(|client| client.get_label() == candidate_label)
             });
-            let color = (0..=u8::MAX)
-                .find(|candidate| {
+            let color_index = (0..=u8::MAX)
+                .find(|candidate_color_index| {
                     !session
                         .clients
                         .list_attached_clients()
-                        .any(|client| client.get_color_index() == *candidate)
+                        .any(|client| client.get_color_index() == *candidate_color_index)
                 })
                 // Every palette index is in use: this client takes index 0,
                 // which another client already holds.
@@ -465,7 +468,7 @@ impl Server {
                 active_tab_id,
                 client_origin,
                 label,
-                color,
+                color_index,
             );
             client.update_cell_size(cell_size);
             // A profile carrying `lock` hands its starting mode to the first
@@ -496,7 +499,7 @@ impl Server {
                 client.update_focused_pane(active_tab_id, pane_id);
                 emitted_events.push(Event::PaneFocused(PaneFocused {
                     client_id,
-                    tab_id: active_tab_id,
+                    tab_id: Some(active_tab_id),
                     pane_id,
                     previous_pane_id: None,
                 }));
@@ -504,21 +507,19 @@ impl Server {
         }
 
         let mut affected_tab_ids = vec![active_tab_id];
-        if let Some(prior_tab_id) = prior_tab_id {
-            if prior_tab_id != active_tab_id {
-                affected_tab_ids.push(prior_tab_id);
+        if let Some(previous_tab_id) = previous_tab_id {
+            if previous_tab_id != active_tab_id {
+                affected_tab_ids.push(previous_tab_id);
             }
         }
         let affected_client_ids =
             list_clients_affected_by_tabs(session, &affected_tab_ids, Some(client_id));
-        let clients_to_advance = affected_client_ids
+        let client_ids_to_advance = affected_client_ids
             .into_iter()
-            .filter(|affected_client_id| {
-                target_client_was_existing || *affected_client_id != client_id
-            })
+            .filter(|affected_client_id| is_client_in_session || *affected_client_id != client_id)
             .collect::<Vec<_>>();
         advance_session_placement_revision(session);
-        advance_client_placement_revisions(session, &clients_to_advance);
+        advance_client_placement_revisions(session, &client_ids_to_advance);
 
         // Reflow the tab the client now views, plus — on a same-session move —
         // the one it left.
@@ -528,7 +529,7 @@ impl Server {
             active_tab_id,
             &mut emitted_events,
         );
-        if let Some(previous_tab_id) = prior_tab_id {
+        if let Some(previous_tab_id) = previous_tab_id {
             if previous_tab_id != active_tab_id {
                 self.reflow_tab_if_viewed(
                     pty_backend.as_ref(),
@@ -559,7 +560,7 @@ impl Server {
         client_id: ClientId,
         viewport_size: Size,
         pane_area: Option<PaneArea>,
-        cell_size: Option<koshi_core::geometry::PixelCellSize>,
+        cell_size: Option<PixelCellSize>,
     ) -> Vec<Event> {
         let pty_backend = Arc::clone(self.get_pty_backend());
         let Some(session_id) = self
@@ -712,7 +713,7 @@ impl Server {
         // A detach for a client no session holds is dropped.
         let session = self.get_session_for_client_mut(client_id)?;
         let session_id = session.session_id;
-        // Removing the client returns its record; its `active_tab` is the tab
+        // Removing the client returns its record; its `active_tab_id` is the tab
         // whose tab size may now grow.
         let removed_client = session
             .detach_client(client_id)
@@ -766,7 +767,7 @@ impl Server {
                 .collect();
         unclaimed_client_ids.sort();
         tracing::info!(
-            unclaimed = unclaimed_client_ids.len(),
+            unclaimed_client_count = unclaimed_client_ids.len(),
             waited_ms = Instant::now()
                 .saturating_duration_since(unclaimed_client_deadline)
                 .as_millis(),

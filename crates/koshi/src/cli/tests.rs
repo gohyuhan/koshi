@@ -1336,6 +1336,9 @@ fn resize_pane_help_renders_its_about_usage_and_flags() {
          Signed number of cells the border moves; defaults to 1\n          \n          \
          [default: 1]\n\n      \
          --pane <PANE_ID>\n          Pane to resize; defaults to the focused pane\n\n      \
+         --client <CLIENT_ID>\n          \
+         Client whose view of a floating pane keeps the edge opposite the moved border in \
+         place; defaults to the issuing client, else the session's only attached one\n\n      \
          --remote <SERVER>\n          \
          Run this invocation against the machine SERVER names — the name it was saved under, \
          or the `host:port` it listens on — instead of this one\n\n  \
@@ -1350,12 +1353,14 @@ fn new_pane_parses_bare_and_with_every_flag() {
     assert_eq!(
         parse_cli_command(&["koshi", "new-pane"]),
         CliCommand::NewPane {
-            direction: None,
-            should_stack: false,
-            pane_id: None,
-            session_reference: None,
-            tab_reference: None,
-            client_id: None,
+            new_pane_flags: NewPaneFlags {
+                direction: None,
+                should_stack: false,
+                pane_id: None,
+                session_reference: None,
+                tab_reference: None,
+                client_id: None,
+            },
         }
     );
     let pane_flag = format!("pane-{}", build_fixed_test_uuid());
@@ -1369,23 +1374,27 @@ fn new_pane_parses_bare_and_with_every_flag() {
             &pane_flag
         ]),
         CliCommand::NewPane {
-            direction: Some(DirectionArgument::Right),
-            should_stack: false,
-            pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
-            session_reference: None,
-            tab_reference: None,
-            client_id: None,
+            new_pane_flags: NewPaneFlags {
+                direction: Some(DirectionArgument::Right),
+                should_stack: false,
+                pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
+                session_reference: None,
+                tab_reference: None,
+                client_id: None,
+            },
         }
     );
     assert_eq!(
         parse_cli_command(&["koshi", "new-pane", "--stacked"]),
         CliCommand::NewPane {
-            direction: None,
-            should_stack: true,
-            pane_id: None,
-            session_reference: None,
-            tab_reference: None,
-            client_id: None,
+            new_pane_flags: NewPaneFlags {
+                direction: None,
+                should_stack: true,
+                pane_id: None,
+                session_reference: None,
+                tab_reference: None,
+                client_id: None,
+            },
         }
     );
 }
@@ -1420,10 +1429,11 @@ fn new_pane_without_a_direction_flag_follows_the_config_file() {
     assert_eq!(
         mapped_command,
         Command::NewPane(NewPaneArgs {
-            source_pane_id: None,
-            tab_id: None,
-            direction: Direction::Down,
-            should_stack: false,
+            placement: NewPanePlacement::Split {
+                source_pane_id: None,
+                tab_id: None,
+                direction: Direction::Down,
+            },
             working_directory: None,
             spawn_spec: None,
             client_id: None,
@@ -1442,14 +1452,28 @@ fn an_explicit_direction_flag_wins_over_the_config_file() {
     let Command::NewPane(command_args) = mapped_command else {
         panic!("new-pane maps to NewPane");
     };
-    assert_eq!(command_args.direction, Direction::Left);
+    assert_eq!(
+        command_args.placement,
+        NewPanePlacement::Split {
+            source_pane_id: None,
+            tab_id: None,
+            direction: Direction::Left,
+        }
+    );
 
     let (_, mapped_command) =
         build_cli_action_for_direction(&["koshi", "run", "--", "htop"], Direction::Down);
-    let Command::RunCommandPane(command_args) = mapped_command else {
-        panic!("run maps to RunCommandPane");
+    let Command::NewPane(command_args) = mapped_command else {
+        panic!("run maps to NewPane");
     };
-    assert_eq!(command_args.direction, Direction::Down);
+    assert_eq!(
+        command_args.placement,
+        NewPanePlacement::Split {
+            source_pane_id: None,
+            tab_id: None,
+            direction: Direction::Down,
+        }
+    );
 }
 
 /// No config directory, no `koshi.kdl`, or a file that did not parse: the fold
@@ -1465,7 +1489,14 @@ fn no_config_file_leaves_the_built_in_split_direction() {
     let Command::NewPane(command_args) = mapped_command else {
         panic!("new-pane maps to NewPane");
     };
-    assert_eq!(command_args.direction, Direction::Right);
+    assert_eq!(
+        command_args.placement,
+        NewPanePlacement::Split {
+            source_pane_id: None,
+            tab_id: None,
+            direction: Direction::Right,
+        }
+    );
 }
 
 #[test]
@@ -1483,12 +1514,14 @@ fn new_pane_parses_session_tab_and_client_targets() {
             &client_flag
         ]),
         CliCommand::NewPane {
-            direction: None,
-            should_stack: false,
-            pane_id: None,
-            session_reference: Some(SessionReference::SessionName("amber-fox".to_string())),
-            tab_reference: Some(TabReference::TabName("logs".to_string())),
-            client_id: Some(ClientId::from_uuid(build_fixed_test_uuid())),
+            new_pane_flags: NewPaneFlags {
+                direction: None,
+                should_stack: false,
+                pane_id: None,
+                session_reference: Some(SessionReference::SessionName("amber-fox".to_string())),
+                tab_reference: Some(TabReference::TabName("logs".to_string())),
+                client_id: Some(ClientId::from_uuid(build_fixed_test_uuid())),
+            },
         }
     );
 }
@@ -1502,10 +1535,11 @@ fn new_pane_tab_given_as_an_id_reaches_the_command_without_a_lookup() {
     assert_eq!(
         mapped_command,
         Command::NewPane(NewPaneArgs {
-            source_pane_id: None,
-            tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
-            direction: Direction::Right,
-            should_stack: false,
+            placement: NewPanePlacement::Split {
+                source_pane_id: None,
+                tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
+                direction: Direction::Right,
+            },
             working_directory: None,
             spawn_spec: None,
             client_id: None,
@@ -1637,114 +1671,42 @@ fn toggle_pane_fullscreen_takes_a_client_flag() {
 }
 
 #[test]
-fn fullscreen_and_scroll_put_their_client_on_the_source() {
+fn resize_pane_takes_a_client_flag_that_rides_on_the_source() {
+    let client_flag = format!("client-{}", build_fixed_test_uuid());
     let client_id = ClientId::from_uuid(build_fixed_test_uuid());
+    let parsed_command = parse_cli_command(&[
+        "koshi",
+        "resize-pane",
+        "--direction",
+        "right",
+        "--size",
+        "3",
+        "--client",
+        &client_flag,
+    ]);
     assert_eq!(
-        CliCommand::TogglePaneFullscreen {
+        parsed_command,
+        CliCommand::ResizePane {
+            direction: DirectionArgument::Right,
+            resize_amount_cells: 3,
+            pane_id: None,
             client_id: Some(client_id),
         }
-        .get_source_client_id(),
-        Some(client_id)
     );
-    assert_eq!(
-        CliCommand::TogglePaneFullscreen { client_id: None }.get_source_client_id(),
-        None
-    );
+    assert_eq!(parsed_command.get_target_client_id(), Some(client_id));
+    assert_eq!(parsed_command.get_source_client_id(), Some(client_id));
 
-    // Every other client-taking verb carries its client inside the command.
+    // The flag never reaches the command; it rides on the command's source.
+    let (_, mapped_command) = parsed_command
+        .build_action_command(&ResolvedTargets::default(), Direction::Left)
+        .expect("resize-pane is an action");
     assert_eq!(
-        CliCommand::NewPane {
-            direction: None,
-            should_stack: false,
+        mapped_command,
+        Command::ResizePane(ResizePaneArgs {
             pane_id: None,
-            session_reference: None,
-            tab_reference: None,
-            client_id: Some(client_id),
-        }
-        .get_source_client_id(),
-        None
-    );
-    assert_eq!(
-        CliCommand::Run {
-            direction: None,
-            should_stack: false,
-            pane_id: None,
-            session_reference: None,
-            tab_reference: None,
-            client_id: Some(client_id),
-            command_arguments: vec!["htop".to_string()],
-        }
-        .get_source_client_id(),
-        None
-    );
-    assert_eq!(
-        CliCommand::NewTab {
-            session_reference: None,
-            client_id: Some(client_id),
-        }
-        .get_source_client_id(),
-        None
-    );
-    assert_eq!(
-        CliCommand::NextTab {
-            client_id: Some(client_id),
-        }
-        .get_source_client_id(),
-        None
-    );
-    assert_eq!(
-        CliCommand::PreviousTab {
-            client_id: Some(client_id),
-        }
-        .get_source_client_id(),
-        None
-    );
-    assert_eq!(
-        CliCommand::FocusTab {
-            tab_index: Some(0),
-            tab_reference: None,
-            client_id: Some(client_id),
-        }
-        .get_source_client_id(),
-        None
-    );
-    assert_eq!(
-        CliCommand::FocusPane {
-            pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
-            client_id: Some(client_id),
-        }
-        .get_source_client_id(),
-        None
-    );
-    assert_eq!(
-        CliCommand::Lock {
-            client_id: Some(client_id),
-        }
-        .get_source_client_id(),
-        None
-    );
-    assert_eq!(
-        CliCommand::Unlock {
-            client_id: Some(client_id),
-        }
-        .get_source_client_id(),
-        None
-    );
-    assert_eq!(
-        CliCommand::ToggleLock {
-            client_id: Some(client_id),
-        }
-        .get_source_client_id(),
-        None
-    );
-    assert_eq!(
-        CliCommand::ScrollPane {
-            scroll_line_count: 3,
-            pane_id: None,
-            client_id: Some(client_id),
-        }
-        .get_source_client_id(),
-        Some(client_id)
+            direction: Direction::Right,
+            resize_amount_cells: 3,
+        })
     );
 }
 
@@ -1781,10 +1743,11 @@ fn every_direction_value_parses_to_its_core_direction() {
         assert_eq!(
             mapped_command,
             Command::NewPane(NewPaneArgs {
-                source_pane_id: None,
-                tab_id: None,
-                direction: *expected_direction,
-                should_stack: false,
+                placement: NewPanePlacement::Split {
+                    source_pane_id: None,
+                    tab_id: None,
+                    direction: *expected_direction,
+                },
                 working_directory: None,
                 spawn_spec: None,
                 client_id: None,
@@ -1820,6 +1783,7 @@ fn resize_pane_defaults_the_size_to_one() {
             direction: DirectionArgument::Left,
             resize_amount_cells: 1,
             pane_id: None,
+            client_id: None,
         }
     );
 }
@@ -1832,6 +1796,7 @@ fn resize_pane_accepts_a_negative_size_in_both_spellings() {
             direction: DirectionArgument::Up,
             resize_amount_cells: -3,
             pane_id: None,
+            client_id: None,
         }
     );
     assert_eq!(
@@ -1840,6 +1805,7 @@ fn resize_pane_accepts_a_negative_size_in_both_spellings() {
             direction: DirectionArgument::Up,
             resize_amount_cells: -3,
             pane_id: None,
+            client_id: None,
         }
     );
 }
@@ -2127,24 +2093,28 @@ fn run_takes_its_command_after_the_separator() {
     assert_eq!(
         parse_cli_command(&["koshi", "run", "--", "htop", "-d", "5"]),
         CliCommand::Run {
-            direction: None,
-            should_stack: false,
-            pane_id: None,
-            session_reference: None,
-            tab_reference: None,
-            client_id: None,
+            new_pane_flags: NewPaneFlags {
+                direction: None,
+                should_stack: false,
+                pane_id: None,
+                session_reference: None,
+                tab_reference: None,
+                client_id: None,
+            },
             command_arguments: vec!["htop".to_string(), "-d".to_string(), "5".to_string()],
         }
     );
     assert_eq!(
         parse_cli_command(&["koshi", "run", "--direction", "down", "--", "htop"]),
         CliCommand::Run {
-            direction: Some(DirectionArgument::Down),
-            should_stack: false,
-            pane_id: None,
-            session_reference: None,
-            tab_reference: None,
-            client_id: None,
+            new_pane_flags: NewPaneFlags {
+                direction: Some(DirectionArgument::Down),
+                should_stack: false,
+                pane_id: None,
+                session_reference: None,
+                tab_reference: None,
+                client_id: None,
+            },
             command_arguments: vec!["htop".to_string()],
         }
     );
@@ -2156,12 +2126,14 @@ fn run_takes_an_optional_source_pane() {
     assert_eq!(
         parse_cli_command(&["koshi", "run", "--pane", &pane_flag, "--", "htop"]),
         CliCommand::Run {
-            direction: None,
-            should_stack: false,
-            pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
-            session_reference: None,
-            tab_reference: None,
-            client_id: None,
+            new_pane_flags: NewPaneFlags {
+                direction: None,
+                should_stack: false,
+                pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
+                session_reference: None,
+                tab_reference: None,
+                client_id: None,
+            },
             command_arguments: vec!["htop".to_string()],
         }
     );
@@ -2171,19 +2143,20 @@ fn run_takes_an_optional_source_pane() {
         build_cli_action(&["koshi", "run", "--pane", &pane_flag, "--", "htop"]);
     assert_eq!(
         mapped_command,
-        Command::RunCommandPane(RunCommandPaneArgs {
-            spawn_spec: SpawnSpec {
+        Command::NewPane(NewPaneArgs {
+            placement: NewPanePlacement::Split {
+                source_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
+                tab_id: None,
+                direction: Direction::Right,
+            },
+            working_directory: None,
+            spawn_spec: Some(SpawnSpec {
                 program: PathBuf::from("htop"),
                 arguments: vec![],
                 working_directory: None,
                 environment_variables: BTreeMap::new(),
                 shell_kind: ShellKind::Other("htop".to_string()),
-            },
-            working_directory: None,
-            source_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
-            tab_id: None,
-            direction: Direction::Right,
-            should_stack: false,
+            }),
             client_id: None,
         })
     );
@@ -2468,10 +2441,11 @@ fn action_subcommands_map_to_their_exact_commands() {
             vec!["koshi", "new-pane", "--direction", "right"],
             "new-pane",
             Command::NewPane(NewPaneArgs {
-                source_pane_id: None,
-                tab_id: None,
-                direction: Direction::Right,
-                should_stack: false,
+                placement: NewPanePlacement::Split {
+                    source_pane_id: None,
+                    tab_id: None,
+                    direction: Direction::Right,
+                },
                 working_directory: None,
                 spawn_spec: None,
                 client_id: None,
@@ -2481,10 +2455,10 @@ fn action_subcommands_map_to_their_exact_commands() {
             vec!["koshi", "new-pane", "--stacked", "--pane", &pane_flag],
             "new-pane",
             Command::NewPane(NewPaneArgs {
-                source_pane_id: Some(pane_id),
-                tab_id: None,
-                direction: Direction::Right,
-                should_stack: true,
+                placement: NewPanePlacement::Stacked {
+                    source_pane_id: Some(pane_id),
+                    tab_id: None,
+                },
                 working_directory: None,
                 spawn_spec: None,
                 client_id: None,
@@ -2669,19 +2643,19 @@ fn action_subcommands_map_to_their_exact_commands() {
         (
             vec!["koshi", "run", "--stacked", "--", "htop", "-d", "5"],
             "run",
-            Command::RunCommandPane(RunCommandPaneArgs {
-                spawn_spec: SpawnSpec {
+            Command::NewPane(NewPaneArgs {
+                placement: NewPanePlacement::Stacked {
+                    source_pane_id: None,
+                    tab_id: None,
+                },
+                working_directory: None,
+                spawn_spec: Some(SpawnSpec {
                     program: PathBuf::from("htop"),
                     arguments: vec!["-d".to_string(), "5".to_string()],
                     working_directory: None,
                     environment_variables: BTreeMap::new(),
                     shell_kind: ShellKind::Other("htop".to_string()),
-                },
-                working_directory: None,
-                source_pane_id: None,
-                tab_id: None,
-                direction: Direction::Right,
-                should_stack: true,
+                }),
                 client_id: None,
             }),
         ),
@@ -2957,82 +2931,133 @@ fn target_client_names_the_client_of_every_verb_that_takes_one() {
     let client_id = ClientId::from_uuid(build_fixed_test_uuid());
     let client_flag = format!("client-{}", build_fixed_test_uuid());
     let pane_flag = format!("pane-{}", build_fixed_test_uuid());
-    let argument_value_lists: Vec<Vec<&str>> = vec![
-        vec!["koshi", "new-pane", "--client", &client_flag],
-        vec!["koshi", "run", "--client", &client_flag, "--", "htop"],
-        vec!["koshi", "new-tab", "--client", &client_flag],
-        vec!["koshi", "next-tab", "--client", &client_flag],
-        vec!["koshi", "previous-tab", "--client", &client_flag],
-        vec![
-            "koshi",
-            "focus-tab",
-            "--index",
-            "0",
-            "--client",
-            &client_flag,
-        ],
-        vec![
-            "koshi",
-            "focus-pane",
-            "--pane",
-            &pane_flag,
-            "--client",
-            &client_flag,
-        ],
-        vec!["koshi", "lock", "--client", &client_flag],
-        vec!["koshi", "unlock", "--client", &client_flag],
-        vec!["koshi", "toggle-lock", "--client", &client_flag],
-        vec!["koshi", "toggle-pane-fullscreen", "--client", &client_flag],
-        vec![
-            "koshi",
-            "place-pane",
-            "--pane",
-            &pane_flag,
-            "--tab",
-            "logs",
-            "--direction",
-            "left",
-            "--client",
-            &client_flag,
-        ],
-        vec![
-            "koshi",
-            "scroll-pane",
-            "--lines",
-            "3",
-            "--client",
-            &client_flag,
-        ],
+    // (arguments, whether the client rides on the command source)
+    let argument_value_lists: Vec<(Vec<&str>, bool)> = vec![
+        (vec!["koshi", "new-pane", "--client", &client_flag], false),
+        (
+            vec!["koshi", "run", "--client", &client_flag, "--", "htop"],
+            false,
+        ),
+        (vec!["koshi", "new-tab", "--client", &client_flag], false),
+        (vec!["koshi", "next-tab", "--client", &client_flag], false),
+        (
+            vec!["koshi", "previous-tab", "--client", &client_flag],
+            false,
+        ),
+        (
+            vec![
+                "koshi",
+                "focus-tab",
+                "--index",
+                "0",
+                "--client",
+                &client_flag,
+            ],
+            false,
+        ),
+        (
+            vec![
+                "koshi",
+                "focus-pane",
+                "--pane",
+                &pane_flag,
+                "--client",
+                &client_flag,
+            ],
+            false,
+        ),
+        (vec!["koshi", "lock", "--client", &client_flag], false),
+        (vec!["koshi", "unlock", "--client", &client_flag], false),
+        (
+            vec!["koshi", "toggle-lock", "--client", &client_flag],
+            false,
+        ),
+        (
+            vec!["koshi", "toggle-pane-fullscreen", "--client", &client_flag],
+            true,
+        ),
+        (
+            vec![
+                "koshi",
+                "place-pane",
+                "--pane",
+                &pane_flag,
+                "--tab",
+                "logs",
+                "--direction",
+                "left",
+                "--client",
+                &client_flag,
+            ],
+            true,
+        ),
+        (
+            vec![
+                "koshi",
+                "scroll-pane",
+                "--lines",
+                "3",
+                "--client",
+                &client_flag,
+            ],
+            true,
+        ),
+        (
+            vec![
+                "koshi",
+                "resize-pane",
+                "--direction",
+                "left",
+                "--client",
+                &client_flag,
+            ],
+            true,
+        ),
     ];
-    for argument_values in &argument_value_lists {
+    for (argument_values, is_client_on_source) in &argument_value_lists {
+        let cli_command = parse_cli_command(argument_values);
         assert_eq!(
-            parse_cli_command(argument_values).get_target_client_id(),
+            cli_command.get_target_client_id(),
             Some(client_id),
+            "for {argument_values:?}"
+        );
+        assert_eq!(
+            cli_command.get_source_client_id(),
+            is_client_on_source.then_some(client_id),
             "for {argument_values:?}"
         );
     }
 
-    assert_eq!(
-        parse_cli_command(&["koshi", "close-pane"]).get_target_client_id(),
-        None
-    );
-    assert_eq!(
-        parse_cli_command(&["koshi", "move-tab", "--index", "0"]).get_target_client_id(),
-        None
-    );
+    for argument_values in [
+        vec!["koshi", "close-pane"],
+        vec!["koshi", "move-tab", "--index", "0"],
+        vec!["koshi", "toggle-pane-fullscreen"],
+    ] {
+        let cli_command = parse_cli_command(&argument_values);
+        assert_eq!(
+            cli_command.get_target_client_id(),
+            None,
+            "for {argument_values:?}"
+        );
+        assert_eq!(
+            cli_command.get_source_client_id(),
+            None,
+            "for {argument_values:?}"
+        );
+    }
 }
 
 /// A `--tab` the routing layer resolved wins over the same flag given
 /// directly as an id.
 #[test]
 fn a_resolved_tab_target_wins_over_a_tab_flag_given_as_an_id() {
-    let flag_tab = TabId::from_uuid(build_fixed_test_uuid());
-    let resolved_tab = TabId::new();
-    assert_ne!(flag_tab, resolved_tab);
-    let tab_flag = flag_tab.to_string();
+    let flag_tab_id = TabId::from_uuid(build_fixed_test_uuid());
+    let resolved_tab_id = TabId::new();
+    assert_ne!(flag_tab_id, resolved_tab_id);
+    let tab_flag = flag_tab_id.to_string();
     let resolved_targets = ResolvedTargets {
         session_id: None,
-        tab_id: Some(resolved_tab),
+        tab_id: Some(resolved_tab_id),
     };
 
     let (_, mapped_command) = parse_cli_command(&["koshi", "close-tab", "--tab", &tab_flag])
@@ -3041,7 +3066,7 @@ fn a_resolved_tab_target_wins_over_a_tab_flag_given_as_an_id() {
     assert_eq!(
         mapped_command,
         Command::CloseTab(CloseTabArgs {
-            tab_id: Some(resolved_tab),
+            tab_id: Some(resolved_tab_id),
             should_force_close: false,
             should_kill_process_tree: false,
         })
@@ -3053,10 +3078,11 @@ fn a_resolved_tab_target_wins_over_a_tab_flag_given_as_an_id() {
     assert_eq!(
         mapped_command,
         Command::NewPane(NewPaneArgs {
-            source_pane_id: None,
-            tab_id: Some(resolved_tab),
-            direction: Direction::Right,
-            should_stack: false,
+            placement: NewPanePlacement::Split {
+                source_pane_id: None,
+                tab_id: Some(resolved_tab_id),
+                direction: Direction::Right,
+            },
             working_directory: None,
             spawn_spec: None,
             client_id: None,
@@ -3262,6 +3288,7 @@ fn resize_pane_size_accepts_the_i16_boundaries() {
             direction: DirectionArgument::Up,
             resize_amount_cells: i16::MAX,
             pane_id: None,
+            client_id: None,
         }
     );
     assert_eq!(
@@ -3277,6 +3304,7 @@ fn resize_pane_size_accepts_the_i16_boundaries() {
             direction: DirectionArgument::Up,
             resize_amount_cells: i16::MIN,
             pane_id: None,
+            client_id: None,
         }
     );
 }
@@ -3365,31 +3393,34 @@ fn run_accepts_an_empty_program_token() {
     assert_eq!(
         parse_cli_command(&["koshi", "run", "--", ""]),
         CliCommand::Run {
-            direction: None,
-            should_stack: false,
-            pane_id: None,
-            session_reference: None,
-            tab_reference: None,
-            client_id: None,
+            new_pane_flags: NewPaneFlags {
+                direction: None,
+                should_stack: false,
+                pane_id: None,
+                session_reference: None,
+                tab_reference: None,
+                client_id: None,
+            },
             command_arguments: vec![String::new()],
         }
     );
     let (_, mapped_command) = build_cli_action(&["koshi", "run", "--", ""]);
     assert_eq!(
         mapped_command,
-        Command::RunCommandPane(RunCommandPaneArgs {
-            spawn_spec: SpawnSpec {
+        Command::NewPane(NewPaneArgs {
+            placement: NewPanePlacement::Split {
+                source_pane_id: None,
+                tab_id: None,
+                direction: Direction::Right,
+            },
+            working_directory: None,
+            spawn_spec: Some(SpawnSpec {
                 program: PathBuf::new(),
                 arguments: vec![],
                 working_directory: None,
                 environment_variables: BTreeMap::new(),
                 shell_kind: ShellKind::Other(String::new()),
-            },
-            working_directory: None,
-            source_pane_id: None,
-            tab_id: None,
-            direction: Direction::Right,
-            should_stack: false,
+            }),
             client_id: None,
         })
     );
@@ -3398,14 +3429,15 @@ fn run_accepts_an_empty_program_token() {
 #[test]
 fn run_program_name_is_preserved_verbatim_for_non_ascii() {
     let (_, mapped_command) = build_cli_action(&["koshi", "run", "--", "☕"]);
-    let Command::RunCommandPane(command_args) = mapped_command else {
-        panic!("expected RunCommandPane");
+    let Command::NewPane(NewPaneArgs {
+        spawn_spec: Some(spawn_spec),
+        ..
+    }) = mapped_command
+    else {
+        panic!("expected NewPane carrying a program");
     };
-    assert_eq!(command_args.spawn_spec.program, PathBuf::from("☕"));
-    assert_eq!(
-        command_args.spawn_spec.shell_kind,
-        ShellKind::Other("☕".to_string())
-    );
+    assert_eq!(spawn_spec.program, PathBuf::from("☕"));
+    assert_eq!(spawn_spec.shell_kind, ShellKind::Other("☕".to_string()));
 }
 
 // --- Session and tab arguments: id or name, verb by verb ---

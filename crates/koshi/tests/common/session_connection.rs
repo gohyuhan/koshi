@@ -6,7 +6,7 @@
 //! the session server answers. [`attach_client_on_connection`] joins the
 //! session as an attached client, and [`read_session_ending`] reads that
 //! client's event stream until a frame or a read failure ends it.
-//! [`send_session_request`], [`submit_session_command`] and [`build_pane`]
+//! [`send_session_request`], [`submit_session_command`] and [`create_pane`]
 //! ask the session for something on a connection that carries no client's
 //! event stream.
 
@@ -14,7 +14,9 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::Instant;
 
-use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource, NewPaneArgs};
+use koshi_core::command::{
+    Command, CommandEnvelope, CommandResult, CommandSource, NewPaneArgs, NewPanePlacement,
+};
 use koshi_core::event::Event;
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId};
@@ -210,7 +212,7 @@ pub fn submit_session_command(
 
 /// Split a new pane off the client's focused one, running `spawn_spec`, and hand
 /// back the pane the session created. `None` launches the platform shell.
-pub fn build_pane(
+pub fn create_pane(
     connection: &mut Connection,
     session_id: SessionId,
     client_id: ClientId,
@@ -221,10 +223,11 @@ pub fn build_pane(
         session_id,
         client_id,
         Command::NewPane(NewPaneArgs {
-            source_pane_id: None,
-            tab_id: None,
-            direction: Direction::Right,
-            should_stack: false,
+            placement: NewPanePlacement::Split {
+                source_pane_id: None,
+                tab_id: None,
+                direction: Direction::Right,
+            },
             working_directory: None,
             spawn_spec,
             client_id: Some(client_id),
@@ -232,7 +235,7 @@ pub fn build_pane(
     );
     emitted_events
         .iter()
-        .find_map(|session_event| match session_event {
+        .find_map(|emitted_event| match emitted_event {
             Event::PaneCreated(created_pane) => Some(created_pane.pane_id),
             _ => None,
         })

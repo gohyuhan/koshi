@@ -13,7 +13,7 @@ use std::{
 pub use koshi_core::client::ClientOrigin;
 use koshi_core::{
     command::Selection,
-    geometry::{PaneArea, PixelCellSize, Point, Size},
+    geometry::{PaneArea, PixelCellSize, Point, Rect, Size},
     ids::{ClientId, PaneId, SessionId, TabId},
     lock::LockMode,
 };
@@ -31,22 +31,86 @@ pub const fn compute_default_pane_area_size(viewport_size: Size) -> Size {
     }
 }
 
-/// One client's view of one floating pane: its placement, and whether this
-/// client pinned or minimized it.
+/// One client's view of one floating pane: where this client draws it, and
+/// whether this client minimized it.
 ///
 /// A client that stores no view of a floating pane reads this type's
-/// `Default`: no placement, not pinned, not minimized.
+/// `Default`: the default placement, not minimized.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FloatingPaneView {
-    /// The top-left cell of the pane's outer rectangle, counted from this
-    /// client's pane-area origin. `None` when this client set no placement.
-    pub placement: Option<Point>,
-    /// Whether this client pinned the pane.
-    /// [`Client::set_floating_pane_placement`] refuses a pinned pane.
-    pub is_pinned: bool,
+    /// Where this client draws the pane.
+    /// [`Client::set_floating_pane_position`] refuses a pinned pane.
+    pub position: FloatingPanePosition,
     /// Whether this client minimized the pane.
     /// [`Client::focus_floating_pane`] refuses a minimized pane.
     pub is_minimized: bool,
+}
+
+/// Where one client draws one floating pane: the default placement, or a
+/// stored top-left cell counted from that client's pane-area origin.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FloatingPanePosition {
+    /// The client stored no cell: the pane draws at the default placement
+    /// ([`place_floating_pane`]).
+    #[default]
+    Default,
+    /// The pane's top-left cell, stored by a move, a resize, or the `at` of
+    /// the command that created the pane.
+    Moved(Point),
+    /// The pane's top-left cell, locked: a move and a resize of the pane's
+    /// left or top edge are refused.
+    Pinned(Point),
+}
+
+/// The rectangle one client draws a floating pane in, counted in that client's
+/// pane-area cells.
+///
+/// The top-left cell is the cell `position` stores, or for
+/// [`FloatingPanePosition::Default`] the default placement: `size` centered in
+/// `client_viewport` (rounding down), then moved `(2, 1)` per cascade step.
+/// The step is `cascade_index % (max_steps + 1)`, where `max_steps` is
+/// `min(right_margin / 2, bottom_margin)` and the margins count the cells
+/// right of and below the centered rectangle. The rectangle then moves left
+/// and up until it lies inside `client_viewport`; on an axis where `size` is
+/// larger than `client_viewport`, it starts at `0`. `position` itself is not
+/// changed.
+///
+/// A `48x13` pane on an `80x22` viewport centers at `(16, 4)`, and `max_steps`
+/// is `min(16 / 2, 5) = 5`: `cascade_index` `1` → `(18, 5)`, `6` → `(16, 4)`.
+/// `Moved((70, 2))` for a `20x10` pane on an `80x22` viewport → `(60, 2)`.
+#[must_use]
+pub fn place_floating_pane(
+    position: FloatingPanePosition,
+    size: Size,
+    cascade_index: usize,
+    client_viewport: Size,
+) -> Rect {
+    let free_column_count = client_viewport
+        .column_count
+        .saturating_sub(size.column_count);
+    let free_row_count = client_viewport.row_count.saturating_sub(size.row_count);
+    let stored_origin = match position {
+        FloatingPanePosition::Moved(origin) | FloatingPanePosition::Pinned(origin) => origin,
+        FloatingPanePosition::Default => {
+            let centered_column = free_column_count / 2;
+            let centered_row = free_row_count / 2;
+            let right_margin = free_column_count - centered_column;
+            let bottom_margin = free_row_count - centered_row;
+            let max_cascade_steps = usize::from((right_margin / 2).min(bottom_margin));
+            let cascade_step = (cascade_index % (max_cascade_steps + 1)) as u16;
+            Point {
+                column: centered_column + 2 * cascade_step,
+                row: centered_row + cascade_step,
+            }
+        }
+    };
+    Rect {
+        origin: Point {
+            column: stored_origin.column.min(free_column_count),
+            row: stored_origin.row.min(free_row_count),
+        },
+        size,
+    }
 }
 
 /// One attached client: a single terminal connected to a session, holding the
@@ -113,7 +177,7 @@ pub struct Client {
     placement_revision: u64,
     /// This client's view of each floating pane, keyed by pane id. The map
     /// holds only views that differ from [`FloatingPaneView::default`]: a pane
-    /// with no entry reads as no placement, not pinned and not minimized.
+    /// with no entry reads as the default placement, not minimized.
     floating_pane_view_by_pane_id: HashMap<PaneId, FloatingPaneView>,
     /// The floating panes this client focused or restored, least recently
     /// first. Focusing or restoring a pane moves it to the end.
@@ -543,28 +607,40 @@ impl Client {
         self.raise_and_focus_floating_pane(pane_id);
     }
 
-    /// Set whether this client pins `pane_id`. A pinned pane refuses
-    /// [`set_floating_pane_placement`](Self::set_floating_pane_placement). The
+    /// Pin `pane_id` for this client with its top-left cell at `position`,
+    /// counted from this client's pane-area origin. A pinned pane refuses
+    /// [`set_floating_pane_position`](Self::set_floating_pane_position). The
     /// focus and the floating focus order stay as they are. Does not check that
     /// `pane_id` is a floating pane.
-    pub fn set_floating_pane_pinned(&mut self, pane_id: PaneId, is_pinned: bool) {
+    pub fn pin_floating_pane(&mut self, pane_id: PaneId, position: Point) {
         let mut floating_pane_view = self.get_floating_pane_view(pane_id);
-        floating_pane_view.is_pinned = is_pinned;
+        floating_pane_view.position = FloatingPanePosition::Pinned(position);
         self.set_floating_pane_view(pane_id, floating_pane_view);
     }
 
-    /// Store `placement` as this client's placement of `pane_id`: the top-left
-    /// cell of the pane's outer rectangle, counted from this client's pane-area
-    /// origin. Does not check that `pane_id` is a floating pane.
+    /// Unpin `pane_id` for this client: a pane pinned at a cell stays at that
+    /// cell, unpinned. A pane this client did not pin is left as it is. Does
+    /// not check that `pane_id` is a floating pane.
+    pub fn unpin_floating_pane(&mut self, pane_id: PaneId) {
+        let mut floating_pane_view = self.get_floating_pane_view(pane_id);
+        if let FloatingPanePosition::Pinned(position) = floating_pane_view.position {
+            floating_pane_view.position = FloatingPanePosition::Moved(position);
+            self.set_floating_pane_view(pane_id, floating_pane_view);
+        }
+    }
+
+    /// Store `position` as this client's top-left cell of `pane_id`, counted
+    /// from this client's pane-area origin. Does not check that `pane_id` is a
+    /// floating pane.
     ///
     /// Returns `false`, changing nothing, when this client pinned `pane_id`.
     #[must_use]
-    pub fn set_floating_pane_placement(&mut self, pane_id: PaneId, placement: Point) -> bool {
+    pub fn set_floating_pane_position(&mut self, pane_id: PaneId, position: Point) -> bool {
         let mut floating_pane_view = self.get_floating_pane_view(pane_id);
-        if floating_pane_view.is_pinned {
+        if let FloatingPanePosition::Pinned(_) = floating_pane_view.position {
             return false;
         }
-        floating_pane_view.placement = Some(placement);
+        floating_pane_view.position = FloatingPanePosition::Moved(position);
         self.set_floating_pane_view(pane_id, floating_pane_view);
         true
     }
@@ -592,7 +668,11 @@ impl Client {
 
     /// Store `floating_pane_view` as this client's view of `pane_id`, or drop
     /// the stored view when `floating_pane_view` is the default.
-    fn set_floating_pane_view(&mut self, pane_id: PaneId, floating_pane_view: FloatingPaneView) {
+    pub(crate) fn set_floating_pane_view(
+        &mut self,
+        pane_id: PaneId,
+        floating_pane_view: FloatingPaneView,
+    ) {
         if floating_pane_view == FloatingPaneView::default() {
             self.floating_pane_view_by_pane_id.remove(&pane_id);
         } else {

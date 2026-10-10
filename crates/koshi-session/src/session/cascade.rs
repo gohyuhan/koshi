@@ -10,9 +10,11 @@
 //!
 //! [`remove_pane_cascade`] is the cascade proper: drop the pane, collapse the
 //! layout, repair each affected client's focus, and — if that empties the tab —
-//! close the tab, and if that empties the session, quit. Each function returns
-//! the events describing what it did, for the caller to emit; neither touches
-//! the terminal or spawns a process.
+//! close the tab, and if that empties the session, quit. A floating pane holds
+//! no leaf: [`remove_floating_pane`] drops it from the registry, the floating
+//! set and every client's view, and closes nothing above it. Each function
+//! returns the events describing what it did, for the caller to emit; none
+//! touches the terminal or spawns a process.
 
 use std::collections::HashSet;
 
@@ -38,8 +40,8 @@ use crate::session::tab_ops::close_and_refocus_tab;
 /// The shared removal routine behind both a closed pane and a self-exiting
 /// shell:
 /// 1. drop the pane from the registry and the tab's focus history;
-/// 2. collapse its leaf out of the layout — *before* focus repair, so the tree
-///    never names a gone pane while candidates are computed;
+/// 2. collapse its leaf out of the layout, before focus repair computes its
+///    candidates;
 /// 3. drop the zoom of every client zoomed on the removed pane, returning
 ///    those clients to their tiled view; a client zoomed on a surviving pane
 ///    keeps its zoom;
@@ -64,7 +66,7 @@ pub fn remove_pane_cascade(
     pane_sizing: PaneSizing,
     pane_exit: Option<PaneProcessExited>,
 ) -> Vec<Event> {
-    // Both checks run before anything is removed, so an unknown pane and an
+    // Both checks run before anything is removed: an unknown pane and an
     // unknown tab each leave the session as it was.
     if !session.tabs.contains_key(&tab_id) || session.panes.remove_pane_record(pane_id).is_none() {
         return Vec::new();
@@ -76,7 +78,10 @@ pub fn remove_pane_cascade(
 
     let mut emitted_events = vec![
         Event::PaneClosing(PaneClosing { pane_id }),
-        Event::PaneRemoved(PaneRemoved { pane_id, tab_id }),
+        Event::PaneRemoved(PaneRemoved {
+            pane_id,
+            tab_id: Some(tab_id),
+        }),
     ];
 
     tab.remove_focus_mru(pane_id);
@@ -160,7 +165,7 @@ pub fn remove_pane_cascade(
                         }
                         emitted_events.push(Event::PaneFocused(PaneFocused {
                             client_id,
-                            tab_id,
+                            tab_id: Some(tab_id),
                             pane_id: new_pane_id,
                             previous_pane_id,
                         }));
@@ -255,6 +260,28 @@ fn resolve_terminal_too_small_cause(
     }
 
     TerminalTooSmallCause::Terminal
+}
+
+/// Remove the floating pane `pane_id`: drop its registry record, its member
+/// entry in the floating set, and every attached client's view of it
+/// ([`Session::remove_floating_member`]). No layout changes and no tab closes.
+///
+/// Returns [`Event::PaneClosing`] then [`Event::PaneRemoved`] with
+/// `tab_id: None`. A `pane_id` that is not a floating member changes nothing
+/// and returns no events.
+#[must_use]
+pub fn remove_floating_pane(session: &mut Session, pane_id: PaneId) -> Vec<Event> {
+    if session.remove_floating_member(pane_id).is_none() {
+        return Vec::new();
+    }
+    let _ = session.panes.remove_pane_record(pane_id);
+    vec![
+        Event::PaneClosing(PaneClosing { pane_id }),
+        Event::PaneRemoved(PaneRemoved {
+            pane_id,
+            tab_id: None,
+        }),
+    ]
 }
 
 /// Handle a pane's child process exiting.

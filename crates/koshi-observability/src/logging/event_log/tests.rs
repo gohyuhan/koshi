@@ -6,14 +6,15 @@
 
 use super::*;
 
+use koshi_core::command::PanePlacementTarget;
 use koshi_core::event::{
     ConfigReloaded, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneClosing,
-    PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneFocused, PaneProcessExited,
-    PaneRemoved, PtyResized, SelectionChanged, TabClosed, TabCreated, TabFocused, TabMoved,
-    TerminalTooSmallCause, TerminalTooSmallEntered,
+    PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneFocused, PanePlacementCommitted,
+    PaneProcessExited, PaneRemoved, PtyResized, SelectionChanged, TabClosed, TabCreated,
+    TabFocused, TabMoved, TerminalTooSmallCause, TerminalTooSmallEntered,
 };
 use koshi_core::geometry::{PaneArea, Size};
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
 
@@ -36,7 +37,10 @@ fn pane_created_is_one_info_line_carrying_its_pane_and_tab_ids() {
     let pane_id = PaneId::new();
     let tab_id = TabId::new();
 
-    let log_output = capture_event_logs(&[Event::PaneCreated(PaneCreated { pane_id, tab_id })]);
+    let log_output = capture_event_logs(&[Event::PaneCreated(PaneCreated {
+        pane_id,
+        tab_id: Some(tab_id),
+    })]);
 
     assert_eq!(
         log_output.lines().count(),
@@ -69,10 +73,13 @@ fn a_new_pane_writes_its_created_line_before_its_focused_line() {
     let tab_id = TabId::new();
 
     let log_output = capture_event_logs(&[
-        Event::PaneCreated(PaneCreated { pane_id, tab_id }),
+        Event::PaneCreated(PaneCreated {
+            pane_id,
+            tab_id: Some(tab_id),
+        }),
         Event::PaneFocused(PaneFocused {
             client_id: ClientId::new(),
-            tab_id,
+            tab_id: Some(tab_id),
             pane_id,
             previous_pane_id: None,
         }),
@@ -180,7 +187,7 @@ fn no_event_is_ever_logged_as_an_error() {
     let log_output = capture_event_logs(&[
         Event::PaneCreated(PaneCreated {
             pane_id: PaneId::new(),
-            tab_id: TabId::new(),
+            tab_id: Some(TabId::new()),
         }),
         Event::ConfigReloaded(ConfigReloaded {
             session_id: SessionId::new(),
@@ -247,7 +254,10 @@ fn a_closed_pane_is_recorded_once_by_the_removal_not_the_announcement() {
 
     let log_output = capture_event_logs(&[
         Event::PaneClosing(PaneClosing { pane_id }),
-        Event::PaneRemoved(PaneRemoved { pane_id, tab_id }),
+        Event::PaneRemoved(PaneRemoved {
+            pane_id,
+            tab_id: Some(tab_id),
+        }),
     ]);
 
     assert_eq!(
@@ -394,7 +404,7 @@ fn each_focus_and_tab_lifecycle_fact_writes_its_own_message_and_ids() {
 
     let focused_pane = capture_event_logs(&[Event::PaneFocused(PaneFocused {
         client_id,
-        tab_id,
+        tab_id: Some(tab_id),
         pane_id,
         previous_pane_id: Some(previous_pane_id),
     })]);
@@ -798,4 +808,71 @@ fn the_remaining_silent_events_write_nothing() {
         log_output, "",
         "an event kept out of the file reached it: {log_output}"
     );
+}
+
+#[test]
+fn a_floating_pane_line_carries_no_tab_id_field() {
+    let pane_id = PaneId::new();
+    let client_id = ClientId::new();
+
+    let log_output = capture_event_logs(&[
+        Event::PaneCreated(PaneCreated {
+            pane_id,
+            tab_id: None,
+        }),
+        Event::PaneFocused(PaneFocused {
+            client_id,
+            tab_id: None,
+            pane_id,
+            previous_pane_id: None,
+        }),
+        Event::PaneRemoved(PaneRemoved {
+            pane_id,
+            tab_id: None,
+        }),
+    ]);
+
+    assert_eq!(
+        log_output.lines().count(),
+        3,
+        "expected exactly three lines: {log_output}"
+    );
+    for log_line in log_output.lines() {
+        assert!(
+            log_line.contains(&format!(r#""pane_id":"{pane_id}""#)),
+            "{log_line}"
+        );
+        assert!(!log_line.contains("tab_id"), "{log_line}");
+    }
+}
+
+#[test]
+fn a_placement_from_a_floating_pane_logs_only_its_destination_tab() {
+    let source_pane_id = PaneId::new();
+    let destination_tab_id = TabId::new();
+
+    let log_output = capture_event_logs(&[Event::PanePlacementCommitted(PanePlacementCommitted {
+        command_id: CommandId::new(),
+        source_pane_id,
+        source_tab_id: None,
+        destination_tab_id: Some(destination_tab_id),
+        placement_target: PanePlacementTarget::Swap {
+            target_pane_id: PaneId::new(),
+        },
+    })]);
+
+    assert_eq!(
+        log_output.lines().count(),
+        1,
+        "expected exactly one line: {log_output}"
+    );
+    assert!(
+        log_output.contains(&format!(r#""source_pane_id":"{source_pane_id}""#)),
+        "{log_output}"
+    );
+    assert!(
+        log_output.contains(&format!(r#""destination_tab_id":"{destination_tab_id}""#)),
+        "{log_output}"
+    );
+    assert!(!log_output.contains("source_tab_id"), "{log_output}");
 }

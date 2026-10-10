@@ -1186,9 +1186,12 @@ fn every_structure_event_converts_to_its_wire_frame() {
     assert_eq!(
         build_wire_event(&Delivery::Event(Event::PaneCreated(PaneCreated {
             pane_id,
-            tab_id,
+            tab_id: Some(tab_id),
         }))),
-        Some(SessionEvent::PaneCreated { pane_id, tab_id })
+        Some(SessionEvent::PaneCreated {
+            pane_id,
+            tab_id: Some(tab_id)
+        })
     );
     assert_eq!(
         build_wire_event(&Delivery::Event(Event::PaneProcessExited(
@@ -1213,20 +1216,23 @@ fn every_structure_event_converts_to_its_wire_frame() {
     assert_eq!(
         build_wire_event(&Delivery::Event(Event::PaneRemoved(PaneRemoved {
             pane_id,
-            tab_id,
+            tab_id: Some(tab_id),
         }))),
-        Some(SessionEvent::PaneRemoved { pane_id, tab_id })
+        Some(SessionEvent::PaneRemoved {
+            pane_id,
+            tab_id: Some(tab_id)
+        })
     );
     assert_eq!(
         build_wire_event(&Delivery::Event(Event::PaneFocused(PaneFocused {
             client_id,
-            tab_id,
+            tab_id: Some(tab_id),
             pane_id,
             previous_pane_id: Some(other_pane_id),
         }))),
         Some(SessionEvent::PaneFocused {
             client_id,
-            tab_id,
+            tab_id: Some(tab_id),
             pane_id,
             previous_pane_id: Some(other_pane_id),
         })
@@ -1248,16 +1254,16 @@ fn every_structure_event_converts_to_its_wire_frame() {
             PanePlacementCommitted {
                 command_id: placement_command_id,
                 source_pane_id: pane_id,
-                source_tab_id: tab_id,
-                destination_tab_id: other_tab_id,
+                source_tab_id: Some(tab_id),
+                destination_tab_id: Some(other_tab_id),
                 placement_target: placement_target.clone(),
             }
         ))),
         Some(SessionEvent::PanePlacementCommitted {
             command_id: placement_command_id,
             source_pane_id: pane_id,
-            source_tab_id: tab_id,
-            destination_tab_id: other_tab_id,
+            source_tab_id: Some(tab_id),
+            destination_tab_id: Some(other_tab_id),
             placement_target,
         })
     );
@@ -1326,13 +1332,47 @@ fn an_absent_optional_field_stays_absent_on_the_wire() {
     assert_eq!(
         build_wire_event(&Delivery::Event(Event::PaneFocused(PaneFocused {
             client_id,
-            tab_id,
+            tab_id: Some(tab_id),
             pane_id,
             previous_pane_id: None,
         }))),
         Some(SessionEvent::PaneFocused {
             client_id,
-            tab_id,
+            tab_id: Some(tab_id),
+            pane_id,
+            previous_pane_id: None,
+        })
+    );
+    assert_eq!(
+        build_wire_event(&Delivery::Event(Event::PaneCreated(PaneCreated {
+            pane_id,
+            tab_id: None,
+        }))),
+        Some(SessionEvent::PaneCreated {
+            pane_id,
+            tab_id: None,
+        })
+    );
+    assert_eq!(
+        build_wire_event(&Delivery::Event(Event::PaneRemoved(PaneRemoved {
+            pane_id,
+            tab_id: None,
+        }))),
+        Some(SessionEvent::PaneRemoved {
+            pane_id,
+            tab_id: None,
+        })
+    );
+    assert_eq!(
+        build_wire_event(&Delivery::Event(Event::PaneFocused(PaneFocused {
+            client_id,
+            tab_id: None,
+            pane_id,
+            previous_pane_id: None,
+        }))),
+        Some(SessionEvent::PaneFocused {
+            client_id,
+            tab_id: None,
             pane_id,
             previous_pane_id: None,
         })

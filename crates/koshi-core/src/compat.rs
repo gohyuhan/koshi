@@ -51,39 +51,22 @@ pub struct Surface {
 /// over that session's control socket.
 ///
 /// `v0.1.0` spoke 1, `v0.2.0` and `v0.3.0` spoke 2, `v0.4.0` spoke 3, and
-/// `v0.5.0` speaks 4. This build speaks 4. The floor is 4: a peer that speaks 3
+/// `v0.5.0` speaks 4. This build speaks 5. The floor is 5: a peer that speaks 4
 /// is refused at the handshake.
 ///
-/// The following shapes differ between 3 and 4. This build writes version 4 on
+/// The following shapes differ between 4 and 5. This build writes version 5 on
 /// every session connection:
 ///
-/// - The keyboard request carries the whole event the client's terminal
-///   reported: the key, whether it went down, repeated or came up, the shifted
-///   and base-layout keys, the text, and all eight modifiers. 3 carried one
-///   chord, which holds no event kind, no text, and neither lock modifier.
-/// - Version 4 includes direct pane movement, per-client scrolling, and
-///   checked pane placement: a swap or an insertion in the pane's own tab or
-///   another tab. A placement preview is a read the client requests. The
-///   session answers a placement with `PanePlacementCommitted` to every
-///   viewer, or with `PlacementCommandRejected` to the viewer that sent it.
-/// - Painted frames carry whether the session shows a recovery notice after
-///   opening a new shell in place of an unrestored session.
-/// - A pane-write command carries its bytes in `pane_input_bytes`. Version 3
-///   called this field `input_bytes`; the two versions cannot decode each
-///   other's pane-write command.
-///
-/// Four shapes differ between 2 and 3:
-///
-/// - A command naming a target client carries `target_client_id`. A peer
-///   speaking 2 has no field for it.
-/// - A `HostWrite` event carries its bytes as one base64 string. 2 wrote a
-///   list of numbers.
-/// - Each entry of a layout split's `children` is the child node itself. 2
-///   wrapped it in a `{"node": …}` record. Layout trees travel in the attach
-///   reply and in the layout report.
-/// - Painted image placements name connection-local content identities. Their
-///   RGBA records travel in bounded image-content events and remain cached
-///   across unchanged frames. Version 2 had no terminal-image wire shape.
+/// - A new-pane command carries `placement`: a split, a stack, or a floating
+///   pane. 4 carried `source_pane_id`, `tab_id`, `direction` and
+///   `should_stack` on the command itself, and had a separate run-command
+///   command; `koshi run` sends a new-pane command with a spawn spec.
+/// - `PaneCreated`, `PaneRemoved` and `PaneFocused` carry a `tab_id` that is
+///   `null` for a floating pane, and `PanePlacementCommitted` carries a
+///   `source_tab_id` and a `destination_tab_id` that are `null` for one.
+/// - A frame's two revisions, an image placement's `is_available`, a close
+///   command's `should_kill_process_tree`, and a terminal-too-small event's
+///   cause are required. 4 read a message without them.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A
@@ -91,8 +74,8 @@ pub struct Surface {
 /// it with the `MalformedRequest` code and the same kind of sentence.
 pub const SESSION_PROTOCOL: Surface = Surface {
     surface_name: "session protocol",
-    minimum_version: 4,
-    maximum_version: 4,
+    minimum_version: 5,
+    maximum_version: 5,
     released_version: Some(4),
 };
 
