@@ -526,7 +526,7 @@ This only says where the sockets go. Nobody else reaches them until
 does nothing else: writing this line opens no port and makes this machine
 reachable by nobody. The port opens the first time you run `koshi share grant`
 and answer yes to the offer it makes, and on every start after that.
-The value is an IP address and a port: IPv4 such as `192.168.1.20:7654`, or
+The value is an IP address and a port: IPv4 such as `192.0.2.20:7654`, or
 IPv6 in brackets such as `[::1]:7654`. A host name, such as
 `laptop.local:7654`, is ignored with a warning, and nothing binds. `0.0.0.0`
 and `[::]` accept connections on every IPv4 or IPv6 address of this machine.

@@ -1,4 +1,4 @@
-//! Focus recovery: choosing the next focused pane after the focused one is gone.
+//! Focus recovery and focus events.
 //!
 //! When a client's focused pane disappears — closed, its shell exited, or it was
 //! suppressed out of view — focus has to land somewhere deterministic.
@@ -9,12 +9,18 @@
 //! It chooses, it does not mutate; the caller applies the verdict. The removed
 //! pane must have been the client's focus: the removal pipeline runs it only
 //! for the clients whose focused pane vanished.
+//!
+//! [`build_pane_focused_event`] reports a change of the pane that takes a
+//! client's input, floating or tiled.
 
-use koshi_core::ids::PaneId;
+use koshi_core::{
+    event::{Event, PaneFocused},
+    ids::PaneId,
+};
 use koshi_layout::focus::FocusCandidates;
 use koshi_pane::{pane::lifecycle::PaneLifecycle, registry::PaneRegistry};
 
-use crate::session::state::Tab;
+use crate::{client::Client, session::state::Tab};
 
 /// The outcome of focus recovery: where focus should go now, or why it cannot
 /// go to a pane.
@@ -84,6 +90,37 @@ pub fn repair_focus(
         Some(pane_id) => FocusRepairResult::Focused(pane_id),
         None => FocusRepairResult::TerminalTooSmall,
     }
+}
+
+/// The [`Event::PaneFocused`] that reports the pane taking `client`'s input
+/// now ([`Client::get_active_focused_pane_id`]), when it is not
+/// `previous_focused_pane_id`, the pane that took the input before.
+///
+/// Returns `None` when no pane takes `client`'s input now, or when that pane
+/// is `previous_focused_pane_id`. The event's `tab_id` is `None` when a
+/// floating pane takes the input, else `client`'s active tab, and its
+/// `previous_pane_id` is `previous_focused_pane_id`. Float `htop` focused
+/// after `vim` in tab `db` → `PaneFocused { tab_id: None, pane_id: htop,
+/// previous_pane_id: Some(vim) }`.
+#[must_use]
+pub fn build_pane_focused_event(
+    client: &Client,
+    previous_focused_pane_id: Option<PaneId>,
+) -> Option<Event> {
+    let focused_pane_id = client.get_active_focused_pane_id()?;
+    if Some(focused_pane_id) == previous_focused_pane_id {
+        return None;
+    }
+    let tab_id = match client.get_focused_floating_pane_id() {
+        Some(_) => None,
+        None => Some(client.get_active_tab_id()),
+    };
+    Some(Event::PaneFocused(PaneFocused {
+        client_id: client.get_client_id(),
+        tab_id,
+        pane_id: focused_pane_id,
+        previous_pane_id: previous_focused_pane_id,
+    }))
 }
 
 #[cfg(test)]

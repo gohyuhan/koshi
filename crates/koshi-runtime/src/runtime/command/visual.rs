@@ -179,7 +179,7 @@ impl Server {
         if !copied_text.is_empty() {
             self.copy_to_clipboard(client_id, &copied_text);
         }
-        Ok(Self::commit_events(&mut self.event_bus, command_id, vec![]))
+        Ok(TransactionScope::new().commit(command_id, &mut self.event_bus))
     }
 
     /// Handle [`VisualCommand::ClearSelection`]: drop the issuing client's

@@ -362,10 +362,13 @@ pub const MOUSE_UNSELECT_HINT: &str = "Mouse Unselect";
 /// other command-backed actions use values their NAME bakes into the command
 /// the resolver builds — `lock`/`unlock` both build `SetLockMode`; the
 /// `new-pane-*`, `focus-pane-*`, and `resize-pane-*` families each build their
-/// family's command with the named direction; `next-tab`/`previous-tab`/
-/// `focus-tab` all build `FocusTab`.
+/// family's command with the named direction; `focus-next-floating-pane` and
+/// `focus-previous-floating-pane` build `FocusPane` with the floating pane
+/// target they name; `next-tab`/`previous-tab`/`focus-tab` all build
+/// `FocusTab`.
 ///
-/// The `resize-pane*`, `focus-pane*`, and `scroll-pane-up`/`scroll-pane-down`
+/// The `resize-pane*`, `focus-pane*`, `focus-next-floating-pane`,
+/// `focus-previous-floating-pane`, and `scroll-pane-up`/`scroll-pane-down`
 /// actions are `is_continuous`; every other action is not.
 #[must_use]
 pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
@@ -648,6 +651,22 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             CoreCommand(CommandKind::FocusPane),
         ),
         build_core_action_seed(
+            "focus-next-floating-pane",
+            "Focus Next Floating Pane",
+            "Move the issuing client's focus to the next floating pane it shows and raise it",
+            Client,
+            vec![ClientTarget],
+            CoreCommand(CommandKind::FocusPane),
+        ),
+        build_core_action_seed(
+            "focus-previous-floating-pane",
+            "Focus Previous Floating Pane",
+            "Move the issuing client's focus to the previous floating pane it shows and raise it",
+            Client,
+            vec![ClientTarget],
+            CoreCommand(CommandKind::FocusPane),
+        ),
+        build_core_action_seed(
             "scroll-pane",
             "Scroll Pane",
             "Scroll a pane's view by a chosen number of lines",
@@ -807,6 +826,8 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
                 | "focus-pane-down"
                 | "focus-pane-up"
                 | "focus-pane-right"
+                | "focus-next-floating-pane"
+                | "focus-previous-floating-pane"
                 | "scroll-pane-up"
                 | "scroll-pane-down"
         ) {

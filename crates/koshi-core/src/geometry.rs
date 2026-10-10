@@ -128,25 +128,13 @@ impl RequiredSize {
         }
     }
 
-    /// `self` as a [`Size`] when each axis of `self` is at most the same axis
-    /// of `container_size`, else `None`. `22×10` inside `80×22` →
-    /// `Some(22×10)`, and `65536×10` inside `65535×22` → `None`.
-    #[must_use]
-    pub fn fit_inside(self, container_size: Size) -> Option<Size> {
-        let fitted_size = Size {
-            column_count: u16::try_from(self.column_count).ok()?,
-            row_count: u16::try_from(self.row_count).ok()?,
-        };
-        fitted_size
-            .can_fit_inside(container_size)
-            .then_some(fitted_size)
-    }
-
     /// Whether each axis of `self` is at most the same axis of
-    /// `container_size`: [`fit_inside`](Self::fit_inside) gives a size.
+    /// `container_size`. `22×10` fits inside `80×22`, and `65536×10` does not
+    /// fit inside `65535×22`.
     #[must_use]
     pub fn can_fit_inside(self, container_size: Size) -> bool {
-        self.fit_inside(container_size).is_some()
+        self.column_count <= u32::from(container_size.column_count)
+            && self.row_count <= u32::from(container_size.row_count)
     }
 }
 

@@ -290,13 +290,15 @@ impl Server {
     /// command names, else the working directory of the target's
     /// `working_directory_pane_id`. Only then does
     /// [`pane_ops::commit_new_floating_pane`] append the member, register the
-    /// pane `Running`, and store the designated client's position. A launch
-    /// failure commits nothing and rejects. No client's focus moves.
+    /// pane `Running`, store the designated client's position, and focus the
+    /// pane for the designated client, drawn above its other floating panes.
+    /// The new pane then takes that client's input. A launch failure commits
+    /// nothing and rejects. No other client's focus moves.
     ///
     /// The session's placement revision advances, and so does the designated
-    /// client's when its view of the pane is stored. Emits
-    /// [`Event::PaneCreated`] with `tab_id: None`, then [`Event::PtyResized`]
-    /// with the spawn size.
+    /// client's. Emits [`Event::PaneCreated`] with `tab_id: None`, the
+    /// designated client's [`Event::PaneFocused`] with `tab_id: None`, then
+    /// [`Event::PtyResized`] with the spawn size.
     fn handle_new_floating_pane(
         &mut self,
         command_id: CommandId,
@@ -329,9 +331,8 @@ impl Server {
         let designated_view = new_floating_pane_target
             .designated_client_id
             .map(|client_id| (client_id, new_floating_pane_target.designated_position));
-        let affected_client_ids: Vec<ClientId> = designated_view
-            .filter(|(_, position)| *position != FloatingPanePosition::Default)
-            .map(|(client_id, _)| client_id)
+        let affected_client_ids: Vec<ClientId> = new_floating_pane_target
+            .designated_client_id
             .into_iter()
             .collect();
 
@@ -543,11 +544,13 @@ impl Server {
     ///
     /// The kill policy is picked as for a tiled pane
     /// ([`Self::resolve_pane_kill_policy`]). [`remove_floating_pane`] drops
-    /// the registry record, the member and every client's view of the pane;
-    /// no layout changes and nothing reflows. The session's placement
-    /// revision advances, and so does the revision of every client whose
-    /// floating view named the pane. Emits [`Event::PaneClosing`] and
-    /// [`Event::PaneRemoved`] with `tab_id: None`.
+    /// the registry record, the member and every client's view of the pane,
+    /// and moves the input of each client that focused the pane; no layout
+    /// changes and nothing reflows. The session's placement revision
+    /// advances, and so does the revision of every client whose floating view
+    /// named the pane. Emits [`Event::PaneClosing`] and [`Event::PaneRemoved`]
+    /// with `tab_id: None`, then one [`Event::PaneFocused`] for each client
+    /// whose input moved.
     fn handle_close_floating_pane(
         &mut self,
         command_id: CommandId,
@@ -719,7 +722,8 @@ impl Server {
             Ok(Some(tab_id)) => tab_id,
             // A floating pane leaves at once: `PaneProcessExited`, then its
             // removal from the registry, the floating set and every client's
-            // view. No layout collapses and no tab closes.
+            // view, then a `PaneFocused` for each client whose input it held.
+            // No layout collapses and no tab closes.
             Ok(None) => {
                 let affected_client_ids = list_clients_holding_floating_view(session, pane_id);
                 let mut emitted_events = vec![Event::PaneProcessExited(pane_exit)];
@@ -1306,12 +1310,14 @@ impl Server {
     }
 
     /// Handle [`Command::FocusPane`]: move the target client's focus to the
-    /// target pane in its active tab. The pane comes out of
-    /// [`Self::resolve_focus_target`], which takes an id target and rejects a
-    /// direction target.
+    /// target pane, which then takes that client's input. The pane comes out
+    /// of [`Self::resolve_focus_target`]. A floating pane goes to
+    /// [`Self::handle_focus_floating_pane`]. A tiled pane in the client's
+    /// active tab takes the client's input; no floating pane stays focused
+    /// for the client.
     ///
-    /// The pane must be visible on screen: one suppressed for lack of space is
-    /// [`RejectReason::InvalidState`]. A collapsed stack member is a valid
+    /// A tiled pane must be visible on screen: one suppressed for lack of
+    /// space is [`RejectReason::InvalidState`]. A collapsed stack member is a valid
     /// target — focusing it activates its stack (the member expands, the
     /// previously active member collapses to a header) and the tab's PTYs
     /// reflow to the new geometry. Zoom follows focus, per client: when the
@@ -1319,9 +1325,11 @@ impl Server {
     /// onto that pane — its zoomed view swaps content and stays on, and no other
     /// client's view moves. Emits [`Event::LayoutChanged`] plus per-pane
     /// [`Event::PtyResized`] when a stack activation or a zoom retarget changed
-    /// the geometry, and [`Event::PaneFocused`] when the client's focus actually
-    /// moved; focusing the already-focused pane of an already-active member
-    /// completes with no events. A rejected focus mutates nothing.
+    /// the geometry, and [`Event::PaneFocused`] when the client's input
+    /// actually moved, naming as `previous_pane_id` the pane that took it
+    /// before; focusing the pane that already takes the client's input, in an
+    /// already-active member, completes with no events. A rejected focus
+    /// mutates nothing.
     pub(super) fn handle_focus_pane(
         &mut self,
         command_id: CommandId,
@@ -1330,8 +1338,17 @@ impl Server {
     ) -> Result<CommandResult, Rejection> {
         let acting_session = self.resolve_acting_session(command_source)?;
         let pane_sizing = self.get_pane_sizing();
-        let pane_target =
-            Self::resolve_focus_target(command_args, command_source, acting_session, pane_sizing)?;
+        let pane_target = match Self::resolve_focus_target(
+            command_args,
+            command_source,
+            acting_session,
+            pane_sizing,
+        )? {
+            FocusPaneTarget::Tiled(client_pane_target) => client_pane_target,
+            FocusPaneTarget::Floating(floating_pane_view_target) => {
+                return self.handle_focus_floating_pane(command_id, &floating_pane_view_target);
+            }
+        };
 
         let pty_backend = Arc::clone(self.get_pty_backend());
 
@@ -1340,11 +1357,8 @@ impl Server {
         // Zoom follows focus and belongs to this client: a zoomed client that
         // focuses another pane zooms that pane, and every other client's view
         // stays as it was. The mode solved and checked below is this client's.
-        let client = session
-            .clients
-            .get_client_by_id(pane_target.client_id)
-            .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
-        let previous_focused_pane_id = client.get_focused_pane_id(pane_target.tab_id);
+        let client = Self::require_client(session, pane_target.client_id)?;
+        let previous_focused_pane_id = client.get_active_focused_pane_id();
         let client_layout_mode = client.get_layout_mode(pane_target.tab_id);
         let effective_layout_mode = match client_layout_mode {
             LayoutMode::Fullscreen { focused_pane_id }
@@ -1419,11 +1433,8 @@ impl Server {
 
         // The focus, and this client's zoom with it, moves before the reflow;
         // the reflow solves PTY sizes from what every client now displays.
-        let client = session
-            .clients
-            .get_client_mut_by_id(pane_target.client_id)
-            .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
-        client.update_focused_pane(pane_target.tab_id, pane_target.pane_id);
+        let client = Self::require_client_mut(session, pane_target.client_id)?;
+        client.focus_tiled_pane(pane_target.tab_id, pane_target.pane_id);
         if let Some(tab_state) = session.tabs.get_mut(&pane_target.tab_id) {
             tab_state.record_focus_mru(pane_target.pane_id);
         }
@@ -1463,6 +1474,51 @@ impl Server {
         ))
     }
 
+    /// Focus the floating pane `floating_pane_view_target` names for its client
+    /// and draw it above that client's other floating panes
+    /// ([`Client::focus_floating_pane`]). The pane then takes the client's
+    /// input.
+    ///
+    /// A pane that already takes the client's input completes with no events.
+    /// Otherwise the client's placement revision advances, and one
+    /// [`Event::PaneFocused`] with `tab_id: None` names the pane and, as
+    /// `previous_pane_id`, the pane that took the client's input before. A
+    /// placement revision that cannot advance is
+    /// [`RejectReason::InvalidState`] `placement revision cannot advance`,
+    /// changing nothing. Every other client's view stays as it is.
+    fn handle_focus_floating_pane(
+        &mut self,
+        command_id: CommandId,
+        floating_pane_view_target: &FloatingPaneViewTarget,
+    ) -> Result<CommandResult, Rejection> {
+        let FloatingPaneViewTarget {
+            session_id,
+            client_id,
+            pane_id,
+        } = *floating_pane_view_target;
+        let session = self
+            .session_by_id
+            .get_mut(&session_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+        let previous_focused_pane_id =
+            Self::require_client(session, client_id)?.get_active_focused_pane_id();
+        if previous_focused_pane_id == Some(pane_id) {
+            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
+        }
+        ensure_client_placement_revision_capacity(session, &[client_id])?;
+        let client = Self::require_client_mut(session, client_id)?;
+        let _ = client.focus_floating_pane(pane_id);
+        let _ = client.advance_placement_revision();
+        let emitted_events = build_pane_focused_event(client, previous_focused_pane_id)
+            .into_iter()
+            .collect();
+        Ok(Self::commit_events(
+            &mut self.event_bus,
+            command_id,
+            emitted_events,
+        ))
+    }
+
     /// Handle [`Command::TogglePaneFullscreen`]: switch the **target client's**
     /// view of that client's tab between tiled and a zoom of the pane that
     /// client has focused.
@@ -1481,9 +1537,11 @@ impl Server {
     /// client still watching. An already-zoomed client toggles
     /// back to tiled whichever pane resolved; a tiled client zooms the target
     /// and, when its focus was elsewhere, moves its focus to the pane now
-    /// filling its view ([`Event::PaneFocused`]). The zoom is a solve-time
-    /// overlay: the tree is untouched, and toggling out restores the prior
-    /// layout. The tab must be viewed by at least one attached client, and a
+    /// filling its view ([`Event::PaneFocused`]). When the tab is the client's
+    /// active tab, that pane also takes over the client's input from a
+    /// focused floating pane. The zoom
+    /// is a solve-time overlay: the tree is untouched, and toggling out
+    /// restores the prior layout. The tab must be viewed by at least one attached client, and a
     /// tab size too small to show the pane at its content minimum rejects.
     /// Emits [`Event::LayoutChanged`] plus one [`Event::PtyResized`] per PTY
     /// whose solved size changed. A pane another client still draws tiled
@@ -1503,12 +1561,8 @@ impl Server {
         let tab_id = pane_target.tab_id;
         let (session, tab_size) =
             self.resolve_session_and_tab_size(pane_target.session_id, tab_id)?;
-        let client = session
-            .clients
-            .get_client_by_id(client_id)
-            .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
+        let client = Self::require_client(session, client_id)?;
         let client_layout_mode = client.get_layout_mode(tab_id);
-        let previous_focused_pane_id = client.get_focused_pane_id(tab_id);
 
         let tab_state = session
             .tabs
@@ -1549,17 +1603,13 @@ impl Server {
         // viewing this tab keeps its view. Entering also moves this client's
         // focus to the zoomed pane. Both land before the reflow, which solves
         // PTY sizes from what the clients now display.
-        let client = session
-            .clients
-            .get_client_mut_by_id(client_id)
-            .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
-        let is_focus_moved =
-            is_zoom_entered && previous_focused_pane_id != Some(pane_target.pane_id);
+        let client = Self::require_client_mut(session, client_id)?;
+        let mut previous_focused_pane_id = None;
+        let mut is_focus_moved = false;
         if is_zoom_entered {
             client.zoom_pane(tab_id, pane_target.pane_id);
-            if is_focus_moved {
-                client.update_focused_pane(tab_id, pane_target.pane_id);
-            }
+            previous_focused_pane_id = client.focus_tiled_pane(tab_id, pane_target.pane_id);
+            is_focus_moved = previous_focused_pane_id != Some(pane_target.pane_id);
         } else {
             client.clear_zoom(tab_id);
         }

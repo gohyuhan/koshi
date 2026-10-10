@@ -1755,6 +1755,87 @@ fn a_key_reaches_the_pane_again_once_it_is_no_longer_suppressed() {
     );
 }
 
+/// A new floating pane takes its client's keys. While that client's own
+/// terminal has no room to draw a floating pane, its key reaches no pane, also
+/// while another attached terminal has room.
+#[test]
+fn a_key_reaches_the_focused_floating_pane_only_while_its_client_has_room_to_draw_it() {
+    let (mut server, fake_pty_backend, client_id, mut viewer) = build_test_server();
+    let tiled_pane_id = get_only_pane_id(&server);
+    dispatch_test_command(
+        &mut server,
+        client_id,
+        Command::NewPane(NewPaneArgs {
+            placement: NewPanePlacement::Floating {
+                size: None,
+                top_left_cell: None,
+                is_pinned: false,
+            },
+            working_directory: None,
+            spawn_spec: None,
+            client_id: None,
+        }),
+    );
+    let floating_pane_id = *server
+        .live_pane_ids
+        .iter()
+        .find(|&&pane_id| pane_id != tiled_pane_id)
+        .expect("the floating pane spawned");
+
+    apply_key_press(
+        &mut server,
+        &mut viewer,
+        build_key_chord(BindingModifierFlags::NONE, 'l'),
+        Instant::now(),
+    );
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(floating_pane_id)
+            .expect("writes"),
+        vec![vec![b'l']]
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(tiled_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+
+    // A second 80x24 terminal keeps an 80x22 floating viewport for the
+    // session. The first client's 3x3 terminal gives a 3x1 pane area, below
+    // the 4x5 floating minimum.
+    attach_second_client(&mut server, client_id, tiled_pane_id);
+    server.handle_client_resize(
+        client_id,
+        Size {
+            column_count: 3,
+            row_count: 3,
+        },
+        None,
+        None,
+    );
+    apply_key_press(
+        &mut server,
+        &mut viewer,
+        build_key_chord(BindingModifierFlags::NONE, 'l'),
+        Instant::now(),
+    );
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(floating_pane_id)
+            .expect("writes"),
+        vec![vec![b'l']]
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(tiled_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+}
+
 /// Zoom is per-client: one client zooming a pane does not silence another
 /// client's keys. Client A zooms its pane. Client B, tiled on the same tab,
 /// keeps typing into the pane B can still see. The key guard asks whether the

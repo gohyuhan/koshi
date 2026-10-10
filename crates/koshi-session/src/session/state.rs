@@ -9,8 +9,7 @@ use koshi_core::{
         FLOATING_PANE_CHROME_SIZE, MAX_FLOATING_PANES_PER_SESSION, MAX_TAB_FOCUS_MRU_ENTRY_COUNT,
     },
     geometry::{
-        compute_percent_cell_count, FloatingPaneDimension, FloatingPaneSize, PixelCellSize,
-        RequiredSize, Size,
+        compute_percent_cell_count, FloatingPaneDimension, FloatingPaneSize, PixelCellSize, Size,
     },
     ids::{ClientId, PaneId, SessionId, TabId},
 };
@@ -125,17 +124,6 @@ impl Tab {
     }
 }
 
-/// What a floating pane's last size solve gave it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FloatingPaneSizeSolve {
-    /// The pane's outer size in cells, chrome included. Its PTY is this size
-    /// less [`FLOATING_PANE_CHROME_SIZE`].
-    Sized(Size),
-    /// The shared floating viewport cannot hold the pane's minimum outer size.
-    /// The pane's PTY keeps its last size.
-    Suppressed,
-}
-
 /// One floating pane: the pane, the size it asks for, and the size it holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FloatingMember {
@@ -144,8 +132,9 @@ pub struct FloatingMember {
     pub pane_id: PaneId,
     /// The size the pane asks for, per axis.
     pub desired_size: FloatingPaneSize,
-    /// What the pane's last size solve gave it.
-    pub solved_size: FloatingPaneSizeSolve,
+    /// The pane's outer size in cells from its last size solve, chrome
+    /// included. Its PTY is this size less [`FLOATING_PANE_CHROME_SIZE`].
+    pub solved_size: Size,
 }
 
 /// The floating panes of one session, in creation order: a new member is
@@ -235,43 +224,39 @@ impl FloatingSet {
     }
 }
 
-/// The floating minimum, `pane_minimum_size` plus
-/// [`FLOATING_PANE_CHROME_SIZE`], when it fits inside
-/// `shared_floating_viewport`; `None` when the viewport is smaller on either
-/// axis. `20x6` in `80x22` → `Some(22x10)`; `20x6` in `80x9` → `None`;
-/// `65534x6` → `None` in every viewport (its floating minimum is `65536x10`).
+/// The floating minimum: `pane_minimum_size` plus
+/// [`FLOATING_PANE_CHROME_SIZE`], each axis capped at `u16::MAX`. `20x6` →
+/// `22x10`; `65534x6` → `65535x10`.
 #[must_use]
-pub fn compute_floating_pane_minimum_size(
-    pane_minimum_size: Size,
-    shared_floating_viewport: Size,
-) -> Option<Size> {
-    RequiredSize::from_size_sum(pane_minimum_size, FLOATING_PANE_CHROME_SIZE)
-        .fit_inside(shared_floating_viewport)
+pub fn compute_floating_pane_minimum_size(pane_minimum_size: Size) -> Size {
+    Size {
+        column_count: pane_minimum_size
+            .column_count
+            .saturating_add(FLOATING_PANE_CHROME_SIZE.column_count),
+        row_count: pane_minimum_size
+            .row_count
+            .saturating_add(FLOATING_PANE_CHROME_SIZE.row_count),
+    }
 }
 
 /// Solve one floating pane's outer size: `desired_size` against
 /// `shared_floating_viewport`, with `pane_minimum_size` as the smallest content
-/// size.
+/// size the pane asks for.
 ///
-/// When the floating minimum ([`compute_floating_pane_minimum_size`]) does not
-/// fit inside `shared_floating_viewport`, the result is
-/// [`FloatingPaneSizeSolve::Suppressed`]. Otherwise
-/// each axis of `desired_size` resolves to cells against the same axis of
-/// `shared_floating_viewport`, a percent rounding down, then is cut to that
-/// axis and raised to the floating minimum: `Percent(60)` by `Percent(60)` on
-/// `80x22` → `Sized(48x13)`.
+/// Each axis of `desired_size` resolves to cells against the same axis of
+/// `shared_floating_viewport`, a percent rounding down, then is raised to the
+/// floating minimum ([`compute_floating_pane_minimum_size`]) and cut to that
+/// axis. On an axis shorter than the floating minimum, the pane takes the
+/// whole axis. `Percent(60)` by `Percent(60)` on `80x22` → `48x13`; with a
+/// `20x6` pane minimum on `40x9` → `24x9`.
 #[must_use]
 pub fn solve_floating_pane_size(
     desired_size: FloatingPaneSize,
     shared_floating_viewport: Size,
     pane_minimum_size: Size,
-) -> FloatingPaneSizeSolve {
-    let Some(floating_pane_minimum_size) =
-        compute_floating_pane_minimum_size(pane_minimum_size, shared_floating_viewport)
-    else {
-        return FloatingPaneSizeSolve::Suppressed;
-    };
-    FloatingPaneSizeSolve::Sized(Size {
+) -> Size {
+    let floating_pane_minimum_size = compute_floating_pane_minimum_size(pane_minimum_size);
+    Size {
         column_count: solve_floating_pane_axis(
             desired_size.width,
             shared_floating_viewport.column_count,
@@ -282,14 +267,15 @@ pub fn solve_floating_pane_size(
             shared_floating_viewport.row_count,
             floating_pane_minimum_size.row_count,
         ),
-    })
+    }
 }
 
 /// The cells `floating_pane_dimension` takes on an axis `axis_cell_count`
 /// cells long, given a floating minimum of `minimum_cell_count` on that axis:
-/// the cell count, or the percent of the axis rounded down, cut to
-/// `axis_cell_count`, then raised to `minimum_cell_count`. `Percent(60)` of
-/// `22` with a minimum of `5` → `13`.
+/// the cell count, or the percent of the axis rounded down, raised to
+/// `minimum_cell_count`, then cut to `axis_cell_count`. `Percent(60)` of `22`
+/// with a minimum of `5` → `13`; `Percent(60)` of `9` with a minimum of `10` →
+/// `9`.
 fn solve_floating_pane_axis(
     floating_pane_dimension: FloatingPaneDimension,
     axis_cell_count: u16,
@@ -302,8 +288,8 @@ fn solve_floating_pane_axis(
         }
     };
     requested_cell_count
-        .min(axis_cell_count)
         .max(minimum_cell_count)
+        .min(axis_cell_count)
 }
 
 /// One running session: the aggregate root owning the tabs, the floating
@@ -480,11 +466,11 @@ impl Session {
     /// issued the command, nor on the order the viewers attached.
     #[must_use]
     pub fn get_tab_size(&self, tab_id: TabId) -> Option<Size> {
-        compute_minimum_pane_area(
-            self.clients
-                .list_attached_clients()
-                .filter(|client| client.get_active_tab_id() == tab_id),
-        )
+        self.clients
+            .list_attached_clients()
+            .filter(|client| client.get_active_tab_id() == tab_id)
+            .filter_map(Client::get_pane_area)
+            .reduce(Size::compute_minimum_axes)
     }
 
     /// The cell size of the earliest-attached client viewing `tab_id` that
@@ -500,17 +486,24 @@ impl Session {
     }
 
     /// The pane region to size the session's floating panes against: every
-    /// attached client's own pane area, whichever tab that client views,
+    /// attached client's floating viewport, whichever tab that client views,
     /// reduced to the per-axis minimum.
     ///
-    /// Each attached client contributes its [`Client::get_pane_area`]; a client
-    /// that reports [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving)
-    /// contributes nothing. Returns `None` when no attached client contributes
-    /// a size. A `120x40` client viewing tab `db` and an `80x22` client viewing
-    /// tab `web` → `80x22`.
+    /// Each attached client contributes its [`Client::get_floating_viewport`];
+    /// a client that reports
+    /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving), or a
+    /// pane area smaller than
+    /// [`MIN_FLOATING_PANE_SIZE`](crate::client::MIN_FLOATING_PANE_SIZE) on
+    /// either axis, contributes nothing. Returns `None` when no attached client
+    /// contributes a size. A `120x40` client viewing tab `db` and an `80x22`
+    /// client viewing tab `web` → `80x22`; a third client with a `3x40` pane
+    /// area keeps `80x22`.
     #[must_use]
     pub fn get_shared_floating_viewport(&self) -> Option<Size> {
-        compute_minimum_pane_area(self.clients.list_attached_clients())
+        self.clients
+            .list_attached_clients()
+            .filter_map(Client::get_floating_viewport)
+            .reduce(Size::compute_minimum_axes)
     }
 
     /// The cell size the session's floating panes take: that of the
@@ -524,7 +517,9 @@ impl Session {
 
     /// Remove `pane_id` from the floating set, keeping the order of the other
     /// members, and from every attached client's floating view: its stored
-    /// view, its floating focus order entry, and a floating focus on it.
+    /// view and its floating focus order entry. A client whose floating focus
+    /// was on `pane_id` focuses the floating pane it focused or restored most
+    /// recently among those it still shows, else no floating pane.
     /// Returns the removed member, or `None`, changing nothing, when `pane_id`
     /// is not floating.
     pub fn remove_floating_member(&mut self, pane_id: PaneId) -> Option<FloatingMember> {
@@ -768,15 +763,28 @@ impl Session {
                 }
             }
 
-            // Each stored floating view must name a floating member.
-            for &viewed_pane_id in client
+            // Each stored floating view must name a floating member, and a
+            // minimized one must be in the floating focus order.
+            for (&viewed_pane_id, floating_pane_view) in client
                 .list_floating_pane_views()
-                .keys()
-                .collect::<BTreeSet<_>>()
+                .iter()
+                .collect::<BTreeMap<_, _>>()
             {
                 if !floating_member_count_by_pane_id.contains_key(&viewed_pane_id) {
                     consistency_violations.push(
                         SessionConsistencyError::FloatingViewTargetMissing {
+                            client_id: client.get_client_id(),
+                            pane_id: viewed_pane_id,
+                        },
+                    );
+                }
+                if floating_pane_view.is_minimized
+                    && !client
+                        .list_floating_pane_focus_order()
+                        .contains(&viewed_pane_id)
+                {
+                    consistency_violations.push(
+                        SessionConsistencyError::MinimizedFloatingPaneNotInFocusOrder {
                             client_id: client.get_client_id(),
                             pane_id: viewed_pane_id,
                         },
@@ -845,16 +853,6 @@ impl Session {
             Err(consistency_violations)
         }
     }
-}
-
-/// The per-axis minimum of the pane areas of `clients`: the largest grid that
-/// fits inside every one of them on both axes. A client that reports
-/// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving)
-/// contributes nothing. `None` when no client contributes a size.
-fn compute_minimum_pane_area<'a>(clients: impl Iterator<Item = &'a Client>) -> Option<Size> {
-    clients
-        .filter_map(Client::get_pane_area)
-        .reduce(Size::compute_minimum_axes)
 }
 
 /// The cell size of the earliest-attached of `clients` that reported one,

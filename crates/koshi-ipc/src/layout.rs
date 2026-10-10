@@ -96,8 +96,9 @@ pub struct ClientFocus {
     pub client_id: ClientId,
     /// The tab the client is viewing.
     pub active_tab_id: TabId,
-    /// The client's focused pane in the tab it is viewing. Absent until the
-    /// client focuses one.
+    /// The pane that takes the client's input: its focused floating pane,
+    /// else its focused pane in the tab it is viewing. Absent until the client
+    /// focuses one.
     pub focused_pane_id: Option<PaneId>,
 }
 

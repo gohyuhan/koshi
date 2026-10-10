@@ -9,9 +9,10 @@ use super::*;
 use koshi_core::command::PanePlacementTarget;
 use koshi_core::event::{
     ConfigReloaded, FloatingPaneMoved, InputModeChanged, LayoutChanged, MouseSelectChanged,
-    PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneFocused, PanePinChanged,
-    PanePlacementCommitted, PaneProcessExited, PaneRemoved, PtyResized, SelectionChanged,
-    TabClosed, TabCreated, TabFocused, TabMoved, TerminalTooSmallCause, TerminalTooSmallEntered,
+    PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneFocused,
+    PaneMinimizedChanged, PanePinChanged, PanePlacementCommitted, PaneProcessExited, PaneRemoved,
+    PtyResized, SelectionChanged, TabClosed, TabCreated, TabFocused, TabMoved,
+    TerminalTooSmallCause, TerminalTooSmallEntered,
 };
 use koshi_core::geometry::{PaneArea, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
@@ -244,6 +245,41 @@ fn a_floating_pane_pin_change_writes_one_info_line_naming_the_state_now_in_effec
         "{log_output}"
     );
     assert!(log_output.contains(r#""is_pinned":false"#), "{log_output}");
+}
+
+#[test]
+fn a_floating_pane_minimize_change_writes_one_info_line_naming_the_state_now_in_effect() {
+    let client_id = ClientId::new();
+    let pane_id = PaneId::new();
+
+    let log_output = capture_event_logs(&[Event::PaneMinimizedChanged(PaneMinimizedChanged {
+        client_id,
+        pane_id,
+        is_minimized: true,
+    })]);
+
+    assert_eq!(
+        log_output.lines().count(),
+        1,
+        "expected exactly one line: {log_output}"
+    );
+    assert!(log_output.contains(r#""level":"INFO""#), "{log_output}");
+    assert!(
+        log_output.contains(r#""message":"floating pane minimize changed""#),
+        "{log_output}"
+    );
+    assert!(
+        log_output.contains(&format!(r#""client_id":"{client_id}""#)),
+        "{log_output}"
+    );
+    assert!(
+        log_output.contains(&format!(r#""pane_id":"{pane_id}""#)),
+        "{log_output}"
+    );
+    assert!(
+        log_output.contains(r#""is_minimized":true"#),
+        "{log_output}"
+    );
 }
 
 // Every written event is `info` or `warn`.

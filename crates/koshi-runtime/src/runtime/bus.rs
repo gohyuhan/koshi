@@ -621,9 +621,11 @@ pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             Event::PaneCommandStarted(_) | Event::PaneCommandFinished(_) => None,
             // A selection is client-local.
             Event::SelectionChanged(_) => None,
-            // One client's own view of a floating pane: its position and its
-            // pin.
-            Event::FloatingPaneMoved(_) | Event::PanePinChanged(_) => None,
+            // One client's own view of a floating pane: its position, its
+            // pin, and its minimized state.
+            Event::FloatingPaneMoved(_)
+            | Event::PanePinChanged(_)
+            | Event::PaneMinimizedChanged(_) => None,
         },
         Delivery::Frame(render_snapshot) => Some(SessionEvent::Painted {
             frame: Box::new(build_wire_frame(render_snapshot)),

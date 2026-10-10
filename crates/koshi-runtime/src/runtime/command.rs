@@ -31,15 +31,15 @@ use koshi_core::{
         CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
         LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs,
         NewPanePlacement, NewTabArgs, PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs,
-        ResizePaneArgs, ScrollPaneArgs, Selection, SelectionKind, SetPanePinnedArgs,
-        SetSelectionArgs, SwitchSessionArgs, TabTarget, ToggleLockModeArgs, VisualCommand,
-        WriteToPaneArgs,
+        ResizePaneArgs, ScrollPaneArgs, Selection, SelectionKind, SetAllFloatingPanesMinimizedArgs,
+        SetPaneMinimizedArgs, SetPanePinnedArgs, SetSelectionArgs, SwitchSessionArgs, TabTarget,
+        ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
     },
     constant::FLOATING_PANE_CHROME_SIZE,
     event::{
         Event, FloatingPaneMoved, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused,
-        PanePinChanged, PanePlacementCommitted, PaneProcessExited, PtyResized, RejectReason,
-        SelectionChanged,
+        PaneMinimizedChanged, PanePinChanged, PanePlacementCommitted, PaneProcessExited,
+        PtyResized, RejectReason, SelectionChanged,
     },
     geometry::{
         Direction, FloatingPaneDimension, FloatingPaneSize, PaneArea, Point, Rect, Size,
@@ -68,12 +68,12 @@ use koshi_session::client::{place_floating_pane, Client, ClientOrigin, FloatingP
 use koshi_session::error::FloatingSetError;
 use koshi_session::session::{
     cascade::{apply_child_exit, remove_floating_pane, remove_pane_cascade},
+    focus::build_pane_focused_event,
     lifecycle::SessionLifecycle,
     pane_ops::{self, NewPaneSpec},
     placement::commit_cross_tab_placement,
     state::{
-        compute_floating_pane_minimum_size, solve_floating_pane_size, FloatingMember,
-        FloatingPaneSizeSolve, Session,
+        compute_floating_pane_minimum_size, solve_floating_pane_size, FloatingMember, Session,
     },
     tab_ops,
 };
@@ -171,15 +171,6 @@ fn compute_floating_pane_content_size(outer_size: Size) -> Size {
             .row_count
             .saturating_sub(FLOATING_PANE_CHROME_SIZE.row_count),
     }
-}
-
-/// [`RejectReason::InvalidState`] `<pane> is suppressed; the smallest attached
-/// terminal has no room for it`, for the floating pane `pane_id`.
-fn build_suppressed_floating_pane_rejection(pane_id: PaneId) -> Rejection {
-    Rejection::from_reason_and_help(
-        RejectReason::InvalidState,
-        &format!("{pane_id} is suppressed; the smallest attached terminal has no room for it"),
-    )
 }
 
 /// Refuse a transaction when its shared placement generation cannot advance.
@@ -369,8 +360,10 @@ struct NewFloatingPaneTarget {
     designated_client_id: Option<ClientId>,
     /// The size the pane asks for.
     desired_size: FloatingPaneSize,
-    /// The solve of `desired_size` against the shared floating viewport.
-    solved_size: FloatingPaneSizeSolve,
+    /// The pane's outer size: `desired_size` solved against the shared
+    /// floating viewport, else the floating minimum when the session has no
+    /// shared floating viewport.
+    solved_size: Size,
     /// The size the pane's PTY spawns at.
     pty_size: PtySize,
     /// The designated client's position for the pane.
@@ -395,21 +388,11 @@ struct FloatingPaneResize {
     top_left_cell: Option<Point>,
 }
 
-/// A floating member whose last size solve placed it. The `Ok` half of
-/// [`Server::require_sized_floating_member`].
-struct SizedFloatingMember {
-    /// The member's index in creation order, which is its cascade index.
-    cascade_index: usize,
-    /// The size the member asks for.
-    desired_size: FloatingPaneSize,
-    /// The member's solved outer size.
-    outer_size: Size,
-}
-
 /// The resolved target of a command that changes one client's own view of a
-/// floating pane ([`Command::MoveFloatingPane`], [`Command::SetPanePinned`]):
-/// the session that owns the pane, the client whose view changes, and the
-/// pane. The `Ok` half of [`Server::resolve_floating_pane_view_target`].
+/// floating pane ([`Command::MoveFloatingPane`], [`Command::SetPanePinned`],
+/// [`Command::SetPaneMinimized`], and [`Command::FocusPane`] on a floating
+/// pane): the session that owns the pane, the client whose view changes, and
+/// the pane. The `Ok` half of [`Server::resolve_floating_pane_view_target`].
 struct FloatingPaneViewTarget {
     session_id: SessionId,
     client_id: ClientId,
@@ -446,17 +429,27 @@ struct ScrollPaneTarget {
 }
 
 /// The resolved concrete target of a command that changes one client's own
-/// view of a pane ([`Command::FocusPane`], [`Command::TogglePaneFullscreen`]):
-/// the owning session, the client whose view changes, that client's active
-/// tab, and the pane. The `Ok` half of both
-/// [`Server::resolve_focus_target`] and
-/// [`Server::resolve_fullscreen_target`]. All fields are `Copy`: the target
-/// holds no borrow into the session map.
+/// view of a tiled pane ([`Command::FocusPane`],
+/// [`Command::TogglePaneFullscreen`]): the owning session, the client whose
+/// view changes, that client's active tab, and the pane. The `Ok` half of
+/// [`Server::resolve_fullscreen_target`], and the tiled half of
+/// [`FocusPaneTarget`]. All fields are `Copy`: the target holds no borrow into
+/// the session map.
 struct ClientPaneTarget {
     session_id: SessionId,
     client_id: ClientId,
     tab_id: TabId,
     pane_id: PaneId,
+}
+
+/// The pane a [`Command::FocusPane`] focuses: a tiled pane in the client's
+/// active tab, or a floating pane. The `Ok` half of
+/// [`Server::resolve_focus_target`].
+enum FocusPaneTarget {
+    /// A tiled pane in the client's active tab.
+    Tiled(ClientPaneTarget),
+    /// A floating pane the client has not minimized.
+    Floating(FloatingPaneViewTarget),
 }
 
 /// A resolved [`Command::NewTab`] target: the session the tab joins and the
@@ -537,6 +530,15 @@ impl Server {
             Command::SetPanePinned(command_args) => {
                 self.handle_set_pane_pinned(command_id, &envelope.command_source, &command_args)
             }
+            Command::SetPaneMinimized(command_args) => {
+                self.handle_set_pane_minimized(command_id, &envelope.command_source, &command_args)
+            }
+            Command::SetAllFloatingPanesMinimized(command_args) => self
+                .handle_set_all_floating_panes_minimized(
+                    command_id,
+                    &envelope.command_source,
+                    &command_args,
+                ),
             Command::FocusPane(command_args) => {
                 self.handle_focus_pane(command_id, &envelope.command_source, &command_args)
             }
@@ -1081,13 +1083,12 @@ impl Server {
     /// First sets [`Session::get_floating_cell_size`] on each floating pane's
     /// terminal engine; with no reported cell size, each engine keeps its own.
     /// With no [`Session::get_shared_floating_viewport`] — no client attached,
-    /// or every client `Starving` — every solved size and every PTY size stays
-    /// as it is. Otherwise [`FloatingSet::update_member_sizes`] solves each pane
-    /// with the pane minimum of [`Server::get_pane_sizing`]. A
-    /// [`FloatingPaneSizeSolve::Sized`] pane's PTY takes its outer size less
-    /// [`FLOATING_PANE_CHROME_SIZE`]: `40x12` → `38x8`. A
-    /// [`FloatingPaneSizeSolve::Suppressed`] pane's PTY keeps its size. A
-    /// session this server does not hold changes nothing.
+    /// or no client with a floating viewport — every solved size and every PTY
+    /// size stays as it is. Otherwise [`FloatingSet::update_member_sizes`]
+    /// solves each pane with the pane minimum of [`Server::get_pane_sizing`],
+    /// and each pane's PTY takes its outer size less
+    /// [`FLOATING_PANE_CHROME_SIZE`]: `40x12` → `38x8`. A session this server
+    /// does not hold changes nothing.
     ///
     /// [`FloatingSet::update_member_sizes`]: koshi_session::session::state::FloatingSet::update_member_sizes
     fn reflow_floating_panes(
@@ -1121,13 +1122,10 @@ impl Server {
             .list_members()
             .iter()
             .map(|floating_member| {
-                let content_rect = match floating_member.solved_size {
-                    FloatingPaneSizeSolve::Sized(outer_size) => Some(Rect::from_size_at_origin(
-                        compute_floating_pane_content_size(outer_size),
-                    )),
-                    FloatingPaneSizeSolve::Suppressed => None,
-                };
-                (floating_member.pane_id, content_rect)
+                let content_rect = Rect::from_size_at_origin(compute_floating_pane_content_size(
+                    floating_member.solved_size,
+                ));
+                (floating_member.pane_id, Some(content_rect))
             })
             .collect();
         self.reflow_changed(backend, content_rects, None, emitted_events);

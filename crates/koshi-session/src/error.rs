@@ -215,6 +215,14 @@ pub enum SessionConsistencyError {
         client_id: ClientId,
         pane_id: PaneId,
     },
+
+    /// A client minimized a floating pane that its floating focus order does
+    /// not list.
+    #[error("client {client_id:?} minimized floating pane {pane_id:?}, which its floating focus order does not list")]
+    MinimizedFloatingPaneNotInFocusOrder {
+        client_id: ClientId,
+        pane_id: PaneId,
+    },
 }
 
 #[cfg(test)]
