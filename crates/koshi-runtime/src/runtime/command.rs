@@ -29,15 +29,17 @@ use koshi_core::{
     command::{
         ClearSelectionArgs, ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult,
         CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
-        LockModeArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs, NewPanePlacement, NewTabArgs,
-        PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, ResizePaneArgs, ScrollPaneArgs,
-        Selection, SelectionKind, SetSelectionArgs, SwitchSessionArgs, TabTarget,
-        ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
+        LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs,
+        NewPanePlacement, NewTabArgs, PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs,
+        ResizePaneArgs, ScrollPaneArgs, Selection, SelectionKind, SetPanePinnedArgs,
+        SetSelectionArgs, SwitchSessionArgs, TabTarget, ToggleLockModeArgs, VisualCommand,
+        WriteToPaneArgs,
     },
     constant::FLOATING_PANE_CHROME_SIZE,
     event::{
-        Event, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused,
-        PanePlacementCommitted, PaneProcessExited, PtyResized, RejectReason, SelectionChanged,
+        Event, FloatingPaneMoved, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused,
+        PanePinChanged, PanePlacementCommitted, PaneProcessExited, PtyResized, RejectReason,
+        SelectionChanged,
     },
     geometry::{
         Direction, FloatingPaneDimension, FloatingPaneSize, PaneArea, Point, Rect, Size,
@@ -393,6 +395,37 @@ struct FloatingPaneResize {
     client_origin: Option<Point>,
 }
 
+/// A floating member whose last size solve placed it. The `Ok` half of
+/// [`Server::require_sized_floating_member`].
+struct SizedFloatingMember {
+    /// The member's index in creation order, which is its cascade index.
+    cascade_index: usize,
+    /// The size the member asks for.
+    desired_size: FloatingPaneSize,
+    /// The member's solved outer size.
+    outer_size: Size,
+}
+
+/// The resolved target of a command that changes one client's own view of a
+/// floating pane ([`Command::MoveFloatingPane`], [`Command::SetPanePinned`]):
+/// the session that owns the pane, the client whose view changes, and the
+/// pane. The `Ok` half of [`Server::resolve_floating_pane_view_target`].
+struct FloatingPaneViewTarget {
+    session_id: SessionId,
+    client_id: ClientId,
+    pane_id: PaneId,
+}
+
+/// The change a [`Command::SetPanePinned`] makes to the acting client's view
+/// of a floating pane.
+enum PanePinChange {
+    /// Pin the pane at this top-left cell, counted from the client's
+    /// pane-area origin.
+    Pin(Point),
+    /// Unpin the pane. It stays at its pinned cell.
+    Unpin,
+}
+
 /// The resolved concrete target of a pane-addressed command
 /// ([`Command::ClosePane`], [`Command::ResizePane`]): the owning session, the
 /// tab whose layout holds the pane (`None` when the pane floats), and the pane
@@ -497,6 +530,12 @@ impl Server {
             }
             Command::ScrollPane(command_args) => {
                 self.handle_scroll_pane(command_id, &envelope.command_source, &command_args)
+            }
+            Command::MoveFloatingPane(command_args) => {
+                self.handle_move_floating_pane(command_id, &envelope.command_source, &command_args)
+            }
+            Command::SetPanePinned(command_args) => {
+                self.handle_set_pane_pinned(command_id, &envelope.command_source, &command_args)
             }
             Command::FocusPane(command_args) => {
                 self.handle_focus_pane(command_id, &envelope.command_source, &command_args)

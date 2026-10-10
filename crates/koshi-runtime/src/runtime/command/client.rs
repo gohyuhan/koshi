@@ -1,5 +1,6 @@
-//! Client lifecycle (attach, resize, detach) and client-mode command
-//! handlers (lock mode, mouse select).
+//! Client lifecycle (attach, resize, detach) and the handlers of commands
+//! that change one client's own state: lock mode, mouse select, and that
+//! client's move and pin of a floating pane.
 
 use super::*;
 
@@ -904,5 +905,112 @@ impl Server {
             is_enabled: is_mouse_selection_enabled,
         }));
         Ok(transaction_scope.commit(command_id, &mut self.event_bus))
+    }
+
+    /// Handle [`Command::MoveFloatingPane`]: store `Moved(to)` as the acting
+    /// client's position of the floating pane
+    /// ([`Self::resolve_move_floating_pane_target`]).
+    ///
+    /// A changed position advances the acting client's placement revision and
+    /// emits one [`Event::FloatingPaneMoved`]. A client that already stores
+    /// `Moved(to)` changes nothing and emits nothing. The session's placement
+    /// revision, the pane's size, and every other client's view stay as they
+    /// are.
+    pub(super) fn handle_move_floating_pane(
+        &mut self,
+        command_id: CommandId,
+        command_source: &CommandSource,
+        command_args: &MoveFloatingPaneArgs,
+    ) -> Result<CommandResult, Rejection> {
+        let acting_session = self.resolve_acting_session(command_source)?;
+        let Some(FloatingPaneViewTarget {
+            session_id,
+            client_id,
+            pane_id,
+        }) =
+            self.resolve_move_floating_pane_target(command_args, command_source, acting_session)?
+        else {
+            return Ok(Self::commit_events(
+                &mut self.event_bus,
+                command_id,
+                Vec::new(),
+            ));
+        };
+        let session = self
+            .session_by_id
+            .get_mut(&session_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+        ensure_client_placement_revision_capacity(session, &[client_id])?;
+        let client = session
+            .clients
+            .get_client_mut_by_id(client_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
+        let _ = client.set_floating_pane_position(pane_id, command_args.to);
+        let _ = client.advance_placement_revision();
+        Ok(Self::commit_events(
+            &mut self.event_bus,
+            command_id,
+            vec![Event::FloatingPaneMoved(FloatingPaneMoved {
+                client_id,
+                pane_id,
+                to: command_args.to,
+            })],
+        ))
+    }
+
+    /// Handle [`Command::SetPanePinned`]: pin or unpin the floating pane in
+    /// the acting client's view ([`Self::resolve_pane_pin_target`]).
+    ///
+    /// A pin stores `Pinned` at the cell where the client draws the pane, or
+    /// would draw it, and an unpin stores `Moved` at the pinned cell. Either
+    /// change advances the acting client's placement revision and emits one
+    /// [`Event::PanePinChanged`]. A view that already has the asked state
+    /// changes nothing and emits nothing. The session's placement revision and
+    /// every other client's view stay as they are.
+    pub(super) fn handle_set_pane_pinned(
+        &mut self,
+        command_id: CommandId,
+        command_source: &CommandSource,
+        command_args: &SetPanePinnedArgs,
+    ) -> Result<CommandResult, Rejection> {
+        let acting_session = self.resolve_acting_session(command_source)?;
+        let Some((
+            FloatingPaneViewTarget {
+                session_id,
+                client_id,
+                pane_id,
+            },
+            pane_pin_change,
+        )) = self.resolve_pane_pin_target(command_args, command_source, acting_session)?
+        else {
+            return Ok(Self::commit_events(
+                &mut self.event_bus,
+                command_id,
+                Vec::new(),
+            ));
+        };
+        let session = self
+            .session_by_id
+            .get_mut(&session_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+        ensure_client_placement_revision_capacity(session, &[client_id])?;
+        let client = session
+            .clients
+            .get_client_mut_by_id(client_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
+        match pane_pin_change {
+            PanePinChange::Pin(pinned_cell) => client.pin_floating_pane(pane_id, pinned_cell),
+            PanePinChange::Unpin => client.unpin_floating_pane(pane_id),
+        }
+        let _ = client.advance_placement_revision();
+        Ok(Self::commit_events(
+            &mut self.event_bus,
+            command_id,
+            vec![Event::PanePinChanged(PanePinChanged {
+                client_id,
+                pane_id,
+                is_pinned: command_args.is_pinned,
+            })],
+        ))
     }
 }

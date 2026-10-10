@@ -84,6 +84,13 @@ pub enum Command {
     PlacePane(PlacePaneArgs),
     /// Move one client's view of a pane through its scrollback.
     ScrollPane(ScrollPaneArgs),
+    /// Store a new top-left cell for a floating pane in one client's view.
+    /// The pane's size and every other client's view of it stay as they are.
+    /// A pane that client pinned refuses the move.
+    MoveFloatingPane(MoveFloatingPaneArgs),
+    /// Pin or unpin a floating pane in one client's view. Every other
+    /// client's view of it stays as it is.
+    SetPanePinned(SetPanePinnedArgs),
     /// Prompt the issuing client to quit the client or session.
     Quit,
     /// Detach one client from the session. The session keeps running and its
@@ -410,6 +417,39 @@ pub struct ScrollPaneArgs {
     pub pane_id: Option<PaneId>,
     /// Signed scroll line count: positive moves toward history, negative moves toward live output.
     pub scroll_line_count: i32,
+}
+
+/// Arguments for [`Command::MoveFloatingPane`].
+///
+/// The acting client is the target client the command source names
+/// ([`CommandSource::get_target_client_id`]), else the issuing client while it
+/// is attached to the pane's session. A keybinding or mouse source whose client
+/// is not attached there is refused. A CLI source with no attached issuing
+/// client acts through the session's sole attached client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveFloatingPaneArgs {
+    /// The floating pane to move.
+    pub pane_id: PaneId,
+    /// The acting client's new top-left cell of the pane, counted from that
+    /// client's pane-area origin. The cell is stored as given, and the pane
+    /// is drawn moved left and up until it lies inside the pane area: `(500,
+    /// 500)` for a `48x13` pane on an `80x22` pane area is drawn at `(32, 9)`.
+    pub to: Point,
+}
+
+/// Arguments for [`Command::SetPanePinned`].
+///
+/// The acting client is chosen as for [`MoveFloatingPaneArgs`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetPanePinnedArgs {
+    /// The floating pane to pin or unpin. `None` takes the issuing pane for an
+    /// in-session CLI, and the acting client's focused floating pane for every
+    /// other source.
+    pub pane_id: Option<PaneId>,
+    /// `true` pins the pane at the top-left cell where the acting client draws
+    /// it, or would draw it when that client minimized it or does not show it.
+    /// `false` unpins it, and the pane stays at its pinned cell.
+    pub is_pinned: bool,
 }
 
 /// Arguments for [`Command::Detach`].

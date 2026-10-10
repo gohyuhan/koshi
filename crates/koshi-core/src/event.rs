@@ -12,7 +12,7 @@
 //! `Instant`. No raw OS handles and no `&mut` references.
 
 use crate::command::PanePlacementTarget;
-use crate::geometry::{PaneArea, Size};
+use crate::geometry::{PaneArea, Point, Size};
 use crate::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
 use crate::lock::LockMode;
 use crate::process::PtySize;
@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 /// A completed fact emitted by the runtime.
 ///
 /// Variants are grouped to match the sections further down the file: pane/tab
-/// lifecycle, input modes, shell integration, selection, and session
-/// lifecycle. Each variant wraps a like-named
+/// lifecycle, input modes, shell integration, selection, floating pane views,
+/// and session lifecycle. Each variant wraps a like-named
 /// payload struct. `Quit` wraps its [`QuitCause`]; `Restarting` carries
 /// nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +77,13 @@ pub enum Event {
     /// reports entering or leaving visual mode.
     SelectionChanged(SelectionChanged),
 
+    // Floating pane views.
+    /// A client stored a new top-left cell for a floating pane in its own
+    /// view.
+    FloatingPaneMoved(FloatingPaneMoved),
+    /// A client pinned or unpinned a floating pane in its own view.
+    PanePinChanged(PanePinChanged),
+
     // Session lifecycle.
     /// The session is over. The payload names what ended it: a quit request,
     /// or the last tab closing, with the child exit that emptied it when one
@@ -114,6 +121,8 @@ impl Event {
             Event::PaneCommandStarted(_) => "PaneCommandStarted",
             Event::PaneCommandFinished(_) => "PaneCommandFinished",
             Event::SelectionChanged(_) => "SelectionChanged",
+            Event::FloatingPaneMoved(_) => "FloatingPaneMoved",
+            Event::PanePinChanged(_) => "PanePinChanged",
             Event::Quit(_) => "Quit",
             Event::Restarting => "Restarting",
         }
@@ -437,6 +446,40 @@ pub struct SelectionChanged {
     pub pane_id: PaneId,
     /// The current selection, or `None` when cleared.
     pub selection: Option<Selection>,
+}
+
+// ============================================================================
+// Floating pane views
+// ============================================================================
+
+/// Payload for [`Event::FloatingPaneMoved`].
+///
+/// A floating pane's position is per-client state: `client_id` names the
+/// client whose view changed. Every other client's view of the pane stays as
+/// it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FloatingPaneMoved {
+    /// The client whose view of the pane moved.
+    pub client_id: ClientId,
+    /// The floating pane that moved.
+    pub pane_id: PaneId,
+    /// The pane's stored top-left cell, counted from the client's pane-area
+    /// origin, exactly as the command named it.
+    pub to: Point,
+}
+
+/// Payload for [`Event::PanePinChanged`].
+///
+/// A pin is per-client state: `client_id` names the client whose view
+/// changed. Every other client's view of the pane stays as it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanePinChanged {
+    /// The client that pinned or unpinned the pane.
+    pub client_id: ClientId,
+    /// The floating pane whose pin changed.
+    pub pane_id: PaneId,
+    /// Whether the client now has the pane pinned.
+    pub is_pinned: bool,
 }
 
 #[cfg(test)]

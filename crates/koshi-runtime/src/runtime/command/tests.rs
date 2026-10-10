@@ -1,9 +1,9 @@
 //! Tests for command dispatch: validation rejects ill-formed commands before
-//! the match, and every handler the match reaches is
-//! exercised — panes, tabs, clients, highlights, fullscreen, detach and the
-//! session switch — together with child exits, client attach and detach, the
-//! floating pane sizes and cell size those client changes set, and the working
-//! directory a new pane opens in.
+//! the match, and every handler the match reaches is exercised — panes, tabs,
+//! clients, highlights, fullscreen, a floating pane's move and pin, detach and
+//! the session switch — together with child exits, client attach and detach,
+//! the floating pane sizes and cell size those client changes set, and the
+//! working directory a new pane opens in.
 //!
 //! Rejection cases (no context) run against an empty runtime. Cases that need
 //! populated state — explicit/default/focused target resolution, in-session-CLI
@@ -388,11 +388,12 @@ fn build_command_matrix_server(client_origin: ClientOrigin) -> CommandMatrixFixt
 
 /// How many [`Command`] variants this build has. [`build_every_command`] lists one
 /// command of each.
-const COMMAND_VARIANT_COUNT: usize = 21;
+const COMMAND_VARIANT_COUNT: usize = 23;
 
 /// One command of every variant, aimed at `tab_id` and `pane_id` — the tab and pane the
 /// acting client of [`build_command_matrix_server`] views. `SwitchSession` names a session
-/// id no runtime holds, so it resolves the same way on every runtime.
+/// id no runtime holds, `MoveFloatingPane` names a pane id no runtime holds, and
+/// `SetPanePinned` names no pane, so each resolves the same way on every runtime.
 fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
     vec![
         Command::NewPane(build_new_pane_args()),
@@ -455,6 +456,14 @@ fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
             pane_id: Some(pane_id),
             scroll_line_count: 3,
         }),
+        Command::MoveFloatingPane(MoveFloatingPaneArgs {
+            pane_id: PaneId::new(),
+            to: Point { column: 4, row: 2 },
+        }),
+        Command::SetPanePinned(SetPanePinnedArgs {
+            pane_id: None,
+            is_pinned: true,
+        }),
         Command::Quit,
         Command::Detach(DetachArgs { client_id: None }),
         Command::DetachAll,
@@ -486,6 +495,8 @@ fn get_command_name(command: &Command) -> &'static str {
         Command::MovePane(_) => "MovePane",
         Command::PlacePane(_) => "PlacePane",
         Command::ScrollPane(_) => "ScrollPane",
+        Command::MoveFloatingPane(_) => "MoveFloatingPane",
+        Command::SetPanePinned(_) => "SetPanePinned",
         Command::Quit => "Quit",
         Command::Detach(_) => "Detach",
         Command::DetachAll => "DetachAll",
@@ -893,11 +904,12 @@ fn every_command_answers_a_remote_client_the_same_as_a_local_one() {
     }
 
     // The commands that reach their handler on this fixture, so the comparison
-    // above is not two matching refusals every time. The four missing commands
+    // above is not two matching refusals every time. The six missing commands
     // are refused by the fixture or by command admission, identically on both
     // sides: a resize has no border to move in a single-pane tab, a move has
-    // no neighbor, a write has no running child, and the switch has no
-    // connected viewer to receive the move.
+    // no neighbor, a floating move names no pane the runtime holds, a pin finds
+    // no focused floating pane, a write has no running child, and the switch
+    // has no connected viewer to receive the move.
     assert_eq!(
         applied_command_names,
         vec![
@@ -21525,4 +21537,1231 @@ fn a_floating_new_pane_opens_in_the_directory_of_the_pane_it_was_asked_from() {
             Some(PathBuf::from(expected_working_directory))
         );
     }
+}
+
+// --- Moving and pinning a floating pane in one client's view -----------------
+
+/// Dispatch a move of the floating pane `pane_id` to `to` from
+/// `command_source`, and return the command id with the result.
+fn dispatch_move_floating_pane(
+    runtime: &mut Server,
+    command_source: CommandSource,
+    pane_id: PaneId,
+    to: Point,
+) -> (CommandId, CommandResult) {
+    let command_envelope = build_command_envelope(
+        command_source,
+        Command::MoveFloatingPane(MoveFloatingPaneArgs { pane_id, to }),
+    );
+    let command_id = command_envelope.command_id;
+    (command_id, runtime.dispatch(command_envelope))
+}
+
+/// Dispatch a pin (`is_pinned: true`) or an unpin of `pane_id` from
+/// `command_source`, and return the command id with the result.
+fn dispatch_set_pane_pinned(
+    runtime: &mut Server,
+    command_source: CommandSource,
+    pane_id: Option<PaneId>,
+    is_pinned: bool,
+) -> (CommandId, CommandResult) {
+    let command_envelope = build_command_envelope(
+        command_source,
+        Command::SetPanePinned(SetPanePinnedArgs { pane_id, is_pinned }),
+    );
+    let command_id = command_envelope.command_id;
+    (command_id, runtime.dispatch(command_envelope))
+}
+
+/// The view the client `client_id` of `session_id` holds of the floating pane
+/// `pane_id`.
+fn get_client_floating_pane_view(
+    runtime: &Server,
+    session_id: SessionId,
+    client_id: ClientId,
+    pane_id: PaneId,
+) -> FloatingPaneView {
+    get_attached_client(runtime, session_id, client_id).get_floating_pane_view(pane_id)
+}
+
+/// The whole record of the client `client_id` of `session_id`, floating views
+/// and placement revision included, encoded as one json text.
+fn serialize_client_record(runtime: &Server, session_id: SessionId, client_id: ClientId) -> String {
+    serde_json::to_string(get_attached_client(runtime, session_id, client_id))
+        .expect("the client encodes")
+}
+
+/// An in-session CLI source issued from the shell of `pane_id`, whose pane was
+/// spawned for `client_id`.
+fn build_in_session_source(
+    session_id: SessionId,
+    client_id: ClientId,
+    pane_id: PaneId,
+) -> CommandSource {
+    CommandSource::from_in_session_cli(
+        session_id,
+        Some(client_id),
+        pane_id,
+        PathBuf::from("/run/koshi/session.sock"),
+    )
+}
+
+/// The refusal `command_id` gets when its floating pane view would need one
+/// more placement revision for a client already at `u64::MAX`.
+fn build_revision_exhausted_rejection(command_id: CommandId) -> CommandResult {
+    CommandResult::Rejected {
+        command_id,
+        reason: RejectReason::InvalidState,
+        help: Some("placement revision cannot advance".to_string()),
+    }
+}
+
+#[test]
+fn moving_a_floating_pane_stores_the_cell_in_the_acting_clients_view_only() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        ..
+    } = build_floating_command_fixture();
+    let bob_client_id = attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 120,
+            row_count: 42,
+        },
+    );
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let floating_member_before = get_floating_member(&runtime, session_id, floating_pane_id);
+    let session_revision_before = runtime.session_by_id[&session_id].get_placement_revision();
+    let alice_revision_before =
+        get_attached_client(&runtime, session_id, alice_client_id).get_placement_revision();
+    let bob_record_before = serialize_client_record(&runtime, session_id, bob_client_id);
+
+    let (command_id, command_result) = dispatch_move_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        floating_pane_id,
+        Point { column: 4, row: 2 },
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
+                client_id: alice_client_id,
+                pane_id: floating_pane_id,
+                to: Point { column: 4, row: 2 },
+            })],
+        }
+    );
+    assert_eq!(
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id),
+        FloatingPaneView {
+            position: FloatingPanePosition::Moved(Point { column: 4, row: 2 }),
+            is_minimized: false,
+        }
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, alice_client_id).get_placement_revision(),
+        alice_revision_before + 1
+    );
+    assert_eq!(
+        runtime.session_by_id[&session_id].get_placement_revision(),
+        session_revision_before
+    );
+    assert_eq!(
+        get_floating_member(&runtime, session_id, floating_pane_id),
+        floating_member_before
+    );
+    assert_eq!(
+        serialize_client_record(&runtime, session_id, bob_client_id),
+        bob_record_before
+    );
+}
+
+#[test]
+fn a_cell_past_the_pane_area_is_stored_as_given_and_a_repeated_move_changes_nothing() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let far_cell = Point {
+        column: 500,
+        row: 500,
+    };
+
+    let (command_id, command_result) = dispatch_move_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        floating_pane_id,
+        far_cell,
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
+                client_id: alice_client_id,
+                pane_id: floating_pane_id,
+                to: far_cell,
+            })],
+        }
+    );
+    let outer_size = Size {
+        column_count: 48,
+        row_count: 13,
+    };
+    assert_eq!(
+        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        FloatingPaneSizeSolve::Sized(outer_size)
+    );
+    let alice_position =
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
+            .position;
+    assert_eq!(alice_position, FloatingPanePosition::Moved(far_cell));
+    // alice's 80x22 pane area draws the 48x13 pane at its bottom-right corner.
+    assert_eq!(
+        place_floating_pane(
+            alice_position,
+            outer_size,
+            0,
+            Size {
+                column_count: 80,
+                row_count: 22,
+            },
+        )
+        .origin,
+        Point { column: 32, row: 9 }
+    );
+
+    let session_records_before = serialize_session_records(&runtime);
+    let (command_id, command_result) = dispatch_move_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        floating_pane_id,
+        far_cell,
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
+fn a_pane_one_client_pinned_refuses_that_clients_move_and_another_client_still_moves_it() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        ..
+    } = build_floating_command_fixture();
+    let bob_client_id = attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 120,
+            row_count: 42,
+        },
+    );
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let (command_id, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(floating_pane_id),
+        true,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+                client_id: alice_client_id,
+                pane_id: floating_pane_id,
+                is_pinned: true,
+            })],
+        }
+    );
+    let session_records_before = serialize_session_records(&runtime);
+
+    let (command_id, command_result) = dispatch_move_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        floating_pane_id,
+        Point { column: 4, row: 2 },
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(format!("{floating_pane_id} is pinned")),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+
+    let (command_id, command_result) = dispatch_move_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(bob_client_id),
+        floating_pane_id,
+        Point { column: 3, row: 1 },
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
+                client_id: bob_client_id,
+                pane_id: floating_pane_id,
+                to: Point { column: 3, row: 1 },
+            })],
+        }
+    );
+    assert_eq!(
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
+            .position,
+        FloatingPanePosition::Pinned(Point { column: 16, row: 4 })
+    );
+    assert_eq!(
+        get_client_floating_pane_view(&runtime, session_id, bob_client_id, floating_pane_id)
+            .position,
+        FloatingPanePosition::Moved(Point { column: 3, row: 1 })
+    );
+}
+
+#[test]
+fn moving_or_pinning_a_tiled_pane_is_refused_naming_what_only_a_floating_pane_does() {
+    let FloatingCommandFixture {
+        mut runtime,
+        alice_client_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let session_records_before = serialize_session_records(&runtime);
+
+    let (command_id, command_result) = dispatch_move_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        tiled_pane_id,
+        Point { column: 4, row: 2 },
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(format!(
+                "{tiled_pane_id} is tiled; only a floating pane moves this way"
+            )),
+        }
+    );
+
+    for is_pinned in [true, false] {
+        let (command_id, command_result) = dispatch_set_pane_pinned(
+            &mut runtime,
+            CommandSource::from_key_binding(alice_client_id),
+            Some(tiled_pane_id),
+            is_pinned,
+        );
+        assert_eq!(
+            command_result,
+            CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::InvalidState,
+                help: Some(format!(
+                    "{tiled_pane_id} is tiled; only a floating pane pins"
+                )),
+            },
+            "is_pinned: {is_pinned}"
+        );
+    }
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
+fn pinning_stores_the_cell_the_client_draws_and_unpinning_keeps_that_cell() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    // The second 48x13 pane is one cascade step from the centered (16, 4).
+    let second_floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let session_revision_before = runtime.session_by_id[&session_id].get_placement_revision();
+    let alice_revision_before =
+        get_attached_client(&runtime, session_id, alice_client_id).get_placement_revision();
+
+    for (applied_change_count, is_pinned, expected_position) in [
+        (
+            1,
+            true,
+            FloatingPanePosition::Pinned(Point { column: 18, row: 5 }),
+        ),
+        (
+            2,
+            false,
+            FloatingPanePosition::Moved(Point { column: 18, row: 5 }),
+        ),
+    ] {
+        let (command_id, command_result) = dispatch_set_pane_pinned(
+            &mut runtime,
+            CommandSource::from_key_binding(alice_client_id),
+            Some(second_floating_pane_id),
+            is_pinned,
+        );
+
+        assert_eq!(
+            command_result,
+            CommandResult::Ok {
+                command_id,
+                emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+                    client_id: alice_client_id,
+                    pane_id: second_floating_pane_id,
+                    is_pinned,
+                })],
+            }
+        );
+        assert_eq!(
+            get_client_floating_pane_view(
+                &runtime,
+                session_id,
+                alice_client_id,
+                second_floating_pane_id
+            ),
+            FloatingPaneView {
+                position: expected_position,
+                is_minimized: false,
+            }
+        );
+        assert_eq!(
+            get_attached_client(&runtime, session_id, alice_client_id).get_placement_revision(),
+            alice_revision_before + applied_change_count
+        );
+        assert_eq!(
+            runtime.session_by_id[&session_id].get_placement_revision(),
+            session_revision_before
+        );
+    }
+}
+
+#[test]
+fn pinning_a_pane_whose_stored_cell_lies_past_the_edge_pins_the_cell_it_is_drawn_at() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(
+            Some(build_cells_floating_pane_size(20, 10)),
+            Some(Point { column: 70, row: 2 }),
+            false,
+        ),
+    );
+    assert_eq!(
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
+            .position,
+        FloatingPanePosition::Moved(Point { column: 70, row: 2 })
+    );
+
+    let (command_id, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(floating_pane_id),
+        true,
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+                client_id: alice_client_id,
+                pane_id: floating_pane_id,
+                is_pinned: true,
+            })],
+        }
+    );
+    // A 20-column pane on alice's 80-column pane area starts at column 60 at most.
+    assert_eq!(
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
+            .position,
+        FloatingPanePosition::Pinned(Point { column: 60, row: 2 })
+    );
+}
+
+#[test]
+fn a_pin_of_a_pinned_pane_and_an_unpin_of_an_unpinned_pane_change_nothing() {
+    let FloatingCommandFixture {
+        mut runtime,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+
+    let session_records_before = serialize_session_records(&runtime);
+    let (command_id, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(floating_pane_id),
+        false,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+
+    let (_, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(floating_pane_id),
+        true,
+    );
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec!["PanePinChanged"])
+    );
+    let session_records_before = serialize_session_records(&runtime);
+    let (command_id, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(floating_pane_id),
+        true,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
+fn a_suppressed_pane_refuses_a_pin_but_moves_and_unpins() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        ..
+    } = build_floating_command_fixture();
+    let pinned_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let (_, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(pinned_pane_id),
+        true,
+    );
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec!["PanePinChanged"])
+    );
+    let unpinned_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    // bob's 3x3 terminal leaves no room for the floating minimum.
+    attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 3,
+            row_count: 3,
+        },
+    );
+    for floating_pane_id in [pinned_pane_id, unpinned_pane_id] {
+        assert_eq!(
+            get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+            FloatingPaneSizeSolve::Suppressed
+        );
+    }
+    let session_records_before = serialize_session_records(&runtime);
+
+    let (command_id, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(unpinned_pane_id),
+        true,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(format!(
+                "{unpinned_pane_id} is suppressed; the smallest attached terminal has no room \
+                 for it"
+            )),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+
+    let (command_id, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(pinned_pane_id),
+        false,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+                client_id: alice_client_id,
+                pane_id: pinned_pane_id,
+                is_pinned: false,
+            })],
+        }
+    );
+    assert_eq!(
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, pinned_pane_id)
+            .position,
+        FloatingPanePosition::Moved(Point { column: 16, row: 4 })
+    );
+
+    let (command_id, command_result) = dispatch_move_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        unpinned_pane_id,
+        Point { column: 2, row: 1 },
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
+                client_id: alice_client_id,
+                pane_id: unpinned_pane_id,
+                to: Point { column: 2, row: 1 },
+            })],
+        }
+    );
+    assert_eq!(
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, unpinned_pane_id)
+            .position,
+        FloatingPanePosition::Moved(Point { column: 2, row: 1 })
+    );
+}
+
+#[test]
+fn a_pin_for_a_client_that_reports_no_pane_area_is_refused() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        ..
+    } = build_floating_command_fixture();
+    attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 120,
+            row_count: 42,
+        },
+    );
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(Some(build_cells_floating_pane_size(40, 12)), None, false),
+    );
+    let _ = runtime.handle_client_resize(
+        alice_client_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        Some(PaneArea::Starving),
+        None,
+    );
+    // bob's pane area still sizes the pane.
+    assert_eq!(
+        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        FloatingPaneSizeSolve::Sized(Size {
+            column_count: 40,
+            row_count: 12,
+        })
+    );
+    let session_records_before = serialize_session_records(&runtime);
+
+    let (command_id, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(floating_pane_id),
+        true,
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(format!(
+                "{floating_pane_id} is not drawn on the client's screen, so it has no position \
+                 to pin"
+            )),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
+fn a_minimized_pane_pins_and_moves_and_stays_minimized() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    runtime
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the fixture's session")
+        .clients
+        .get_client_mut_by_id(alice_client_id)
+        .expect("alice is attached")
+        .minimize_floating_pane(floating_pane_id);
+
+    let (_, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(floating_pane_id),
+        true,
+    );
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec!["PanePinChanged"])
+    );
+    assert_eq!(
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id),
+        FloatingPaneView {
+            position: FloatingPanePosition::Pinned(Point { column: 16, row: 4 }),
+            is_minimized: true,
+        }
+    );
+
+    let (_, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(floating_pane_id),
+        false,
+    );
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec!["PanePinChanged"])
+    );
+    let (_, command_result) = dispatch_move_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        floating_pane_id,
+        Point { column: 1, row: 1 },
+    );
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec!["FloatingPaneMoved"])
+    );
+    assert_eq!(
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id),
+        FloatingPaneView {
+            position: FloatingPanePosition::Moved(Point { column: 1, row: 1 }),
+            is_minimized: true,
+        }
+    );
+}
+
+#[test]
+fn a_pin_naming_no_pane_takes_the_acting_clients_focused_floating_pane() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let session_records_before = serialize_session_records(&runtime);
+
+    let (command_id, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        None,
+        true,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("no floating pane is focused".to_string()),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+
+    assert!(runtime
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the fixture's session")
+        .clients
+        .get_client_mut_by_id(alice_client_id)
+        .expect("alice is attached")
+        .focus_floating_pane(floating_pane_id));
+    let (command_id, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        None,
+        true,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+                client_id: alice_client_id,
+                pane_id: floating_pane_id,
+                is_pinned: true,
+            })],
+        }
+    );
+    assert_eq!(
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
+            .position,
+        FloatingPanePosition::Pinned(Point { column: 16, row: 4 })
+    );
+}
+
+#[test]
+fn an_in_session_move_and_pin_act_on_the_pane_they_were_issued_from() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let floating_shell_source =
+        build_in_session_source(session_id, alice_client_id, floating_pane_id);
+
+    let (command_id, command_result) = dispatch_move_floating_pane(
+        &mut runtime,
+        floating_shell_source.clone(),
+        floating_pane_id,
+        Point { column: 5, row: 3 },
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
+                client_id: alice_client_id,
+                pane_id: floating_pane_id,
+                to: Point { column: 5, row: 3 },
+            })],
+        }
+    );
+    let (command_id, command_result) =
+        dispatch_set_pane_pinned(&mut runtime, floating_shell_source, None, true);
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+                client_id: alice_client_id,
+                pane_id: floating_pane_id,
+                is_pinned: true,
+            })],
+        }
+    );
+    assert_eq!(
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
+            .position,
+        FloatingPanePosition::Pinned(Point { column: 5, row: 3 })
+    );
+
+    let session_records_before = serialize_session_records(&runtime);
+    let (command_id, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        build_in_session_source(session_id, alice_client_id, tiled_pane_id),
+        None,
+        true,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(format!(
+                "{tiled_pane_id} is tiled; only a floating pane pins"
+            )),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
+fn an_external_move_and_pin_change_only_the_named_clients_view() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        ..
+    } = build_floating_command_fixture();
+    let bob_client_id = attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 120,
+            row_count: 42,
+        },
+    );
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    assert!(runtime
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the fixture's session")
+        .clients
+        .get_client_mut_by_id(bob_client_id)
+        .expect("bob is attached")
+        .focus_floating_pane(floating_pane_id));
+    let alice_record_before = serialize_client_record(&runtime, session_id, alice_client_id);
+    let bob_source = CommandSource::from_external_cli(Some(session_id), Some(bob_client_id));
+
+    // bob's 120x40 pane area draws the 48x13 pane centered at (36, 13).
+    for (pane_id, is_pinned, expected_position) in [
+        (
+            None,
+            true,
+            FloatingPanePosition::Pinned(Point {
+                column: 36,
+                row: 13,
+            }),
+        ),
+        (
+            Some(floating_pane_id),
+            false,
+            FloatingPanePosition::Moved(Point {
+                column: 36,
+                row: 13,
+            }),
+        ),
+    ] {
+        let (command_id, command_result) =
+            dispatch_set_pane_pinned(&mut runtime, bob_source.clone(), pane_id, is_pinned);
+        assert_eq!(
+            command_result,
+            CommandResult::Ok {
+                command_id,
+                emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+                    client_id: bob_client_id,
+                    pane_id: floating_pane_id,
+                    is_pinned,
+                })],
+            }
+        );
+        assert_eq!(
+            get_client_floating_pane_view(&runtime, session_id, bob_client_id, floating_pane_id)
+                .position,
+            expected_position
+        );
+    }
+    let (command_id, command_result) = dispatch_move_floating_pane(
+        &mut runtime,
+        bob_source,
+        floating_pane_id,
+        Point { column: 4, row: 2 },
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
+                client_id: bob_client_id,
+                pane_id: floating_pane_id,
+                to: Point { column: 4, row: 2 },
+            })],
+        }
+    );
+    assert_eq!(
+        serialize_client_record(&runtime, session_id, alice_client_id),
+        alice_record_before
+    );
+
+    let session_records_before = serialize_session_records(&runtime);
+    let (command_id, command_result) = dispatch_move_floating_pane(
+        &mut runtime,
+        CommandSource::from_external_cli(Some(session_id), Some(ClientId::new())),
+        floating_pane_id,
+        Point { column: 4, row: 2 },
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: Some("target client not attached to the session".to_string()),
+        }
+    );
+    let (command_id, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_external_cli(Some(session_id), None),
+        Some(floating_pane_id),
+        true,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetAmbiguous,
+            help: Some("several clients are attached; name the target client".to_string()),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
+fn a_key_or_mouse_of_a_client_in_another_session_changes_nothing_there() {
+    let FloatingCommandFixture {
+        mut runtime,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let other_session_id = SessionId::new();
+    let carol_client_id = runtime
+        .bootstrap_local(
+            other_session_id,
+            Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect("bootstrap carol");
+    let other_session = &runtime.session_by_id[&other_session_id];
+    let other_tab_id = *other_session
+        .tabs
+        .keys()
+        .next()
+        .expect("the other session's tab");
+    let other_tiled_pane_id = other_session
+        .panes
+        .list_pane_records()
+        .map(PaneRecord::get_pane_id)
+        .next()
+        .expect("the other session's pane");
+    let other_floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(carol_client_id),
+        build_floating_new_pane_args(Some(build_cells_floating_pane_size(40, 12)), None, false),
+    );
+    let session_records_before = serialize_session_records(&runtime);
+    let build_not_attached_rejection = |command_id| CommandResult::Rejected {
+        command_id,
+        reason: RejectReason::TargetNotFound,
+        help: Some("the issuing client is not attached to the session".to_string()),
+    };
+
+    let (command_id, command_result) = dispatch_move_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        other_floating_pane_id,
+        Point { column: 4, row: 2 },
+    );
+    assert_eq!(command_result, build_not_attached_rejection(command_id));
+
+    let (command_id, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_mouse(alice_client_id),
+        Some(other_floating_pane_id),
+        true,
+    );
+    assert_eq!(command_result, build_not_attached_rejection(command_id));
+
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        other_floating_pane_id,
+        Direction::Right,
+        1,
+    );
+    assert_eq!(command_result, build_not_attached_rejection(command_id));
+
+    let place_pane_envelope = build_command_envelope(
+        CommandSource::from_mouse(alice_client_id),
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id: other_tiled_pane_id,
+            placement_target: PanePlacementTarget::Split {
+                destination_tab_id: other_tab_id,
+                anchor: PanePlacementAnchor::Tab,
+                direction: Direction::Right,
+            },
+            expected_placement_revision: None,
+        }),
+    );
+    let command_id = place_pane_envelope.command_id;
+    assert_eq!(
+        runtime.dispatch(place_pane_envelope),
+        build_not_attached_rejection(command_id)
+    );
+
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
+fn a_view_change_past_the_maximum_client_revision_is_refused_and_a_no_op_still_succeeds() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let (_, command_result) = dispatch_move_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        floating_pane_id,
+        Point { column: 4, row: 2 },
+    );
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec!["FloatingPaneMoved"])
+    );
+    let session_revision = runtime.session_by_id[&session_id].get_placement_revision();
+    replace_persisted_placement_revisions(
+        &mut runtime,
+        session_id,
+        alice_client_id,
+        session_revision,
+        u64::MAX,
+    );
+    let session_records_before = serialize_session_records(&runtime);
+
+    let (command_id, command_result) = dispatch_move_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        floating_pane_id,
+        Point { column: 5, row: 2 },
+    );
+    assert_eq!(
+        command_result,
+        build_revision_exhausted_rejection(command_id)
+    );
+    let (command_id, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(floating_pane_id),
+        true,
+    );
+    assert_eq!(
+        command_result,
+        build_revision_exhausted_rejection(command_id)
+    );
+
+    let (command_id, command_result) = dispatch_move_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        floating_pane_id,
+        Point { column: 4, row: 2 },
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+    let (command_id, command_result) = dispatch_set_pane_pinned(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(floating_pane_id),
+        false,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
 }

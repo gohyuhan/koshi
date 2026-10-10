@@ -8,8 +8,10 @@ use std::time::Duration;
 
 use crate::event::tests::list_event_cases;
 use crate::event::{
-    ConfigReloaded, PaneCommandFinished, PaneCreated, PaneFocused, QuitCause, TabFocused,
+    ConfigReloaded, FloatingPaneMoved, PaneCommandFinished, PaneCreated, PaneFocused,
+    PanePinChanged, QuitCause, TabFocused,
 };
+use crate::geometry::Point;
 
 /// A fixed instant, so an assertion never races the clock.
 fn build_occurred_at() -> SystemTime {
@@ -126,6 +128,44 @@ fn a_pane_created_records_its_pane_and_tab_and_nothing_else() {
             pane_id: Some(pane_id),
             command_id: None,
         }
+    );
+}
+
+#[test]
+fn floating_pane_view_events_record_their_client_and_pane_and_nothing_else() {
+    let client_id = ClientId::new();
+    let pane_id = PaneId::new();
+    let build_floating_view_record = |event_name: &'static str| RecentEvent {
+        occurred_at: build_occurred_at(),
+        event_name: Cow::Borrowed(event_name),
+        session_id: None,
+        client_id: Some(client_id),
+        tab_id: None,
+        pane_id: Some(pane_id),
+        command_id: None,
+    };
+
+    assert_eq!(
+        record_event(
+            &Event::FloatingPaneMoved(FloatingPaneMoved {
+                client_id,
+                pane_id,
+                to: Point { column: 70, row: 2 },
+            }),
+            build_occurred_at(),
+        ),
+        build_floating_view_record("FloatingPaneMoved")
+    );
+    assert_eq!(
+        record_event(
+            &Event::PanePinChanged(PanePinChanged {
+                client_id,
+                pane_id,
+                is_pinned: true,
+            }),
+            build_occurred_at(),
+        ),
+        build_floating_view_record("PanePinChanged")
     );
 }
 

@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::command::{GridPosition, PanePlacementAnchor, PanePlacementTarget, SelectionKind};
-use crate::geometry::{Direction, PaneArea, Size};
+use crate::geometry::{Direction, PaneArea, Point, Size};
 use crate::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use crate::process::PtySize;
 
@@ -184,6 +184,43 @@ fn selection_events_with_and_without_a_selection_round_trip_through_json() {
     }));
 }
 
+#[test]
+fn floating_pane_view_events_encode_the_client_the_pane_and_the_new_state() {
+    let client_id = ClientId::new();
+    let pane_id = PaneId::new();
+
+    assert_eq!(
+        serde_json::to_value(Event::FloatingPaneMoved(FloatingPaneMoved {
+            client_id,
+            pane_id,
+            to: Point { column: 70, row: 2 },
+        }))
+        .expect("serialize floating pane moved"),
+        serde_json::json!({
+            "FloatingPaneMoved": {
+                "client_id": client_id,
+                "pane_id": pane_id,
+                "to": { "column": 70, "row": 2 },
+            }
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(Event::PanePinChanged(PanePinChanged {
+            client_id,
+            pane_id,
+            is_pinned: false,
+        }))
+        .expect("serialize pane pin changed"),
+        serde_json::json!({
+            "PanePinChanged": {
+                "client_id": client_id,
+                "pane_id": pane_id,
+                "is_pinned": false,
+            }
+        })
+    );
+}
+
 /// Round-trips the variants the named round-trip tests above leave out, with
 /// both `Some` and `None` for `PaneFocused::previous_pane_id`.
 #[test]
@@ -290,7 +327,7 @@ fn format_debug_variant_name<DebugSubject: std::fmt::Debug>(
 
 /// One instance per top-level `Event` variant with its canonical name. The
 /// array length is the variant count.
-pub(crate) fn list_event_cases() -> [(Event, &'static str); 21] {
+pub(crate) fn list_event_cases() -> [(Event, &'static str); 23] {
     [
         (
             Event::PaneCreated(PaneCreated {
@@ -438,18 +475,34 @@ pub(crate) fn list_event_cases() -> [(Event, &'static str); 21] {
             }),
             "SelectionChanged",
         ),
+        (
+            Event::FloatingPaneMoved(FloatingPaneMoved {
+                client_id: ClientId::new(),
+                pane_id: PaneId::new(),
+                to: Point { column: 4, row: 2 },
+            }),
+            "FloatingPaneMoved",
+        ),
+        (
+            Event::PanePinChanged(PanePinChanged {
+                client_id: ClientId::new(),
+                pane_id: PaneId::new(),
+                is_pinned: true,
+            }),
+            "PanePinChanged",
+        ),
         (Event::Quit(QuitCause::Requested), "Quit"),
         (Event::Restarting, "Restarting"),
     ]
 }
 
-/// Checks 21 distinct top-level event names against `Debug` and
+/// Checks 23 distinct top-level event names against `Debug` and
 /// [`Event::get_event_name`].
 #[test]
 fn event_variants_report_their_canonical_names() {
     let event_cases = list_event_cases();
     let mut event_names = std::collections::BTreeSet::new();
-    assert_eq!(event_cases.len(), 21);
+    assert_eq!(event_cases.len(), 23);
     for (event, event_name) in event_cases {
         assert_eq!(format_debug_variant_name(&event), event_name);
         assert_eq!(event.get_event_name(), event_name);
@@ -458,7 +511,7 @@ fn event_variants_report_their_canonical_names() {
             "duplicate event name: {event_name}"
         );
     }
-    assert_eq!(event_names.len(), 21);
+    assert_eq!(event_names.len(), 23);
 }
 
 #[test]

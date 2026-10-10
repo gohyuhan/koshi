@@ -152,6 +152,41 @@ fn pane_command_variants_round_trip_through_json() {
             }
         })
     );
+    let floating_pane_id = PaneId::new();
+    assert_json_roundtrip(&Command::MoveFloatingPane(MoveFloatingPaneArgs {
+        pane_id: floating_pane_id,
+        to: Point { column: 70, row: 2 },
+    }));
+    assert_eq!(
+        serde_json::to_value(Command::MoveFloatingPane(MoveFloatingPaneArgs {
+            pane_id: floating_pane_id,
+            to: Point { column: 70, row: 2 },
+        }))
+        .expect("serialize floating move command"),
+        json!({
+            "MoveFloatingPane": {
+                "pane_id": floating_pane_id,
+                "to": { "column": 70, "row": 2 },
+            }
+        })
+    );
+    assert_json_roundtrip(&Command::SetPanePinned(SetPanePinnedArgs {
+        pane_id: Some(floating_pane_id),
+        is_pinned: false,
+    }));
+    assert_eq!(
+        serde_json::to_value(Command::SetPanePinned(SetPanePinnedArgs {
+            pane_id: None,
+            is_pinned: true,
+        }))
+        .expect("serialize pin command"),
+        json!({
+            "SetPanePinned": {
+                "pane_id": null,
+                "is_pinned": true,
+            }
+        })
+    );
     assert_json_roundtrip(&Command::NewPane(NewPaneArgs {
         placement: NewPanePlacement::Split {
             source_pane_id: Some(PaneId::new()),
@@ -328,6 +363,20 @@ fn command_variant_names_are_canonical() {
             }),
             "ScrollPane",
         ),
+        (
+            Command::MoveFloatingPane(MoveFloatingPaneArgs {
+                pane_id: PaneId::new(),
+                to: Point { column: 0, row: 0 },
+            }),
+            "MoveFloatingPane",
+        ),
+        (
+            Command::SetPanePinned(SetPanePinnedArgs {
+                pane_id: None,
+                is_pinned: true,
+            }),
+            "SetPanePinned",
+        ),
         (Command::Quit, "Quit"),
         (Command::ToggleMouseSelect, "ToggleMouseSelect"),
         (Command::Detach(DetachArgs::default()), "Detach"),
@@ -340,7 +389,7 @@ fn command_variant_names_are_canonical() {
             "SwitchSession",
         ),
     ];
-    assert_eq!(command_cases.len(), 21);
+    assert_eq!(command_cases.len(), 23);
     for (command, command_name) in &command_cases {
         assert_eq!(&format_debug_variant_name(command), command_name);
     }
@@ -1064,7 +1113,7 @@ fn a_command_with_an_unknown_variant_name_is_rejected() {
 
     assert_eq!(
         parse_error.to_string(),
-        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `Visual`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `PlacePane`, `ScrollPane`, `Quit`, `Detach`, `DetachAll`, `SwitchSession`"
+        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `Visual`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `PlacePane`, `ScrollPane`, `MoveFloatingPane`, `SetPanePinned`, `Quit`, `Detach`, `DetachAll`, `SwitchSession`"
     );
 }
 
