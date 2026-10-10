@@ -454,3 +454,83 @@ fn commit_rejects_a_prepared_tree_that_moves_more_than_the_source_pane() {
         serialized_session_before
     );
 }
+
+#[test]
+fn the_placed_pane_takes_over_the_acting_clients_input_from_a_focused_floating_pane() {
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    let (staying_pane_id, placed_pane_id, destination_pane_id, floating_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
+    let client_id = ClientId::new();
+    let mut session = build_session();
+    for pane_id in [
+        staying_pane_id,
+        placed_pane_id,
+        destination_pane_id,
+        floating_pane_id,
+    ] {
+        register_pane(&mut session, pane_id);
+    }
+    register_tab(&mut session, source_tab_id, &[staying_pane_id]);
+    session
+        .tabs
+        .get_mut(&source_tab_id)
+        .expect("source tab")
+        .update_layout(build_horizontal_split(staying_pane_id, placed_pane_id));
+    register_tab(&mut session, destination_tab_id, &[destination_pane_id]);
+    session
+        .floating_set
+        .add_member(crate::session::state::tests::build_default_floating_member(
+            floating_pane_id,
+        ))
+        .expect("the floating set is empty");
+    attach_client(&mut session, client_id, source_tab_id, staying_pane_id);
+    assert!(session
+        .clients
+        .get_client_mut_by_id(client_id)
+        .expect("acting client")
+        .focus_floating_pane(floating_pane_id));
+
+    let emitted_events = commit_cross_tab_placement(
+        &mut session,
+        source_tab_id,
+        destination_tab_id,
+        placed_pane_id,
+        CrossTabPlacement {
+            source_tree: Some(LayoutNode::Pane(staying_pane_id)),
+            destination_tree: build_horizontal_split(destination_pane_id, placed_pane_id),
+        },
+        client_id,
+    )
+    .expect("placement commits");
+
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::LayoutChanged(LayoutChanged {
+                tab_id: destination_tab_id,
+            }),
+            Event::LayoutChanged(LayoutChanged {
+                tab_id: source_tab_id,
+            }),
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: destination_tab_id,
+                previous_tab_id: source_tab_id,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: Some(destination_tab_id),
+                pane_id: placed_pane_id,
+                previous_pane_id: Some(floating_pane_id),
+            }),
+        ]
+    );
+    let client = session
+        .clients
+        .get_client_by_id(client_id)
+        .expect("acting client");
+    assert_eq!(client.get_focused_floating_pane_id(), None);
+    assert_eq!(client.get_active_focused_pane_id(), Some(placed_pane_id));
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+}

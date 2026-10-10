@@ -18,10 +18,10 @@
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
 use koshi_core::event::{
     ConfigReloaded, Event, FloatingPaneMoved, InputModeChanged, LayoutChanged, MouseSelectChanged,
-    PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneFocused, PanePinChanged,
-    PanePlacementCommitted, PaneProcessExited, PaneRemoved, PtyResized, QuitCause,
-    SelectionChanged, TabClosed, TabCreated, TabFocused, TabMoved, TerminalTooSmallCause,
-    TerminalTooSmallEntered,
+    PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneFocused,
+    PaneMinimizedChanged, PanePinChanged, PanePlacementCommitted, PaneProcessExited, PaneRemoved,
+    PtyResized, QuitCause, SelectionChanged, TabClosed, TabCreated, TabFocused, TabMoved,
+    TerminalTooSmallCause, TerminalTooSmallEntered,
 };
 use koshi_core::geometry::{Direction, PaneArea, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
@@ -1434,6 +1434,11 @@ fn every_event_with_no_wire_spelling_converts_to_nothing() {
             client_id,
             pane_id,
             is_pinned: true,
+        }),
+        Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            client_id,
+            pane_id,
+            is_minimized: true,
         }),
     ];
 

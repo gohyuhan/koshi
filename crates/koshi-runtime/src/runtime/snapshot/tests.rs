@@ -18,7 +18,7 @@ use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_session::client::{ClientOrigin, ClientRegistry};
-use koshi_session::session::state::{FloatingMember, FloatingPaneSizeSolve};
+use koshi_session::session::state::FloatingMember;
 use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::state::CursorShape;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -822,10 +822,10 @@ fn a_placement_snapshot_of_a_floating_source_is_refused_naming_the_pane() {
         .add_member(FloatingMember {
             pane_id: floating_pane_id,
             desired_size: DEFAULT_FLOATING_PANE_SIZE,
-            solved_size: FloatingPaneSizeSolve::Sized(Size {
+            solved_size: Size {
                 column_count: 48,
                 row_count: 13,
-            }),
+            },
         })
         .expect("the set has room");
     server.session_by_id.insert(session_id, session);
@@ -1343,16 +1343,16 @@ fn snapshot_reports_a_live_offset_for_a_scrolled_client_on_the_alternate_screen(
 fn shorten_home_replaces_the_prefix_only_on_a_path_boundary() {
     use super::shorten_home_path;
     use std::path::Path;
-    let home_path = Some("/Users/ab");
-    assert_eq!(shorten_home_path(Path::new("/Users/ab"), home_path), "~");
+    let home_path = Some("/home/user");
+    assert_eq!(shorten_home_path(Path::new("/home/user"), home_path), "~");
     assert_eq!(
-        shorten_home_path(Path::new("/Users/ab/koshi"), home_path),
+        shorten_home_path(Path::new("/home/user/koshi"), home_path),
         "~/koshi"
     );
     // A sibling directory sharing the prefix text is NOT under home.
     assert_eq!(
-        shorten_home_path(Path::new("/Users/ab2/x"), home_path),
-        "/Users/ab2/x"
+        shorten_home_path(Path::new("/home/user2/x"), home_path),
+        "/home/user2/x"
     );
     assert_eq!(shorten_home_path(Path::new("/tmp"), None), "/tmp");
 }

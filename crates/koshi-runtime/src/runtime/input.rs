@@ -128,14 +128,21 @@ impl Server {
         }
     }
 
-    /// The pane a keystroke from `client_id` types into: the pane it has focused
-    /// in its active tab, when that pane can take a keystroke at all.
+    /// The pane a keystroke from `client_id` types into: the pane that takes
+    /// its input ([`Client::get_active_focused_pane_id`]), when that pane can
+    /// take a keystroke at all.
     ///
-    /// Yields `None` for an unknown client, an active tab with no focused pane,
-    /// a focused pane the session no longer holds, a missing tab, and a tab with
-    /// no tab size.
+    /// Yields `None` for an unknown client, a client with no such pane, and a
+    /// pane the session no longer holds.
     ///
-    /// A focused pane this client draws no content for also yields `None` —
+    /// A focused floating pane takes the keystroke while this client has room
+    /// to draw a floating pane ([`Client::get_floating_viewport`]), and yields
+    /// `None` while this client's pane area is smaller than `4x5` on either
+    /// axis, also while another attached client has room.
+    ///
+    /// A focused tiled pane yields `None` for a missing tab and a tab with no
+    /// tab size. A tiled pane this client draws no content for also yields
+    /// `None` —
     /// suppressed for want of space, hidden behind a pane this client has
     /// zoomed, or collapsed to a stack header. Shrink the terminal until the
     /// focused pane is suppressed, type `l`, and the shell inside it stays
@@ -148,13 +155,21 @@ impl Server {
     /// are drawn, exactly as they agree on the frame.
     ///
     /// [`Session::get_tab_size`]: koshi_session::session::state::Session::get_tab_size
+    /// [`Client::get_floating_viewport`]: koshi_session::client::Client::get_floating_viewport
+    /// [`Client::get_active_focused_pane_id`]: koshi_session::client::Client::get_active_focused_pane_id
     pub(crate) fn find_typed_pane(&self, client_id: ClientId) -> Option<PaneId> {
         let session = self.get_session_for_client(client_id)?;
         let attached_client = session.clients.get_client_by_id(client_id)?;
-        let tab_id = attached_client.get_active_tab_id();
-        let pane_id = attached_client.get_focused_pane_id(tab_id)?;
+        let pane_id = attached_client.get_active_focused_pane_id()?;
         session.panes.get_pane_record_by_id(pane_id)?;
+        if attached_client.get_focused_floating_pane_id().is_some() {
+            return attached_client
+                .get_floating_viewport()
+                .is_some()
+                .then_some(pane_id);
+        }
 
+        let tab_id = attached_client.get_active_tab_id();
         let tab_record = session.tabs.get(&tab_id)?;
         let tab_size = session.get_tab_size(tab_id)?;
         list_content_rects(&solve_tab_layout(

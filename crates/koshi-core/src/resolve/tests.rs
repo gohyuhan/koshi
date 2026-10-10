@@ -210,6 +210,20 @@ fn build_bindable_action_table() -> Vec<(&'static str, Command)> {
             }),
         ),
         (
+            "focus-next-floating-pane",
+            Command::FocusPane(FocusPaneArgs {
+                focus_target: FocusTarget::NextFloatingPane,
+                client_id: None,
+            }),
+        ),
+        (
+            "focus-previous-floating-pane",
+            Command::FocusPane(FocusPaneArgs {
+                focus_target: FocusTarget::PreviousFloatingPane,
+                client_id: None,
+            }),
+        ),
+        (
             "scroll-pane-up",
             Command::ScrollPane(ScrollPaneArgs {
                 pane_id: None,
@@ -376,6 +390,8 @@ fn find_command_kind(command: &Command) -> Option<CommandKind> {
         Command::Visual(_)
         | Command::MoveFloatingPane(_)
         | Command::SetPanePinned(_)
+        | Command::SetPaneMinimized(_)
+        | Command::SetAllFloatingPanesMinimized(_)
         | Command::Detach(_)
         | Command::DetachAll
         | Command::SwitchSession(_) => None,

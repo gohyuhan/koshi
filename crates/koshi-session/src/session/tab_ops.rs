@@ -53,13 +53,15 @@ pub enum TabTarget {
 /// command recorded on the root pane.
 ///
 /// `focus_client_id` — when given and still attached — switches onto the new tab
-/// and focuses its root pane; a stale id focuses nothing, exactly like `None`.
+/// and focuses its root pane, which takes that client's input: no floating
+/// pane stays focused for it. A stale id focuses nothing, exactly like `None`.
 /// Other clients never move.
 ///
 /// Returns the focused client's *previous* tab when one was switched, and the
 /// events to emit: [`Event::TabCreated`], [`Event::PaneCreated`], then — only
 /// when `focus_client_id` applies — [`Event::TabFocused`] and
-/// [`Event::PaneFocused`], in that order.
+/// [`Event::PaneFocused`], in that order. The `PaneFocused` names as
+/// `previous_pane_id` the floating pane that held the client's input, if any.
 #[must_use]
 pub fn commit_new_tab(
     session: &mut Session,
@@ -100,7 +102,7 @@ pub fn commit_new_tab(
                 tab_id: new_tab_id,
                 previous_tab_id,
             }));
-            let previous_pane_id = client.update_focused_pane(new_tab_id, new_pane_id);
+            let previous_pane_id = client.focus_tiled_pane(new_tab_id, new_pane_id);
             emitted_events.push(Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: Some(new_tab_id),
@@ -140,9 +142,11 @@ pub struct ProfileTab {
 ///
 /// `focus_client_id` — when given and still attached — records the focus pane for
 /// that client in this tab; a stale id records nothing, exactly like `None`.
-/// `is_active` then decides that client's view: `true` switches it onto the tab and
-/// emits [`Event::TabFocused`] and [`Event::PaneFocused`]; `false` leaves the
-/// client viewing the tab it was on and emits neither.
+/// `is_active` then decides that client's view: `true` switches it onto the tab,
+/// gives the focus pane that client's input (no floating pane stays focused for
+/// it), and emits [`Event::TabFocused`] and [`Event::PaneFocused`]; `false`
+/// leaves the client viewing the tab it was on, with its input where it was,
+/// and emits neither.
 ///
 /// Returns the events to emit: [`Event::TabCreated`], one
 /// [`Event::PaneCreated`] per pane in layout order, then the focus pair when it
@@ -199,12 +203,10 @@ pub fn commit_profile_tab(
 
     if let Some(client_id) = focus_client_id {
         if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
-            // The pane is recorded on the client whether or not the tab starts
-            // active.
-            let previous_pane_id = client.update_focused_pane(tab_id, focused_pane_id);
             if is_active {
                 let previous_tab_id = client.get_active_tab_id();
                 client.update_active_tab_id(tab_id);
+                let previous_pane_id = client.focus_tiled_pane(tab_id, focused_pane_id);
                 emitted_events.push(Event::TabFocused(TabFocused {
                     client_id,
                     tab_id,
@@ -216,6 +218,8 @@ pub fn commit_profile_tab(
                     pane_id: focused_pane_id,
                     previous_pane_id,
                 }));
+            } else {
+                client.update_focused_pane(tab_id, focused_pane_id);
             }
         }
     }
@@ -240,7 +244,7 @@ pub fn close_tab(session: &mut Session, tab_id: TabId) -> Vec<Event> {
 
     let mut emitted_events = vec![];
     for pane_id in tab_pane_ids {
-        let _ = session.panes.remove_pane_record(pane_id);
+        session.panes.remove_pane_record(pane_id);
         emitted_events.push(Event::PaneClosing(PaneClosing { pane_id }));
         emitted_events.push(Event::PaneRemoved(PaneRemoved {
             pane_id,

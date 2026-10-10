@@ -177,7 +177,8 @@ pub struct PanePlacementClientSnapshot {
     pub pane_area: Option<PaneArea>,
     /// The tab the client viewed when it requested the preview.
     pub active_tab_id: TabId,
-    /// The pane focused in the active tab, if any.
+    /// The pane that takes the client's input, if any: its focused floating
+    /// pane, else the pane focused in the active tab.
     pub focused_pane_id: Option<PaneId>,
 }
 

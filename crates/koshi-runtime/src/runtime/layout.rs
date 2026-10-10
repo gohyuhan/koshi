@@ -107,8 +107,7 @@ impl Server {
             .map(|client_record| ClientFocus {
                 client_id: client_record.get_client_id(),
                 active_tab_id: client_record.get_active_tab_id(),
-                focused_pane_id: client_record
-                    .get_focused_pane_id(client_record.get_active_tab_id()),
+                focused_pane_id: client_record.get_active_focused_pane_id(),
             })
             .collect();
 

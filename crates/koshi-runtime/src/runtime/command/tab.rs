@@ -71,14 +71,15 @@ impl Server {
         // built from `self.config.terminal` before the session is borrowed.
         let mut spawn_spec =
             self.build_default_shell_spec(command_args.working_directory.clone(), BTreeMap::new());
-        // No directory was asked for: the tab opens where the designated
-        // client's focused pane currently is ([`Self::resolve_pane_working_directory`]).
+        // No directory was asked for: the tab opens where the pane that takes
+        // the designated client's input currently is
+        // ([`Self::resolve_pane_working_directory`]).
         if spawn_spec.working_directory.is_none() {
             spawn_spec.working_directory = self
                 .session_by_id
                 .get(&tab_target.session_id)
                 .and_then(|session| session.clients.get_client_by_id(tab_target.client_id))
-                .and_then(|client| client.get_focused_pane_id(client.get_active_tab_id()))
+                .and_then(Client::get_active_focused_pane_id)
                 .and_then(|pane_id| {
                     self.resolve_pane_working_directory(tab_target.session_id, pane_id)
                 });
@@ -88,10 +89,7 @@ impl Server {
             .session_by_id
             .get_mut(&tab_target.session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
-        let client = session
-            .clients
-            .get_client_by_id(tab_target.client_id)
-            .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
+        let client = Self::require_client(session, tab_target.client_id)?;
 
         // The new tab fills the designated client's pane area.
         let reject_when_no_room = || {
@@ -329,10 +327,7 @@ impl Server {
             .session_by_id
             .get_mut(&tab_target.session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
-        let client = session
-            .clients
-            .get_client_by_id(tab_target.client_id)
-            .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
+        let client = Self::require_client(session, tab_target.client_id)?;
         let previous_tab_id = client.get_active_tab_id();
 
         // Already viewing it: nothing changes, and no event is emitted.

@@ -83,6 +83,8 @@ pub enum Event {
     FloatingPaneMoved(FloatingPaneMoved),
     /// A client pinned or unpinned a floating pane in its own view.
     PanePinChanged(PanePinChanged),
+    /// A client minimized or restored a floating pane in its own view.
+    PaneMinimizedChanged(PaneMinimizedChanged),
 
     // Session lifecycle.
     /// The session is over. The payload names what ended it: a quit request,
@@ -123,6 +125,7 @@ impl Event {
             Event::SelectionChanged(_) => "SelectionChanged",
             Event::FloatingPaneMoved(_) => "FloatingPaneMoved",
             Event::PanePinChanged(_) => "PanePinChanged",
+            Event::PaneMinimizedChanged(_) => "PaneMinimizedChanged",
             Event::Quit(_) => "Quit",
             Event::Restarting => "Restarting",
         }
@@ -210,6 +213,11 @@ pub struct PaneRemoved {
 }
 
 /// Payload for [`Event::PaneFocused`].
+///
+/// `tab_id: Some(tab)` reports a new focused pane of that tab for the client.
+/// `tab_id: None` reports that the client's input moved to the floating pane
+/// `pane_id`. When the client's input leaves its floating panes, one event
+/// names the client's active tab and the pane it focused there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneFocused {
     /// The client whose focus moved.
@@ -220,7 +228,12 @@ pub struct PaneFocused {
     pub tab_id: Option<TabId>,
     /// The newly focused pane.
     pub pane_id: PaneId,
-    /// The pane that held this client's focus in the tab before, if any.
+    /// When the client's input moves into, out of or between floating panes,
+    /// the pane that held the input before. Otherwise, the pane the client
+    /// focused in the tab before, if any. Tab `db` focuses `vim`, then
+    /// `core:focus-next-floating-pane` onto float `htop` gives
+    /// `previous_pane_id: vim`, and a directional focus back gives
+    /// `previous_pane_id: htop`.
     pub previous_pane_id: Option<PaneId>,
 }
 
@@ -480,6 +493,20 @@ pub struct PanePinChanged {
     pub pane_id: PaneId,
     /// Whether the client now has the pane pinned.
     pub is_pinned: bool,
+}
+
+/// Payload for [`Event::PaneMinimizedChanged`].
+///
+/// Minimizing is per-client state: `client_id` names the client whose view
+/// changed. Every other client's view of the pane stays as it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneMinimizedChanged {
+    /// The client that minimized or restored the pane.
+    pub client_id: ClientId,
+    /// The floating pane whose minimized state changed.
+    pub pane_id: PaneId,
+    /// Whether the client now has the pane minimized.
+    pub is_minimized: bool,
 }
 
 #[cfg(test)]

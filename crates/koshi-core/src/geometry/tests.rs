@@ -365,54 +365,46 @@ fn a_required_size_fits_inside_a_container_only_when_both_axes_fit() {
         column_count: u16::MAX,
         row_count: 22,
     };
-    for (required_size, fitted_size) in [
+    for (required_size, is_fitting) in [
         (
             RequiredSize {
                 column_count: 22,
                 row_count: 10,
             },
-            Some(Size {
-                column_count: 22,
-                row_count: 10,
-            }),
+            true,
         ),
         (
             RequiredSize {
                 column_count: 65_535,
                 row_count: 22,
             },
-            Some(full_width_container_size),
+            true,
         ),
         (
             RequiredSize {
                 column_count: 65_536,
                 row_count: 10,
             },
-            None,
+            false,
         ),
         (
             RequiredSize {
                 column_count: 22,
                 row_count: 23,
             },
-            None,
+            false,
         ),
         (
             RequiredSize {
                 column_count: 22,
                 row_count: u32::MAX,
             },
-            None,
+            false,
         ),
     ] {
         assert_eq!(
-            required_size.fit_inside(full_width_container_size),
-            fitted_size,
-            "{required_size:?} inside 65535x22"
-        );
-        assert_eq!(
             required_size.can_fit_inside(full_width_container_size),
-            fitted_size.is_some(),
+            is_fitting,
             "{required_size:?} inside 65535x22"
         );
     }

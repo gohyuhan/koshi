@@ -173,10 +173,14 @@ fn resolve_core_action(
         "resize-pane-down" => build_resize_pane_command(Direction::Down),
         "resize-pane-up" => build_resize_pane_command(Direction::Up),
         "resize-pane-right" => build_resize_pane_command(Direction::Right),
-        "focus-pane-left" => build_focus_pane_command(Direction::Left),
-        "focus-pane-down" => build_focus_pane_command(Direction::Down),
-        "focus-pane-up" => build_focus_pane_command(Direction::Up),
-        "focus-pane-right" => build_focus_pane_command(Direction::Right),
+        "focus-pane-left" => build_focus_pane_command(FocusTarget::Direction(Direction::Left)),
+        "focus-pane-down" => build_focus_pane_command(FocusTarget::Direction(Direction::Down)),
+        "focus-pane-up" => build_focus_pane_command(FocusTarget::Direction(Direction::Up)),
+        "focus-pane-right" => build_focus_pane_command(FocusTarget::Direction(Direction::Right)),
+        "focus-next-floating-pane" => build_focus_pane_command(FocusTarget::NextFloatingPane),
+        "focus-previous-floating-pane" => {
+            build_focus_pane_command(FocusTarget::PreviousFloatingPane)
+        }
         "toggle-pane-fullscreen" => Command::TogglePaneFullscreen,
 
         // --- Tabs ---
@@ -245,11 +249,12 @@ fn build_resize_pane_command(direction: Direction) -> Command {
     })
 }
 
-/// The command a `focus-pane-<direction>` action builds: move the issuing
-/// client's focus to the neighboring pane toward `direction`.
-fn build_focus_pane_command(direction: Direction) -> Command {
+/// The command a focus action builds: move the issuing client's focus to
+/// `focus_target`. `focus-pane-left` builds it with
+/// `FocusTarget::Direction(Direction::Left)`.
+fn build_focus_pane_command(focus_target: FocusTarget) -> Command {
     Command::FocusPane(FocusPaneArgs {
-        focus_target: FocusTarget::Direction(direction),
+        focus_target,
         client_id: None,
     })
 }

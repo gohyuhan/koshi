@@ -91,6 +91,13 @@ pub enum Command {
     /// Pin or unpin a floating pane in one client's view. Every other
     /// client's view of it stays as it is.
     SetPanePinned(SetPanePinnedArgs),
+    /// Minimize or restore a floating pane in one client's view. Every other
+    /// client's view of it stays as it is.
+    SetPaneMinimized(SetPaneMinimizedArgs),
+    /// Minimize every floating pane one client shows, or restore every
+    /// floating pane that client minimized. Every other client's view stays as
+    /// it is.
+    SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs),
     /// Prompt the issuing client to quit the client or session.
     Quit,
     /// Detach one client from the session. The session keeps running and its
@@ -247,17 +254,29 @@ pub struct ResizePaneArgs {
 /// The pane a [`Command::FocusPane`] moves focus to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FocusTarget {
-    /// A pane named by id.
+    /// A pane named by id: a tiled pane in the client's active tab, or a
+    /// floating pane of the client's session.
     Pane(PaneId),
     /// The nearest pane in a direction from the client's focused pane,
-    /// resolved geometrically against the solved layout.
+    /// resolved geometrically against the solved layout. While a floating
+    /// pane holds the client's focus, the target is the pane the client
+    /// focused in its active tab, in every direction.
     Direction(Direction),
+    /// The floating pane after the focused one among the floating panes the
+    /// client shows, in creation order, wrapping past the last to the first.
+    /// With no floating pane focused, the first one.
+    NextFloatingPane,
+    /// The floating pane before the focused one among the floating panes the
+    /// client shows, in creation order, wrapping past the first to the last.
+    /// With no floating pane focused, the last one.
+    PreviousFloatingPane,
 }
 
 /// Arguments for [`Command::FocusPane`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FocusPaneArgs {
-    /// Pane to focus, by id or by direction from the focused pane.
+    /// Pane to focus: by id, by direction from the focused pane, or the next
+    /// or previous floating pane.
     pub focus_target: FocusTarget,
     /// Client whose focus moves; resolved by the same rules as
     /// [`NewPaneArgs::client_id`].
@@ -450,6 +469,37 @@ pub struct SetPanePinnedArgs {
     /// it, or would draw it when that client minimized it or does not show it.
     /// `false` unpins it, and the pane stays at its pinned cell.
     pub is_pinned: bool,
+}
+
+/// Arguments for [`Command::SetPaneMinimized`].
+///
+/// The acting client is chosen as for [`MoveFloatingPaneArgs`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetPaneMinimizedArgs {
+    /// The floating pane to minimize or restore. `None` takes the issuing pane
+    /// for an in-session CLI, and the acting client's focused floating pane for
+    /// every other source.
+    pub pane_id: Option<PaneId>,
+    /// `true` minimizes a pane the acting client shows: that client stops
+    /// drawing it, and a focus on it moves to the floating pane that client
+    /// focused most recently among those it still shows, else to its active
+    /// tab's focused pane. `false` restores a pane the acting client does not
+    /// show: that client draws it above its other floating panes and focuses
+    /// it. A minimize of a pane the acting client does not show, or a restore
+    /// of a pane it shows, changes nothing.
+    pub is_minimized: bool,
+}
+
+/// Arguments for [`Command::SetAllFloatingPanesMinimized`].
+///
+/// The acting client is chosen as for [`MoveFloatingPaneArgs`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetAllFloatingPanesMinimizedArgs {
+    /// `true` minimizes every floating pane the acting client shows, and that
+    /// client's focus moves to its active tab's focused pane. `false` restores
+    /// every floating pane the acting client minimized, in that client's
+    /// floating focus order: the last one restored is drawn on top and focused.
+    pub is_minimized: bool,
 }
 
 /// Arguments for [`Command::Detach`].

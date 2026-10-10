@@ -2344,3 +2344,275 @@ fn closing_a_tab_that_is_not_the_last_keeps_every_floating_pane() {
         Some(floating_pane_id)
     );
 }
+
+/// Focus `pane_ids`, in order, as floating panes of `client_id` in `session`.
+fn focus_floating_panes(session: &mut Session, client_id: ClientId, pane_ids: &[PaneId]) {
+    let client = session
+        .clients
+        .get_client_mut_by_id(client_id)
+        .expect("the client is attached");
+    for &pane_id in pane_ids {
+        assert!(client.focus_floating_pane(pane_id));
+    }
+}
+
+#[test]
+fn commit_new_tab_takes_over_the_input_from_a_focused_floating_pane() {
+    let existing_tab_id = TabId::new();
+    let existing_pane_id = PaneId::new();
+    let mut session = build_session_with(
+        vec![build_single_pane_tab(existing_tab_id, existing_pane_id, 0)],
+        vec![existing_pane_id],
+    );
+    let floating_pane_id = PaneId::new();
+    add_floating_pane(&mut session, floating_pane_id);
+    let client_id = attach_client_on(&mut session, existing_tab_id);
+    focus_floating_panes(&mut session, client_id, &[floating_pane_id]);
+    let (new_tab_id, new_pane_id) = (TabId::new(), PaneId::new());
+
+    let (_, emitted_events) = commit_new_tab(
+        &mut session,
+        new_tab_id,
+        new_pane_id,
+        "second".to_owned(),
+        Some(client_id),
+        NewPaneSpec::default(),
+    );
+
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::TabCreated(TabCreated { tab_id: new_tab_id }),
+            Event::PaneCreated(PaneCreated {
+                pane_id: new_pane_id,
+                tab_id: Some(new_tab_id),
+            }),
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: new_tab_id,
+                previous_tab_id: existing_tab_id,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: Some(new_tab_id),
+                pane_id: new_pane_id,
+                previous_pane_id: Some(floating_pane_id),
+            }),
+        ]
+    );
+    let client = session.clients.get_client_by_id(client_id).unwrap();
+    assert_eq!(client.get_focused_floating_pane_id(), None);
+    assert_eq!(client.get_active_focused_pane_id(), Some(new_pane_id));
+}
+
+#[test]
+fn an_active_profile_tab_takes_over_the_input_from_a_focused_floating_pane() {
+    let existing_tab_id = TabId::new();
+    let existing_pane_id = PaneId::new();
+    let mut session = build_session_with(
+        vec![build_single_pane_tab(existing_tab_id, existing_pane_id, 0)],
+        vec![existing_pane_id],
+    );
+    let floating_pane_id = PaneId::new();
+    add_floating_pane(&mut session, floating_pane_id);
+    let client_id = attach_client_on(&mut session, existing_tab_id);
+    focus_floating_panes(&mut session, client_id, &[floating_pane_id]);
+    let profile_tab_id = TabId::new();
+    let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
+
+    let emitted_events = commit_profile_tab(
+        &mut session,
+        profile_tab_id,
+        ProfileTab {
+            pane_ids: vec![first_pane_id, second_pane_id],
+            layout_tree: build_two_leaf_layout(first_pane_id, second_pane_id),
+            new_pane_specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
+            focused_leaf_index: 1,
+        },
+        "dev".to_owned(),
+        Some(client_id),
+        true,
+    );
+
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::TabCreated(TabCreated {
+                tab_id: profile_tab_id
+            }),
+            Event::PaneCreated(PaneCreated {
+                pane_id: first_pane_id,
+                tab_id: Some(profile_tab_id),
+            }),
+            Event::PaneCreated(PaneCreated {
+                pane_id: second_pane_id,
+                tab_id: Some(profile_tab_id),
+            }),
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: profile_tab_id,
+                previous_tab_id: existing_tab_id,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: Some(profile_tab_id),
+                pane_id: second_pane_id,
+                previous_pane_id: Some(floating_pane_id),
+            }),
+        ]
+    );
+    let client = session.clients.get_client_by_id(client_id).unwrap();
+    assert_eq!(client.get_focused_floating_pane_id(), None);
+    assert_eq!(client.get_active_focused_pane_id(), Some(second_pane_id));
+}
+
+#[test]
+fn an_inactive_profile_tab_leaves_the_input_on_a_focused_floating_pane() {
+    let existing_tab_id = TabId::new();
+    let existing_pane_id = PaneId::new();
+    let mut session = build_session_with(
+        vec![build_single_pane_tab(existing_tab_id, existing_pane_id, 0)],
+        vec![existing_pane_id],
+    );
+    let floating_pane_id = PaneId::new();
+    add_floating_pane(&mut session, floating_pane_id);
+    let client_id = attach_client_on(&mut session, existing_tab_id);
+    focus_floating_panes(&mut session, client_id, &[floating_pane_id]);
+    let profile_tab_id = TabId::new();
+    let profile_pane_id = PaneId::new();
+
+    let emitted_events = commit_profile_tab(
+        &mut session,
+        profile_tab_id,
+        ProfileTab {
+            pane_ids: vec![profile_pane_id],
+            layout_tree: LayoutNode::Pane(profile_pane_id),
+            new_pane_specs: vec![NewPaneSpec::default()],
+            focused_leaf_index: 0,
+        },
+        "dev".to_owned(),
+        Some(client_id),
+        false,
+    );
+
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::TabCreated(TabCreated {
+                tab_id: profile_tab_id
+            }),
+            Event::PaneCreated(PaneCreated {
+                pane_id: profile_pane_id,
+                tab_id: Some(profile_tab_id),
+            }),
+        ]
+    );
+    let client = session.clients.get_client_by_id(client_id).unwrap();
+    assert_eq!(
+        client.get_focused_floating_pane_id(),
+        Some(floating_pane_id)
+    );
+    assert_eq!(
+        client.get_focused_pane_id(profile_tab_id),
+        Some(profile_pane_id)
+    );
+}
+
+#[test]
+fn a_tab_switch_keeps_the_input_on_a_focused_floating_pane() {
+    let (mut session, [first_tab_id, second_tab_id, _]) = build_three_tab_session();
+    let floating_pane_id = PaneId::new();
+    add_floating_pane(&mut session, floating_pane_id);
+    let client_id = attach_client_on(&mut session, first_tab_id);
+    focus_floating_panes(&mut session, client_id, &[floating_pane_id]);
+    let second_tab_pane_id = get_only_pane_id(&session, second_tab_id);
+
+    let emitted_events = focus_tab(&mut session, client_id, TabTarget::Id(second_tab_id));
+
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: second_tab_id,
+                previous_tab_id: first_tab_id,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: Some(second_tab_id),
+                pane_id: second_tab_pane_id,
+                previous_pane_id: None,
+            }),
+        ]
+    );
+    let client = session.clients.get_client_by_id(client_id).unwrap();
+    assert_eq!(client.get_active_tab_id(), second_tab_id);
+    assert_eq!(client.get_active_focused_pane_id(), Some(floating_pane_id));
+}
+
+#[test]
+fn closing_the_last_tab_moves_a_floating_focus_through_the_floats_it_removes() {
+    let tab_id = TabId::new();
+    let tiled_pane_id = PaneId::new();
+    let (first_floating_pane_id, second_floating_pane_id) = (PaneId::new(), PaneId::new());
+    let mut session = build_session_with(
+        vec![build_single_pane_tab(tab_id, tiled_pane_id, 0)],
+        vec![tiled_pane_id],
+    );
+    add_floating_pane(&mut session, first_floating_pane_id);
+    add_floating_pane(&mut session, second_floating_pane_id);
+    let client_id = attach_client_on(&mut session, tab_id);
+    focus_floating_panes(
+        &mut session,
+        client_id,
+        &[second_floating_pane_id, first_floating_pane_id],
+    );
+
+    let emitted_events = close_tab(&mut session, tab_id);
+
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::PaneClosing(PaneClosing {
+                pane_id: tiled_pane_id,
+            }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: tiled_pane_id,
+                tab_id: Some(tab_id),
+            }),
+            Event::TabClosed(TabClosed { tab_id }),
+            Event::PaneClosing(PaneClosing {
+                pane_id: first_floating_pane_id,
+            }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: first_floating_pane_id,
+                tab_id: None,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: None,
+                pane_id: second_floating_pane_id,
+                previous_pane_id: Some(first_floating_pane_id),
+            }),
+            Event::PaneClosing(PaneClosing {
+                pane_id: second_floating_pane_id,
+            }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: second_floating_pane_id,
+                tab_id: None,
+            }),
+            Event::Quit(QuitCause::LastTabClosed {
+                tab_id,
+                pane_exit: None,
+            }),
+        ]
+    );
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .unwrap()
+            .get_active_focused_pane_id(),
+        None
+    );
+}

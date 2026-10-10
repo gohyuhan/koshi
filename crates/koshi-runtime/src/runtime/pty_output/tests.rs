@@ -20,7 +20,7 @@ use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::error::PtyError;
 use koshi_renderer::snapshot::Delivery;
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
-use koshi_session::session::state::{FloatingMember, FloatingPaneSizeSolve, Session, Tab};
+use koshi_session::session::state::{FloatingMember, Session, Tab};
 use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::style::{Color, Style};
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -153,10 +153,10 @@ fn a_cell_pixel_size_query_answers_with_the_tab_cell_size_or_the_floating_cell_s
                 width: forty_cells,
                 height: forty_cells,
             },
-            solved_size: FloatingPaneSizeSolve::Sized(Size {
+            solved_size: Size {
                 column_count: 40,
                 row_count: 40,
-            }),
+            },
         })
         .expect("the floating set is empty");
     // alice attaches first and views `db` with 10x20 px cells; bob views

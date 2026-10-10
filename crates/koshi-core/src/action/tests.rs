@@ -535,6 +535,18 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             vec![ClientTarget],
         ),
         (
+            "core:focus-next-floating-pane",
+            CommandKind::FocusPane,
+            Client,
+            vec![ClientTarget],
+        ),
+        (
+            "core:focus-previous-floating-pane",
+            CommandKind::FocusPane,
+            Client,
+            vec![ClientTarget],
+        ),
+        (
             "core:scroll-pane",
             CommandKind::ScrollPane,
             Client,
@@ -788,6 +800,8 @@ fn lock_and_focus_seeds_use_client_scope_and_targets() {
 
     let client_scoped_action_cases: &[(&str, Vec<TargetKind>)] = &[
         ("focus-pane", vec![TargetKind::Pane, TargetKind::Client]),
+        ("focus-next-floating-pane", vec![TargetKind::Client]),
+        ("focus-previous-floating-pane", vec![TargetKind::Client]),
         ("focus-tab", vec![TargetKind::Tab, TargetKind::Client]),
         ("next-tab", vec![TargetKind::Client]),
         ("previous-tab", vec![TargetKind::Client]),
@@ -825,8 +839,8 @@ fn lock_and_focus_seeds_use_client_scope_and_targets() {
     }
 }
 
-/// Pins which seeds are continuous: the resize-pane, focus-pane, and scroll
-/// action families. A new member of a family added without the `continuous`
+/// Pins which seeds are continuous: the resize-pane, focus-pane, floating
+/// focus, and scroll action families. A new member of a family added without the `continuous`
 /// flag — or the flag appearing on any other action — changes this list and
 /// fails the assert.
 #[test]
@@ -849,6 +863,8 @@ fn continuous_action_seeds_are_stable() {
         "core:focus-pane-down",
         "core:focus-pane-up",
         "core:focus-pane-right",
+        "core:focus-next-floating-pane",
+        "core:focus-previous-floating-pane",
         "core:scroll-pane-down",
         "core:scroll-pane-up",
     ]
@@ -877,11 +893,13 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:close-tab",
         "core:confirm-pane-placement",
         "core:cycle-pane-placement-span",
+        "core:focus-next-floating-pane",
         "core:focus-pane",
         "core:focus-pane-down",
         "core:focus-pane-left",
         "core:focus-pane-right",
         "core:focus-pane-up",
+        "core:focus-previous-floating-pane",
         "core:focus-tab",
         "core:lock",
         "core:mouse-select",

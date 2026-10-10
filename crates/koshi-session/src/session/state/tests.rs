@@ -195,17 +195,72 @@ fn shared_floating_viewport_takes_the_per_axis_minimum_across_every_tab() {
     let mut session = build_empty_session();
 
     // Two clients view two different tabs, with opposite aspect ratios.
-    attach_viewer(&mut session, TabId::new(), 80, 5);
+    attach_viewer(&mut session, TabId::new(), 80, 8);
     attach_viewer(&mut session, TabId::new(), 40, 24);
 
-    // The full-viewport minimum is 40x5; minus the tabline and hint rows it
-    // leaves 40x3.
+    // The full-viewport minimum is 40x8; minus the tabline and hint rows it
+    // leaves 40x6.
     assert_eq!(
         session.get_shared_floating_viewport(),
         Some(Size {
             column_count: 40,
-            row_count: 3
+            row_count: 6
         })
+    );
+}
+
+#[test]
+fn shared_floating_viewport_leaves_out_a_client_below_the_floating_minimum() {
+    let mut session = build_empty_session();
+    let roomy_pane_area = Size {
+        column_count: 120,
+        row_count: 40,
+    };
+    let minimum_floating_pane_area = Size {
+        column_count: 4,
+        row_count: 5,
+    };
+
+    attach_viewer_with_pane_area(
+        &mut session,
+        TabId::new(),
+        120,
+        42,
+        Some(PaneArea::Reported(roomy_pane_area)),
+    );
+    for narrow_pane_area in [
+        Size {
+            column_count: 3,
+            row_count: 40,
+        },
+        Size {
+            column_count: 120,
+            row_count: 4,
+        },
+    ] {
+        attach_viewer_with_pane_area(
+            &mut session,
+            TabId::new(),
+            120,
+            42,
+            Some(PaneArea::Reported(narrow_pane_area)),
+        );
+    }
+    assert_eq!(
+        session.get_shared_floating_viewport(),
+        Some(roomy_pane_area)
+    );
+
+    attach_viewer_with_pane_area(
+        &mut session,
+        TabId::new(),
+        120,
+        42,
+        Some(PaneArea::Reported(minimum_floating_pane_area)),
+    );
+    assert_eq!(
+        session.get_shared_floating_viewport(),
+        Some(minimum_floating_pane_area)
     );
 }
 
@@ -2341,10 +2396,10 @@ pub(crate) fn build_default_floating_member(pane_id: PaneId) -> FloatingMember {
     FloatingMember {
         pane_id,
         desired_size: koshi_core::geometry::DEFAULT_FLOATING_PANE_SIZE,
-        solved_size: FloatingPaneSizeSolve::Sized(Size {
+        solved_size: Size {
             column_count: 48,
             row_count: 13,
-        }),
+        },
     }
 }
 
@@ -2353,13 +2408,13 @@ fn build_floating_member(pane_id: PaneId) -> FloatingMember {
     FloatingMember {
         pane_id,
         desired_size: FloatingPaneSize {
-            width: FloatingPaneDimension::Cells(NonZeroU16::new(40).expect("40 is nonzero")),
-            height: FloatingPaneDimension::Cells(NonZeroU16::new(10).expect("10 is nonzero")),
+            width: build_cells_dimension(40),
+            height: build_cells_dimension(10),
         },
-        solved_size: FloatingPaneSizeSolve::Sized(Size {
+        solved_size: Size {
             column_count: 40,
             row_count: 10,
-        }),
+        },
     }
 }
 
@@ -2444,10 +2499,10 @@ fn add_member_refuses_a_pane_the_set_already_holds() {
         .add_member(build_floating_member(pane_id))
         .expect("the floating set is empty");
     let mut repeated_member = build_floating_member(pane_id);
-    repeated_member.solved_size = FloatingPaneSizeSolve::Sized(Size {
+    repeated_member.solved_size = Size {
         column_count: 20,
         row_count: 5,
-    });
+    };
 
     assert_eq!(
         floating_set.add_member(repeated_member),
@@ -2511,7 +2566,10 @@ fn a_floating_set_survives_a_serde_round_trip() {
                     AxisPercent::try_from(100).expect("100 is a percent"),
                 ),
             },
-            solved_size: FloatingPaneSizeSolve::Suppressed,
+            solved_size: Size {
+                column_count: 4,
+                row_count: 5,
+            },
         })
         .expect("the floating set has room");
 
@@ -2523,12 +2581,12 @@ fn a_floating_set_survives_a_serde_round_trip() {
             {
                 "pane_id": cell_sized_pane_id,
                 "desired_size": {"width": {"Cells": 40}, "height": {"Cells": 10}},
-                "solved_size": {"Sized": {"column_count": 40, "row_count": 10}}
+                "solved_size": {"column_count": 40, "row_count": 10}
             },
             {
                 "pane_id": percent_sized_pane_id,
                 "desired_size": {"width": {"Percent": 60}, "height": {"Percent": 100}},
-                "solved_size": "Suppressed"
+                "solved_size": {"column_count": 4, "row_count": 5}
             }
         ]})
     );
@@ -2549,7 +2607,7 @@ fn build_percent_dimension(percent: u8) -> FloatingPaneDimension {
 }
 
 /// A floating set holding one fresh pane per `(width, height)` pair, in that
-/// order, each last solved as suppressed.
+/// order, each last solved to `4x5`.
 fn build_floating_set_asking_for(
     desired_dimensions: &[(FloatingPaneDimension, FloatingPaneDimension)],
 ) -> FloatingSet {
@@ -2559,7 +2617,10 @@ fn build_floating_set_asking_for(
             .add_member(FloatingMember {
                 pane_id: PaneId::new(),
                 desired_size: FloatingPaneSize { width, height },
-                solved_size: FloatingPaneSizeSolve::Suppressed,
+                solved_size: Size {
+                    column_count: 4,
+                    row_count: 5,
+                },
             })
             .expect("the floating set has room");
     }
@@ -2567,7 +2628,7 @@ fn build_floating_set_asking_for(
 }
 
 /// The solved size of every member of `floating_set`, in creation order.
-fn list_solved_sizes(floating_set: &FloatingSet) -> Vec<FloatingPaneSizeSolve> {
+fn list_solved_sizes(floating_set: &FloatingSet) -> Vec<Size> {
     floating_set
         .list_members()
         .iter()
@@ -2595,15 +2656,15 @@ fn update_member_sizes_resolves_a_percent_against_the_shared_viewport_rounding_d
 
     assert_eq!(
         list_solved_sizes(&floating_set),
-        [FloatingPaneSizeSolve::Sized(Size {
+        [Size {
             column_count: 48,
             row_count: 13,
-        })]
+        }]
     );
 }
 
 #[test]
-fn update_member_sizes_cuts_each_member_to_the_shared_viewport_and_raises_it_to_the_minimum() {
+fn update_member_sizes_raises_each_member_to_the_minimum_and_cuts_it_to_the_shared_viewport() {
     let mut floating_set = build_floating_set_asking_for(&[
         (build_cells_dimension(200), build_cells_dimension(50)),
         (build_cells_dimension(10), build_cells_dimension(3)),
@@ -2625,24 +2686,24 @@ fn update_member_sizes_cuts_each_member_to_the_shared_viewport_and_raises_it_to_
     assert_eq!(
         list_solved_sizes(&floating_set),
         [
-            FloatingPaneSizeSolve::Sized(Size {
+            Size {
                 column_count: 80,
                 row_count: 22,
-            }),
-            FloatingPaneSizeSolve::Sized(Size {
+            },
+            Size {
                 column_count: 22,
                 row_count: 10,
-            }),
-            FloatingPaneSizeSolve::Sized(Size {
+            },
+            Size {
                 column_count: 22,
                 row_count: 22,
-            }),
+            },
         ]
     );
 }
 
 #[test]
-fn update_member_sizes_fits_at_the_floating_minimum_and_suppresses_below_it_on_either_axis() {
+fn update_member_sizes_shrinks_a_member_below_the_floating_minimum_to_the_shared_viewport() {
     let mut floating_set = build_floating_set_asking_for(&[
         (build_percent_dimension(60), build_percent_dimension(60)),
         (build_cells_dimension(30), build_cells_dimension(12)),
@@ -2659,15 +2720,17 @@ fn update_member_sizes_fits_at_the_floating_minimum_and_suppresses_below_it_on_e
         },
         pane_minimum_size,
     );
-    let floating_pane_minimum = FloatingPaneSizeSolve::Sized(Size {
+    let floating_pane_minimum = Size {
         column_count: 22,
         row_count: 10,
-    });
+    };
     assert_eq!(
         list_solved_sizes(&floating_set),
         [floating_pane_minimum, floating_pane_minimum]
     );
 
+    // 21 columns is one short of the 22-column floating minimum: each member
+    // takes all 21 columns.
     floating_set.update_member_sizes(
         Size {
             column_count: 21,
@@ -2678,11 +2741,19 @@ fn update_member_sizes_fits_at_the_floating_minimum_and_suppresses_below_it_on_e
     assert_eq!(
         list_solved_sizes(&floating_set),
         [
-            FloatingPaneSizeSolve::Suppressed,
-            FloatingPaneSizeSolve::Suppressed
+            Size {
+                column_count: 21,
+                row_count: 18,
+            },
+            Size {
+                column_count: 21,
+                row_count: 12,
+            },
         ]
     );
 
+    // 9 rows is one short of the 10-row floating minimum: each member takes
+    // all 9 rows.
     floating_set.update_member_sizes(
         Size {
             column_count: 30,
@@ -2693,8 +2764,14 @@ fn update_member_sizes_fits_at_the_floating_minimum_and_suppresses_below_it_on_e
     assert_eq!(
         list_solved_sizes(&floating_set),
         [
-            FloatingPaneSizeSolve::Suppressed,
-            FloatingPaneSizeSolve::Suppressed
+            Size {
+                column_count: 22,
+                row_count: 9,
+            },
+            Size {
+                column_count: 30,
+                row_count: 9,
+            },
         ]
     );
 }
@@ -2715,10 +2792,10 @@ fn update_member_sizes_restores_the_desired_size_after_a_shrink_and_a_regrow() {
         column_count: 20,
         row_count: 6,
     };
-    let solved_on_roomy_viewport = FloatingPaneSizeSolve::Sized(Size {
+    let solved_on_roomy_viewport = Size {
         column_count: 48,
         row_count: 13,
-    });
+    };
 
     floating_set.update_member_sizes(roomy_viewport, pane_minimum_size);
     assert_eq!(list_solved_sizes(&floating_set), [solved_on_roomy_viewport]);
@@ -2731,7 +2808,10 @@ fn update_member_sizes_restores_the_desired_size_after_a_shrink_and_a_regrow() {
     );
     assert_eq!(
         list_solved_sizes(&floating_set),
-        [FloatingPaneSizeSolve::Suppressed]
+        [Size {
+            column_count: 21,
+            row_count: 18,
+        }]
     );
     floating_set.update_member_sizes(roomy_viewport, pane_minimum_size);
 
@@ -2740,13 +2820,13 @@ fn update_member_sizes_restores_the_desired_size_after_a_shrink_and_a_regrow() {
 }
 
 #[test]
-fn update_member_sizes_suppresses_every_member_when_the_floating_minimum_passes_u16_max() {
+fn update_member_sizes_caps_a_floating_minimum_past_u16_max_at_the_shared_viewport() {
     let mut floating_set = build_floating_set_asking_for(&[
         (build_cells_dimension(40), build_cells_dimension(10)),
         (build_percent_dimension(100), build_percent_dimension(100)),
     ]);
 
-    // 65534 content columns plus 2 chrome columns need 65536 columns.
+    // 65534 content columns plus 2 chrome columns cap at 65535 columns.
     floating_set.update_member_sizes(
         Size {
             column_count: u16::MAX,
@@ -2761,8 +2841,14 @@ fn update_member_sizes_suppresses_every_member_when_the_floating_minimum_passes_
     assert_eq!(
         list_solved_sizes(&floating_set),
         [
-            FloatingPaneSizeSolve::Suppressed,
-            FloatingPaneSizeSolve::Suppressed
+            Size {
+                column_count: u16::MAX,
+                row_count: 10,
+            },
+            Size {
+                column_count: u16::MAX,
+                row_count: 22,
+            },
         ]
     );
 }
@@ -2789,14 +2875,14 @@ fn update_member_sizes_fits_a_floating_minimum_of_exactly_u16_max_columns() {
     assert_eq!(
         list_solved_sizes(&floating_set),
         [
-            FloatingPaneSizeSolve::Sized(Size {
+            Size {
                 column_count: u16::MAX,
                 row_count: 10,
-            }),
-            FloatingPaneSizeSolve::Sized(Size {
+            },
+            Size {
                 column_count: u16::MAX,
                 row_count: 22,
-            })
+            },
         ]
     );
 }
@@ -2814,9 +2900,10 @@ fn remove_floating_member_keeps_the_order_of_the_rest_and_clears_every_client_vi
     assert!(focusing_client.focus_floating_pane(middle_pane_id));
     assert!(focusing_client.focus_floating_pane(removed_pane_id));
     let pinning_client = get_attached_client_mut(&mut session, pinning_client_id);
+    assert!(pinning_client.focus_floating_pane(last_pane_id));
+    assert!(pinning_client.minimize_floating_pane(last_pane_id));
     assert!(pinning_client.focus_floating_pane(removed_pane_id));
     pinning_client.pin_floating_pane(removed_pane_id, Point { column: 3, row: 4 });
-    pinning_client.minimize_floating_pane(last_pane_id);
 
     assert_eq!(
         session.remove_floating_member(removed_pane_id),
@@ -2835,11 +2922,14 @@ fn remove_floating_member_keeps_the_order_of_the_rest_and_clears_every_client_vi
         focusing_client.list_floating_pane_focus_order(),
         [middle_pane_id]
     );
-    assert_eq!(focusing_client.get_focused_floating_pane_id(), None);
+    assert_eq!(
+        focusing_client.get_focused_floating_pane_id(),
+        Some(middle_pane_id)
+    );
     let pinning_client = get_attached_client_mut(&mut session, pinning_client_id);
     assert_eq!(
         pinning_client.list_floating_pane_focus_order(),
-        Vec::<PaneId>::new()
+        [last_pane_id]
     );
     assert_eq!(pinning_client.get_focused_floating_pane_id(), None);
     assert_eq!(
@@ -3122,7 +3212,7 @@ fn a_floating_focus_on_a_pane_the_client_minimized_is_reported() {
     let client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
     let client = get_attached_client_mut(&mut session, client_id);
     assert!(client.focus_floating_pane(minimized_pane_id));
-    client.minimize_floating_pane(minimized_pane_id);
+    assert!(client.minimize_floating_pane(minimized_pane_id));
     replace_client_fields(
         &mut session,
         client_id,
@@ -3136,6 +3226,33 @@ fn a_floating_focus_on_a_pane_the_client_minimized_is_reported() {
         session.validate_session_consistency(),
         Err(vec![
             SessionConsistencyError::FocusedFloatingPaneMinimized {
+                client_id,
+                pane_id: minimized_pane_id,
+            }
+        ])
+    );
+}
+
+#[test]
+fn a_minimized_floating_pane_missing_from_the_focus_order_is_reported() {
+    let mut session = build_empty_session();
+    let minimized_pane_id = register_floating_pane(&mut session);
+    let client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
+    let client = get_attached_client_mut(&mut session, client_id);
+    assert!(client.focus_floating_pane(minimized_pane_id));
+    assert!(client.minimize_floating_pane(minimized_pane_id));
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+
+    replace_client_fields(
+        &mut session,
+        client_id,
+        &[("floating_pane_focus_order", serde_json::json!([]))],
+    );
+
+    assert_eq!(
+        session.validate_session_consistency(),
+        Err(vec![
+            SessionConsistencyError::MinimizedFloatingPaneNotInFocusOrder {
                 client_id,
                 pane_id: minimized_pane_id,
             }
@@ -3202,17 +3319,13 @@ fn a_session_json_without_a_floating_set_is_refused() {
 /// A floating pane size of `column_count` by `row_count` cells.
 fn build_cells_size(column_count: u16, row_count: u16) -> FloatingPaneSize {
     FloatingPaneSize {
-        width: FloatingPaneDimension::Cells(
-            NonZeroU16::new(column_count).expect("a nonzero column count"),
-        ),
-        height: FloatingPaneDimension::Cells(
-            NonZeroU16::new(row_count).expect("a nonzero row count"),
-        ),
+        width: build_cells_dimension(column_count),
+        height: build_cells_dimension(row_count),
     }
 }
 
 #[test]
-fn solve_floating_pane_size_cuts_to_the_viewport_and_raises_to_the_floating_minimum() {
+fn solve_floating_pane_size_raises_to_the_floating_minimum_and_cuts_to_the_viewport() {
     let shared_floating_viewport = Size {
         column_count: 80,
         row_count: 22,
@@ -3233,10 +3346,10 @@ fn solve_floating_pane_size_cuts_to_the_viewport_and_raises_to_the_floating_mini
             shared_floating_viewport,
             pane_minimum_size,
         ),
-        FloatingPaneSizeSolve::Sized(Size {
+        Size {
             column_count: 48,
             row_count: 13,
-        })
+        }
     );
     assert_eq!(
         solve_floating_pane_size(
@@ -3244,7 +3357,7 @@ fn solve_floating_pane_size_cuts_to_the_viewport_and_raises_to_the_floating_mini
             shared_floating_viewport,
             pane_minimum_size,
         ),
-        FloatingPaneSizeSolve::Sized(shared_floating_viewport)
+        shared_floating_viewport
     );
     assert_eq!(
         solve_floating_pane_size(
@@ -3252,10 +3365,10 @@ fn solve_floating_pane_size_cuts_to_the_viewport_and_raises_to_the_floating_mini
             shared_floating_viewport,
             pane_minimum_size,
         ),
-        FloatingPaneSizeSolve::Sized(Size {
+        Size {
             column_count: 4,
             row_count: 5,
-        })
+        }
     );
     assert_eq!(
         solve_floating_pane_size(
@@ -3266,7 +3379,44 @@ fn solve_floating_pane_size_cuts_to_the_viewport_and_raises_to_the_floating_mini
             },
             pane_minimum_size,
         ),
-        FloatingPaneSizeSolve::Suppressed
+        Size {
+            column_count: 3,
+            row_count: 10,
+        }
+    );
+}
+
+#[test]
+fn floating_pane_minimum_adds_the_chrome_and_caps_each_axis_at_u16_max() {
+    assert_eq!(
+        compute_floating_pane_minimum_size(Size {
+            column_count: 20,
+            row_count: 6,
+        }),
+        Size {
+            column_count: 22,
+            row_count: 10,
+        }
+    );
+    assert_eq!(
+        compute_floating_pane_minimum_size(Size {
+            column_count: u16::MAX - 1,
+            row_count: 6,
+        }),
+        Size {
+            column_count: u16::MAX,
+            row_count: 10,
+        }
+    );
+    assert_eq!(
+        compute_floating_pane_minimum_size(Size {
+            column_count: 2,
+            row_count: u16::MAX,
+        }),
+        Size {
+            column_count: 4,
+            row_count: u16::MAX,
+        }
     );
 }
 

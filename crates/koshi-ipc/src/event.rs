@@ -128,7 +128,9 @@ pub enum SessionEvent {
         tab_id: Option<TabId>,
         /// The newly focused pane.
         pane_id: PaneId,
-        /// The pane that held this client's focus in the tab before, if any.
+        /// When the client's input moves into, out of or between floating
+        /// panes, the pane that held the input before. Otherwise, the pane
+        /// that held this client's focus in the tab before, if any.
         previous_pane_id: Option<PaneId>,
     },
     /// A tab's layout tree changed.

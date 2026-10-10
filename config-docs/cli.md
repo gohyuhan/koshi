@@ -565,6 +565,22 @@ becomes 60 columns wide. A pane that client pinned keeps its pinned cell. On a
 tiled pane, the resize ends the fullscreen view of the client `--client` names.
 A positive `scroll-pane --lines` moves toward history.
 
+`focus-pane --pane` also takes a floating pane. That pane then takes the
+client's keys and shows above the client's other floating panes. A floating
+pane that client minimized is refused with `<pane> is minimized`.
+
+Without `--pane`, `close-pane`, `resize-pane`, `scroll-pane` and `input` act on
+one pane. Inside a koshi pane, the command acts on that pane. Outside koshi, the
+command acts on the pane that takes the client's keys: its focused floating
+pane, else its focused pane in its tab. `new-pane` without `--pane` is refused
+with `<pane> is floating and has no split to divide`, and
+`toggle-pane-fullscreen` with `<pane> is floating; fullscreen fills a tab`, in
+two cases: inside a floating pane, and outside koshi while a floating pane takes
+the client's keys.
+
+Example: with a floating `htop` focused over a shell, `koshi close-pane` run
+outside koshi closes `htop`, and the keys return to the shell.
+
 Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 `git status` at that pane's prompt without running it.
 
@@ -721,7 +737,7 @@ machine. The address in that command depends on `remote-listen`:
   addresses, and puts first the address this machine sends to the internet
   from. Each command ends with the name of its interface. If this machine has no
   such address, the command shows `<this machine's address>` in place of one.
-- One address of this machine, such as `192.168.1.20:7654`, gives one command
+- One address of this machine, such as `192.0.2.20:7654`, gives one command
   with that address. A line then says that this machine accepts connections on
   that address only.
 - A loopback address, such as `127.0.0.1:7654`, gives no command. A line says
@@ -729,8 +745,8 @@ machine. The address in that command depends on `remote-listen`:
 
 ```text
 connect from another machine, at the address of this one it can reach:
-  koshi attach --remote 192.168.1.20:7654 --save-as alice [SESSION]   # en0
-  koshi attach --remote 100.64.0.2:7654 --save-as alice [SESSION]   # utun3
+  koshi attach --remote 192.0.2.20:7654 --save-as alice [SESSION]   # en0
+  koshi attach --remote 198.51.100.2:7654 --save-as alice [SESSION]   # utun3
 set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.
 ```
 

@@ -219,6 +219,21 @@ fn floating_pane_view_events_encode_the_client_the_pane_and_the_new_state() {
             }
         })
     );
+    assert_eq!(
+        serde_json::to_value(Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            client_id,
+            pane_id,
+            is_minimized: true,
+        }))
+        .expect("serialize pane minimized changed"),
+        serde_json::json!({
+            "PaneMinimizedChanged": {
+                "client_id": client_id,
+                "pane_id": pane_id,
+                "is_minimized": true,
+            }
+        })
+    );
 }
 
 /// Round-trips the variants the named round-trip tests above leave out, with
@@ -327,7 +342,7 @@ fn format_debug_variant_name<DebugSubject: std::fmt::Debug>(
 
 /// One instance per top-level `Event` variant with its canonical name. The
 /// array length is the variant count.
-pub(crate) fn list_event_cases() -> [(Event, &'static str); 23] {
+pub(crate) fn list_event_cases() -> [(Event, &'static str); 24] {
     [
         (
             Event::PaneCreated(PaneCreated {
@@ -491,18 +506,26 @@ pub(crate) fn list_event_cases() -> [(Event, &'static str); 23] {
             }),
             "PanePinChanged",
         ),
+        (
+            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+                client_id: ClientId::new(),
+                pane_id: PaneId::new(),
+                is_minimized: false,
+            }),
+            "PaneMinimizedChanged",
+        ),
         (Event::Quit(QuitCause::Requested), "Quit"),
         (Event::Restarting, "Restarting"),
     ]
 }
 
-/// Checks 23 distinct top-level event names against `Debug` and
+/// Checks 24 distinct top-level event names against `Debug` and
 /// [`Event::get_event_name`].
 #[test]
 fn event_variants_report_their_canonical_names() {
     let event_cases = list_event_cases();
     let mut event_names = std::collections::BTreeSet::new();
-    assert_eq!(event_cases.len(), 23);
+    assert_eq!(event_cases.len(), 24);
     for (event, event_name) in event_cases {
         assert_eq!(format_debug_variant_name(&event), event_name);
         assert_eq!(event.get_event_name(), event_name);
@@ -511,7 +534,7 @@ fn event_variants_report_their_canonical_names() {
             "duplicate event name: {event_name}"
         );
     }
-    assert_eq!(event_names.len(), 23);
+    assert_eq!(event_names.len(), 24);
 }
 
 #[test]

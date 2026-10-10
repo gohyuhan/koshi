@@ -18,6 +18,7 @@ use koshi_pane::pane::state::PaneRecord;
 
 use crate::client::{FloatingPanePosition, FloatingPaneView};
 use crate::error::FloatingSetError;
+use crate::session::focus::build_pane_focused_event;
 use crate::session::state::{FloatingMember, Session};
 
 /// What to record on a freshly created pane: the working directory it launched
@@ -51,7 +52,8 @@ pub(crate) fn register_running_pane(
 /// designated client onto the tab (if it is not already there), register the new
 /// pane as `Running`, swap in `candidate_layout_tree` as the tab's layout — dropping the zoom
 /// that would have hidden the new pane, so it lands visible — and focus the new
-/// pane for `focus_client_id` when one is given and still attached.
+/// pane for `focus_client_id` when one is given and still attached. The new
+/// pane then takes that client's input: no floating pane stays focused for it.
 ///
 /// Whose zoom drops depends on who made the split: with a `focus_client_id`, only
 /// that client's zoom of `tab_id`; with none, every attached client's zoom of
@@ -67,10 +69,12 @@ pub(crate) fn register_running_pane(
 /// directory and spawn specification recorded on the new pane.
 ///
 /// Returns the designated client's *previous* tab when this op switched it onto
-/// `tab_id` (so the caller can reflow the tab it left), and the events to emit —
+/// `tab_id`, else `None`, and the events to emit —
 /// [`Event::TabFocused`] (only when a client was switched), then
 /// [`Event::PaneCreated`], [`Event::LayoutChanged`], and — only when
-/// `focus_client_id` applies — [`Event::PaneFocused`], in that order.
+/// `focus_client_id` applies — [`Event::PaneFocused`], in that order. The
+/// `PaneFocused` names as `previous_pane_id` the floating pane that held the
+/// client's input, else the pane it focused in `tab_id` before.
 ///
 /// An unknown `tab_id` is a no-op with no events: nothing is registered and
 /// nothing is emitted.
@@ -126,7 +130,9 @@ pub fn commit_new_pane(
     // Drop the zoom that would hide the new pane, then focus it:
     //
     // - **With a `focus_client_id`**: that client's zoom of `tab_id` drops and it
-    //   focuses the new pane. Every other client keeps its zoom and its focus.
+    //   focuses the new pane. The new pane takes that client's input: no
+    //   floating pane stays focused for it. Every other client keeps its zoom
+    //   and its focus.
     // - **With none**: every attached client's zoom of `tab_id` drops, and no
     //   client's focus moves.
     let mut previous_pane_id = None;
@@ -134,7 +140,7 @@ pub fn commit_new_pane(
         Some(client_id) => {
             if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
                 client.clear_zoom(tab_id);
-                previous_pane_id = client.update_focused_pane(tab_id, new_pane_id);
+                previous_pane_id = client.focus_tiled_pane(tab_id, new_pane_id);
             }
         }
         None => {
@@ -162,18 +168,24 @@ pub fn commit_new_pane(
 
 /// Apply an already-spawned floating pane: append `floating_member` to the
 /// session's floating set, register its pane as `Running` with `new_pane_spec`'s
-/// working directory and spawn specification, and store `designated_view`'s
-/// position as that client's view of the pane.
+/// working directory and spawn specification, store `designated_view`'s
+/// position as that client's view of the pane, and focus the pane for that
+/// client.
 ///
-/// A `designated_view` naming a client that is not attached stores nothing,
-/// and neither does a [`FloatingPanePosition::Default`] position. No client's
-/// focus moves and no tab changes.
+/// The designated client focuses the new pane and draws it on top of its other
+/// floating panes: the new pane takes that client's input. A
+/// [`FloatingPanePosition::Default`] position stores no view. A
+/// `designated_view` naming a client that is not attached stores nothing and
+/// focuses nothing. No other client's focus moves and no tab changes.
 ///
 /// The caller (the runtime) has minted `floating_member.pane_id`: no tab
 /// holds it and the pane registry has no record of it. A registry record
 /// already under that id stays as it is.
 ///
-/// Returns the one event to emit: [`Event::PaneCreated`] with `tab_id: None`.
+/// Returns the events to emit: [`Event::PaneCreated`] with `tab_id: None`,
+/// then, for an attached designated client, [`Event::PaneFocused`] with
+/// `tab_id: None` and the pane that held its input before as
+/// `previous_pane_id`.
 ///
 /// # Errors
 ///
@@ -188,6 +200,10 @@ pub fn commit_new_floating_pane(
     let new_pane_id = floating_member.pane_id;
     session.floating_set.add_member(floating_member)?;
     register_running_pane(session, new_pane_id, new_pane_spec);
+    let mut emitted_events = vec![Event::PaneCreated(PaneCreated {
+        pane_id: new_pane_id,
+        tab_id: None,
+    })];
     if let Some((client_id, position)) = designated_view {
         if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
             client.set_floating_pane_view(
@@ -197,12 +213,12 @@ pub fn commit_new_floating_pane(
                     is_minimized: false,
                 },
             );
+            let previous_focused_pane_id = client.get_active_focused_pane_id();
+            let _ = client.focus_floating_pane(new_pane_id);
+            emitted_events.extend(build_pane_focused_event(client, previous_focused_pane_id));
         }
     }
-    Ok(vec![Event::PaneCreated(PaneCreated {
-        pane_id: new_pane_id,
-        tab_id: None,
-    })])
+    Ok(emitted_events)
 }
 
 #[cfg(test)]

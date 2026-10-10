@@ -383,10 +383,10 @@ pub enum IpcRequestKind {
         resume_client_id: Option<ClientId>,
         /// The token the session handed this caller at its last attach,
         /// presented to get that attach's view back: the active tab, the
-        /// focused pane of each tab, the zoomed pane of each tab, and the
-        /// scroll offset of each pane. `None` on a first attach. A token the
-        /// session does not hold, and a token older than 120 seconds, attach
-        /// with a fresh view instead of failing.
+        /// focused pane of each tab, the zoomed pane of each tab, the scroll
+        /// offset of each pane, and the view of the floating panes. `None` on a
+        /// first attach. A token the session does not hold, and a token older
+        /// than 120 seconds, attach with a fresh view instead of failing.
         resume_token: Option<ConnectionToken>,
         /// The pane region the caller draws the tab's panes in, which the
         /// server records on the client. Absent, the server sizes the

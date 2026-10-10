@@ -473,4 +473,11 @@ fn client_floating_view_errors_display_the_client_and_the_pane() {
         SessionConsistencyError::FocusedFloatingPaneMinimized { client_id, pane_id }.to_string(),
         format!("client {client_id:?} focuses floating pane {pane_id:?}, which it minimized")
     );
+    assert_eq!(
+        SessionConsistencyError::MinimizedFloatingPaneNotInFocusOrder { client_id, pane_id }
+            .to_string(),
+        format!(
+            "client {client_id:?} minimized floating pane {pane_id:?}, which its floating focus order does not list"
+        )
+    );
 }

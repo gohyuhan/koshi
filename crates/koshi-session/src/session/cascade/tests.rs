@@ -1626,6 +1626,12 @@ fn remove_floating_pane_drops_the_record_the_member_and_every_client_view() {
                 pane_id: floating_pane_id,
                 tab_id: None,
             }),
+            Event::PaneFocused(PaneFocused {
+                client_id: focusing_client_id,
+                tab_id: Some(tab_id),
+                pane_id: tiled_pane_id,
+                previous_pane_id: Some(floating_pane_id),
+            }),
         ]
     );
     assert_eq!(session.floating_set.list_members(), []);
@@ -1654,6 +1660,117 @@ fn remove_floating_pane_drops_the_record_the_member_and_every_client_view() {
         &LayoutNode::Pane(tiled_pane_id)
     );
     assert_eq!(session.validate_session_consistency(), Ok(()));
+}
+
+#[test]
+fn remove_floating_pane_moves_a_focusing_client_to_its_most_recent_shown_float() {
+    let tab_id = TabId::new();
+    let tiled_pane_id = PaneId::new();
+    let (shown_pane_id, minimized_pane_id, removed_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut session = build_session_with(
+        vec![build_single_pane_tab(tab_id, tiled_pane_id)],
+        vec![
+            build_pane_record(tiled_pane_id, PaneLifecycle::Running),
+            build_pane_record(shown_pane_id, PaneLifecycle::Running),
+            build_pane_record(minimized_pane_id, PaneLifecycle::Running),
+            build_pane_record(removed_pane_id, PaneLifecycle::Running),
+        ],
+    );
+    for pane_id in [shown_pane_id, minimized_pane_id, removed_pane_id] {
+        session
+            .floating_set
+            .add_member(build_default_floating_member(pane_id))
+            .expect("the floating set has room");
+    }
+    let mut focusing_client = build_focused_client(session.session_id, tab_id, tiled_pane_id);
+    for pane_id in [shown_pane_id, minimized_pane_id, removed_pane_id] {
+        assert!(focusing_client.focus_floating_pane(pane_id));
+    }
+    assert!(focusing_client.minimize_floating_pane(minimized_pane_id));
+    assert!(focusing_client.focus_floating_pane(removed_pane_id));
+    let focusing_client_id = focusing_client.get_client_id();
+    session.attach_client(focusing_client);
+
+    let emitted_events = remove_floating_pane(&mut session, removed_pane_id);
+
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::PaneClosing(PaneClosing {
+                pane_id: removed_pane_id,
+            }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: removed_pane_id,
+                tab_id: None,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id: focusing_client_id,
+                tab_id: None,
+                pane_id: shown_pane_id,
+                previous_pane_id: Some(removed_pane_id),
+            }),
+        ]
+    );
+    let focusing_client = session
+        .clients
+        .get_client_by_id(focusing_client_id)
+        .expect("the client is attached");
+    assert_eq!(
+        focusing_client.list_floating_pane_focus_order(),
+        [minimized_pane_id, shown_pane_id]
+    );
+    assert_eq!(
+        focusing_client.get_active_focused_pane_id(),
+        Some(shown_pane_id)
+    );
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+}
+
+#[test]
+fn remove_floating_pane_reports_no_focus_for_a_client_left_with_no_pane_to_type_into() {
+    let tab_id = TabId::new();
+    let tiled_pane_id = PaneId::new();
+    let floating_pane_id = PaneId::new();
+    let mut session = build_session_with(
+        vec![build_single_pane_tab(tab_id, tiled_pane_id)],
+        vec![
+            build_pane_record(tiled_pane_id, PaneLifecycle::Running),
+            build_pane_record(floating_pane_id, PaneLifecycle::Running),
+        ],
+    );
+    session
+        .floating_set
+        .add_member(build_default_floating_member(floating_pane_id))
+        .expect("the floating set is empty");
+    let mut unfocused_client = build_focused_client(session.session_id, tab_id, tiled_pane_id);
+    unfocused_client.remove_focused_pane(tab_id);
+    assert!(unfocused_client.focus_floating_pane(floating_pane_id));
+    let unfocused_client_id = unfocused_client.get_client_id();
+    session.attach_client(unfocused_client);
+
+    let emitted_events = remove_floating_pane(&mut session, floating_pane_id);
+
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::PaneClosing(PaneClosing {
+                pane_id: floating_pane_id,
+            }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: floating_pane_id,
+                tab_id: None,
+            }),
+        ]
+    );
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(unfocused_client_id)
+            .expect("the client is attached")
+            .get_active_focused_pane_id(),
+        None
+    );
 }
 
 #[test]

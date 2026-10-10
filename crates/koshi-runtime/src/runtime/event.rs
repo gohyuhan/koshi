@@ -178,8 +178,8 @@ pub enum RuntimeEvent {
         /// fresh client otherwise.
         resume_client_id: Option<ClientId>,
         /// The token the caller's last attach minted, presented to get that
-        /// attach's view back: the active tab, the focused pane of each tab,
-        /// the zoomed pane of each tab, and the scroll offset of each pane. The
+        /// attach's view back
+        /// ([`SavedView`](crate::runtime::saved_view::SavedView)). The
         /// dispatcher hands that view back when it still holds one under this
         /// token, and mints a fresh view otherwise. Absent on a first attach.
         resume_token: Option<ConnectionToken>,

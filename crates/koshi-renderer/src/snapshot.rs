@@ -1032,17 +1032,19 @@ pub struct ClientSnapshot {
     pub viewport_size: Size,
     /// The tab the client is currently viewing.
     pub active_tab_id: TabId,
-    /// The client's focused pane in the active tab, or `None` when the tab has
-    /// no focusable pane. The renderer highlights the pane whose
-    /// [`PaneSlot::pane_id`] matches, and places the cursor there.
+    /// The pane that takes the client's input: its focused floating pane,
+    /// else its focused pane in the active tab. `None` when the client focuses
+    /// neither. The renderer highlights the pane whose [`PaneSlot::pane_id`]
+    /// matches, and places the cursor there. A floating pane matches no
+    /// [`PaneSlot`].
     pub focused_pane_id: Option<PaneId>,
     /// The client's input mode, as the session has it: it drives the mode tag,
     /// decides whether a paste from the client's own terminal reaches the pane,
     /// and is what `koshi list-clients` reports.
     pub lock_mode: LockMode,
     /// Whether this client grabs the mouse for text selection. Adds the `SELECT`
-    /// tag to the mode indicator; orthogonal to [`lock_mode`](Self::lock_mode),
-    /// so both can be on at once. The viewer also reads it off a painted frame
+    /// tag to the mode indicator. It is independent of
+    /// [`lock_mode`](Self::lock_mode): both can be on at once. The viewer also reads it off a painted frame
     /// to decide whether a press in a mouse-aware pane begins a highlight.
     pub is_mouse_selection_enabled: bool,
 }

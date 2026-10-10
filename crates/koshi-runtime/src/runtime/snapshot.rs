@@ -266,7 +266,7 @@ impl Server {
                     client_revision: client.get_placement_revision(),
                     viewport_size: client.get_viewport_size(),
                     active_tab_id: client.get_active_tab_id(),
-                    focused_pane_id: client.get_focused_pane_id(client.get_active_tab_id()),
+                    focused_pane_id: client.get_active_focused_pane_id(),
                     lock_mode: client.get_lock_mode(),
                     is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
                 },
@@ -406,7 +406,7 @@ impl Server {
                 client_revision: client.get_placement_revision(),
                 viewport_size: client.get_viewport_size(),
                 active_tab_id,
-                focused_pane_id: client.get_focused_pane_id(active_tab_id),
+                focused_pane_id: client.get_active_focused_pane_id(),
                 lock_mode: client.get_lock_mode(),
                 is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
             },
@@ -549,8 +549,8 @@ fn get_home_path_text() -> Option<&'static str> {
 }
 
 /// The `~`-shortening behind [`format_display_path`], with the home directory passed
-/// in. The prefix must end on a path boundary — a sibling like `/Users/ab2`
-/// next to home `/Users/ab` stays whole.
+/// in. The prefix must end on a path boundary — a sibling like `/home/user2`
+/// next to home `/home/user` stays whole.
 fn shorten_home_path(display_path: &std::path::Path, home_path_text: Option<&str>) -> String {
     let display_path_text = display_path.display().to_string();
     if let Some(home_path_text) = home_path_text {

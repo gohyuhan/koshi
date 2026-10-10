@@ -113,8 +113,9 @@ pub struct ClientDiscovery {
     pub viewport_size: Size,
     /// The tab the client is viewing.
     pub active_tab_id: TabId,
-    /// The client's focused pane in the tab it is viewing, once it has
-    /// focused one.
+    /// The pane that takes the client's input: its focused floating pane, else
+    /// its focused pane in the tab it is viewing. `None` until it has focused
+    /// one.
     pub focused_pane_id: Option<PaneId>,
     /// The client's modal input state.
     pub lock_mode: LockMode,
