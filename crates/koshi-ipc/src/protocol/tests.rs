@@ -654,24 +654,24 @@ fn the_new_pane_placement_wire_shapes_belong_to_this_protocol_version() {
                     AxisPercent::try_from(60).expect("60 is a percent"),
                 ),
             }),
-            at: Some(Point { column: 5, row: 2 }),
+            top_left_cell: Some(Point { column: 5, row: 2 }),
             is_pinned: true,
         })
         .expect("placement encodes"),
         json!({ "Floating": {
             "size": { "width": { "Cells": 40 }, "height": { "Percent": 60 } },
-            "at": { "column": 5, "row": 2 },
+            "top_left_cell": { "column": 5, "row": 2 },
             "is_pinned": true
         } })
     );
     assert_eq!(
         serde_json::to_value(NewPanePlacement::Floating {
             size: None,
-            at: None,
+            top_left_cell: None,
             is_pinned: false,
         })
         .expect("placement encodes"),
-        json!({ "Floating": { "size": null, "at": null, "is_pinned": false } })
+        json!({ "Floating": { "size": null, "top_left_cell": null, "is_pinned": false } })
     );
 }
 

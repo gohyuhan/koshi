@@ -8,12 +8,12 @@ use super::*;
 
 use koshi_core::command::PanePlacementTarget;
 use koshi_core::event::{
-    ConfigReloaded, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneClosing,
-    PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneFocused, PanePlacementCommitted,
-    PaneProcessExited, PaneRemoved, PtyResized, SelectionChanged, TabClosed, TabCreated,
-    TabFocused, TabMoved, TerminalTooSmallCause, TerminalTooSmallEntered,
+    ConfigReloaded, FloatingPaneMoved, InputModeChanged, LayoutChanged, MouseSelectChanged,
+    PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneFocused, PanePinChanged,
+    PanePlacementCommitted, PaneProcessExited, PaneRemoved, PtyResized, SelectionChanged,
+    TabClosed, TabCreated, TabFocused, TabMoved, TerminalTooSmallCause, TerminalTooSmallEntered,
 };
-use koshi_core::geometry::{PaneArea, Size};
+use koshi_core::geometry::{PaneArea, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
@@ -181,6 +181,71 @@ fn mouse_select_change_is_info_naming_the_state_now_in_effect() {
     assert!(log_output.contains(r#""is_enabled":true"#), "{log_output}");
 }
 
+#[test]
+fn a_floating_pane_move_writes_one_info_line_with_the_client_pane_and_cell() {
+    let client_id = ClientId::new();
+    let pane_id = PaneId::new();
+
+    let log_output = capture_event_logs(&[Event::FloatingPaneMoved(FloatingPaneMoved {
+        client_id,
+        pane_id,
+        top_left_cell: Point { column: 70, row: 2 },
+    })]);
+
+    assert_eq!(
+        log_output.lines().count(),
+        1,
+        "expected exactly one line: {log_output}"
+    );
+    assert!(log_output.contains(r#""level":"INFO""#), "{log_output}");
+    assert!(
+        log_output.contains(r#""message":"floating pane moved""#),
+        "{log_output}"
+    );
+    assert!(
+        log_output.contains(&format!(r#""client_id":"{client_id}""#)),
+        "{log_output}"
+    );
+    assert!(
+        log_output.contains(&format!(r#""pane_id":"{pane_id}""#)),
+        "{log_output}"
+    );
+    assert!(log_output.contains(r#""column":70,"#), "{log_output}");
+    assert!(log_output.contains(r#""row":2}"#), "{log_output}");
+}
+
+#[test]
+fn a_floating_pane_pin_change_writes_one_info_line_naming_the_state_now_in_effect() {
+    let client_id = ClientId::new();
+    let pane_id = PaneId::new();
+
+    let log_output = capture_event_logs(&[Event::PanePinChanged(PanePinChanged {
+        client_id,
+        pane_id,
+        is_pinned: false,
+    })]);
+
+    assert_eq!(
+        log_output.lines().count(),
+        1,
+        "expected exactly one line: {log_output}"
+    );
+    assert!(log_output.contains(r#""level":"INFO""#), "{log_output}");
+    assert!(
+        log_output.contains(r#""message":"floating pane pin changed""#),
+        "{log_output}"
+    );
+    assert!(
+        log_output.contains(&format!(r#""client_id":"{client_id}""#)),
+        "{log_output}"
+    );
+    assert!(
+        log_output.contains(&format!(r#""pane_id":"{pane_id}""#)),
+        "{log_output}"
+    );
+    assert!(log_output.contains(r#""is_pinned":false"#), "{log_output}");
+}
+
 // Every written event is `info` or `warn`.
 #[test]
 fn no_event_is_ever_logged_as_an_error() {
@@ -324,7 +389,7 @@ fn a_pane_exit_writes_its_code_as_a_number_and_omits_an_absent_one() {
         signal: None,
     })]);
     assert!(
-        negative_exit_log.contains(r#""exit_code":-1"#),
+        negative_exit_log.contains(r#""exit_code":-1}"#),
         "{negative_exit_log}"
     );
 
@@ -351,7 +416,7 @@ fn a_pane_exit_writes_its_code_as_a_number_and_omits_an_absent_one() {
         "{signaled_exit_log}"
     );
     assert!(
-        signaled_exit_log.contains(r#""signal":9"#),
+        signaled_exit_log.contains(r#""signal":9}"#),
         "{signaled_exit_log}"
     );
 }
@@ -521,7 +586,7 @@ fn a_tab_move_records_the_slot_it_left_and_the_slot_it_landed_on() {
         log_output.contains(r#""previous_tab_index":0"#),
         "{log_output}"
     );
-    assert!(log_output.contains(r#""new_tab_index":3"#), "{log_output}");
+    assert!(log_output.contains(r#""new_tab_index":3}"#), "{log_output}");
     assert!(
         log_output.contains(&format!(r#""tab_id":"{tab_id}""#)),
         "{log_output}"
@@ -553,8 +618,8 @@ fn terminal_too_small_writes_the_size_the_pane_area_and_the_cause() {
         entered.contains(r#""message":"terminal too small; panes hidden""#),
         "{entered}"
     );
-    assert!(entered.contains(r#""column_count":10"#), "{entered}");
-    assert!(entered.contains(r#""row_count":3"#), "{entered}");
+    assert!(entered.contains(r#""column_count":10,"#), "{entered}");
+    assert!(entered.contains(r#""row_count":3,"#), "{entered}");
     assert!(
         entered.contains(r#""pane_area":"Some(Starving)""#),
         "{entered}"
@@ -700,7 +765,7 @@ fn a_quit_line_names_the_tab_and_the_pane_exit_that_ended_the_session() {
         "{closed_by_exit_log}"
     );
     assert!(
-        closed_by_exit_log.contains(r#""exit_code":127"#),
+        closed_by_exit_log.contains(r#""exit_code":127}"#),
         "{closed_by_exit_log}"
     );
     assert!(
@@ -717,7 +782,7 @@ fn a_quit_line_names_the_tab_and_the_pane_exit_that_ended_the_session() {
         }),
     })]);
     assert!(
-        closed_by_signal_log.contains(r#""signal":9"#),
+        closed_by_signal_log.contains(r#""signal":9}"#),
         "{closed_by_signal_log}"
     );
     assert!(

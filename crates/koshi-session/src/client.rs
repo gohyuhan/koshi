@@ -54,8 +54,8 @@ pub enum FloatingPanePosition {
     /// ([`place_floating_pane`]).
     #[default]
     Default,
-    /// The pane's top-left cell, stored by a move, a resize, or the `at` of
-    /// the command that created the pane.
+    /// The pane's top-left cell, stored by a move, a resize, or the
+    /// `top_left_cell` of the command that created the pane.
     Moved(Point),
     /// The pane's top-left cell, locked: a move and a resize of the pane's
     /// left or top edge are refused.
@@ -89,8 +89,9 @@ pub fn place_floating_pane(
         .column_count
         .saturating_sub(size.column_count);
     let free_row_count = client_viewport.row_count.saturating_sub(size.row_count);
-    let stored_origin = match position {
-        FloatingPanePosition::Moved(origin) | FloatingPanePosition::Pinned(origin) => origin,
+    let unclamped_top_left_cell = match position {
+        FloatingPanePosition::Moved(top_left_cell)
+        | FloatingPanePosition::Pinned(top_left_cell) => top_left_cell,
         FloatingPanePosition::Default => {
             let centered_column = free_column_count / 2;
             let centered_row = free_row_count / 2;
@@ -106,8 +107,8 @@ pub fn place_floating_pane(
     };
     Rect {
         origin: Point {
-            column: stored_origin.column.min(free_column_count),
-            row: stored_origin.row.min(free_row_count),
+            column: unclamped_top_left_cell.column.min(free_column_count),
+            row: unclamped_top_left_cell.row.min(free_row_count),
         },
         size,
     }
@@ -607,14 +608,14 @@ impl Client {
         self.raise_and_focus_floating_pane(pane_id);
     }
 
-    /// Pin `pane_id` for this client with its top-left cell at `position`,
-    /// counted from this client's pane-area origin. A pinned pane refuses
+    /// Pin `pane_id` for this client at `top_left_cell`, counted from this
+    /// client's pane-area origin. A pinned pane refuses
     /// [`set_floating_pane_position`](Self::set_floating_pane_position). The
     /// focus and the floating focus order stay as they are. Does not check that
     /// `pane_id` is a floating pane.
-    pub fn pin_floating_pane(&mut self, pane_id: PaneId, position: Point) {
+    pub fn pin_floating_pane(&mut self, pane_id: PaneId, top_left_cell: Point) {
         let mut floating_pane_view = self.get_floating_pane_view(pane_id);
-        floating_pane_view.position = FloatingPanePosition::Pinned(position);
+        floating_pane_view.position = FloatingPanePosition::Pinned(top_left_cell);
         self.set_floating_pane_view(pane_id, floating_pane_view);
     }
 
@@ -623,24 +624,24 @@ impl Client {
     /// not check that `pane_id` is a floating pane.
     pub fn unpin_floating_pane(&mut self, pane_id: PaneId) {
         let mut floating_pane_view = self.get_floating_pane_view(pane_id);
-        if let FloatingPanePosition::Pinned(position) = floating_pane_view.position {
-            floating_pane_view.position = FloatingPanePosition::Moved(position);
+        if let FloatingPanePosition::Pinned(top_left_cell) = floating_pane_view.position {
+            floating_pane_view.position = FloatingPanePosition::Moved(top_left_cell);
             self.set_floating_pane_view(pane_id, floating_pane_view);
         }
     }
 
-    /// Store `position` as this client's top-left cell of `pane_id`, counted
-    /// from this client's pane-area origin. Does not check that `pane_id` is a
+    /// Store `top_left_cell` for `pane_id` in this client's view, counted from
+    /// this client's pane-area origin. Does not check that `pane_id` is a
     /// floating pane.
     ///
     /// Returns `false`, changing nothing, when this client pinned `pane_id`.
     #[must_use]
-    pub fn set_floating_pane_position(&mut self, pane_id: PaneId, position: Point) -> bool {
+    pub fn set_floating_pane_position(&mut self, pane_id: PaneId, top_left_cell: Point) -> bool {
         let mut floating_pane_view = self.get_floating_pane_view(pane_id);
         if let FloatingPanePosition::Pinned(_) = floating_pane_view.position {
             return false;
         }
-        floating_pane_view.position = FloatingPanePosition::Moved(position);
+        floating_pane_view.position = FloatingPanePosition::Moved(top_left_cell);
         self.set_floating_pane_view(pane_id, floating_pane_view);
         true
     }

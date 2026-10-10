@@ -45,7 +45,7 @@ impl Server {
             } => (source_pane_id, tab_id, None),
             NewPanePlacement::Floating {
                 size,
-                at,
+                top_left_cell,
                 is_pinned,
             } => {
                 return self.handle_new_floating_pane(
@@ -53,7 +53,7 @@ impl Server {
                     command_source,
                     command_args,
                     size,
-                    at,
+                    top_left_cell,
                     is_pinned,
                 );
             }
@@ -303,14 +303,14 @@ impl Server {
         command_source: &CommandSource,
         command_args: &NewPaneArgs,
         size: Option<FloatingPaneSize>,
-        at: Option<Point>,
+        top_left_cell: Option<Point>,
         is_pinned: bool,
     ) -> Result<CommandResult, Rejection> {
         let acting_session = self.resolve_acting_session(command_source)?;
         let new_floating_pane_target = self.resolve_new_floating_pane_target(
             command_args.client_id,
             size,
-            at,
+            top_left_cell,
             is_pinned,
             command_source,
             acting_session,
@@ -907,7 +907,7 @@ impl Server {
             pane_id,
             client_id,
             desired_size,
-            client_origin,
+            top_left_cell,
         } = floating_pane_resize;
         let pty_backend = Arc::clone(self.get_pty_backend());
         let session = self
@@ -918,7 +918,7 @@ impl Server {
             .get_floating_pane_view(pane_id)
             .position;
         let acting_client_ids: Vec<ClientId> =
-            client_origin.map(|_| client_id).into_iter().collect();
+            top_left_cell.map(|_| client_id).into_iter().collect();
         ensure_session_placement_revision_capacity(session)?;
         ensure_client_placement_revision_capacity(session, &acting_client_ids)?;
 
@@ -926,11 +926,11 @@ impl Server {
             .floating_set
             .update_member_desired_size(pane_id, desired_size);
         advance_session_placement_revision(session);
-        if let (Some(client_origin), Some(client)) = (
-            client_origin,
+        if let (Some(top_left_cell), Some(client)) = (
+            top_left_cell,
             session.clients.get_client_mut_by_id(client_id),
         ) {
-            let _ = client.set_floating_pane_position(pane_id, client_origin);
+            let _ = client.set_floating_pane_position(pane_id, top_left_cell);
             if client.get_floating_pane_view(pane_id).position != previous_position {
                 let _ = client.advance_placement_revision();
             }

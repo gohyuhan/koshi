@@ -151,6 +151,25 @@ pub fn log_event(runtime_event: &Event) {
             );
         }
 
+        // --- floating pane view: one client's move or pin of a floating pane.
+        Event::FloatingPaneMoved(event_payload) => {
+            tracing::info!(
+                client_id = %event_payload.client_id,
+                pane_id = %event_payload.pane_id,
+                column = event_payload.top_left_cell.column,
+                row = event_payload.top_left_cell.row,
+                "floating pane moved"
+            );
+        }
+        Event::PanePinChanged(event_payload) => {
+            tracing::info!(
+                client_id = %event_payload.client_id,
+                pane_id = %event_payload.pane_id,
+                is_pinned = event_payload.is_pinned,
+                "floating pane pin changed"
+            );
+        }
+
         // --- session end: `cause` is `requested` or `last-tab-closed`. A
         // last-tab close names its tab, and the pane exit that emptied it when
         // one did. Only a close that followed a failed exit logs at warn.

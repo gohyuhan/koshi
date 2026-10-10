@@ -374,6 +374,8 @@ fn find_command_kind(command: &Command) -> Option<CommandKind> {
         Command::ScrollPane(_) => Some(CommandKind::ScrollPane),
         Command::Quit => Some(CommandKind::Quit),
         Command::Visual(_)
+        | Command::MoveFloatingPane(_)
+        | Command::SetPanePinned(_)
         | Command::Detach(_)
         | Command::DetachAll
         | Command::SwitchSession(_) => None,

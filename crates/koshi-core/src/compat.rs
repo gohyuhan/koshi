@@ -67,6 +67,9 @@ pub struct Surface {
 /// - A frame's two revisions, an image placement's `is_available`, a close
 ///   command's `should_kill_process_tree`, and a terminal-too-small event's
 ///   cause are required. 4 read a message without them.
+/// - The `MoveFloatingPane` and `SetPanePinned` commands, and the
+///   `FloatingPaneMoved` and `PanePinChanged` events in a command result,
+///   exist in 5 only.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A

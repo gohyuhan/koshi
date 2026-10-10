@@ -161,6 +161,16 @@ pub fn record_event(event: &Event, occurred_at: SystemTime) -> RecentEvent {
             pane_id: Some(selection_changed.pane_id),
             ..recent_event_without_entity_ids
         },
+        Event::FloatingPaneMoved(floating_pane_moved) => RecentEvent {
+            client_id: Some(floating_pane_moved.client_id),
+            pane_id: Some(floating_pane_moved.pane_id),
+            ..recent_event_without_entity_ids
+        },
+        Event::PanePinChanged(pane_pin_changed) => RecentEvent {
+            client_id: Some(pane_pin_changed.client_id),
+            pane_id: Some(pane_pin_changed.pane_id),
+            ..recent_event_without_entity_ids
+        },
         Event::Quit(_) | Event::Restarting => recent_event_without_entity_ids,
     }
 }
