@@ -784,14 +784,15 @@ impl Server {
             .session_by_id
             .get(&floating_pane_view_target.session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
-        let is_shown = Self::require_client(pane_session, floating_pane_view_target.client_id)?
-            .is_floating_pane_shown(floating_pane_view_target.pane_id);
-        let is_in_asked_state = if command_args.is_minimized {
-            !is_shown
+        let is_floating_pane_shown =
+            Self::require_client(pane_session, floating_pane_view_target.client_id)?
+                .is_floating_pane_shown(floating_pane_view_target.pane_id);
+        let is_view_in_asked_state = if command_args.is_minimized {
+            !is_floating_pane_shown
         } else {
-            is_shown
+            is_floating_pane_shown
         };
-        if is_in_asked_state {
+        if is_view_in_asked_state {
             return Ok(None);
         }
         Ok(Some(floating_pane_view_target))
@@ -1435,41 +1436,46 @@ impl Server {
                 }
             }
             FocusTarget::NextFloatingPane | FocusTarget::PreviousFloatingPane => {
-                let shown_pane_ids: Vec<PaneId> = session
+                let shown_floating_pane_ids: Vec<PaneId> = session
                     .floating_set
                     .list_members()
                     .iter()
                     .map(|floating_member| floating_member.pane_id)
                     .filter(|&pane_id| client.is_floating_pane_shown(pane_id))
                     .collect();
-                let shown_pane_count = shown_pane_ids.len();
-                if shown_pane_count == 0 {
+                let shown_floating_pane_count = shown_floating_pane_ids.len();
+                if shown_floating_pane_count == 0 {
                     return Err(Rejection::from_reason_and_help(
                         RejectReason::TargetNotFound,
                         "no floating pane is visible",
                     ));
                 }
-                let focused_index =
+                let focused_floating_pane_index =
                     client
                         .get_focused_floating_pane_id()
-                        .and_then(|focused_pane_id| {
-                            shown_pane_ids
+                        .and_then(|focused_floating_pane_id| {
+                            shown_floating_pane_ids
                                 .iter()
-                                .position(|&pane_id| pane_id == focused_pane_id)
+                                .position(|&pane_id| pane_id == focused_floating_pane_id)
                         });
-                let is_next = command_args.focus_target == FocusTarget::NextFloatingPane;
-                let target_index = match (focused_index, is_next) {
-                    (Some(focused_index), true) => (focused_index + 1) % shown_pane_count,
-                    (Some(focused_index), false) => {
-                        (focused_index + shown_pane_count - 1) % shown_pane_count
-                    }
-                    (None, true) => 0,
-                    (None, false) => shown_pane_count - 1,
-                };
+                let should_focus_next_floating_pane =
+                    command_args.focus_target == FocusTarget::NextFloatingPane;
+                let target_floating_pane_index =
+                    match (focused_floating_pane_index, should_focus_next_floating_pane) {
+                        (Some(focused_floating_pane_index), true) => {
+                            (focused_floating_pane_index + 1) % shown_floating_pane_count
+                        }
+                        (Some(focused_floating_pane_index), false) => {
+                            (focused_floating_pane_index + shown_floating_pane_count - 1)
+                                % shown_floating_pane_count
+                        }
+                        (None, true) => 0,
+                        (None, false) => shown_floating_pane_count - 1,
+                    };
                 return Ok(FocusPaneTarget::Floating(FloatingPaneViewTarget {
                     session_id: session.session_id,
                     client_id,
-                    pane_id: shown_pane_ids[target_index],
+                    pane_id: shown_floating_pane_ids[target_floating_pane_index],
                 }));
             }
         };

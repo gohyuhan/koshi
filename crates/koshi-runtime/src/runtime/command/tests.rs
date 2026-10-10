@@ -8300,6 +8300,48 @@ fn move_pane_without_a_neighbor_is_rejected_without_changing_the_layout() {
 }
 
 #[test]
+fn move_pane_from_a_tiled_shell_leaves_the_input_on_the_focused_floating_pane() {
+    let ResizeFixture {
+        mut runtime,
+        session_id,
+        client_id,
+        root_pane_id,
+        split_pane_id,
+        ..
+    } = build_resize_fixture();
+    let tab_id = runtime.session_by_id[&session_id]
+        .clients
+        .get_client_by_id(client_id)
+        .expect("client")
+        .get_active_tab_id();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(build_command_envelope(
+            build_in_session_source(session_id, Some(client_id), split_pane_id),
+            Command::MovePane(MovePaneArgs {
+                pane_id: None,
+                direction: Direction::Left,
+            }),
+        ))),
+        Ok(vec!["PanePlacementCommitted", "LayoutChanged"])
+    );
+
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(
+        session.tabs[&tab_id].get_layout_tree().list_leaf_pane_ids(),
+        vec![split_pane_id, root_pane_id]
+    );
+    let client = session.clients.get_client_by_id(client_id).expect("client");
+    assert_eq!(client.get_active_focused_pane_id(), Some(floating_pane_id));
+    assert_eq!(client.get_focused_pane_id(tab_id), Some(split_pane_id));
+}
+
+#[test]
 fn a_same_tab_swap_placement_exchanges_pane_occupants() {
     let ResizeFixture {
         mut runtime,
@@ -19302,7 +19344,7 @@ fn bootstrap_alice_session(viewport_size: Size) -> FloatingCommandFixture {
 /// A floating `new-pane` request with `size`, `top_left_cell` and `is_pinned`
 /// as given, running the default shell with no working directory and naming
 /// no client.
-fn build_floating_new_pane_args(
+pub(crate) fn build_floating_new_pane_args(
     size: Option<FloatingPaneSize>,
     top_left_cell: Option<Point>,
     is_pinned: bool,
@@ -19334,7 +19376,7 @@ fn build_cells_floating_pane_size(column_count: u16, row_count: u16) -> Floating
 /// Dispatch `new_pane_args` from `command_source` and return the floating pane
 /// it created. Panics unless the command applied and its first event is a
 /// [`PaneCreated`] with no tab.
-fn create_floating_pane(
+pub(crate) fn create_floating_pane(
     runtime: &mut Server,
     command_source: CommandSource,
     new_pane_args: NewPaneArgs,

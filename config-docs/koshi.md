@@ -316,6 +316,10 @@ before that dial. The seconds count down by one each second. The attempt number
 rises by one on every dial, so the fourth dial and every dial after it waits the
 full 8 seconds. Joining again puts back the tab you were on, the focused pane of
 each tab, the fullscreened pane of each tab, and the scroll offset of each pane.
+It also puts back your floating panes: which ones show, where each one sits,
+which ones you pinned or minimized, and which one takes your keys. If that
+floating pane closed while the link was down, your keys go to the shown floating
+pane you focused most recently, else to the tab's focused pane.
 Keys typed while the link is down are dropped; a resize is kept.
 
 A refusal no dial can change stops the dialing at once, without waiting the 120

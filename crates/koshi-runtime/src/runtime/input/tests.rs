@@ -8,6 +8,7 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{mpsc, Arc};
 
+use crate::runtime::command::tests::{build_floating_new_pane_args, create_floating_pane};
 use crate::runtime::pty_inbox::InboxSink;
 use crate::runtime::tests::build_viewer;
 use koshi_config::conflict::KeymapVerdict;
@@ -1762,25 +1763,11 @@ fn a_key_reaches_the_pane_again_once_it_is_no_longer_suppressed() {
 fn a_key_reaches_the_focused_floating_pane_only_while_its_client_has_room_to_draw_it() {
     let (mut server, fake_pty_backend, client_id, mut viewer) = build_test_server();
     let tiled_pane_id = get_only_pane_id(&server);
-    dispatch_test_command(
+    let floating_pane_id = create_floating_pane(
         &mut server,
-        client_id,
-        Command::NewPane(NewPaneArgs {
-            placement: NewPanePlacement::Floating {
-                size: None,
-                top_left_cell: None,
-                is_pinned: false,
-            },
-            working_directory: None,
-            spawn_spec: None,
-            client_id: None,
-        }),
+        CommandSource::from_key_binding(client_id),
+        build_floating_new_pane_args(None, None, false),
     );
-    let floating_pane_id = *server
-        .live_pane_ids
-        .iter()
-        .find(|&&pane_id| pane_id != tiled_pane_id)
-        .expect("the floating pane spawned");
 
     apply_key_press(
         &mut server,

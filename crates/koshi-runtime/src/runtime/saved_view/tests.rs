@@ -4,9 +4,9 @@
 //! client files, what `forget` leaves behind, how an untouched view
 //! round-trips, and which saved view records a save drops.
 
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{Point, Size};
 use koshi_core::ids::SessionId;
-use koshi_session::client::ClientOrigin;
+use koshi_session::client::{ClientOrigin, FloatingPanePosition};
 
 use super::*;
 
@@ -41,12 +41,17 @@ fn a_minted_token_takes_back_every_part_of_the_saved_view() {
     let focused_pane_id = PaneId::new();
     let zoomed_pane_id = PaneId::new();
     let scrolled_pane_id = PaneId::new();
+    let (minimized_floating_pane_id, focused_floating_pane_id) = (PaneId::new(), PaneId::new());
 
     let mut client = build_client(ClientId::new(), tab_id);
     client.update_focused_pane(tab_id, focused_pane_id);
     client.update_focused_pane(other_tab_id, zoomed_pane_id);
     client.zoom_pane(other_tab_id, zoomed_pane_id);
     client.set_scroll_offset(scrolled_pane_id, 7);
+    assert!(client.focus_floating_pane(minimized_floating_pane_id));
+    assert!(client.focus_floating_pane(focused_floating_pane_id));
+    assert!(client.minimize_floating_pane(minimized_floating_pane_id));
+    client.pin_floating_pane(focused_floating_pane_id, Point { column: 4, row: 2 });
 
     let mut saved_view_store = SavedViewStore::default();
     let resume_token = saved_view_store.mint_resume_token(client.get_client_id());
@@ -67,6 +72,33 @@ fn a_minted_token_takes_back_every_part_of_the_saved_view() {
     assert_eq!(
         saved_view.scroll_offset_by_pane_id,
         HashMap::from([(scrolled_pane_id, 7)])
+    );
+    assert_eq!(
+        saved_view.floating_pane_view_by_pane_id,
+        HashMap::from([
+            (
+                minimized_floating_pane_id,
+                FloatingPaneView {
+                    position: FloatingPanePosition::Default,
+                    is_minimized: true,
+                },
+            ),
+            (
+                focused_floating_pane_id,
+                FloatingPaneView {
+                    position: FloatingPanePosition::Pinned(Point { column: 4, row: 2 }),
+                    is_minimized: false,
+                },
+            ),
+        ])
+    );
+    assert_eq!(
+        saved_view.floating_pane_focus_order,
+        [minimized_floating_pane_id, focused_floating_pane_id]
+    );
+    assert_eq!(
+        saved_view.focused_floating_pane_id,
+        Some(focused_floating_pane_id)
     );
 }
 
@@ -261,7 +293,7 @@ fn a_clock_too_near_its_end_to_hold_the_lifetime_files_nothing_and_drops_the_has
 }
 
 #[test]
-fn a_client_that_touched_nothing_takes_back_its_tab_and_three_empty_maps() {
+fn a_client_that_touched_nothing_takes_back_its_tab_and_an_empty_view() {
     let tab_id = TabId::new();
     let client = build_client(ClientId::new(), tab_id);
     let mut saved_view_store = SavedViewStore::default();
@@ -275,6 +307,9 @@ fn a_client_that_touched_nothing_takes_back_its_tab_and_three_empty_maps() {
             focused_pane_id_by_tab_id: HashMap::new(),
             zoomed_pane_id_by_tab_id: HashMap::new(),
             scroll_offset_by_pane_id: HashMap::new(),
+            floating_pane_view_by_pane_id: HashMap::new(),
+            floating_pane_focus_order: Vec::new(),
+            focused_floating_pane_id: None,
         })
     );
 }

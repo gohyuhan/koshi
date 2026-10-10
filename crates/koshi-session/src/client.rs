@@ -608,7 +608,8 @@ impl Client {
 
     /// Every floating pane view this client stores, keyed by pane id. Each one
     /// differs from [`FloatingPaneView::default`].
-    pub(crate) fn list_floating_pane_views(&self) -> &HashMap<PaneId, FloatingPaneView> {
+    #[must_use]
+    pub fn list_floating_pane_views(&self) -> &HashMap<PaneId, FloatingPaneView> {
         &self.floating_pane_view_by_pane_id
     }
 
@@ -651,7 +652,7 @@ impl Client {
 
     /// Minimize `pane_id` for this client when this client shows it
     /// ([`is_floating_pane_shown`](Self::is_floating_pane_shown)). The pane
-    /// keeps its place in the floating focus order. A floating focus on
+    /// stays in the floating focus order. A floating focus on
     /// `pane_id` moves to the floating pane this client focused or restored
     /// most recently among those it still shows, which moves to the end of the
     /// floating focus order; with none shown, no floating pane is focused.
@@ -740,6 +741,51 @@ impl Client {
         if self.focused_floating_pane_id == Some(pane_id) {
             self.recover_floating_focus();
         }
+    }
+
+    /// Replace this client's floating view with the floating view of one
+    /// client: `floating_pane_view_by_pane_id`, `floating_pane_focus_order` and
+    /// `focused_floating_pane_id` as that client's
+    /// [`list_floating_pane_views`](Self::list_floating_pane_views),
+    /// [`list_floating_pane_focus_order`](Self::list_floating_pane_focus_order)
+    /// and [`get_focused_floating_pane_id`](Self::get_focused_floating_pane_id)
+    /// return them. Then each pane they name for which `is_floating_member`
+    /// returns `false` is dropped: its view and its floating focus order entry
+    /// go, and a floating focus on it moves as
+    /// [`minimize_floating_pane`](Self::minimize_floating_pane) moves it.
+    /// `[a, b, c]` with `c` focused and `c` no longer floating gives `[a, b]`
+    /// with `b` focused.
+    ///
+    /// Returns whether this client's floating view changed.
+    #[must_use]
+    pub fn replace_floating_view(
+        &mut self,
+        floating_pane_view_by_pane_id: &HashMap<PaneId, FloatingPaneView>,
+        floating_pane_focus_order: &[PaneId],
+        focused_floating_pane_id: Option<PaneId>,
+        is_floating_member: impl Fn(PaneId) -> bool,
+    ) -> bool {
+        let floating_pane_view_by_pane_id_before = std::mem::replace(
+            &mut self.floating_pane_view_by_pane_id,
+            floating_pane_view_by_pane_id.clone(),
+        );
+        let floating_pane_focus_order_before = std::mem::replace(
+            &mut self.floating_pane_focus_order,
+            floating_pane_focus_order.to_vec(),
+        );
+        let focused_floating_pane_id_before =
+            std::mem::replace(&mut self.focused_floating_pane_id, focused_floating_pane_id);
+        for &pane_id in floating_pane_view_by_pane_id
+            .keys()
+            .chain(floating_pane_focus_order)
+        {
+            if !is_floating_member(pane_id) {
+                self.remove_floating_pane_view(pane_id);
+            }
+        }
+        self.floating_pane_view_by_pane_id != floating_pane_view_by_pane_id_before
+            || self.floating_pane_focus_order != floating_pane_focus_order_before
+            || self.focused_floating_pane_id != focused_floating_pane_id_before
     }
 
     /// Move `pane_id` to the end of the floating focus order, appending it when

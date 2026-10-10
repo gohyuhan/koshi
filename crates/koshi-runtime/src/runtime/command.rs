@@ -1244,4 +1244,4 @@ mod tab;
 mod visual;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

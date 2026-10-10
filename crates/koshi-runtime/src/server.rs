@@ -266,13 +266,12 @@ pub struct Server {
     /// [`handle_drop_unclaimed_clients`](Self::handle_drop_unclaimed_clients)
     /// when the grace window closes.
     pub(crate) client_ids_awaiting_reconnect: HashSet<ClientId>,
-    /// The view each dropped client left behind — the tab it was on, the pane
-    /// it had focused in each tab, the pane it had zoomed in each tab, and how
-    /// far it had scrolled up each pane — keyed by the sha256 of the token that
-    /// client's attach minted. Every attach mints one token and files its hash
-    /// here; presenting that token on the next attach hands the view back once.
-    /// The store lives only in memory: nothing in it is written to disk, sent
-    /// over a socket, or carried across an image swap.
+    /// The view each dropped client left behind
+    /// ([`SavedView`](crate::runtime::saved_view::SavedView)), keyed by the
+    /// sha256 of the token that client's attach minted. Every attach mints one
+    /// token and files its hash here; presenting that token on the next attach
+    /// hands the view back once. The store lives only in memory: nothing in it
+    /// is written to disk, sent over a socket, or carried across an image swap.
     pub(crate) saved_view_store: SavedViewStore,
     /// Bytes waiting to be written to each client's own outer terminal —
     /// escape sequences aimed at the terminal program the client runs in, not

@@ -1,11 +1,10 @@
 //! The views detached clients left behind, and the tokens that take them back.
 //!
-//! Every attach mints one token. When that client detaches, its view — the tab
-//! it was on, the pane it had focused in each tab, the pane it had zoomed in
-//! each tab, and how far it had scrolled up each pane — is filed under the
-//! sha256 of that token. sha256 is the 256-bit hash function from the SHA-2
-//! family; [`koshi_ipc::remote_tokens::hash_connection_token`] writes its 32 result bytes
-//! as 64 lowercase hex characters. The store holds the hash and never the
+//! Every attach mints one token. When that client detaches, its view
+//! ([`SavedView`]) is filed under the sha256 of that token. sha256 is the
+//! 256-bit hash function from the SHA-2 family;
+//! [`koshi_ipc::remote_tokens::hash_connection_token`] writes its 32 result
+//! bytes as 64 lowercase hex characters. The store holds the hash and never the
 //! secret.
 //!
 //! Presenting the token hands the view back once and drops the record, so a
@@ -25,7 +24,7 @@ use subtle::ConstantTimeEq;
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::remote_tokens::hash_connection_token;
-use koshi_session::client::Client;
+use koshi_session::client::{Client, FloatingPaneView};
 
 /// How long a filed view stands before it is dropped: 120 seconds.
 const SAVED_VIEW_LIFETIME_DURATION: Duration = Duration::from_secs(120);
@@ -49,6 +48,15 @@ pub struct SavedView {
     /// value the lines scrolled up from the live bottom. A pane with no entry
     /// sat at the live bottom.
     pub scroll_offset_by_pane_id: HashMap<PaneId, usize>,
+    /// The client's view of each floating pane, keyed by pane id: where it drew
+    /// the pane, and whether it pinned or minimized the pane. A pane with no
+    /// entry drew at the default placement, unpinned and not minimized.
+    pub floating_pane_view_by_pane_id: HashMap<PaneId, FloatingPaneView>,
+    /// The floating panes the client focused or restored, least recently first.
+    pub floating_pane_focus_order: Vec<PaneId>,
+    /// The floating pane that took the client's input, or `None` when no
+    /// floating pane did.
+    pub focused_floating_pane_id: Option<PaneId>,
 }
 
 /// One filed view: the sha256 of the token that takes it back, when it stops
@@ -119,6 +127,9 @@ impl SavedViewStore {
                 focused_pane_id_by_tab_id: client.list_focused_pane_ids().clone(),
                 zoomed_pane_id_by_tab_id: client.list_zoomed_pane_ids().clone(),
                 scroll_offset_by_pane_id: client.list_scroll_offsets().clone(),
+                floating_pane_view_by_pane_id: client.list_floating_pane_views().clone(),
+                floating_pane_focus_order: client.list_floating_pane_focus_order().to_vec(),
+                focused_floating_pane_id: client.get_focused_floating_pane_id(),
             },
         });
         while self.saved_view_records.len() > MAX_SAVED_VIEW_RECORD_COUNT {

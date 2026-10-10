@@ -956,7 +956,7 @@ impl Server {
     /// - The swap commits through the same path as a same-tab
     ///   [`Command::PlacePane`] swap: it clears the issuing client's zoom on
     ///   the tab, emits `PanePlacementCommitted` then `LayoutChanged`, and
-    ///   reflows the tab's live PTYs.
+    ///   reflows the tab's live PTYs. No focus moves.
     pub(super) fn handle_move_pane(
         &mut self,
         command_id: CommandId,
@@ -993,6 +993,11 @@ impl Server {
     /// within one tab or across two tabs, then reflow every tab whose viewers
     /// change. Every fallible layout and revision check runs before the session
     /// commit.
+    ///
+    /// Within one tab, no focus moves: a floating pane that takes a client's
+    /// input keeps it. Across two tabs, the acting client moves to the
+    /// destination tab and focuses the placed pane, which takes its input
+    /// ([`commit_cross_tab_placement`]).
     pub(super) fn apply_place_pane(
         &mut self,
         command_id: CommandId,
