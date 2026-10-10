@@ -150,7 +150,7 @@ fn floating_pane_view_events_record_their_client_and_pane_and_nothing_else() {
             &Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id,
                 pane_id,
-                to: Point { column: 70, row: 2 },
+                top_left_cell: Point { column: 70, row: 2 },
             }),
             build_occurred_at(),
         ),

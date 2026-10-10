@@ -189,7 +189,7 @@ fn a_floating_pane_move_writes_one_info_line_with_the_client_pane_and_cell() {
     let log_output = capture_event_logs(&[Event::FloatingPaneMoved(FloatingPaneMoved {
         client_id,
         pane_id,
-        to: Point { column: 70, row: 2 },
+        top_left_cell: Point { column: 70, row: 2 },
     })]);
 
     assert_eq!(

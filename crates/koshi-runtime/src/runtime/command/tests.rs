@@ -458,7 +458,7 @@ fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
         }),
         Command::MoveFloatingPane(MoveFloatingPaneArgs {
             pane_id: PaneId::new(),
-            to: Point { column: 4, row: 2 },
+            top_left_cell: Point { column: 4, row: 2 },
         }),
         Command::SetPanePinned(SetPanePinnedArgs {
             pane_id: None,
@@ -19395,17 +19395,18 @@ fn bootstrap_alice_session(viewport_size: Size) -> FloatingCommandFixture {
     }
 }
 
-/// A floating `new-pane` request with `size`, `at` and `is_pinned` as given,
-/// running the default shell with no working directory and naming no client.
+/// A floating `new-pane` request with `size`, `top_left_cell` and `is_pinned`
+/// as given, running the default shell with no working directory and naming
+/// no client.
 fn build_floating_new_pane_args(
     size: Option<FloatingPaneSize>,
-    at: Option<Point>,
+    top_left_cell: Option<Point>,
     is_pinned: bool,
 ) -> NewPaneArgs {
     NewPaneArgs {
         placement: NewPanePlacement::Floating {
             size,
-            at,
+            top_left_cell,
             is_pinned,
         },
         working_directory: None,
@@ -20381,7 +20382,7 @@ fn resizing_a_floating_pane_keeps_the_edge_opposite_the_moved_one_where_the_issu
         direction,
         resize_amount_cells,
         expected_desired_size,
-        expected_origin,
+        expected_top_left_cell,
         expected_pty_size,
     ) in resize_cases
     {
@@ -20441,7 +20442,7 @@ fn resizing_a_floating_pane_keeps_the_edge_opposite_the_moved_one_where_the_issu
         assert_eq!(
             alice_client.get_floating_pane_view(floating_pane_id),
             FloatingPaneView {
-                position: FloatingPanePosition::Moved(expected_origin),
+                position: FloatingPanePosition::Moved(expected_top_left_cell),
                 is_minimized: false,
             },
             "{direction:?} {resize_amount_cells}"
@@ -21541,17 +21542,20 @@ fn a_floating_new_pane_opens_in_the_directory_of_the_pane_it_was_asked_from() {
 
 // --- Moving and pinning a floating pane in one client's view -----------------
 
-/// Dispatch a move of the floating pane `pane_id` to `to` from
+/// Dispatch a move of the floating pane `pane_id` to `top_left_cell` from
 /// `command_source`, and return the command id with the result.
 fn dispatch_move_floating_pane(
     runtime: &mut Server,
     command_source: CommandSource,
     pane_id: PaneId,
-    to: Point,
+    top_left_cell: Point,
 ) -> (CommandId, CommandResult) {
     let command_envelope = build_command_envelope(
         command_source,
-        Command::MoveFloatingPane(MoveFloatingPaneArgs { pane_id, to }),
+        Command::MoveFloatingPane(MoveFloatingPaneArgs {
+            pane_id,
+            top_left_cell,
+        }),
     );
     let command_id = command_envelope.command_id;
     (command_id, runtime.dispatch(command_envelope))
@@ -21659,7 +21663,7 @@ fn moving_a_floating_pane_stores_the_cell_in_the_acting_clients_view_only() {
             emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id: alice_client_id,
                 pane_id: floating_pane_id,
-                to: Point { column: 4, row: 2 },
+                top_left_cell: Point { column: 4, row: 2 },
             })],
         }
     );
@@ -21720,7 +21724,7 @@ fn a_cell_past_the_pane_area_is_stored_as_given_and_a_repeated_move_changes_noth
             emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id: alice_client_id,
                 pane_id: floating_pane_id,
-                to: far_cell,
+                top_left_cell: far_cell,
             })],
         }
     );
@@ -21842,7 +21846,7 @@ fn a_pane_one_client_pinned_refuses_that_clients_move_and_another_client_still_m
             emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id: bob_client_id,
                 pane_id: floating_pane_id,
-                to: Point { column: 3, row: 1 },
+                top_left_cell: Point { column: 3, row: 1 },
             })],
         }
     );
@@ -22190,7 +22194,7 @@ fn a_suppressed_pane_refuses_a_pin_but_moves_and_unpins() {
             emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id: alice_client_id,
                 pane_id: unpinned_pane_id,
-                to: Point { column: 2, row: 1 },
+                top_left_cell: Point { column: 2, row: 1 },
             })],
         }
     );
@@ -22426,7 +22430,7 @@ fn an_in_session_move_and_pin_act_on_the_pane_they_were_issued_from() {
             emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id: alice_client_id,
                 pane_id: floating_pane_id,
-                to: Point { column: 5, row: 3 },
+                top_left_cell: Point { column: 5, row: 3 },
             })],
         }
     );
@@ -22554,7 +22558,7 @@ fn an_external_move_and_pin_change_only_the_named_clients_view() {
             emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id: bob_client_id,
                 pane_id: floating_pane_id,
-                to: Point { column: 4, row: 2 },
+                top_left_cell: Point { column: 4, row: 2 },
             })],
         }
     );

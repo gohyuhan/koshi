@@ -119,7 +119,7 @@ fn close_undriven_panes_removes_a_floating_pane_whose_child_is_gone() {
         Command::NewPane(NewPaneArgs {
             placement: NewPanePlacement::Floating {
                 size: None,
-                at: None,
+                top_left_cell: None,
                 is_pinned: false,
             },
             working_directory: None,
@@ -2394,12 +2394,12 @@ fn the_restart_announcement_waits_for_every_client_to_hold_the_frame() {
     let ending_notice = Arc::clone(server.get_ending_notice());
     ending_notice.record_writer_started();
     let writer_ending_notice = Arc::clone(&ending_notice);
+    let wait_started_at = Instant::now();
     let writer_thread = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(150));
         writer_ending_notice.record_writer_ended();
     });
 
-    let wait_started_at = Instant::now();
     server.announce_restarting();
     let waited_duration = wait_started_at.elapsed();
 

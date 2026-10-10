@@ -70,7 +70,7 @@ fn pane_command_variants_round_trip_through_json() {
                     AxisPercent::try_from(60).expect("60 is a percent"),
                 ),
             }),
-            at: Some(Point { column: 5, row: 2 }),
+            top_left_cell: Some(Point { column: 5, row: 2 }),
             is_pinned: true,
         },
         ..build_new_pane_args()
@@ -155,18 +155,18 @@ fn pane_command_variants_round_trip_through_json() {
     let floating_pane_id = PaneId::new();
     assert_json_roundtrip(&Command::MoveFloatingPane(MoveFloatingPaneArgs {
         pane_id: floating_pane_id,
-        to: Point { column: 70, row: 2 },
+        top_left_cell: Point { column: 70, row: 2 },
     }));
     assert_eq!(
         serde_json::to_value(Command::MoveFloatingPane(MoveFloatingPaneArgs {
             pane_id: floating_pane_id,
-            to: Point { column: 70, row: 2 },
+            top_left_cell: Point { column: 70, row: 2 },
         }))
         .expect("serialize floating move command"),
         json!({
             "MoveFloatingPane": {
                 "pane_id": floating_pane_id,
-                "to": { "column": 70, "row": 2 },
+                "top_left_cell": { "column": 70, "row": 2 },
             }
         })
     );
@@ -366,7 +366,7 @@ fn command_variant_names_are_canonical() {
         (
             Command::MoveFloatingPane(MoveFloatingPaneArgs {
                 pane_id: PaneId::new(),
-                to: Point { column: 0, row: 0 },
+                top_left_cell: Point { column: 0, row: 0 },
             }),
             "MoveFloatingPane",
         ),

@@ -907,15 +907,15 @@ impl Server {
         Ok(transaction_scope.commit(command_id, &mut self.event_bus))
     }
 
-    /// Handle [`Command::MoveFloatingPane`]: store `Moved(to)` as the acting
-    /// client's position of the floating pane
+    /// Handle [`Command::MoveFloatingPane`]: store `Moved(top_left_cell)` as
+    /// the acting client's position of the floating pane
     /// ([`Self::resolve_move_floating_pane_target`]).
     ///
     /// A changed position advances the acting client's placement revision and
     /// emits one [`Event::FloatingPaneMoved`]. A client that already stores
-    /// `Moved(to)` changes nothing and emits nothing. The session's placement
-    /// revision, the pane's size, and every other client's view stay as they
-    /// are.
+    /// `Moved(top_left_cell)` changes nothing and emits nothing. The session's
+    /// placement revision, the pane's size, and every other client's view
+    /// stay as they are.
     pub(super) fn handle_move_floating_pane(
         &mut self,
         command_id: CommandId,
@@ -945,7 +945,7 @@ impl Server {
             .clients
             .get_client_mut_by_id(client_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
-        let _ = client.set_floating_pane_position(pane_id, command_args.to);
+        let _ = client.set_floating_pane_position(pane_id, command_args.top_left_cell);
         let _ = client.advance_placement_revision();
         Ok(Self::commit_events(
             &mut self.event_bus,
@@ -953,7 +953,7 @@ impl Server {
             vec![Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id,
                 pane_id,
-                to: command_args.to,
+                top_left_cell: command_args.top_left_cell,
             })],
         ))
     }
@@ -999,7 +999,7 @@ impl Server {
             .get_client_mut_by_id(client_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
         match pane_pin_change {
-            PanePinChange::Pin(pinned_cell) => client.pin_floating_pane(pane_id, pinned_cell),
+            PanePinChange::Pin(top_left_cell) => client.pin_floating_pane(pane_id, top_left_cell),
             PanePinChange::Unpin => client.unpin_floating_pane(pane_id),
         }
         let _ = client.advance_placement_revision();

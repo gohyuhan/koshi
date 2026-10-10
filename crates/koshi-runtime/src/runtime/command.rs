@@ -392,7 +392,7 @@ struct FloatingPaneResize {
     desired_size: FloatingPaneSize,
     /// The client's top-left cell after the resize; `None` when the client
     /// reports no pane area and keeps its view.
-    client_origin: Option<Point>,
+    top_left_cell: Option<Point>,
 }
 
 /// A floating member whose last size solve placed it. The `Ok` half of

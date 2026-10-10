@@ -193,14 +193,14 @@ fn floating_pane_view_events_encode_the_client_the_pane_and_the_new_state() {
         serde_json::to_value(Event::FloatingPaneMoved(FloatingPaneMoved {
             client_id,
             pane_id,
-            to: Point { column: 70, row: 2 },
+            top_left_cell: Point { column: 70, row: 2 },
         }))
         .expect("serialize floating pane moved"),
         serde_json::json!({
             "FloatingPaneMoved": {
                 "client_id": client_id,
                 "pane_id": pane_id,
-                "to": { "column": 70, "row": 2 },
+                "top_left_cell": { "column": 70, "row": 2 },
             }
         })
     );
@@ -479,7 +479,7 @@ pub(crate) fn list_event_cases() -> [(Event, &'static str); 23] {
             Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id: ClientId::new(),
                 pane_id: PaneId::new(),
-                to: Point { column: 4, row: 2 },
+                top_left_cell: Point { column: 4, row: 2 },
             }),
             "FloatingPaneMoved",
         ),

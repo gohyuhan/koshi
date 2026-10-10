@@ -156,8 +156,8 @@ pub fn log_event(runtime_event: &Event) {
             tracing::info!(
                 client_id = %event_payload.client_id,
                 pane_id = %event_payload.pane_id,
-                column = event_payload.to.column,
-                row = event_payload.to.row,
+                column = event_payload.top_left_cell.column,
+                row = event_payload.top_left_cell.row,
                 "floating pane moved"
             );
         }

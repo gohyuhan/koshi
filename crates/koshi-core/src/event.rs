@@ -465,7 +465,7 @@ pub struct FloatingPaneMoved {
     pub pane_id: PaneId,
     /// The pane's stored top-left cell, counted from the client's pane-area
     /// origin, exactly as the command named it.
-    pub to: Point,
+    pub top_left_cell: Point,
 }
 
 /// Payload for [`Event::PanePinChanged`].

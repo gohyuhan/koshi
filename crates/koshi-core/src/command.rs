@@ -158,7 +158,7 @@ pub struct NewPaneArgs {
     pub spawn_spec: Option<SpawnSpec>,
     /// Client to show the new pane on: the client that views and focuses a
     /// split or stacked pane, or the designated client whose view a
-    /// [`NewPanePlacement::Floating`] `at` and `is_pinned` write.
+    /// [`NewPanePlacement::Floating`] `top_left_cell` and `is_pinned` write.
     ///
     /// - `Some(client)`: that client is targeted, even over an in-session
     ///   issuer. A client not attached to the target session is rejected;
@@ -202,12 +202,12 @@ pub enum NewPanePlacement {
         /// Desired size, one dimension per axis. `None` takes 60% x 60% of the
         /// shared floating viewport.
         size: Option<FloatingPaneSize>,
-        /// The designated client's position of the pane's top-left cell,
-        /// counted from that client's pane-area origin. `None` takes the
-        /// default placement. No other client's view is written.
-        at: Option<Point>,
-        /// `true` pins the new pane for the designated client only, at `at`
-        /// or at the drawn default placement.
+        /// The designated client's top-left cell of the pane, counted from
+        /// that client's pane-area origin. `None` takes the default
+        /// placement. No other client's view is written.
+        top_left_cell: Option<Point>,
+        /// `true` pins the new pane for the designated client only, at
+        /// `top_left_cell` or at the drawn default placement.
         is_pinned: bool,
     },
 }
@@ -434,7 +434,7 @@ pub struct MoveFloatingPaneArgs {
     /// client's pane-area origin. The cell is stored as given, and the pane
     /// is drawn moved left and up until it lies inside the pane area: `(500,
     /// 500)` for a `48x13` pane on an `80x22` pane area is drawn at `(32, 9)`.
-    pub to: Point,
+    pub top_left_cell: Point,
 }
 
 /// Arguments for [`Command::SetPanePinned`].

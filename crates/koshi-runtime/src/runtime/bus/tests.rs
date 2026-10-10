@@ -1428,7 +1428,7 @@ fn every_event_with_no_wire_spelling_converts_to_nothing() {
         Event::FloatingPaneMoved(FloatingPaneMoved {
             client_id,
             pane_id,
-            to: Point { column: 70, row: 2 },
+            top_left_cell: Point { column: 70, row: 2 },
         }),
         Event::PanePinChanged(PanePinChanged {
             client_id,

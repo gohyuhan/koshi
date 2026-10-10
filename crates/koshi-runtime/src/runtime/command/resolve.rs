@@ -336,13 +336,13 @@ impl Server {
                     .map(drop),
                 NewPanePlacement::Floating {
                     size,
-                    at,
+                    top_left_cell,
                     is_pinned,
                 } => self
                     .resolve_new_floating_pane_target(
                         command_args.client_id,
                         size,
-                        at,
+                        top_left_cell,
                         is_pinned,
                         command_source,
                         session,
@@ -672,7 +672,8 @@ impl Server {
     /// ([`Self::resolve_floating_pane_view_target`]). Shared by validation and
     /// [`Self::handle_move_floating_pane`].
     ///
-    /// `None` when the acting client already stores `Moved(to)` for the pane.
+    /// `None` when the acting client already stores `Moved(top_left_cell)` for
+    /// the pane.
     /// A suppressed pane, a pane the acting client minimized, and a pane that
     /// client does not show all resolve. A pane the acting client pinned is
     /// [`RejectReason::InvalidState`] `<pane> is pinned`.
@@ -702,7 +703,7 @@ impl Server {
                 &format!("{} is pinned", floating_pane_view_target.pane_id),
             ));
         }
-        if client_position == FloatingPanePosition::Moved(command_args.to) {
+        if client_position == FloatingPanePosition::Moved(command_args.top_left_cell) {
             return Ok(None);
         }
         Ok(Some(floating_pane_view_target))
@@ -906,22 +907,23 @@ impl Server {
     ///   pane is [`FloatingPaneSizeSolve::Suppressed`].
     /// - The PTY takes the solved outer size less
     ///   [`FLOATING_PANE_CHROME_SIZE`], or the pane minimum when suppressed.
-    /// - The designated client's position is `Moved(at)`, `Pinned(at)` when
-    ///   `is_pinned`, the drawn default placement pinned when `is_pinned`
-    ///   without `at`, and [`FloatingPanePosition::Default`] otherwise. An
-    ///   `at` or `is_pinned` with no designated client is
-    ///   [`RejectReason::InvalidState`] `no client is attached to place or pin
-    ///   the new floating pane for`. `is_pinned` without `at` for a pane the
-    ///   designated client would not draw (suppressed, or the client reports no
-    ///   pane area) is [`RejectReason::InvalidState`] `the new floating pane is
-    ///   not drawn on the client's screen, so it has no position to pin`.
+    /// - The designated client's position is `Moved(top_left_cell)`,
+    ///   `Pinned(top_left_cell)` when `is_pinned`, the drawn default placement
+    ///   pinned when `is_pinned` without `top_left_cell`, and
+    ///   [`FloatingPanePosition::Default`] otherwise. A `top_left_cell` or
+    ///   `is_pinned` with no designated client is [`RejectReason::InvalidState`]
+    ///   `no client is attached to place or pin the new floating pane for`.
+    ///   `is_pinned` without `top_left_cell` for a pane the designated client
+    ///   would not draw (suppressed, or the client reports no pane area) is
+    ///   [`RejectReason::InvalidState`] `the new floating pane is not drawn on
+    ///   the client's screen, so it has no position to pin`.
     /// - The working directory comes from the in-session CLI's own pane, else
     ///   from the designated client's focused pane in its active tab.
     pub(super) fn resolve_new_floating_pane_target(
         &self,
         client_id: Option<ClientId>,
         size: Option<FloatingPaneSize>,
-        at: Option<Point>,
+        top_left_cell: Option<Point>,
         is_pinned: bool,
         command_source: &CommandSource,
         session: Option<&Session>,
@@ -957,7 +959,7 @@ impl Server {
             }
             FloatingPaneSizeSolve::Suppressed => pane_minimum_size,
         };
-        let designated_position = match (at, is_pinned, designated_client_id) {
+        let designated_position = match (top_left_cell, is_pinned, designated_client_id) {
             (None, false, _) => FloatingPanePosition::Default,
             (Some(_), _, None) | (None, true, None) => {
                 return Err(Rejection::from_reason_and_help(
@@ -965,8 +967,8 @@ impl Server {
                     "no client is attached to place or pin the new floating pane for",
                 ));
             }
-            (Some(position), false, Some(_)) => FloatingPanePosition::Moved(position),
-            (Some(position), true, Some(_)) => FloatingPanePosition::Pinned(position),
+            (Some(top_left_cell), false, Some(_)) => FloatingPanePosition::Moved(top_left_cell),
+            (Some(top_left_cell), true, Some(_)) => FloatingPanePosition::Pinned(top_left_cell),
             (None, true, Some(client_id)) => {
                 let client = Self::require_client(session, client_id)?;
                 let (FloatingPaneSizeSolve::Sized(outer_size), Some(client_viewport)) =
@@ -1171,7 +1173,7 @@ impl Server {
         } else {
             desired_size.height = FloatingPaneDimension::Cells(resized_cell_count);
         }
-        let client_origin = drawn_rect.map(|drawn_rect| match direction {
+        let top_left_cell = drawn_rect.map(|drawn_rect| match direction {
             Direction::Left => Point {
                 column: drawn_rect.origin.column + drawn_rect.size.column_count
                     - resized_cell_count.get(),
@@ -1188,7 +1190,7 @@ impl Server {
             pane_id,
             client_id,
             desired_size,
-            client_origin,
+            top_left_cell,
         })
     }
 
