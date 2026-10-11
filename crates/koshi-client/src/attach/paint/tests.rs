@@ -1,7 +1,8 @@
 //! Tests for [`build_render_snapshot`]: a frame that travels and is read back is the
 //! frame that was sent — every style field, a wide glyph and its continuation
 //! half, a combining mark, both cursor states, the scroll offset, the mouse
-//! mode, a pane with no grid at all, and the highlight rows.
+//! mode, a pane with no grid at all, the highlight rows, and the floating pane
+//! slots in their order.
 
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -384,6 +385,7 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
                     is_active: false,
                 },
             ],
+            floating_pane_slots: Vec::new(),
         },
         pane_snapshots,
         client_snapshot: ClientSnapshot {
@@ -408,6 +410,46 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
         build_empty_pane_snapshot(PaneId::new()),
     ]);
     expected_render_snapshot.is_recovery_notice_visible = true;
+    expected_render_snapshot
+        .session_snapshot
+        .floating_pane_slots = vec![
+        FloatingPaneSlot {
+            pane_id: PaneId::new(),
+            outer_rect: Rect {
+                origin: Point { column: 2, row: 1 },
+                size: Size {
+                    column_count: 10,
+                    row_count: 5,
+                },
+            },
+            content_rect: Rect {
+                origin: Point { column: 3, row: 4 },
+                size: Size {
+                    column_count: 8,
+                    row_count: 1,
+                },
+            },
+            is_pinned: false,
+        },
+        FloatingPaneSlot {
+            pane_id: PaneId::new(),
+            outer_rect: Rect {
+                origin: Point { column: 8, row: 0 },
+                size: Size {
+                    column_count: 12,
+                    row_count: 6,
+                },
+            },
+            content_rect: Rect {
+                origin: Point { column: 9, row: 3 },
+                size: Size {
+                    column_count: 10,
+                    row_count: 2,
+                },
+            },
+            is_pinned: true,
+        },
+    ];
     assert_eq!(
         build_render_snapshot(&build_wire_frame(&expected_render_snapshot)),
         expected_render_snapshot

@@ -92,7 +92,7 @@ use koshi_renderer::snapshot::{
 use koshi_terminal::graphics::ImageRecord;
 
 use crate::executable_watch::ExecutableWatch;
-use crate::runtime::bus::build_wire_event;
+use crate::runtime::bus::{build_wire_event, build_wire_host_write_events};
 use crate::runtime::event::{EndingNotice, RuntimeEvent, SessionEnding};
 use crate::runtime::frame::{
     build_wire_frame, build_wire_frame_with_content_ids, build_wire_image_chunk_sources,
@@ -284,6 +284,13 @@ struct AttachedStream {
     ending_notice: Arc<EndingNotice>,
     /// Graphics capabilities reported by this connection.
     graphics_capabilities: GraphicsCapabilities,
+    /// The longest the reading half waits for the client's next bytes: the
+    /// Attach request's `link_timeout_ms`. `None` waits with no limit.
+    link_timeout: Option<Duration>,
+    /// Whether the connection came from another machine. A connection that
+    /// ends with no `Leaving` request reports its client as returning when
+    /// this is `true`.
+    is_remote: bool,
 }
 
 /// The serving side of one session's control socket: the bound listener's
@@ -692,9 +699,30 @@ fn run_accept_loop(
 /// koshi protocol — the framing faults, a request kind this build does not
 /// have, and the Hello — and reads `live_setting` before any of its answers go
 /// out. What is left is this session's own vocabulary: `SubmitCommand`,
-/// `Attach`, `Discovery`, `Layout` and `Restart` cross to the dispatcher over
-/// the inbox and answer with its reply. `RecentEvents` is answered on this
-/// thread, from the process-wide log ring, and reaches no dispatcher.
+/// `Attach`, `Discovery`, `Layout`, `Restart`, `ClipboardCopyPart` and
+/// `ClipboardCopy` cross to the dispatcher over the inbox and answer with its
+/// reply. `RecentEvents` is answered on this thread, from the process-wide log
+/// ring, and reaches no dispatcher.
+///
+/// A clipboard copy that a stand-in clipboard tool sends is held on this
+/// connection part by part:
+///
+/// 1. Each `ClipboardCopyPart` asks the dispatcher whether the session takes a
+///    copy of every byte held plus the part's bytes
+///    ([`Server::can_take_clipboard_tool_copy`](crate::server::Server::can_take_clipboard_tool_copy)).
+///    If yes, the connection holds the part and answers
+///    `ClipboardCopyPartTaken`. If no, the connection drops every byte it
+///    holds and answers `ClipboardCopyRouted` with `should_run_clipboard_tool`
+///    set to `true`.
+/// 2. A `ClipboardCopy` hands the dispatcher the held bytes, then its own
+///    bytes, as one copy
+///    ([`Server::route_clipboard_tool_copy`](crate::server::Server::route_clipboard_tool_copy)),
+///    and answers `ClipboardCopyRouted` with the dispatcher's answer. The
+///    connection then holds no bytes.
+///
+/// Both kinds are refused with [`IpcErrorCode::RequestFailed`] on a connection
+/// from another machine or from another local user, and the connection keeps
+/// serving.
 ///
 /// A `SubmitCommand` on this connection has its source stamped by
 /// [`stamp_cli_command_source`] before it crosses to the dispatcher: this connection carries
@@ -736,6 +764,7 @@ fn serve_connection(
     executable_watch: Option<&Arc<ExecutableWatch>>,
 ) {
     let mut handshake = Handshake::from_expected_token_and_peer(connection_token, peer);
+    let mut held_copy_bytes: Vec<u8> = Vec::new();
     // The setting is read again for each request. `None` is a connection from
     // the user who started the session, whose admission cannot be withdrawn.
     let admission_setting = live_setting.clone();
@@ -800,6 +829,7 @@ fn serve_connection(
                 pane_area,
                 graphics_capabilities,
                 cell_size,
+                link_timeout_ms,
             } => {
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
@@ -842,6 +872,7 @@ fn serve_connection(
                             client_id: accepted_client.client_id,
                             detached_at: SystemTime::now(),
                             is_streamed: false,
+                            is_returning: handshake.is_remote_caller(),
                         },
                     );
                     return;
@@ -855,6 +886,10 @@ fn serve_connection(
                         deliveries: accepted_client.deliveries,
                         ending_notice: accepted_client.ending_notice,
                         graphics_capabilities,
+                        link_timeout: link_timeout_ms.map(|link_timeout_ms| {
+                            Duration::from_millis(u64::from(link_timeout_ms))
+                        }),
+                        is_remote: handshake.is_remote_caller(),
                     },
                     inbox_sender,
                     live_setting,
@@ -871,7 +906,8 @@ fn serve_connection(
             | IpcRequestKind::CellSize { .. }
             | IpcRequestKind::Paste { .. }
             | IpcRequestKind::Mouse(_)
-            | IpcRequestKind::ReadPanePlacement { .. } => return,
+            | IpcRequestKind::ReadPanePlacement { .. }
+            | IpcRequestKind::Ping => return,
             IpcRequestKind::Discovery => {
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
@@ -935,7 +971,80 @@ fn serve_connection(
                 }
             }
             // No answer belongs to this one.
-            IpcRequestKind::Leaving => return,
+            IpcRequestKind::Leaving { .. } => return,
+            IpcRequestKind::ClipboardCopyPart { .. } | IpcRequestKind::ClipboardCopy { .. }
+                if handshake.is_remote_caller() || live_setting.is_some() =>
+            {
+                IpcResponse {
+                    request_id,
+                    answer_result: IpcResult::Error(IpcErrorPayload {
+                        code: IpcErrorCode::RequestFailed,
+                        message: "a pane clipboard copy must come from this machine and this user"
+                            .to_owned(),
+                    }),
+                }
+            }
+            IpcRequestKind::ClipboardCopyPart { copied_bytes } => {
+                let held_copy_byte_count = held_copy_bytes.len() + copied_bytes.len();
+                let dispatch_response = request_dispatcher_response(
+                    &served_connection.intake,
+                    inbox_sender,
+                    |response_sender| RuntimeEvent::IpcClipboardCopyPart {
+                        held_copy_byte_count,
+                        response_sender,
+                    },
+                );
+                // No dispatcher left: the connection closes with no answer.
+                let Some(can_take_clipboard_tool_copy) = dispatch_response else {
+                    return;
+                };
+                let answer_result = if can_take_clipboard_tool_copy {
+                    held_copy_bytes.extend_from_slice(&copied_bytes);
+                    IpcResult::ClipboardCopyPartTaken
+                } else {
+                    held_copy_bytes = Vec::new();
+                    IpcResult::ClipboardCopyRouted {
+                        should_run_clipboard_tool: true,
+                    }
+                };
+                IpcResponse {
+                    request_id,
+                    answer_result,
+                }
+            }
+            IpcRequestKind::ClipboardCopy {
+                pane_id,
+                clipboard_targets,
+                copied_bytes,
+            } => {
+                // A copy that came in one part moves to the dispatcher as it is.
+                let whole_copy_bytes = if held_copy_bytes.is_empty() {
+                    copied_bytes
+                } else {
+                    held_copy_bytes.extend_from_slice(&copied_bytes);
+                    std::mem::take(&mut held_copy_bytes)
+                };
+                let dispatch_response = request_dispatcher_response(
+                    &served_connection.intake,
+                    inbox_sender,
+                    |response_sender| RuntimeEvent::IpcClipboardCopy {
+                        pane_id,
+                        clipboard_targets,
+                        copied_bytes: whole_copy_bytes,
+                        response_sender,
+                    },
+                );
+                // No dispatcher left: the connection closes with no answer.
+                let Some(should_run_clipboard_tool) = dispatch_response else {
+                    return;
+                };
+                IpcResponse {
+                    request_id,
+                    answer_result: IpcResult::ClipboardCopyRouted {
+                        should_run_clipboard_tool,
+                    },
+                }
+            }
         };
         if connection.send(&outgoing_response).is_err() {
             return;
@@ -956,9 +1065,21 @@ fn serve_connection(
 /// or, for a rejected pane placement command, one
 /// [`SessionEvent::PlacementCommandRejected`] carrying its `command_id`; and
 /// a `Mouse` round is answered on the writing half by exactly one
-/// [`SessionEvent::MouseAnswer`] carrying that round's `request_id`. A request
-/// of any other kind, end of stream, a transport fault, an oversize frame, or a
-/// dispatcher that is gone all end the reading loop.
+/// [`SessionEvent::MouseAnswer`] carrying that round's `request_id`. A `Ping`
+/// crosses as [`RuntimeEvent::ClientPing`], and the writing half answers it
+/// with one [`SessionEvent::Pong`]. A request of any other kind, end of stream,
+/// a transport fault, an oversize frame, or a dispatcher that is gone all end
+/// the reading loop.
+///
+/// With a `link_timeout`, each read of the client's next bytes waits at most
+/// that long, and a read that waits longer ends the reading loop. Example: a
+/// 30-second link timeout ends the loop when the client sends nothing,
+/// a `Ping` included, for 30 seconds.
+///
+/// A host write goes out as the frames [`build_wire_host_write_events`] gives.
+/// Once they are written, the writing thread drops the delivery and its
+/// in-flight marker, then hands over [`RuntimeEvent::HostWriteSent`] for
+/// `client_id`.
 ///
 /// A frame that arrives whole and does not decode costs the client that one
 /// request. The reading half drops it and reads the next frame, and the client
@@ -969,27 +1090,32 @@ fn serve_connection(
 /// [`stamp_client_command_source`]: it is attributed to `client_id` and to no
 /// other client.
 ///
-/// Either half ending detaches the client, which removes its record and drops
-/// its subscription; the closed queue, or the terminal `Quit` or `Restarting`
-/// frame, then ends the writing thread. Both halves hand over a detach when
-/// they end. A detach for a client already gone changes nothing.
+/// The reading loop ending detaches the client: it hands over one
+/// [`RuntimeEvent::ClientDetached`], whose `is_returning` is the value of the
+/// `Leaving` request that ended the loop, and with no such request,
+/// `is_remote`. The detach removes the client's record and drops its
+/// subscription; the closed queue, or the terminal `Quit` or `Restarting`
+/// frame, then ends the writing thread. The writing thread hands over no
+/// detach: a write that fails is a connection whose peer closed, and the
+/// reading loop then reads end of stream. A detach for a client already gone
+/// changes nothing.
 ///
 /// A detach the server starts closes the client's queue: the writing thread
 /// writes what is already queued, then [`SessionEvent::Detached`] as its last
-/// frame, and ends. A session ending at the same moment drops what is queued,
-/// and the goodbye is still what this client reads. The reading half keeps
-/// reading until the client closes its end, and that close reads as end of
-/// stream — a second detach for a client already gone. A `Leaving` request ends
-/// the reading half the same way: the client says it sends nothing more, and
-/// every key it sent has already been handed over.
+/// frame, and ends. A session ending at the same moment writes only the host
+/// writes still queued, and the goodbye is still what this client reads. The
+/// reading half keeps reading until the client closes its end, and that close
+/// reads as end of stream — a second detach for a client already gone. A
+/// `Leaving` request ends the reading half the same way: the client says it
+/// sends nothing more, and every key it sent has already been handed over.
 ///
 /// `ending_notice` is what the session raises when it ends — see
-/// [`EndingNotice`]. The writing thread reads it at the top of each turn and
-/// writes the frame it names, [`SessionEvent::Quit`] or
-/// [`SessionEvent::Restarting`], dropping anything still queued. A client whose
-/// queue the server closed before that reads [`SessionEvent::Detached`]
-/// instead: it left before the session did. The thread counts itself on the
-/// notice for as long as it runs.
+/// [`EndingNotice`]. The writing thread reads it at the top of each turn. It
+/// writes each host write still queued, then the frame the notice names,
+/// [`SessionEvent::Quit`] or [`SessionEvent::Restarting`]. Every other delivery
+/// still queued goes unwritten. A client whose queue the server closed before
+/// that reads [`SessionEvent::Detached`] instead: it left before the session
+/// did. The thread counts itself on the notice for as long as it runs.
 ///
 /// `live_setting` is the live read of the `allow-other-users` setting on a
 /// connection from another local user, and `None` on one from the user who
@@ -1016,32 +1142,47 @@ fn stream_events(
         deliveries,
         ending_notice,
         graphics_capabilities,
+        link_timeout,
+        is_remote,
     } = attached_stream;
     let (mut frame_reader, mut frame_writer) = connection.split();
+    frame_reader.set_idle_timeout(link_timeout);
     let writer_inbox_sender = inbox_sender.clone();
     let writer_intake = Arc::clone(&served_connection.intake);
     ending_notice.record_writer_started();
     std::thread::spawn(move || {
         let mut image_cache = ConnectionImageCache::new();
         loop {
-            // The session is ending. This client is told at once and whatever
-            // is still queued for it goes unwritten. A queue the server already
-            // closed detached this client before the session ended: its own
-            // goodbye is what it reads.
+            // The session is ending. This client is told at once: each host
+            // write still queued for it goes out first, and everything else
+            // still queued goes unwritten. A queue the server already closed
+            // detached this client before the session ended: its own goodbye
+            // is what it reads.
             if let Some(session_ending) = ending_notice.get_session_ending() {
                 let terminal_event = loop {
                     match deliveries.try_recv() {
-                        Ok(_) => {}
-                        Err(mpsc::TryRecvError::Empty) => {
-                            break match session_ending {
-                                SessionEnding::Quit => SessionEvent::Quit,
-                                SessionEnding::Restarting => SessionEvent::Restarting,
+                        Ok(Delivery::HostWrite {
+                            host_write_bytes, ..
+                        }) => {
+                            if send_host_write(&mut frame_writer, &host_write_bytes) {
+                                break None;
                             }
                         }
-                        Err(mpsc::TryRecvError::Disconnected) => break SessionEvent::Detached,
+                        Ok(_) => {}
+                        Err(mpsc::TryRecvError::Empty) => {
+                            break Some(match session_ending {
+                                SessionEnding::Quit => SessionEvent::Quit,
+                                SessionEnding::Restarting => SessionEvent::Restarting,
+                            })
+                        }
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            break Some(SessionEvent::Detached)
+                        }
                     }
                 };
-                let _ = frame_writer.send(&terminal_event);
+                if let Some(terminal_event) = terminal_event {
+                    let _ = frame_writer.send(&terminal_event);
+                }
                 break;
             }
             let Ok(delivery) = deliveries.recv() else {
@@ -1070,10 +1211,23 @@ fn stream_events(
                     graphics_capabilities,
                     client_id,
                 ),
+                Delivery::HostWrite {
+                    host_write_bytes, ..
+                } => send_host_write(&mut frame_writer, host_write_bytes),
                 _ => false,
             };
             if has_write_failed {
                 break;
+            }
+            if matches!(delivery, Delivery::HostWrite { .. }) {
+                // The delivery and its in-flight marker drop before the session
+                // reads that the bytes went out.
+                drop(delivery);
+                writer_intake.hand_over_event(
+                    &writer_inbox_sender,
+                    RuntimeEvent::HostWriteSent { client_id },
+                );
+                continue;
             }
             if matches!(
                 delivery,
@@ -1109,17 +1263,12 @@ fn stream_events(
                 }
             }
         }
-        writer_intake.hand_over_event(
-            &writer_inbox_sender,
-            RuntimeEvent::ClientDetached {
-                client_id,
-                detached_at: SystemTime::now(),
-                is_streamed: true,
-            },
-        );
         ending_notice.record_writer_ended();
     });
 
+    // A connection that ends with no `Leaving` request reports its client as
+    // returning when it came from another machine.
+    let mut is_returning = is_remote;
     loop {
         let incoming_request_result = frame_reader.recv::<IncomingRequest>();
         // The setting is read again after each read on this connection,
@@ -1205,15 +1354,23 @@ fn stream_events(
                 source_pane_id: pane_id,
                 destination_tab_id,
             },
+            IpcRequestKind::Ping => RuntimeEvent::ClientPing { client_id },
             // The client sends nothing more on this connection, and everything
             // it did send is handed over above.
-            IpcRequestKind::Leaving => break,
+            IpcRequestKind::Leaving {
+                is_returning: is_client_returning,
+            } => {
+                is_returning = is_client_returning;
+                break;
+            }
             IpcRequestKind::Hello { .. }
             | IpcRequestKind::Attach { .. }
             | IpcRequestKind::Discovery
             | IpcRequestKind::Layout { .. }
             | IpcRequestKind::RecentEvents
-            | IpcRequestKind::Restart => break,
+            | IpcRequestKind::Restart
+            | IpcRequestKind::ClipboardCopyPart { .. }
+            | IpcRequestKind::ClipboardCopy { .. } => break,
         };
         if !served_connection
             .intake
@@ -1228,6 +1385,7 @@ fn stream_events(
             client_id,
             detached_at: SystemTime::now(),
             is_streamed: true,
+            is_returning,
         },
     );
 }
@@ -1538,6 +1696,22 @@ fn send_painted_frame(
         "the painted frame",
         prepared_image_frame.image_uploads,
     )
+}
+
+/// Send `host_write_bytes` as the frames [`build_wire_host_write_events`]
+/// lists: `HostWritePart` frames of
+/// [`MAX_HOST_WRITE_BYTE_COUNT`](koshi_ipc::event::MAX_HOST_WRITE_BYTE_COUNT)
+/// bytes, then one `HostWrite` frame with the bytes that are left. The first
+/// failed write stops the sending.
+///
+/// Returns `true` when the connection is no longer usable.
+fn send_host_write(frame_writer: &mut FrameWriter, host_write_bytes: &[u8]) -> bool {
+    for host_write_event in build_wire_host_write_events(host_write_bytes) {
+        if frame_writer.send(&host_write_event).is_err() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Send one placement preview and each new image record after it.

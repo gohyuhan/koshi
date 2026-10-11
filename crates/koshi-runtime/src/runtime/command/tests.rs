@@ -2868,6 +2868,7 @@ fn copying_a_pane_with_no_highlight_writes_nothing_and_is_not_an_error() {
         split_pane_id,
         ..
     } = build_resize_fixture();
+    let outer_terminal_receiver = runtime.subscribe(client_id);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_mouse(client_id),
@@ -2884,7 +2885,10 @@ fn copying_a_pane_with_no_highlight_writes_nothing_and_is_not_an_error() {
             emitted_events: Vec::new(),
         }
     );
-    assert_eq!(runtime.take_host_writes(client_id), None);
+    assert_eq!(
+        runtime.take_host_writes(client_id, &outer_terminal_receiver),
+        None
+    );
 }
 
 /// A character highlight from row 0, column 0 to row 0, column 1.
@@ -4659,14 +4663,14 @@ fn new_pane_without_command_spawns_the_default_shell() {
     // terminal identity and the in-session identity vars in its environment.
     let new_pane_id = find_other_pane_id(&runtime, session_id, &[root_pane_id]);
     let mut expected_spawn_spec = runtime.build_default_shell_spec(None, BTreeMap::new());
-    expected_spawn_spec
-        .environment_variables
-        .extend(build_koshi_environment(
-            session_id,
-            Some(client_id),
-            new_pane_id,
-            koshi_paths::resolve_runtime_directory().as_deref(),
-        ));
+    add_koshi_environment(
+        &mut expected_spawn_spec.environment_variables,
+        session_id,
+        Some(client_id),
+        new_pane_id,
+        koshi_paths::resolve_runtime_directory().as_deref(),
+        false,
+    );
     assert_eq!(
         fake_pty_backend.get_spawn_spec(new_pane_id).unwrap(),
         expected_spawn_spec
@@ -4702,14 +4706,14 @@ fn new_pane_with_command_spawns_that_command() {
     recorded_spawn_spec.environment_variables =
         runtime.apply_terminal_identity_environment_variables(BTreeMap::new());
     let mut launched_spawn_spec = recorded_spawn_spec.clone();
-    launched_spawn_spec
-        .environment_variables
-        .extend(build_koshi_environment(
-            session_id,
-            Some(client_id),
-            new_pane_id,
-            koshi_paths::resolve_runtime_directory().as_deref(),
-        ));
+    add_koshi_environment(
+        &mut launched_spawn_spec.environment_variables,
+        session_id,
+        Some(client_id),
+        new_pane_id,
+        koshi_paths::resolve_runtime_directory().as_deref(),
+        false,
+    );
     assert_eq!(
         fake_pty_backend.get_spawn_spec(new_pane_id).unwrap(),
         launched_spawn_spec
@@ -10236,14 +10240,14 @@ fn new_tab_root_pane_carries_the_in_session_identity_env() {
     let new_tab = &session.tabs[&find_other_tab_id(&runtime, session_id, first_tab_id)];
     let new_pane_id = new_tab.get_layout_tree().list_leaf_pane_ids()[0];
     let mut expected_spawn_spec = runtime.build_default_shell_spec(None, BTreeMap::new());
-    expected_spawn_spec
-        .environment_variables
-        .extend(build_koshi_environment(
-            session_id,
-            Some(client_id),
-            new_pane_id,
-            koshi_paths::resolve_runtime_directory().as_deref(),
-        ));
+    add_koshi_environment(
+        &mut expected_spawn_spec.environment_variables,
+        session_id,
+        Some(client_id),
+        new_pane_id,
+        koshi_paths::resolve_runtime_directory().as_deref(),
+        false,
+    );
     assert_eq!(
         fake_pty_backend.get_spawn_spec(new_pane_id).unwrap(),
         expected_spawn_spec

@@ -1,27 +1,15 @@
 //! Tests for geometry solver: layout tree + rect → pane rectangles.
 
 use koshi_core::geometry::{Point, SplitDirection};
+use koshi_test_support::fixtures::build_cell_rect;
 use koshi_test_support::layout_assert::{
     check_exact_tiling, check_minimum_size_respected, check_no_outside, check_no_overlap,
 };
 
 use super::*;
+
 use crate::test_trees::build_deep_alternating_layout;
 use crate::tree::LayoutNode;
-
-/// Constructs a cell rectangle with the given origin and dimensions.
-fn build_cell_rect(origin_column: u16, origin_row: u16, column_count: u16, row_count: u16) -> Rect {
-    Rect::from_origin_and_size(
-        Point {
-            column: origin_column,
-            row: origin_row,
-        },
-        Size {
-            column_count,
-            row_count,
-        },
-    )
-}
 
 /// The default content floor with the given gap between kept children of a
 /// directional split.

@@ -131,6 +131,71 @@ fn a_higher_precedence_layer_can_shut_other_users_back_out() {
 }
 
 #[test]
+fn pane_clipboard_writes_are_off_with_an_eight_mebibyte_limit_unless_the_file_changes_them() {
+    assert_eq!(
+        merge_server(ServerConfig::default(), vec![PartialKoshiConfig::default()])
+            .pane_clipboard_writes,
+        PaneClipboardWriteConfig {
+            should_allow_writes: false,
+            maximum_copy_byte_count: 8_388_608,
+        }
+    );
+}
+
+#[test]
+fn pane_clipboard_writes_fold_onto_the_session_side_only() {
+    let layer = PartialKoshiConfig {
+        pane_clipboard_writes: Some(PartialPaneClipboardWriteConfig {
+            should_allow_writes: Some(true),
+            maximum_copy_byte_count: Some(1024),
+        }),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        merge_server(ServerConfig::default(), vec![layer.clone()]),
+        ServerConfig {
+            pane_clipboard_writes: PaneClipboardWriteConfig {
+                should_allow_writes: true,
+                maximum_copy_byte_count: 1024,
+            },
+            ..ServerConfig::default()
+        }
+    );
+    assert_eq!(
+        merge_client(ClientConfig::default(), vec![layer]),
+        ClientConfig::default()
+    );
+}
+
+#[test]
+fn a_higher_precedence_layer_overrides_each_pane_clipboard_write_field_on_its_own() {
+    let user_layer = PartialKoshiConfig {
+        pane_clipboard_writes: Some(PartialPaneClipboardWriteConfig {
+            should_allow_writes: Some(true),
+            maximum_copy_byte_count: Some(1024),
+        }),
+        ..Default::default()
+    };
+    let session_layer = PartialKoshiConfig {
+        pane_clipboard_writes: Some(PartialPaneClipboardWriteConfig {
+            should_allow_writes: Some(false),
+            maximum_copy_byte_count: None,
+        }),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        merge_server(ServerConfig::default(), vec![user_layer, session_layer])
+            .pane_clipboard_writes,
+        PaneClipboardWriteConfig {
+            should_allow_writes: false,
+            maximum_copy_byte_count: 1024,
+        }
+    );
+}
+
+#[test]
 fn a_higher_precedence_layer_wins_on_the_shared_sessions_directory() {
     let user_layer = PartialKoshiConfig {
         shared_sessions_directory: Some(Some(PathBuf::from("/var/run/koshi"))),
@@ -767,6 +832,26 @@ fn an_update_layer_keeps_the_fields_it_leaves_unset() {
     assert_eq!(merged_client_config.update.check_interval_days, 1);
     assert!(merged_client_config.update.should_auto_check_for_updates); // default kept
     assert!(!merged_client_config.update.should_allow_prerelease_updates); // default kept
+}
+
+#[test]
+fn remote_link_timeout_folds_onto_the_viewer_side_only() {
+    let layer = PartialKoshiConfig {
+        remote_link_timeout_ms: Some(90_000),
+        ..Default::default()
+    };
+
+    let merged_client_config = merge_client(ClientConfig::default(), vec![layer.clone()]);
+    assert_eq!(
+        merged_client_config,
+        ClientConfig {
+            remote_link_timeout_ms: 90_000,
+            ..ClientConfig::default()
+        }
+    );
+
+    let merged_server_config = merge_server(ServerConfig::default(), vec![layer]);
+    assert_eq!(merged_server_config, ServerConfig::default());
 }
 
 #[test]

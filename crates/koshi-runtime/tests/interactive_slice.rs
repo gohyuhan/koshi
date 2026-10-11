@@ -114,9 +114,7 @@ fn pty_output_received_through_the_inbox_reaches_the_client_snapshot() {
 
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     let pane_snapshot = render_snapshot
-        .pane_snapshots
-        .iter()
-        .find(|pane_snapshot| pane_snapshot.pane_id == pane_id)
+        .find_pane_snapshot(pane_id)
         .expect("pane in snapshot");
     let terminal_grid = &pane_snapshot
         .terminal_grid_view

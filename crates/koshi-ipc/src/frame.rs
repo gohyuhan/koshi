@@ -74,8 +74,8 @@ where
 ///
 /// A reader joins [`pane_snapshots`](Self::pane_snapshots) to the
 /// [`FrameSlot`]s in [`session_snapshot`](Self::session_snapshot)'s active tab
-/// by [`PaneId`]: a slot says *where* a pane sits, its [`FramePane`] says
-/// *what* is inside it.
+/// and to its [`FrameFloatingPaneSlot`]s by [`PaneId`]: a slot says *where* a
+/// pane sits, its [`FramePane`] says *what* is inside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaintedFrame {
     /// Whether the statusline shows that the session restarted with a new
@@ -83,18 +83,19 @@ pub struct PaintedFrame {
     /// with no field means no notice.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_recovery_notice_visible: bool,
-    /// The session being viewed: its identity, its solved active tab, and its
-    /// tab list.
+    /// The session being viewed: its identity, its solved active tab, its tab
+    /// list, and the floating panes the viewing client shows.
     pub session_snapshot: FrameSession,
-    /// Per-pane content, one entry per live pane in the active tab, matched to
-    /// a [`FrameSlot`] by [`PaneId`].
+    /// Per-pane content: one entry per pane slot in the active tab and one per
+    /// floating pane slot, matched to its slot by [`PaneId`].
     pub pane_snapshots: Vec<FramePane>,
     /// The viewing client's own state (viewport, focus, lock mode).
     pub client_snapshot: FrameClient,
 }
 
-/// The session-scoped part of a frame: identity, the solved active tab, and the
-/// entries the tab bar is drawn from.
+/// The session-scoped part of a frame: identity, the solved active tab, the
+/// entries the tab bar is drawn from, and the floating panes the viewing client
+/// shows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameSession {
     /// The session's stable id.
@@ -107,6 +108,12 @@ pub struct FrameSession {
     pub active_tab_snapshot: FrameTab,
     /// One entry per tab in the session, in display order.
     pub tab_snapshots: Vec<FrameTabMetadata>,
+    /// The floating panes the viewing client shows, back to front: the pane
+    /// that client focused least recently first, its minimized panes left
+    /// out. Empty when the client has no floating viewport: it reports
+    /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving), or a
+    /// pane area narrower than 4 columns or shorter than 5 rows.
+    pub floating_pane_slots: Vec<FrameFloatingPaneSlot>,
 }
 
 /// The active tab, with its layout already solved into placed pane slots.
@@ -180,6 +187,25 @@ pub struct FrameSlot {
     pub is_visible: bool,
     /// Whether the pane is suppressed for lack of room.
     pub is_suppressed: bool,
+}
+
+/// One floating pane the viewing client shows, placed for that client.
+///
+/// Both rects count cells from the client's pane-area origin, with no
+/// letterbox offset: an outer rect at column `150` draws at pane-area column
+/// `150`, also when the client's tiled layout starts at column `60`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameFloatingPaneSlot {
+    /// The floating pane this slot places.
+    pub pane_id: PaneId,
+    /// The pane's box with its chrome: the border ring, the titlebar row and
+    /// the separator row.
+    pub outer_rect: Rect,
+    /// The cells inside the chrome, the size of the pane's PTY. Cells and the
+    /// cursor are drawn here.
+    pub content_rect: Rect,
+    /// Whether the viewing client pinned the pane at its cell.
+    pub is_pinned: bool,
 }
 
 /// One image placement carried with a pane's visible cells.
@@ -567,8 +593,8 @@ pub struct FrameClient {
     /// The pane that takes the client's input: its focused floating pane,
     /// else its focused pane in the active tab. `None` when the client focuses
     /// neither. The client highlights the pane whose [`FrameSlot::pane_id`]
-    /// matches, and places the cursor there. A floating pane matches no
-    /// [`FrameSlot`].
+    /// or [`FrameFloatingPaneSlot::pane_id`] matches, and places the cursor
+    /// there.
     pub focused_pane_id: Option<PaneId>,
     /// The client's input mode, as the session has it.
     pub lock_mode: LockMode,
@@ -578,11 +604,13 @@ pub struct FrameClient {
     pub is_mouse_selection_enabled: bool,
 }
 
-/// One pane's content: the cells drawn inside the matching [`FrameSlot`]'s
-/// content rect, plus what a mouse event over this pane is answered from.
+/// One pane's content: the cells drawn inside the matching [`FrameSlot`]'s or
+/// [`FrameFloatingPaneSlot`]'s content rect, plus what a mouse event over this
+/// pane is answered from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FramePane {
-    /// The pane this content belongs to, matched to a [`FrameSlot`] by id.
+    /// The pane this content belongs to, matched to a [`FrameSlot`] or a
+    /// [`FrameFloatingPaneSlot`] by id.
     pub pane_id: PaneId,
     /// The pane's resolved display title: on the alternate screen the running
     /// app's OSC 0/1/2 title; on the primary screen the shell's OSC 7 working

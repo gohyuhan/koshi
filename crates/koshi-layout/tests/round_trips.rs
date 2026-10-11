@@ -5,7 +5,7 @@
 //! the input the module before it would have produced. These tests chain the
 //! real modules together and pin the exact rects the chain ends on.
 
-use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
+use koshi_core::geometry::{Rect, Size, SplitDirection};
 use koshi_core::ids::PaneId;
 use koshi_layout::content::list_content_rects;
 use koshi_layout::mode::LayoutMode;
@@ -14,6 +14,7 @@ use koshi_layout::solver::{
     solve_layout, solve_layout_with_mode, solve_layout_with_sizing, PaneSizing,
 };
 use koshi_layout::template::{TemplateNode, TemplateSplit, TerminalTemplate};
+use koshi_test_support::fixtures::build_cell_rect;
 
 /// A terminal leaf running the default shell.
 fn build_template_leaf() -> TemplateNode {
@@ -35,19 +36,6 @@ fn build_test_template() -> TemplateNode {
         weights: vec![SizeWeight::default(); 2],
         active_child_index: 0,
     })
-}
-
-fn build_cell_rect(column_index: u16, row_index: u16, column_count: u16, row_count: u16) -> Rect {
-    Rect::from_origin_and_size(
-        Point {
-            column: column_index,
-            row: row_index,
-        },
-        Size {
-            column_count,
-            row_count,
-        },
-    )
 }
 
 fn build_tab_rect() -> Rect {

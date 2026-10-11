@@ -11,11 +11,13 @@
 //!
 //! The snapshot is per-client, not session-global:
 //! `session_snapshot.active_tab_snapshot` holds *this* client's viewed tab, and
-//! always names the same tab as `client_snapshot.active_tab_id`, while
+//! always names the same tab as `client_snapshot.active_tab_id`, and
+//! `session_snapshot.floating_pane_slots` holds the floating panes *this*
+//! client shows, at its own positions, while
 //! `session_snapshot.session_name`/`tabs_metadata` are the session-wide data.
 //!
-//! `Server::build_layout` is the same work stopping short of the panes: it
-//! yields the [`OwnedFrameLayout`] that says where every surface sits, with no
+//! `Server::build_frame_layout` is the same work stopping short of the panes:
+//! it yields the [`OwnedFrameLayout`] that says where every surface sits, with no
 //! grid, title, or highlight. Writing a mouse report to a pane reads only that
 //! much.
 //!
@@ -33,12 +35,12 @@ use koshi_layout::content::list_content_rects;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::{solve_layout_with_mode, LayoutSolve, PaneSizing};
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, OwnedFrameLayout, PaneSlot,
-    PaneSnapshot, PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot,
-    PlacementSnapshotError, PlacementSnapshotErrorCode, PlacementTabSnapshot, RenderSnapshot,
-    ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, FloatingPaneSlot, GridView, ImagePlacementSnapshot,
+    OwnedFrameLayout, PaneSlot, PaneSnapshot, PlacementClientSnapshot, PlacementPaneSnapshot,
+    PlacementSnapshot, PlacementSnapshotError, PlacementSnapshotErrorCode, PlacementTabSnapshot,
+    RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
 };
-use koshi_session::client::Client;
+use koshi_session::client::{place_floating_pane, Client, FloatingPanePosition};
 use koshi_session::session::state::{Session, Tab};
 use koshi_terminal::graphics::DecodedImage;
 use koshi_terminal::grid::state::Grid;
@@ -141,22 +143,33 @@ impl Server {
     /// larger viewport. A tab whose every viewer reports
     /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving) solves
     /// at `0x0`: every pane is suppressed and the frame carries `is_every_pane_suppressed`.
+    /// `session_snapshot.floating_pane_slots` holds the floating panes the
+    /// client shows, placed for it, and `pane_snapshots` holds one entry per
+    /// tiled slot, then one per floating pane slot.
     pub fn build_snapshot(&self, client_id: ClientId) -> Option<RenderSnapshot> {
         let owned_frame_layout = self.build_frame_layout(client_id)?;
         let session = self.get_session_for_client(client_id)?;
         let client = session.clients.get_client_by_id(client_id)?;
 
-        // One content snapshot per solved slot, in slot order.
-        let pane_snapshots: Vec<PaneSnapshot> = owned_frame_layout
-            .session_snapshot
+        // One content snapshot per solved slot, in slot order, then one per
+        // floating pane slot, back to front.
+        let session_snapshot = &owned_frame_layout.session_snapshot;
+        let pane_snapshots: Vec<PaneSnapshot> = session_snapshot
             .active_tab_snapshot
             .pane_slots
             .iter()
-            .map(|pane_slot| {
+            .map(|pane_slot| pane_slot.pane_id)
+            .chain(
+                session_snapshot
+                    .floating_pane_slots
+                    .iter()
+                    .map(|floating_pane_slot| floating_pane_slot.pane_id),
+            )
+            .map(|pane_id| {
                 self.build_pane_snapshot(
-                    pane_slot.pane_id,
-                    client.get_scroll_offset(pane_slot.pane_id),
-                    client.get_selection(pane_slot.pane_id),
+                    pane_id,
+                    client.get_scroll_offset(pane_id),
+                    client.get_selection(pane_id),
                 )
             })
             .collect();
@@ -338,7 +351,8 @@ impl Server {
     }
 
     /// Freeze only where `client_id`'s surfaces sit: the solved layout, the tab
-    /// bar's metadata, and the client's own view state.
+    /// bar's metadata, the floating panes the client shows, and the client's
+    /// own view state.
     ///
     /// Returns `None` on the same terms as
     /// [`build_snapshot`](Self::build_snapshot) — no attached client with that
@@ -400,6 +414,7 @@ impl Server {
                 session_name: session.session_name.clone(),
                 active_tab_snapshot,
                 tabs_metadata,
+                floating_pane_slots: list_floating_pane_slots(session, client),
             },
             client_snapshot: ClientSnapshot {
                 client_id: client.get_client_id(),
@@ -524,6 +539,46 @@ impl Server {
             },
         }
     }
+}
+
+/// The floating panes `client` shows, back to front: its floating focus order
+/// with its minimized panes left out, each placed for it. A slot's outer rect
+/// is [`place_floating_pane`] of the client's position for the pane, the
+/// pane's solved size and its cascade index, on the client's floating viewport
+/// ([`Client::get_floating_viewport`]); its content rect comes from that outer
+/// rect ([`FloatingPaneSlot::from_outer_rect`]). A focus-order entry that is no
+/// floating member of `session` is left out. Empty when the client has no
+/// floating viewport.
+///
+/// A `72x22` pane at the default position, alone in the session, on a client
+/// whose floating viewport is `120x38` → outer rect `(24, 8)` `72x22`, content
+/// rect `(25, 11)` `70x18`.
+fn list_floating_pane_slots(session: &Session, client: &Client) -> Vec<FloatingPaneSlot> {
+    let Some(floating_viewport) = client.get_floating_viewport() else {
+        return Vec::new();
+    };
+    client
+        .list_floating_pane_focus_order()
+        .iter()
+        .filter_map(|&pane_id| {
+            let floating_pane_view = client.get_floating_pane_view(pane_id);
+            if floating_pane_view.is_minimized {
+                return None;
+            }
+            let (cascade_index, floating_member) = session.floating_set.find_member(pane_id)?;
+            let outer_rect = place_floating_pane(
+                floating_pane_view.position,
+                floating_member.solved_size,
+                cascade_index,
+                floating_viewport,
+            );
+            Some(FloatingPaneSlot::from_outer_rect(
+                pane_id,
+                outer_rect,
+                matches!(floating_pane_view.position, FloatingPanePosition::Pinned(_)),
+            ))
+        })
+        .collect()
 }
 
 /// One path as pane-title text: the user's home directory prefix shortened to

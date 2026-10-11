@@ -166,6 +166,7 @@ impl Server {
             new_pane_target.session_id,
             designated_client_id,
             new_pane_pty_size,
+            self.config.pane_clipboard_writes.should_allow_writes,
         )?;
 
         // The child is live — commit all session state through the pure op: it
@@ -251,9 +252,12 @@ impl Server {
     /// The record holds the directory the child launches in, and `spawn_spec`
     /// itself when `command_args` names a spawn specification; it keeps the
     /// caller's own environment variables. The launched child also receives
-    /// koshi's in-session identity variables for `session_id`,
-    /// `designated_client_id` and `new_pane_id`. A launch failure is
+    /// koshi's in-session environment for `session_id`,
+    /// `designated_client_id` and `new_pane_id`, with the stand-in clipboard
+    /// tools when `should_add_clipboard_tools` is `true`
+    /// ([`add_koshi_environment`]). A launch failure is
     /// [`Self::spawn_child`]'s rejection.
+    #[allow(clippy::too_many_arguments)]
     fn launch_new_pane_child(
         pty_backend: &dyn PtyBackend,
         command_args: &NewPaneArgs,
@@ -262,6 +266,7 @@ impl Server {
         session_id: SessionId,
         designated_client_id: Option<ClientId>,
         pty_size: PtySize,
+        should_add_clipboard_tools: bool,
     ) -> Result<NewPaneSpec, Rejection> {
         let new_pane_spec = NewPaneSpec {
             working_directory: spawn_spec.working_directory.clone(),
@@ -270,14 +275,14 @@ impl Server {
                 .is_some()
                 .then(|| spawn_spec.clone()),
         };
-        spawn_spec
-            .environment_variables
-            .extend(build_koshi_environment(
-                session_id,
-                designated_client_id,
-                new_pane_id,
-                koshi_paths::resolve_runtime_directory().as_deref(),
-            ));
+        add_koshi_environment(
+            &mut spawn_spec.environment_variables,
+            session_id,
+            designated_client_id,
+            new_pane_id,
+            koshi_paths::resolve_runtime_directory().as_deref(),
+            should_add_clipboard_tools,
+        );
         Self::spawn_child(pty_backend, new_pane_id, spawn_spec, pty_size)?;
         Ok(new_pane_spec)
     }
@@ -352,6 +357,7 @@ impl Server {
             session_id,
             new_floating_pane_target.designated_client_id,
             new_floating_pane_target.pty_size,
+            self.config.pane_clipboard_writes.should_allow_writes,
         )?;
 
         let floating_member = FloatingMember {

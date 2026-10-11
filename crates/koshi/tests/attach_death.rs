@@ -18,11 +18,7 @@
 //! attach` or write a `koshi.kdl` run on Unix only.
 
 #[cfg(unix)]
-use std::io::Read;
-#[cfg(unix)]
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::process::Child;
 #[cfg(unix)]
 use std::time::Instant;
 
@@ -46,8 +42,9 @@ use common::session_connection::{
 };
 #[cfg(unix)]
 use common::{
-    build_koshi_command_under_home, resolve_runtime_directory_under_home, write_test_config,
-    POLL_INTERVAL_DURATION, WAIT_DURATION,
+    build_koshi_command_under_home, format_client_exit, read_client_output_text,
+    resolve_runtime_directory_under_home, wait_for_attached_client_count, wait_for_client_exit,
+    write_test_config, RunningClient, POLL_INTERVAL_DURATION, WAIT_DURATION,
 };
 use common::{build_short_test_directory, start_session_server_under_home};
 
@@ -71,20 +68,6 @@ impl Drop for RouterStartedByClient {
     }
 }
 
-/// A `koshi attach` the test started. Dropping it ends that process.
-#[cfg(unix)]
-struct RunningClient {
-    child_process: Child,
-}
-
-#[cfg(unix)]
-impl Drop for RunningClient {
-    fn drop(&mut self) {
-        let _ = self.child_process.kill();
-        let _ = self.child_process.wait();
-    }
-}
-
 /// Start the `koshi` binary as a client attaching to `session_id`, the way a
 /// user types `koshi attach <id>`.
 #[cfg(unix)]
@@ -97,107 +80,10 @@ fn start_attaching_client(home_directory: &Path, session_id: SessionId) -> Runni
     RunningClient { child_process }
 }
 
-/// `the client exited <status>: <what it wrote to its error stream>` once
-/// `attaching_client` has ended, for a failure message. `None` while it runs,
-/// or while its state cannot be read.
-#[cfg(unix)]
-fn describe_client_exit(attaching_client: &mut RunningClient) -> Option<String> {
-    let exit_status = attaching_client.child_process.try_wait().ok().flatten()?;
-    let mut client_error_text = String::new();
-    if let Some(stderr_pipe) = attaching_client.child_process.stderr.as_mut() {
-        let _ = stderr_pipe.read_to_string(&mut client_error_text);
-    }
-    Some(format!(
-        "the client exited {exit_status}: {}",
-        client_error_text.trim()
-    ))
-}
-
 /// Wait until the session server answers a Hello, then close that connection.
 #[cfg(unix)]
 fn wait_for_session_server(runtime_directory: &Path, session_id: SessionId) {
     drop(wait_for_session_connection(runtime_directory, session_id));
-}
-
-/// Poll the session server's overview every [`POLL_INTERVAL_DURATION`] until
-/// it lists one attached client.
-///
-/// # Panics
-/// When the overview cannot be read, or lists no single client within
-/// [`WAIT_DURATION`]. The message names how `attaching_client` exited, when it
-/// has.
-#[cfg(unix)]
-fn wait_for_attached_client(
-    runtime_directory: &Path,
-    session_id: SessionId,
-    attaching_client: &mut RunningClient,
-) {
-    let wait_deadline = Instant::now() + WAIT_DURATION;
-    loop {
-        let session_overview = koshi_link::discovery::fetch_session_overview(
-            runtime_directory,
-            None,
-            session_id,
-            None,
-        )
-        .expect("the session server describes itself");
-        if session_overview.clients.len() == 1 {
-            return;
-        }
-        assert!(
-            Instant::now() < wait_deadline,
-            "no client attached to {session_id}; {}",
-            describe_client_exit(attaching_client)
-                .unwrap_or_else(|| "the client is still running".to_string())
-        );
-        std::thread::sleep(POLL_INTERVAL_DURATION);
-    }
-}
-
-/// Wait for `attaching_client` to end, polling every
-/// [`POLL_INTERVAL_DURATION`], and hand back its exit status, its standard
-/// output, and its error stream.
-///
-/// # Panics
-/// When it still runs after [`WAIT_DURATION`], or either stream is not a pipe
-/// of UTF-8 text.
-#[cfg(unix)]
-fn read_client_ending(
-    attaching_client: &mut RunningClient,
-) -> (std::process::ExitStatus, String, String) {
-    let wait_deadline = Instant::now() + WAIT_DURATION;
-    let exit_status = loop {
-        if let Some(exit_status) = attaching_client
-            .child_process
-            .try_wait()
-            .expect("the client's state can be read")
-        {
-            break exit_status;
-        }
-        assert!(
-            Instant::now() < wait_deadline,
-            "the attaching client kept running"
-        );
-        std::thread::sleep(POLL_INTERVAL_DURATION);
-    };
-
-    let mut client_output_text = String::new();
-    let mut client_error_text = String::new();
-    attaching_client
-        .child_process
-        .stdout
-        .take()
-        .expect("the client's output is a pipe")
-        .read_to_string(&mut client_output_text)
-        .expect("the client's output reads as text");
-    attaching_client
-        .child_process
-        .stderr
-        .take()
-        .expect("the client's errors are a pipe")
-        .read_to_string(&mut client_error_text)
-        .expect("the client's errors read as text");
-    (exit_status, client_output_text, client_error_text)
 }
 
 #[test]
@@ -238,11 +124,11 @@ fn a_killed_session_server_ends_the_attaching_client_with_the_death_message() {
 
     wait_for_session_server(&runtime_directory, session_id);
     let mut attaching_client = start_attaching_client(home_directory.path(), session_id);
-    wait_for_attached_client(&runtime_directory, session_id, &mut attaching_client);
+    wait_for_attached_client_count(&runtime_directory, session_id, 1, &mut attaching_client);
 
     session_process.terminate_session_server();
 
-    let (exit_status, _, client_error_text) = read_client_ending(&mut attaching_client);
+    let (exit_status, client_error_text) = wait_for_client_exit(&mut attaching_client);
     assert_eq!(
         exit_status.code(),
         Some(CliExitCode::RuntimeAction.get_exit_code())
@@ -275,7 +161,7 @@ fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
 
     wait_for_session_server(&runtime_directory, session_id);
     let mut attaching_client = start_attaching_client(home_directory.path(), session_id);
-    wait_for_attached_client(&runtime_directory, session_id, &mut attaching_client);
+    wait_for_attached_client_count(&runtime_directory, session_id, 1, &mut attaching_client);
 
     let endpoint_before_restart = EndpointFile::load_from_path(
         &EndpointFile::resolve_endpoint_file_path(&runtime_directory, session_id),
@@ -310,7 +196,7 @@ fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
         assert!(
             Instant::now() < advertise_deadline,
             "the session advertised no new socket; {}",
-            describe_client_exit(&mut attaching_client)
+            format_client_exit(&mut attaching_client)
                 .unwrap_or_else(|| "the client is still running".to_string())
         );
         std::thread::sleep(POLL_INTERVAL_DURATION);
@@ -344,8 +230,8 @@ fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
         std::thread::sleep(POLL_INTERVAL_DURATION);
     }
 
-    let (exit_status, client_output_text, client_error_text) =
-        read_client_ending(&mut attaching_client);
+    let (exit_status, client_error_text) = wait_for_client_exit(&mut attaching_client);
+    let client_output_text = read_client_output_text(&mut attaching_client);
     assert_eq!(
         exit_status.code(),
         Some(CliExitCode::Success.get_exit_code())
@@ -371,7 +257,7 @@ fn a_detach_ends_the_attaching_client_with_a_success() {
 
     wait_for_session_server(&runtime_directory, session_id);
     let mut attaching_client = start_attaching_client(home_directory.path(), session_id);
-    wait_for_attached_client(&runtime_directory, session_id, &mut attaching_client);
+    wait_for_attached_client_count(&runtime_directory, session_id, 1, &mut attaching_client);
 
     // The session keeps running, so the goodbye frame the server writes as it
     // closes the client's queue is the whole ending the client reads.
@@ -388,8 +274,8 @@ fn a_detach_ends_the_attaching_client_with_a_success() {
         String::from_utf8_lossy(&detach_output.stderr)
     );
 
-    let (exit_status, client_output_text, client_error_text) =
-        read_client_ending(&mut attaching_client);
+    let (exit_status, client_error_text) = wait_for_client_exit(&mut attaching_client);
+    let client_output_text = read_client_output_text(&mut attaching_client);
     assert_eq!(
         exit_status.code(),
         Some(CliExitCode::Success.get_exit_code())

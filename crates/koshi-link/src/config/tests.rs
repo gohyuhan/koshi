@@ -874,23 +874,33 @@ fn the_flag_shares_a_session_that_has_no_config_file_at_all() {
     );
 }
 
-// --- Whether a viewer sends native image output ---
+// --- The settings a viewer resolves before it dials ---
 
 #[test]
-fn supports_image_output_with_no_app_file_is_on() {
-    assert!(supports_image_output(None));
+fn resolve_client_config_with_no_app_file_gives_the_defaults() {
+    assert_eq!(resolve_client_config(None), ClientConfig::default());
 }
 
 #[test]
-fn supports_image_output_takes_the_value_the_app_file_names() {
-    let disabled_config = PartialKoshiConfig {
+fn resolve_client_config_takes_the_values_the_app_file_names() {
+    let app_config_layer = PartialKoshiConfig {
         supports_image_protocols: Some(false),
+        remote_link_timeout_ms: Some(45_000),
         ..Default::default()
     };
-    assert!(!supports_image_output(Some(disabled_config)));
+    assert_eq!(
+        resolve_client_config(Some(app_config_layer)),
+        ClientConfig {
+            supports_image_protocols: false,
+            remote_link_timeout_ms: 45_000,
+            ..ClientConfig::default()
+        }
+    );
 
-    let unset_config = PartialKoshiConfig::default();
-    assert!(supports_image_output(Some(unset_config)));
+    assert_eq!(
+        resolve_client_config(Some(PartialKoshiConfig::default())),
+        ClientConfig::default()
+    );
 }
 
 // --- Reading the config directory a caller names ---

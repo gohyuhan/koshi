@@ -1310,6 +1310,7 @@ dependencies = [
  "koshi-core",
  "koshi-layout",
  "koshi-terminal",
+ "koshi-test-support",
  "ratatui",
 ]
 

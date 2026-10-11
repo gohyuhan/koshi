@@ -43,7 +43,8 @@ use koshi_link::remote_client::{self, DIAL_TIMEOUT_DURATION};
 use koshi_test_support::child_exit::wait_until_child_has_exited;
 use koshi_test_support::fixtures::{
     build_test_runtime_directory, count_program_runs, spawn_session_listening_before_it_advertises,
-    write_koshi_0_1_0_window_endpoint_file, write_printing_program, NO_SUCH_PROCESS_ID,
+    write_clipboard_tool_directory, write_koshi_0_1_0_window_endpoint_file, write_printing_program,
+    NO_SUCH_PROCESS_ID,
 };
 
 #[test]
@@ -666,7 +667,7 @@ const PAST_RESTART_WINDOW_DURATION: Duration =
 const INSIDE_RESTART_WINDOW_DURATION: Duration = Duration::from_secs(1);
 
 #[test]
-fn removing_a_session_takes_its_resume_and_program_files_with_it() {
+fn removing_a_session_takes_its_resume_program_and_clipboard_tool_files_with_it() {
     // A resume file past the window goes with the session's other files.
     let gone_session_id = SessionId::new();
     let runtime_directory = build_test_runtime_directory();
@@ -695,6 +696,8 @@ fn removing_a_session_takes_its_resume_and_program_files_with_it() {
         gone_session_id,
         PAST_RESTART_WINDOW_DURATION,
     );
+    let clipboard_tool_directory =
+        write_clipboard_tool_directory(runtime_directory.path(), gone_session_id);
 
     let mut session_registry = build_session_registry(&[(gone_session_id, "S-quiet-lake")]);
     assert_eq!(
@@ -712,6 +715,10 @@ fn removing_a_session_takes_its_resume_and_program_files_with_it() {
     assert!(!endpoint_path.exists(), "the endpoint file is removed");
     assert!(!resume_file_path.exists(), "the resume file is removed");
     assert!(!program_file_path.exists(), "the program file is removed");
+    assert!(
+        !clipboard_tool_directory.exists(),
+        "the folder of stand-in clipboard tools is removed"
+    );
 }
 
 #[test]
@@ -735,6 +742,8 @@ fn removing_a_session_that_is_replacing_its_image_leaves_it_and_its_files_alone(
         replacing_session_id,
         INSIDE_RESTART_WINDOW_DURATION,
     );
+    let clipboard_tool_directory =
+        write_clipboard_tool_directory(runtime_directory.path(), replacing_session_id);
 
     let mut session_registry = build_session_registry(&[(replacing_session_id, "S-quiet-lake")]);
     assert_eq!(
@@ -757,6 +766,13 @@ fn removing_a_session_that_is_replacing_its_image_leaves_it_and_its_files_alone(
     assert!(
         resume_file_path.exists(),
         "the resume file is left in place"
+    );
+    assert_eq!(
+        std::fs::read_dir(&clipboard_tool_directory)
+            .expect("the folder of stand-in clipboard tools is left in place")
+            .map(|directory_entry| directory_entry.expect("the entry reads").file_name())
+            .collect::<Vec<std::ffi::OsString>>(),
+        vec![std::ffi::OsString::from("xclip")]
     );
 }
 
@@ -7579,6 +7595,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
     let (mut bridged_connection, _bridged_writer) = remote_client::attach_remote_session(
         attaching_connection,
         SessionSelector::SessionId(session_id),
+        remote_client::JOIN_TIMEOUT_DURATION + Duration::from_secs(30),
     )
     .expect("the attach is sent");
     let hello_response: IncomingResponse = bridged_connection

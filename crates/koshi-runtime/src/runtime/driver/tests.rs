@@ -1,5 +1,6 @@
-//! Tests for the loop-facing driver surface: render-wakeup timing and
-//! poll delegation to the scheduler, the live-pane check, the routing of an
+//! Tests for the loop-facing driver surface: render-wakeup timing,
+//! poll delegation to the scheduler, the image animations each poll
+//! advances, the live-pane check, the routing of an
 //! attached client's key press and pasted text, the inbox events that are
 //! dropped or answered on their reply channel, and the abrupt group-kill the
 //! panic path takes.
@@ -19,6 +20,7 @@ use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
 use koshi_core::process::{PtySize, SpawnSpec};
 use koshi_pty::backend::state::PtyBackend;
+use koshi_terminal::engine::TerminalEngine;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::build_key_input_for_chord;
 
@@ -447,4 +449,117 @@ fn an_invalidation_right_after_a_render_waits_out_the_frame_cadence() {
         Some(Duration::ZERO)
     );
     assert!(server.poll_render(next_frame_time));
+}
+
+/// An 80x24 engine that shows one kitty animation in one cell and loops it
+/// forever: frame 1 is red for 100 ms, frame 2 is blue for 300 ms. The
+/// animation runs, and its clock starts at the next advance.
+fn build_two_frame_animated_terminal_engine() -> TerminalEngine {
+    let mut terminal_engine = TerminalEngine::from_pty_size(TEST_PTY_SIZE);
+    let kitty_commands: [&[u8]; 4] = [
+        b"\x1b_Ga=T,i=7,f=32,s=1,v=1,c=1,r=1,C=1,q=2;/wAA/w==\x1b\\",
+        b"\x1b_Ga=f,i=7,f=32,s=1,v=1,z=300,q=2;AAD//w==\x1b\\",
+        b"\x1b_Ga=a,i=7,r=1,z=100,q=2\x1b\\",
+        b"\x1b_Ga=a,i=7,s=3,v=1,q=2\x1b\\",
+    ];
+    for kitty_command in kitty_commands {
+        assert_eq!(terminal_engine.process_pty_output(kitty_command), b"");
+    }
+    terminal_engine
+}
+
+/// The pixels that the first image placement of the pane `pane_id` shows.
+fn get_shown_rgba_bytes(server: &Server, pane_id: PaneId) -> Vec<u8> {
+    server.terminal_engine_by_pane_id[&pane_id]
+        .get_terminal_state()
+        .list_image_placements()[0]
+        .get_image_record()
+        .image
+        .rgba_bytes
+        .clone()
+}
+
+#[test]
+fn every_animated_pane_advances_when_another_pane_changes_frame() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let first_pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
+    for pane_id in [first_pane_id, second_pane_id] {
+        server
+            .terminal_engine_by_pane_id
+            .insert(pane_id, build_two_frame_animated_terminal_engine());
+    }
+    let start_time = Instant::now();
+    let frame_change_time = start_time + Duration::from_millis(100);
+    assert!(!server.poll_render(start_time));
+
+    assert!(server.poll_render(frame_change_time));
+
+    for pane_id in [first_pane_id, second_pane_id] {
+        assert_eq!(get_shown_rgba_bytes(&server, pane_id), [0, 0, 255, 255]);
+        assert_eq!(
+            server.terminal_engine_by_pane_id[&pane_id]
+                .get_next_image_animation_delay(frame_change_time),
+            Some(Duration::from_millis(300))
+        );
+    }
+}
+
+#[test]
+fn an_animated_pane_beside_a_static_pane_requests_a_render_only_when_its_frame_changes() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let animated_pane_id = PaneId::new();
+    server
+        .terminal_engine_by_pane_id
+        .insert(PaneId::new(), TerminalEngine::from_pty_size(TEST_PTY_SIZE));
+    server
+        .terminal_engine_by_pane_id
+        .insert(animated_pane_id, build_two_frame_animated_terminal_engine());
+    let start_time = Instant::now();
+    assert!(!server.poll_render(start_time));
+
+    assert!(!server.poll_render(start_time + Duration::from_millis(50)));
+    assert!(server.poll_render(start_time + Duration::from_millis(100)));
+
+    assert_eq!(
+        get_shown_rgba_bytes(&server, animated_pane_id),
+        [0, 0, 255, 255]
+    );
+}
+
+#[test]
+fn an_animation_that_starts_after_an_idle_poll_shows_its_first_frame_for_its_whole_gap() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let idle_poll_time = Instant::now();
+    assert!(!server.poll_render(idle_poll_time));
+    let animated_pane_id = PaneId::new();
+    server
+        .terminal_engine_by_pane_id
+        .insert(animated_pane_id, build_two_frame_animated_terminal_engine());
+    let first_poll_time = idle_poll_time + Duration::from_secs(1);
+    let frame_change_time = first_poll_time + Duration::from_millis(100);
+
+    assert_eq!(
+        server.compute_next_render_wakeup(first_poll_time),
+        Some(Duration::ZERO)
+    );
+    assert!(!server.poll_render(first_poll_time));
+
+    assert_eq!(
+        get_shown_rgba_bytes(&server, animated_pane_id),
+        [255, 0, 0, 255]
+    );
+    assert_eq!(
+        server.compute_next_render_wakeup(first_poll_time),
+        Some(Duration::from_millis(100))
+    );
+    assert!(server.poll_render(frame_change_time));
+    assert_eq!(
+        get_shown_rgba_bytes(&server, animated_pane_id),
+        [0, 0, 255, 255]
+    );
+    assert_eq!(
+        server.compute_next_render_wakeup(frame_change_time),
+        Some(Duration::from_millis(300))
+    );
 }

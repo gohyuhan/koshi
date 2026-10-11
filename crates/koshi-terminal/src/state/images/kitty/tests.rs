@@ -7,7 +7,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use image::ImageEncoder;
 use koshi_core::process::PtySize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const KITTY_UPLOAD_SEQUENCE_BYTES: &[u8] =
     b"\x1b_Ga=T,f=32,s=1,v=1,c=2,r=2,C=1,i=7,q=2;/wAA/w==\x1b\\";
@@ -887,46 +887,203 @@ fn kitty_animation_loop_value_counts_completed_playbacks_after_restore() {
                 .get_numerator_ms(),
             10
         );
+        let restored_time = Instant::now();
         assert_eq!(
             restored_terminal_engine
                 .get_terminal_state()
-                .get_next_image_animation_delay(),
+                .get_next_image_animation_delay(restored_time),
+            Some(Duration::ZERO)
+        );
+        assert!(!restored_terminal_engine.advance_image_animations(restored_time));
+        assert_eq!(
+            restored_terminal_engine
+                .get_terminal_state()
+                .get_next_image_animation_delay(restored_time),
             Some(Duration::from_millis(8))
         );
 
         if expected_playback_count == 2 {
-            let _ = restored_terminal_engine.advance_image_animations(Duration::from_millis(18));
+            let first_cycle_end_time = restored_time + Duration::from_millis(18);
+            let _ = restored_terminal_engine.advance_image_animations(first_cycle_end_time);
             assert_eq!(
-                restored_terminal_engine
-                    .get_terminal_state()
-                    .list_image_placements()[0]
-                    .get_image_record()
-                    .image
-                    .rgba_bytes,
+                get_shown_rgba_bytes(&restored_terminal_engine),
                 [255, 0, 0, 255]
             );
             assert_eq!(
                 restored_terminal_engine
                     .get_terminal_state()
-                    .get_next_image_animation_delay(),
+                    .get_next_image_animation_delay(first_cycle_end_time),
                 Some(Duration::from_millis(8))
             );
         }
-        let _ = restored_terminal_engine.advance_image_animations(Duration::from_millis(18));
+        let last_cycle_end_time =
+            restored_time + Duration::from_millis(18 * u64::from(expected_playback_count));
+        let _ = restored_terminal_engine.advance_image_animations(last_cycle_end_time);
         assert_eq!(
-            restored_terminal_engine
-                .get_terminal_state()
-                .list_image_placements()[0]
-                .get_image_record()
-                .image
-                .rgba_bytes,
+            get_shown_rgba_bytes(&restored_terminal_engine),
             [0, 0, 255, 255]
         );
         assert_eq!(
             restored_terminal_engine
                 .get_terminal_state()
-                .get_next_image_animation_delay(),
+                .get_next_image_animation_delay(last_cycle_end_time),
             None
+        );
+    }
+}
+
+/// The pixels that the first image placement of `terminal_engine` shows.
+fn get_shown_rgba_bytes(terminal_engine: &TerminalEngine) -> Vec<u8> {
+    terminal_engine.get_terminal_state().list_image_placements()[0]
+        .get_image_record()
+        .image
+        .rgba_bytes
+        .clone()
+}
+
+/// Shows image 7 in one cell as a two-frame animation that loops forever:
+/// frame 1 is red for 100 ms and frame 2 is blue for 300 ms.
+fn show_red_and_blue_animation(terminal_engine: &mut TerminalEngine) {
+    display_animation_base(terminal_engine, 1, 1, &[255, 0, 0, 255]);
+    let kitty_commands: [&[u8]; 3] = [
+        b"\x1b_Ga=f,i=7,f=32,s=1,v=1,z=300,q=2;AAD//w==\x1b\\",
+        b"\x1b_Ga=a,i=7,r=1,z=100,q=2\x1b\\",
+        b"\x1b_Ga=a,i=7,s=3,v=1,q=2\x1b\\",
+    ];
+    for kitty_command in kitty_commands {
+        assert_eq!(terminal_engine.process_pty_output(kitty_command), b"");
+    }
+}
+
+/// The time from `monotonic_timestamp` until the next animation frame of
+/// `terminal_engine` is due.
+fn get_next_frame_delay(
+    terminal_engine: &TerminalEngine,
+    monotonic_timestamp: Instant,
+) -> Option<Duration> {
+    terminal_engine
+        .get_terminal_state()
+        .get_next_image_animation_delay(monotonic_timestamp)
+}
+
+#[test]
+fn a_selected_frame_shows_for_its_whole_gap() {
+    let mut engine = build_terminal_engine();
+    show_red_and_blue_animation(&mut engine);
+    let start_time = Instant::now();
+    let selection_time = start_time + Duration::from_millis(90);
+    assert!(!engine.advance_image_animations(start_time));
+    assert!(!engine.advance_image_animations(selection_time));
+
+    assert_eq!(
+        engine.process_pty_output(b"\x1b_Ga=a,i=7,c=2,q=2\x1b\\"),
+        b""
+    );
+
+    assert_eq!(get_shown_rgba_bytes(&engine), [0, 0, 255, 255]);
+    assert_eq!(
+        get_next_frame_delay(&engine, selection_time),
+        Some(Duration::ZERO)
+    );
+    assert!(!engine.advance_image_animations(selection_time));
+    assert_eq!(
+        get_next_frame_delay(&engine, selection_time),
+        Some(Duration::from_millis(300))
+    );
+}
+
+#[test]
+fn deleting_the_current_frame_shows_the_next_frame_for_its_whole_gap() {
+    let mut engine = build_terminal_engine();
+    show_red_and_blue_animation(&mut engine);
+    assert_eq!(
+        engine.process_pty_output(b"\x1b_Ga=f,i=7,f=32,s=1,v=1,z=100,q=2;AP8A/w==\x1b\\"),
+        b""
+    );
+    let start_time = Instant::now();
+    let deletion_time = start_time + Duration::from_millis(150);
+    assert!(!engine.advance_image_animations(start_time));
+    assert!(engine.advance_image_animations(deletion_time));
+    assert_eq!(get_shown_rgba_bytes(&engine), [0, 0, 255, 255]);
+
+    assert_eq!(
+        engine.process_pty_output(b"\x1b_Ga=d,d=f,i=7,r=2,q=2\x1b\\"),
+        b""
+    );
+
+    assert_eq!(get_shown_rgba_bytes(&engine), [0, 255, 0, 255]);
+    assert!(!engine.advance_image_animations(deletion_time));
+    assert_eq!(
+        get_next_frame_delay(&engine, deletion_time),
+        Some(Duration::from_millis(100))
+    );
+}
+
+#[test]
+fn a_restarted_animation_counts_no_time_from_while_it_was_stopped() {
+    let mut engine = build_terminal_engine();
+    show_red_and_blue_animation(&mut engine);
+    let start_time = Instant::now();
+    let restart_time = start_time + Duration::from_secs(5);
+    assert!(!engine.advance_image_animations(start_time));
+    assert!(!engine.advance_image_animations(start_time + Duration::from_millis(50)));
+
+    assert_eq!(
+        engine.process_pty_output(b"\x1b_Ga=a,i=7,s=1,q=2\x1b\\"),
+        b""
+    );
+    assert_eq!(get_next_frame_delay(&engine, restart_time), None);
+    assert_eq!(
+        engine.process_pty_output(b"\x1b_Ga=a,i=7,s=3,q=2\x1b\\"),
+        b""
+    );
+
+    assert!(!engine.advance_image_animations(restart_time));
+    assert_eq!(get_shown_rgba_bytes(&engine), [255, 0, 0, 255]);
+    assert_eq!(
+        get_next_frame_delay(&engine, restart_time),
+        Some(Duration::from_millis(100))
+    );
+}
+
+#[test]
+fn a_loading_animation_that_waits_for_frames_shows_a_new_frame_at_once_with_or_without_a_restore() {
+    for is_restored in [false, true] {
+        let mut engine = build_terminal_engine();
+        show_red_and_blue_animation(&mut engine);
+        assert_eq!(
+            engine.process_pty_output(b"\x1b_Ga=a,i=7,s=2,q=2\x1b\\"),
+            b""
+        );
+        let start_time = Instant::now();
+        let wait_start_time = start_time + Duration::from_millis(400);
+        assert!(!engine.advance_image_animations(start_time));
+        assert!(engine.advance_image_animations(wait_start_time));
+        assert_eq!(get_next_frame_delay(&engine, wait_start_time), None);
+        if is_restored {
+            let restored_terminal_state: TerminalState = serde_json::from_slice(
+                &serde_json::to_vec(engine.get_terminal_state()).expect("the state serializes"),
+            )
+            .expect("the waiting animation restores");
+            engine = TerminalEngine::from_terminal_state(restored_terminal_state, &[]);
+        }
+        assert_eq!(get_shown_rgba_bytes(&engine), [0, 0, 255, 255]);
+
+        assert_eq!(
+            engine.process_pty_output(b"\x1b_Ga=f,i=7,f=32,s=1,v=1,z=100,q=2;AP8A/w==\x1b\\"),
+            b""
+        );
+        let frame_arrival_time = start_time + Duration::from_secs(1);
+
+        assert_eq!(
+            get_next_frame_delay(&engine, frame_arrival_time),
+            Some(Duration::ZERO)
+        );
+        assert!(engine.advance_image_animations(frame_arrival_time));
+        assert_eq!(get_shown_rgba_bytes(&engine), [0, 255, 0, 255]);
+        assert_eq!(
+            get_next_frame_delay(&engine, frame_arrival_time),
+            Some(Duration::from_millis(100))
         );
     }
 }

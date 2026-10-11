@@ -5,7 +5,7 @@
 //! items meant for a client in another process.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use koshi_config::hints::KeyMatch;
@@ -1400,6 +1400,7 @@ fn build_render_snapshot(
                 gap_cell_count: 0,
             },
             tabs_metadata: Vec::new(),
+            floating_pane_slots: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {
@@ -2719,16 +2720,59 @@ fn dialing_again_shows_on_the_chrome_the_viewer_paints_and_comes_back_off() {
 
     let reconnecting_state = Reconnecting {
         attempt: 1,
-        retry_in_seconds: 5,
+        retry_in_seconds: Some(5),
     };
-    client.set_reconnecting(Some(reconnecting_state));
+    client.set_link_status(LinkStatus::Redialing(reconnecting_state));
     assert_eq!(
         client.build_viewer_chrome(active_tab_id).reconnecting,
         Some(reconnecting_state)
     );
 
-    client.set_reconnecting(None);
+    client.set_link_status(LinkStatus::AwaitingRestartedSession);
+    assert_eq!(
+        client.build_viewer_chrome(active_tab_id).reconnecting,
+        None,
+        "a restart rejoin draws no tag"
+    );
+
+    client.set_link_status(LinkStatus::Linked);
     assert_eq!(client.build_viewer_chrome(active_tab_id).reconnecting, None);
+}
+
+#[test]
+fn a_viewer_with_no_link_reads_keys_with_its_base_keymap_while_a_placement_waits() {
+    let mut client = build_client_with_submitted_placement(
+        PlacementModeLifetime::UntilCancelled,
+        PaneId::new(),
+        TabId::new(),
+    );
+    assert!(client.is_placement_confirmation_pending());
+    assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
+
+    client.set_link_status(LinkStatus::AwaitingRestartedSession);
+
+    assert_eq!(client.get_active_input_mode(), LockMode::Normal);
+    assert_eq!(
+        client.pending_key_sequence, None,
+        "the sequence open in the placement keymap closes with it"
+    );
+    assert_eq!(
+        client.resolve_key(
+            KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('q')),
+            Instant::now(),
+        ),
+        crate::input::KeyOutcome::Fire(BoundAction {
+            action_reference: ActionReference::from_core_action_name("quit")
+                .expect("valid core action name"),
+        })
+    );
+    assert!(
+        client.is_placement_confirmation_pending(),
+        "the placement itself still waits for its answer"
+    );
+
+    client.set_link_status(LinkStatus::Linked);
+    assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
 }
 
 #[test]
@@ -2752,7 +2796,10 @@ fn terminal_bytes_are_counted_and_move_nothing_in_the_viewer() {
     let viewport_size = client.get_viewport_size();
 
     delivery_sender
-        .send(Delivery::HostWrite(vec![0x1b, b']', b'5', b'2']))
+        .send(Delivery::HostWrite {
+            host_write_bytes: vec![0x1b, b']', b'5', b'2'],
+            in_flight_marker: Arc::new(()),
+        })
         .expect("the viewer's queue has room");
 
     assert_eq!(client.apply_events(), 1, "the write was seen");

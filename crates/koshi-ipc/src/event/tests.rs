@@ -1,7 +1,8 @@
 //! Tests for the client event stream's wire form: every frame survives an
 //! encode/decode round trip with every field intact, the encodings are the ones
 //! this protocol version pins, a field this build does not know is ignored,
-//! and a frame this build has no name for reads as unknown.
+//! a frame this build has no name for reads as unknown, and a host write frame
+//! of [`MAX_HOST_WRITE_BYTE_COUNT`] bytes fits one frame.
 
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
 use koshi_core::geometry::{Direction, Point, Rect, Size};
@@ -11,6 +12,7 @@ use koshi_core::mouse::{MouseAnswer, MouseTracking};
 use koshi_layout::mode::LayoutMode;
 use serde_json::json;
 
+use crate::error::IpcError;
 use crate::frame::{
     FrameClient, FrameCursor, FrameCursorShape, FrameGraphicsProtocol, FrameImageAction,
     FrameImageChunk, FrameImageRecordHeader, FrameImageTransfer, FramePane, FrameScrollback,
@@ -74,6 +76,7 @@ fn build_test_painted_frame() -> PaintedFrame {
                 tab_index: 0,
                 is_active: true,
             }],
+            floating_pane_slots: Vec::new(),
         },
         pane_snapshots: vec![FramePane {
             pane_id,
@@ -113,7 +116,7 @@ fn build_test_painted_frame() -> PaintedFrame {
     }
 }
 
-/// One valid image transfer header for the fixed pane in [`painted_frame`].
+/// One valid image transfer header for the fixed pane in [`build_test_painted_frame`].
 fn build_test_image_transfer() -> FrameImageTransfer {
     FrameImageTransfer {
         image_content_id: 1,
@@ -194,6 +197,7 @@ fn list_test_events() -> Vec<SessionEvent> {
             session_id: SessionId::from_uuid(build_fixed_test_uuid()),
         },
         SessionEvent::PlacementCommandRejected { command_id },
+        SessionEvent::Pong,
     ]
 }
 
@@ -398,7 +402,7 @@ fn a_host_write_survives_a_round_trip() {
     // An OSC 52 copy of "hello": a byte over 127 and a control byte, so a
     // spelling that mangled either shows up here.
     let expected_event = SessionEvent::HostWrite {
-        host_output_bytes: b"\x1b]52;c;aGVsbG8=\x07\xc3\xa9".to_vec(),
+        host_write_bytes: b"\x1b]52;c;aGVsbG8=\x07\xc3\xa9".to_vec(),
     };
 
     let serialized_event_json = serde_json::to_string(&expected_event).expect("event encodes");
@@ -408,7 +412,7 @@ fn a_host_write_survives_a_round_trip() {
     assert_eq!(
         decoded_event,
         SessionEvent::HostWrite {
-            host_output_bytes: vec![
+            host_write_bytes: vec![
                 0x1b, b']', b'5', b'2', b';', b'c', b';', b'a', b'G', b'V', b's', b'b', b'G', b'8',
                 b'=', 0x07, 0xc3, 0xa9,
             ],
@@ -513,6 +517,7 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
             json!({ "Resync": { "dropped_event_count": 4 } }),
             json!({ "SwitchTo": { "session_id": wire_identifier } }),
             json!({ "PlacementCommandRejected": { "command_id": wire_identifier } }),
+            json!("Pong"),
         ]
     );
 }
@@ -618,24 +623,31 @@ fn the_payload_frames_wire_shape_belongs_to_this_protocol_version() {
     );
     assert_eq!(
         serde_json::to_value(SessionEvent::HostWrite {
-            host_output_bytes: vec![0x1b, b']', 0xc3, 0xa9],
+            host_write_bytes: vec![0x1b, b']', 0xc3, 0xa9],
         })
         .expect("event encodes"),
-        json!({ "HostWrite": { "host_output_bytes": "G13DqQ==" } })
+        json!({ "HostWrite": { "host_write_bytes": "G13DqQ==" } })
+    );
+    assert_eq!(
+        serde_json::to_value(SessionEvent::HostWritePart {
+            host_write_bytes: vec![0x1b, b']', 0xc3, 0xa9],
+        })
+        .expect("event encodes"),
+        json!({ "HostWritePart": { "host_write_bytes": "G13DqQ==" } })
     );
 }
 
 #[test]
 fn a_host_write_travels_as_one_base64_string() {
     let expected_event = SessionEvent::HostWrite {
-        host_output_bytes: vec![0x1b, b']', 0xc3, 0xa9],
+        host_write_bytes: vec![0x1b, b']', 0xc3, 0xa9],
     };
 
     let serialized_event_json = serde_json::to_string(&expected_event).expect("event encodes");
 
     assert_eq!(
         serialized_event_json,
-        r#"{"HostWrite":{"host_output_bytes":"G13DqQ=="}}"#
+        r#"{"HostWrite":{"host_write_bytes":"G13DqQ=="}}"#
     );
     let decoded_event: SessionEvent =
         serde_json::from_str(&serialized_event_json).expect("event decodes");
@@ -644,16 +656,16 @@ fn a_host_write_travels_as_one_base64_string() {
 
 #[test]
 fn every_byte_value_survives_a_host_write() {
-    let all_host_output_bytes: Vec<u8> = (0..=u8::MAX).collect();
+    let all_host_write_bytes: Vec<u8> = (0..=u8::MAX).collect();
     let expected_event = SessionEvent::HostWrite {
-        host_output_bytes: all_host_output_bytes.clone(),
+        host_write_bytes: all_host_write_bytes.clone(),
     };
 
     let serialized_event_json = serde_json::to_value(&expected_event).expect("event encodes");
 
     assert_eq!(
         serialized_event_json,
-        json!({ "HostWrite": { "host_output_bytes": "\
+        json!({ "HostWrite": { "host_write_bytes": "\
 AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7\
 PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3\
 eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKz\
@@ -665,7 +677,7 @@ tLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v
     assert_eq!(
         decoded_event,
         SessionEvent::HostWrite {
-            host_output_bytes: all_host_output_bytes,
+            host_write_bytes: all_host_write_bytes,
         }
     );
 }
@@ -673,25 +685,25 @@ tLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v
 #[test]
 fn a_host_write_carrying_a_list_of_numbers_is_refused() {
     let decode_error = serde_json::from_str::<SessionEvent>(
-        r#"{"HostWrite":{"host_output_bytes":[27,93,195,169]}}"#,
+        r#"{"HostWrite":{"host_write_bytes":[27,93,195,169]}}"#,
     )
     .expect_err("a number list is not base64 text");
 
     assert_eq!(
         decode_error.to_string(),
-        "invalid type: sequence, expected bytes as a base64 string at line 1 column 34"
+        "invalid type: sequence, expected bytes as a base64 string at line 1 column 33"
     );
 }
 
 #[test]
 fn an_empty_host_write_reads_as_no_bytes() {
     let decoded_event: SessionEvent =
-        serde_json::from_str(r#"{"HostWrite":{"host_output_bytes":""}}"#).expect("event decodes");
+        serde_json::from_str(r#"{"HostWrite":{"host_write_bytes":""}}"#).expect("event decodes");
 
     assert_eq!(
         decoded_event,
         SessionEvent::HostWrite {
-            host_output_bytes: Vec::new(),
+            host_write_bytes: Vec::new(),
         }
     );
 }
@@ -699,19 +711,19 @@ fn an_empty_host_write_reads_as_no_bytes() {
 #[test]
 fn a_host_write_carrying_a_number_is_refused() {
     let decode_error =
-        serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"host_output_bytes":27}}"#)
+        serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"host_write_bytes":27}}"#)
             .expect_err("a number is not base64 text");
 
     assert_eq!(
         decode_error.to_string(),
-        "invalid type: integer `27`, expected bytes as a base64 string at line 1 column 36"
+        "invalid type: integer `27`, expected bytes as a base64 string at line 1 column 35"
     );
 }
 
 #[test]
 fn a_host_write_carrying_text_that_is_not_base64_is_refused() {
     let decode_error =
-        serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"host_output_bytes":"a"}}"#)
+        serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"host_write_bytes":"a"}}"#)
             .expect_err("one character is not a base64 group");
 
     assert!(
@@ -749,7 +761,10 @@ fn numeric_fields_round_trip_at_their_extremes() {
             mouse_answers: Vec::new(),
         },
         SessionEvent::HostWrite {
-            host_output_bytes: vec![0, 255],
+            host_write_bytes: vec![0, 255],
+        },
+        SessionEvent::HostWritePart {
+            host_write_bytes: vec![0, 255],
         },
     ];
 
@@ -944,4 +959,71 @@ fn an_event_missing_a_tab_id_field_is_refused() {
             format!("missing field `{missing_field_name}`")
         );
     }
+}
+
+/// Encode `session_event` as one frame into a new buffer.
+fn write_session_event_frame(session_event: &SessionEvent) -> Result<Vec<u8>, IpcError> {
+    let mut written_frame_bytes = Vec::new();
+    crate::transport::write_message(&mut written_frame_bytes, session_event)?;
+    Ok(written_frame_bytes)
+}
+
+#[test]
+fn host_write_frames_of_the_largest_size_fit_one_frame() {
+    let host_write_part = SessionEvent::HostWritePart {
+        host_write_bytes: vec![0xff; MAX_HOST_WRITE_BYTE_COUNT],
+    };
+    let host_write = SessionEvent::HostWrite {
+        host_write_bytes: vec![0xff; MAX_HOST_WRITE_BYTE_COUNT],
+    };
+
+    assert_eq!(
+        serde_json::to_vec(&host_write_part)
+            .expect("event encodes")
+            .len(),
+        16_777_213
+    );
+    assert_eq!(
+        serde_json::to_vec(&host_write)
+            .expect("event encodes")
+            .len(),
+        16_777_209
+    );
+    assert_eq!(
+        write_session_event_frame(&host_write_part)
+            .expect("the largest part fits one frame")
+            .len(),
+        4 + 16_777_213
+    );
+    assert_eq!(
+        write_session_event_frame(&host_write)
+            .expect("the largest final write fits one frame")
+            .len(),
+        4 + 16_777_209
+    );
+}
+
+#[test]
+fn a_host_write_part_three_bytes_past_the_largest_size_is_refused_by_the_frame_limit() {
+    let host_write_part = SessionEvent::HostWritePart {
+        host_write_bytes: vec![0xff; MAX_HOST_WRITE_BYTE_COUNT + 3],
+    };
+
+    assert_eq!(
+        serde_json::to_vec(&host_write_part)
+            .expect("event encodes")
+            .len(),
+        16_777_217
+    );
+    let Err(IpcError::FrameTooLarge {
+        maximum_frame_byte_count,
+        ..
+    }) = write_session_event_frame(&host_write_part)
+    else {
+        panic!("a part three bytes past the largest one must not fit one frame");
+    };
+    assert_eq!(
+        maximum_frame_byte_count,
+        crate::transport::MAX_FRAME_BYTE_COUNT
+    );
 }

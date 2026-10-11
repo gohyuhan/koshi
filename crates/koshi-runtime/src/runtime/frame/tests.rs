@@ -3,7 +3,8 @@
 //! one run; a row travels the grid's full width and carries how its line ends;
 //! rows travel top to bottom; a pane with no terminal content sends no window;
 //! every color, underline style and cursor shape maps to its wire form; and the
-//! session, tab, slot, client and per-pane scalars come across unchanged.
+//! session, tab, slot, floating pane slot, client and per-pane scalars come
+//! across unchanged.
 
 use std::sync::Arc;
 
@@ -17,8 +18,9 @@ use koshi_ipc::transport::MAX_FRAME_BYTE_COUNT;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, PaneSlot, PaneSnapshot,
-    RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, FloatingPaneSlot, GridView, ImagePlacementSnapshot, PaneSlot,
+    PaneSnapshot, RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata,
+    TabSnapshot,
 };
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
@@ -58,7 +60,7 @@ fn build_test_grid() -> Grid {
     test_grid
 }
 
-/// The cell [`grid`] writes at (0, 0), as it travels.
+/// The cell [`build_test_grid`] writes at (0, 0), as it travels.
 fn build_written_frame_cell() -> FrameCell {
     FrameCell {
         character: 'e',
@@ -83,7 +85,7 @@ fn build_written_frame_cell() -> FrameCell {
     }
 }
 
-/// The two blank cells [`grid`] leaves at (0, 1) and (0, 2), as they travel.
+/// The two blank cells [`build_test_grid`] leaves at (0, 1) and (0, 2), as they travel.
 fn build_blank_frame_cell() -> FrameCell {
     FrameCell {
         character: ' ',
@@ -156,7 +158,7 @@ fn build_image_placement_snapshot() -> ImagePlacementSnapshot {
     .expect("test image placement is valid")
 }
 
-/// One pane holding [`grid`], scrolled 7 lines back, reporting any-motion mouse
+/// One pane holding [`build_test_grid`], scrolled 7 lines back, reporting any-motion mouse
 /// tracking and a truncated scrollback of 500 retained lines.
 fn build_pane_snapshot(pane_id: PaneId) -> PaneSnapshot {
     PaneSnapshot {
@@ -290,6 +292,7 @@ fn build_render_snapshot(content_pane_id: PaneId, empty_pane_id: PaneId) -> Rend
                     is_active: false,
                 },
             ],
+            floating_pane_slots: Vec::new(),
         },
         pane_snapshots: vec![
             build_pane_snapshot(content_pane_id),
@@ -746,6 +749,74 @@ fn recovery_notice_visibility_travels_with_the_frame() {
     render_snapshot.is_recovery_notice_visible = false;
     let cleared_frame = build_wire_frame(&render_snapshot);
     assert!(!cleared_frame.is_recovery_notice_visible);
+}
+
+#[test]
+fn floating_pane_slots_copy_straight_across_back_to_front() {
+    let mut render_snapshot = build_render_snapshot(PaneId::new(), PaneId::new());
+    let (lower_floating_pane_id, upper_floating_pane_id) = (PaneId::new(), PaneId::new());
+    let lower_outer_rect = Rect {
+        origin: Point { column: 2, row: 1 },
+        size: Size {
+            column_count: 8,
+            row_count: 5,
+        },
+    };
+    let lower_content_rect = Rect {
+        origin: Point { column: 3, row: 4 },
+        size: Size {
+            column_count: 6,
+            row_count: 1,
+        },
+    };
+    let upper_outer_rect = Rect {
+        origin: Point { column: 6, row: 0 },
+        size: Size {
+            column_count: 6,
+            row_count: 6,
+        },
+    };
+    let upper_content_rect = Rect {
+        origin: Point { column: 7, row: 3 },
+        size: Size {
+            column_count: 4,
+            row_count: 2,
+        },
+    };
+    render_snapshot.session_snapshot.floating_pane_slots = vec![
+        FloatingPaneSlot {
+            pane_id: lower_floating_pane_id,
+            outer_rect: lower_outer_rect,
+            content_rect: lower_content_rect,
+            is_pinned: false,
+        },
+        FloatingPaneSlot {
+            pane_id: upper_floating_pane_id,
+            outer_rect: upper_outer_rect,
+            content_rect: upper_content_rect,
+            is_pinned: true,
+        },
+    ];
+
+    let painted_frame = build_wire_frame(&render_snapshot);
+
+    assert_eq!(
+        painted_frame.session_snapshot.floating_pane_slots,
+        [
+            FrameFloatingPaneSlot {
+                pane_id: lower_floating_pane_id,
+                outer_rect: lower_outer_rect,
+                content_rect: lower_content_rect,
+                is_pinned: false,
+            },
+            FrameFloatingPaneSlot {
+                pane_id: upper_floating_pane_id,
+                outer_rect: upper_outer_rect,
+                content_rect: upper_content_rect,
+                is_pinned: true,
+            },
+        ]
+    );
 }
 
 #[test]

@@ -67,11 +67,24 @@ pub struct Surface {
 /// - A frame's two revisions, an image placement's `is_available`, a close
 ///   command's `should_kill_process_tree`, and a terminal-too-small event's
 ///   cause are required. 4 read a message without them.
+/// - A frame carries `floating_pane_slots`: the floating panes its client
+///   shows, back to front, each with its outer rect, content rect and pin
+///   state. The field is required, and 4 has no such field.
 /// - The `MoveFloatingPane`, `SetPanePinned`, `SetPaneMinimized` and
 ///   `SetAllFloatingPanesMinimized` commands, the `NextFloatingPane` and
 ///   `PreviousFloatingPane` focus targets, and the `FloatingPaneMoved`,
 ///   `PanePinChanged` and `PaneMinimizedChanged` events in a command result,
 ///   exist in 5 only.
+/// - A `HostWrite` event names its bytes `host_write_bytes` and carries at
+///   most 12582879 of them; 4 named them `host_output_bytes`. A longer host
+///   write goes as `HostWritePart` events, then one `HostWrite`. The
+///   `HostWritePart` event, the `ClipboardCopyPart` and `ClipboardCopy`
+///   requests, and their `ClipboardCopyPartTaken` and `ClipboardCopyRouted`
+///   answers exist in 5 only.
+/// - An `Attach` request carries `link_timeout_ms`, which a client on another
+///   machine sets and a client on this machine leaves out. `Leaving` carries
+///   `is_returning`; 4 sent a bare `Leaving`. The `Ping` request and the
+///   `Pong` event exist in 5 only.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A
@@ -128,6 +141,10 @@ pub const TOKEN_STORE_FORMAT: Surface = Surface {
 /// `v0.4.0` speaks 1. `v0.5.0` speaks 2. The floor is 2. Its two ends are
 /// different machines. The session protocol the two ends settle after the
 /// Welcome is a separate surface, [`SESSION_PROTOCOL`].
+///
+/// An `Attach` may carry `bridge_timeout_ms`. A listener that does not know
+/// the field ignores it, and an `Attach` without it sets no time limit on the
+/// bridge.
 pub const REMOTE_PROTOCOL: Surface = Surface {
     surface_name: "remote protocol",
     minimum_version: 2,

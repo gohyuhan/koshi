@@ -986,6 +986,23 @@ them first.
 
 Tokens are granted only from the machine holding the sessions.
 
+### Copies made in a pane
+
+With `pane-clipboard-writes { allow #true }` in the `koshi.kdl` of the machine
+holding the session, a copy that a program in a pane makes reaches the
+clipboard of a terminal attached from another machine:
+
+- an `OSC 52` copy goes to the terminal of every client whose focused pane is
+  that pane;
+- on Linux and macOS, a copy made with `pbcopy`, `xclip`, `xsel` or `wl-copy`
+  goes to the terminal of each client on another machine whose focused pane is
+  that pane.
+
+Example: `printf hi | xclip -selection clipboard` in a pane that you focus
+from your laptop with `koshi attach --remote` puts `hi` on your laptop's
+clipboard. The setting is off by default. [`koshi.kdl`](koshi.md#pane-clipboard-writes)
+lists every copy it covers and every copy it does not.
+
 ## Versions
 
 | Command | Result |
@@ -1106,6 +1123,10 @@ koshi keeps its router socket and its session sockets in one directory per
 user. On Linux and macOS that directory is `/tmp/koshi-<your user id>`, built
 from your user id and nothing else. On Windows it is `run` under your
 application data directory.
+
+On Linux and macOS, a session whose `pane-clipboard-writes` allows writes also
+keeps its folder of stand-in clipboard tools there:
+`session-<uuid>.clipboard-tools`. The folder goes when the session ends.
 
 `KOSHI_RUNTIME_DIR` names the directory instead, and koshi reads it only when
 it holds an absolute path. A relative value is ignored. Two koshi processes

@@ -360,8 +360,9 @@ pub enum CliCommand {
         )]
         output_format: OutputFormat,
     },
-    /// Open a new pane running a shell; its working directory and
-    /// environment come from the issuing terminal.
+    /// Open a new pane running a shell; it starts in the current working
+    /// directory of the pane it splits from, with the environment the session
+    /// process started with plus koshi's own variables.
     NewPane {
         #[command(flatten)]
         new_pane_flags: NewPaneFlags,
@@ -462,8 +463,10 @@ pub enum CliCommand {
         #[arg(long = "no-enter")]
         should_leave_input_at_prompt: bool,
     },
-    /// Open a new tab; its first pane inherits the issuing terminal's
-    /// working directory and environment.
+    /// Open a new tab; its first pane starts in the current working directory
+    /// of the focused pane of the terminal that switches onto the tab, with the
+    /// environment the session process started with plus koshi's own
+    /// variables.
     NewTab {
         /// Session the tab joins, by id or name; defaults to the current
         /// session, else the only running one.
@@ -668,8 +671,10 @@ pub enum CliCommand {
         )]
         output_format: OutputFormat,
     },
-    /// Open a new pane running the command given after `--`; its working
-    /// directory and environment come from the issuing terminal.
+    /// Open a new pane running the command given after `--`; it starts in the
+    /// current working directory of the pane it splits from, with the
+    /// environment the session process started with plus koshi's own
+    /// variables.
     Run {
         #[command(flatten)]
         new_pane_flags: NewPaneFlags,
@@ -1590,8 +1595,9 @@ impl NewPaneFlags {
 
 /// Build the [`SpawnSpec`] for a `run` invocation's trailing argv: the first
 /// token is the program, the rest its arguments. The working directory and
-/// environment stay empty — they are filled from the issuing terminal when
-/// the command is sent.
+/// environment stay empty: the session starts the program in the current
+/// working directory of the pane it splits from, with the environment the
+/// session process started with plus koshi's own variables.
 ///
 /// Panics when `command_arguments` is empty.
 fn build_spawn_spec_from_arguments(command_arguments: &[String]) -> SpawnSpec {

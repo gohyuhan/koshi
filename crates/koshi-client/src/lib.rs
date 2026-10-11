@@ -220,6 +220,20 @@ pub(crate) struct ViewerRestorePoint {
     placement_state: PlacementState,
 }
 
+/// Whether a viewer holds a link to its session, and how it is getting one back
+/// when it does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinkStatus {
+    /// The viewer's requests reach the session, and its frames arrive.
+    Linked,
+    /// The session is replacing its own process image, and the viewer waits
+    /// to join its new image. The tabline draws no tag.
+    AwaitingRestartedSession,
+    /// The link to a session on a server dropped, and the viewer dials that
+    /// server again. The tabline draws the tag this value describes.
+    Redialing(Reconnecting),
+}
+
 /// What placement mode does with one owned key or mouse event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PlacementInputAction {
@@ -337,11 +351,11 @@ pub struct Client {
     hovered_pane_id: Option<PaneId>,
     /// The pane whose top border currently exposes the placement handle.
     placement_handle_pane_id: Option<PaneId>,
-    /// Where this viewer's dialing stands while it has no link to the session,
-    /// and `None` while it has one. The tabline draws
-    /// `RECONNECTING (attempt 4, retry in 8s)` while it holds a
-    /// `Reconnecting { attempt: 4, retry_in_seconds: 8 }`.
-    reconnecting: Option<Reconnecting>,
+    /// Whether this viewer holds a link to its session, and how it is getting
+    /// one back when it does not. The tabline draws
+    /// `RECONNECTING (attempt 4, retry in 8s)` while it holds
+    /// `LinkStatus::Redialing(Reconnecting { attempt: 4, retry_in_seconds: Some(8) })`.
+    link_status: LinkStatus,
     /// This viewer's pane placement mode, its preview reads, and the placement
     /// revisions of the newest painted frame.
     placement_state: PlacementState,
@@ -397,7 +411,7 @@ impl Client {
             selection_scroll_origin_row_index: None,
             hovered_pane_id: None,
             placement_handle_pane_id: None,
-            reconnecting: None,
+            link_status: LinkStatus::Linked,
             placement_state: PlacementState::default(),
             active_tab_id: None,
             focused_pane_id: None,
@@ -491,11 +505,20 @@ impl Client {
         self.client_id = client_id;
     }
 
-    /// Record where this viewer's dialing stands, or `None` once it has a link
-    /// again. The tabline draws `RECONNECTING (attempt 4, retry in 8s)` for a
-    /// `Some(Reconnecting { attempt: 4, retry_in_seconds: 8 })`.
-    pub fn set_reconnecting(&mut self, reconnecting: Option<Reconnecting>) {
-        self.reconnecting = reconnecting;
+    /// Record whether this viewer holds a link to its session. The tabline
+    /// draws `RECONNECTING (attempt 4, retry in 8s)` for
+    /// `LinkStatus::Redialing(Reconnecting { attempt: 4, retry_in_seconds: Some(8) })`.
+    ///
+    /// Pane placement owns the keyboard only while the viewer is
+    /// [`LinkStatus::Linked`]. A change that moves the keyboard between the
+    /// placement keymap and the base keymap drops an open key sequence, and no
+    /// pane receives its chords.
+    pub(crate) fn set_link_status(&mut self, link_status: LinkStatus) {
+        let previous_active_input_mode = self.get_active_input_mode();
+        self.link_status = link_status;
+        if self.get_active_input_mode() != previous_active_input_mode {
+            self.pending_key_sequence = None;
+        }
     }
 
     /// The client's own outer-terminal size in cells.
@@ -1378,9 +1401,10 @@ impl Client {
     /// process. It is counted, and nothing is taken from it. So is a
     /// [`Delivery::MouseAnswer`], which answers that client's mouse round, a
     /// [`Delivery::HostWrite`], which that client writes to its own terminal,
-    /// and a [`Delivery::SwitchTo`], which moves that client to another
-    /// session. A [`Delivery::PlacementCommandRejected`] clears the matching
-    /// pending placement command.
+    /// a [`Delivery::SwitchTo`], which moves that client to another session,
+    /// and a [`Delivery::Pong`], which answers that client's ping. A
+    /// [`Delivery::PlacementCommandRejected`] clears the matching pending
+    /// placement command.
     pub fn apply_events(&mut self) -> usize {
         let mut delivery_count = 0;
         while let Ok(delivery) = self.delivery_receiver.try_recv() {
@@ -1399,15 +1423,16 @@ impl Client {
                     }
                     _ => {}
                 },
-                // A frame, a mouse round's answers, terminal bytes, and a
-                // session move all belong to a client in another process, which
-                // reads them off its own connection.
+                // A frame, a mouse round's answers, terminal bytes, a session
+                // move, and a ping's answer all belong to a client in another
+                // process, which reads them off its own connection.
                 Delivery::Frame(_)
                 | Delivery::PanePlacementSnapshot { .. }
                 | Delivery::PanePlacementRefused { .. }
                 | Delivery::MouseAnswer { .. }
-                | Delivery::HostWrite(_)
-                | Delivery::SwitchTo(_) => {}
+                | Delivery::HostWrite { .. }
+                | Delivery::SwitchTo(_)
+                | Delivery::Pong => {}
                 Delivery::PlacementCommandRejected(command_id) => {
                     self.reject_placement_command(command_id);
                 }

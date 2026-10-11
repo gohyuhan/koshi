@@ -16,20 +16,25 @@
 //! events. An unchanged record is referenced again without sending its RGBA
 //! bytes again.
 //!
-//! Five frames here are not session facts.
+//! Seven frames here are not session facts.
 //! [`Resync`](crate::event::SessionEvent::Resync) is the first: the server
 //! sends it after a client's queue overflowed, and it names how many deliveries
 //! went missing.
 //! [`MouseAnswer`](crate::event::SessionEvent::MouseAnswer) is the second: it
 //! answers one [`IpcRequestKind::Mouse`](crate::protocol::IpcRequestKind::Mouse)
 //! request and is addressed to the client that sent it.
-//! [`HostWrite`](crate::event::SessionEvent::HostWrite) is the third: bytes a
-//! pane aimed at the terminal the client runs in, such as an OSC 52 clipboard
-//! write.
-//! [`SwitchTo`](crate::event::SessionEvent::SwitchTo) is the fourth: it names
+//! [`HostWrite`](crate::event::SessionEvent::HostWrite) is the third: bytes
+//! for the terminal the client runs in, such as an OSC 52 clipboard write.
+//! [`HostWritePart`](crate::event::SessionEvent::HostWritePart) is the fourth:
+//! the first bytes of a host write longer than
+//! [`MAX_HOST_WRITE_BYTE_COUNT`](crate::event::MAX_HOST_WRITE_BYTE_COUNT).
+//! [`SwitchTo`](crate::event::SessionEvent::SwitchTo) is the fifth: it names
 //! the session the client leaves this one for.
 //! [`PlacementCommandRejected`](crate::event::SessionEvent::PlacementCommandRejected)
-//! is the fifth: it names a placement command that the session rejected.
+//! is the sixth: it names a placement command that the session rejected.
+//! [`Pong`](crate::event::SessionEvent::Pong) is the seventh: it answers one
+//! [`IpcRequestKind::Ping`](crate::protocol::IpcRequestKind::Ping) from the
+//! client.
 
 use koshi_core::command::PanePlacementTarget;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
@@ -43,6 +48,17 @@ use crate::wire::{MaybeKnown, WireName, WireVariants};
 /// An event as a client reads it: it may name a frame this build does not
 /// have.
 pub type IncomingEvent = MaybeKnown<SessionEvent>;
+
+/// The most `host_write_bytes` one [`SessionEvent::HostWrite`] or
+/// [`SessionEvent::HostWritePart`] frame carries: 12582879.
+///
+/// A `HostWritePart` frame with no bytes is
+/// `{"HostWritePart":{"host_write_bytes":""}}`, 41 bytes, and a `HostWrite`
+/// frame is 4 bytes shorter. Base64 writes each 3 bytes as 4 characters, so
+/// (16777216 - 41) / 4 * 3 = 12582879 bytes fit in one
+/// [`MAX_FRAME_BYTE_COUNT`](crate::transport::MAX_FRAME_BYTE_COUNT) frame of
+/// either kind, and 3 bytes more do not fit a `HostWritePart` frame.
+pub const MAX_HOST_WRITE_BYTE_COUNT: usize = 12_582_879;
 
 /// One frame on an attached client's event stream.
 ///
@@ -214,11 +230,29 @@ pub enum SessionEvent {
         mouse_answers: Vec<koshi_core::mouse::MouseAnswer>,
     },
     /// Bytes for the terminal this client runs in, written to it verbatim.
+    ///
+    /// The client writes the bytes of every
+    /// [`HostWritePart`](Self::HostWritePart) it read since its last
+    /// `HostWrite`, then these bytes, to its terminal in one write.
     HostWrite {
-        /// The bytes to write, in the order the session queued them. Written
-        /// as one base64 string: the two bytes `[104, 105]` are `"aGk="`.
+        /// The last bytes of the host write, in the order the session queued
+        /// them, at most [`MAX_HOST_WRITE_BYTE_COUNT`]. Written as one base64
+        /// string: the two bytes `[104, 105]` are `"aGk="`.
         #[serde(with = "crate::bytes")]
-        host_output_bytes: Vec<u8>,
+        host_write_bytes: Vec<u8>,
+    },
+    /// The first bytes of a host write longer than
+    /// [`MAX_HOST_WRITE_BYTE_COUNT`]. The client holds them, and writes them
+    /// with the bytes of the [`HostWrite`](Self::HostWrite) that follows. A
+    /// client whose link to the session drops discards the bytes it holds.
+    ///
+    /// Example: a host write of 30000000 bytes arrives as two `HostWritePart`
+    /// frames of 12582879 bytes, then one `HostWrite` frame of 4834242 bytes.
+    HostWritePart {
+        /// Exactly [`MAX_HOST_WRITE_BYTE_COUNT`] bytes. Written as one base64
+        /// string.
+        #[serde(with = "crate::bytes")]
+        host_write_bytes: Vec<u8>,
     },
     /// The client drops this session and attaches to the named one.
     SwitchTo {
@@ -231,6 +265,10 @@ pub enum SessionEvent {
         /// The rejected command.
         command_id: CommandId,
     },
+    /// The answer to one
+    /// [`IpcRequestKind::Ping`](crate::protocol::IpcRequestKind::Ping) from
+    /// this client. Carries nothing.
+    Pong,
 }
 
 impl SessionEvent {
@@ -262,8 +300,10 @@ impl SessionEvent {
             SessionEvent::Resync { .. } => "Resync",
             SessionEvent::MouseAnswer { .. } => "MouseAnswer",
             SessionEvent::HostWrite { .. } => "HostWrite",
+            SessionEvent::HostWritePart { .. } => "HostWritePart",
             SessionEvent::SwitchTo { .. } => "SwitchTo",
             SessionEvent::PlacementCommandRejected { .. } => "PlacementCommandRejected",
+            SessionEvent::Pong => "Pong",
         }
     }
 }
@@ -295,8 +335,10 @@ impl WireVariants for SessionEvent {
         "Resync",
         "MouseAnswer",
         "HostWrite",
+        "HostWritePart",
         "SwitchTo",
         "PlacementCommandRejected",
+        "Pong",
     ];
 }
 

@@ -1,10 +1,12 @@
 //! Tests for resize transactions: moving pane borders by exact signed cell
 //! counts — outward grows the pane, inward shrinks it toward the neighbor.
 
-use koshi_core::geometry::{Point, Size};
+use koshi_core::geometry::Size;
+use koshi_test_support::fixtures::build_cell_rect;
 use koshi_test_support::layout_assert::check_exact_tiling;
 
 use super::*;
+
 use crate::solver::{solve_layout, solve_layout_with_sizing, MIN_PANE_SIZE};
 use crate::tree::{LayoutNode, SplitNode};
 
@@ -58,20 +60,6 @@ fn build_pane_sizing(gap_cell_count: u16) -> PaneSizing {
         minimum_size: MIN_PANE_SIZE,
         gap_cell_count,
     }
-}
-
-/// Constructs a cell rectangle with the given origin and dimensions.
-fn build_cell_rect(origin_column: u16, origin_row: u16, column_count: u16, row_count: u16) -> Rect {
-    Rect::from_origin_and_size(
-        Point {
-            column: origin_column,
-            row: origin_row,
-        },
-        Size {
-            column_count,
-            row_count,
-        },
-    )
 }
 
 /// Solves the layout under `pane_sizing` and returns the rect of the given pane.

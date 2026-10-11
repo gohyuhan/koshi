@@ -82,8 +82,8 @@ pub const JOIN_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
 /// counted from the moment the connection opens.
 ///
 /// The dial before it has [`DIAL_TIMEOUT_DURATION`] of its own, so one request takes at most
-/// `DIAL_TIMEOUT_DURATION + REPLY_TIMEOUT_DURATION`. An attached client passes `None` instead and
-/// waits as long as it takes.
+/// `DIAL_TIMEOUT_DURATION + REPLY_TIMEOUT_DURATION`. A client that joins a session as a viewer
+/// passes [`JOIN_TIMEOUT_DURATION`] instead.
 pub const REPLY_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
 
 /// How many saved servers [`reach_all_saved_servers`] asks at once, one thread each. Records
@@ -945,19 +945,29 @@ pub fn list_remote_sessions(
 /// token and the versions this build named. The next frame the caller reads
 /// is that session server's Hello answer.
 ///
+/// `bridge_timeout` goes up in the Attach as `bridge_timeout_ms`, in whole
+/// milliseconds: the serving machine ends the connection once this caller
+/// sends nothing for that long, or one write to this caller takes no byte for
+/// that long. A timeout past `u32::MAX` milliseconds goes up as `u32::MAX`.
+///
 /// # Errors
 /// [`CliError::IpcUnavailable`] when the request could not be sent.
 pub fn attach_remote_session(
     remote_link: RemoteLink,
     session_selector: SessionSelector,
+    bridge_timeout: Duration,
 ) -> Result<(FrameReader, FrameWriter), CliError> {
     let RemoteLink {
         frame_reader,
         mut frame_writer,
         ..
     } = remote_link;
+    let bridge_timeout_ms = u32::try_from(bridge_timeout.as_millis()).unwrap_or(u32::MAX);
     frame_writer
-        .send(&RemoteClientFrame::Attach { session_selector })
+        .send(&RemoteClientFrame::Attach {
+            session_selector,
+            bridge_timeout_ms: Some(bridge_timeout_ms),
+        })
         .map_err(build_ipc_unavailable_error)?;
     Ok((frame_reader, frame_writer))
 }
@@ -1150,6 +1160,8 @@ pub fn fetch_remote_overview(
 /// from the Hello answer the server sent on this caller's behalf, then send
 /// the IPC request and read its answer.
 ///
+/// The Attach names [`REPLY_TIMEOUT_DURATION`] as its bridge timeout.
+///
 /// The dial, the Attach and the Hello answer run through
 /// [`dial_through_router_restart`] with
 /// [`RESTART_WINDOW_DURATION`](koshi_ipc::endpoint::RESTART_WINDOW_DURATION):
@@ -1165,9 +1177,12 @@ fn send_remote_ipc_request(
         dial_through_router_restart(koshi_ipc::endpoint::RESTART_WINDOW_DURATION, || {
             let (remote_link, _) =
                 connect_saved_server(server_reference, None, Some(REPLY_TIMEOUT_DURATION))?;
-            let (mut frame_reader, frame_writer) =
-                attach_remote_session(remote_link, session_selector.clone())
-                    .map_err(DialError::Unreachable)?;
+            let (mut frame_reader, frame_writer) = attach_remote_session(
+                remote_link,
+                session_selector.clone(),
+                REPLY_TIMEOUT_DURATION,
+            )
+            .map_err(DialError::Unreachable)?;
             let hello_response = read_forwarded_hello_answer(&mut frame_reader, &session_selector)?;
             Ok((frame_reader, frame_writer, hello_response))
         })?;

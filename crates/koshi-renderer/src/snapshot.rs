@@ -44,6 +44,7 @@ use koshi_terminal::graphics::{
 use koshi_terminal::grid::state::Grid;
 use koshi_terminal::state::{CursorShape, ImagePlacement, ImagePlacementId};
 
+use crate::floating_pane_chrome::compute_floating_pane_content_rect;
 use crate::region::{solve_core_regions, TablineInputs};
 
 /// The statusline data the renderer draws, re-exported from the keymap crate
@@ -54,17 +55,19 @@ pub use koshi_config::hints::{HintBinding, KeymapHints};
 ///
 /// The renderer joins [`pane_snapshots`](Self::pane_snapshots) to the
 /// [`PaneSlot`]s in [`session_snapshot`](Self::session_snapshot)'s active tab
-/// by [`PaneId`]: a slot says where a pane sits, and its [`PaneSnapshot`] says
-/// what is inside it.
+/// and to its [`FloatingPaneSlot`]s by [`PaneId`]: a slot says where a pane
+/// sits, and its [`PaneSnapshot`] says what is inside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderSnapshot {
     /// Whether a failed session restore opened a new shell whose recovery
     /// notice remains visible on the statusline.
     pub is_recovery_notice_visible: bool,
-    /// The session being viewed: its identity, active tab, and tab list.
+    /// The session being viewed: its identity, active tab, tab list, and the
+    /// floating panes the viewing client shows.
     pub session_snapshot: SessionSnapshot,
-    /// Per-pane content (grid, cursor, title), one entry per live pane in the
-    /// active tab, matched to a [`PaneSlot`] by [`PaneId`].
+    /// Per-pane content (grid, cursor, title): one entry per pane slot in the
+    /// active tab and one per floating pane slot, matched to its slot by
+    /// [`PaneId`].
     pub pane_snapshots: Vec<PaneSnapshot>,
     /// The viewing client's own state (viewport, focus, lock mode).
     pub client_snapshot: ClientSnapshot,
@@ -193,6 +196,15 @@ impl RenderSnapshot {
             committed_regions: None,
         }
     }
+
+    /// The content snapshot of the pane `pane_id` in this frame, or `None`
+    /// when the frame carries no content for it.
+    #[must_use]
+    pub fn find_pane_snapshot(&self, pane_id: PaneId) -> Option<&PaneSnapshot> {
+        self.pane_snapshots
+            .iter()
+            .find(|pane_snapshot| pane_snapshot.pane_id == pane_id)
+    }
 }
 
 /// The region geometry that was committed with one painted frame.
@@ -242,7 +254,8 @@ impl CommittedRegions {
 /// One item on a subscriber's queue: a live event, the frame composed for the
 /// subscriber's client, a fresh frame that resyncs a subscriber whose queue
 /// overflowed, the answers to one round of mouse actions, bytes for the
-/// subscriber's own terminal, or the session its client moves to.
+/// subscriber's own terminal, the session its client moves to, or the answer
+/// to its client's ping.
 ///
 /// All of them ride the same queue in order: a subscriber that missed events
 /// reads the backlog it already had, then the frame, then live events again.
@@ -288,11 +301,21 @@ pub enum Delivery {
     },
     /// Bytes for the terminal the subscriber's client runs in, written to it
     /// verbatim.
-    HostWrite(Vec<u8>),
+    HostWrite {
+        /// The bytes, in the order the session queued them.
+        host_write_bytes: Vec<u8>,
+        /// One reference to the marker the session made for this host write.
+        /// The session counts the host write as in flight while any reference
+        /// to the marker exists: dropping this delivery, and each clone of it,
+        /// ends that.
+        in_flight_marker: Arc<()>,
+    },
     /// The session the subscriber's client leaves this one for.
     SwitchTo(SessionId),
     /// A pane placement command from the subscriber was rejected.
     PlacementCommandRejected(CommandId),
+    /// The answer to one ping from the subscriber's client.
+    Pong,
 }
 
 /// The viewer-owned frame state: which pane the pointer is over, which top
@@ -326,26 +349,31 @@ pub struct ViewerChrome {
     /// without changing focus. The renderer windows the tab list from this and
     /// clamps an index past the last tab.
     pub tabline_offset: Option<usize>,
-    /// Where the viewer's dialing stands while it has no link to the session,
-    /// and `None` while it has one. The tabline draws
+    /// Where the viewer's dialing stands while it dials its server again, and
+    /// `None` otherwise. The tabline draws
     /// `RECONNECTING (attempt 4, retry in 8s)` from a
-    /// `Reconnecting { attempt: 4, retry_in_seconds: 8 }`.
+    /// `Reconnecting { attempt: 4, retry_in_seconds: Some(8) }`, and
+    /// `RECONNECTING (attempt 4, dialing)` from a
+    /// `Reconnecting { attempt: 4, retry_in_seconds: None }`.
     pub reconnecting: Option<Reconnecting>,
 }
 
-/// How far a viewer with no link has got: which dial comes next, and how many
-/// seconds are left before it goes out.
+/// How far a viewer that dials its server again has got: which dial runs or
+/// comes next, and how many seconds are left before it goes out.
 ///
-/// The viewer replaces this once a second while it waits, so the tag it draws
-/// counts down: `retry_in_seconds` 3, then 2, then 1, then the dial.
+/// The viewer replaces this each time the whole seconds left change, so the
+/// tag it draws counts down: `retry_in_seconds` `Some(3)`, then `Some(2)`, then
+/// `Some(1)`, then `None` while the dial runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reconnecting {
-    /// Which dial comes next, counting from 1. Drawn as the `attempt 4` part of
-    /// `RECONNECTING (attempt 4, retry in 8s)`.
+    /// Which dial runs or comes next, counting from 1. Drawn as the
+    /// `attempt 4` part of `RECONNECTING (attempt 4, retry in 8s)`.
     pub attempt: u32,
-    /// Whole seconds left before that dial goes out. Drawn as the `retry in 8s`
-    /// part of `RECONNECTING (attempt 4, retry in 8s)`.
-    pub retry_in_seconds: u32,
+    /// Whole seconds left before that dial goes out, rounded up, drawn as the
+    /// `retry in 8s` part of `RECONNECTING (attempt 4, retry in 8s)`. `None`
+    /// while the dial runs, drawn as the `dialing` part of
+    /// `RECONNECTING (attempt 4, dialing)`.
+    pub retry_in_seconds: Option<u32>,
 }
 
 /// Where a frame's surfaces sit, borrowed: the session with its solved active
@@ -400,6 +428,25 @@ impl<'a> FrameLayout<'a> {
             tabline_offset: self.viewer_chrome.tabline_offset,
         }
     }
+
+    /// The floating panes this viewer draws in this frame, back to front:
+    /// every slot in the session's
+    /// [`floating_pane_slots`](SessionSnapshot::floating_pane_slots). None
+    /// while `viewer_chrome.is_pane_placement_visible` is `true`, and none
+    /// while the active tab's `is_every_pane_suppressed` is `true` (the frame
+    /// shows the "terminal too small" overlay).
+    #[must_use]
+    pub(crate) fn list_drawn_floating_pane_slots(&self) -> &'a [FloatingPaneSlot] {
+        if self.viewer_chrome.is_pane_placement_visible
+            || self
+                .session_snapshot
+                .active_tab_snapshot
+                .is_every_pane_suppressed
+        {
+            return &[];
+        }
+        &self.session_snapshot.floating_pane_slots
+    }
 }
 
 /// The owned form of [`FrameLayout`], for a caller that builds these two
@@ -442,7 +489,7 @@ pub struct MouseFrame {
     /// The viewing client's own state (viewport, focus, lock mode).
     pub client_snapshot: ClientSnapshot,
     /// One entry per pane the frame carried content for, matched to a
-    /// [`PaneSlot`] by pane id.
+    /// [`PaneSlot`] or a [`FloatingPaneSlot`] by pane id.
     pub mouse_panes: Vec<MousePane>,
     /// The region solve and input revision that were painted with this frame.
     pub committed_regions: CommittedRegions,
@@ -487,7 +534,8 @@ impl MouseFrame {
 /// row is, and what decides where a wheel tick over it goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MousePane {
-    /// The pane this entry describes, matched to a [`PaneSlot`] by id.
+    /// The pane this entry describes, matched to a [`PaneSlot`] or a
+    /// [`FloatingPaneSlot`] by id.
     pub pane_id: PaneId,
     /// The absolute line number of the pane's top visible row, copied from
     /// [`PaneSnapshot::view_top_row_index`].
@@ -519,8 +567,9 @@ impl From<&PaneSnapshot> for MousePane {
     }
 }
 
-/// The session-scoped part of a frame: identity plus the active tab and the
-/// metadata needed to draw the tab bar.
+/// The session-scoped part of a frame: identity plus the active tab, the
+/// metadata needed to draw the tab bar, and the floating panes the viewing
+/// client shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSnapshot {
     /// The session's stable id.
@@ -533,6 +582,12 @@ pub struct SessionSnapshot {
     pub active_tab_snapshot: TabSnapshot,
     /// Lightweight entry per tab for the tab bar (index, name, active marker).
     pub tabs_metadata: Vec<TabMetadata>,
+    /// The floating panes the viewing client shows, back to front: the pane
+    /// that client focused least recently first, its minimized panes left
+    /// out. Empty when the client has no floating viewport: it reports
+    /// [`PaneArea::Starving`], or a pane area narrower than 4 columns or shorter
+    /// than 5 rows.
+    pub floating_pane_slots: Vec<FloatingPaneSlot>,
 }
 
 /// One tab's entry in the tab bar: enough to draw the tab list without its full
@@ -611,9 +666,46 @@ pub struct PaneSlot {
     pub is_suppressed: bool,
 }
 
+/// One floating pane the viewing client shows, placed for that client.
+/// Paired with a [`PaneSnapshot`] by [`pane_id`](Self::pane_id).
+///
+/// Both rects count cells from the client's pane-area origin, with no
+/// letterbox offset: an outer rect at column `150` draws at pane-area column
+/// `150`, also when the client's tiled layout starts at column `60`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloatingPaneSlot {
+    /// The floating pane this slot places.
+    pub pane_id: PaneId,
+    /// The pane's box with its chrome: the border ring, the titlebar row and
+    /// the separator row.
+    pub outer_rect: Rect,
+    /// The cells inside the chrome, the size of the pane's PTY
+    /// ([`compute_floating_pane_content_rect`]). The renderer draws cells and
+    /// places the cursor here.
+    pub content_rect: Rect,
+    /// Whether the viewing client pinned the pane at its cell.
+    pub is_pinned: bool,
+}
+
+impl FloatingPaneSlot {
+    /// The slot of the floating pane `pane_id` drawn in the box `outer_rect`,
+    /// its content rect taken from that box
+    /// ([`compute_floating_pane_content_rect`]). Outer `(24, 8)` `72x22` gives
+    /// content `(25, 11)` `70x18`.
+    #[must_use]
+    pub fn from_outer_rect(pane_id: PaneId, outer_rect: Rect, is_pinned: bool) -> Self {
+        Self {
+            pane_id,
+            outer_rect,
+            content_rect: compute_floating_pane_content_rect(outer_rect),
+            is_pinned,
+        }
+    }
+}
+
 /// One pane's content: what the renderer paints inside the matching
-/// [`PaneSlot`]'s content rect, plus what a mouse event over this pane is
-/// answered from.
+/// [`PaneSlot`]'s or [`FloatingPaneSlot`]'s content rect, plus what a mouse
+/// event over this pane is answered from.
 ///
 /// Those last fields are not painted. [`mouse_tracking`](Self::mouse_tracking),
 /// [`is_alternate_scroll_enabled`](Self::is_alternate_scroll_enabled),
@@ -624,7 +716,8 @@ pub struct PaneSlot {
 /// frame is painted, and that is what the viewer's decision reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneSnapshot {
-    /// The pane this content belongs to, matched to a [`PaneSlot`] by id.
+    /// The pane this content belongs to, matched to a [`PaneSlot`] or a
+    /// [`FloatingPaneSlot`] by id.
     pub pane_id: PaneId,
     /// The pane's resolved display title: on the alternate screen the running
     /// app's OSC 0/1/2 title; on the primary screen the shell's OSC 7 working
@@ -1035,8 +1128,7 @@ pub struct ClientSnapshot {
     /// The pane that takes the client's input: its focused floating pane,
     /// else its focused pane in the active tab. `None` when the client focuses
     /// neither. The renderer highlights the pane whose [`PaneSlot::pane_id`]
-    /// matches, and places the cursor there. A floating pane matches no
-    /// [`PaneSlot`].
+    /// or [`FloatingPaneSlot::pane_id`] matches, and places the cursor there.
     pub focused_pane_id: Option<PaneId>,
     /// The client's input mode, as the session has it: it drives the mode tag,
     /// decides whether a paste from the client's own terminal reaches the pane,

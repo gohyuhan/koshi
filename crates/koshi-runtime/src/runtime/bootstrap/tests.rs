@@ -331,14 +331,14 @@ fn bootstrap_local_injects_the_in_session_identity_env() {
     let tab = session.tabs.values().next().expect("one tab");
     let pane_id = tab.get_layout_tree().list_leaf_pane_ids()[0];
     let mut expected_shell_spec = server.build_default_shell_spec(None, BTreeMap::new());
-    expected_shell_spec
-        .environment_variables
-        .extend(build_koshi_environment(
-            session_id,
-            Some(client_id),
-            pane_id,
-            koshi_paths::resolve_runtime_directory().as_deref(),
-        ));
+    add_koshi_environment(
+        &mut expected_shell_spec.environment_variables,
+        session_id,
+        Some(client_id),
+        pane_id,
+        koshi_paths::resolve_runtime_directory().as_deref(),
+        false,
+    );
     assert_eq!(
         fake_pty_backend.get_spawn_spec(pane_id).unwrap(),
         expected_shell_spec
@@ -413,14 +413,14 @@ fn profile_panes_carry_the_in_session_identity_env() {
     let tab = session.tabs.values().next().expect("one tab");
     for pane_id in tab.get_layout_tree().list_leaf_pane_ids() {
         let mut expected_pane_shell_spec = server.build_default_shell_spec(None, BTreeMap::new());
-        expected_pane_shell_spec
-            .environment_variables
-            .extend(build_koshi_environment(
-                session_id,
-                Some(client_id),
-                pane_id,
-                koshi_paths::resolve_runtime_directory().as_deref(),
-            ));
+        add_koshi_environment(
+            &mut expected_pane_shell_spec.environment_variables,
+            session_id,
+            Some(client_id),
+            pane_id,
+            koshi_paths::resolve_runtime_directory().as_deref(),
+            false,
+        );
         assert_eq!(
             fake_pty_backend.get_spawn_spec(pane_id).unwrap(),
             expected_pane_shell_spec,

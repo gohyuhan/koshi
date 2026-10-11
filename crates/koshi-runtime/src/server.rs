@@ -237,8 +237,6 @@ pub struct Server {
     /// Decides when the dispatcher repaints: event handlers mark invalidation
     /// reasons on it, the event loop polls it for render timing.
     pub(crate) render_scheduler: RenderScheduler,
-    /// Monotonic time at which retained image animations were last advanced.
-    pub(crate) animation_clock: Instant,
     /// Receiving end of the single runtime event inbox; the loop drains it.
     inbox_receiver: Receiver<RuntimeEvent>,
     /// True when a quit asked for zero-grace process teardown, in this process
@@ -273,12 +271,6 @@ pub struct Server {
     /// hands the view back once. The store lives only in memory: nothing in it
     /// is written to disk, sent over a socket, or carried across an image swap.
     pub(crate) saved_view_store: SavedViewStore,
-    /// Bytes waiting to be written to each client's own outer terminal —
-    /// escape sequences aimed at the terminal program the client runs in, not
-    /// at any pane's child. The copy queues its OSC 52 clipboard write here;
-    /// [`push_frames`](Self::push_frames) drains a client's queue onto its
-    /// subscriber, ahead of that client's next frame.
-    host_write_bytes_by_client_id: HashMap<ClientId, Vec<u8>>,
 }
 
 impl Server {
@@ -305,7 +297,6 @@ impl Server {
             subscriptions: Vec::new(),
             ipc_server: None,
             render_scheduler: RenderScheduler::new(),
-            animation_clock: Instant::now(),
             inbox_receiver,
             should_shutdown_immediately: false,
             is_quit_requested: false,
@@ -313,7 +304,6 @@ impl Server {
             restart_check: None,
             client_ids_awaiting_reconnect: HashSet::new(),
             saved_view_store: SavedViewStore::default(),
-            host_write_bytes_by_client_id: HashMap::new(),
             app_layer,
             config,
             client_config,
@@ -417,7 +407,7 @@ impl Server {
             };
             server.live_pane_ids.insert(pane_id);
             server.pty_size_by_pane_id.insert(pane_id, pty_size);
-            server.terminal_engine_by_pane_id.insert(
+            server.insert_terminal_engine(
                 pane_id,
                 TerminalEngine::from_carried_state(
                     carried_pane_state.terminal_state,
@@ -569,10 +559,9 @@ impl Server {
     /// own view state, which is gone with the record.
     ///
     /// A client with no subscription of its own leaves the bus untouched.
-    /// Bytes still queued for the client's own terminal are dropped with it:
-    /// the terminal that was to be written to is gone.
+    /// Bytes still waiting for the client's own terminal are dropped with its
+    /// subscription: the terminal that was to be written to is gone.
     pub(crate) fn unsubscribe_client(&mut self, client_id: ClientId) {
-        self.host_write_bytes_by_client_id.remove(&client_id);
         let bus = &mut self.event_bus;
         self.subscriptions
             .retain(|&(subscriber_id, viewed_client_id)| {
@@ -630,15 +619,10 @@ impl Server {
     }
 
     /// Put each client's current frame on its queue. Called once per due
-    /// render, after [`resync_lagged`](Self::resync_lagged), and once more by a
-    /// caller that has stopped rendering and still holds bytes for a client's
-    /// own terminal.
+    /// render, after [`resync_lagged`](Self::resync_lagged).
     ///
     /// The frame is the subscriber's viewing client's, built by
     /// [`build_snapshot`](Self::build_snapshot).
-    ///
-    /// Bytes queued for a client's own terminal go on its subscriber's queue
-    /// first, so a clipboard write lands ahead of the frame drawn after it.
     ///
     /// A frame that does not fit the queue is dropped and the next due render
     /// offers a newer one. A subscriber the send removed — its receiver is gone
@@ -648,10 +632,6 @@ impl Server {
         // the loop touches `subscriptions` itself.
         let subscriptions = std::mem::take(&mut self.subscriptions);
         for &(subscriber_id, client_id) in &subscriptions {
-            if let Some(host_output_bytes) = self.host_write_bytes_by_client_id.remove(&client_id) {
-                self.event_bus
-                    .try_send_host_write(subscriber_id, host_output_bytes);
-            }
             let Some(snapshot) = self.build_snapshot(client_id) else {
                 continue;
             };
@@ -665,7 +645,10 @@ impl Server {
     }
 
     /// Put the session `client_id` moves to on the queue of every subscriber
-    /// that views that client.
+    /// that views that client, after the bytes waiting for the client's own
+    /// terminal, as
+    /// [`EventBus::try_send_switch`](crate::runtime::bus::EventBus::try_send_switch)
+    /// states.
     ///
     /// `true` when at least one subscriber holds the move. `false` when the
     /// client has no subscriber, or every queue was full: a full queue drops
@@ -684,6 +667,15 @@ impl Server {
         has_sent_switch
     }
 
+    /// The subscriber that views `client_id`, or `None` when no subscriber
+    /// does. The first in subscription order when several do.
+    fn find_subscriber_id_by_client_id(&self, client_id: ClientId) -> Option<SubscriberId> {
+        self.subscriptions
+            .iter()
+            .find(|&&(_, viewed_client_id)| viewed_client_id == client_id)
+            .map(|&(subscriber_id, _)| subscriber_id)
+    }
+
     /// Build and queue one read-only placement preview for `client_id`.
     pub(crate) fn send_placement_snapshot(
         &mut self,
@@ -692,12 +684,7 @@ impl Server {
         source_pane_id: PaneId,
         destination_tab_id: TabId,
     ) -> bool {
-        let Some(subscriber_id) = self
-            .subscriptions
-            .iter()
-            .find(|&&(_, viewed_client_id)| viewed_client_id == client_id)
-            .map(|&(subscriber_id, _)| subscriber_id)
-        else {
+        let Some(subscriber_id) = self.find_subscriber_id_by_client_id(client_id) else {
             return false;
         };
         match self.build_placement_snapshot(client_id, source_pane_id, destination_tab_id) {
@@ -721,16 +708,20 @@ impl Server {
         client_id: ClientId,
         command_id: CommandId,
     ) -> bool {
-        let Some(subscriber_id) = self
-            .subscriptions
-            .iter()
-            .find(|&&(_, viewed_client_id)| viewed_client_id == client_id)
-            .map(|&(subscriber_id, _)| subscriber_id)
-        else {
+        let Some(subscriber_id) = self.find_subscriber_id_by_client_id(client_id) else {
             return false;
         };
         self.event_bus
             .try_send_placement_command_rejection(subscriber_id, command_id)
+    }
+
+    /// Put the answer to one ping on the queue of the client `client_id`, as
+    /// [`EventBus::try_send_pong`] states. A client that no subscriber views
+    /// gets nothing.
+    pub(crate) fn send_pong(&mut self, client_id: ClientId) {
+        if let Some(subscriber_id) = self.find_subscriber_id_by_client_id(client_id) {
+            self.event_bus.try_send_pong(subscriber_id);
+        }
     }
 
     /// Log each of `events`, add it to the recent-events ring, then deliver it
@@ -753,13 +744,37 @@ impl Server {
         }
     }
 
-    /// Queue `host_input_bytes` for `client_id`'s outer terminal, behind anything already
-    /// queued.
-    pub(crate) fn queue_host_write(&mut self, client_id: ClientId, host_input_bytes: &[u8]) {
-        self.host_write_bytes_by_client_id
-            .entry(client_id)
-            .or_default()
-            .extend_from_slice(host_input_bytes);
+    /// Queue `host_write_bytes`, one whole escape sequence, for `client_id`'s
+    /// outer terminal on the first subscriber that views `client_id`, as
+    /// [`EventBus::queue_host_write`](crate::runtime::bus::EventBus::queue_host_write)
+    /// states.
+    ///
+    /// Returns `false`, and drops the bytes, when no subscriber views
+    /// `client_id`: the client is not connected. Returns `false` when the
+    /// subscriber's queue drops the bytes, as
+    /// [`EventBus::queue_host_write`](crate::runtime::bus::EventBus::queue_host_write)
+    /// states.
+    pub(crate) fn queue_host_write(
+        &mut self,
+        client_id: ClientId,
+        host_write_bytes: &[u8],
+    ) -> bool {
+        match self.find_subscriber_id_by_client_id(client_id) {
+            Some(subscriber_id) => self
+                .event_bus
+                .queue_host_write(subscriber_id, host_write_bytes),
+            None => false,
+        }
+    }
+
+    /// Send the bytes waiting for `client_id`'s own terminal once its
+    /// connection writer reports the last host write written, as
+    /// [`EventBus::send_pending_host_write`](crate::runtime::bus::EventBus::send_pending_host_write)
+    /// states. A client with no subscriber sends nothing.
+    pub(crate) fn handle_host_write_sent(&mut self, client_id: ClientId) {
+        if let Some(subscriber_id) = self.find_subscriber_id_by_client_id(client_id) {
+            let _ = self.event_bus.send_pending_host_write(subscriber_id);
+        }
     }
 
     /// Whether a `core:quit` command was applied, in this process or carried

@@ -45,9 +45,10 @@ use koshi_ipc::frame::{
 };
 use koshi_ipc::placement::PanePlacementSnapshot;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, PaneSlot, PaneSnapshot,
-    PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot, PlacementTabSnapshot,
-    RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, FloatingPaneSlot, GridView, ImagePlacementSnapshot, PaneSlot,
+    PaneSnapshot, PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot,
+    PlacementTabSnapshot, RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot,
+    TabMetadata, TabSnapshot,
 };
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
@@ -102,6 +103,17 @@ fn build_render_snapshot_with_images(
                 .tab_snapshots
                 .iter()
                 .map(build_tab_metadata)
+                .collect(),
+            floating_pane_slots: painted_frame
+                .session_snapshot
+                .floating_pane_slots
+                .iter()
+                .map(|frame_floating_pane_slot| FloatingPaneSlot {
+                    pane_id: frame_floating_pane_slot.pane_id,
+                    outer_rect: frame_floating_pane_slot.outer_rect,
+                    content_rect: frame_floating_pane_slot.content_rect,
+                    is_pinned: frame_floating_pane_slot.is_pinned,
+                })
                 .collect(),
         },
         pane_snapshots: painted_frame

@@ -46,7 +46,8 @@ pub const DEFAULT_THEME_NAME: &str = "default";
 
 /// The settings the session host reads: the shared layout floor, the
 /// scrollback buffers it owns, the environment it spawns children into, its
-/// own log file, and who else on this machine may reach it.
+/// own log file, who else on this machine may reach it, and whether its panes
+/// may write the clipboard.
 ///
 /// One session has one of these however many viewers are attached. Every
 /// field here describes something all of them share. A viewer's own
@@ -78,6 +79,9 @@ pub struct ServerConfig {
     pub shared_sessions_directory: Option<PathBuf>,
     /// Whether the session ends when its last client leaves.
     pub should_auto_close_session: bool,
+    /// Whether a program in a pane may write the clipboard of the clients that
+    /// focus that pane, and the largest copy it may write.
+    pub pane_clipboard_writes: PaneClipboardWriteConfig,
 }
 
 impl Default for ServerConfig {
@@ -93,6 +97,34 @@ impl Default for ServerConfig {
             remote_listen_address: None,
             shared_sessions_directory: None,
             should_auto_close_session: false,
+            pane_clipboard_writes: PaneClipboardWriteConfig::default(),
+        }
+    }
+}
+
+/// The `pane-clipboard-writes` block: whether a program in a pane may write
+/// the clipboard, through an `OSC 52` sequence or through a clipboard tool
+/// such as `pbcopy`, and the largest copy it may write.
+///
+/// The session reads it when it starts and when it restarts into a new build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneClipboardWriteConfig {
+    /// Whether the session reads the `OSC 52` copies of every pane, and whether
+    /// a pane started while it is `true` finds the stand-in clipboard tools
+    /// first on its `PATH`. `false` makes a pane's copy reach no clipboard
+    /// through koshi.
+    pub should_allow_writes: bool,
+    /// The most decoded bytes one copy may carry, at least `1`. An `OSC 52`
+    /// copy past it makes no copy. A clipboard tool copy past it goes to the
+    /// real tool on the session's machine with every byte.
+    pub maximum_copy_byte_count: usize,
+}
+
+impl Default for PaneClipboardWriteConfig {
+    fn default() -> Self {
+        Self {
+            should_allow_writes: false,
+            maximum_copy_byte_count: 8 * 1024 * 1024,
         }
     }
 }
@@ -145,6 +177,19 @@ pub struct ClientConfig {
     /// dropped link, with the message that names how to attach again by hand. A
     /// link to a session on this machine ends the viewer either way.
     pub should_reconnect_remote_session: bool,
+    /// The longest a viewer's link to a session on another machine may carry
+    /// nothing, in milliseconds, at least `1`. The viewer sends the session a
+    /// ping every third of this time, and the session answers each ping. A
+    /// viewer that reads nothing on the link for this long counts the link as
+    /// dropped, and a session that reads nothing from the viewer for this long
+    /// removes the viewer's client. The router of the machine that serves the
+    /// session ends its link to the viewer when a read from the viewer gets no
+    /// byte, or a write to the viewer takes no byte, for this time plus 20
+    /// seconds. Example: `30000` sends a ping every 10 seconds, counts the link
+    /// as dropped after 30 seconds with nothing read, and lets the serving
+    /// router end the link after 50 seconds. A link to a session on this
+    /// machine sends no ping and has no limit.
+    pub remote_link_timeout_ms: u32,
 }
 
 impl Default for ClientConfig {
@@ -163,6 +208,7 @@ impl Default for ClientConfig {
             should_reduce_motion: false,
             should_stay_in_pane_placement_mode_after_placement: true,
             should_reconnect_remote_session: true,
+            remote_link_timeout_ms: 30_000,
         }
     }
 }

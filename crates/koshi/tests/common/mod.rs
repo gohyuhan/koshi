@@ -5,6 +5,8 @@
 //! a test pane runs.
 //! [`in_process_session`] runs one session server on a thread of the test
 //! process. [`session_connection`] speaks to a session server either way.
+//! [`RunningClient`] holds a `koshi` client the test started, and the waits
+//! below read what it did.
 //!
 //! Every test binary declaring `mod common;` compiles all of it. No single
 //! binary uses every helper, and an unused helper is allowed here.
@@ -16,7 +18,7 @@ pub mod session_connection;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use koshi_core::ids::SessionId;
@@ -563,4 +565,113 @@ pub fn build_no_such_session_result(session_id: SessionId) -> RouterResult {
         code: IpcErrorCode::NotFound,
         message: format!("no session {session_id} is running"),
     })
+}
+
+/// A `koshi` client the test started. Dropping it ends the process.
+pub struct RunningClient {
+    pub child_process: Child,
+}
+
+impl Drop for RunningClient {
+    fn drop(&mut self) {
+        let _ = self.child_process.kill();
+        let _ = self.child_process.wait();
+    }
+}
+
+/// `the client exited <status>: <what it wrote to its error stream>` once
+/// `running_client` has ended, for a failure message. `None` while it runs,
+/// or while its state cannot be read.
+pub fn format_client_exit(running_client: &mut RunningClient) -> Option<String> {
+    let exit_status = running_client.child_process.try_wait().ok().flatten()?;
+    let mut client_error_text = String::new();
+    if let Some(client_error_stream) = running_client.child_process.stderr.as_mut() {
+        let _ = client_error_stream.read_to_string(&mut client_error_text);
+    }
+    Some(format!(
+        "the client exited {exit_status}: {}",
+        client_error_text.trim()
+    ))
+}
+
+/// Poll the overview of session `session_id` in `runtime_directory` every
+/// [`POLL_INTERVAL_DURATION`] until it lists `client_count` attached clients.
+///
+/// # Panics
+/// When the overview cannot be read, or lists another count after
+/// [`WAIT_DURATION`]. The message names how `running_client` exited, when it
+/// has.
+pub fn wait_for_attached_client_count(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    client_count: usize,
+    running_client: &mut RunningClient,
+) {
+    let wait_deadline = Instant::now() + WAIT_DURATION;
+    loop {
+        let session_overview = koshi_link::discovery::fetch_session_overview(
+            runtime_directory,
+            None,
+            session_id,
+            None,
+        )
+        .expect("the session server describes itself");
+        if session_overview.clients.len() == client_count {
+            return;
+        }
+        assert!(
+            Instant::now() < wait_deadline,
+            "session {session_id} lists {} clients, not {client_count}; {}",
+            session_overview.clients.len(),
+            format_client_exit(running_client)
+                .unwrap_or_else(|| "the client is still running".to_string())
+        );
+        std::thread::sleep(POLL_INTERVAL_DURATION);
+    }
+}
+
+/// Wait for `running_client` to end, polling every [`POLL_INTERVAL_DURATION`],
+/// and hand back its exit status and its error stream.
+///
+/// # Panics
+/// When it still runs after [`WAIT_DURATION`], or its error stream is not a
+/// pipe of UTF-8 text.
+pub fn wait_for_client_exit(running_client: &mut RunningClient) -> (ExitStatus, String) {
+    let wait_deadline = Instant::now() + WAIT_DURATION;
+    let exit_status = loop {
+        if let Some(exit_status) = running_client
+            .child_process
+            .try_wait()
+            .expect("the client's state can be read")
+        {
+            break exit_status;
+        }
+        assert!(Instant::now() < wait_deadline, "the client kept running");
+        std::thread::sleep(POLL_INTERVAL_DURATION);
+    };
+    let mut client_error_text = String::new();
+    running_client
+        .child_process
+        .stderr
+        .take()
+        .expect("the client's errors are a pipe")
+        .read_to_string(&mut client_error_text)
+        .expect("the client's errors read as text");
+    (exit_status, client_error_text)
+}
+
+/// What `running_client` wrote to its standard output, read to the end.
+///
+/// # Panics
+/// When its standard output is not a pipe of UTF-8 text.
+pub fn read_client_output_text(running_client: &mut RunningClient) -> String {
+    let mut client_output_text = String::new();
+    running_client
+        .child_process
+        .stdout
+        .take()
+        .expect("the client's output is a pipe")
+        .read_to_string(&mut client_output_text)
+        .expect("the client's output reads as text");
+    client_output_text
 }

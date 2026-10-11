@@ -1,23 +1,9 @@
 //! Tests for [`list_content_rects`].
 
-use koshi_core::geometry::{Point, Size};
+use koshi_test_support::fixtures::build_cell_rect;
 
 use super::*;
 use crate::solver::StackHeader;
-
-/// Constructs a test cell rectangle at the given origin and dimensions.
-fn build_cell_rect(origin_column: u16, origin_row: u16, column_count: u16, row_count: u16) -> Rect {
-    Rect::from_origin_and_size(
-        Point {
-            column: origin_column,
-            row: origin_row,
-        },
-        Size {
-            column_count,
-            row_count,
-        },
-    )
-}
 
 /// Constructs a test layout solve with the given pane rectangles, suppressed pane IDs, and stack
 /// headers.

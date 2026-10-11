@@ -33,8 +33,9 @@ use koshi_core::log::{LogFormat, LogLevel};
 use crate::key::Leader;
 use crate::types::{
     ClientConfig, ColorPalette, CopyConfig, KeybindingsConfig, LayoutDefaults, LoggingConfig,
-    ModeBindings, ModeName, MouseConfig, PaneConfig, RgbColor, ScrollbackLimits, ScrollbackView,
-    ServerConfig, TerminalConfig, ThemeConfig, UpdateConfig, WheelScroll,
+    ModeBindings, ModeName, MouseConfig, PaneClipboardWriteConfig, PaneConfig, RgbColor,
+    ScrollbackLimits, ScrollbackView, ServerConfig, TerminalConfig, ThemeConfig, UpdateConfig,
+    WheelScroll,
 };
 
 /// Folds `config_layers` onto `base_server_config` in order and returns the
@@ -193,6 +194,8 @@ pub struct PartialKoshiConfig {
     pub should_stay_in_pane_placement_mode_after_placement: Option<bool>,
     /// Remote-reconnect override.
     pub should_reconnect_remote_session: Option<bool>,
+    /// Remote link timeout override, in milliseconds.
+    pub remote_link_timeout_ms: Option<u32>,
     /// Beta-feature gate override.
     pub should_allow_beta_features: Option<bool>,
     /// Other-users gate override.
@@ -207,6 +210,8 @@ pub struct PartialKoshiConfig {
     pub shared_sessions_directory: Option<Option<PathBuf>>,
     /// Auto-close override.
     pub should_auto_close_session: Option<bool>,
+    /// Pane clipboard write overrides.
+    pub pane_clipboard_writes: Option<PartialPaneClipboardWriteConfig>,
 }
 
 impl PartialKoshiConfig {
@@ -245,6 +250,10 @@ impl PartialKoshiConfig {
             &mut server_config.should_auto_close_session,
             self.should_auto_close_session,
         );
+        if let Some(pane_clipboard_writes) = self.pane_clipboard_writes {
+            pane_clipboard_writes
+                .apply_to_pane_clipboard_write_config(&mut server_config.pane_clipboard_writes);
+        }
     }
 
     /// Applies the viewer-owned sections' overrides onto `client_config`, ignoring
@@ -289,6 +298,10 @@ impl PartialKoshiConfig {
         merge_override_field(
             &mut client_config.should_reconnect_remote_session,
             self.should_reconnect_remote_session,
+        );
+        merge_override_field(
+            &mut client_config.remote_link_timeout_ms,
+            self.remote_link_timeout_ms,
         );
     }
 
@@ -486,6 +499,31 @@ impl PartialCopyConfig {
         merge_override_field(
             &mut copy_config.should_trim_trailing_whitespace,
             self.should_trim_trailing_whitespace,
+        );
+    }
+}
+
+/// Pane clipboard write overrides.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PartialPaneClipboardWriteConfig {
+    /// Whether a program in a pane may write the clipboard.
+    pub should_allow_writes: Option<bool>,
+    /// The most decoded bytes one copy may carry, at least `1`.
+    pub maximum_copy_byte_count: Option<usize>,
+}
+
+impl PartialPaneClipboardWriteConfig {
+    fn apply_to_pane_clipboard_write_config(
+        self,
+        pane_clipboard_write_config: &mut PaneClipboardWriteConfig,
+    ) {
+        merge_override_field(
+            &mut pane_clipboard_write_config.should_allow_writes,
+            self.should_allow_writes,
+        );
+        merge_override_field(
+            &mut pane_clipboard_write_config.maximum_copy_byte_count,
+            self.maximum_copy_byte_count,
         );
     }
 }

@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use koshi_core::geometry::{ImageCellGeometry, Point, Size};
 use koshi_sixel::{IndexedImage, SixelPalette};
@@ -63,9 +64,23 @@ pub(super) struct ImageContent {
     animation_frame_index: u32,
     animation_loop_count: u32,
     animation_elapsed_nanos: u64,
+    /// The time at which `animation_elapsed_nanos` was measured. `None` while
+    /// the animation is stopped, and while its clock waits for the next advance
+    /// to start it: after a start, a restore, or a change of the current frame
+    /// outside an advance.
+    animation_elapsed_measured_at: Option<Instant>,
     is_animation_running: bool,
     is_animation_loading: bool,
     sixel: Option<SixelImageSource>,
+}
+
+impl ImageContent {
+    /// Sets the time the current frame has shown to zero. A running
+    /// animation's clock starts again at its next advance.
+    fn clear_animation_elapsed_time(&mut self) {
+        self.animation_elapsed_nanos = 0;
+        self.animation_elapsed_measured_at = None;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1178,9 +1193,14 @@ pub(super) fn serialize_kitty_image(
     })
 }
 
+/// The image contents of `terminal_state`, one per identity. Each
+/// `animation_elapsed_nanos` is the time the current frame has shown at the
+/// moment of the call: a running animation whose clock started adds the time
+/// since `animation_elapsed_measured_at`.
 pub(super) fn serialize_image_content_table(
     terminal_state: &TerminalState,
 ) -> Result<Vec<SerializedImageContent>, String> {
+    let serialization_timestamp = Instant::now();
     let mut image_content_by_id = BTreeMap::<ImageContentId, Arc<ImageContent>>::new();
     let mut add_image_content = |image_content: &Arc<ImageContent>| -> Result<(), String> {
         if let Some(existing_image_content) =
@@ -1231,7 +1251,11 @@ pub(super) fn serialize_image_content_table(
             animation: image_content.animation.clone(),
             animation_frame_index: image_content.animation_frame_index,
             animation_loop_count: image_content.animation_loop_count,
-            animation_elapsed_nanos: image_content.animation_elapsed_nanos,
+            animation_elapsed_nanos: u64::try_from(compute_shown_animation_nanoseconds(
+                &image_content,
+                serialization_timestamp,
+            ))
+            .unwrap_or(u64::MAX),
             is_animation_running: image_content.is_animation_running,
             is_animation_loading: image_content.is_animation_loading,
             sixel: image_content.sixel.clone(),
@@ -1291,6 +1315,7 @@ impl RestoreImageBuilder {
                     animation_frame_index: serialized_content.animation_frame_index,
                     animation_loop_count: serialized_content.animation_loop_count,
                     animation_elapsed_nanos: serialized_content.animation_elapsed_nanos,
+                    animation_elapsed_measured_at: None,
                     is_animation_running: serialized_content.is_animation_running,
                     is_animation_loading: serialized_content.is_animation_loading,
                     sixel: serialized_content.sixel,
@@ -1469,9 +1494,6 @@ fn validate_animation_content_state(
         .is_some_and(|total| animation_loop_count > total)
     {
         return Err("image content playback count exceeds its animation loop policy".to_owned());
-    }
-    if is_animation_loading && !is_animation_running {
-        return Err("image content cannot load an animation while stopped".to_owned());
     }
     Ok(())
 }
@@ -2518,25 +2540,31 @@ struct AdvancedImageAnimation {
 }
 
 impl TerminalState {
-    /// Return the time until the next retained animation frame is due.
-    pub(crate) fn get_next_image_animation_delay(&self) -> Option<std::time::Duration> {
-        self.list_image_animation_contents()
-            .values()
+    /// Return the time from `monotonic_timestamp` until the next retained
+    /// animation frame is due. A running animation whose clock has not started
+    /// is due at once.
+    pub(crate) fn get_next_image_animation_delay(
+        &self,
+        monotonic_timestamp: Instant,
+    ) -> Option<Duration> {
+        self.list_retained_image_contents()
             .filter_map(|image_content| {
-                get_image_animation_delay_nanoseconds(image_content)
-                    .map(convert_nanoseconds_to_duration)
+                get_image_animation_delay_nanoseconds(image_content, monotonic_timestamp)
             })
             .min()
+            .map(convert_nanoseconds_to_duration)
     }
 
-    /// Advance every retained animation and report whether visible pixels changed.
-    pub(crate) fn advance_image_animations(&mut self, elapsed: std::time::Duration) -> bool {
-        let elapsed_nanoseconds = elapsed.as_nanos().min(u128::from(u64::MAX));
+    /// Advance every retained animation to `monotonic_timestamp` and report
+    /// whether visible pixels changed. The first advance after an animation
+    /// starts running starts its clock at `monotonic_timestamp` and counts no
+    /// time before it.
+    pub(crate) fn advance_image_animations(&mut self, monotonic_timestamp: Instant) -> bool {
         let advanced_image_content_by_id = self
             .list_image_animation_contents()
             .into_iter()
             .filter_map(|(image_content_id, image_content)| {
-                advance_image_animation_content(&image_content, elapsed_nanoseconds)
+                advance_image_animation_content(&image_content, monotonic_timestamp)
                     .map(|advanced_image_animation| (image_content_id, advanced_image_animation))
             })
             .collect::<BTreeMap<_, _>>();
@@ -2606,7 +2634,10 @@ impl TerminalState {
     }
 }
 
-fn get_image_animation_delay_nanoseconds(image_content: &ImageContent) -> Option<u128> {
+fn get_image_animation_delay_nanoseconds(
+    image_content: &ImageContent,
+    monotonic_timestamp: Instant,
+) -> Option<u128> {
     if !image_content.is_animation_running {
         return None;
     }
@@ -2614,10 +2645,32 @@ fn get_image_animation_delay_nanoseconds(image_content: &ImageContent) -> Option
     let animation_frame = animation
         .list_frames()
         .get(image_content.animation_frame_index as usize)?;
+    if image_content.animation_elapsed_measured_at.is_none() {
+        return Some(0);
+    }
     Some(
-        compute_animation_frame_delay_nanoseconds(animation_frame)
-            .saturating_sub(u128::from(image_content.animation_elapsed_nanos)),
+        compute_animation_frame_delay_nanoseconds(animation_frame).saturating_sub(
+            compute_shown_animation_nanoseconds(image_content, monotonic_timestamp),
+        ),
     )
+}
+
+/// The time the current frame of `image_content` has shown at
+/// `monotonic_timestamp`: `animation_elapsed_nanos` plus the time since it was
+/// measured. Before the clock starts, `animation_elapsed_nanos` alone.
+fn compute_shown_animation_nanoseconds(
+    image_content: &ImageContent,
+    monotonic_timestamp: Instant,
+) -> u128 {
+    let nanoseconds_since_measurement =
+        image_content
+            .animation_elapsed_measured_at
+            .map_or(0, |elapsed_measured_at| {
+                monotonic_timestamp
+                    .saturating_duration_since(elapsed_measured_at)
+                    .as_nanos()
+            });
+    u128::from(image_content.animation_elapsed_nanos).saturating_add(nanoseconds_since_measurement)
 }
 
 fn compute_animation_frame_delay_nanoseconds(
@@ -2637,8 +2690,8 @@ fn compute_animation_frame_delay_nanoseconds(
         / u128::from(frame_delay.get_denominator_ms())
 }
 
-fn convert_nanoseconds_to_duration(nanosecond_count: u128) -> std::time::Duration {
-    std::time::Duration::from_nanos(nanosecond_count.min(u128::from(u64::MAX)) as u64)
+fn convert_nanoseconds_to_duration(nanosecond_count: u128) -> Duration {
+    Duration::from_nanos(nanosecond_count.min(u128::from(u64::MAX)) as u64)
 }
 
 fn compute_animation_cycle_nanoseconds(animation: &DecodedAnimation) -> u128 {
@@ -2651,7 +2704,7 @@ fn compute_animation_cycle_nanoseconds(animation: &DecodedAnimation) -> u128 {
 
 fn advance_image_animation_content(
     image_content: &Arc<ImageContent>,
-    elapsed_nanoseconds: u128,
+    monotonic_timestamp: Instant,
 ) -> Option<AdvancedImageAnimation> {
     let animation = image_content.animation.as_ref()?;
     if !image_content.is_animation_running {
@@ -2664,8 +2717,9 @@ fn advance_image_animation_content(
         return None;
     }
     let mut current_animation_loop_count = image_content.animation_loop_count;
-    let mut remaining_animation_nanoseconds =
-        u128::from(image_content.animation_elapsed_nanos).saturating_add(elapsed_nanoseconds);
+    let shown_animation_nanoseconds =
+        compute_shown_animation_nanoseconds(image_content, monotonic_timestamp);
+    let mut remaining_animation_nanoseconds = shown_animation_nanoseconds;
     let previous_animation_frame_index = current_animation_frame_index;
     let mut is_animation_running = true;
     let mut zero_delay_transition_count = 0usize;
@@ -2727,7 +2781,9 @@ fn advance_image_animation_content(
         }
         if image_content.is_animation_loading {
             current_animation_frame_index = get_last_visible_animation_frame_index(animation);
-            remaining_animation_nanoseconds = 0;
+            remaining_animation_nanoseconds = compute_animation_frame_delay_nanoseconds(
+                &animation.list_frames()[current_animation_frame_index],
+            );
             is_animation_running = false;
             break;
         }
@@ -2758,8 +2814,9 @@ fn advance_image_animation_content(
     let new_animation_elapsed_nanoseconds = u64::try_from(remaining_animation_nanoseconds).ok()?;
     if current_animation_frame_index == previous_animation_frame_index
         && current_animation_loop_count == image_content.animation_loop_count
-        && new_animation_elapsed_nanoseconds == image_content.animation_elapsed_nanos
+        && remaining_animation_nanoseconds == shown_animation_nanoseconds
         && is_animation_running == image_content.is_animation_running
+        && image_content.animation_elapsed_measured_at.is_some()
     {
         return None;
     }
@@ -2771,6 +2828,8 @@ fn advance_image_animation_content(
         u32::try_from(current_animation_frame_index).ok()?;
     advanced_image_content.animation_loop_count = current_animation_loop_count;
     advanced_image_content.animation_elapsed_nanos = new_animation_elapsed_nanoseconds;
+    advanced_image_content.animation_elapsed_measured_at =
+        is_animation_running.then_some(monotonic_timestamp);
     advanced_image_content.is_animation_running = is_animation_running;
     Some(AdvancedImageAnimation {
         image_content: Arc::new(advanced_image_content),
@@ -2935,6 +2994,7 @@ impl TerminalState {
             animation_frame_index: 0,
             animation_loop_count: 0,
             animation_elapsed_nanos: 0,
+            animation_elapsed_measured_at: None,
             is_animation_running: image_record.animation.is_some(),
             is_animation_loading: false,
             sixel: sixel_source,
@@ -4229,6 +4289,7 @@ fn get_refreshed_shared_sixel_content(
         animation_frame_index: image_content.animation_frame_index,
         animation_loop_count: image_content.animation_loop_count,
         animation_elapsed_nanos: image_content.animation_elapsed_nanos,
+        animation_elapsed_measured_at: image_content.animation_elapsed_measured_at,
         is_animation_running: image_content.is_animation_running,
         is_animation_loading: image_content.is_animation_loading,
         sixel: Some(sixel_image_source),

@@ -383,6 +383,116 @@ fn a_non_boolean_auto_close_session_is_skipped_with_a_warning() {
 }
 
 #[test]
+fn pane_clipboard_writes_records_both_fields() {
+    let (layer, warnings) =
+        parse_with_warnings("pane-clipboard-writes {\n    allow #true\n    max-copy-bytes 1\n}");
+    assert_eq!(
+        layer.pane_clipboard_writes,
+        Some(PartialPaneClipboardWriteConfig {
+            should_allow_writes: Some(true),
+            maximum_copy_byte_count: Some(1),
+        })
+    );
+    assert_eq!(warnings, Vec::<String>::new());
+}
+
+#[test]
+fn an_absent_pane_clipboard_writes_section_sets_no_layer() {
+    assert_eq!(parse_config("").pane_clipboard_writes, None);
+}
+
+#[test]
+fn a_pane_clipboard_writes_section_sets_only_the_fields_it_lists() {
+    assert_eq!(
+        parse_config("pane-clipboard-writes {\n    allow #false\n}").pane_clipboard_writes,
+        Some(PartialPaneClipboardWriteConfig {
+            should_allow_writes: Some(false),
+            maximum_copy_byte_count: None,
+        })
+    );
+}
+
+#[test]
+fn a_max_copy_bytes_below_one_is_skipped_with_a_warning() {
+    for max_copy_bytes_text in ["0", "-5"] {
+        let (layer, warnings) = parse_with_warnings(&format!(
+            "pane-clipboard-writes {{\n    allow #true\n    max-copy-bytes {max_copy_bytes_text}\n}}"
+        ));
+        assert_eq!(
+            layer.pane_clipboard_writes,
+            Some(PartialPaneClipboardWriteConfig {
+                should_allow_writes: Some(true),
+                maximum_copy_byte_count: None,
+            })
+        );
+        assert_eq!(
+            warnings,
+            vec!["ignored `pane-clipboard-writes.max-copy-bytes`: must be at least 1".to_string()]
+        );
+    }
+}
+
+#[test]
+fn a_max_copy_bytes_that_is_not_an_integer_is_skipped_with_a_warning() {
+    for max_copy_bytes_text in ["\"8388608\"", "1.5", "#true"] {
+        let (layer, warnings) = parse_with_warnings(&format!(
+            "pane-clipboard-writes {{\n    max-copy-bytes {max_copy_bytes_text}\n}}"
+        ));
+        assert_eq!(
+            layer.pane_clipboard_writes,
+            Some(PartialPaneClipboardWriteConfig::default())
+        );
+        assert_eq!(
+            warnings,
+            vec!["ignored `pane-clipboard-writes.max-copy-bytes`: expected an integer".to_string()]
+        );
+    }
+}
+
+#[test]
+fn a_max_copy_bytes_past_the_largest_size_becomes_the_largest_size() {
+    assert_eq!(
+        parse_config(
+            "pane-clipboard-writes {\n    max-copy-bytes 999999999999999999999999999999\n}"
+        )
+        .pane_clipboard_writes,
+        Some(PartialPaneClipboardWriteConfig {
+            should_allow_writes: None,
+            maximum_copy_byte_count: Some(usize::MAX),
+        })
+    );
+}
+
+#[test]
+fn a_non_boolean_pane_clipboard_writes_allow_is_skipped_with_a_warning() {
+    let (layer, warnings) = parse_with_warnings("pane-clipboard-writes {\n    allow \"yes\"\n}");
+    assert_eq!(
+        layer.pane_clipboard_writes,
+        Some(PartialPaneClipboardWriteConfig::default())
+    );
+    assert_eq!(
+        warnings,
+        vec![
+            "ignored `pane-clipboard-writes.allow`: expected a boolean (#true or #false)"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn an_unknown_pane_clipboard_writes_key_warns_with_the_nearest_key() {
+    let (_, warnings) = parse_with_warnings("pane-clipboard-writes {\n    max-copy-byte 10\n}");
+    assert_eq!(
+        warnings,
+        vec![
+            "ignored unknown key `pane-clipboard-writes.max-copy-byte`; did you mean \
+             `pane-clipboard-writes.max-copy-bytes`?"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
 fn a_colors_block_in_the_app_file_is_ignored() {
     // Colors belong to a theme file. An inline `colors` block in `koshi.kdl`
     // is an unknown top-level node and sets nothing.
@@ -728,6 +838,69 @@ fn a_repeated_remote_reconnect_line_keeps_the_first_and_warns() {
     assert_eq!(
         warnings,
         vec!["ignored duplicate `remote-reconnect` section".to_string()]
+    );
+}
+
+#[test]
+fn remote_link_timeout_records_what_it_is_set_to_down_to_one_millisecond() {
+    assert_eq!(
+        parse_config("remote-link-timeout-ms 45000").remote_link_timeout_ms,
+        Some(45_000)
+    );
+    assert_eq!(
+        parse_config("remote-link-timeout-ms 1").remote_link_timeout_ms,
+        Some(1)
+    );
+    assert_eq!(
+        parse_config("remote-link-timeout-ms 4294967295").remote_link_timeout_ms,
+        Some(u32::MAX)
+    );
+}
+
+#[test]
+fn an_absent_remote_link_timeout_leaves_thirty_seconds() {
+    assert_eq!(parse_config("").remote_link_timeout_ms, None);
+    assert_eq!(ClientConfig::default().remote_link_timeout_ms, 30_000);
+}
+
+#[test]
+fn a_remote_link_timeout_out_of_range_or_not_an_integer_is_skipped_with_a_warning() {
+    for (config_text, expected_warning) in [
+        (
+            "remote-link-timeout-ms 0",
+            "ignored `remote-link-timeout-ms`: must be at least 1",
+        ),
+        (
+            "remote-link-timeout-ms -5",
+            "ignored `remote-link-timeout-ms`: must be at least 1",
+        ),
+        (
+            "remote-link-timeout-ms 4294967296",
+            "ignored `remote-link-timeout-ms`: must be at most 4294967295",
+        ),
+        (
+            "remote-link-timeout-ms \"30s\"",
+            "ignored `remote-link-timeout-ms`: expected an integer",
+        ),
+    ] {
+        let (layer, warnings) = parse_with_warnings(config_text);
+        assert_eq!(layer.remote_link_timeout_ms, None, "{config_text}");
+        assert_eq!(
+            warnings,
+            vec![expected_warning.to_string()],
+            "{config_text}"
+        );
+    }
+}
+
+#[test]
+fn a_repeated_remote_link_timeout_line_keeps_the_first_and_warns() {
+    let (layer, warnings) =
+        parse_with_warnings("remote-link-timeout-ms 5000\nremote-link-timeout-ms 9000");
+    assert_eq!(layer.remote_link_timeout_ms, Some(5_000));
+    assert_eq!(
+        warnings,
+        vec!["ignored duplicate `remote-link-timeout-ms` section".to_string()]
     );
 }
 

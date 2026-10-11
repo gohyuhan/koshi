@@ -386,7 +386,9 @@ pub enum IpcRequestKind {
         /// focused pane of each tab, the zoomed pane of each tab, the scroll
         /// offset of each pane, and the view of the floating panes. `None` on a
         /// first attach. A token the session does not hold, and a token older
-        /// than 120 seconds, attach with a fresh view instead of failing.
+        /// than 24 hours, attach with a fresh view instead of failing. A token
+        /// minted for a client that is still attached takes that client's view
+        /// over, and the session removes that client.
         resume_token: Option<ConnectionToken>,
         /// The pane region the caller draws the tab's panes in, which the
         /// server records on the client. Absent, the server sizes the
@@ -401,6 +403,15 @@ pub enum IpcRequestKind {
         /// or `None` when the terminal has no usable measurement.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cell_size: Option<koshi_core::geometry::PixelCellSize>,
+        /// The longest the session waits for the next request on this
+        /// connection once the client is attached, in milliseconds. A
+        /// connection that sends nothing for that long ends, as a dropped
+        /// link does. `None` sets no limit. A client on another machine sends
+        /// its `remote-link-timeout-ms` and a [`Ping`](Self::Ping) every third
+        /// of it; a client on this machine sends `None`. Left off the wire when
+        /// `None`; absent, it reads as `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        link_timeout_ms: Option<u32>,
     },
     /// One keyboard event an attached client sends for the pane it is typing
     /// into: its keymap bound nothing to the event, or no chord could name it.
@@ -473,10 +484,84 @@ pub enum IpcRequestKind {
     /// answer comes back.
     ///
     /// An attached client sends it when it reads
-    /// [`SessionEvent::Restarting`](crate::event::SessionEvent::Restarting).
+    /// [`SessionEvent::Restarting`](crate::event::SessionEvent::Restarting),
+    /// when it leaves a dropped link to dial the session again, when its
+    /// terminal goes away, and when the session moves it to another session.
     /// Requests arrive in the order the caller queued them.
-    Leaving,
+    Leaving {
+        /// Whether the client attaches again. `true` keeps the session running
+        /// when that client was its last one. `false` lets
+        /// `auto-close-session` end a session that the client leaves with no
+        /// client. A connection that ends with no `Leaving` counts as `true`
+        /// when it came from another machine and as `false` otherwise.
+        is_returning: bool,
+    },
+    /// An attached client asks the session for one
+    /// [`SessionEvent::Pong`](crate::event::SessionEvent::Pong). A client on
+    /// another machine sends one every third of its link timeout. On a
+    /// connection with no attached client, a `Ping` closes the connection.
+    Ping,
+    /// One part of a clipboard copy that a stand-in clipboard tool in a pane
+    /// sends before the last part, which goes as
+    /// [`ClipboardCopy`](Self::ClipboardCopy).
+    ///
+    /// The session holds the part on this connection and answers
+    /// [`IpcResult::ClipboardCopyPartTaken`] while every byte it holds stays
+    /// within `max-copy-bytes`. A part that takes the held bytes past
+    /// `max-copy-bytes`, or a session with `pane-clipboard-writes` off, gets
+    /// [`IpcResult::ClipboardCopyRouted`] with `should_run_clipboard_tool`
+    /// set to `true`, and the session drops every byte it held.
+    ///
+    /// The session refuses it with [`IpcErrorCode::RequestFailed`] on a
+    /// connection from another machine or from another user of this machine.
+    ClipboardCopyPart {
+        /// The bytes of this part, at most
+        /// [`MAX_CLIPBOARD_COPY_PART_BYTE_COUNT`]. Written as one base64
+        /// string: the two bytes `[104, 105]` are `"aGk="`.
+        #[serde(with = "crate::bytes")]
+        copied_bytes: Vec<u8>,
+    },
+    /// The last part of a clipboard copy that a stand-in clipboard tool in
+    /// `pane_id` makes, which can be empty. The copy is every part this
+    /// connection sent as [`ClipboardCopyPart`](Self::ClipboardCopyPart)
+    /// since its last answered copy, then these bytes.
+    ///
+    /// The session answers [`IpcResult::ClipboardCopyRouted`]. Each client on
+    /// another machine that focuses `pane_id` gets the copy as an `OSC 52`
+    /// host write. `should_run_clipboard_tool` is `false` when only such
+    /// clients focus the pane, and `true` in every other case: no client
+    /// focuses the pane, a client on this machine focuses it,
+    /// `pane-clipboard-writes` is off, the session holds no such pane, or the
+    /// copy passes `max-copy-bytes`.
+    ///
+    /// The session refuses it with [`IpcErrorCode::RequestFailed`] on a
+    /// connection from another machine or from another user of this machine.
+    ClipboardCopy {
+        /// The pane the stand-in clipboard tool runs in, read from its
+        /// `KOSHI_PANE_ID`.
+        pane_id: PaneId,
+        /// The `OSC 52` targets the tool names, such as `c` for the clipboard
+        /// and `p` for the primary selection. The session keeps each of `c`,
+        /// `p`, `q`, `s` and `0` to `7` once and removes every other byte.
+        clipboard_targets: String,
+        /// The bytes of the last part, at most
+        /// [`MAX_CLIPBOARD_COPY_PART_BYTE_COUNT`]. Written as one base64
+        /// string.
+        #[serde(with = "crate::bytes")]
+        copied_bytes: Vec<u8>,
+    },
 }
+
+/// The most `copied_bytes` one [`IpcRequestKind::ClipboardCopy`] or
+/// [`IpcRequestKind::ClipboardCopyPart`] carries: 12582783.
+///
+/// A `ClipboardCopy` with an empty copy, the request id 18446744073709551615
+/// and 12 target bytes encodes to a frame of 172 bytes. A pane id always
+/// encodes to 36 characters. Base64 writes each 3 bytes as 4 characters, so
+/// (16777216 - 172) / 4 * 3 = 12582783 bytes fit in one
+/// [`MAX_FRAME_BYTE_COUNT`](crate::transport::MAX_FRAME_BYTE_COUNT) frame,
+/// and 3 bytes more do not.
+pub const MAX_CLIPBOARD_COPY_PART_BYTE_COUNT: usize = 12_582_783;
 
 impl IpcRequestKind {
     /// The Hello this build opens a connection with: the versions it speaks,
@@ -511,7 +596,10 @@ impl IpcRequestKind {
             IpcRequestKind::ReadPanePlacement { .. } => "ReadPanePlacement",
             IpcRequestKind::RecentEvents => "RecentEvents",
             IpcRequestKind::Restart => "Restart",
-            IpcRequestKind::Leaving => "Leaving",
+            IpcRequestKind::Leaving { .. } => "Leaving",
+            IpcRequestKind::Ping => "Ping",
+            IpcRequestKind::ClipboardCopyPart { .. } => "ClipboardCopyPart",
+            IpcRequestKind::ClipboardCopy { .. } => "ClipboardCopy",
         }
     }
 }
@@ -635,6 +723,18 @@ pub enum IpcResult {
     Restarting,
     /// The request was refused.
     Error(IpcErrorPayload),
+    /// Answers [`IpcRequestKind::ClipboardCopyPart`]: the session holds the
+    /// part, and the caller sends the next part.
+    ClipboardCopyPartTaken,
+    /// Answers [`IpcRequestKind::ClipboardCopy`], and an
+    /// [`IpcRequestKind::ClipboardCopyPart`] the session does not take: the
+    /// copy is over, and the session holds none of its bytes.
+    ClipboardCopyRouted {
+        /// `true` tells the caller to run the real clipboard tool with every
+        /// byte of the copy. `false` means every client that focuses the pane
+        /// is on another machine, and each one got the copy.
+        should_run_clipboard_tool: bool,
+    },
 }
 
 /// Why a request was refused.
@@ -731,6 +831,9 @@ impl WireVariants for IpcRequestKind {
         "RecentEvents",
         "Restart",
         "Leaving",
+        "Ping",
+        "ClipboardCopyPart",
+        "ClipboardCopy",
     ];
 }
 
@@ -752,6 +855,8 @@ impl WireVariants for IpcResult {
         "RecentEvents",
         "Restarting",
         "Error",
+        "ClipboardCopyPartTaken",
+        "ClipboardCopyRouted",
     ];
 }
 
@@ -766,6 +871,8 @@ impl WireName for IpcResult {
             IpcResult::RecentEvents(_) => "RecentEvents",
             IpcResult::Restarting => "Restarting",
             IpcResult::Error(_) => "Error",
+            IpcResult::ClipboardCopyPartTaken => "ClipboardCopyPartTaken",
+            IpcResult::ClipboardCopyRouted { .. } => "ClipboardCopyRouted",
         }
     }
 }

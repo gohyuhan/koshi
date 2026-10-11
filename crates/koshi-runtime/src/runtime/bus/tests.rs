@@ -8,12 +8,15 @@
 //! subscriber's queue, is refused by a desynced one, and on a full queue is
 //! refused while the subscriber stays live. Then a round's mouse answers, which
 //! ride the same queue and desync the subscriber when they do not fit. Then
-//! bytes for the terminal a subscriber's client runs in and the session a
-//! subscriber's client moves to, which ride it the same way, and which are each
-//! refused for an unknown subscriber and for a desynced one.
+//! bytes for the terminal a subscriber's client runs in: one host write in
+//! flight at a time, the bytes that wait behind it and their limit, and the
+//! session ending, a switch and a resync that put the waiting bytes on the
+//! queue. Then the session a subscriber's client moves to, which rides the
+//! queue the same way, and is refused for an unknown subscriber and for a
+//! desynced one.
 //!
 //! Then the wire conversion: one queue item becomes the frame the client is
-//! sent.
+//! sent, and one host write becomes the frames that carry its bytes.
 
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
 use koshi_core::event::{
@@ -29,6 +32,7 @@ use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
 use koshi_layout::mode::LayoutMode;
 use koshi_renderer::snapshot::{ClientSnapshot, SessionSnapshot, TabSnapshot};
+use koshi_test_support::fixtures::build_counting_bytes;
 
 use super::*;
 
@@ -64,6 +68,7 @@ fn build_test_render_snapshot() -> Box<RenderSnapshot> {
                 gap_cell_count: 0,
             },
             tabs_metadata: Vec::new(),
+            floating_pane_slots: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {
@@ -954,28 +959,142 @@ fn a_subscriber_whose_receiver_is_gone_is_removed_by_its_mouse_answer() {
     assert_eq!(bus.count_subscribers(), 0);
 }
 
+/// The OSC 52 copy of `hello`: the sequence a clipboard write queues.
+const CLIPBOARD_WRITE_BYTES: &[u8] = b"\x1b]52;c;aGVsbG8=\x07";
+
+/// The host write that carries `host_write_bytes`, as a queue holds it.
+fn build_host_write_delivery(host_write_bytes: &[u8]) -> Delivery {
+    Delivery::HostWrite {
+        host_write_bytes: host_write_bytes.to_vec(),
+        in_flight_marker: Arc::new(()),
+    }
+}
+
 #[test]
-fn a_host_write_reaches_the_subscriber_as_the_bytes_it_queued() {
-    // An OSC 52 copy of "hello", the sequence a clipboard write queues.
-    let clipboard_write_bytes = b"\x1b]52;c;aGVsbG8=\x07".to_vec();
+fn a_host_write_reaches_an_idle_subscriber_at_once_and_stays_in_flight_while_held() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver) = bus.subscribe();
 
-    assert!(bus.try_send_host_write(subscriber_id, clipboard_write_bytes.clone()));
+    assert!(bus.queue_host_write(subscriber_id, CLIPBOARD_WRITE_BYTES));
 
     let queued_deliveries: Vec<Delivery> = subscriber_receiver.try_iter().collect();
     assert_eq!(
         queued_deliveries,
-        vec![Delivery::HostWrite(clipboard_write_bytes.clone())]
+        vec![build_host_write_delivery(CLIPBOARD_WRITE_BYTES)]
     );
-    assert_eq!(
-        build_wire_event(&queued_deliveries[0]),
-        Some(SessionEvent::HostWrite {
-            host_output_bytes: clipboard_write_bytes,
-        })
-    );
+    assert!(bus.has_host_write_in_flight(subscriber_id));
+    drop(queued_deliveries);
+    assert!(!bus.has_host_write_in_flight(subscriber_id));
     assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
+}
+
+#[test]
+fn host_writes_queued_while_one_is_in_flight_wait_then_go_out_as_one_in_order() {
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    assert!(bus.queue_host_write(subscriber_id, b"first"));
+    let first_delivery = subscriber_receiver
+        .try_recv()
+        .expect("the first host write is on the queue");
+
+    assert!(bus.queue_host_write(subscriber_id, b"second"));
+    assert!(bus.queue_host_write(subscriber_id, b"third"));
+    assert!(bus.send_pending_host_write(subscriber_id));
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
+        Vec::new()
+    );
+
+    drop(first_delivery);
+    assert!(bus.send_pending_host_write(subscriber_id));
+
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
+        vec![build_host_write_delivery(b"secondthird")]
+    );
+}
+
+#[test]
+fn waiting_host_writes_past_the_limit_drop_every_older_byte_and_keep_the_newest() {
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    assert!(bus.queue_host_write(subscriber_id, b"in flight"));
+    let in_flight_delivery = subscriber_receiver.try_recv().expect("queued");
+    let older_bytes = vec![b'a'; MAX_HOST_WRITE_BYTE_COUNT - 1];
+    assert!(bus.queue_host_write(subscriber_id, &older_bytes));
+
+    assert!(bus.queue_host_write(subscriber_id, b"bc"));
+
+    drop(in_flight_delivery);
+    assert!(bus.send_pending_host_write(subscriber_id));
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
+        vec![build_host_write_delivery(b"bc")]
+    );
+}
+
+#[test]
+fn waiting_host_writes_up_to_the_limit_keep_every_byte() {
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    assert!(bus.queue_host_write(subscriber_id, b"in flight"));
+    let in_flight_delivery = subscriber_receiver.try_recv().expect("queued");
+    let older_bytes = vec![b'a'; MAX_HOST_WRITE_BYTE_COUNT - 2];
+    assert!(bus.queue_host_write(subscriber_id, &older_bytes));
+
+    assert!(bus.queue_host_write(subscriber_id, b"bc"));
+
+    drop(in_flight_delivery);
+    assert!(bus.send_pending_host_write(subscriber_id));
+    let mut expected_host_write_bytes = older_bytes;
+    expected_host_write_bytes.extend_from_slice(b"bc");
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
+        vec![build_host_write_delivery(&expected_host_write_bytes)]
+    );
+}
+
+#[test]
+fn a_host_write_longer_than_the_limit_with_nothing_waiting_goes_out_whole() {
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let host_write_bytes = build_counting_bytes(MAX_HOST_WRITE_BYTE_COUNT + 1);
+
+    assert!(bus.queue_host_write(subscriber_id, &host_write_bytes));
+
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
+        vec![build_host_write_delivery(&host_write_bytes)]
+    );
+}
+
+#[test]
+fn an_empty_host_write_puts_nothing_on_the_queue() {
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+
+    assert!(bus.queue_host_write(subscriber_id, b""));
+
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
+        Vec::new()
+    );
+    assert!(!bus.has_host_write_in_flight(subscriber_id));
+}
+
+#[test]
+fn a_host_write_for_an_unknown_subscriber_is_refused() {
+    let mut bus = EventBus::new();
+    let (_subscriber_id, subscriber_receiver) = bus.subscribe();
+
+    assert!(!bus.queue_host_write(SubscriberId::new(), CLIPBOARD_WRITE_BYTES));
+
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<_>>(),
+        Vec::<Delivery>::new()
+    );
     assert_eq!(bus.count_subscribers(), 1);
+    assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
 }
 
 #[test]
@@ -985,9 +1104,10 @@ fn a_full_queue_desyncs_the_subscriber_and_drops_the_host_write() {
     let (subscriber_id, subscriber_receiver) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
 
-    assert!(!bus.try_send_host_write(subscriber_id, b"\x1b]52;c;aGVsbG8=\x07".to_vec()));
+    assert!(!bus.queue_host_write(subscriber_id, CLIPBOARD_WRITE_BYTES));
 
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
+    assert!(!bus.has_host_write_in_flight(subscriber_id));
     assert_eq!(bus.count_subscribers(), 1);
     // The backlog that filled the queue, and nothing else: the bytes are gone,
     // and the desync is what puts a fresh frame on the queue.
@@ -998,59 +1118,78 @@ fn a_full_queue_desyncs_the_subscriber_and_drops_the_host_write() {
 }
 
 #[test]
-fn an_empty_host_write_reaches_the_subscriber_as_empty_bytes() {
-    let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
-
-    assert!(bus.try_send_host_write(subscriber_id, Vec::new()));
-
-    let queued_deliveries: Vec<Delivery> = subscriber_receiver.try_iter().collect();
-    assert_eq!(queued_deliveries, vec![Delivery::HostWrite(Vec::new())]);
-    assert_eq!(
-        build_wire_event(&queued_deliveries[0]),
-        Some(SessionEvent::HostWrite {
-            host_output_bytes: Vec::new(),
-        })
-    );
-}
-
-#[test]
-fn a_host_write_for_an_unknown_subscriber_is_refused() {
-    let mut bus = EventBus::new();
-    let (_subscriber_id, subscriber_receiver) = bus.subscribe();
-
-    assert!(!bus.try_send_host_write(SubscriberId::new(), b"\x07".to_vec()));
-
-    assert_eq!(
-        subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        Vec::<Delivery>::new()
-    );
-    assert_eq!(bus.count_subscribers(), 1);
-    assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
-}
-
-#[test]
-fn a_host_write_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
+fn a_desynced_subscriber_keeps_its_host_write_until_the_resync_queues_it_after_the_snapshot() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
-    // Drained, so a refusal here cannot be a full queue.
     assert_eq!(
         subscriber_receiver.try_iter().count(),
         SUBSCRIBER_QUEUE_CAPACITY
     );
 
-    assert!(!bus.try_send_host_write(subscriber_id, b"\x1b]52;c;aGVsbG8=\x07".to_vec()));
+    assert!(bus.queue_host_write(subscriber_id, CLIPBOARD_WRITE_BYTES));
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
+        Vec::new()
+    );
+
+    let render_snapshot = build_test_render_snapshot();
+    assert!(bus.try_resync(subscriber_id, render_snapshot.clone()));
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
+        vec![
+            Delivery::Snapshot {
+                render_snapshot,
+                lag_report: SubscriberLagged {
+                    subscriber_id,
+                    dropped_event_count: 1,
+                },
+            },
+            build_host_write_delivery(CLIPBOARD_WRITE_BYTES),
+        ]
+    );
+}
+
+#[test]
+fn the_last_frame_puts_the_waiting_host_write_on_the_queue_first_with_one_in_flight() {
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    assert!(bus.queue_host_write(subscriber_id, b"first"));
+    let _in_flight_delivery = subscriber_receiver.try_recv().expect("queued");
+    assert!(bus.queue_host_write(subscriber_id, b"second"));
+
+    bus.publish(&Event::Restarting);
 
     assert_eq!(
-        subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        Vec::<Delivery>::new()
+        subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
+        vec![
+            build_host_write_delivery(b"second"),
+            Delivery::Event(Event::Restarting),
+        ]
     );
-    assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
-    assert_eq!(bus.count_subscribers(), 1);
+}
+
+#[test]
+fn a_switch_puts_the_waiting_host_write_on_the_queue_first() {
+    let session_id = SessionId::new();
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    assert!(bus.queue_host_write(subscriber_id, b"first"));
+    let _in_flight_delivery = subscriber_receiver.try_recv().expect("queued");
+    assert!(bus.queue_host_write(subscriber_id, b"second"));
+
+    assert!(bus.try_send_switch(subscriber_id, session_id));
+
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
+        vec![
+            build_host_write_delivery(b"second"),
+            Delivery::SwitchTo(session_id),
+        ]
+    );
 }
 
 #[test]
@@ -1059,11 +1198,73 @@ fn a_subscriber_whose_receiver_is_gone_is_removed_by_the_host_write() {
     let (subscriber_id, subscriber_receiver) = bus.subscribe();
     drop(subscriber_receiver);
 
-    assert!(!bus.try_send_host_write(subscriber_id, b"\x1b]52;c;aGVsbG8=\x07".to_vec()));
+    assert!(!bus.queue_host_write(subscriber_id, CLIPBOARD_WRITE_BYTES));
 
     assert!(!bus.has_subscriber(subscriber_id));
     assert_eq!(bus.count_subscribers(), 0);
     assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
+}
+
+#[test]
+fn a_host_write_has_no_single_wire_frame() {
+    assert_eq!(
+        build_wire_event(&build_host_write_delivery(CLIPBOARD_WRITE_BYTES)),
+        None
+    );
+}
+
+#[test]
+fn a_host_write_within_one_frame_becomes_one_host_write_frame() {
+    assert_eq!(
+        build_wire_host_write_events(CLIPBOARD_WRITE_BYTES).collect::<Vec<SessionEvent>>(),
+        vec![SessionEvent::HostWrite {
+            host_write_bytes: CLIPBOARD_WRITE_BYTES.to_vec(),
+        }]
+    );
+}
+
+#[test]
+fn an_empty_host_write_becomes_one_empty_host_write_frame() {
+    assert_eq!(
+        build_wire_host_write_events(b"").collect::<Vec<SessionEvent>>(),
+        vec![SessionEvent::HostWrite {
+            host_write_bytes: Vec::new(),
+        }]
+    );
+}
+
+#[test]
+fn a_host_write_of_exactly_one_frame_becomes_one_host_write_frame() {
+    let host_write_bytes = build_counting_bytes(MAX_HOST_WRITE_BYTE_COUNT);
+
+    assert_eq!(
+        build_wire_host_write_events(&host_write_bytes).collect::<Vec<SessionEvent>>(),
+        vec![SessionEvent::HostWrite {
+            host_write_bytes: host_write_bytes.clone(),
+        }]
+    );
+}
+
+#[test]
+fn a_host_write_past_one_frame_becomes_full_parts_then_the_rest() {
+    let host_write_bytes = build_counting_bytes(2 * MAX_HOST_WRITE_BYTE_COUNT + 5);
+
+    assert_eq!(
+        build_wire_host_write_events(&host_write_bytes).collect::<Vec<SessionEvent>>(),
+        vec![
+            SessionEvent::HostWritePart {
+                host_write_bytes: host_write_bytes[..MAX_HOST_WRITE_BYTE_COUNT].to_vec(),
+            },
+            SessionEvent::HostWritePart {
+                host_write_bytes: host_write_bytes
+                    [MAX_HOST_WRITE_BYTE_COUNT..2 * MAX_HOST_WRITE_BYTE_COUNT]
+                    .to_vec(),
+            },
+            SessionEvent::HostWrite {
+                host_write_bytes: host_write_bytes[2 * MAX_HOST_WRITE_BYTE_COUNT..].to_vec(),
+            },
+        ]
+    );
 }
 
 #[test]

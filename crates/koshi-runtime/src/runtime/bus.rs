@@ -32,15 +32,20 @@
 //!
 //! A subscriber in another process works in the wire spellings from
 //! `koshi-ipc` instead. [`build_wire_event`] turns one queue item into the
-//! frame that client is sent.
+//! frame that client is sent, and [`build_wire_host_write_events`] turns one
+//! host write into the frames that client is sent.
+//!
+//! `EventBus::has_host_write_in_flight` says whether the last host write put
+//! on a subscriber's queue is still on that queue or with the thread writing
+//! it. That thread drops the delivery once it wrote the bytes.
 
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use koshi_core::event::{Event, SubscriberLagged};
 use koshi_core::ids::{CommandId, SessionId, SubscriberId};
 use koshi_core::mouse::MouseAnswer;
-use koshi_ipc::event::SessionEvent;
+use koshi_ipc::event::{SessionEvent, MAX_HOST_WRITE_BYTE_COUNT};
 use koshi_renderer::snapshot::{
     Delivery, PlacementSnapshot, PlacementSnapshotError, PlacementSnapshotErrorCode, RenderSnapshot,
 };
@@ -79,8 +84,8 @@ enum QueueDeliveryStatus {
     Skipped,
 }
 
-/// One registered subscriber: its id, its delivery state, and the sending end
-/// of its queue.
+/// One registered subscriber: its id, its delivery state, the sending end of
+/// its queue, and the host-write bytes that wait for that queue.
 #[derive(Debug)]
 struct Subscriber {
     /// Stable subscriber ID assigned at subscription, named in log lines about this
@@ -92,6 +97,15 @@ struct Subscriber {
     /// Sending end of the subscriber's bounded queue; the receiver lives with
     /// the subscriber.
     delivery_sender: SyncSender<Delivery>,
+    /// Bytes for the terminal the subscriber's client runs in that wait to go
+    /// on the queue as one host write: whole escape sequences, in the order
+    /// they were queued.
+    pending_host_write_bytes: Vec<u8>,
+    /// The marker of the last host write put on this subscriber's queue. The
+    /// host write is in flight while the marker exists, and the marker exists
+    /// while the delivery that holds it is on the queue or with the thread
+    /// writing it.
+    host_write_in_flight: Weak<()>,
 }
 
 /// Event fan-out hub: every published event is delivered to each live
@@ -132,14 +146,18 @@ impl EventBus {
             subscriber_id,
             delivery_state: DeliveryState::Live,
             delivery_sender,
+            pending_host_write_bytes: Vec::new(),
+            host_write_in_flight: Weak::new(),
         });
         (subscriber_id, delivery_receiver)
     }
 
     /// Deliver `event` to every live subscriber, and to every desynced one
-    /// when `event` ends the stream. An event that ends
-    /// the stream raises the [`EndingNotice`] first, so a subscriber whose
-    /// queue has no room for it is told over the notice instead.
+    /// when `event` ends the stream. An event that ends the stream first puts
+    /// each live subscriber's waiting host-write bytes on its queue, as
+    /// [`flush_pending_host_write`](Self::flush_pending_host_write) states,
+    /// then raises the [`EndingNotice`], so a subscriber whose queue has no
+    /// room for the event is told over the notice instead.
     ///
     /// A desynced subscriber receives nothing else, and counts what it misses.
     /// A live subscriber whose queue is full misses the event and becomes
@@ -159,6 +177,14 @@ impl EventBus {
             _ => None,
         };
         if let Some(session_ending) = session_ending {
+            let subscriber_ids: Vec<SubscriberId> = self
+                .subscribers
+                .iter()
+                .map(|subscriber| subscriber.subscriber_id)
+                .collect();
+            for subscriber_id in subscriber_ids {
+                let _ = self.flush_pending_host_write(subscriber_id);
+            }
             self.ending_notice.raise_session_ending(session_ending);
         }
         let is_stream_ending = session_ending.is_some();
@@ -234,6 +260,19 @@ impl EventBus {
         self.find_subscriber_index(subscriber_id).is_some()
     }
 
+    /// Whether the last host write put on `subscriber_id`'s queue is still on
+    /// that queue or with the thread writing it. `false` for a subscriber that
+    /// is not registered.
+    pub(crate) fn has_host_write_in_flight(&self, subscriber_id: SubscriberId) -> bool {
+        self.find_subscriber_index(subscriber_id)
+            .is_some_and(|subscriber_index| {
+                self.subscribers[subscriber_index]
+                    .host_write_in_flight
+                    .strong_count()
+                    > 0
+            })
+    }
+
     /// Where `subscriber_id` sits in the subscription-ordered list, or `None` when `subscriber_id`
     /// is not registered.
     fn find_subscriber_index(&self, subscriber_id: SubscriberId) -> Option<usize> {
@@ -249,7 +288,10 @@ impl EventBus {
     }
 
     /// Put `snapshot` on desynced subscriber `subscriber_id`'s queue and return it to live
-    /// delivery, reporting how many deliveries it missed.
+    /// delivery, reporting how many deliveries it missed. The host-write bytes
+    /// that waited while it was paused then go on its queue after the
+    /// snapshot, as [`send_pending_host_write`](Self::send_pending_host_write)
+    /// states.
     ///
     /// Returns `true` once the snapshot is queued. Returns `false` when `subscriber_id` is
     /// unknown, when it is already live, or when its queue is still full — the
@@ -285,6 +327,7 @@ impl EventBus {
                     dropped_event_count,
                     "snapshot queued; subscriber resynced"
                 );
+                let _ = self.send_pending_host_write(subscriber_id);
                 true
             }
             Err(TrySendError::Full(_)) => false,
@@ -444,18 +487,108 @@ impl EventBus {
         }
     }
 
+    /// Queue `host_write_bytes`, one whole escape sequence, for the terminal
+    /// subscriber `subscriber_id`'s client runs in, behind the bytes already
+    /// waiting, then send the waiting bytes as
+    /// [`send_pending_host_write`](Self::send_pending_host_write) states.
+    ///
+    /// When bytes wait, and they and `host_write_bytes` together are more than
+    /// [`MAX_HOST_WRITE_BYTE_COUNT`], every waiting byte is dropped first and a
+    /// warning is logged: the newest sequence always waits. Example: 12 MiB
+    /// waiting and a copy of 1 MiB leave the 1 MiB copy alone. A sequence
+    /// longer than [`MAX_HOST_WRITE_BYTE_COUNT`] with no bytes waiting drops
+    /// nothing and logs nothing.
+    ///
+    /// Returns `false` when `subscriber_id` is not registered, and drops
+    /// `host_write_bytes`. Returns `false` when the send drops the bytes, as
+    /// [`send_pending_host_write`](Self::send_pending_host_write) states.
+    pub(crate) fn queue_host_write(
+        &mut self,
+        subscriber_id: SubscriberId,
+        host_write_bytes: &[u8],
+    ) -> bool {
+        let Some(subscriber_index) = self.find_subscriber_index(subscriber_id) else {
+            return false;
+        };
+        let pending_host_write_bytes =
+            &mut self.subscribers[subscriber_index].pending_host_write_bytes;
+        if !pending_host_write_bytes.is_empty()
+            && pending_host_write_bytes.len() + host_write_bytes.len() > MAX_HOST_WRITE_BYTE_COUNT
+        {
+            tracing::warn!(
+                subscriber_id = %subscriber_id,
+                dropped_byte_count = pending_host_write_bytes.len(),
+                "older host writes dropped; the client reads them slower than they arrive"
+            );
+            pending_host_write_bytes.clear();
+        }
+        pending_host_write_bytes.extend_from_slice(host_write_bytes);
+        self.send_pending_host_write(subscriber_id)
+    }
+
+    /// Put the bytes waiting for subscriber `subscriber_id`'s client's terminal
+    /// on its queue as one host write, unless the last host write put on that
+    /// queue is still in flight
+    /// ([`has_host_write_in_flight`](Self::has_host_write_in_flight)). The rest
+    /// is as [`flush_pending_host_write`](Self::flush_pending_host_write)
+    /// states.
+    ///
+    /// Returns `false` when the bytes were dropped, and `true` when they are
+    /// on the queue, wait there, or no bytes wait.
+    pub(crate) fn send_pending_host_write(&mut self, subscriber_id: SubscriberId) -> bool {
+        if self.has_host_write_in_flight(subscriber_id) {
+            return true;
+        }
+        self.flush_pending_host_write(subscriber_id)
+    }
+
+    /// Put the bytes waiting for subscriber `subscriber_id`'s client's terminal
+    /// on its queue as one host write, whether or not an earlier host write is
+    /// in flight. Sends nothing when no bytes wait, and when the subscriber is
+    /// unknown or paused: a paused subscriber keeps its bytes waiting. Bytes
+    /// that do not fit the queue are dropped as
+    /// [`try_send_host_write`](Self::try_send_host_write) states.
+    ///
+    /// Returns `false` when the bytes were dropped: the queue was full, or its
+    /// receiver is gone. Returns `true` in every other case.
+    fn flush_pending_host_write(&mut self, subscriber_id: SubscriberId) -> bool {
+        let Some(subscriber_index) = self.find_subscriber_index(subscriber_id) else {
+            return true;
+        };
+        let subscriber = &mut self.subscribers[subscriber_index];
+        if subscriber.delivery_state != DeliveryState::Live
+            || subscriber.pending_host_write_bytes.is_empty()
+        {
+            return true;
+        }
+        let host_write_bytes = std::mem::take(&mut subscriber.pending_host_write_bytes);
+        self.try_send_host_write(subscriber_id, host_write_bytes)
+    }
+
     /// Put `host_write_bytes` for the terminal live subscriber `subscriber_id`'s client runs in on
-    /// that subscriber's queue.
+    /// that subscriber's queue, with a fresh in-flight marker
+    /// ([`has_host_write_in_flight`](Self::has_host_write_in_flight)).
     ///
     /// Returns `true` once the bytes are queued, `false` otherwise
     /// ([`Self::try_send_delivery`]). Dropped bytes leave a clipboard copy
-    /// unwritten.
-    pub(crate) fn try_send_host_write(
+    /// unwritten, and leave no host write in flight.
+    fn try_send_host_write(
         &mut self,
         subscriber_id: SubscriberId,
         host_write_bytes: Vec<u8>,
     ) -> bool {
-        match self.try_send_delivery(subscriber_id, Delivery::HostWrite(host_write_bytes)) {
+        let in_flight_marker = Arc::new(());
+        if let Some(subscriber_index) = self.find_subscriber_index(subscriber_id) {
+            self.subscribers[subscriber_index].host_write_in_flight =
+                Arc::downgrade(&in_flight_marker);
+        }
+        match self.try_send_delivery(
+            subscriber_id,
+            Delivery::HostWrite {
+                host_write_bytes,
+                in_flight_marker,
+            },
+        ) {
             QueueDeliveryStatus::Sent => true,
             QueueDeliveryStatus::Dropped => {
                 tracing::warn!(
@@ -469,7 +602,8 @@ impl EventBus {
     }
 
     /// Put the session live subscriber `subscriber_id`'s client moves to on that
-    /// subscriber's queue.
+    /// subscriber's queue, after the host-write bytes that wait for it, as
+    /// [`flush_pending_host_write`](Self::flush_pending_host_write) states.
     ///
     /// Returns `true` once the switch is queued, `false` otherwise
     /// ([`Self::try_send_delivery`]). A dropped switch leaves the client in this
@@ -479,6 +613,7 @@ impl EventBus {
         subscriber_id: SubscriberId,
         session_id: SessionId,
     ) -> bool {
+        let _ = self.flush_pending_host_write(subscriber_id);
         match self.try_send_delivery(subscriber_id, Delivery::SwitchTo(session_id)) {
             QueueDeliveryStatus::Sent => true,
             QueueDeliveryStatus::Dropped => {
@@ -518,6 +653,15 @@ impl EventBus {
             QueueDeliveryStatus::Skipped => false,
         }
     }
+
+    /// Put the answer to one ping on live subscriber `subscriber_id`'s queue.
+    ///
+    /// A full queue drops the answer and marks the subscriber desynced, as
+    /// [`Self::try_send_delivery`] states. A subscriber that is unknown,
+    /// desynced, or disconnected takes nothing.
+    pub(crate) fn try_send_pong(&mut self, subscriber_id: SubscriberId) {
+        let _ = self.try_send_delivery(subscriber_id, Delivery::Pong);
+    }
 }
 
 /// The frame an attached client is sent for one item off its queue, or `None`
@@ -535,14 +679,16 @@ impl EventBus {
 /// A [`Delivery::MouseAnswer`] becomes [`SessionEvent::MouseAnswer`] carrying
 /// the id of the round it answers and that round's answers.
 ///
-/// A [`Delivery::HostWrite`] becomes [`SessionEvent::HostWrite`] carrying the
-/// bytes the client writes to its own terminal.
+/// A [`Delivery::HostWrite`] gives `None`: its bytes go out as the frames
+/// [`build_wire_host_write_events`] lists.
 ///
 /// A [`Delivery::SwitchTo`] becomes [`SessionEvent::SwitchTo`] carrying the id
 /// of the session the client attaches to next.
 ///
 /// A [`Delivery::PlacementCommandRejected`] becomes
 /// [`SessionEvent::PlacementCommandRejected`] carrying the rejected command id.
+///
+/// A [`Delivery::Pong`] becomes [`SessionEvent::Pong`].
 ///
 /// Every [`Event`] variant with no [`SessionEvent`] spelling is named here and
 /// returns `None`. The match takes no wildcard arm, so a new variant is a
@@ -666,9 +812,7 @@ pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             request_id: *request_id,
             mouse_answers: mouse_answers.clone(),
         }),
-        Delivery::HostWrite(host_write_bytes) => Some(SessionEvent::HostWrite {
-            host_output_bytes: host_write_bytes.clone(),
-        }),
+        Delivery::HostWrite { .. } => None,
         Delivery::SwitchTo(session_id) => Some(SessionEvent::SwitchTo {
             session_id: *session_id,
         }),
@@ -677,7 +821,30 @@ pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
                 command_id: *command_id,
             })
         }
+        Delivery::Pong => Some(SessionEvent::Pong),
     }
+}
+
+/// The frames one host write of `host_write_bytes` goes out as, in order: one
+/// [`SessionEvent::HostWritePart`] for each run of [`MAX_HOST_WRITE_BYTE_COUNT`]
+/// bytes before the last run, then one [`SessionEvent::HostWrite`] carrying the
+/// last run. Each frame carries a copy of its run.
+///
+/// Example: 30000000 bytes go out as two `HostWritePart` frames of 12582879
+/// bytes, then one `HostWrite` frame of 4834242 bytes. No bytes go out as one
+/// empty `HostWrite` frame.
+pub fn build_wire_host_write_events(
+    host_write_bytes: &[u8],
+) -> impl Iterator<Item = SessionEvent> + '_ {
+    let mut host_write_runs = host_write_bytes.chunks(MAX_HOST_WRITE_BYTE_COUNT);
+    let last_host_write_run = host_write_runs.next_back().unwrap_or_default();
+    host_write_runs
+        .map(|host_write_run| SessionEvent::HostWritePart {
+            host_write_bytes: host_write_run.to_vec(),
+        })
+        .chain(std::iter::once(SessionEvent::HostWrite {
+            host_write_bytes: last_host_write_run.to_vec(),
+        }))
 }
 
 #[cfg(test)]

@@ -869,9 +869,7 @@ fn a_burst_larger_than_one_socket_read_arrives_whole() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let server_address = listener.local_addr().expect("read the bound address");
 
-    let sent_bytes: Vec<u8> = (0..BURST_BYTE_COUNT)
-        .map(|byte_index| (byte_index % 251) as u8)
-        .collect();
+    let sent_bytes = build_counting_bytes(BURST_BYTE_COUNT);
     let expected_bytes = sent_bytes.clone();
     let server_thread = std::thread::spawn(move || {
         let (mut socket, _) = listener.accept().expect("accept the client");
@@ -1011,7 +1009,10 @@ fn no_deadline_leaves_the_socket_timeouts_as_they_are() {
         .set_write_timeout(Some(Duration::from_secs(9)))
         .expect("set a write timeout");
 
-    set_socket_timeouts_until(&socket, None).expect("no deadline is not a failure");
+    set_socket_timeout_until(&socket, None, TcpStream::set_read_timeout)
+        .expect("no deadline is not a failure");
+    set_socket_timeout_until(&socket, None, TcpStream::set_write_timeout)
+        .expect("no deadline is not a failure");
 
     assert_eq!(
         socket.read_timeout().expect("read the timeout"),
@@ -1027,8 +1028,9 @@ fn no_deadline_leaves_the_socket_timeouts_as_they_are() {
 fn a_deadline_already_reached_is_timed_out_and_the_socket_timeouts_stay_unset() {
     let (socket, _peer) = build_loopback_socket_pair();
 
-    let timeout_error = set_socket_timeouts_until(&socket, Some(Instant::now()))
-        .expect_err("no time left is a failure");
+    let timeout_error =
+        set_socket_timeout_until(&socket, Some(Instant::now()), TcpStream::set_read_timeout)
+            .expect_err("no time left is a failure");
 
     assert_eq!(timeout_error.kind(), io::ErrorKind::TimedOut);
     assert_eq!(timeout_error.to_string(), "this step ran out of time");
@@ -1037,28 +1039,45 @@ fn a_deadline_already_reached_is_timed_out_and_the_socket_timeouts_stay_unset() 
 }
 
 #[test]
-fn a_deadline_ahead_sets_both_socket_timeouts_to_the_time_left() {
+fn a_deadline_ahead_sets_only_the_named_socket_timeout_to_the_time_left() {
     let (socket, _peer) = build_loopback_socket_pair();
 
-    set_socket_timeouts_until(&socket, Some(Instant::now() + Duration::from_secs(60)))
-        .expect("time left is not a failure");
+    set_socket_timeout_until(
+        &socket,
+        Some(Instant::now() + Duration::from_secs(60)),
+        TcpStream::set_read_timeout,
+    )
+    .expect("time left is not a failure");
 
     let read_timeout = socket
         .read_timeout()
         .expect("read the timeout")
         .expect("a read timeout is set");
-    let write_timeout = socket
-        .write_timeout()
-        .expect("read the timeout")
-        .expect("a write timeout is set");
     // The time left shrinks between the call and this look at it.
     assert!(
         read_timeout > Duration::from_secs(59) && read_timeout <= Duration::from_secs(60),
         "the read timeout is the time left: {read_timeout:?}"
     );
+    assert_eq!(socket.write_timeout().expect("read the timeout"), None);
+
+    set_socket_timeout_until(
+        &socket,
+        Some(Instant::now() + Duration::from_secs(30)),
+        TcpStream::set_write_timeout,
+    )
+    .expect("time left is not a failure");
+
+    let write_timeout = socket
+        .write_timeout()
+        .expect("read the timeout")
+        .expect("a write timeout is set");
     assert!(
-        write_timeout > Duration::from_secs(59) && write_timeout <= Duration::from_secs(60),
+        write_timeout > Duration::from_secs(29) && write_timeout <= Duration::from_secs(30),
         "the write timeout is the time left: {write_timeout:?}"
+    );
+    assert_eq!(
+        socket.read_timeout().expect("read the timeout"),
+        Some(read_timeout)
     );
 }
 
@@ -1108,17 +1127,17 @@ fn giving_a_half_a_deadline_stores_it_and_leaves_the_socket_timeouts_alone() {
 }
 
 #[test]
-fn taking_the_deadline_away_clears_both_timeouts_on_that_halfs_handle() {
-    let (mut reader, _writer, _peer) = build_split_tls_without_handshake();
+fn taking_a_halfs_deadline_away_clears_only_its_own_timeout_on_its_handle() {
+    let (mut reader, mut writer, _peer) = build_split_tls_without_handshake();
+    for half_socket in [&reader.socket, &writer.socket] {
+        half_socket
+            .set_read_timeout(Some(Duration::from_secs(7)))
+            .expect("set a read timeout");
+        half_socket
+            .set_write_timeout(Some(Duration::from_secs(9)))
+            .expect("set a write timeout");
+    }
     reader.set_deadline(Some(Instant::now() + Duration::from_secs(60)));
-    reader
-        .socket
-        .set_read_timeout(Some(Duration::from_secs(7)))
-        .expect("set a read timeout");
-    reader
-        .socket
-        .set_write_timeout(Some(Duration::from_secs(9)))
-        .expect("set a write timeout");
 
     reader.set_deadline(None);
 
@@ -1129,6 +1148,113 @@ fn taking_the_deadline_away_clears_both_timeouts_on_that_halfs_handle() {
     );
     assert_eq!(
         reader.socket.write_timeout().expect("read the timeout"),
+        Some(Duration::from_secs(9))
+    );
+
+    writer
+        .socket
+        .set_read_timeout(Some(Duration::from_secs(7)))
+        .expect("set a read timeout");
+    writer.set_deadline(Some(Instant::now() + Duration::from_secs(60)));
+
+    writer.set_deadline(None);
+
+    assert_eq!(writer.deadline, None);
+    assert_eq!(
+        writer.socket.write_timeout().expect("read the timeout"),
+        None
+    );
+    assert_eq!(
+        writer.socket.read_timeout().expect("read the timeout"),
+        Some(Duration::from_secs(7))
+    );
+}
+
+#[test]
+fn a_readers_read_timeout_goes_on_its_own_handle_and_none_takes_it_away() {
+    let (reader, _writer, _peer) = build_split_tls_without_handshake();
+
+    reader
+        .set_read_timeout(Some(Duration::from_secs(7)))
+        .expect("set the read timeout");
+
+    assert_eq!(
+        reader.socket.read_timeout().expect("read the timeout"),
+        Some(Duration::from_secs(7))
+    );
+
+    reader
+        .set_read_timeout(None)
+        .expect("take the read timeout away");
+
+    assert_eq!(
+        reader.socket.read_timeout().expect("read the timeout"),
+        None
+    );
+}
+
+#[test]
+fn a_writers_write_timeout_goes_on_its_own_handle_and_none_takes_it_away() {
+    let (_reader, writer, _peer) = build_split_tls_without_handshake();
+
+    writer
+        .set_write_timeout(Some(Duration::from_secs(9)))
+        .expect("set the write timeout");
+
+    assert_eq!(
+        writer.socket.write_timeout().expect("read the timeout"),
+        Some(Duration::from_secs(9))
+    );
+
+    writer
+        .set_write_timeout(None)
+        .expect("take the write timeout away");
+
+    assert_eq!(
+        writer.socket.write_timeout().expect("read the timeout"),
+        None
+    );
+}
+
+#[test]
+fn a_zero_read_or_write_timeout_is_refused_and_leaves_each_handle_as_it_was() {
+    let (reader, writer, _peer) = build_split_tls_without_handshake();
+
+    let read_timeout_error = reader
+        .set_read_timeout(Some(Duration::ZERO))
+        .expect_err("a zero read timeout is refused");
+    let write_timeout_error = writer
+        .set_write_timeout(Some(Duration::ZERO))
+        .expect_err("a zero write timeout is refused");
+
+    assert_eq!(read_timeout_error.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(write_timeout_error.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(
+        reader.socket.read_timeout().expect("read the timeout"),
+        None
+    );
+    assert_eq!(
+        writer.socket.write_timeout().expect("read the timeout"),
+        None
+    );
+}
+
+#[test]
+fn a_read_under_the_readers_deadline_leaves_the_write_timeout_unset() {
+    let (mut reader, writer, _peer) = build_split_tls_without_handshake();
+    reader.set_deadline(Some(Instant::now() + Duration::from_millis(100)));
+    let mut probe_byte = [0u8; 1];
+
+    let read_error = reader
+        .read(&mut probe_byte)
+        .expect_err("the peer sends nothing");
+
+    assert!(
+        is_io_timeout(&read_error),
+        "the read ended at the reader's deadline: {read_error:?}"
+    );
+    assert_eq!(
+        writer.socket.write_timeout().expect("read the timeout"),
         None
     );
 }
@@ -1294,9 +1420,7 @@ const MAX_PLAINTEXT_WRITE_BYTE_COUNT: usize = 64 * 1024;
 #[test]
 fn one_write_takes_at_most_sixty_four_kib_and_write_all_delivers_the_rest() {
     let (server_config, _certificate_der_bytes) = build_fresh_server_config();
-    let sent_bytes: Vec<u8> = (0..MAX_PLAINTEXT_WRITE_BYTE_COUNT + 1000)
-        .map(|byte_index| (byte_index % 251) as u8)
-        .collect();
+    let sent_bytes = build_counting_bytes(MAX_PLAINTEXT_WRITE_BYTE_COUNT + 1000);
     let sent_byte_count = sent_bytes.len();
     let (server_address, server_thread) =
         serve_after_tls_handshake(server_config, move |tls_connection, socket| {
@@ -1418,10 +1542,11 @@ const SLOW_LINK_CHUNK_BYTE_COUNT: usize = 4096;
 /// How long the slow link waits after each step.
 const SLOW_LINK_PAUSE_DURATION: Duration = Duration::from_millis(1);
 
-/// `TWO_WAY_BYTE_COUNT` bytes counting `0` to `250` over and over.
-fn build_two_way_bytes() -> Vec<u8> {
-    (0..TWO_WAY_BYTE_COUNT)
-        .map(|byte_index| (byte_index % 251) as u8)
+/// `byte_count` bytes that count from `0` to `250` and then start again at
+/// `0`: the byte at index `n` is `n % 251`.
+fn build_counting_bytes(byte_count: usize) -> Vec<u8> {
+    (0..byte_count)
+        .map(|byte_index| u8::try_from(byte_index % 251).expect("a value below 251 fits in u8"))
         .collect()
 }
 
@@ -1492,7 +1617,9 @@ fn both_ends_writing_more_than_a_slow_link_holds_at_once_deliver_every_byte_both
     ] {
         let finished_half_sender = finished_half_sender.clone();
         std::thread::spawn(move || {
-            let is_written = writer.write_all(&build_two_way_bytes()).is_ok();
+            let is_written = writer
+                .write_all(&build_counting_bytes(TWO_WAY_BYTE_COUNT))
+                .is_ok();
             let _ = finished_half_sender.send((half_name, is_written));
             writer
         });
@@ -1505,7 +1632,7 @@ fn both_ends_writing_more_than_a_slow_link_holds_at_once_deliver_every_byte_both
         std::thread::spawn(move || {
             let mut received_bytes = vec![0u8; TWO_WAY_BYTE_COUNT];
             let is_read = reader.read_exact(&mut received_bytes).is_ok()
-                && received_bytes == build_two_way_bytes();
+                && received_bytes == build_counting_bytes(TWO_WAY_BYTE_COUNT);
             let _ = finished_half_sender.send((half_name, is_read));
             reader
         });
@@ -1534,9 +1661,12 @@ fn both_ends_writing_more_than_a_slow_link_holds_at_once_deliver_every_byte_both
 fn less_than_a_millisecond_left_counts_as_no_time_left() {
     let (socket, _peer) = build_loopback_socket_pair();
 
-    let timeout_error =
-        set_socket_timeouts_until(&socket, Some(Instant::now() + Duration::from_micros(500)))
-            .expect_err("less than a millisecond is no time left");
+    let timeout_error = set_socket_timeout_until(
+        &socket,
+        Some(Instant::now() + Duration::from_micros(500)),
+        TcpStream::set_write_timeout,
+    )
+    .expect_err("less than a millisecond is no time left");
 
     assert_eq!(timeout_error.kind(), io::ErrorKind::TimedOut);
     assert_eq!(timeout_error.to_string(), "this step ran out of time");

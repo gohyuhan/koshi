@@ -39,6 +39,13 @@ fn main() -> ExitCode {
     #[cfg(windows)]
     koshi_host::standard_handles::clear_standard_handle_inheritance();
 
+    // A program file named after a clipboard tool, such as `xclip`, runs as
+    // that tool's stand-in and reads no koshi command line.
+    #[cfg(unix)]
+    if let Some(clipboard_tool_name) = koshi::clipboard_tool::find_invoked_clipboard_tool() {
+        return koshi::clipboard_tool::run_clipboard_tool(clipboard_tool_name);
+    }
+
     // Usage errors print through clap and exit 2; --help/--version exit 0.
     let cli = parse_cli_arguments();
 

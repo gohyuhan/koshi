@@ -40,23 +40,26 @@ use crate::transport::{compute_time_left_until, is_io_timeout};
 /// How many raw bytes [`TlsReader`] takes off the socket in one read.
 const TLS_READ_BUFFER_BYTE_COUNT: usize = 16 * 1024;
 
-/// Set both of `socket`'s timeouts to the time left until `deadline`. `None`
-/// returns at once and leaves the timeouts as they are.
+/// Set one of `socket`'s two timeouts, the one `set_socket_timeout` sets
+/// ([`TcpStream::set_read_timeout`] or [`TcpStream::set_write_timeout`]), to
+/// the time left until `deadline`. The other timeout stays as it is. `None`
+/// returns at once and leaves both timeouts as they are.
 ///
-/// Every blocking read and write calls this first; each call reads the time
-/// left again.
+/// Every blocking read sets the read timeout this way first, and every
+/// blocking write the write timeout; each call reads the time left again.
 ///
 /// # Errors
 /// [`io::ErrorKind::TimedOut`] with the text `this step ran out of time` when
-/// less than 1 ms is left; otherwise the failure of setting a socket timeout.
-fn set_socket_timeouts_until(socket: &TcpStream, deadline: Option<Instant>) -> io::Result<()> {
+/// less than 1 ms is left; otherwise the failure of setting the timeout.
+fn set_socket_timeout_until(
+    socket: &TcpStream,
+    deadline: Option<Instant>,
+    set_socket_timeout: fn(&TcpStream, Option<Duration>) -> io::Result<()>,
+) -> io::Result<()> {
     let Some(deadline) = deadline else {
         return Ok(());
     };
-    let remaining_timeout_duration = compute_time_left_until(deadline)?;
-    socket.set_read_timeout(Some(remaining_timeout_duration))?;
-    socket.set_write_timeout(Some(remaining_timeout_duration))?;
-    Ok(())
+    set_socket_timeout(socket, Some(compute_time_left_until(deadline)?))
 }
 
 /// Decrypt the bytes `tls_connection` has taken and queue whatever it answers with.
@@ -75,7 +78,8 @@ fn decrypt_pending_tls_records(tls_connection: &mut rustls::Connection) -> io::R
 
 /// Split a TLS stream into its reading and its writing half.
 ///
-/// Each half gets its own handle on the same socket. Both halves share one
+/// The writing half keeps `socket`, and the reading half gets its own handle
+/// on the same socket from [`TcpStream::try_clone`]. Both halves share one
 /// [`rustls::Connection`] behind a mutex, and neither half holds the mutex
 /// during a socket call: one half blocking on the socket does not stop the
 /// other.
@@ -85,19 +89,20 @@ fn decrypt_pending_tls_records(tls_connection: &mut rustls::Connection) -> io::R
 /// out at the start of the writing half's next write, ahead of its own
 /// plaintext.
 ///
-/// A half with a deadline sets both timeouts on its own handle before each of
-/// its socket calls. A half with no deadline sets nothing and runs under the
-/// timeouts its own handle carries.
+/// The reading half sets only the read timeout of its own handle, and the
+/// writing half only the write timeout of its own handle. A half with a
+/// deadline sets its timeout to the time left before each of its socket
+/// calls. A half with no deadline sets nothing, and its socket calls run
+/// under the timeout its own handle carries. A deadline on one half never
+/// limits the other half's socket calls.
 ///
-/// A timeout one half sets reaches the other only on Unix, where the two
-/// handles are one duplicated descriptor onto one socket. On Windows each
-/// handle is its own socket descriptor and carries its own timeouts. Give each
-/// half the deadline it is to run under.
+/// Both handles start with the timeouts `socket` carries at the split, such
+/// as the ones [`run_tls_handshake`] left on it. On Unix the two handles
+/// share one read timeout and one write timeout. On Windows each handle
+/// carries its own, and a timeout set through one handle does not reach the
+/// other.
 ///
-/// Neither half starts with a deadline. Each handle keeps the timeouts
-/// [`run_tls_handshake`] left on the socket it was cloned from until
-/// [`TlsReader::set_deadline`] or [`TlsWriter::set_deadline`] sets or clears
-/// that half's own.
+/// Neither half starts with a deadline.
 ///
 /// # Errors
 /// Returns the failure of duplicating the socket handle.
@@ -125,17 +130,19 @@ pub fn split_tls_stream(
     ))
 }
 
-/// Store `deadline` in `deadline_slot`. When it is `None`, clear the read and the write
-/// timeout on `socket` as well; a failure to clear one is ignored.
+/// Store `deadline` in `deadline_slot`. When it is `None`, also clear the
+/// timeout of `socket` that `set_socket_timeout` sets
+/// ([`TcpStream::set_read_timeout`] or [`TcpStream::set_write_timeout`]); a
+/// failure to clear it is ignored.
 fn store_socket_deadline(
     socket: &TcpStream,
     deadline_slot: &mut Option<Instant>,
     deadline: Option<Instant>,
+    set_socket_timeout: fn(&TcpStream, Option<Duration>) -> io::Result<()>,
 ) {
     *deadline_slot = deadline;
     if deadline.is_none() {
-        let _ = socket.set_read_timeout(None);
-        let _ = socket.set_write_timeout(None);
+        let _ = set_socket_timeout(socket, None);
     }
 }
 
@@ -176,11 +183,31 @@ impl TlsReader {
     /// Give this half a deadline, or `None` to take its deadline away.
     ///
     /// Every socket read this half makes ends by `deadline`, however many
-    /// reads it takes to produce one helping of plaintext. `None` clears both
-    /// timeouts on this half's handle; a read after it blocks for as long as
-    /// it takes.
+    /// reads it takes to produce one helping of plaintext. `None` clears the
+    /// read timeout on this half's handle; a read after it blocks for as long
+    /// as it takes, until [`TlsReader::set_read_timeout`] sets a new one.
     pub fn set_deadline(&mut self, deadline: Option<Instant>) {
-        store_socket_deadline(&self.socket, &mut self.deadline, deadline);
+        store_socket_deadline(
+            &self.socket,
+            &mut self.deadline,
+            deadline,
+            TcpStream::set_read_timeout,
+        );
+    }
+
+    /// Set the read timeout of this half's handle to `read_timeout`, or take
+    /// it away for `None`. With no deadline set, each socket read this half
+    /// makes waits at most `read_timeout`, and with no limit for `None`.
+    ///
+    /// A deadline set with [`TlsReader::set_deadline`] replaces the read
+    /// timeout before each socket read, and `set_deadline(None)` takes it
+    /// away.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::InvalidInput`] for a zero `read_timeout`, and the
+    /// platform's own failure to set it.
+    pub fn set_read_timeout(&self, read_timeout: Option<Duration>) -> io::Result<()> {
+        self.socket.set_read_timeout(read_timeout)
     }
 }
 
@@ -225,7 +252,7 @@ impl Read for TlsReader {
                 decrypt_pending_tls_records(&mut tls_connection)?;
                 continue;
             }
-            set_socket_timeouts_until(&self.socket, self.deadline)?;
+            set_socket_timeout_until(&self.socket, self.deadline, TcpStream::set_read_timeout)?;
             // No lock is held during the socket read; the writing half keeps
             // working while this half waits.
             self.encrypted_byte_count = self.socket.read(&mut self.encrypted_read_buffer[..])?;
@@ -263,10 +290,31 @@ impl TlsWriter {
     ///
     /// Every socket write this half makes ends by `deadline`, however many
     /// writes it takes to put one helping of plaintext on the socket. `None`
-    /// clears both timeouts on this half's handle; a write after it blocks for
-    /// as long as it takes.
+    /// clears the write timeout on this half's handle; a write after it blocks
+    /// for as long as it takes, until [`TlsWriter::set_write_timeout`] sets a
+    /// new one.
     pub fn set_deadline(&mut self, deadline: Option<Instant>) {
-        store_socket_deadline(&self.socket, &mut self.deadline, deadline);
+        store_socket_deadline(
+            &self.socket,
+            &mut self.deadline,
+            deadline,
+            TcpStream::set_write_timeout,
+        );
+    }
+
+    /// Set the write timeout of this half's handle to `write_timeout`, or
+    /// take it away for `None`. With no deadline set, each socket write this
+    /// half makes waits at most `write_timeout`, and with no limit for `None`.
+    ///
+    /// A deadline set with [`TlsWriter::set_deadline`] replaces the write
+    /// timeout before each socket write, and `set_deadline(None)` takes it
+    /// away.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::InvalidInput`] for a zero `write_timeout`, and the
+    /// platform's own failure to set it.
+    pub fn set_write_timeout(&self, write_timeout: Option<Duration>) -> io::Result<()> {
+        self.socket.set_write_timeout(write_timeout)
     }
 }
 
@@ -324,7 +372,7 @@ impl TlsWriter {
     /// otherwise the socket write's own failure. The bytes not taken stay.
     fn send_unsent_encrypted_bytes(&mut self) -> io::Result<()> {
         while !self.unsent_encrypted_bytes.is_empty() {
-            set_socket_timeouts_until(&self.socket, self.deadline)?;
+            set_socket_timeout_until(&self.socket, self.deadline, TcpStream::set_write_timeout)?;
             let sent_byte_count = self.socket.write(&self.unsent_encrypted_bytes)?;
             if sent_byte_count == 0 {
                 return Err(io::Error::from(io::ErrorKind::WriteZero));
@@ -361,14 +409,22 @@ struct BoundedSocket<'a> {
 
 impl Read for BoundedSocket<'_> {
     fn read(&mut self, encrypted_buffer: &mut [u8]) -> io::Result<usize> {
-        set_socket_timeouts_until(self.socket, Some(self.deadline))?;
+        set_socket_timeout_until(
+            self.socket,
+            Some(self.deadline),
+            TcpStream::set_read_timeout,
+        )?;
         self.socket.read(encrypted_buffer)
     }
 }
 
 impl Write for BoundedSocket<'_> {
     fn write(&mut self, socket_write_bytes: &[u8]) -> io::Result<usize> {
-        set_socket_timeouts_until(self.socket, Some(self.deadline))?;
+        set_socket_timeout_until(
+            self.socket,
+            Some(self.deadline),
+            TcpStream::set_write_timeout,
+        )?;
         self.socket.write(socket_write_bytes)
     }
 
@@ -381,8 +437,8 @@ impl Write for BoundedSocket<'_> {
 ///
 /// Every blocking read and write inside the handshake is given the time left
 /// until `deadline` when it starts. A deadline already reached returns before
-/// the socket is touched. The timeouts the last read or write set stay on
-/// `socket` after the handshake.
+/// the socket is touched. The read timeout the last read set and the write
+/// timeout the last write set stay on `socket` after the handshake.
 ///
 /// # Errors
 /// [`io::ErrorKind::TimedOut`] with the text `the TLS handshake did not

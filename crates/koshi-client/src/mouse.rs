@@ -70,7 +70,7 @@ use crate::input::{
     build_placement_destinations, find_destination_tab_snapshot, is_same_tab_placement_noop,
 };
 use crate::terminal::project_core_rect;
-use crate::{Client, PlacementInputAction};
+use crate::{Client, LinkStatus, PlacementInputAction};
 
 #[cfg(test)]
 mod tests;
@@ -310,7 +310,10 @@ impl Client {
                 .tabline_peek
                 .filter(|tabline_peek| tabline_peek.active_tab_id == active_tab_id)
                 .map(|tabline_peek| tabline_peek.first_visible_tab_index),
-            reconnecting: self.reconnecting,
+            reconnecting: match self.link_status {
+                LinkStatus::Redialing(reconnecting) => Some(reconnecting),
+                LinkStatus::Linked | LinkStatus::AwaitingRestartedSession => None,
+            },
         }
     }
 

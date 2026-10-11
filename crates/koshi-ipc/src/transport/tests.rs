@@ -547,6 +547,122 @@ fn frame_halves_speak_the_frame_shape_and_hand_each_deadline_to_its_half() {
     assert_eq!(*read_deadline.lock().expect("deadline"), None);
 }
 
+/// An in-memory reading half that hands out one byte per read and records the
+/// deadline it holds when each read starts.
+struct ByteAtATimeStream {
+    read_cursor: Cursor<Vec<u8>>,
+    deadline: Option<Instant>,
+    deadlines_at_reads: Arc<Mutex<Vec<Option<Instant>>>>,
+}
+
+impl Read for ByteAtATimeStream {
+    fn read(&mut self, read_buffer: &mut [u8]) -> io::Result<usize> {
+        self.deadlines_at_reads
+            .lock()
+            .expect("deadlines_at_reads")
+            .push(self.deadline);
+        let byte_count = read_buffer.len().min(1);
+        self.read_cursor.read(&mut read_buffer[..byte_count])
+    }
+}
+
+impl Deadlined for ByteAtATimeStream {
+    fn set_deadline(&mut self, deadline_instant: Option<Instant>) {
+        self.deadline = deadline_instant;
+    }
+}
+
+/// A frame reader over a [`ByteAtATimeStream`] that holds `framed_bytes`, and
+/// the deadlines its reads record.
+fn build_byte_at_a_time_reader(
+    framed_bytes: Vec<u8>,
+) -> (FrameReader, Arc<Mutex<Vec<Option<Instant>>>>) {
+    let deadlines_at_reads = Arc::new(Mutex::new(Vec::new()));
+    let (reader, _) = build_frame_halves(
+        Box::new(ByteAtATimeStream {
+            read_cursor: Cursor::new(framed_bytes),
+            deadline: None,
+            deadlines_at_reads: Arc::clone(&deadlines_at_reads),
+        }),
+        Box::new(RecordedStream {
+            read_cursor: Cursor::new(Vec::new()),
+            written_bytes: Arc::new(Mutex::new(Vec::new())),
+            deadline: Arc::new(Mutex::new(None)),
+        }),
+    );
+    (reader, deadlines_at_reads)
+}
+
+#[test]
+fn an_idle_timeout_gives_each_read_of_a_frame_its_own_deadline() {
+    let mut framed_bytes: Vec<u8> = Vec::new();
+    write_message(&mut framed_bytes, &build_hello_request(5)).expect("frame");
+    let framed_byte_count = framed_bytes.len();
+    let (mut reader, deadlines_at_reads) = build_byte_at_a_time_reader(framed_bytes);
+    let idle_timeout = Duration::from_secs(30);
+    reader.set_idle_timeout(Some(idle_timeout));
+
+    let receive_started_at = Instant::now();
+    assert_eq!(
+        reader.recv::<IpcRequest>().expect("recv"),
+        build_hello_request(5)
+    );
+    let receive_ended_at = Instant::now();
+
+    let deadlines_at_reads = deadlines_at_reads.lock().expect("deadlines_at_reads");
+    assert_eq!(deadlines_at_reads.len(), framed_byte_count);
+    let mut previous_deadline = receive_started_at + idle_timeout;
+    for deadline_at_read in deadlines_at_reads.iter() {
+        let deadline = deadline_at_read.expect("each read carries a deadline");
+        assert!(
+            deadline >= previous_deadline,
+            "each read moves the deadline on"
+        );
+        assert!(deadline <= receive_ended_at + idle_timeout);
+        previous_deadline = deadline;
+    }
+}
+
+#[test]
+fn without_an_idle_timeout_reads_keep_the_deadline_set_before() {
+    let mut framed_bytes: Vec<u8> = Vec::new();
+    write_message(&mut framed_bytes, &build_hello_request(5)).expect("frame");
+    let (mut reader, deadlines_at_reads) = build_byte_at_a_time_reader(framed_bytes);
+    let deadline_instant = Instant::now() + Duration::from_secs(10);
+    reader.set_deadline(Some(deadline_instant));
+    reader.set_idle_timeout(Some(Duration::from_secs(30)));
+    reader.set_idle_timeout(None);
+
+    assert_eq!(
+        reader.recv::<IpcRequest>().expect("recv"),
+        build_hello_request(5)
+    );
+    assert!(deadlines_at_reads
+        .lock()
+        .expect("deadlines_at_reads")
+        .iter()
+        .all(|deadline_at_read| *deadline_at_read == Some(deadline_instant)));
+}
+
+#[test]
+fn an_idle_timeout_too_large_to_add_takes_the_deadline_away() {
+    let mut framed_bytes: Vec<u8> = Vec::new();
+    write_message(&mut framed_bytes, &build_hello_request(5)).expect("frame");
+    let (mut reader, deadlines_at_reads) = build_byte_at_a_time_reader(framed_bytes);
+    reader.set_deadline(Some(Instant::now()));
+    reader.set_idle_timeout(Some(Duration::MAX));
+
+    assert_eq!(
+        reader.recv::<IpcRequest>().expect("recv"),
+        build_hello_request(5)
+    );
+    assert!(deadlines_at_reads
+        .lock()
+        .expect("deadlines_at_reads")
+        .iter()
+        .all(Option::is_none));
+}
+
 // --- address mapping ---
 
 #[cfg(unix)]

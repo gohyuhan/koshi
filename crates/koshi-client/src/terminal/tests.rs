@@ -109,9 +109,9 @@ use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, GridView, PaneSlot, PlacementClientSnapshot,
-    PlacementPaneSnapshot, PlacementSnapshot, PlacementTabSnapshot, RenderSnapshot, TabSnapshot,
-    ViewerChrome,
+    ClientSnapshot, CommittedRegions, FloatingPaneSlot, GridView, PaneSlot,
+    PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot, PlacementTabSnapshot,
+    RenderSnapshot, TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::{build_image_cell_snapshot, build_image_paints};
 use koshi_runtime::runtime::pty_inbox::InboxSink;
@@ -423,6 +423,7 @@ fn build_source_image_pixel_map(render_snapshot: &RenderSnapshot) -> BTreeMap<(u
     for image_paint in build_image_paints(
         render_snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
+        ViewerChrome::default(),
         Rect::new(0, 0, 80, 24),
     ) {
         for target_row_offset in 0..image_paint.target_area.height {
@@ -1038,6 +1039,7 @@ fn two_images_survive_partial_full_and_reverse_scrolling_for_every_protocol_pair
             build_image_paints(
                 &render_snapshots[0],
                 &build_committed_regions(TEST_VIEWPORT_SIZE),
+                ViewerChrome::default(),
                 Rect::new(0, 0, 80, 24)
             )
             .len()
@@ -1178,6 +1180,7 @@ fn pane_placement_preview_hides_the_focused_panes_hardware_cursor() {
     assert!(get_cursor_position(
         &render_snapshot,
         &committed_regions,
+        ViewerChrome::default(),
         Rect::new(0, 0, 80, 24)
     )
     .is_some());
@@ -1355,10 +1358,19 @@ fn assert_partial_native_frame_write_recovers(
     let client = build_test_client(&mut server, client_id);
     let committed_regions = build_committed_regions(TEST_VIEWPORT_SIZE);
     let render_area = Rect::new(0, 0, 80, 24);
-    let image_paint_commands =
-        build_image_paints(&render_snapshot, &committed_regions, render_area);
-    let image_cell_snapshot =
-        build_image_cell_snapshot(&render_snapshot, &committed_regions, render_area).map(Arc::new);
+    let image_paint_commands = build_image_paints(
+        &render_snapshot,
+        &committed_regions,
+        ViewerChrome::default(),
+        render_area,
+    );
+    let image_cell_snapshot = build_image_cell_snapshot(
+        &render_snapshot,
+        &committed_regions,
+        ViewerChrome::default(),
+        render_area,
+    )
+    .map(Arc::new);
     let mut image_output_state =
         ImageOutputState::from_output_kind(ImageOutputKind::from_support(graphics_support));
     let settle_deadline = Instant::now() + Duration::from_secs(5);
@@ -2033,6 +2045,38 @@ fn window_title_reads_the_focused_pane_not_the_first_one_listed() {
     render_snapshot.pane_snapshots[0].pane_title = Some("bash".to_string());
     render_snapshot.pane_snapshots.push(second_pane_snapshot);
     render_snapshot.client_snapshot.focused_pane_id = Some(focused_pane_id);
+
+    assert_eq!(build_window_title(&render_snapshot), "quiet-lake | htop");
+}
+
+#[test]
+fn window_title_reads_a_focused_floating_panes_title() {
+    let (server, client_id, pane_id) = build_test_server_with_pane();
+    let mut render_snapshot = build_render_snapshot(&server, client_id);
+    render_snapshot.session_snapshot.session_name = "quiet-lake".to_string();
+    render_snapshot.pane_snapshots[0].pane_id = pane_id;
+    render_snapshot.pane_snapshots[0].pane_title = Some("bash".to_string());
+    let floating_pane_id = PaneId::new();
+    let floating_outer_rect = CoreRect::from_origin_and_size(
+        CorePoint { column: 4, row: 2 },
+        Size {
+            column_count: 30,
+            row_count: 8,
+        },
+    );
+    render_snapshot
+        .session_snapshot
+        .floating_pane_slots
+        .push(FloatingPaneSlot::from_outer_rect(
+            floating_pane_id,
+            floating_outer_rect,
+            false,
+        ));
+    let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
+    floating_pane_snapshot.pane_id = floating_pane_id;
+    floating_pane_snapshot.pane_title = Some("htop".to_string());
+    render_snapshot.pane_snapshots.push(floating_pane_snapshot);
+    render_snapshot.client_snapshot.focused_pane_id = Some(floating_pane_id);
 
     assert_eq!(build_window_title(&render_snapshot), "quiet-lake | htop");
 }
@@ -3680,35 +3724,14 @@ fn placement_render_snapshot_replaces_the_active_pane_layout() {
 fn placement_render_snapshot_shows_a_cross_tab_destination_in_the_pane_area() {
     let (session_server, client_id, source_pane_id) = build_test_server_with_pane();
     let render_snapshot = build_render_snapshot(&session_server, client_id);
-    let source_tab_id = render_snapshot.client_snapshot.active_tab_id;
     let destination_tab_id = TabId::new();
     let destination_pane_ids = [PaneId::new(), PaneId::new()];
-    let placement_snapshot = PlacementSnapshot {
-        session_id: render_snapshot.session_snapshot.session_id,
+    let placement_snapshot = build_cross_tab_placement_snapshot(
+        &render_snapshot,
         source_pane_id,
-        source_tab_id,
         destination_tab_id,
-        session_placement_revision: render_snapshot.session_snapshot.session_revision,
-        client_placement_revision: render_snapshot.client_snapshot.client_revision,
-        source_tab_snapshot: build_test_placement_tab_snapshot(
-            source_tab_id,
-            "source",
-            [source_pane_id, PaneId::new()],
-        ),
-        destination_tab_snapshot: Some(build_test_placement_tab_snapshot(
-            destination_tab_id,
-            "destination",
-            destination_pane_ids,
-        )),
-        client_snapshot: PlacementClientSnapshot {
-            client_snapshot: render_snapshot.client_snapshot.clone(),
-            reported_pane_area: Some(PaneArea::Reported(Size {
-                column_count: 20,
-                row_count: 8,
-            })),
-        },
-        pane_sizing: PaneSizing::default(),
-    };
+        destination_pane_ids,
+    );
 
     let displayed_render_snapshot =
         build_placement_render_snapshot(&render_snapshot, &placement_snapshot)
@@ -3746,6 +3769,69 @@ fn placement_render_snapshot_shows_a_cross_tab_destination_in_the_pane_area() {
             .map(|pane_snapshot| pane_snapshot.pane_id)
             .collect::<Vec<_>>(),
         destination_pane_ids.to_vec()
+    );
+}
+
+#[test]
+fn placement_render_snapshot_keeps_the_floating_panes_and_their_content() {
+    let (session_server, client_id, source_pane_id) = build_test_server_with_pane();
+    let mut render_snapshot = build_render_snapshot(&session_server, client_id);
+    let floating_pane_id = PaneId::new();
+    let floating_outer_rect = CoreRect::from_origin_and_size(
+        CorePoint { column: 4, row: 2 },
+        Size {
+            column_count: 30,
+            row_count: 8,
+        },
+    );
+    render_snapshot
+        .session_snapshot
+        .floating_pane_slots
+        .push(FloatingPaneSlot::from_outer_rect(
+            floating_pane_id,
+            floating_outer_rect,
+            true,
+        ));
+    let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
+    floating_pane_snapshot.pane_id = floating_pane_id;
+    floating_pane_snapshot.pane_title = Some("htop".to_string());
+    render_snapshot
+        .pane_snapshots
+        .push(floating_pane_snapshot.clone());
+    let destination_tab_id = TabId::new();
+    let destination_pane_ids = [PaneId::new(), PaneId::new()];
+    let placement_snapshot = build_cross_tab_placement_snapshot(
+        &render_snapshot,
+        source_pane_id,
+        destination_tab_id,
+        destination_pane_ids,
+    );
+
+    let displayed_render_snapshot =
+        build_placement_render_snapshot(&render_snapshot, &placement_snapshot)
+            .expect("the destination tab is carried by the placement snapshot");
+
+    assert_eq!(
+        displayed_render_snapshot
+            .session_snapshot
+            .floating_pane_slots,
+        render_snapshot.session_snapshot.floating_pane_slots
+    );
+    assert_eq!(
+        displayed_render_snapshot
+            .pane_snapshots
+            .iter()
+            .map(|pane_snapshot| pane_snapshot.pane_id)
+            .collect::<Vec<_>>(),
+        vec![
+            floating_pane_id,
+            destination_pane_ids[0],
+            destination_pane_ids[1]
+        ]
+    );
+    assert_eq!(
+        displayed_render_snapshot.pane_snapshots[0],
+        floating_pane_snapshot
     );
 }
 
@@ -3906,6 +3992,44 @@ fn target_outline_leaves_cells_on_the_source_border_unstyled() {
         !is_styled_outline_cell(8, 0),
         "a cell outside the outline stays unstyled"
     );
+}
+
+/// A placement of `source_pane_id` from the active tab of `render_snapshot`
+/// into tab `destination_tab_id`, which holds `destination_pane_ids` side by
+/// side, for a client that reports a `20x8` pane area.
+fn build_cross_tab_placement_snapshot(
+    render_snapshot: &RenderSnapshot,
+    source_pane_id: PaneId,
+    destination_tab_id: TabId,
+    destination_pane_ids: [PaneId; 2],
+) -> PlacementSnapshot {
+    let source_tab_id = render_snapshot.client_snapshot.active_tab_id;
+    PlacementSnapshot {
+        session_id: render_snapshot.session_snapshot.session_id,
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        session_placement_revision: render_snapshot.session_snapshot.session_revision,
+        client_placement_revision: render_snapshot.client_snapshot.client_revision,
+        source_tab_snapshot: build_test_placement_tab_snapshot(
+            source_tab_id,
+            "source",
+            [source_pane_id, PaneId::new()],
+        ),
+        destination_tab_snapshot: Some(build_test_placement_tab_snapshot(
+            destination_tab_id,
+            "destination",
+            destination_pane_ids,
+        )),
+        client_snapshot: PlacementClientSnapshot {
+            client_snapshot: render_snapshot.client_snapshot.clone(),
+            reported_pane_area: Some(PaneArea::Reported(Size {
+                column_count: 20,
+                row_count: 8,
+            })),
+        },
+        pane_sizing: PaneSizing::default(),
+    }
 }
 
 fn build_test_placement_tab_snapshot(
@@ -4092,7 +4216,7 @@ fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its
     assert_eq!(
         halfway_tab_snapshot, expected_halfway_tab_snapshot,
         "the moved pane is halfway, the arriving and collapsing panes sit at their \
-         is_frame_committed slots, the leaving pane is gone, and the is_frame_committed headers show"
+         committed slots, the leaving pane is gone, and the committed headers show"
     );
 
     let early_tab_snapshot =

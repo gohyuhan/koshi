@@ -351,6 +351,7 @@ impl Connection {
             FrameReader {
                 reader_half: Box::new(LocalSocketReader::from_recv_half(reader_half)),
                 is_closed: self.is_read_closed,
+                idle_timeout: None,
             },
             FrameWriter {
                 writer_half: Box::new(LocalSocketWriter::from_send_half(writer_half)),
@@ -776,6 +777,7 @@ pub fn build_frame_halves(
         FrameReader {
             reader_half,
             is_closed: Arc::new(AtomicBool::new(false)),
+            idle_timeout: None,
         },
         FrameWriter { writer_half },
     )
@@ -787,6 +789,9 @@ pub struct FrameReader {
     /// Set by [`ReadCloser::close`]. Every read after it reports
     /// [`IpcError::Disconnected`] without touching the socket.
     is_closed: Arc<AtomicBool>,
+    /// The longest each read of a frame waits for its next bytes, or `None`
+    /// to read under this half's deadline alone.
+    idle_timeout: Option<Duration>,
 }
 
 impl FrameReader {
@@ -796,6 +801,53 @@ impl FrameReader {
     /// join it to a session, and none afterwards.
     pub fn set_deadline(&mut self, deadline: Option<Instant>) {
         self.reader_half.set_deadline(deadline);
+    }
+
+    /// Give each read of a frame at most `idle_timeout` to get its next bytes,
+    /// or `None` to read under this half's deadline alone.
+    ///
+    /// With an idle timeout, each read that [`recv`](Self::recv) and
+    /// [`recv_answer`](Self::recv_answer) make first sets this half's deadline
+    /// to the time the read starts plus `idle_timeout`. That deadline replaces
+    /// the one set before. An `idle_timeout` too large to add to the current
+    /// time takes the deadline away. A peer that sends nothing for
+    /// `idle_timeout` ends the read with a timeout error.
+    ///
+    /// Example: with a 30-second idle timeout, a frame whose bytes arrive 10
+    /// seconds apart is read whole, and a peer that sends nothing for 30
+    /// seconds ends the read.
+    pub fn set_idle_timeout(&mut self, idle_timeout: Option<Duration>) {
+        self.idle_timeout = idle_timeout;
+    }
+
+    /// The reads of one frame: through [`IdleTimedRead`], so each read
+    /// applies `idle_timeout` first.
+    fn build_frame_read(&mut self) -> IdleTimedRead<'_> {
+        IdleTimedRead {
+            reader_half: &mut *self.reader_half,
+            idle_timeout: self.idle_timeout,
+        }
+    }
+}
+
+/// The reads of one frame from a [`FrameReader`]'s half. When `idle_timeout`
+/// is `Some`, each read first sets the half's deadline to the time the read
+/// starts plus `idle_timeout`, or takes the deadline away when that time is
+/// too large to hold. When it is `None`, each read goes to the half as it is.
+struct IdleTimedRead<'a> {
+    /// The half the bytes come from.
+    reader_half: &'a mut dyn DeadlinedRead,
+    /// The longest one read waits for bytes, or `None` for no idle timeout.
+    idle_timeout: Option<Duration>,
+}
+
+impl Read for IdleTimedRead<'_> {
+    fn read(&mut self, frame_bytes: &mut [u8]) -> io::Result<usize> {
+        if let Some(idle_timeout) = self.idle_timeout {
+            self.reader_half
+                .set_deadline(Instant::now().checked_add(idle_timeout));
+        }
+        self.reader_half.read(frame_bytes)
     }
 }
 
@@ -816,7 +868,7 @@ impl FrameReader {
         if self.is_closed.load(Ordering::SeqCst) {
             return Err(IpcError::Disconnected);
         }
-        read_message(&mut self.reader_half)
+        read_message(&mut self.build_frame_read())
     }
 
     /// Read one frame and parse it as an [`Answer`] carrying `Response`, as
@@ -829,7 +881,7 @@ impl FrameReader {
         if self.is_closed.load(Ordering::SeqCst) {
             return Err(IpcError::Disconnected);
         }
-        read_answer(&mut self.reader_half)
+        read_answer(&mut self.build_frame_read())
     }
 }
 

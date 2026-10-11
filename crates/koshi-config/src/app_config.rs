@@ -47,8 +47,8 @@ use koshi_core::log::{LogFormat, LogLevel};
 use crate::error::{build_validation_error, validate_config_schema_version, ConfigError};
 use crate::layer::{
     PartialCopyConfig, PartialKoshiConfig, PartialLayoutDefaults, PartialLoggingConfig,
-    PartialMouseConfig, PartialPaneConfig, PartialScrollbackConfig, PartialTerminalConfig,
-    PartialUpdateConfig,
+    PartialMouseConfig, PartialPaneClipboardWriteConfig, PartialPaneConfig,
+    PartialScrollbackConfig, PartialTerminalConfig, PartialUpdateConfig,
 };
 use crate::parser::{
     find_section_block, format_unknown_key, parse_boolean_kdl_value, parse_integer_kdl_value,
@@ -74,11 +74,13 @@ const APP_CONFIG_SECTION_NAMES: &[&str] = &[
     "reduced-motion",
     "stay-in-pane-placement-mode-after-placement",
     "remote-reconnect",
+    "remote-link-timeout-ms",
     "allow-beta-features",
     "allow-other-users",
     "remote-listen",
     "shared-sessions-dir",
     "auto-close-session",
+    "pane-clipboard-writes",
 ];
 
 /// A parsed `koshi.kdl`.
@@ -210,6 +212,12 @@ pub fn parse_app_config(
                 config_section_name,
                 &mut parse_warnings,
             ),
+            "remote-link-timeout-ms" => set_top_level_field(
+                &mut partial_koshi_config.remote_link_timeout_ms,
+                parse_remote_link_timeout_ms(config_node),
+                config_section_name,
+                &mut parse_warnings,
+            ),
             "allow-beta-features" => set_top_level_field(
                 &mut partial_koshi_config.should_allow_beta_features,
                 parse_boolean_kdl_value(config_node),
@@ -256,6 +264,11 @@ pub fn parse_app_config(
                 config_section_name,
                 &mut parse_warnings,
             ),
+            "pane-clipboard-writes" => {
+                partial_koshi_config.pane_clipboard_writes = Some(
+                    parse_pane_clipboard_write_config(config_node, &mut parse_warnings),
+                );
+            }
             unknown_section_name => parse_warnings.push(format!(
                 "ignored {}",
                 format_unknown_key(unknown_section_name, APP_CONFIG_SECTION_NAMES)
@@ -639,6 +652,71 @@ fn parse_logging_config(
         }
     }
     partial_logging_config
+}
+
+/// Reads the `pane-clipboard-writes { … }` block.
+fn parse_pane_clipboard_write_config(
+    config_node: &KdlNode,
+    parse_warnings: &mut Vec<String>,
+) -> PartialPaneClipboardWriteConfig {
+    let mut partial_pane_clipboard_write_config = PartialPaneClipboardWriteConfig::default();
+    let Some(section_children) = find_section_block(config_node, parse_warnings) else {
+        return partial_pane_clipboard_write_config;
+    };
+    for field_node in section_children.nodes() {
+        let field_name = field_node.name().value();
+        match field_name {
+            "allow" => set_parsed_field(
+                &mut partial_pane_clipboard_write_config.should_allow_writes,
+                parse_boolean_kdl_value(field_node),
+                "pane-clipboard-writes",
+                field_name,
+                parse_warnings,
+            ),
+            "max-copy-bytes" => set_parsed_field(
+                &mut partial_pane_clipboard_write_config.maximum_copy_byte_count,
+                parse_maximum_copy_byte_count(field_node),
+                "pane-clipboard-writes",
+                field_name,
+                parse_warnings,
+            ),
+            unknown_field_name => parse_warnings.push(format!(
+                "ignored {}",
+                format_unknown_key(
+                    &format!("pane-clipboard-writes.{unknown_field_name}"),
+                    &[
+                        "pane-clipboard-writes.allow",
+                        "pane-clipboard-writes.max-copy-bytes",
+                    ],
+                )
+            )),
+        }
+    }
+    partial_pane_clipboard_write_config
+}
+
+/// Reads the largest copy a pane may write, in decoded bytes. A value below
+/// `1` gives `must be at least 1`. A value above `usize::MAX` becomes
+/// `usize::MAX`. `max-copy-bytes 0` is an error, and `max-copy-bytes 1` yields
+/// `1`.
+fn parse_maximum_copy_byte_count(field_node: &KdlNode) -> Result<usize, String> {
+    let maximum_copy_byte_count = parse_integer_kdl_value(field_node)?;
+    if maximum_copy_byte_count < 1 {
+        return Err("must be at least 1".to_string());
+    }
+    Ok(usize::try_from(maximum_copy_byte_count).unwrap_or(usize::MAX))
+}
+
+/// Reads the remote link timeout in milliseconds. A value below `1` gives
+/// `must be at least 1`, and a value above `4294967295` gives `must be at most
+/// 4294967295`. `remote-link-timeout-ms 0` is an error, and
+/// `remote-link-timeout-ms 1` yields `1`.
+fn parse_remote_link_timeout_ms(config_node: &KdlNode) -> Result<u32, String> {
+    let remote_link_timeout_ms = parse_integer_kdl_value(config_node)?;
+    if remote_link_timeout_ms < 1 {
+        return Err("must be at least 1".to_string());
+    }
+    u32::try_from(remote_link_timeout_ms).map_err(|_| "must be at most 4294967295".to_string())
 }
 
 /// Reads a scrollback cap. A negative value becomes `0` (no scrollback); a

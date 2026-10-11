@@ -86,6 +86,19 @@ pub enum RuntimeEvent {
         /// stream. `false` from the attach reply failing to write, which hands
         /// the client no token; the view it was looking at is dropped.
         is_streamed: bool,
+        /// Whether the client may attach again: the `is_returning` of the
+        /// `Leaving` request that ended the connection, and with no such
+        /// request, whether the connection came from another machine. `true`
+        /// removes the client with no `auto-close-session` quit. `false` lets
+        /// `auto-close-session` end a session the client leaves with no
+        /// client.
+        is_returning: bool,
+    },
+    /// An attached client sent a ping. The handler puts one
+    /// [`Delivery::Pong`] on that client's queue.
+    ClientPing {
+        /// The client that sent the ping.
+        client_id: ClientId,
     },
     /// A request to stop the event loop and shut the process down. Produced
     /// when reading a client's outer terminal fails, which is that terminal
@@ -240,6 +253,40 @@ pub enum RuntimeEvent {
     IpcRestart {
         /// Where the dispatcher sends its verdict.
         response_sender: Sender<Result<(), crate::server::RestartRefusal>>,
+    },
+    /// The connection writer of `client_id` wrote one host write whole and
+    /// holds none of it. The dispatcher sends the bytes that wait for that
+    /// client's terminal, when any wait.
+    HostWriteSent {
+        /// The client whose host write was written.
+        client_id: ClientId,
+    },
+    /// A stand-in clipboard tool asks whether the session takes one more part
+    /// of a copy, which brings the bytes the connection holds for that copy to
+    /// `held_copy_byte_count`. The dispatcher answers `true` while
+    /// `pane-clipboard-writes` allows writes and `held_copy_byte_count` is at
+    /// most `max-copy-bytes`.
+    IpcClipboardCopyPart {
+        /// The bytes of the copy the connection would hold with the part.
+        held_copy_byte_count: usize,
+        /// Where the dispatcher sends its answer.
+        response_sender: Sender<bool>,
+    },
+    /// A stand-in clipboard tool in `pane_id` hands the session a whole copy.
+    /// Each client on another machine whose focused pane is `pane_id` gets the
+    /// copy as an `OSC 52` host write. The dispatcher answers whether the tool
+    /// runs the real clipboard tool: `false` when at least one client focuses
+    /// `pane_id`, every one of them is on another machine, and each one took
+    /// the host write, and `true` in every other case.
+    IpcClipboardCopy {
+        /// The pane the tool runs in.
+        pane_id: PaneId,
+        /// The `OSC 52` targets the tool names, before the session filters them.
+        clipboard_targets: String,
+        /// Every byte of the copy.
+        copied_bytes: Vec<u8>,
+        /// Where the dispatcher sends `should_run_clipboard_tool`.
+        response_sender: Sender<bool>,
     },
     /// The grace window for the clients whose records came across an image
     /// swap has closed. The dispatcher detaches every one of those clients

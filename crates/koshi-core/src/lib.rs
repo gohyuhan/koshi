@@ -15,7 +15,8 @@
 //!   for.
 //! - [`process`] — spawn, kill, and exit types; [`naming`] — generated names
 //!   for sessions, tabs, and clients; [`client`] — where a client connected
-//!   from.
+//!   from; [`clipboard`] — the targets of a clipboard copy that a program in
+//!   a pane makes.
 //! - [`discovery`] — the read-only snapshots the list and inspect queries
 //!   answer with; [`redact`] — scrubbing secrets out of text; [`log`] — the
 //!   log level and format a config file names.
@@ -30,6 +31,7 @@
 
 pub mod action;
 pub mod client;
+pub mod clipboard;
 pub mod command;
 pub mod compat;
 pub mod constant;

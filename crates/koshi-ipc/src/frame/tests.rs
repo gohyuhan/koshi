@@ -1,7 +1,8 @@
 //! Tests for painted-frame wire encoding, image placement and transfer limits,
 //! frame-row run-length expansion, and compatibility defaults. They verify that frame-row
-//! runs expand to the original cells, counts above `u16::MAX` split, and exact
-//! field names stay on the wire.
+//! runs expand to the original cells, counts above `u16::MAX` split, exact
+//! field names stay on the wire, and a frame without its floating pane slots
+//! is refused.
 
 use koshi_core::geometry::Point;
 use serde_json::json;
@@ -47,7 +48,8 @@ fn build_blank_frame_cell() -> FrameCell {
 
 /// A one-pane frame at fixed ids, so its encoding is byte-stable. The pane
 /// reports button-event mouse tracking, which travels as
-/// [`MouseTracking::ButtonMotion`].
+/// [`MouseTracking::ButtonMotion`]. The client shows one pinned floating pane,
+/// `pane-5`, at `(0, 0)` `4x5`.
 fn build_painted_frame() -> PaintedFrame {
     let tab_id = TabId::from_uuid(Uuid::from_u128(2));
     let pane_id = PaneId::from_uuid(Uuid::from_u128(4));
@@ -94,6 +96,24 @@ fn build_painted_frame() -> PaintedFrame {
                 tab_name: "edit".to_string(),
                 tab_index: 0,
                 is_active: true,
+            }],
+            floating_pane_slots: vec![FrameFloatingPaneSlot {
+                pane_id: PaneId::from_uuid(Uuid::from_u128(5)),
+                outer_rect: Rect {
+                    origin: Point { column: 0, row: 0 },
+                    size: Size {
+                        column_count: 4,
+                        row_count: 5,
+                    },
+                },
+                content_rect: Rect {
+                    origin: Point { column: 1, row: 3 },
+                    size: Size {
+                        column_count: 2,
+                        row_count: 1,
+                    },
+                },
+                is_pinned: true,
             }],
         },
         pane_snapshots: vec![FramePane {
@@ -292,6 +312,26 @@ fn a_frame_without_a_placement_revision_is_refused() {
             )
         );
     }
+}
+
+#[test]
+fn a_frame_without_floating_pane_slots_is_refused() {
+    let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("the frame encodes");
+    encoded_json["session_snapshot"]
+        .as_object_mut()
+        .expect("the session snapshot is an object")
+        .remove("floating_pane_slots")
+        .expect("the floating pane slots are present");
+
+    let decode_error = serde_json::from_str::<PaintedFrame>(&encoded_json.to_string())
+        .expect_err("a frame without floating pane slots is refused");
+    assert_eq!(
+        decode_error.to_string(),
+        format!(
+            "missing field `floating_pane_slots` at line 1 column {}",
+            decode_error.column()
+        )
+    );
 }
 
 #[test]
@@ -547,6 +587,18 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                     "tab_name": "edit",
                     "tab_index": 0,
                     "is_active": true
+                }],
+                "floating_pane_slots": [{
+                    "pane_id": "00000000-0000-0000-0000-000000000005",
+                    "outer_rect": {
+                        "origin": { "column": 0, "row": 0 },
+                        "size": { "column_count": 4, "row_count": 5 }
+                    },
+                    "content_rect": {
+                        "origin": { "column": 1, "row": 3 },
+                        "size": { "column_count": 2, "row_count": 1 }
+                    },
+                    "is_pinned": true
                 }]
             },
             "pane_snapshots": [{

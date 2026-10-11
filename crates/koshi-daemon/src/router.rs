@@ -114,7 +114,8 @@ use koshi_core::ids::SessionId;
 use koshi_core::naming::{generate_name, NameKind};
 use koshi_ipc::endpoint::{
     compute_socket_address, delete_socket_file, is_refusal_from_live_session,
-    is_replacing_its_image, resolve_resume_file_path, EndpointFile, ServerProgramFile,
+    is_replacing_its_image, resolve_clipboard_tool_directory_path, resolve_resume_file_path,
+    EndpointFile, ServerProgramFile,
 };
 #[cfg(windows)]
 use koshi_ipc::endpoint::{delete_advertisement_marker, resolve_advertisement_marker_path};
@@ -3967,9 +3968,10 @@ fn remove_session_from_registry(
 }
 
 /// Drop `session_id` from the list and remove every file it left, with no
-/// check: its program file, its endpoint file, its resume file, and on Unix
-/// its socket file in `runtime_directory`. Those four paths come from the id:
-/// an entry that was never in the list is cleaned the same way.
+/// check: its program file, its endpoint file, its resume file, its folder of
+/// stand-in clipboard tools with every link in it, and on Unix its socket file
+/// in `runtime_directory`. Those five paths come from the id: an entry that was
+/// never in the list is cleaned the same way.
 ///
 /// What the session advertised in the shared directory goes through
 /// [`delete_shared_session_advertisement`], from the socket address
@@ -3995,6 +3997,10 @@ fn delete_session_files(
         session_id,
     ));
     let _ = std::fs::remove_file(resolve_resume_file_path(runtime_directory, session_id));
+    let _ = std::fs::remove_dir_all(resolve_clipboard_tool_directory_path(
+        runtime_directory,
+        session_id,
+    ));
     delete_socket_file(&compute_socket_address(runtime_directory, session_id));
     if let Some(advertised_endpoint_file) = advertised_endpoint_file {
         delete_shared_session_advertisement(

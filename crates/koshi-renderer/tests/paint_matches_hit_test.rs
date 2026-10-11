@@ -33,6 +33,7 @@ use koshi_renderer::{
 };
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::Style as CellStyle;
+use koshi_test_support::fixtures::build_cell_rect;
 
 /// The client viewport every frame here is painted and hit-tested in.
 const TEST_VIEWPORT_SIZE: Size = Size {
@@ -52,19 +53,6 @@ const TAB_NAMES: [&str; 3] = ["one", "two", "three"];
 
 /// The glyphs `Block` draws a full border ring with.
 const BORDER_GLYPHS: [&str; 6] = ["┌", "┐", "└", "┘", "─", "│"];
-
-fn build_cell_rect(column: u16, row_index: u16, column_count: u16, row_count: u16) -> Rect {
-    Rect {
-        origin: Point {
-            column,
-            row: row_index,
-        },
-        size: Size {
-            column_count,
-            row_count,
-        },
-    }
-}
 
 /// A visible pane slot whose content area is `outer_rect` inset by its one-cell
 /// border.
@@ -163,6 +151,7 @@ fn build_render_snapshot(
                 gap_cell_count: 0,
             },
             tabs_metadata,
+            floating_pane_slots: Vec::new(),
         },
         pane_snapshots,
         client_snapshot: ClientSnapshot {
@@ -422,8 +411,13 @@ fn a_tab_ribbon_spells_the_tab_it_hits() {
 fn the_cursor_lands_in_the_focused_pane_content() {
     let (frame, left, ..) = build_tiled_frame();
     let regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
-    let position = get_cursor_position(&frame, &regions, build_viewport_area())
-        .expect("the focused pane has a cursor");
+    let position = get_cursor_position(
+        &frame,
+        &regions,
+        ViewerChrome::default(),
+        build_viewport_area(),
+    )
+    .expect("the focused pane has a cursor");
     let mouse = MouseFrame::from_snapshot(&frame, regions);
     let layout = mouse.build_frame_layout(ViewerChrome::default());
 

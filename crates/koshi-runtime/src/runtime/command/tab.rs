@@ -120,14 +120,14 @@ impl Server {
         let tab_name = generate_tab_name(session);
 
         let launch_working_directory = spawn_spec.working_directory.clone();
-        spawn_spec
-            .environment_variables
-            .extend(build_koshi_environment(
-                tab_target.session_id,
-                Some(tab_target.client_id),
-                new_pane_id,
-                koshi_paths::resolve_runtime_directory().as_deref(),
-            ));
+        add_koshi_environment(
+            &mut spawn_spec.environment_variables,
+            tab_target.session_id,
+            Some(tab_target.client_id),
+            new_pane_id,
+            koshi_paths::resolve_runtime_directory().as_deref(),
+            self.config.pane_clipboard_writes.should_allow_writes,
+        );
 
         // Launch the child BEFORE committing any state. A failure returns
         // here with nothing registered and no view moved.

@@ -730,25 +730,38 @@ fn a_server_that_hangs_up_before_it_answers_reports_the_peer_disconnected() {
 }
 
 #[test]
-fn attaching_writes_one_attach_frame_naming_the_session() {
-    let session_id = SessionId::new();
-    let (remote_link, written_bytes) = build_remote_link(Vec::new());
+fn attaching_writes_one_attach_frame_naming_the_session_and_its_bridge_timeout() {
+    // Whole milliseconds go up; a timeout past `u32::MAX` milliseconds goes up
+    // as `u32::MAX`.
+    for (bridge_timeout, expected_bridge_timeout_ms) in [
+        (Duration::from_secs(50), 50_000),
+        (Duration::from_micros(20_000_999), 20_000),
+        (Duration::from_millis(u64::from(u32::MAX)), u32::MAX),
+        (Duration::from_millis(u64::from(u32::MAX) + 1), u32::MAX),
+    ] {
+        let session_id = SessionId::new();
+        let (remote_link, written_bytes) = build_remote_link(Vec::new());
 
-    let (_frame_reader, frame_writer) =
-        attach_remote_session(remote_link, SessionSelector::SessionId(session_id))
-            .expect("the attach is written");
-    drop(frame_writer);
+        let (_frame_reader, frame_writer) = attach_remote_session(
+            remote_link,
+            SessionSelector::SessionId(session_id),
+            bridge_timeout,
+        )
+        .expect("the attach is written");
+        drop(frame_writer);
 
-    let sent_frame_bytes = written_bytes
-        .lock()
-        .expect("the frame writer is finished")
-        .clone();
-    assert_eq!(
-        deserialize_client_frame(sent_frame_bytes),
-        RemoteClientFrame::Attach {
-            session_selector: SessionSelector::SessionId(session_id),
-        }
-    );
+        let sent_frame_bytes = written_bytes
+            .lock()
+            .expect("the frame writer is finished")
+            .clone();
+        assert_eq!(
+            deserialize_client_frame(sent_frame_bytes),
+            RemoteClientFrame::Attach {
+                session_selector: SessionSelector::SessionId(session_id),
+                bridge_timeout_ms: Some(expected_bridge_timeout_ms),
+            }
+        );
+    }
 }
 
 // A saved server pinning no certificate is never dialled by the sweep.

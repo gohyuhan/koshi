@@ -74,7 +74,7 @@ same machine or another one, and the panes are where you left them.
 - 🎹 **Complete keyboard events** — preserve key presses, repeats, releases, text, and modifiers from the outer terminal to pane programs through the kitty keyboard protocol.
 - 🔒 **Lock mode** — send keys directly to the active program.
 - 🖱️ **Mouse support** — focus panes, resize borders, scroll, and select text; `Shift`+drag selects even while a program owns the mouse.
-- 📋 **Clipboard copy** — copy mouse selections through OSC 52, including remote sessions.
+- 📋 **Clipboard copy** — copy mouse selections through OSC 52, including remote sessions. With `pane-clipboard-writes` on, a copy that a program in a pane makes, through OSC 52 or `pbcopy`, `xclip`, `xsel` or `wl-copy`, reaches your clipboard too.
 - 🎯 **Mouse selection mode** — select text while a program owns mouse input.
 - 👥 **Multi-client sessions** — attach several terminals to one session; each keeps its own focus, active tab, and zoom.
 - 📜 **Per-pane history** — keep separate scrollback and scroll positions.
@@ -347,7 +347,7 @@ the user.
 
 | File | Contents |
 |---|---|
-| `koshi.kdl` | Theme, image, reduced-motion, pane placement, pane, scrollback, layout, mouse, copy, terminal, logging, update, beta-feature, session-closing, other-user access, and remote access settings |
+| `koshi.kdl` | Theme, image, reduced-motion, pane placement, pane, scrollback, layout, mouse, copy, pane clipboard write, terminal, logging, update, beta-feature, session-closing, other-user access, and remote access settings |
 | `themes/<name>.kdl` | Koshi interface colors |
 | `keybinding.kdl` | Keybindings and input modes |
 | `profile/<name>.kdl` | Tabs, pane layouts, commands, directories, environment values, and the starting input mode |

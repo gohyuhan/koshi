@@ -94,6 +94,7 @@ fn attach_test_client_with_resume_token(
                 pane_area: None,
                 graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
+                link_timeout_ms: None,
             },
         })
         .expect("send attach");
@@ -452,11 +453,11 @@ fn the_event_stream_ends_with_the_quit_frame() {
                 });
             assert_eq!(session_events.last(), Some(&SessionEvent::Quit));
 
-            // The quit frame ends the stream: its writing thread exits and
-            // detaches the client. The viewer connection is still open: the
-            // record goes away only through that exit.
+            // The quit frame ends the stream. The viewer closes its connection
+            // once it reads that frame, and the record goes with it.
+            drop(viewer_connection);
             wait_for_client_count(&mut caller_connection, 0, 5);
-            (vec![caller_connection, viewer_connection], session_id)
+            (vec![caller_connection], session_id)
         },
     );
 

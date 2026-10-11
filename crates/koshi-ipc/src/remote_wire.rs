@@ -17,7 +17,9 @@
 //!
 //! Once an [`Attach`](crate::remote_wire::RemoteClientFrame::Attach) is
 //! admitted, these frames stop. The next bytes on the stream are the session
-//! server's own answer frames, carried through unparsed.
+//! server's own answer frames, carried through unparsed. From then on the
+//! server ends the stream once the client sends nothing for the Attach's
+//! `bridge_timeout_ms`, or one write to the client takes no byte for that long.
 //!
 //! Every refusal carries the same sentence,
 //! [`REMOTE_REFUSED`](crate::remote_wire::REMOTE_REFUSED), but two: a remote
@@ -87,8 +89,8 @@ pub fn format_version_refusal(
 /// One message from a remote client to the machine serving it.
 ///
 /// A field this build does not know is ignored. A client that adds one still
-/// decodes here. Every field below is required: a misspelled name is the
-/// missing-field error for the name it displaced.
+/// decodes here. Every field below but `bridge_timeout_ms` is required: a
+/// misspelled name is the missing-field error for the name it displaced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RemoteClientFrame {
     /// Opens the stream: names the remote protocol versions and the session
@@ -118,6 +120,13 @@ pub enum RemoteClientFrame {
     Attach {
         /// Which session to attach to.
         session_selector: SessionSelector,
+        /// The longest the server waits, once it carries the stream to the
+        /// session, for the client's next bytes, and for one write to the
+        /// client to take a byte, in milliseconds. A wait past it ends the
+        /// stream. `0` is refused. `None` sets no limit. Left off the wire
+        /// when `None`; absent, it reads as `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bridge_timeout_ms: Option<u32>,
     },
 }
 

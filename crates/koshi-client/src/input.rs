@@ -42,7 +42,7 @@ use koshi_layout::placement::{
 };
 use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
 
-use crate::{Client, PendingPlacementCommand, PlacementInputAction};
+use crate::{Client, LinkStatus, PendingPlacementCommand, PlacementInputAction};
 
 #[cfg(test)]
 mod tests;
@@ -84,10 +84,12 @@ impl Client {
     ///
     /// Placement is a local submode layered over the stored normal or locked
     /// mode. Entering it changes key resolution only; it does not change the
-    /// session lock state.
+    /// session lock state. Placement owns the keyboard only while the viewer is
+    /// [`LinkStatus::Linked`]: with no link, the stored base mode does, and
+    /// `<C-q>` in the default keymap reaches `core:quit`.
     #[must_use]
     pub(crate) fn get_active_input_mode(&self) -> LockMode {
-        if self.is_placement_mode_active() {
+        if self.link_status == LinkStatus::Linked && self.is_placement_mode_active() {
             LockMode::PanePlacement
         } else {
             self.lock_mode
@@ -428,11 +430,9 @@ impl Client {
         let open_key_sequence = self.pending_key_sequence.take();
 
         // In locked base mode the unlock chord fires before the keymap is
-        // read. While placement mode is active, this check is skipped and the
-        // placement keymap resolves the chord.
-        if !self.is_placement_mode_active()
-            && self.lock_mode == LockMode::Locked
-            && chord == self.keymap_catalog.get_unlock_chord()
+        // read. While placement mode owns the keyboard, this check is skipped
+        // and the placement keymap resolves the chord.
+        if active_input_mode == LockMode::Locked && chord == self.keymap_catalog.get_unlock_chord()
         {
             return KeyOutcome::Fire(build_unlock_bound_action());
         }

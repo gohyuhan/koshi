@@ -7,21 +7,13 @@
 //! C `(40, 20, 40, 20)`, D `(80, 20, 40, 20)`.
 
 use koshi_core::geometry::Point;
+use koshi_test_support::fixtures::build_cell_rect;
 use koshi_test_support::layout_assert::check_exact_tiling;
 
 use super::*;
+
 use crate::size::{SizeConstraint, SizeWeight};
 use crate::solver::{solve_layout, StackHeader};
-
-fn build_cell_rect(column: u16, row: u16, column_count: u16, row_count: u16) -> Rect {
-    Rect::from_origin_and_size(
-        Point { column, row },
-        Size {
-            column_count,
-            row_count,
-        },
-    )
-}
 
 fn build_flex_weight(share: u32) -> SizeWeight {
     SizeWeight::from_primary_constraint(SizeConstraint::Flex(share))

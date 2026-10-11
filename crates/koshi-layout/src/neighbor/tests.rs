@@ -4,25 +4,14 @@
 //! 40 cells: A `(0, 0, 40, 40)`, B `(40, 0, 80, 20)`, C `(40, 20, 40, 20)`,
 //! D `(80, 20, 40, 20)`.
 
-use koshi_core::geometry::{Point, Size, SplitDirection};
+use koshi_core::geometry::SplitDirection;
+use koshi_test_support::fixtures::build_cell_rect;
 
 use super::*;
+
 use crate::size::{SizeConstraint, SizeWeight};
 use crate::solver::solve_layout;
 use crate::tree::{LayoutNode, SplitNode};
-
-fn build_cell_rect(origin_column: u16, origin_row: u16, column_count: u16, row_count: u16) -> Rect {
-    Rect::from_origin_and_size(
-        Point {
-            column: origin_column,
-            row: origin_row,
-        },
-        Size {
-            column_count,
-            row_count,
-        },
-    )
-}
 
 /// Four pane ids in ascending order: index 0 is the smallest id.
 fn build_sorted_pane_ids() -> [PaneId; 4] {

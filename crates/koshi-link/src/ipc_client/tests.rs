@@ -15,7 +15,7 @@ use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcResponse, MIN_PROTOC
 use koshi_ipc::transport::Listener;
 use koshi_layout::tree::LayoutNode;
 use koshi_test_support::fixtures::{
-    build_test_runtime_directory, close_connection_after_peer_hangs_up,
+    build_counting_bytes, build_test_runtime_directory, close_connection_after_peer_hangs_up,
     spawn_previous_release_session, spawn_session_listening_before_it_advertises,
     write_koshi_0_1_0_window_endpoint_file, write_session_endpoint_file,
     KOSHI_0_2_0_HELLO_ANSWER_TEXT, KOSHI_0_2_0_RESTART_REFUSAL_TEXT, KOSHI_0_4_0_HELLO_ANSWER_TEXT,
@@ -4284,4 +4284,480 @@ fn wait_for_refused_session_restart_waits_through_a_restart_that_has_started() {
         wait_result.expect("the session restarted"),
         restarted_endpoint
     );
+}
+
+// --- Handing the copy of a stand-in clipboard tool to its session -----------
+
+/// How long a test copy exchange has before its answer deadline.
+const TEST_COPY_ANSWER_WAIT_DURATION: Duration = Duration::from_secs(60);
+
+/// How the stand-in session answers one connection of a copy exchange.
+struct CopyConnectionScript {
+    /// The answer to the Hello.
+    hello_result: IpcResult,
+    /// The answer to each copy request, in order. The first answers the copy
+    /// request behind the Hello.
+    copy_results: Vec<IpcResult>,
+}
+
+/// The script of a connection whose Hello the session accepts, and whose copy
+/// requests get `copy_results` in order.
+fn build_accepting_copy_script(copy_results: Vec<IpcResult>) -> CopyConnectionScript {
+    CopyConnectionScript {
+        hello_result: IpcResult::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            build_version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        copy_results,
+    }
+}
+
+/// Serve one connection per entry of `connection_scripts`, in order, for
+/// `session_id` at `runtime_directory`. Hands back the session's thread and a
+/// receiver that carries each copy request the callers sent, in order.
+///
+/// Each connection runs these steps:
+///
+/// 1. Accept one caller. Before each connection after the first, the session
+///    writes its endpoint file again under a new token.
+/// 2. Read the Hello and the copy request behind it. Answer the Hello with
+///    `hello_result`, then that copy request with the first entry of
+///    `copy_results`.
+/// 3. For each later entry of `copy_results`, read the next copy request and
+///    answer it with that entry.
+/// 4. Require the caller to hang up with no further request.
+fn spawn_copying_session(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    connection_scripts: Vec<CopyConnectionScript>,
+) -> (JoinHandle<()>, Receiver<IpcRequest>) {
+    let session_socket_address =
+        koshi_ipc::endpoint::compute_socket_address(runtime_directory, session_id);
+    let session_listener = Listener::bind(&session_socket_address).expect("bind fake session");
+    let endpoint_file_path =
+        EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
+    let advertise_session = move || {
+        EndpointFile {
+            socket_address: session_socket_address.clone(),
+            connection_token: ConnectionToken::generate(),
+            process_id: std::process::id(),
+        }
+        .write_to_path(&endpoint_file_path)
+        .expect("write endpoint file");
+    };
+    advertise_session();
+
+    let (copy_request_sender, copy_request_receiver) = mpsc::channel();
+    let session_server_thread = std::thread::spawn(move || {
+        for (connection_index, connection_script) in connection_scripts.into_iter().enumerate() {
+            if connection_index > 0 {
+                advertise_session();
+            }
+            let mut session_connection = session_listener.accept().expect("accept the stand-in");
+            let hello_request: IpcRequest = session_connection.recv().expect("read hello");
+            let first_copy_request: IpcRequest = session_connection
+                .recv()
+                .expect("read the copy request behind the Hello");
+            send_ipc_result_best_effort(
+                &mut session_connection,
+                hello_request.request_id,
+                connection_script.hello_result,
+            );
+            let mut unanswered_first_copy_request = Some(first_copy_request);
+            for copy_result in connection_script.copy_results {
+                let copy_request = match unanswered_first_copy_request.take() {
+                    Some(first_copy_request) => first_copy_request,
+                    None => session_connection
+                        .recv()
+                        .expect("read the next copy request"),
+                };
+                let copy_request_id = copy_request.request_id;
+                copy_request_sender
+                    .send(copy_request)
+                    .expect("report the copy request");
+                send_ipc_result_best_effort(&mut session_connection, copy_request_id, copy_result);
+            }
+            let request_after_last_answer = session_connection.recv::<IpcRequest>();
+            assert!(
+                matches!(request_after_last_answer, Err(IpcError::Disconnected)),
+                "the caller hangs up after the last answer, got {request_after_last_answer:?}"
+            );
+        }
+    });
+    (session_server_thread, copy_request_receiver)
+}
+
+#[test]
+fn a_copy_within_one_part_goes_as_one_clipboard_copy_and_returns_the_routing() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let in_session_context = build_in_session_context(session_id);
+    let (session_server_thread, copy_requests) = spawn_copying_session(
+        runtime_directory.path(),
+        session_id,
+        vec![build_accepting_copy_script(vec![
+            IpcResult::ClipboardCopyRouted {
+                should_run_clipboard_tool: false,
+            },
+        ])],
+    );
+
+    let should_run_clipboard_tool = submit_clipboard_copy(
+        runtime_directory.path(),
+        &in_session_context,
+        "c",
+        b"echo hi",
+        Instant::now() + TEST_COPY_ANSWER_WAIT_DURATION,
+    )
+    .expect("the session routes the copy");
+
+    session_server_thread.join().expect("fake session exits");
+    assert!(!should_run_clipboard_tool);
+    assert_eq!(
+        copy_requests.try_iter().collect::<Vec<IpcRequest>>(),
+        vec![IpcRequest {
+            request_id: 2,
+            request_kind: IpcRequestKind::ClipboardCopy {
+                pane_id: in_session_context.pane_id,
+                clipboard_targets: "c".to_string(),
+                copied_bytes: b"echo hi".to_vec(),
+            },
+        }]
+    );
+}
+
+#[test]
+fn an_empty_copy_goes_as_one_clipboard_copy_with_no_bytes() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let in_session_context = build_in_session_context(session_id);
+    let (session_server_thread, copy_requests) = spawn_copying_session(
+        runtime_directory.path(),
+        session_id,
+        vec![build_accepting_copy_script(vec![
+            IpcResult::ClipboardCopyRouted {
+                should_run_clipboard_tool: true,
+            },
+        ])],
+    );
+
+    let should_run_clipboard_tool = submit_clipboard_copy(
+        runtime_directory.path(),
+        &in_session_context,
+        "p",
+        b"",
+        Instant::now() + TEST_COPY_ANSWER_WAIT_DURATION,
+    )
+    .expect("the session routes the copy");
+
+    session_server_thread.join().expect("fake session exits");
+    assert!(should_run_clipboard_tool);
+    assert_eq!(
+        copy_requests.try_iter().collect::<Vec<IpcRequest>>(),
+        vec![IpcRequest {
+            request_id: 2,
+            request_kind: IpcRequestKind::ClipboardCopy {
+                pane_id: in_session_context.pane_id,
+                clipboard_targets: "p".to_string(),
+                copied_bytes: Vec::new(),
+            },
+        }]
+    );
+}
+
+#[test]
+fn a_copy_one_byte_past_a_part_goes_as_a_part_then_a_clipboard_copy_of_one_byte() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let in_session_context = build_in_session_context(session_id);
+    let copied_bytes = build_counting_bytes(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 1);
+    let (session_server_thread, copy_requests) = spawn_copying_session(
+        runtime_directory.path(),
+        session_id,
+        vec![build_accepting_copy_script(vec![
+            IpcResult::ClipboardCopyPartTaken,
+            IpcResult::ClipboardCopyRouted {
+                should_run_clipboard_tool: false,
+            },
+        ])],
+    );
+
+    let should_run_clipboard_tool = submit_clipboard_copy(
+        runtime_directory.path(),
+        &in_session_context,
+        "cp",
+        &copied_bytes,
+        Instant::now() + TEST_COPY_ANSWER_WAIT_DURATION,
+    )
+    .expect("the session routes the copy");
+
+    session_server_thread.join().expect("fake session exits");
+    assert!(!should_run_clipboard_tool);
+    let sent_copy_requests: Vec<IpcRequest> = copy_requests.try_iter().collect();
+    let [first_copy_request, last_copy_request] = sent_copy_requests.as_slice() else {
+        panic!(
+            "expected two copy requests, got {}",
+            sent_copy_requests.len()
+        );
+    };
+    assert_eq!(first_copy_request.request_id, 2);
+    let IpcRequestKind::ClipboardCopyPart {
+        copied_bytes: first_part_bytes,
+    } = &first_copy_request.request_kind
+    else {
+        panic!(
+            "expected a ClipboardCopyPart first, got {}",
+            first_copy_request.request_kind.get_request_kind_name()
+        );
+    };
+    assert!(
+        first_part_bytes[..] == copied_bytes[..MAX_CLIPBOARD_COPY_PART_BYTE_COUNT],
+        "the part holds the first 12582783 bytes of the copy"
+    );
+    assert_eq!(
+        last_copy_request,
+        &IpcRequest {
+            request_id: 3,
+            request_kind: IpcRequestKind::ClipboardCopy {
+                pane_id: in_session_context.pane_id,
+                clipboard_targets: "cp".to_string(),
+                copied_bytes: copied_bytes[MAX_CLIPBOARD_COPY_PART_BYTE_COUNT..].to_vec(),
+            },
+        }
+    );
+}
+
+#[test]
+fn a_part_the_session_does_not_take_ends_the_copy_with_no_request_after_it() {
+    // The session answers the first part with `ClipboardCopyRouted`, then
+    // requires the caller to hang up with no further request.
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let copied_bytes = build_counting_bytes(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 1);
+    let (session_server_thread, copy_requests) = spawn_copying_session(
+        runtime_directory.path(),
+        session_id,
+        vec![build_accepting_copy_script(vec![
+            IpcResult::ClipboardCopyRouted {
+                should_run_clipboard_tool: true,
+            },
+        ])],
+    );
+
+    let should_run_clipboard_tool = submit_clipboard_copy(
+        runtime_directory.path(),
+        &build_in_session_context(session_id),
+        "c",
+        &copied_bytes,
+        Instant::now() + TEST_COPY_ANSWER_WAIT_DURATION,
+    )
+    .expect("the session routes the copy");
+
+    session_server_thread.join().expect("fake session exits");
+    assert!(should_run_clipboard_tool);
+    let sent_copy_requests: Vec<IpcRequest> = copy_requests.try_iter().collect();
+    let [first_copy_request] = sent_copy_requests.as_slice() else {
+        panic!(
+            "expected one copy request, got {}",
+            sent_copy_requests.len()
+        );
+    };
+    assert_eq!(first_copy_request.request_id, 2);
+    let IpcRequestKind::ClipboardCopyPart {
+        copied_bytes: first_part_bytes,
+    } = &first_copy_request.request_kind
+    else {
+        panic!(
+            "expected a ClipboardCopyPart, got {}",
+            first_copy_request.request_kind.get_request_kind_name()
+        );
+    };
+    assert!(
+        first_part_bytes[..] == copied_bytes[..MAX_CLIPBOARD_COPY_PART_BYTE_COUNT],
+        "the part holds the first 12582783 bytes of the copy"
+    );
+}
+
+#[test]
+fn a_copy_the_session_refuses_or_does_not_know_carries_the_sessions_sentence() {
+    let runtime_directory = build_test_runtime_directory();
+    for (refusal_code, refusal_sentence) in [
+        (
+            IpcErrorCode::RequestFailed,
+            "a pane clipboard copy must come from this machine and this user",
+        ),
+        (
+            IpcErrorCode::UnsupportedKind,
+            "this session does not know the request ClipboardCopy",
+        ),
+    ] {
+        let session_id = SessionId::new();
+        let (session_server_thread, _copy_requests) = spawn_copying_session(
+            runtime_directory.path(),
+            session_id,
+            vec![build_accepting_copy_script(vec![IpcResult::Error(
+                IpcErrorPayload {
+                    code: refusal_code,
+                    message: refusal_sentence.to_string(),
+                },
+            )])],
+        );
+
+        let copy_error = submit_clipboard_copy(
+            runtime_directory.path(),
+            &build_in_session_context(session_id),
+            "c",
+            b"echo hi",
+            Instant::now() + TEST_COPY_ANSWER_WAIT_DURATION,
+        )
+        .expect_err("the session refuses the copy");
+
+        session_server_thread.join().expect("fake session exits");
+        let CliError::IpcUnavailable { detail } = copy_error else {
+            panic!("expected IpcUnavailable for {refusal_code:?}, got {copy_error:?}");
+        };
+        assert_eq!(detail, refusal_sentence);
+    }
+}
+
+#[test]
+fn a_last_part_answered_as_taken_names_that_reply() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let (session_server_thread, _copy_requests) = spawn_copying_session(
+        runtime_directory.path(),
+        session_id,
+        vec![build_accepting_copy_script(vec![
+            IpcResult::ClipboardCopyPartTaken,
+        ])],
+    );
+
+    let copy_error = submit_clipboard_copy(
+        runtime_directory.path(),
+        &build_in_session_context(session_id),
+        "c",
+        b"echo hi",
+        Instant::now() + TEST_COPY_ANSWER_WAIT_DURATION,
+    )
+    .expect_err("a ClipboardCopyPartTaken does not answer the last part");
+
+    session_server_thread.join().expect("fake session exits");
+    let CliError::IpcUnavailable { detail } = copy_error else {
+        panic!("expected IpcUnavailable naming the reply kind, got {copy_error:?}");
+    };
+    assert_eq!(
+        detail,
+        "the session answered with an unexpected ClipboardCopyPartTaken reply",
+    );
+}
+
+#[test]
+fn a_copy_refused_for_its_token_goes_again_once_the_session_advertises_another() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let in_session_context = build_in_session_context(session_id);
+    let (session_server_thread, copy_requests) = spawn_copying_session(
+        runtime_directory.path(),
+        session_id,
+        vec![
+            CopyConnectionScript {
+                hello_result: IpcResult::Error(IpcErrorPayload {
+                    code: IpcErrorCode::BadToken,
+                    message: "the token presented does not match this Koshi's".to_string(),
+                }),
+                copy_results: vec![IpcResult::Error(IpcErrorPayload {
+                    code: IpcErrorCode::HelloRequired,
+                    message: "ClipboardCopy arrived before a Hello opened the connection"
+                        .to_string(),
+                })],
+            },
+            build_accepting_copy_script(vec![IpcResult::ClipboardCopyRouted {
+                should_run_clipboard_tool: false,
+            }]),
+        ],
+    );
+
+    let should_run_clipboard_tool = submit_clipboard_copy(
+        runtime_directory.path(),
+        &in_session_context,
+        "c",
+        b"echo hi",
+        Instant::now() + TEST_COPY_ANSWER_WAIT_DURATION,
+    )
+    .expect("the second Hello presents the session's new token");
+
+    session_server_thread.join().expect("fake session exits");
+    assert!(!should_run_clipboard_tool);
+    let expected_copy_request = IpcRequest {
+        request_id: 2,
+        request_kind: IpcRequestKind::ClipboardCopy {
+            pane_id: in_session_context.pane_id,
+            clipboard_targets: "c".to_string(),
+            copied_bytes: b"echo hi".to_vec(),
+        },
+    };
+    assert_eq!(
+        copy_requests.try_iter().collect::<Vec<IpcRequest>>(),
+        vec![expected_copy_request.clone(), expected_copy_request]
+    );
+}
+
+#[test]
+fn a_copy_to_a_session_that_never_answers_ends_at_the_answer_deadline() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let session_socket_address =
+        koshi_ipc::endpoint::compute_socket_address(runtime_directory.path(), session_id);
+    let session_listener = Listener::bind(&session_socket_address).expect("bind fake session");
+    EndpointFile {
+        socket_address: session_socket_address,
+        connection_token: ConnectionToken::generate(),
+        process_id: std::process::id(),
+    }
+    .write_to_path(&EndpointFile::resolve_endpoint_file_path(
+        runtime_directory.path(),
+        session_id,
+    ))
+    .expect("write endpoint file");
+    let session_server_thread = std::thread::spawn(move || {
+        let session_connection = session_listener.accept().expect("accept the stand-in");
+        close_connection_after_peer_hangs_up(session_connection);
+    });
+
+    let copy_error = submit_clipboard_copy(
+        runtime_directory.path(),
+        &build_in_session_context(session_id),
+        "c",
+        b"echo hi",
+        Instant::now() + Duration::from_millis(300),
+    )
+    .expect_err("the session never answers");
+
+    session_server_thread.join().expect("fake session exits");
+    let CliError::SessionAnswerTimedOut = copy_error else {
+        panic!("expected SessionAnswerTimedOut, got {copy_error:?}");
+    };
+}
+
+#[test]
+fn a_copy_to_a_session_with_no_endpoint_file_reports_the_session_not_running() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+
+    let copy_error = submit_clipboard_copy(
+        runtime_directory.path(),
+        &build_in_session_context(session_id),
+        "c",
+        b"echo hi",
+        Instant::now() + TEST_COPY_ANSWER_WAIT_DURATION,
+    )
+    .expect_err("no endpoint file exists");
+
+    let CliError::SessionNotFound {
+        session_name: found_session_name,
+    } = copy_error
+    else {
+        panic!("expected SessionNotFound, got {copy_error:?}");
+    };
+    assert_eq!(found_session_name, session_id.to_string());
 }

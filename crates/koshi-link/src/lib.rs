@@ -26,7 +26,7 @@
 //!
 //! [`error`] is the failure both halves report, and the one a koshi program
 //! turns into an exit code. On Unix, `process` replaces the running koshi
-//! program with another koshi command.
+//! program with another program.
 
 pub mod config;
 pub mod discovery;

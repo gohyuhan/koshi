@@ -157,12 +157,23 @@ impl FloatingSet {
         &self.members
     }
 
+    /// The member holding `pane_id`, with its index in creation order: its
+    /// cascade index ([`place_floating_pane`](crate::client::place_floating_pane)).
+    /// `None` when no member holds `pane_id`. With members `[a, b]`, `b` →
+    /// `Some((1, b))`.
+    #[must_use]
+    pub fn find_member(&self, pane_id: PaneId) -> Option<(usize, FloatingMember)> {
+        self.members
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, floating_member)| floating_member.pane_id == pane_id)
+    }
+
     /// Whether a member holds `pane_id`.
     #[must_use]
     pub fn has_pane(&self, pane_id: PaneId) -> bool {
-        self.members
-            .iter()
-            .any(|floating_member| floating_member.pane_id == pane_id)
+        self.find_member(pane_id).is_some()
     }
 
     /// Whether the set holds [`MAX_FLOATING_PANES_PER_SESSION`] members or
@@ -212,14 +223,10 @@ impl FloatingSet {
         pane_id: PaneId,
         desired_size: FloatingPaneSize,
     ) -> bool {
-        let Some(floating_member) = self
-            .members
-            .iter_mut()
-            .find(|floating_member| floating_member.pane_id == pane_id)
-        else {
+        let Some((member_index, _)) = self.find_member(pane_id) else {
             return false;
         };
-        floating_member.desired_size = desired_size;
+        self.members[member_index].desired_size = desired_size;
         true
     }
 }
@@ -523,11 +530,7 @@ impl Session {
     /// Returns the removed member, or `None`, changing nothing, when `pane_id`
     /// is not floating.
     pub fn remove_floating_member(&mut self, pane_id: PaneId) -> Option<FloatingMember> {
-        let member_index = self
-            .floating_set
-            .members
-            .iter()
-            .position(|floating_member| floating_member.pane_id == pane_id)?;
+        let (member_index, _) = self.floating_set.find_member(pane_id)?;
         let floating_member = self.floating_set.members.remove(member_index);
         for client in self.clients.list_attached_clients_mut() {
             client.remove_floating_pane_view(pane_id);

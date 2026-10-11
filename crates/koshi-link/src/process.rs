@@ -1,4 +1,4 @@
-//! Replacing the running koshi program with another koshi command.
+//! Replacing the running koshi program with another program.
 
 use std::process::Command;
 
