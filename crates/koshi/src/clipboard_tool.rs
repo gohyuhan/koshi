@@ -6,12 +6,15 @@
 //! the stand-in. The stand-in reads the arguments as the real tool reads them
 //! ([`parse_clipboard_tool_call`](crate::clipboard_tool::parse_clipboard_tool_call)):
 //!
-//! - A copy of text goes to the pane's session
-//!   ([`submit_clipboard_copy`](koshi_link::ipc_client::submit_clipboard_copy)).
-//!   Each client on another machine that focuses the pane gets the copy as an
+//! - A copy of text goes to the pane's session part by part, as standard
+//!   input is read
+//!   ([`open_clipboard_copy_exchange`](koshi_link::ipc_client::open_clipboard_copy_exchange)).
+//!   Each client on another machine that focuses the pane takes the copy as an
 //!   `OSC 52` host write. When the session answers that the real tool runs,
 //!   the real tool runs with the same arguments and the same input, and the
-//!   stand-in exits with the real tool's exit code. The bytes of a copy pick
+//!   stand-in exits with the real tool's exit code. The stand-in holds every
+//!   byte it read for the real tool: at most `max-copy-bytes` plus one part
+//!   and one byte while the session takes the parts. The bytes of a copy pick
 //!   no type: `pbcopy` input that starts with `{\rtf`, which the real `pbcopy`
 //!   keeps as rich text, goes to the session as its RTF source.
 //! - Every other call runs the real tool in place of the stand-in, with
@@ -29,15 +32,17 @@
 //! and the real `xclip` does not run.
 
 use std::ffi::{OsStr, OsString};
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Read, StdinLock, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, ExitCode, Stdio};
-use std::time::Instant;
 
 use koshi_host::clipboard_tool::{find_real_clipboard_tool, CLIPBOARD_TOOL_NAMES};
 use koshi_host::program_path::resolve_program_path;
+use koshi_ipc::protocol::MAX_CLIPBOARD_COPY_PART_BYTE_COUNT;
 use koshi_link::in_session::InSessionContext;
-use koshi_link::ipc_client::{submit_clipboard_copy, SESSION_ANSWER_TIMEOUT_DURATION};
+use koshi_link::ipc_client::{
+    open_clipboard_copy_exchange, ClipboardCopyAnswer, SESSION_ANSWER_TIMEOUT_DURATION,
+};
 use koshi_link::process::exec_and_keep_ignoring_sigpipe;
 
 #[cfg(test)]
@@ -50,6 +55,10 @@ const MISSING_CLIPBOARD_TOOL_EXIT_CODE: u8 = 127;
 /// The exit code of a stand-in whose real tool does not start: 126, the code a
 /// shell gives for a command it finds and cannot run.
 const UNSTARTABLE_CLIPBOARD_TOOL_EXIT_CODE: u8 = 126;
+
+/// The most bytes of standard input that one read passes on to the real tool
+/// once the bytes the stand-in held are written: 65536.
+const PASSED_INPUT_CHUNK_BYTE_COUNT: usize = 64 * 1024;
 
 /// Every option `xclip` reads, as the option table of `xclip.c` lists them.
 const XCLIP_OPTION_NAMES: [&str; 18] = [
@@ -128,18 +137,20 @@ pub fn find_invoked_clipboard_tool() -> Option<&'static str> {
 ///    that is not UTF-8 makes the call a pass-through.
 /// 2. A pass-through runs the real tool in place of this process, with
 ///    standard input untouched.
-/// 3. A copy reads its text: every byte of standard input, or the argument
-///    text. A failed read of standard input prints the failure and exits with
-///    code 1.
-/// 4. The copy goes to the session that the pane's `KOSHI_*` variables name
-///    ([`submit_clipboard_copy`], within [`SESSION_ANSWER_TIMEOUT_DURATION`]).
-///    The real tool runs with the copy when the copy is not UTF-8, when the
+/// 3. A copy goes to the session that the pane's `KOSHI_*` variables name,
+///    part by part: standard input as it is read, in parts of up to
+///    [`MAX_CLIPBOARD_COPY_PART_BYTE_COUNT`] bytes, or the argument text. The
+///    real tool runs with the copy when the copy is not UTF-8, when the
 ///    variables are missing or broken, when the runtime directory is unknown,
-///    when asking the session fails, and when the session answers so. It then
-///    reads the same bytes as the stand-in read, before any newline was
-///    trimmed, and the stand-in exits with its exit code, or with 128 plus the
-///    number of the signal that ended it. Otherwise the stand-in exits with
-///    code 0.
+///    when asking the session fails, and when the session answers so.
+///    Otherwise the stand-in exits with code 0.
+/// 4. The real tool of a copy of standard input reads every byte the stand-in
+///    read, before any newline was trimmed, then the rest of standard input.
+///    The stand-in exits with the real tool's exit code, or with 128 plus the
+///    number of the signal that ended it. The real tool of a copy of argument
+///    text runs in place of this process.
+/// 5. A failed read of standard input prints the failure and exits with
+///    code 1, also after the real tool ran.
 ///
 /// The real tool is the first `tool_name` that [`find_real_clipboard_tool`]
 /// finds on this process's `PATH`. When it finds none, the stand-in prints a
@@ -174,33 +185,166 @@ pub fn run_clipboard_tool(tool_name: &str) -> ExitCode {
     };
     match copy_source {
         CopySource::ArgumentText(argument_text) => {
-            if should_run_real_clipboard_tool(clipboard_targets, argument_text.as_bytes()) {
+            let mut copy_input = CopyInput::from_input_reader(argument_text.as_bytes(), false);
+            if !matches!(
+                route_copy_input(&mut copy_input, clipboard_targets),
+                Ok(true)
+            ) {
                 return run_real_clipboard_tool(tool_name, &invoked_name, &tool_arguments, None);
             }
         }
         CopySource::StandardInput {
             should_trim_last_newline,
         } => {
-            let mut standard_input_bytes = Vec::new();
-            if let Err(read_error) = std::io::stdin().read_to_end(&mut standard_input_bytes) {
-                eprintln!("koshi: {tool_name}: reading standard input failed: {read_error}");
-                return ExitCode::FAILURE;
-            }
-            let mut copied_bytes = standard_input_bytes.as_slice();
-            if should_trim_last_newline {
-                copied_bytes = copied_bytes.strip_suffix(b"\n").unwrap_or(copied_bytes);
-            }
-            if should_run_real_clipboard_tool(clipboard_targets, copied_bytes) {
-                return run_real_clipboard_tool(
-                    tool_name,
-                    &invoked_name,
-                    &tool_arguments,
-                    Some(&standard_input_bytes),
-                );
+            let mut copy_input =
+                CopyInput::from_input_reader(std::io::stdin().lock(), should_trim_last_newline);
+            match route_copy_input(&mut copy_input, clipboard_targets) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return run_real_clipboard_tool(
+                        tool_name,
+                        &invoked_name,
+                        &tool_arguments,
+                        Some(copy_input),
+                    );
+                }
+                Err(read_error) => {
+                    eprintln!("koshi: {tool_name}: reading standard input failed: {read_error}");
+                    return ExitCode::FAILURE;
+                }
             }
         }
     }
     ExitCode::SUCCESS
+}
+
+/// The bytes of a copy, read from `input_reader` part by part
+/// ([`CopyInput::read_next_copy_part`]). Every byte read stays in
+/// `read_input_bytes` until the copy ends. While the session takes the
+/// parts, that is at most `max-copy-bytes` plus one part and one byte.
+struct CopyInput<InputReader> {
+    /// Where the copy comes from: the stand-in's standard input, or the
+    /// argument text.
+    input_reader: InputReader,
+    /// Every byte read from `input_reader`, in order.
+    read_input_bytes: Vec<u8>,
+    /// How many bytes at the front of `read_input_bytes` went out in parts.
+    sent_byte_count: usize,
+    /// How many bytes at the front of `read_input_bytes` are whole UTF-8
+    /// characters.
+    utf8_byte_count: usize,
+    /// Whether `input_reader` reported its end.
+    is_input_ended: bool,
+    /// Whether the last part leaves out one `\n` that ends the input.
+    should_trim_last_newline: bool,
+}
+
+impl<InputReader: Read> CopyInput<InputReader> {
+    /// A copy from `input_reader` with nothing read yet. With
+    /// `should_trim_last_newline`, the last part leaves out one `\n` that ends
+    /// the input.
+    fn from_input_reader(input_reader: InputReader, should_trim_last_newline: bool) -> Self {
+        CopyInput {
+            input_reader,
+            read_input_bytes: Vec::new(),
+            sent_byte_count: 0,
+            utf8_byte_count: 0,
+            is_input_ended: false,
+            should_trim_last_newline,
+        }
+    }
+
+    /// Read the next part of the copy, and hand it back with whether it is
+    /// the last part.
+    ///
+    /// The read goes on until [`MAX_CLIPBOARD_COPY_PART_BYTE_COUNT`] + 1 bytes
+    /// wait behind the parts handed back before, or until the input ends.
+    /// While the input has not ended, the part is the first
+    /// [`MAX_CLIPBOARD_COPY_PART_BYTE_COUNT`] bytes that wait, and one byte or
+    /// more waits behind it. Once the input has ended, the part is every byte
+    /// that waits, less one `\n` that ends the input while
+    /// `should_trim_last_newline`, and it is the last part.
+    ///
+    /// Example: the input `hi\n` with `should_trim_last_newline` gives the
+    /// last part `hi`. An input of 12582784 bytes gives a part of 12582783
+    /// bytes, then a last part of 1 byte.
+    ///
+    /// `Ok(None)` when the bytes read are not UTF-8: a byte that starts or
+    /// continues no UTF-8 character, or, once the input has ended, a
+    /// character cut off at the end. A character cut by the end of a part is
+    /// whole once the next bytes are read.
+    ///
+    /// # Errors
+    /// A read of `input_reader` that fails.
+    fn read_next_copy_part(&mut self) -> std::io::Result<Option<(&[u8], bool)>> {
+        let wanted_byte_count = self.sent_byte_count + MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 1;
+        if !self.is_input_ended && self.read_input_bytes.len() < wanted_byte_count {
+            let missing_byte_count = wanted_byte_count - self.read_input_bytes.len();
+            let read_byte_count = (&mut self.input_reader)
+                .take(missing_byte_count as u64)
+                .read_to_end(&mut self.read_input_bytes)?;
+            self.is_input_ended = read_byte_count < missing_byte_count;
+        }
+        match std::str::from_utf8(&self.read_input_bytes[self.utf8_byte_count..]) {
+            Ok(_) => self.utf8_byte_count = self.read_input_bytes.len(),
+            Err(utf8_error) if utf8_error.error_len().is_none() && !self.is_input_ended => {
+                self.utf8_byte_count += utf8_error.valid_up_to();
+            }
+            Err(_) => return Ok(None),
+        }
+        let part_start_index = self.sent_byte_count;
+        if !self.is_input_ended {
+            self.sent_byte_count += MAX_CLIPBOARD_COPY_PART_BYTE_COUNT;
+            let copy_part = &self.read_input_bytes[part_start_index..self.sent_byte_count];
+            return Ok(Some((copy_part, false)));
+        }
+        self.sent_byte_count = self.read_input_bytes.len();
+        let mut last_copy_part = &self.read_input_bytes[part_start_index..];
+        if self.should_trim_last_newline {
+            last_copy_part = last_copy_part.strip_suffix(b"\n").unwrap_or(last_copy_part);
+        }
+        Ok(Some((last_copy_part, true)))
+    }
+
+    /// Write every byte read, then each byte that `input_reader` still gives
+    /// until its end, to `real_tool_input`, and drop the bytes read once they
+    /// are written. A write that fails ends the writing, and so does a read
+    /// that fails.
+    ///
+    /// Example: after the part `hi` of the input `hi\n`, the real tool reads
+    /// `hi\n`.
+    ///
+    /// # Errors
+    /// A read of `input_reader` that fails. A write that fails is no error.
+    fn write_whole_input(self, real_tool_input: &mut impl Write) -> std::io::Result<()> {
+        let CopyInput {
+            mut input_reader,
+            read_input_bytes,
+            is_input_ended,
+            ..
+        } = self;
+        if real_tool_input.write_all(&read_input_bytes).is_err() || is_input_ended {
+            return Ok(());
+        }
+        drop(read_input_bytes);
+        let mut passed_input_bytes = vec![0; PASSED_INPUT_CHUNK_BYTE_COUNT];
+        loop {
+            let read_byte_count = match input_reader.read(&mut passed_input_bytes) {
+                Ok(0) => return Ok(()),
+                Ok(read_byte_count) => read_byte_count,
+                Err(read_error) if read_error.kind() == std::io::ErrorKind::Interrupted => {
+                    continue;
+                }
+                Err(read_error) => return Err(read_error),
+            };
+            if real_tool_input
+                .write_all(&passed_input_bytes[..read_byte_count])
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+    }
 }
 
 /// What the stand-in for `tool_name` does with `tool_arguments`, the
@@ -495,42 +639,75 @@ fn is_plain_text_type(content_type: &str) -> bool {
     )
 }
 
-/// Whether the real tool runs with `copied_bytes`, a copy for
-/// `clipboard_targets`.
+/// Hand the copy that `copy_input` reads, for `clipboard_targets`, to the
+/// session of the pane that the `KOSHI_*` variables name, and hand back
+/// whether the session routed it: `true` when each client that focuses the
+/// pane is on another machine and took the copy, so the real tool does not
+/// run.
 ///
-/// `true` when `copied_bytes` is not UTF-8, when the `KOSHI_*` variables of a
-/// pane are missing or broken ([`InSessionContext::from_env`]), when the
-/// runtime directory is unknown, when asking the session fails, and when the
-/// session answers so ([`submit_clipboard_copy`], within
-/// [`SESSION_ANSWER_TIMEOUT_DURATION`]). `false` when the session answers that
-/// each client that focuses the pane got the copy.
-fn should_run_real_clipboard_tool(clipboard_targets: &str, copied_bytes: &[u8]) -> bool {
-    if std::str::from_utf8(copied_bytes).is_err() {
-        return true;
-    }
+/// 1. `false` at once when the `KOSHI_*` variables of a pane are missing or
+///    broken ([`InSessionContext::from_env`]), or the runtime directory is
+///    unknown. Nothing is read.
+/// 2. The first part ([`CopyInput::read_next_copy_part`]) opens the exchange
+///    ([`open_clipboard_copy_exchange`]). Each later part goes out after the
+///    session took the part before it
+///    ([`ClipboardCopyExchange::send_copy_part`](koshi_link::ipc_client::ClipboardCopyExchange::send_copy_part)).
+///    The session has [`SESSION_ANSWER_TIMEOUT_DURATION`] to answer each
+///    part.
+/// 3. `false` when the bytes read are not UTF-8, when asking the session
+///    fails, and when the session answers that the real tool runs. The
+///    exchange closes, and the session drops every part it holds.
+///
+/// # Errors
+/// A read of the input that fails. The exchange closes, and the session
+/// drops every part it holds.
+fn route_copy_input(
+    copy_input: &mut CopyInput<impl Read>,
+    clipboard_targets: &str,
+) -> std::io::Result<bool> {
     let Ok(Some(in_session_context)) = InSessionContext::from_env() else {
-        return true;
+        return Ok(false);
     };
     let Some(runtime_directory) = koshi_paths::resolve_runtime_directory() else {
-        return true;
+        return Ok(false);
     };
-    submit_clipboard_copy(
+    let Some((first_copy_part, is_last_part)) = copy_input.read_next_copy_part()? else {
+        return Ok(false);
+    };
+    let Ok((mut copy_exchange, mut copy_answer)) = open_clipboard_copy_exchange(
         &runtime_directory,
         &in_session_context,
         clipboard_targets,
-        copied_bytes,
-        Instant::now() + SESSION_ANSWER_TIMEOUT_DURATION,
-    )
-    .unwrap_or(true)
+        first_copy_part,
+        is_last_part,
+        SESSION_ANSWER_TIMEOUT_DURATION,
+    ) else {
+        return Ok(false);
+    };
+    while copy_answer == ClipboardCopyAnswer::PartTaken {
+        let Some((copy_part, is_last_part)) = copy_input.read_next_copy_part()? else {
+            return Ok(false);
+        };
+        let Ok(next_copy_answer) = copy_exchange.send_copy_part(copy_part, is_last_part) else {
+            return Ok(false);
+        };
+        copy_answer = next_copy_answer;
+    }
+    Ok(copy_answer
+        == ClipboardCopyAnswer::Routed {
+            should_run_clipboard_tool: false,
+        })
 }
 
 /// Run the real `tool_name`, found by [`find_real_clipboard_tool`] on this
 /// process's `PATH`, with `tool_arguments` and the program name
 /// `invoked_name`, and hand back the exit code.
 ///
-/// - With `standard_input_bytes`, the real tool reads those bytes on its
-///   standard input. The stand-in waits for it and exits with its exit code,
-///   or with 128 plus the number of the signal that ended it.
+/// - With `copy_input`, the real tool reads every byte of standard input on
+///   its standard input ([`CopyInput::write_whole_input`]). The stand-in
+///   waits for it and exits with its exit code, or with 128 plus the number
+///   of the signal that ended it. A read of standard input that fails prints
+///   the failure and gives 1 once the real tool ended.
 /// - With `None`, the real tool replaces this process, with standard input
 ///   untouched.
 ///
@@ -542,7 +719,7 @@ fn run_real_clipboard_tool(
     tool_name: &str,
     invoked_name: &OsStr,
     tool_arguments: &[OsString],
-    standard_input_bytes: Option<&[u8]>,
+    copy_input: Option<CopyInput<StdinLock<'static>>>,
 ) -> ExitCode {
     let Some(real_tool_path) =
         find_real_clipboard_tool(tool_name, std::env::var_os("PATH").as_deref())
@@ -552,7 +729,7 @@ fn run_real_clipboard_tool(
     };
     let mut real_tool_command = Command::new(&real_tool_path);
     real_tool_command.arg0(invoked_name).args(tool_arguments);
-    let Some(standard_input_bytes) = standard_input_bytes else {
+    let Some(copy_input) = copy_input else {
         let exec_error = exec_and_keep_ignoring_sigpipe(&mut real_tool_command);
         eprintln!("koshi: {}: {exec_error}", real_tool_path.display());
         return ExitCode::from(UNSTARTABLE_CLIPBOARD_TOOL_EXIT_CODE);
@@ -564,12 +741,13 @@ fn run_real_clipboard_tool(
             return ExitCode::from(UNSTARTABLE_CLIPBOARD_TOOL_EXIT_CODE);
         }
     };
-    if let Some(mut real_tool_input) = real_tool_process.stdin.take() {
-        // A real tool that stops reading leaves the rest of the bytes
-        // unwritten, and its exit code still stands.
-        let _ = real_tool_input.write_all(standard_input_bytes);
-    }
-    match real_tool_process.wait() {
+    // A real tool that stops reading leaves the rest of the bytes unwritten,
+    // and its exit code still stands.
+    let input_read_result = match real_tool_process.stdin.take() {
+        Some(mut real_tool_input) => copy_input.write_whole_input(&mut real_tool_input),
+        None => Ok(()),
+    };
+    let exit_code = match real_tool_process.wait() {
         Ok(exit_status) => {
             let exit_code = match exit_status.code() {
                 Some(exit_code) => exit_code,
@@ -581,5 +759,10 @@ fn run_real_clipboard_tool(
             eprintln!("koshi: {}: {wait_error}", real_tool_path.display());
             ExitCode::FAILURE
         }
+    };
+    if let Err(read_error) = input_read_result {
+        eprintln!("koshi: {tool_name}: reading standard input failed: {read_error}");
+        return ExitCode::FAILURE;
     }
+    exit_code
 }

@@ -37,7 +37,7 @@
 //! frame is unaffected.
 
 use koshi_core::geometry::{Rect, Size};
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_layout::mode::LayoutMode;
@@ -598,6 +598,10 @@ pub struct FrameClient {
     pub focused_pane_id: Option<PaneId>,
     /// The client's input mode, as the session has it.
     pub lock_mode: LockMode,
+    /// The last lock command that the client's own connection sent and the
+    /// session ran before it built this frame. `None` before the session runs
+    /// one, and again after the session restarts.
+    pub last_applied_lock_command_id: Option<CommandId>,
     /// Whether this client grabs the mouse for text selection. Adds the
     /// `SELECT` tag to the mode indicator, and decides whether a press in a
     /// mouse-aware pane begins a highlight.

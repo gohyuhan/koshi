@@ -24,8 +24,8 @@
 //! image reads as restarting instead.
 //!
 //! A stand-in clipboard tool in a pane hands its copy to the pane's session
-//! with [`submit_clipboard_copy`]: the copy goes in parts, all on one
-//! connection.
+//! part by part, on the one connection that [`open_clipboard_copy_exchange`]
+//! opens.
 
 #[cfg(unix)]
 use std::collections::HashMap;
@@ -54,7 +54,6 @@ use koshi_ipc::previous_release::{
 };
 use koshi_ipc::protocol::{
     ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult,
-    MAX_CLIPBOARD_COPY_PART_BYTE_COUNT,
 };
 use koshi_ipc::transport::{
     compute_time_left_until, Connection, FrameReader, FrameWriter, CONNECT_WAIT_DURATION,
@@ -208,58 +207,168 @@ fn submit_command_via_runtime_directory(
     )
 }
 
-/// Hand `copied_bytes`, a copy that a stand-in clipboard tool made for
-/// `clipboard_targets`, to the session the tool's pane belongs to, and hand
-/// back whether the tool must run the real clipboard tool with the copy.
+/// What the session answers to one part of the copy that a stand-in
+/// clipboard tool sends ([`open_clipboard_copy_exchange`],
+/// [`ClipboardCopyExchange::send_copy_part`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardCopyAnswer {
+    /// The session holds the part, and the tool sends the next part.
+    PartTaken,
+    /// The copy is over, and the session holds none of its bytes.
+    Routed {
+        /// `true` tells the tool to run the real clipboard tool with every
+        /// byte of the copy: no client focuses the pane, a client on this
+        /// machine focuses it, a client on another machine did not take the
+        /// copy, `pane-clipboard-writes` is off, the session holds no such
+        /// pane, or the copy passes `max-copy-bytes`. `false` means each
+        /// client that focuses the pane is on another machine, and each one
+        /// took the copy.
+        should_run_clipboard_tool: bool,
+    },
+}
+
+/// The copy of a stand-in clipboard tool, handed to the session of the
+/// tool's pane part by part on the one connection that
+/// [`open_clipboard_copy_exchange`] opened. Dropping it closes the
+/// connection, and the session drops every part it holds.
+pub struct ClipboardCopyExchange {
+    /// The half of the connection that reads the session's answers.
+    response_reader: FrameReader,
+    /// The half of the connection that writes the parts.
+    request_writer: FrameWriter,
+    /// The request id of the last part sent.
+    last_request_id: u64,
+    /// The pane the stand-in clipboard tool runs in.
+    pane_id: PaneId,
+    /// The `OSC 52` targets the tool names, such as `c` for the clipboard.
+    clipboard_targets: String,
+    /// How long the session has to answer a part, counted from the call
+    /// that sends the part.
+    answer_timeout: Duration,
+}
+
+/// Open a connection to the session of the pane that a stand-in clipboard
+/// tool runs in, send `first_copy_part`, the first part of the tool's copy
+/// for `clipboard_targets`, and hand back the connection with the session's
+/// answer.
 ///
 /// The session and the pane are `in_session_context.session_id` and
 /// `in_session_context.pane_id`, and the session's endpoint file is in
-/// `runtime_directory`. The copy goes on one connection, in parts of at most
-/// [`MAX_CLIPBOARD_COPY_PART_BYTE_COUNT`] bytes: each part but the last as
-/// [`IpcRequestKind::ClipboardCopyPart`], and the last as
-/// [`IpcRequestKind::ClipboardCopy`]. A part goes out only after the session
-/// took the part before it. The exchange runs through
+/// `runtime_directory`. The part goes as [`IpcRequestKind::ClipboardCopy`]
+/// when `is_last_part`, and as [`IpcRequestKind::ClipboardCopyPart`]
+/// otherwise, with request id `2`. The Hello and the part go out back to
+/// back, before either reply is read, through
 /// [`run_session_exchange_with_restart_wait`]: a session of this user's that
-/// refuses this build's protocol version, or the connection token, is asked
-/// again once it has restarted or advertises another token. `answer_deadline`
-/// bounds the exchange and each wait.
+/// refuses this build's protocol version, or the connection token, gets the
+/// Hello and the same part again once it has restarted or advertises another
+/// token. The exchange and each wait end `answer_timeout` after the call.
 ///
-/// `true` tells the caller to run the real clipboard tool with every byte of
-/// the copy: no client focuses the pane, a client on this machine focuses it,
-/// `pane-clipboard-writes` is off, the session holds no such pane, or the copy
-/// passes `max-copy-bytes`. `false` means each client that focuses the pane is
-/// on another machine, and each one got the copy.
-///
-/// Example: a pane that a client on another machine focuses alone gives
-/// `false`, and a pane that a client on this machine focuses gives `true`.
+/// Example: the copy `hi` in one part opens with one `ClipboardCopy`, and a
+/// pane that a client on another machine focuses alone gives
+/// `Routed { should_run_clipboard_tool: false }`.
 ///
 /// # Errors
-/// What [`run_session_exchange_with_restart_wait`] gives: a session that is
-/// not running, a refused request, an answer of another kind, and a write or
-/// read that fails or does not end by `answer_deadline`.
-pub fn submit_clipboard_copy(
+/// - What [`run_session_exchange_with_restart_wait`] gives: a session that is
+///   not running, and a write or read that fails or does not end in time.
+/// - What [`build_peer_refusal_error`] gives for an answer that refuses the
+///   part, such as `RequestFailed` from a session that refuses the copy, or
+///   `UnsupportedKind` from one that does not know the request.
+/// - [`CliError::IpcUnavailable`] naming the reply for every other answer
+///   that is not `ClipboardCopyPartTaken` to a part that is not the last or
+///   `ClipboardCopyRouted`.
+pub fn open_clipboard_copy_exchange(
     runtime_directory: &Path,
     in_session_context: &InSessionContext,
     clipboard_targets: &str,
-    copied_bytes: &[u8],
-    answer_deadline: Instant,
-) -> Result<bool, CliError> {
-    run_session_exchange_with_restart_wait(
-        runtime_directory,
-        None,
-        in_session_context.session_id,
-        Some(answer_deadline),
-        |session_endpoint| {
-            exchange_clipboard_copy(
-                session_endpoint,
-                in_session_context.session_id,
-                in_session_context.pane_id,
-                clipboard_targets,
-                copied_bytes,
-                answer_deadline,
-            )
-        },
-    )
+    first_copy_part: &[u8],
+    is_last_part: bool,
+    answer_timeout: Duration,
+) -> Result<(ClipboardCopyExchange, ClipboardCopyAnswer), CliError> {
+    let answer_deadline = Instant::now() + answer_timeout;
+    let first_request_id = 2;
+    let (response_reader, request_writer, first_copy_result) =
+        run_session_exchange_with_restart_wait(
+            runtime_directory,
+            None,
+            in_session_context.session_id,
+            Some(answer_deadline),
+            |session_endpoint| {
+                open_session_exchange(
+                    session_endpoint,
+                    in_session_context.session_id,
+                    build_clipboard_copy_request(
+                        first_request_id,
+                        in_session_context.pane_id,
+                        clipboard_targets,
+                        first_copy_part,
+                        is_last_part,
+                    ),
+                    Some(answer_deadline),
+                )
+            },
+        )?;
+    let first_copy_answer = parse_clipboard_copy_answer(first_copy_result, is_last_part)?;
+    let copy_exchange = ClipboardCopyExchange {
+        response_reader,
+        request_writer,
+        last_request_id: first_request_id,
+        pane_id: in_session_context.pane_id,
+        clipboard_targets: clipboard_targets.to_string(),
+        answer_timeout,
+    };
+    Ok((copy_exchange, first_copy_answer))
+}
+
+impl ClipboardCopyExchange {
+    /// Send `copy_part`, the next part of the copy, and hand back the
+    /// session's answer. The caller sends a part only after the answer
+    /// [`ClipboardCopyAnswer::PartTaken`] to the part before it.
+    ///
+    /// The part goes as [`IpcRequestKind::ClipboardCopy`] when
+    /// `is_last_part`, and as [`IpcRequestKind::ClipboardCopyPart`]
+    /// otherwise, under the request id after the last part's. The write and
+    /// the read of the answer end `answer_timeout` after the call.
+    ///
+    /// Example: the second part, sent `30` seconds after the first one, has
+    /// its own `answer_timeout` and request id `3`.
+    ///
+    /// # Errors
+    /// - [`CliError::SessionAnswerTimedOut`] for a failed write or read once
+    ///   `answer_timeout` has passed, and what [`build_ipc_unavailable_error`]
+    ///   gives for one before it.
+    /// - What [`build_peer_refusal_error`] gives for an answer that refuses
+    ///   the part.
+    /// - [`CliError::IpcUnavailable`] naming the reply for every other answer
+    ///   that is not `ClipboardCopyPartTaken` to a part that is not the last
+    ///   or `ClipboardCopyRouted`.
+    pub fn send_copy_part(
+        &mut self,
+        copy_part: &[u8],
+        is_last_part: bool,
+    ) -> Result<ClipboardCopyAnswer, CliError> {
+        let answer_deadline = Instant::now() + self.answer_timeout;
+        self.response_reader.set_deadline(Some(answer_deadline));
+        self.request_writer.set_deadline(Some(answer_deadline));
+        let build_exchange_error =
+            |ipc_error: IpcError| build_session_exchange_error(ipc_error, Some(answer_deadline));
+        self.last_request_id += 1;
+        let copy_request = build_clipboard_copy_request(
+            self.last_request_id,
+            self.pane_id,
+            &self.clipboard_targets,
+            copy_part,
+            is_last_part,
+        );
+        self.request_writer
+            .send(&copy_request)
+            .map_err(build_exchange_error)?;
+        let copy_response: IncomingResponse = self
+            .response_reader
+            .recv_answer()
+            .map_err(build_exchange_error)?;
+        let copy_result = talk::SESSION_PEER_WORDS.take_response_result(copy_response)?;
+        parse_clipboard_copy_answer(copy_result, is_last_part)
+    }
 }
 
 /// [`submit_external_command`] against an explicit runtime directory: the whole
@@ -2137,94 +2246,55 @@ fn open_session_exchange(
     Ok((response_reader, request_writer, ipc_result))
 }
 
-/// Hand `copied_bytes`, the copy a stand-in clipboard tool in the pane
-/// `pane_id` made for `clipboard_targets`, to the session at `endpoint`, and
-/// hand back the `should_run_clipboard_tool` the session answers.
-///
-/// The copy goes in parts of at most [`MAX_CLIPBOARD_COPY_PART_BYTE_COUNT`]
-/// bytes, all on one connection:
-///
-/// 1. Each part but the last goes as [`IpcRequestKind::ClipboardCopyPart`].
-/// 2. The last part goes as [`IpcRequestKind::ClipboardCopy`]. An empty copy
-///    is one `ClipboardCopy` with no bytes.
-/// 3. The Hello and the first part go out back to back, as
-///    [`open_session_exchange`] states. Each later part goes out only after
-///    the answer [`IpcResult::ClipboardCopyPartTaken`] to the part before it.
-///    Any other answer ends the exchange, and no part goes after it.
-///
-/// Every write and read ends by `answer_deadline`.
-///
-/// Example: a copy of 12582784 bytes goes as one `ClipboardCopyPart` of
-/// 12582783 bytes, then one `ClipboardCopy` of 1 byte.
-///
-/// # Errors
-/// - What [`open_session_exchange`] gives.
-/// - [`CliError::SessionAnswerTimedOut`] for a failed write or read of a later
-///   part once `answer_deadline` is reached, and [`CliError::IpcUnavailable`]
-///   for one before it.
-/// - What [`build_peer_refusal_error`] gives for a refused request, such as a
-///   session that refuses the copy with `RequestFailed` or does not know the
-///   request with `UnsupportedKind`.
-/// - [`CliError::IpcUnavailable`] for an answer that is not
-///   [`IpcResult::ClipboardCopyRouted`], such as
-///   [`IpcResult::ClipboardCopyPartTaken`] to the last part.
-fn exchange_clipboard_copy(
-    endpoint: &EndpointFile,
-    session_id: SessionId,
+/// The request that carries `copy_part` of a stand-in clipboard tool's copy
+/// under `request_id`: an [`IpcRequestKind::ClipboardCopy`] for `pane_id` and
+/// `clipboard_targets` when `is_last_part`, and an
+/// [`IpcRequestKind::ClipboardCopyPart`] otherwise.
+fn build_clipboard_copy_request(
+    request_id: u64,
     pane_id: PaneId,
     clipboard_targets: &str,
-    copied_bytes: &[u8],
-    answer_deadline: Instant,
-) -> Result<bool, CliError> {
-    let build_copy_request = |request_id: u64, copy_part: &[u8], is_last_part: bool| {
-        let copied_bytes = copy_part.to_vec();
-        let request_kind = if is_last_part {
-            IpcRequestKind::ClipboardCopy {
-                pane_id,
-                clipboard_targets: clipboard_targets.to_string(),
-                copied_bytes,
-            }
-        } else {
-            IpcRequestKind::ClipboardCopyPart { copied_bytes }
-        };
-        IpcRequest {
-            request_id,
-            request_kind,
+    copy_part: &[u8],
+    is_last_part: bool,
+) -> IpcRequest {
+    let copied_bytes = copy_part.to_vec();
+    let request_kind = if is_last_part {
+        IpcRequestKind::ClipboardCopy {
+            pane_id,
+            clipboard_targets: clipboard_targets.to_string(),
+            copied_bytes,
         }
+    } else {
+        IpcRequestKind::ClipboardCopyPart { copied_bytes }
     };
-    let mut copy_parts = copied_bytes
-        .chunks(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT)
-        .peekable();
-    let first_copy_part = copy_parts.next().unwrap_or_default();
-    let mut request_id: u64 = 2;
-    let first_copy_request =
-        build_copy_request(request_id, first_copy_part, copy_parts.peek().is_none());
-    let (mut response_reader, mut request_writer, mut copy_result) = open_session_exchange(
-        endpoint,
-        session_id,
-        first_copy_request,
-        Some(answer_deadline),
-    )?;
-    let build_exchange_error =
-        |ipc_error: IpcError| build_session_exchange_error(ipc_error, Some(answer_deadline));
-    while let Some(copy_part) = copy_parts.next() {
-        if !matches!(copy_result, IpcResult::ClipboardCopyPartTaken) {
-            break;
-        }
-        request_id += 1;
-        let copy_request = build_copy_request(request_id, copy_part, copy_parts.peek().is_none());
-        request_writer
-            .send(&copy_request)
-            .map_err(build_exchange_error)?;
-        let copy_response: IncomingResponse = response_reader
-            .recv_answer()
-            .map_err(build_exchange_error)?;
-        copy_result = talk::SESSION_PEER_WORDS.take_response_result(copy_response)?;
+    IpcRequest {
+        request_id,
+        request_kind,
     }
+}
+
+/// The [`ClipboardCopyAnswer`] in `copy_result`, the session's answer to one
+/// part of a clipboard copy: [`IpcResult::ClipboardCopyPartTaken`] to a part
+/// that is not the last gives `PartTaken`, and
+/// [`IpcResult::ClipboardCopyRouted`] gives `Routed`.
+///
+/// # Errors
+/// - What [`build_peer_refusal_error`] gives for a refused part, such as a
+///   session that refuses the copy with `RequestFailed` or does not know the
+///   request with `UnsupportedKind`.
+/// - [`CliError::IpcUnavailable`] naming the reply for every other answer,
+///   such as `ClipboardCopyPartTaken` to the last part.
+fn parse_clipboard_copy_answer(
+    copy_result: IpcResult,
+    is_last_part: bool,
+) -> Result<ClipboardCopyAnswer, CliError> {
     match copy_result {
+        IpcResult::ClipboardCopyPartTaken if !is_last_part => Ok(ClipboardCopyAnswer::PartTaken),
         IpcResult::ClipboardCopyRouted {
             should_run_clipboard_tool,
-        } => Ok(should_run_clipboard_tool),
+        } => Ok(ClipboardCopyAnswer::Routed {
+            should_run_clipboard_tool,
+        }),
         IpcResult::Error(refusal) => Err(build_peer_refusal_error(&refusal)),
         unexpected_result => {
             Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))

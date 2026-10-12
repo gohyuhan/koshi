@@ -35,12 +35,12 @@ fn missing_version_is_a_validation_error() {
 
 #[test]
 fn colors_parse_and_the_theme_is_left_unnamed() {
-    let (theme, warnings) =
+    let (parsed_theme, parse_warnings) =
         parse_theme_text("colors {\n    ramp-start \"#581c87\"\n    accent \"#a78bfa\"\n}");
     // The theme is named by its file, which this parser never sees; the loader
     // fills the name in from the path it read.
-    assert_eq!(theme.theme_name, None);
-    let colors = theme.colors.expect("colors present");
+    assert_eq!(parsed_theme.theme_name, None);
+    let colors = parsed_theme.colors.expect("colors present");
     assert_eq!(
         colors.ramp_start,
         Some(RgbColor::from_channels(0x58, 0x1c, 0x87))
@@ -51,12 +51,12 @@ fn colors_parse_and_the_theme_is_left_unnamed() {
     );
     // A role the file did not name keeps the lower layer's color.
     assert_eq!(colors.ramp_end, None);
-    assert!(warnings.is_empty());
+    assert!(parse_warnings.is_empty());
 }
 
 #[test]
 fn every_color_role_parses() {
-    let (theme, warnings) = parse_theme_text(
+    let (parsed_theme, parse_warnings) = parse_theme_text(
         "colors {\n\
          ramp-start \"#010101\"\n\
          ramp-end \"#020202\"\n\
@@ -73,7 +73,7 @@ fn every_color_role_parses() {
          bar-bg \"#0d0d0d\"\n\
          }",
     );
-    let colors = theme.colors.expect("colors present");
+    let colors = parsed_theme.colors.expect("colors present");
     assert_eq!(colors.ramp_start, Some(RgbColor::from_channels(1, 1, 1)));
     assert_eq!(colors.ramp_end, Some(RgbColor::from_channels(2, 2, 2)));
     assert_eq!(colors.on_ramp, Some(RgbColor::from_channels(3, 3, 3)));
@@ -99,30 +99,30 @@ fn every_color_role_parses() {
     );
     assert_eq!(colors.letterbox, Some(RgbColor::from_channels(12, 12, 12)));
     assert_eq!(colors.bar_bg, Some(RgbColor::from_channels(13, 13, 13)));
-    assert!(warnings.is_empty());
+    assert!(parse_warnings.is_empty());
 }
 
 #[test]
 fn a_bad_color_is_skipped_and_the_rest_apply() {
-    let (theme, warnings) =
+    let (parsed_theme, parse_warnings) =
         parse_theme_text("colors {\n    ramp-start \"nothex\"\n    accent \"#a78bfa\"\n}");
-    let colors = theme.colors.expect("colors present");
+    let colors = parsed_theme.colors.expect("colors present");
     assert_eq!(colors.ramp_start, None);
     assert_eq!(
         colors.accent,
         Some(RgbColor::from_channels(0xa7, 0x8b, 0xfa))
     );
     assert_eq!(
-        warnings,
+        parse_warnings,
         ["ignored `colors.ramp-start`: color `nothex` contains a non-hex digit"]
     );
 }
 
 #[test]
 fn an_unknown_color_role_warns() {
-    let (_, warnings) = parse_theme_text("colors {\n    foreground \"#ffffff\"\n}");
+    let (_, parse_warnings) = parse_theme_text("colors {\n    foreground \"#ffffff\"\n}");
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec![
             "ignored unknown key `colors.foreground`; did you mean `colors.ramp-end`?".to_string()
         ]
@@ -131,9 +131,9 @@ fn an_unknown_color_role_warns() {
 
 #[test]
 fn a_bare_hex_without_a_hash_parses() {
-    let (theme, _) = parse_theme_text("colors {\n    accent \"a78bfa\"\n}");
+    let (parsed_theme, _) = parse_theme_text("colors {\n    accent \"a78bfa\"\n}");
     assert_eq!(
-        theme.colors.expect("colors present").accent,
+        parsed_theme.colors.expect("colors present").accent,
         Some(RgbColor::from_channels(0xa7, 0x8b, 0xfa))
     );
 }
@@ -195,16 +195,19 @@ fn a_syntax_error_is_a_parse_error() {
 fn a_bad_color_names_the_exact_reason_in_its_warning() {
     // The skip warning carries the underlying color-parse reason verbatim, not
     // just the field name.
-    let (theme, warnings) = parse_theme_text("colors {\n    ramp-start \"nothex\"\n}");
-    assert_eq!(theme.colors.expect("colors present").ramp_start, None);
+    let (parsed_theme, parse_warnings) = parse_theme_text("colors {\n    ramp-start \"nothex\"\n}");
     assert_eq!(
-        warnings,
+        parsed_theme.colors.expect("colors present").ramp_start,
+        None
+    );
+    assert_eq!(
+        parse_warnings,
         vec!["ignored `colors.ramp-start`: color `nothex` contains a non-hex digit".to_string()]
     );
 
-    let (_, warnings) = parse_theme_text("colors {\n    accent \"#fff\"\n}");
+    let (_, parse_warnings) = parse_theme_text("colors {\n    accent \"#fff\"\n}");
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 3".to_string()]
     );
 }
@@ -214,10 +217,10 @@ fn a_color_given_as_an_integer_is_skipped_as_a_non_string() {
     // A number where a hex string belongs is the wrong kind of value; it is
     // skipped with the shared "expected a string" reason and the default
     // color stands.
-    let (theme, warnings) = parse_theme_text("colors {\n    accent 5\n}");
-    assert_eq!(theme.colors.expect("colors present").accent, None);
+    let (parsed_theme, parse_warnings) = parse_theme_text("colors {\n    accent 5\n}");
+    assert_eq!(parsed_theme.colors.expect("colors present").accent, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored `colors.accent`: expected a string".to_string()]
     );
 }
@@ -226,15 +229,15 @@ fn a_color_given_as_an_integer_is_skipped_as_a_non_string() {
 fn a_name_node_warns_because_the_file_name_owns_the_theme_name() {
     // The theme's name comes from its file name, so a `name` node in the file
     // is not part of the schema.
-    let (theme, warnings) =
+    let (parsed_theme, parse_warnings) =
         parse_theme_text("name \"solarized\"\ncolors {\n    accent \"#ffffff\"\n}");
-    assert_eq!(theme.theme_name, None);
+    assert_eq!(parsed_theme.theme_name, None);
     assert_eq!(
-        theme.colors.expect("colors present").accent,
+        parsed_theme.colors.expect("colors present").accent,
         Some(RgbColor::from_channels(0xff, 0xff, 0xff))
     );
     assert_eq!(
-        warnings,
+        parse_warnings,
         ["ignored unknown key `name`; did you mean `colors`?"]
     );
 }
@@ -243,36 +246,36 @@ fn a_name_node_warns_because_the_file_name_owns_the_theme_name() {
 fn a_repeated_color_role_keeps_the_final_value() {
     // Two entries for one role: the final one overwrites the earlier, with no
     // warning — KDL allows the repeat and the parser takes the final word.
-    let (theme, warnings) =
+    let (parsed_theme, parse_warnings) =
         parse_theme_text("colors {\n    accent \"#000000\"\n    accent \"#ffffff\"\n}");
     assert_eq!(
-        theme.colors.expect("colors present").accent,
+        parsed_theme.colors.expect("colors present").accent,
         Some(RgbColor::from_channels(0xff, 0xff, 0xff))
     );
-    assert!(warnings.is_empty());
+    assert!(parse_warnings.is_empty());
 }
 
 #[test]
 fn the_channel_boundaries_survive_the_parser() {
-    let (theme, warnings) =
+    let (parsed_theme, parse_warnings) =
         parse_theme_text("colors {\n    on-accent \"#000000\"\n    on-ramp \"#ffffff\"\n}");
-    let colors = theme.colors.expect("colors present");
+    let colors = parsed_theme.colors.expect("colors present");
     assert_eq!(colors.on_accent, Some(RgbColor::from_channels(0, 0, 0)));
     assert_eq!(
         colors.on_ramp,
         Some(RgbColor::from_channels(0xff, 0xff, 0xff))
     );
-    assert!(warnings.is_empty());
+    assert!(parse_warnings.is_empty());
 }
 
 #[test]
 fn an_empty_colors_block_sets_no_role() {
     // A `colors` block with no children is present but overrides nothing.
-    let (theme, warnings) = parse_theme_text("colors {\n}");
-    let colors = theme.colors.expect("colors present");
+    let (parsed_theme, parse_warnings) = parse_theme_text("colors {\n}");
+    let colors = parsed_theme.colors.expect("colors present");
     assert_eq!(colors.ramp_start, None);
     assert_eq!(colors.accent, None);
-    assert!(warnings.is_empty());
+    assert!(parse_warnings.is_empty());
 }
 
 #[test]
@@ -297,22 +300,22 @@ fn a_non_integer_version_is_a_validation_error() {
 
 #[test]
 fn a_comments_only_theme_is_treated_as_empty() {
-    let (theme, warnings) = parse_theme_text("// just a comment\n");
-    assert_eq!(theme.theme_name, None);
-    assert_eq!(theme.colors, None);
-    assert!(warnings.is_empty());
+    let (parsed_theme, parse_warnings) = parse_theme_text("// just a comment\n");
+    assert_eq!(parsed_theme.theme_name, None);
+    assert_eq!(parsed_theme.colors, None);
+    assert!(parse_warnings.is_empty());
 }
 
 #[test]
 fn a_repeated_colors_block_warns_and_the_first_one_stands() {
-    let (theme, warnings) = parse_theme_text(
+    let (parsed_theme, parse_warnings) = parse_theme_text(
         "colors {\n    accent \"#000000\"\n}\ncolors {\n    accent \"#ffffff\"\n    letterbox \"#123456\"\n}",
     );
-    let colors = theme.colors.expect("colors present");
+    let colors = parsed_theme.colors.expect("colors present");
     assert_eq!(colors.accent, Some(RgbColor::from_channels(0, 0, 0)));
     // Nothing of the second block is read, not even a role the first left unset.
     assert_eq!(colors.letterbox, None);
-    assert_eq!(warnings, ["ignored duplicate `colors` section"]);
+    assert_eq!(parse_warnings, ["ignored duplicate `colors` section"]);
 }
 
 #[test]
@@ -390,65 +393,67 @@ fn a_version_with_two_values_is_rejected() {
 
 #[test]
 fn a_colors_node_without_a_block_sets_no_role() {
-    let (theme, warnings) = parse_theme_text("colors");
-    assert_eq!(theme.colors, Some(PartialColorPalette::default()));
-    assert!(warnings.is_empty());
+    let (parsed_theme, parse_warnings) = parse_theme_text("colors");
+    assert_eq!(parsed_theme.colors, Some(PartialColorPalette::default()));
+    assert!(parse_warnings.is_empty());
 }
 
 #[test]
 fn a_color_carrying_a_child_block_is_skipped() {
-    let (theme, warnings) =
+    let (parsed_theme, parse_warnings) =
         parse_theme_text("colors {\n    accent \"#ffffff\" {\n        shade\n    }\n}");
-    assert_eq!(theme.colors.expect("colors present").accent, None);
+    assert_eq!(parsed_theme.colors.expect("colors present").accent, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         ["ignored `colors.accent`: takes no children".to_string()]
     );
 }
 
 #[test]
 fn a_color_that_is_not_exactly_one_value_is_skipped() {
-    let (theme, warnings) = parse_theme_text("colors {\n    accent \"#ffffff\" \"#000000\"\n}");
-    assert_eq!(theme.colors.expect("colors present").accent, None);
+    let (parsed_theme, parse_warnings) =
+        parse_theme_text("colors {\n    accent \"#ffffff\" \"#000000\"\n}");
+    assert_eq!(parsed_theme.colors.expect("colors present").accent, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         ["ignored `colors.accent`: expected exactly one value".to_string()]
     );
 
-    let (theme, warnings) = parse_theme_text("colors {\n    accent value=\"#ffffff\"\n}");
-    assert_eq!(theme.colors.expect("colors present").accent, None);
+    let (parsed_theme, parse_warnings) =
+        parse_theme_text("colors {\n    accent value=\"#ffffff\"\n}");
+    assert_eq!(parsed_theme.colors.expect("colors present").accent, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         ["ignored `colors.accent`: expected exactly one value".to_string()]
     );
 }
 
 #[test]
 fn uppercase_hex_digits_parse_theme_text() {
-    let (theme, warnings) = parse_theme_text("colors {\n    accent \"#A78BFA\"\n}");
+    let (parsed_theme, parse_warnings) = parse_theme_text("colors {\n    accent \"#A78BFA\"\n}");
     assert_eq!(
-        theme.colors.expect("colors present").accent,
+        parsed_theme.colors.expect("colors present").accent,
         Some(RgbColor::from_channels(0xa7, 0x8b, 0xfa))
     );
-    assert!(warnings.is_empty());
+    assert!(parse_warnings.is_empty());
 }
 
 #[test]
 fn an_empty_color_string_is_skipped() {
-    let (theme, warnings) = parse_theme_text("colors {\n    accent \"\"\n}");
-    assert_eq!(theme.colors.expect("colors present").accent, None);
+    let (parsed_theme, parse_warnings) = parse_theme_text("colors {\n    accent \"\"\n}");
+    assert_eq!(parsed_theme.colors.expect("colors present").accent, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         ["ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 0".to_string()]
     );
 }
 
 #[test]
 fn a_seven_digit_color_is_skipped() {
-    let (theme, warnings) = parse_theme_text("colors {\n    accent \"#1234567\"\n}");
-    assert_eq!(theme.colors.expect("colors present").accent, None);
+    let (parsed_theme, parse_warnings) = parse_theme_text("colors {\n    accent \"#1234567\"\n}");
+    assert_eq!(parsed_theme.colors.expect("colors present").accent, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         ["ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 7".to_string()]
     );
 }
@@ -457,11 +462,11 @@ fn a_seven_digit_color_is_skipped() {
 fn a_six_character_color_of_multi_byte_characters_is_skipped() {
     // Six characters, twelve bytes. The digit check rejects the value before
     // any byte slicing runs.
-    let (theme, warnings) =
+    let (parsed_theme, parse_warnings) =
         parse_theme_text("colors {\n    accent \"#\u{ff}\u{ff}\u{ff}\u{ff}\u{ff}\u{ff}\"\n}");
-    assert_eq!(theme.colors.expect("colors present").accent, None);
+    assert_eq!(parsed_theme.colors.expect("colors present").accent, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         [format!(
             "ignored `colors.accent`: color `{}` contains a non-hex digit",
             "\u{ff}".repeat(6)
@@ -471,13 +476,13 @@ fn a_six_character_color_of_multi_byte_characters_is_skipped() {
 
 #[test]
 fn warnings_come_out_in_file_order() {
-    let (theme, warnings) = parse_theme_text(
+    let (parsed_theme, parse_warnings) = parse_theme_text(
         "name \"solarized\"\ncolors {\n    foreground \"#ffffff\"\n}\ncolors {\n    accent \"#ffffff\"\n}",
     );
-    assert_eq!(theme.theme_name, None);
-    assert_eq!(theme.colors.expect("colors present").accent, None);
+    assert_eq!(parsed_theme.theme_name, None);
+    assert_eq!(parsed_theme.colors.expect("colors present").accent, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         [
             "ignored unknown key `name`; did you mean `colors`?",
             "ignored unknown key `colors.foreground`; did you mean `colors.ramp-end`?",
@@ -488,13 +493,14 @@ fn warnings_come_out_in_file_order() {
 
 #[test]
 fn a_value_on_the_colors_line_is_warned_about_and_ignored() {
-    let (theme, warnings) = parse_theme_text("colors \"oops\" {\n    accent \"#ff0000\"\n}");
+    let (parsed_theme, parse_warnings) =
+        parse_theme_text("colors \"oops\" {\n    accent \"#ff0000\"\n}");
     assert_eq!(
-        warnings,
+        parse_warnings,
         ["ignored `colors` value: a section takes a `{ … }` block"]
     );
     assert_eq!(
-        theme.colors,
+        parsed_theme.colors,
         Some(PartialColorPalette {
             accent: Some(RgbColor::from_channels(0xff, 0x00, 0x00)),
             ..PartialColorPalette::default()

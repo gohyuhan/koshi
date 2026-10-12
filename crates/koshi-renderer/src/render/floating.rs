@@ -15,9 +15,9 @@ use crate::snapshot::{CommittedRegions, FloatingPaneSlot, RenderSnapshot, Viewer
 use crate::theme::Theme;
 
 use super::{
-    compute_pane_area, compute_pane_border_style, draw_grid, draw_pane_scroll_position,
-    draw_placement_hover_tint, get_area_origin, is_placement_handle_hovered, place_cell_rect,
-    set_line_clipped,
+    compute_pane_area, compute_pane_border_style, compute_symbol_display_width, draw_grid,
+    draw_pane_scroll_position, draw_placement_hover_tint, get_area_origin,
+    is_placement_handle_hovered, place_cell_rect, set_line_clipped,
 };
 
 /// The grab handle a floating pane draws in its titlebar.
@@ -86,7 +86,13 @@ pub(crate) fn list_placed_floating_panes<'a>(
 /// Draw one placed floating pane over every cell drawn before it, in this
 /// order:
 ///
-/// 1. Blanks every cell of its outer area.
+/// 1. Blanks every cell of its outer area. On each row of the outer area, it
+///    also blanks the glyph that starts left of the outer area and reaches
+///    into it. The row is read from its first column, and each glyph covers
+///    the number of columns that [`compute_symbol_display_width`] gives its
+///    symbol, 1 at least. Example: `世` at column `5` beside a box that starts
+///    at column `6` becomes a blank at column `5` with the style `世` had, and
+///    `U+17D8` at column `5` stays.
 /// 2. Draws its border ring in the style [`compute_pane_border_style`] gives
 ///    it.
 /// 3. On an outer area of 4 rows or more, draws the separator `├──┤` on the
@@ -119,6 +125,19 @@ pub(super) fn draw_floating_pane(
         theme,
     );
     Clear.render(outer_area, screen_buffer);
+    for row_index in outer_area.top()..outer_area.bottom() {
+        let mut column_index = screen_buffer.area.left();
+        while column_index < outer_area.x {
+            let Some(glyph_cell) = screen_buffer.cell_mut((column_index, row_index)) else {
+                break;
+            };
+            let glyph_width = compute_symbol_display_width(glyph_cell.symbol()).max(1);
+            if column_index.saturating_add(glyph_width) > outer_area.x {
+                glyph_cell.set_symbol(" ");
+            }
+            column_index = column_index.saturating_add(glyph_width);
+        }
+    }
     Block::new()
         .borders(Borders::ALL)
         .border_style(border_style)

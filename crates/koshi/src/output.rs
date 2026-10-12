@@ -35,9 +35,9 @@ use koshi_core::action::{
 use koshi_core::discovery::{
     ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, SessionOverview, TabDiscovery,
 };
+use koshi_core::display_width::compute_text_display_width;
 use koshi_core::geometry::Size;
 use serde::Serialize;
-use unicode_width::UnicodeWidthStr;
 
 use crate::cli::{KeymapScope, OutputFormat};
 use koshi_link::discovery::{ClientRow, PaneRow, SessionRow, TabRow};
@@ -54,16 +54,16 @@ fn render_json<SerializableValue: Serialize>(serializable_value: &SerializableVa
 /// Aligned columns: a header row, then one row per item, each column padded
 /// to its widest cell and separated by two spaces, with no trailing spaces.
 ///
-/// A cell's width is its terminal column count ([`UnicodeWidthStr::width`]):
-/// `文字文字` is 8 columns wide, and `name` is 4.
+/// A cell's width is its terminal column count ([`compute_text_display_width`]):
+/// `文字文字` is 8 columns wide, `ｶﾞ` (`U+FF76` `U+FF9E`) is 2, and `name` is 4.
 fn render_table(column_headers: &[&str], table_rows: Vec<Vec<String>>) -> String {
     let mut column_widths: Vec<usize> = column_headers
         .iter()
-        .map(|column_header| column_header.width())
+        .map(|column_header| compute_text_display_width(column_header))
         .collect();
     for row_cells in &table_rows {
         for (column_width, cell_text) in column_widths.iter_mut().zip(row_cells) {
-            *column_width = (*column_width).max(cell_text.width());
+            *column_width = (*column_width).max(compute_text_display_width(cell_text));
         }
     }
     let mut rendered_output = String::new();
@@ -80,7 +80,8 @@ fn render_table(column_headers: &[&str], table_rows: Vec<Vec<String>>) -> String
                 rendered_line.push_str("  ");
             }
             rendered_line.push_str(cell_text);
-            let cell_padding_count = column_width.saturating_sub(cell_text.width());
+            let cell_padding_count =
+                column_width.saturating_sub(compute_text_display_width(cell_text));
             rendered_line.extend(std::iter::repeat_n(' ', cell_padding_count));
         }
         rendered_output.push_str(rendered_line.trim_end());

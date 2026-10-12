@@ -33,6 +33,8 @@ use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{ConnectionToken, WireMouseAction};
 use koshi_renderer::snapshot::Delivery;
 
+use crate::runtime::bus::WaitingHostWrites;
+
 /// A trigger the dispatcher thread reacts to, drained from the runtime inbox.
 ///
 /// One variant per runtime event source. Construction is the producer's job
@@ -87,18 +89,14 @@ pub enum RuntimeEvent {
         /// the client no token; the view it was looking at is dropped.
         is_streamed: bool,
         /// Whether the client may attach again: the `is_returning` of the
-        /// `Leaving` request that ended the connection, and with no such
-        /// request, whether the connection came from another machine. `true`
-        /// removes the client with no `auto-close-session` quit. `false` lets
-        /// `auto-close-session` end a session the client leaves with no
-        /// client.
+        /// `Leaving` request that ended the connection. With no such request,
+        /// it is `true` for a connection from another machine. For a
+        /// connection on this machine, it is `true` when the connection ended
+        /// before its first request after an `Attach` that named
+        /// `resume_client_id`, and `false` otherwise. `true` removes the client
+        /// with no `auto-close-session` quit. `false` lets `auto-close-session`
+        /// end a session the client leaves with no client.
         is_returning: bool,
-    },
-    /// An attached client sent a ping. The handler puts one
-    /// [`Delivery::Pong`] on that client's queue.
-    ClientPing {
-        /// The client that sent the ping.
-        client_id: ClientId,
     },
     /// A request to stop the event loop and shut the process down. Produced
     /// when reading a client's outer terminal fails, which is that terminal
@@ -254,13 +252,6 @@ pub enum RuntimeEvent {
         /// Where the dispatcher sends its verdict.
         response_sender: Sender<Result<(), crate::server::RestartRefusal>>,
     },
-    /// The connection writer of `client_id` wrote one host write whole and
-    /// holds none of it. The dispatcher sends the bytes that wait for that
-    /// client's terminal, when any wait.
-    HostWriteSent {
-        /// The client whose host write was written.
-        client_id: ClientId,
-    },
     /// A stand-in clipboard tool asks whether the session takes one more part
     /// of a copy, which brings the bytes the connection holds for that copy to
     /// `held_copy_byte_count`. The dispatcher answers `true` while
@@ -273,7 +264,7 @@ pub enum RuntimeEvent {
         response_sender: Sender<bool>,
     },
     /// A stand-in clipboard tool in `pane_id` hands the session a whole copy.
-    /// Each client on another machine whose focused pane is `pane_id` gets the
+    /// Each client on another machine whose focused pane is `pane_id` takes the
     /// copy as an `OSC 52` host write. The dispatcher answers whether the tool
     /// runs the real clipboard tool: `false` when at least one client focuses
     /// `pane_id`, every one of them is on another machine, and each one took
@@ -300,8 +291,8 @@ pub enum RuntimeEvent {
 
 /// What the dispatcher minted for one [`RuntimeEvent::IpcAttach`]: the client
 /// record, the session it joined, the structure built for the attach reply, the
-/// receiving end of the client's own event queue, and the session's shared
-/// ending notice.
+/// receiving end of the client's own event queue, the host-write bytes that
+/// wait for the client's own terminal, and the session's shared ending notice.
 ///
 /// The whole of it comes out of one dispatcher turn: the structure names the
 /// same state the queue's first event follows.
@@ -315,6 +306,9 @@ pub struct AttachAccepted {
     pub session_structure: AttachedSessionStructureSnapshot,
     /// The client's event queue. Dropping it ends the subscription.
     pub deliveries: Receiver<Delivery>,
+    /// Shared with the session. This client's writing thread takes the bytes
+    /// that wait for the client's own terminal from it before each delivery.
+    pub waiting_host_writes: Arc<WaitingHostWrites>,
     /// Shared with the session. This client's writing thread reads the session
     /// ending from it even when the queue above is full, and the session reads
     /// from it when that thread has written the last frame.

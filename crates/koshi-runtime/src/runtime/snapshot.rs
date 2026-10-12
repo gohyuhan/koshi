@@ -281,6 +281,7 @@ impl Server {
                     active_tab_id: client.get_active_tab_id(),
                     focused_pane_id: client.get_active_focused_pane_id(),
                     lock_mode: client.get_lock_mode(),
+                    last_applied_lock_command_id: client.get_last_applied_lock_command_id(),
                     is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
                 },
                 reported_pane_area: client.get_reported_pane_area(),
@@ -423,6 +424,7 @@ impl Server {
                 active_tab_id,
                 focused_pane_id: client.get_active_focused_pane_id(),
                 lock_mode: client.get_lock_mode(),
+                last_applied_lock_command_id: client.get_last_applied_lock_command_id(),
                 is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
             },
         })

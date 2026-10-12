@@ -2341,6 +2341,19 @@ fn get_client_lock_mode(runtime: &Server, session_id: SessionId, client_id: Clie
         .get_lock_mode()
 }
 
+/// Read `client_id`'s last applied lock command out of session `session_id`.
+fn get_client_last_applied_lock_command_id(
+    runtime: &Server,
+    session_id: SessionId,
+    client_id: ClientId,
+) -> Option<CommandId> {
+    runtime.session_by_id[&session_id]
+        .clients
+        .get_client_by_id(client_id)
+        .expect("client")
+        .get_last_applied_lock_command_id()
+}
+
 #[test]
 fn toggle_lock_mode_locks_an_unlocked_client() {
     let (mut runtime, _runtime_event_sender, client_id, session_id) = build_lock_fixture();
@@ -2536,6 +2549,127 @@ fn setting_the_current_lock_mode_emits_nothing() {
     assert_eq!(
         get_client_lock_mode(&runtime, session_id, client_id),
         LockMode::Normal
+    );
+}
+
+#[test]
+fn a_lock_command_from_the_clients_own_connection_is_its_last_applied_lock_command() {
+    let (mut runtime, _runtime_event_sender, client_id, session_id) = build_lock_fixture();
+    assert_eq!(
+        get_client_last_applied_lock_command_id(&runtime, session_id, client_id),
+        None
+    );
+
+    let lock_command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(client_id),
+        Command::SetLockMode(LockModeArgs {
+            is_locked: true,
+            client_id: None,
+        }),
+    );
+    let lock_command_id = lock_command_envelope.command_id;
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(lock_command_envelope)),
+        Ok(vec!["InputModeChanged"])
+    );
+    assert_eq!(
+        get_client_last_applied_lock_command_id(&runtime, session_id, client_id),
+        Some(lock_command_id)
+    );
+
+    // Locking a locked client changes no mode and still answers the command.
+    let repeated_lock_command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(client_id),
+        Command::SetLockMode(LockModeArgs {
+            is_locked: true,
+            client_id: None,
+        }),
+    );
+    let repeated_lock_command_id = repeated_lock_command_envelope.command_id;
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(repeated_lock_command_envelope)),
+        Ok(Vec::new())
+    );
+    assert_eq!(
+        get_client_lock_mode(&runtime, session_id, client_id),
+        LockMode::Locked
+    );
+    assert_eq!(
+        get_client_last_applied_lock_command_id(&runtime, session_id, client_id),
+        Some(repeated_lock_command_id)
+    );
+}
+
+#[test]
+fn a_lock_command_from_another_source_changes_the_mode_and_not_the_last_applied_lock_command() {
+    let (mut runtime, _runtime_event_sender) = build_runtime();
+    let (alice_client_id, bob_client_id) = (ClientId::new(), ClientId::new());
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
+    let mut session = build_bare_session(SessionId::new());
+    register_pane_record(&mut session, pane_id);
+    register_session_tab(&mut session, tab_id, pane_id);
+    attach_client(&mut session, alice_client_id, tab_id, Some(pane_id));
+    attach_client(&mut session, bob_client_id, tab_id, Some(pane_id));
+    let session_id = session.session_id;
+    runtime.session_by_id.insert(session_id, session);
+    let alice_lock_command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(alice_client_id),
+        Command::SetLockMode(LockModeArgs {
+            is_locked: true,
+            client_id: None,
+        }),
+    );
+    let alice_lock_command_id = alice_lock_command_envelope.command_id;
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(alice_lock_command_envelope)),
+        Ok(vec!["InputModeChanged"])
+    );
+
+    // Bob's viewer unlocks Alice by name.
+    let bob_unlock_command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(bob_client_id),
+        Command::SetLockMode(LockModeArgs {
+            is_locked: false,
+            client_id: Some(alice_client_id),
+        }),
+    );
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(bob_unlock_command_envelope)),
+        Ok(vec!["InputModeChanged"])
+    );
+    assert_eq!(
+        get_client_lock_mode(&runtime, session_id, alice_client_id),
+        LockMode::Normal
+    );
+    assert_eq!(
+        get_client_last_applied_lock_command_id(&runtime, session_id, alice_client_id),
+        Some(alice_lock_command_id)
+    );
+    assert_eq!(
+        get_client_last_applied_lock_command_id(&runtime, session_id, bob_client_id),
+        None
+    );
+
+    // `koshi lock --client` from outside every pane.
+    let external_lock_command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::SetLockMode(LockModeArgs {
+            is_locked: true,
+            client_id: Some(alice_client_id),
+        }),
+    );
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(external_lock_command_envelope)),
+        Ok(vec!["InputModeChanged"])
+    );
+    assert_eq!(
+        get_client_lock_mode(&runtime, session_id, alice_client_id),
+        LockMode::Locked
+    );
+    assert_eq!(
+        get_client_last_applied_lock_command_id(&runtime, session_id, alice_client_id),
+        Some(alice_lock_command_id)
     );
 }
 
@@ -2868,7 +3002,7 @@ fn copying_a_pane_with_no_highlight_writes_nothing_and_is_not_an_error() {
         split_pane_id,
         ..
     } = build_resize_fixture();
-    let outer_terminal_receiver = runtime.subscribe(client_id);
+    let (outer_terminal_receiver, _) = runtime.subscribe(client_id);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_mouse(client_id),
@@ -17945,7 +18079,7 @@ fn detaching_the_last_client_leaves_the_session_running_with_no_clients() {
         )
         .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
-    let delivery_receiver = runtime.subscribe(client_id);
+    let (delivery_receiver, _) = runtime.subscribe(client_id);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_external_cli(Some(session_id), None),
@@ -18005,8 +18139,8 @@ fn detach_all_takes_every_attached_client() {
         SystemTime::now(),
         false,
     );
-    let initial_client_delivery_receiver = runtime.subscribe(initial_client_id);
-    let additional_client_delivery_receiver = runtime.subscribe(additional_client_id);
+    let (initial_client_delivery_receiver, _) = runtime.subscribe(initial_client_id);
+    let (additional_client_delivery_receiver, _) = runtime.subscribe(additional_client_id);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_external_cli(Some(session_id), None),
@@ -18158,7 +18292,7 @@ fn detach_with_a_sole_attached_client_and_none_named_takes_that_client() {
         )
         .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
-    let delivery_receiver = runtime.subscribe(only_client_id);
+    let (delivery_receiver, _) = runtime.subscribe(only_client_id);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_external_cli(Some(session_id), None),
@@ -18301,7 +18435,7 @@ fn a_switch_puts_the_session_to_join_on_the_clients_queue() {
         )
         .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
-    let delivery_receiver = runtime.subscribe(client_id);
+    let (delivery_receiver, _) = runtime.subscribe(client_id);
     let target_session_id = SessionId::new();
 
     let command_envelope = build_command_envelope(
@@ -18345,7 +18479,7 @@ fn a_switch_into_the_session_the_client_is_already_in_is_refused() {
         )
         .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
-    let delivery_receiver = runtime.subscribe(client_id);
+    let (delivery_receiver, _) = runtime.subscribe(client_id);
 
     let command_envelope = build_command_envelope(
         build_in_session_source(session_id, Some(client_id), pane_id),
@@ -18424,7 +18558,7 @@ fn a_client_that_switched_away_ends_the_session_under_auto_close() {
     runtime.config.should_auto_close_session = true;
     // An attach registers the client and its subscriber together, so a client
     // that can be moved always has one.
-    let _delivery_receiver = runtime.subscribe(client_id);
+    let (_delivery_receiver, _) = runtime.subscribe(client_id);
 
     let command_envelope = build_command_envelope(
         build_in_session_source(session_id, Some(client_id), pane_id),
@@ -18477,7 +18611,7 @@ fn a_switch_moves_the_client_it_names_with_several_attached() {
         tab_id,
         None,
     );
-    let delivery_receiver = runtime.subscribe(initial_client_id);
+    let (delivery_receiver, _) = runtime.subscribe(initial_client_id);
     let target_session_id = SessionId::new();
 
     // An external source names no client of its own: `client_id` names the
@@ -18525,7 +18659,7 @@ fn a_switch_is_refused_when_the_clients_queue_is_full() {
         )
         .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
-    let _delivery_receiver = runtime.subscribe(client_id);
+    let (_delivery_receiver, _) = runtime.subscribe(client_id);
 
     // Nothing reads the queue: publishing its whole capacity fills it.
     let queued_events: Vec<Event> = (0..crate::runtime::bus::SUBSCRIBER_QUEUE_CAPACITY)

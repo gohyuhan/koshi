@@ -41,6 +41,7 @@
 //! ([`osc`]), and CSI parameter accessors ([`params`]) — while the
 //! [`vte::Perform`] trait impl itself stays here as the dispatch surface.
 
+use koshi_core::display_width::compute_character_display_width;
 use koshi_core::text::sanitize_reported_text;
 
 use crate::grid::state::{Cell, ImagePlaceholder, RowEnd};
@@ -48,7 +49,6 @@ use crate::state::{
     CursorShape, MouseEncoding, MouseTracking, Screen, ShellIntegrationFact, ShellIntegrationState,
     TerminalState,
 };
-use unicode_width::UnicodeWidthChar;
 
 use self::motion::{find_next_tab_stop, find_previous_tab_stop};
 use self::osc::{parse_osc133, parse_osc7_working_directory, Osc133};
@@ -75,7 +75,9 @@ impl vte::Perform for TerminalState {
     /// passthrough), folds continuations (combining marks, ZWJ emoji parts,
     /// variation selectors) onto the preceding base, handles display width
     /// (narrow single-column or wide CJK/emoji two-column), and respects
-    /// autowrap at the effective horizontal right bound.
+    /// autowrap at the effective horizontal right bound. A halfwidth katakana
+    /// sound mark (`U+FF9E`, `U+FF9F`) is a narrow glyph of its own, and
+    /// `U+17D8` is a narrow glyph.
     fn print(&mut self, character: char) {
         // Translate through the active GL charset (DEC line drawing, UK). The
         // cell stores the remapped glyph and width is computed on it; the
@@ -94,9 +96,9 @@ impl vte::Perform for TerminalState {
         // has no display width (`None`) → ignore it. A zero-width char with no
         // cluster to join (e.g. a combining mark at the very start of a line)
         // has no base to attach to → drop it. Every other glyph is narrow (1)
-        // or wide (2, e.g. CJK / emoji); `unicode-width` treats ambiguous-width
-        // characters as narrow.
-        let Some(raw_width) = character.width() else {
+        // or wide (2, e.g. CJK / emoji); `compute_character_display_width`
+        // treats ambiguous-width characters as narrow.
+        let Some(raw_width) = compute_character_display_width(character) else {
             // The reset ends the text run: a continuation that follows starts
             // fresh.
             self.reset_cluster();

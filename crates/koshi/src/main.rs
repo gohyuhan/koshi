@@ -335,7 +335,11 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         // The discovery queries read every running session's state and render
         // it here. They dispatch no command and never enter the routing layer
         // the action verbs use.
-        return run_discovery(command, cli.remote_server_reference.as_deref());
+        return run_discovery(
+            command,
+            cli.remote_server_reference.as_deref(),
+            cli.certificate_fingerprint.as_deref(),
+        );
     }
 
     if let Some(CliCommand::Debug { command }) = &cli.command {
@@ -387,6 +391,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         if let Some(server_reference) = &cli.remote_server_reference {
             return attach::attach_remote_session(
                 server_reference,
+                cli.certificate_fingerprint.as_deref(),
                 save_as.as_deref(),
                 session_argument.as_deref(),
             );
@@ -456,9 +461,12 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     // With `--remote` the target is picked from the sessions on the named
     // machine; the pane identity on this one is not read.
     let command_result = match &cli.remote_server_reference {
-        Some(server_reference) => {
-            targeting::submit_remote(server_reference, cli_command, new_pane_direction)?
-        }
+        Some(server_reference) => targeting::submit_remote(
+            server_reference,
+            cli.certificate_fingerprint.as_deref(),
+            cli_command,
+            new_pane_direction,
+        )?,
         None => match targeting::resolve_command_route(cli_command, in_session_context.as_ref())? {
             Route::InSession(resolved_targets) => {
                 let in_session_context =
@@ -516,8 +524,10 @@ fn render_command_result(command_result: CommandResult) -> Result<(), CliError> 
 /// `list-sessions` also lists the sessions on the saved servers: a bare one
 /// sweeps every saved server and appends each session that answered, named
 /// under its server in the `server` column; `--remote <server>` lists that one
-/// server's sessions alone. A saved server that refused, did not answer, or
-/// pins no certificate yet is named on stderr and its sessions are left out;
+/// server's sessions alone, and `certificate_fingerprint` is the
+/// `--certificate-fingerprint` value a server not saved yet needs. A saved
+/// server that refused, did not answer, or holds no certificate fingerprint is
+/// named on stderr and its sessions are left out;
 /// a refusal carries the sentence a dial to that server reports. Only a
 /// session on this machine that could not answer fails the listing. A bare
 /// one also names on stderr each runtime directory of koshi 0.1.0 and 0.2.0
@@ -529,11 +539,13 @@ fn render_command_result(command_result: CommandResult) -> Result<(), CliError> 
 fn run_discovery(
     command: &CliCommand,
     remote_server_reference: Option<&str>,
+    certificate_fingerprint: Option<&str>,
 ) -> Result<(), CliError> {
     if let (CliCommand::ListSessions { output_format }, Some(remote_server_reference)) =
         (command, remote_server_reference)
     {
-        let saved_server_argument = remote_client::resolve_server(remote_server_reference)?;
+        let saved_server_argument =
+            remote_client::resolve_server(remote_server_reference, certificate_fingerprint)?;
         let (mut remote_link, _) = remote_client::connect_saved_server(
             &saved_server_argument,
             None,
@@ -586,7 +598,7 @@ fn run_discovery(
             }
             let mut session_rows = discovery::build_session_rows(session_overviews);
             session_rows.extend(
-                remote_client::list_saved_server_session_rows("list-sessions")
+                remote_client::list_saved_server_session_rows()
                     .into_iter()
                     .map(|(server_label, remote_session_row)| {
                         SessionRow::from_session(

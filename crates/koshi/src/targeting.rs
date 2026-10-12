@@ -176,12 +176,16 @@ fn resolve_command_route_in_runtime_directory(
 /// dispatcher's result.
 ///
 /// `server_reference` is the name this machine saved that server under, or the
-/// `host:port` it listens on. The sessions that server's secret reaches stand
-/// in for this machine's census, so the explicit `--session`/`--tab`/`--pane`/
-/// `--client` flags and the count rule pick the target there exactly as they
-/// do here. Nothing on this side of the connection is consulted: an identity
-/// in the pane environment names a session on this machine, which the named
-/// machine knows nothing about.
+/// `host:port` it listens on. `certificate_fingerprint` is the
+/// `--certificate-fingerprint` value, which a server this machine has not saved
+/// needs, as [`remote_client::resolve_server`] states.
+///
+/// The sessions that server's secret reaches stand in for this machine's
+/// census, so the explicit `--session`/`--tab`/`--pane`/`--client` flags and
+/// the count rule pick the target there exactly as they do here. Nothing on
+/// this side of the connection is consulted: an identity in the pane
+/// environment names a session on this machine, which the named machine knows
+/// nothing about.
 ///
 /// Nothing here creates a session. A server whose secret reaches no running
 /// session refuses with [`CliError::NoSessions`], the same refusal an external
@@ -191,10 +195,11 @@ fn resolve_command_route_in_runtime_directory(
 /// put on a pane-opening verb that was given no `--direction`.
 pub fn submit_remote(
     server_reference: &str,
+    certificate_fingerprint: Option<&str>,
     command: &CliCommand,
     new_pane_direction: Direction,
 ) -> Result<CommandResult, CliError> {
-    let saved_server = remote_client::resolve_server(server_reference)?;
+    let saved_server = remote_client::resolve_server(server_reference, certificate_fingerprint)?;
     // This connection saves the record the dials below present.
     let (mut remote_link, saved_server_record) = remote_client::connect_saved_server(
         &saved_server,

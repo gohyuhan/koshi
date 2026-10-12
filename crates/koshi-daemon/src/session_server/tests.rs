@@ -477,17 +477,16 @@ fn a_copy_applied_while_the_swap_runs_reaches_the_clients_own_terminal() {
     apply_queued_runtime_events(&mut server, DetachPolicy::Apply);
 
     // base64("hello") = aGVsbG8=
-    let host_write_bytes: Vec<Vec<u8>> = attached_client
+    let host_write_wake_count = attached_client
         .deliveries
         .try_iter()
-        .filter_map(|delivery| match delivery {
-            Delivery::HostWrite {
-                host_write_bytes, ..
-            } => Some(host_write_bytes),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(host_write_bytes, vec![b"\x1b]52;c;aGVsbG8=\x07".to_vec()]);
+        .filter(|delivery| matches!(delivery, Delivery::HostWrite))
+        .count();
+    assert_eq!(host_write_wake_count, 1);
+    assert_eq!(
+        attached_client.waiting_host_writes.take_host_write_bytes(),
+        b"\x1b]52;c;aGVsbG8=\x07".to_vec()
+    );
 }
 
 #[test]

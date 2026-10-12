@@ -403,13 +403,15 @@ pub enum IpcRequestKind {
         /// or `None` when the terminal has no usable measurement.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cell_size: Option<koshi_core::geometry::PixelCellSize>,
-        /// The longest the session waits for the next request on this
-        /// connection once the client is attached, in milliseconds. A
-        /// connection that sends nothing for that long ends, as a dropped
-        /// link does. `None` sets no limit. A client on another machine sends
-        /// its `remote-link-timeout-ms` and a [`Ping`](Self::Ping) every third
-        /// of it; a client on this machine sends `None`. Left off the wire when
-        /// `None`; absent, it reads as `None`.
+        /// The client's link timeout, in milliseconds. Once the client is
+        /// attached, the session writes it a
+        /// [`SessionEvent::Pong`](crate::event::SessionEvent::Pong) whenever
+        /// it has written it nothing for a third of this value. `None` writes
+        /// no `Pong`. A value below `1000` is refused with
+        /// [`IpcErrorCode::RequestFailed`]. A client on another machine sends
+        /// its `remote-link-timeout-ms` and [`Ping`](Self::Ping) requests; a
+        /// client on this machine sends `None`. Left off the wire when `None`;
+        /// absent, it reads as `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         link_timeout_ms: Option<u32>,
     },
@@ -487,19 +489,26 @@ pub enum IpcRequestKind {
     /// [`SessionEvent::Restarting`](crate::event::SessionEvent::Restarting),
     /// when it leaves a dropped link to dial the session again, when its
     /// terminal goes away, and when the session moves it to another session.
-    /// Requests arrive in the order the caller queued them.
+    /// A link that a rejoin opens after the quit keybinding or the terminal
+    /// going away ended the client gets it with `is_returning` `true`, and so
+    /// does the first link of a terminal that cannot be set up. Requests
+    /// arrive in the order the caller queued them.
     Leaving {
         /// Whether the client attaches again. `true` keeps the session running
         /// when that client was its last one. `false` lets
         /// `auto-close-session` end a session that the client leaves with no
         /// client. A connection that ends with no `Leaving` counts as `true`
-        /// when it came from another machine and as `false` otherwise.
+        /// when it came from another machine. A connection on this machine
+        /// counts as `true` when it ends before its first request after an
+        /// `Attach` that names `resume_client_id`, and as `false` otherwise.
         is_returning: bool,
     },
-    /// An attached client asks the session for one
-    /// [`SessionEvent::Pong`](crate::event::SessionEvent::Pong). A client on
-    /// another machine sends one every third of its link timeout. On a
-    /// connection with no attached client, a `Ping` closes the connection.
+    /// A heartbeat from an attached client. The session reads it and drops it,
+    /// and nothing answers it. A client on another machine sends one every
+    /// third of its link timeout while it waits for the answer to its
+    /// `Attach`, and goes on sending one every third of its link timeout once
+    /// it has joined. On a connection with no attached client, a `Ping`
+    /// closes the connection.
     Ping,
     /// One part of a clipboard copy that a stand-in clipboard tool in a pane
     /// sends before the last part, which goes as
@@ -527,12 +536,16 @@ pub enum IpcRequestKind {
     /// since its last answered copy, then these bytes.
     ///
     /// The session answers [`IpcResult::ClipboardCopyRouted`]. Each client on
-    /// another machine that focuses `pane_id` gets the copy as an `OSC 52`
+    /// another machine that focuses `pane_id` takes the copy as an `OSC 52`
     /// host write. `should_run_clipboard_tool` is `false` when only such
-    /// clients focus the pane, and `true` in every other case: no client
-    /// focuses the pane, a client on this machine focuses it,
+    /// clients focus the pane and each one took the copy, and `true` in every
+    /// other case: no client focuses the pane, a client on this machine
+    /// focuses it, a client on another machine did not take the copy, such as
+    /// one whose connection's writing thread has ended,
     /// `pane-clipboard-writes` is off, the session holds no such pane, or the
-    /// copy passes `max-copy-bytes`.
+    /// copy passes `max-copy-bytes`. A client whose link dropped takes the
+    /// copy until the session notices the drop, and its terminal does not get
+    /// the copy.
     ///
     /// The session refuses it with [`IpcErrorCode::RequestFailed`] on a
     /// connection from another machine or from another user of this machine.
@@ -732,7 +745,7 @@ pub enum IpcResult {
     ClipboardCopyRouted {
         /// `true` tells the caller to run the real clipboard tool with every
         /// byte of the copy. `false` means every client that focuses the pane
-        /// is on another machine, and each one got the copy.
+        /// is on another machine, and each one took the copy.
         should_run_clipboard_tool: bool,
     },
 }

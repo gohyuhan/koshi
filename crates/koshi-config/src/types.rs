@@ -178,16 +178,20 @@ pub struct ClientConfig {
     /// link to a session on this machine ends the viewer either way.
     pub should_reconnect_remote_session: bool,
     /// The longest a viewer's link to a session on another machine may carry
-    /// nothing, in milliseconds, at least `1`. The viewer sends the session a
-    /// ping every third of this time, and the session answers each ping. A
-    /// viewer that reads nothing on the link for this long counts the link as
-    /// dropped, and a session that reads nothing from the viewer for this long
-    /// removes the viewer's client. The router of the machine that serves the
-    /// session ends its link to the viewer when a read from the viewer gets no
-    /// byte, or a write to the viewer takes no byte, for this time plus 20
-    /// seconds. Example: `30000` sends a ping every 10 seconds, counts the link
-    /// as dropped after 30 seconds with nothing read, and lets the serving
-    /// router end the link after 50 seconds. A link to a session on this
+    /// no byte, in milliseconds, at least `1000`. The viewer sends the session
+    /// a ping every third of this time, and the session sends the viewer a
+    /// pong whenever it has sent the viewer nothing for a third of this time.
+    /// A viewer that reads no byte on the link for this long counts the link
+    /// as dropped, and a socket write from the viewer that puts no byte on the
+    /// link for this long ends the viewer's writing on that link. The router
+    /// of the machine that serves the session ends its link to the viewer when
+    /// a socket read from the viewer gets no byte, or a socket write to the
+    /// viewer takes no byte, for this long, and the session then removes the
+    /// viewer's client. While the viewer joins, that router waits at least 20
+    /// seconds for the viewer's first request to the session. Example: `30000`
+    /// sends a ping every 10 seconds, a laptop that sleeps loses its link 30
+    /// seconds after the last byte, and a paste that takes two minutes to send
+    /// keeps the link while its bytes keep moving. A link to a session on this
     /// machine sends no ping and has no limit.
     pub remote_link_timeout_ms: u32,
 }

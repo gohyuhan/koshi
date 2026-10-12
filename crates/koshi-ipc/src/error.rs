@@ -10,7 +10,7 @@ use thiserror::Error;
 /// ([`ConnectRefused`](IpcError::ConnectRefused),
 /// [`ConnectTimedOut`](IpcError::ConnectTimedOut),
 /// [`TlsHandshakeFailed`](IpcError::TlsHandshakeFailed),
-/// [`CertificateChanged`](IpcError::CertificateChanged)), a refused frame
+/// [`CertificateMismatch`](IpcError::CertificateMismatch)), a refused frame
 /// ([`FrameTooLarge`](IpcError::FrameTooLarge)), an answer from a server that
 /// koshi 0.1.0 to 0.4.0 started
 /// ([`PreviousReleaseAnswer`](IpcError::PreviousReleaseAnswer)), a socket address that fails
@@ -179,17 +179,19 @@ pub enum IpcError {
         server_address: String,
         error_detail: String,
     },
-    /// The server at `server_address` presented a different certificate than
-    /// the one pinned the first time it was dialled.
+    /// The server at `server_address` presented a certificate whose
+    /// fingerprint is not the one the dial expected. The secret was not sent.
     #[error(
-        "the certificate of {server_address} changed: pinned {pinned_certificate}, presented {presented_certificate}. \
-         if the server was reinstalled on purpose, run `koshi remote forget {server_address}` \
-         and connect again."
+        "the certificate {server_address} presented is not the expected one: expected \
+         {expected_certificate_fingerprint}, presented {presented_certificate_fingerprint}. the \
+         secret was not sent. if that machine's certificate changed on purpose, `koshi share \
+         grant` there prints the new fingerprint: give it with --certificate-fingerprint, or \
+         with `koshi remote edit` for a saved server."
     )]
-    CertificateChanged {
+    CertificateMismatch {
         server_address: String,
-        pinned_certificate: String,
-        presented_certificate: String,
+        expected_certificate_fingerprint: String,
+        presented_certificate_fingerprint: String,
     },
 }
 

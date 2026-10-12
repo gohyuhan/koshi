@@ -2,7 +2,9 @@
 //! and non-ASCII payloads, an escape inside the payload, the targets, paste
 //! byte translation, and the runtime copy paths: koshi's own copy for one
 //! client, a pane's `OSC 52` copy for every client that focuses the pane, and a
-//! stand-in clipboard tool's copy for the clients on other machines.
+//! stand-in clipboard tool's copy for the clients on other machines. Each path
+//! is also run against a client whose waiting host writes replace or refuse
+//! the copy.
 
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
@@ -11,6 +13,7 @@ use crate::runtime::pty_inbox::InboxSink;
 use koshi_config::types::PaneClipboardWriteConfig;
 use koshi_core::geometry::Size;
 use koshi_core::ids::SessionId;
+use koshi_ipc::event::MAX_HOST_WRITE_BYTE_COUNT;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::snapshot::Delivery;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -152,7 +155,7 @@ fn an_empty_bracketed_paste_is_just_the_two_markers() {
 fn copying_queues_the_osc_52_sequence_for_the_clients_outer_terminal() {
     let mut server = build_test_runtime();
     let client_id = ClientId::new();
-    let delivery_receiver = server.subscribe(client_id);
+    let (delivery_receiver, _) = server.subscribe(client_id);
 
     server.copy_to_clipboard(client_id, "hello");
 
@@ -165,19 +168,36 @@ fn copying_queues_the_osc_52_sequence_for_the_clients_outer_terminal() {
 }
 
 #[test]
-fn two_copies_to_one_client_queue_both_sequences_in_order() {
+fn a_second_copy_to_one_client_replaces_the_first_while_it_waits() {
     let mut server = build_test_runtime();
     let client_id = ClientId::new();
-    let delivery_receiver = server.subscribe(client_id);
+    let (delivery_receiver, _) = server.subscribe(client_id);
 
     server.copy_to_clipboard(client_id, "one");
     server.copy_to_clipboard(client_id, "two");
 
-    let mut expected_host_writes = encode_osc52_copy("c", b"one");
-    expected_host_writes.extend_from_slice(&encode_osc52_copy("c", b"two"));
     assert_eq!(
         server.take_host_writes(client_id, &delivery_receiver),
-        Some(expected_host_writes)
+        Some(encode_osc52_copy("c", b"two"))
+    );
+}
+
+#[test]
+fn a_copy_that_the_waiting_host_writes_refuse_is_skipped_and_they_stay_whole() {
+    let mut server = build_test_runtime();
+    let client_id = ClientId::new();
+    let (delivery_receiver, _) = server.subscribe(client_id);
+    let waiting_copied_bytes = vec![b'a'; MAX_HOST_WRITE_BYTE_COUNT];
+    assert!(server.queue_host_write(
+        client_id,
+        &HostWrite::from_clipboard_copy("p", &waiting_copied_bytes)
+    ));
+
+    server.copy_to_clipboard(client_id, "hello");
+
+    assert_eq!(
+        server.take_host_writes(client_id, &delivery_receiver),
+        Some(encode_osc52_copy("p", &waiting_copied_bytes))
     );
 }
 
@@ -185,7 +205,7 @@ fn two_copies_to_one_client_queue_both_sequences_in_order() {
 fn copying_an_empty_selection_queues_the_empty_sequence() {
     let mut server = build_test_runtime();
     let client_id = ClientId::new();
-    let delivery_receiver = server.subscribe(client_id);
+    let (delivery_receiver, _) = server.subscribe(client_id);
 
     server.copy_to_clipboard(client_id, "");
 
@@ -200,8 +220,8 @@ fn each_client_takes_only_the_sequence_its_own_copy_queued() {
     let mut server = build_test_runtime();
     let client_with_first_copy = ClientId::new();
     let client_with_second_copy = ClientId::new();
-    let first_receiver = server.subscribe(client_with_first_copy);
-    let second_receiver = server.subscribe(client_with_second_copy);
+    let (first_receiver, _) = server.subscribe(client_with_first_copy);
+    let (second_receiver, _) = server.subscribe(client_with_second_copy);
 
     server.copy_to_clipboard(client_with_first_copy, "one");
     server.copy_to_clipboard(client_with_second_copy, "two");
@@ -266,8 +286,8 @@ fn build_clipboard_routing_fixture(
         SystemTime::UNIX_EPOCH,
         true,
     );
-    let local_receiver = server.subscribe(local_client_id);
-    let remote_receiver = server.subscribe(remote_client_id);
+    let (local_receiver, _) = server.subscribe(local_client_id);
+    let (remote_receiver, _) = server.subscribe(remote_client_id);
     ClipboardRoutingFixture {
         server,
         pane_id,
@@ -360,6 +380,37 @@ fn a_pane_copy_for_a_pane_no_client_focuses_reaches_no_client() {
 }
 
 #[test]
+fn a_pane_copy_that_one_clients_waiting_host_writes_refuse_still_reaches_the_other() {
+    let mut fixture = build_clipboard_routing_fixture(ALLOWED_PANE_CLIPBOARD_WRITES);
+    let waiting_copied_bytes = vec![b'a'; MAX_HOST_WRITE_BYTE_COUNT];
+    assert!(fixture.server.queue_host_write(
+        fixture.remote_client_id,
+        &HostWrite::from_clipboard_copy("p", &waiting_copied_bytes)
+    ));
+
+    fixture.server.copy_pane_clipboard_to_clients(
+        fixture.pane_id,
+        &[ClipboardCopy {
+            clipboard_targets: String::from("c"),
+            copied_bytes: b"one".to_vec(),
+        }],
+    );
+
+    assert_eq!(
+        fixture
+            .server
+            .take_host_writes(fixture.local_client_id, &fixture.local_receiver),
+        Some(encode_osc52_copy("c", b"one"))
+    );
+    assert_eq!(
+        fixture
+            .server
+            .take_host_writes(fixture.remote_client_id, &fixture.remote_receiver),
+        Some(encode_osc52_copy("p", &waiting_copied_bytes))
+    );
+}
+
+#[test]
 fn pane_output_with_an_osc_52_copy_reaches_each_focusing_client_while_writes_are_allowed() {
     let mut fixture = build_clipboard_routing_fixture(ALLOWED_PANE_CLIPBOARD_WRITES);
 
@@ -404,16 +455,15 @@ fn pane_output_with_an_osc_52_copy_reaches_no_client_while_writes_are_off() {
 }
 
 #[test]
-fn a_tool_copy_with_only_a_client_on_another_machine_focusing_reaches_it_and_answers_false() {
+fn a_tool_copy_with_only_a_client_on_another_machine_focusing_reaches_it_and_is_routed() {
     let mut fixture = build_clipboard_routing_fixture(ALLOWED_PANE_CLIPBOARD_WRITES);
     let _ = fixture.server.handle_client_detach(fixture.local_client_id);
 
-    let should_run_clipboard_tool =
-        fixture
-            .server
-            .route_clipboard_tool_copy(fixture.pane_id, "c", b"hello");
+    let is_routed = fixture
+        .server
+        .route_clipboard_tool_copy(fixture.pane_id, "c", b"hello");
 
-    assert!(!should_run_clipboard_tool);
+    assert!(is_routed);
     assert_eq!(
         fixture
             .server
@@ -423,15 +473,14 @@ fn a_tool_copy_with_only_a_client_on_another_machine_focusing_reaches_it_and_ans
 }
 
 #[test]
-fn a_tool_copy_with_a_client_on_this_machine_focusing_answers_true_and_still_reaches_the_other() {
+fn a_tool_copy_with_a_client_on_this_machine_focusing_is_not_routed_and_still_reaches_the_other() {
     let mut fixture = build_clipboard_routing_fixture(ALLOWED_PANE_CLIPBOARD_WRITES);
 
-    let should_run_clipboard_tool =
-        fixture
-            .server
-            .route_clipboard_tool_copy(fixture.pane_id, "c", b"hello");
+    let is_routed = fixture
+        .server
+        .route_clipboard_tool_copy(fixture.pane_id, "c", b"hello");
 
-    assert!(should_run_clipboard_tool);
+    assert!(!is_routed);
     assert_eq!(
         fixture
             .server
@@ -451,7 +500,7 @@ fn a_tool_copy_keeps_only_the_clipboard_targets_once_each() {
     let mut fixture = build_clipboard_routing_fixture(ALLOWED_PANE_CLIPBOARD_WRITES);
     let _ = fixture.server.handle_client_detach(fixture.local_client_id);
 
-    assert!(!fixture
+    assert!(fixture
         .server
         .route_clipboard_tool_copy(fixture.pane_id, "pXcp", b"hello"));
 
@@ -468,7 +517,7 @@ fn a_tool_copy_of_exactly_the_copy_limit_is_taken() {
     let mut fixture = build_clipboard_routing_fixture(ALLOWED_PANE_CLIPBOARD_WRITES);
     let _ = fixture.server.handle_client_detach(fixture.local_client_id);
 
-    assert!(!fixture
+    assert!(fixture
         .server
         .route_clipboard_tool_copy(fixture.pane_id, "c", b"12345678"));
 
@@ -481,11 +530,11 @@ fn a_tool_copy_of_exactly_the_copy_limit_is_taken() {
 }
 
 #[test]
-fn a_tool_copy_past_the_copy_limit_answers_true_and_reaches_no_client() {
+fn a_tool_copy_past_the_copy_limit_is_not_routed_and_reaches_no_client() {
     let mut fixture = build_clipboard_routing_fixture(ALLOWED_PANE_CLIPBOARD_WRITES);
     let _ = fixture.server.handle_client_detach(fixture.local_client_id);
 
-    assert!(fixture
+    assert!(!fixture
         .server
         .route_clipboard_tool_copy(fixture.pane_id, "c", b"123456789"));
 
@@ -498,11 +547,11 @@ fn a_tool_copy_past_the_copy_limit_answers_true_and_reaches_no_client() {
 }
 
 #[test]
-fn a_tool_copy_while_writes_are_off_answers_true_and_reaches_no_client() {
+fn a_tool_copy_while_writes_are_off_is_not_routed_and_reaches_no_client() {
     let mut fixture = build_clipboard_routing_fixture(PaneClipboardWriteConfig::default());
     let _ = fixture.server.handle_client_detach(fixture.local_client_id);
 
-    assert!(fixture
+    assert!(!fixture
         .server
         .route_clipboard_tool_copy(fixture.pane_id, "c", b"hello"));
 
@@ -515,10 +564,10 @@ fn a_tool_copy_while_writes_are_off_answers_true_and_reaches_no_client() {
 }
 
 #[test]
-fn a_tool_copy_for_a_pane_no_client_focuses_answers_true() {
+fn a_tool_copy_for_a_pane_no_client_focuses_is_not_routed() {
     let mut fixture = build_clipboard_routing_fixture(ALLOWED_PANE_CLIPBOARD_WRITES);
 
-    assert!(fixture
+    assert!(!fixture
         .server
         .route_clipboard_tool_copy(PaneId::new(), "c", b"hello"));
 
@@ -531,14 +580,100 @@ fn a_tool_copy_for_a_pane_no_client_focuses_answers_true() {
 }
 
 #[test]
-fn a_tool_copy_whose_client_on_another_machine_lost_its_subscription_answers_true() {
+fn a_tool_copy_whose_client_on_another_machine_lost_its_receiver_is_not_routed() {
     let mut fixture = build_clipboard_routing_fixture(ALLOWED_PANE_CLIPBOARD_WRITES);
     let _ = fixture.server.handle_client_detach(fixture.local_client_id);
     drop(fixture.remote_receiver);
 
-    assert!(fixture
+    assert!(!fixture
         .server
         .route_clipboard_tool_copy(fixture.pane_id, "c", b"hello"));
+}
+
+#[test]
+fn a_tool_copy_that_one_client_on_another_machine_cannot_take_still_reaches_the_other() {
+    let mut fixture = build_clipboard_routing_fixture(ALLOWED_PANE_CLIPBOARD_WRITES);
+    let _ = fixture.server.handle_client_detach(fixture.local_client_id);
+    let session_id = *fixture
+        .server
+        .session_by_id
+        .keys()
+        .next()
+        .expect("one session");
+    let active_tab_id = fixture.server.session_by_id[&session_id]
+        .clients
+        .get_client_by_id(fixture.remote_client_id)
+        .expect("the client on another machine")
+        .get_active_tab_id();
+    let unsubscribed_client_id = ClientId::new();
+    let _ = fixture.server.handle_client_attach(
+        session_id,
+        unsubscribed_client_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        None,
+        active_tab_id,
+        None,
+        SystemTime::UNIX_EPOCH,
+        true,
+    );
+
+    assert!(!fixture
+        .server
+        .route_clipboard_tool_copy(fixture.pane_id, "c", b"hello"));
+
+    assert_eq!(
+        fixture
+            .server
+            .take_host_writes(fixture.remote_client_id, &fixture.remote_receiver),
+        Some(encode_osc52_copy("c", b"hello"))
+    );
+}
+
+#[test]
+fn a_tool_copy_that_the_waiting_host_writes_refuse_is_not_routed_and_they_stay_whole() {
+    let mut fixture = build_clipboard_routing_fixture(ALLOWED_PANE_CLIPBOARD_WRITES);
+    let _ = fixture.server.handle_client_detach(fixture.local_client_id);
+    let waiting_copied_bytes = vec![b'a'; MAX_HOST_WRITE_BYTE_COUNT];
+    assert!(fixture.server.queue_host_write(
+        fixture.remote_client_id,
+        &HostWrite::from_clipboard_copy("p", &waiting_copied_bytes)
+    ));
+
+    assert!(!fixture
+        .server
+        .route_clipboard_tool_copy(fixture.pane_id, "c", b"hello"));
+
+    assert_eq!(
+        fixture
+            .server
+            .take_host_writes(fixture.remote_client_id, &fixture.remote_receiver),
+        Some(encode_osc52_copy("p", &waiting_copied_bytes))
+    );
+}
+
+#[test]
+fn a_tool_copy_replaces_the_waiting_copy_for_its_clipboard_targets_kept_once_each() {
+    let mut fixture = build_clipboard_routing_fixture(ALLOWED_PANE_CLIPBOARD_WRITES);
+    let _ = fixture.server.handle_client_detach(fixture.local_client_id);
+    let waiting_copied_bytes = vec![b'a'; MAX_HOST_WRITE_BYTE_COUNT];
+    assert!(fixture.server.queue_host_write(
+        fixture.remote_client_id,
+        &HostWrite::from_clipboard_copy("p", &waiting_copied_bytes)
+    ));
+
+    assert!(fixture
+        .server
+        .route_clipboard_tool_copy(fixture.pane_id, "pXp", b"hello"));
+
+    assert_eq!(
+        fixture
+            .server
+            .take_host_writes(fixture.remote_client_id, &fixture.remote_receiver),
+        Some(encode_osc52_copy("p", b"hello"))
+    );
 }
 
 #[test]

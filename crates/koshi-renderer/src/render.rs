@@ -22,14 +22,23 @@
 //! The floating panes the viewing client shows draw over the tiled panes and
 //! the letterbox, back to front, each in a box with a titlebar. They sit in
 //! the pane area at their own cells, with no letterbox offset.
+//!
+//! Each drawn cell takes the columns that [`compute_text_display_width`] gives
+//! its symbol, and the text of the tabline, the statusline, the borders and
+//! the titlebars is placed at those columns. A cell whose symbol ratatui
+//! measures at another width gets that width as its forced width: a cell that
+//! holds `U+17D8` takes 1 column, not the 3 that ratatui measures.
 
-use ratatui::buffer::Buffer;
+use std::num::NonZeroU16;
+
+use ratatui::buffer::{Buffer, CellDiffOption, CellWidth};
 use ratatui::layout::{Position, Rect as RatatuiRect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Widget};
 
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
+use koshi_core::display_width::compute_text_display_width;
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{PaneId, TabId};
 use koshi_core::key::KeySequence;
@@ -89,6 +98,10 @@ use placement::draw_pane_placement_presentation;
 ///    active tab is suppressed.
 /// 9. Draws the tabline in the first committed region, over that margin.
 /// 10. Draws the statusline in the second committed region, over that margin.
+/// 11. Gives each cell of `viewport_area` whose symbol ratatui measures at
+///     another width than [`compute_text_display_width`] gives it that width as
+///     its forced width. Example: a cell that holds `U+17D8` takes 1 column, not
+///     the 3 that ratatui measures.
 ///
 /// `theme`, `keymap_hints`, `pending_key_sequence`, and `viewer_chrome` come
 /// from the viewer: the colors it paints koshi's chrome in, the statusline data
@@ -267,6 +280,8 @@ pub fn render_frame(
             screen_buffer,
         );
     }
+
+    apply_display_widths(viewport_area, screen_buffer);
 }
 
 /// The buffer cell where the client's focused pane wants the hardware cursor, or
@@ -749,6 +764,37 @@ fn draw_grid(
     }
 }
 
+/// Give each cell of `viewport_area` whose symbol ratatui measures at another
+/// width ([`CellWidth::cell_width`]) than [`compute_symbol_display_width`]
+/// that width as its forced width ([`CellDiffOption::ForcedWidth`]). A cell
+/// whose symbol takes 0 columns keeps ratatui's width.
+///
+/// Example: ratatui measures `U+17D8` 3 columns wide, and
+/// [`compute_symbol_display_width`] gives it 1. Its cell gets the forced width
+/// 1, and the frame diff takes the cell after it as the next screen column.
+fn apply_display_widths(viewport_area: RatatuiRect, screen_buffer: &mut Buffer) {
+    let drawn_area = viewport_area.intersection(screen_buffer.area);
+    for row_index in drawn_area.top()..drawn_area.bottom() {
+        for column_index in drawn_area.left()..drawn_area.right() {
+            let screen_cell = &mut screen_buffer[(column_index, row_index)];
+            let display_width = compute_symbol_display_width(screen_cell.symbol());
+            if screen_cell.cell_width() == display_width {
+                continue;
+            }
+            if let Some(forced_cell_width) = NonZeroU16::new(display_width) {
+                screen_cell.set_diff_option(CellDiffOption::ForcedWidth(forced_cell_width));
+            }
+        }
+    }
+}
+
+/// The columns `symbol`, the text of one cell or one grapheme, takes on the
+/// screen: its [`compute_text_display_width`], at most `u16::MAX`. Example:
+/// `U+17D8` is 1, `世` is 2, and `世ﾞ` (`U+4E16` `U+FF9E`) is 3.
+fn compute_symbol_display_width(symbol: &str) -> u16 {
+    u16::try_from(compute_text_display_width(symbol)).unwrap_or(u16::MAX)
+}
+
 /// The glyph a cell draws: its base character followed by any combining marks
 /// and joined code points, as one string.
 fn get_cell_symbol(cell: &Cell) -> String {
@@ -1023,31 +1069,51 @@ pub fn compute_pane_area(
     )
 }
 
-/// The cells `text` occupies when drawn, counted as Unicode display width and
-/// never from its bytes or chars: `漢字` is 4, `🦀` is 2, `e` plus a combining
-/// acute is 1.
+/// The cells `text` occupies when drawn ([`count_span_cells`]), never counted
+/// from its bytes or chars: `漢字` is 4, `🦀` is 2, `e` plus a combining acute
+/// is 1, `ｶﾞ` (`U+FF76` `U+FF9E`) is 2, and `U+17D8` is 1.
 ///
 /// Text wider than `u16::MAX` cells gives `u16::MAX`, which every width
 /// comparison in this crate reads as wider than the row.
 pub(crate) fn get_text_width(text: &str) -> u16 {
-    u16::try_from(Span::raw(text).width()).unwrap_or(u16::MAX)
+    u16::try_from(count_span_cells(&Span::raw(text))).unwrap_or(u16::MAX)
 }
 
-/// The cells `line` occupies when drawn, summed over its spans and never taken
-/// from their styles.
+/// The cells `line` occupies when drawn: [`count_span_cells`] of each span,
+/// summed, and never taken from their styles.
 ///
 /// A line wider than `u16::MAX` cells gives `u16::MAX`, which every width
 /// comparison in this crate reads as wider than the row.
 pub(crate) fn get_line_width(line: &Line<'_>) -> u16 {
-    u16::try_from(line.width()).unwrap_or(u16::MAX)
+    let line_cell_count: usize = line.spans.iter().map(count_span_cells).sum();
+    u16::try_from(line_cell_count).unwrap_or(u16::MAX)
 }
 
-/// Draw a line, writing nothing when `row_index` lies outside the buffer's rows.
+/// The cells [`set_line_clipped`] places `span` in: the
+/// [`compute_text_display_width`] of each grapheme of the span that holds no
+/// control character, summed. Example: `ｶﾞ` (`U+FF76` `U+FF9E`) is 2, and
+/// `U+17D8` is 1.
+fn count_span_cells(span: &Span<'_>) -> usize {
+    span.styled_graphemes(Style::default())
+        .map(|styled_grapheme| compute_text_display_width(styled_grapheme.symbol))
+        .sum()
+}
+
+/// Draw `line` from `start_column` on `row_index`, in at most `maximum_width`
+/// columns and never past the buffer's right edge. A `row_index` outside the
+/// buffer's rows writes nothing: a buffer shorter than the laid-out frame
+/// leaves the chrome rows below it undrawn.
 ///
-/// [`Buffer::set_line`] clips a line horizontally but writes its row with no
-/// vertical bound: a row past the buffer's height panics. A buffer shorter than
-/// the laid-out frame — a resize left the frame's rows solved for a taller
-/// size — places chrome rows below it, and those rows are skipped.
+/// Each span is drawn in the line's style patched with the span's own. Each
+/// grapheme with no control character takes the columns that
+/// [`compute_symbol_display_width`] gives it. Its first cell gets the grapheme
+/// and the style, and each further cell it covers is reset. A grapheme of 0
+/// columns is left out. A span stops at its first grapheme that does not fit
+/// the columns left, and the next span is drawn from the column where that one
+/// stopped.
+///
+/// Example: `U+17D8` then `x` in 2 columns puts `U+17D8` at `start_column` and
+/// `x` in the column after it. `漢x` in 1 column draws nothing.
 pub(crate) fn set_line_clipped(
     screen_buffer: &mut Buffer,
     start_column: u16,
@@ -1058,7 +1124,32 @@ pub(crate) fn set_line_clipped(
     if row_index < screen_buffer.area.top() || row_index >= screen_buffer.area.bottom() {
         return;
     }
-    screen_buffer.set_line(start_column, row_index, line, maximum_width);
+    let end_column = screen_buffer
+        .area
+        .right()
+        .min(start_column.saturating_add(maximum_width));
+    let mut column_index = start_column;
+    for span in &line.spans {
+        for styled_grapheme in span.styled_graphemes(line.style) {
+            let grapheme_width = compute_symbol_display_width(styled_grapheme.symbol);
+            if grapheme_width == 0 {
+                continue;
+            }
+            let Some(next_column_index) = column_index
+                .checked_add(grapheme_width)
+                .filter(|next_column_index| *next_column_index <= end_column)
+            else {
+                break;
+            };
+            screen_buffer[(column_index, row_index)]
+                .set_symbol(styled_grapheme.symbol)
+                .set_style(styled_grapheme.style);
+            for covered_column_index in column_index + 1..next_column_index {
+                screen_buffer[(covered_column_index, row_index)].reset();
+            }
+            column_index = next_column_index;
+        }
+    }
 }
 
 /// The centered rect of the effective (solved) size within the pane area.

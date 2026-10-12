@@ -7,8 +7,10 @@
 //! `remote-link-timeout-ms 1000` and `remote-reconnect #false`. Once the client
 //! is attached, the relay keeps both of its connections open and drops every
 //! byte it reads from either one, as a network that loses every packet does.
-//! Then the session removes the client and keeps running, and the client ends
-//! with the message of a link that broke.
+//! Then the router ends its connection to the client, the session removes the
+//! client and keeps running, and the client ends with the message of a link
+//! that broke. The client's first connection saved the server under the
+//! address it dialled, with the certificate fingerprint it was given.
 //!
 //! Every wait is bounded by [`WAIT_DURATION`](common::WAIT_DURATION).
 
@@ -29,9 +31,9 @@ use koshi_ipc::transport::Connection;
 
 use common::{
     build_koshi_command_under_home, build_short_test_directory, connect_to_router, create_session,
-    resolve_runtime_directory_under_home, send_router_request, start_router_process,
-    wait_for_attached_client_count, wait_for_client_exit, write_test_config, RunningClient,
-    RunningRouter, RunningSessions,
+    list_saved_server_records, resolve_runtime_directory_under_home, send_router_request,
+    start_router_process, wait_for_attached_client_count, wait_for_client_exit, write_test_config,
+    RunningClient, RunningRouter, RunningSessions,
 };
 
 /// The most bytes one read of a relay pump takes: 16 KiB.
@@ -181,7 +183,8 @@ fn pump_relayed_bytes(
 
 /// Write the `koshi.kdl` of `home_directory`, start a router under it serving
 /// `runtime_directory`, and switch its remote access on. Hands back the
-/// router, a connection to it, and the address its remote listener serves.
+/// router, a connection to it, the address its remote listener serves, and
+/// the fingerprint of the certificate that listener presents.
 ///
 /// `koshi.kdl` sets `remote-link-timeout-ms 1000`, `remote-reconnect #false`,
 /// and a free loopback port as `remote-listen`. The port is found by binding
@@ -195,7 +198,7 @@ fn pump_relayed_bytes(
 fn start_router_with_remote_access(
     home_directory: &Path,
     runtime_directory: &Path,
-) -> (RunningRouter, Connection, SocketAddr) {
+) -> (RunningRouter, Connection, SocketAddr, String) {
     let mut last_router_result = None;
     for _ in 0..MAX_ADDRESS_ATTEMPT_COUNT {
         let remote_listen_port = TcpListener::bind("127.0.0.1:0")
@@ -217,8 +220,15 @@ fn start_router_with_remote_access(
         match send_router_request(&mut router_connection, RouterRequestKind::EnableRemote) {
             RouterResult::RemoteEnabled {
                 remote_listen_address,
-                ..
-            } => return (router, router_connection, remote_listen_address),
+                certificate_fingerprint,
+            } => {
+                return (
+                    router,
+                    router_connection,
+                    remote_listen_address,
+                    certificate_fingerprint,
+                )
+            }
             router_result => last_router_result = Some(router_result),
         }
     }
@@ -228,12 +238,14 @@ fn start_router_with_remote_access(
     );
 }
 
-/// Start `koshi attach --remote <relay_address> <session_id>` under
-/// `home_directory`, with `remote_secret` in `KOSHI_REMOTE_SECRET`. A thread
-/// reads the client's standard output to its end and drops it.
+/// Start `koshi attach --remote <relay_address> --certificate-fingerprint
+/// <certificate_fingerprint> <session_id>` under `home_directory`, with
+/// `remote_secret` in `KOSHI_REMOTE_SECRET`. A thread reads the client's
+/// standard output to its end and drops it.
 fn start_remote_client(
     home_directory: &Path,
     relay_address: SocketAddr,
+    certificate_fingerprint: &str,
     session_id: SessionId,
     remote_secret: &str,
 ) -> RunningClient {
@@ -241,6 +253,8 @@ fn start_remote_client(
         .arg("attach")
         .arg("--remote")
         .arg(relay_address.to_string())
+        .arg("--certificate-fingerprint")
+        .arg(certificate_fingerprint)
         .arg(session_id.to_string())
         .env("KOSHI_REMOTE_SECRET", remote_secret)
         .spawn()
@@ -259,7 +273,7 @@ fn start_remote_client(
 fn a_silent_link_ends_the_remote_viewer_and_its_session_removes_it() {
     let home_directory = build_short_test_directory();
     let runtime_directory = resolve_runtime_directory_under_home(home_directory.path());
-    let (_router, mut router_connection, listener_address) =
+    let (_router, mut router_connection, listener_address, certificate_fingerprint) =
         start_router_with_remote_access(home_directory.path(), &runtime_directory);
     let created_session = create_session(&mut router_connection);
     let _session_processes = RunningSessions {
@@ -284,6 +298,7 @@ fn a_silent_link_ends_the_remote_viewer_and_its_session_removes_it() {
     let mut remote_client = start_remote_client(
         home_directory.path(),
         relay_address,
+        &certificate_fingerprint,
         session_id,
         connection_token.expose_secret(),
     );
@@ -291,8 +306,9 @@ fn a_silent_link_ends_the_remote_viewer_and_its_session_removes_it() {
 
     silent_relay.drop_every_byte();
 
-    // The session reads no byte from the client for 1 second and removes it.
-    // The overview still answers: the session keeps running.
+    // The router reads no byte from the client for 1 second and ends its
+    // connection, and the session removes the client. The overview still
+    // answers: the session keeps running.
     wait_for_attached_client_count(&runtime_directory, session_id, 0, &mut remote_client);
     // With `remote-reconnect` off, the client that reads no byte for 1 second
     // counts the link as broken and ends.
@@ -309,5 +325,16 @@ fn a_silent_link_ends_the_remote_viewer_and_its_session_removes_it() {
              if session {session_id} is among them, reattach with \
              `koshi attach --remote {relay_address} {session_id}`\n"
         )
+    );
+
+    // The first connection saved the server under the address it dialled,
+    // holding the fingerprint it was given.
+    assert_eq!(
+        list_saved_server_records(home_directory.path()),
+        vec![(
+            None,
+            relay_address.to_string(),
+            Some(certificate_fingerprint)
+        )]
     );
 }

@@ -9,8 +9,8 @@
 //! the link.
 //!
 //! A link on this machine is a Unix socket or a Windows named pipe. A link from
-//! another machine is TLS, and the dialling side pins the certificate the server
-//! presented on the first connection.
+//! another machine is TLS 1.3, and the dialling side refuses a server whose
+//! certificate does not have the fingerprint the dial expects.
 //!
 //! The crate also holds the records these processes keep on disk: the endpoint
 //! file a session advertises its socket in, the remote access token store, the
@@ -47,8 +47,8 @@ pub mod previous_release;
 pub mod protocol;
 /// One-way conversion of remote access files written by version 0.4.0.
 pub mod remote_migration;
-/// The servers a dialling user has connected to: the address, the secret, the
-/// pinned certificate fingerprint, and the name the user chose for each.
+/// The servers a dialling user has saved: the address, the secret, the
+/// certificate fingerprint, and the name the user chose for each.
 pub mod remote_servers;
 /// The certificate this machine presents to remote clients, and the record
 /// that the operator switched remote access on.
@@ -68,7 +68,7 @@ pub mod router;
 /// handshake that opens the link, and the address it listens on.
 pub mod supervisor;
 /// The TLS stream a remote client and the machine serving it talk over, and
-/// the certificate pinning that recognises a server on the second connection.
+/// the check that the server presents the certificate a dial expects.
 pub mod tls;
 /// Framed messages over a local socket or named pipe, and the same frame shape
 /// on any other pair of byte streams.

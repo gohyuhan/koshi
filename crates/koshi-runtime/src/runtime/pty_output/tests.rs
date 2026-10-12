@@ -270,7 +270,7 @@ fn synchronized_body_keeps_the_committed_state_and_side_effects_hidden() {
     let (mut runtime, fake_pty_backend) = build_test_server();
     let pane_id = insert_test_terminal_engine(&mut runtime);
     spawn_test_pane(&fake_pty_backend, pane_id);
-    let event_deliveries = runtime.subscribe(ClientId::new());
+    let (event_deliveries, _) = runtime.subscribe(ClientId::new());
     let render_time = Instant::now();
     runtime.handle_pty_output(pane_id, b"old");
     assert!(runtime.render_scheduler.claim_due_render(render_time));
@@ -321,7 +321,7 @@ fn synchronized_deadline_uses_the_runtime_wakeup_and_common_delivery_path() {
     let (mut runtime, fake_pty_backend) = build_test_server();
     let pane_id = insert_test_terminal_engine(&mut runtime);
     spawn_test_pane(&fake_pty_backend, pane_id);
-    let event_deliveries = runtime.subscribe(ClientId::new());
+    let (event_deliveries, _) = runtime.subscribe(ClientId::new());
     let current_time = Instant::now();
     let engine = runtime
         .terminal_engine_by_pane_id
@@ -369,7 +369,7 @@ fn synchronized_deadline_uses_the_runtime_wakeup_and_common_delivery_path() {
 fn shell_markers_publish_command_events_in_order() {
     let (mut runtime, _fake_pty_backend) = build_test_server();
     let pane_id = insert_test_terminal_engine(&mut runtime);
-    let event_deliveries = runtime.subscribe(ClientId::new());
+    let (event_deliveries, _) = runtime.subscribe(ClientId::new());
 
     runtime.handle_pty_output(pane_id, b"\x1b]133;C\x07\x1b]133;D;137\x07");
 
@@ -389,7 +389,7 @@ fn shell_markers_publish_command_events_in_order() {
 fn duplicate_shell_starts_publish_one_command_pair() {
     let (mut runtime, _fake_pty_backend) = build_test_server();
     let pane_id = insert_test_terminal_engine(&mut runtime);
-    let event_deliveries = runtime.subscribe(ClientId::new());
+    let (event_deliveries, _) = runtime.subscribe(ClientId::new());
 
     runtime.handle_pty_output(pane_id, b"\x1b]133;C\x07\x1b]133;C\x07\x1b]133;D;0\x07");
 
@@ -409,7 +409,7 @@ fn duplicate_shell_starts_publish_one_command_pair() {
 fn an_unmatched_finish_and_plain_output_publish_no_command_events() {
     let (mut runtime, _fake_pty_backend) = build_test_server();
     let pane_id = insert_test_terminal_engine(&mut runtime);
-    let event_deliveries = runtime.subscribe(ClientId::new());
+    let (event_deliveries, _) = runtime.subscribe(ClientId::new());
 
     runtime.handle_pty_output(pane_id, b"\x1b]133;D;1\x07plain output");
 
@@ -421,7 +421,7 @@ fn command_lifecycle_state_is_independent_per_pane() {
     let (mut runtime, _fake_pty_backend) = build_test_server();
     let first_pane_id = insert_test_terminal_engine(&mut runtime);
     let second_pane_id = insert_test_terminal_engine(&mut runtime);
-    let event_deliveries = runtime.subscribe(ClientId::new());
+    let (event_deliveries, _) = runtime.subscribe(ClientId::new());
 
     runtime.handle_pty_output(first_pane_id, b"\x1b]133;C\x07");
     runtime.handle_pty_output(second_pane_id, b"\x1b]133;C\x07");

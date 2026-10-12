@@ -6,8 +6,9 @@
 //! Also [`WarningRateLimiter`], which writes a repeated warning once per window,
 //! [`RemoteConnectionEndReport`], which reports a bridged connection ended once, the two
 //! functions that read and write one frame, the frames an admitted connection
-//! sends, what [`bind_remote_listener`] refuses, and the check of the router's
-//! program file that each accepted connection runs.
+//! sends, what [`bind_remote_listener`] refuses, the refusal of a caller
+//! offering TLS 1.2 alone, and the check of the router's program file that
+//! each accepted connection runs.
 //!
 //! [`serve_remote_connection`] is served over real TLS on loopback in two places: the
 //! answers a caller reads before it is admitted, and one admitted client held
@@ -465,7 +466,7 @@ fn remote_client_frame_at_the_cap_is_read_and_one_byte_over_is_closed() {
     // cap closes the connection before the payload is read.
     let sent_remote_client_frame = RemoteClientFrame::Attach {
         session_selector: SessionSelector::SessionName("S-quiet-lake".to_string()),
-        bridge_timeout_ms: Some(50_000),
+        link_timeout_ms: Some(30_000),
     };
     let remote_client_frame_bytes = build_remote_client_frame_bytes(&sent_remote_client_frame);
     let payload_byte_count =
@@ -611,7 +612,7 @@ fn remote_server_frame_uses_a_big_endian_length_prefix() {
 }
 
 /// A `Vec`-backed writing half standing in for the TLS one: bytes are
-/// recorded, and a deadline is taken and ignored.
+/// recorded, and a deadline and an idle timeout are taken and ignored.
 struct RecordedWriter {
     written_frame_bytes: Vec<u8>,
 }
@@ -629,6 +630,8 @@ impl Write for RecordedWriter {
 
 impl Deadlined for RecordedWriter {
     fn set_deadline(&mut self, _write_deadline: Option<Instant>) {}
+
+    fn set_idle_timeout(&mut self, _idle_timeout: Option<Duration>) {}
 }
 
 /// A writing half that takes one byte per call, standing in for a socket that
@@ -759,7 +762,7 @@ fn one_admitted_connection_lists_and_then_attaches() {
     request_frame_bytes.extend(build_remote_client_frame_bytes(
         &RemoteClientFrame::Attach {
             session_selector: SessionSelector::SessionId(session_id),
-            bridge_timeout_ms: Some(50_000),
+            link_timeout_ms: Some(30_000),
         },
     ));
     let mut reader = Cursor::new(request_frame_bytes);
@@ -780,7 +783,7 @@ fn one_admitted_connection_lists_and_then_attaches() {
 
     assert_eq!(
         attached_session,
-        Some((session_endpoint_path, Some(50_000)))
+        Some((session_endpoint_path, Some(30_000)))
     );
     assert_eq!(
         parse_remote_server_frames(&writer.written_frame_bytes),
@@ -864,33 +867,49 @@ fn the_hello_of_koshi_0_4_0_on_an_admitted_connection_is_refused() {
     );
 }
 
-/// Run one admitted Attach naming `bridge_timeout_ms` for a fresh session id
+/// What [`process_admitted_remote_frames`] did with one admitted Attach.
+struct ServedAttach {
+    /// What the frame loop returned.
+    attached_session: Option<(PathBuf, Option<u32>)>,
+    /// Every frame the frame loop wrote.
+    written_server_frames: Vec<RemoteServerFrame>,
+    /// How many times the frame loop asked the dispatcher where the session
+    /// listens.
+    locate_ask_count: usize,
+}
+
+/// Run one admitted Attach naming `link_timeout_ms` for a fresh session id
 /// against a stand-in dispatcher that answers its Locate with
-/// `locate_answer`. Hands back what the frame loop returned and every frame it
-/// wrote.
+/// `locate_answer`, and hand back what the frame loop did.
 fn serve_attach_against_locate_answer(
     locate_answer: Result<PathBuf, LocateRefusal>,
-    bridge_timeout_ms: Option<u32>,
-) -> (Option<(PathBuf, Option<u32>)>, Vec<RemoteServerFrame>) {
+    link_timeout_ms: Option<u32>,
+) -> ServedAttach {
     let session_id = SessionId::new();
     let (router_events_sender, router_events_receiver) = mpsc::channel();
     let dispatcher_thread = std::thread::spawn(move || {
-        let Ok(RouterEvent::Admission(AdmissionAsk::Locate {
-            session_selector,
-            response_sender,
-            ..
-        })) = router_events_receiver.recv()
-        else {
-            panic!("an attach asks the dispatcher where the session listens");
-        };
-        assert_eq!(session_selector, SessionSelector::SessionId(session_id));
-        let _ = response_sender.send(locate_answer);
+        let mut locate_answer = Some(locate_answer);
+        let mut locate_ask_count = 0;
+        for router_event in router_events_receiver {
+            let RouterEvent::Admission(AdmissionAsk::Locate {
+                session_selector,
+                response_sender,
+                ..
+            }) = router_event
+            else {
+                panic!("an attach asks the dispatcher only where the session listens");
+            };
+            assert_eq!(session_selector, SessionSelector::SessionId(session_id));
+            locate_ask_count += 1;
+            let _ = response_sender.send(locate_answer.take().expect("one Locate per attach"));
+        }
+        locate_ask_count
     });
 
     let mut reader = Cursor::new(build_remote_client_frame_bytes(
         &RemoteClientFrame::Attach {
             session_selector: SessionSelector::SessionId(session_id),
-            bridge_timeout_ms,
+            link_timeout_ms,
         },
     ));
     let mut writer = RecordedWriter {
@@ -907,68 +926,98 @@ fn serve_attach_against_locate_answer(
         &admitted_connection,
         &router_events_sender,
     );
-    dispatcher_thread
+    drop(router_events_sender);
+    let locate_ask_count = dispatcher_thread
         .join()
         .expect("the stand-in dispatcher ended");
-    (
+    ServedAttach {
         attached_session,
-        parse_remote_server_frames(&writer.written_frame_bytes),
-    )
+        written_server_frames: parse_remote_server_frames(&writer.written_frame_bytes),
+        locate_ask_count,
+    }
 }
 
 #[test]
 fn an_attach_the_dispatcher_refuses_ends_the_connection_unattached() {
     // A session that does not exist and a session the scope does not cover
     // both reach this loop as the same `LocateRefusal::NotReached`.
-    let (attached_session, written_server_frames) =
-        serve_attach_against_locate_answer(Err(LocateRefusal::NotReached), Some(50_000));
+    let served_attach =
+        serve_attach_against_locate_answer(Err(LocateRefusal::NotReached), Some(30_000));
 
-    assert_eq!(attached_session, None);
+    assert_eq!(served_attach.attached_session, None);
     assert_eq!(
-        written_server_frames,
+        served_attach.written_server_frames,
         vec![RemoteServerFrame::Refused {
             message: REMOTE_REFUSED.to_string(),
         }],
     );
+    assert_eq!(served_attach.locate_ask_count, 1);
 }
 
 #[test]
 fn an_attach_arriving_while_the_router_restarts_is_refused_with_the_restarting_sentence() {
-    let (attached_session, written_server_frames) =
-        serve_attach_against_locate_answer(Err(LocateRefusal::RouterRestarting), Some(50_000));
+    let served_attach =
+        serve_attach_against_locate_answer(Err(LocateRefusal::RouterRestarting), Some(30_000));
 
-    assert_eq!(attached_session, None);
+    assert_eq!(served_attach.attached_session, None);
     assert_eq!(
-        written_server_frames,
+        served_attach.written_server_frames,
         vec![RemoteServerFrame::Refused {
             message: ROUTER_RESTARTING_MESSAGE.to_string(),
         }],
     );
+    assert_eq!(served_attach.locate_ask_count, 1);
 }
 
 #[test]
-fn an_attach_the_dispatcher_locates_hands_back_the_session_endpoint_file_and_its_bridge_timeout() {
+fn an_attach_the_dispatcher_locates_hands_back_the_session_endpoint_file_and_its_link_timeout() {
     let session_endpoint_path = PathBuf::from("/home/user/.koshi/session-5000.json");
 
-    let (attached_session, written_server_frames) =
-        serve_attach_against_locate_answer(Ok(session_endpoint_path.clone()), Some(50_000));
+    let served_attach = serve_attach_against_locate_answer(
+        Ok(session_endpoint_path.clone()),
+        Some(MIN_LINK_TIMEOUT_MS),
+    );
 
     assert_eq!(
-        attached_session,
-        Some((session_endpoint_path, Some(50_000)))
+        served_attach.attached_session,
+        Some((session_endpoint_path, Some(MIN_LINK_TIMEOUT_MS)))
     );
-    assert_eq!(written_server_frames, Vec::new());
+    assert_eq!(served_attach.written_server_frames, Vec::new());
+    assert_eq!(served_attach.locate_ask_count, 1);
 }
 
 #[test]
-fn an_attach_naming_no_bridge_timeout_hands_back_none_for_it() {
+fn an_attach_naming_a_link_timeout_below_the_minimum_is_refused_before_the_dispatcher_is_asked() {
+    let served_attach = serve_attach_against_locate_answer(
+        Ok(PathBuf::from("/home/user/.koshi/session-5000.json")),
+        Some(MIN_LINK_TIMEOUT_MS - 1),
+    );
+
+    assert_eq!(served_attach.attached_session, None);
+    assert_eq!(
+        served_attach.written_server_frames,
+        vec![RemoteServerFrame::Refused {
+            message: REMOTE_REFUSED.to_string(),
+        }],
+    );
+    assert_eq!(
+        served_attach.locate_ask_count, 0,
+        "the dispatcher is never asked"
+    );
+}
+
+#[test]
+fn an_attach_naming_no_link_timeout_hands_back_none_for_it() {
     let session_endpoint_path = PathBuf::from("/home/user/.koshi/session-5000.json");
 
-    let (attached_session, written_server_frames) =
-        serve_attach_against_locate_answer(Ok(session_endpoint_path.clone()), None);
+    let served_attach = serve_attach_against_locate_answer(Ok(session_endpoint_path.clone()), None);
 
-    assert_eq!(attached_session, Some((session_endpoint_path, None)));
-    assert_eq!(written_server_frames, Vec::new());
+    assert_eq!(
+        served_attach.attached_session,
+        Some((session_endpoint_path, None))
+    );
+    assert_eq!(served_attach.written_server_frames, Vec::new());
+    assert_eq!(served_attach.locate_ask_count, 1);
 }
 
 #[test]
@@ -1094,6 +1143,58 @@ fn a_certificate_no_tls_configuration_accepts_takes_no_port() {
     assert_eq!(bind_error.kind(), io::ErrorKind::Other);
 }
 
+/// The bytes of one TLS record carrying a ClientHello that offers TLS 1.2
+/// alone: its `supported_versions` extension lists `0x0303` only, beside one
+/// cipher suite, null compression and one signature algorithm.
+fn build_tls_1_2_only_client_hello_record() -> Vec<u8> {
+    let mut client_hello_bytes = Vec::new();
+    client_hello_bytes.extend_from_slice(&[0x03, 0x03]); // legacy_version: TLS 1.2
+    client_hello_bytes.extend_from_slice(&[0u8; 32]); // random
+    client_hello_bytes.push(0); // legacy_session_id: empty
+    client_hello_bytes.extend_from_slice(&[0x00, 0x02, 0xc0, 0x2b]); // one cipher suite
+    client_hello_bytes.extend_from_slice(&[0x01, 0x00]); // compression: null only
+    let mut extension_bytes = Vec::new();
+    // signature_algorithms: ecdsa_secp256r1_sha256 alone
+    extension_bytes.extend_from_slice(&[0x00, 0x0d, 0x00, 0x04, 0x00, 0x02, 0x04, 0x03]);
+    // supported_versions: TLS 1.2 alone
+    extension_bytes.extend_from_slice(&[0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x03]);
+    let extension_byte_count = u16::try_from(extension_bytes.len()).expect("a short list");
+    client_hello_bytes.extend_from_slice(&extension_byte_count.to_be_bytes());
+    client_hello_bytes.extend_from_slice(&extension_bytes);
+
+    let client_hello_byte_count = u32::try_from(client_hello_bytes.len()).expect("a short hello");
+    let mut handshake_bytes = vec![0x01]; // handshake type: client_hello
+    handshake_bytes.extend_from_slice(&client_hello_byte_count.to_be_bytes()[1..]);
+    handshake_bytes.extend_from_slice(&client_hello_bytes);
+
+    let handshake_byte_count = u16::try_from(handshake_bytes.len()).expect("a short record");
+    let mut record_bytes = vec![0x16, 0x03, 0x01]; // record type: handshake
+    record_bytes.extend_from_slice(&handshake_byte_count.to_be_bytes());
+    record_bytes.extend_from_slice(&handshake_bytes);
+    record_bytes
+}
+
+#[test]
+fn a_caller_offering_tls_1_2_alone_is_refused_by_the_server_configuration() {
+    let tls_config = Arc::new(
+        build_remote_server_tls_config(&build_test_certificate()).expect("the TLS config builds"),
+    );
+    let mut server_connection =
+        ServerConnection::new(tls_config).expect("a server connection starts");
+
+    server_connection
+        .read_tls(&mut Cursor::new(build_tls_1_2_only_client_hello_record()))
+        .expect("the record is read");
+    let handshake_error = server_connection
+        .process_new_packets()
+        .expect_err("a TLS 1.2 caller is refused");
+
+    assert_eq!(
+        handshake_error,
+        rustls::Error::PeerIncompatible(rustls::PeerIncompatible::Tls12NotOfferedOrEnabled)
+    );
+}
+
 #[test]
 fn a_remote_connection_makes_the_restart_due_when_the_program_file_holds_another_version() {
     // The accept loop serves on a loopback port and is left running on its
@@ -1161,11 +1262,14 @@ mod admission_answers {
     /// true, and a refusal when it is false. Every listing is empty and every
     /// locate is refused.
     ///
-    /// Returns the address the client dials.
-    fn start_test_remote_listener(should_admit_connection: bool) -> String {
+    /// Returns the address the client dials and the fingerprint of the
+    /// certificate the listener presents.
+    fn start_test_remote_listener(should_admit_connection: bool) -> TestRemoteListener {
+        let certificate_file = build_test_certificate();
+        let certificate_fingerprint =
+            tls::compute_certificate_fingerprint(&certificate_file.cert_der);
         let tls_config = Arc::new(
-            build_remote_server_tls_config(&build_test_certificate())
-                .expect("the TLS config builds"),
+            build_remote_server_tls_config(&certificate_file).expect("the TLS config builds"),
         );
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind the test listener");
         let remote_listen_address = listener
@@ -1215,24 +1319,34 @@ mod admission_answers {
             );
         });
 
-        remote_listen_address
+        TestRemoteListener {
+            remote_listen_address,
+            certificate_fingerprint,
+        }
     }
 
-    /// Dial the listener at `remote_listen_address`, send `opening_frame`, and
-    /// hand back the one frame it answers with. No certificate is pinned.
+    /// The listener one test serves, and what a client needs to dial it.
+    struct TestRemoteListener {
+        /// The address the client dials.
+        remote_listen_address: String,
+        /// The fingerprint of the certificate the listener presents.
+        certificate_fingerprint: String,
+    }
+
+    /// Dial `test_remote_listener`, expecting the certificate it presents,
+    /// send `opening_frame`, and hand back the one frame it answers with.
     fn request_test_remote_listener(
-        remote_listen_address: &str,
+        test_remote_listener: &TestRemoteListener,
         opening_frame: &RemoteClientFrame,
     ) -> RemoteServerFrame {
-        let (_frame_reader, _frame_writer, _certificate_fingerprint, response_frame) =
-            remote_wire::open_remote_connection(
-                remote_listen_address,
-                None,
-                opening_frame,
-                REMOTE_DIAL_TIMEOUT_DURATION,
-                None,
-            )
-            .expect("the listener answers the opening frame");
+        let (_frame_reader, _frame_writer, response_frame) = remote_wire::open_remote_connection(
+            &test_remote_listener.remote_listen_address,
+            &test_remote_listener.certificate_fingerprint,
+            opening_frame,
+            REMOTE_DIAL_TIMEOUT_DURATION,
+            None,
+        )
+        .expect("the listener answers the opening frame");
         response_frame
     }
 
@@ -1257,10 +1371,10 @@ mod admission_answers {
     fn a_caller_speaking_no_remote_protocol_version_this_build_speaks_is_told_both_ranges() {
         // This dispatcher refuses every secret, and the answer still names the
         // ranges: the version is checked before the secret.
-        let remote_listen_address = start_test_remote_listener(false);
+        let test_remote_listener = start_test_remote_listener(false);
 
         let response_frame = request_test_remote_listener(
-            &remote_listen_address,
+            &test_remote_listener,
             &build_remote_hello(
                 REMOTE_PROTOCOL_VERSION + 1,
                 REMOTE_PROTOCOL_VERSION + 2,
@@ -1283,10 +1397,13 @@ mod admission_answers {
     fn a_caller_opening_with_the_hello_of_koshi_0_4_0_is_told_both_ranges() {
         // This dispatcher admits every secret, and the answer is still the
         // version refusal: no secret is read from that Hello.
-        let remote_listen_address = start_test_remote_listener(true);
-        let (mut tls_reader, mut tls_writer, _certificate_fingerprint) =
-            tls::connect_tls_stream(&remote_listen_address, None, REMOTE_DIAL_TIMEOUT_DURATION)
-                .expect("the listener finishes the TLS handshake");
+        let test_remote_listener = start_test_remote_listener(true);
+        let (mut tls_reader, mut tls_writer) = tls::connect_tls_stream(
+            &test_remote_listener.remote_listen_address,
+            &test_remote_listener.certificate_fingerprint,
+            REMOTE_DIAL_TIMEOUT_DURATION,
+        )
+        .expect("the listener finishes the TLS handshake");
 
         tls_writer
             .write_all(&build_remote_client_frame_bytes(
@@ -1317,10 +1434,10 @@ mod admission_answers {
 
     #[test]
     fn a_secret_the_dispatcher_refuses_reads_as_every_other_refusal_does() {
-        let remote_listen_address = start_test_remote_listener(false);
+        let test_remote_listener = start_test_remote_listener(false);
 
         let response_frame = request_test_remote_listener(
-            &remote_listen_address,
+            &test_remote_listener,
             &build_remote_hello(
                 MIN_REMOTE_PROTOCOL_VERSION,
                 REMOTE_PROTOCOL_VERSION,
@@ -1340,10 +1457,10 @@ mod admission_answers {
     fn an_opening_frame_that_is_not_a_hello_is_refused_with_no_secret_presented() {
         // This dispatcher admits every secret; a List arriving first is still
         // refused.
-        let remote_listen_address = start_test_remote_listener(true);
+        let test_remote_listener = start_test_remote_listener(true);
 
         let response_frame =
-            request_test_remote_listener(&remote_listen_address, &RemoteClientFrame::List);
+            request_test_remote_listener(&test_remote_listener, &RemoteClientFrame::List);
 
         assert_eq!(
             response_frame,
@@ -1355,10 +1472,10 @@ mod admission_answers {
 
     #[test]
     fn an_admitted_caller_is_welcomed_with_the_remote_protocol_version_both_ends_speak() {
-        let remote_listen_address = start_test_remote_listener(true);
+        let test_remote_listener = start_test_remote_listener(true);
 
         let response_frame = request_test_remote_listener(
-            &remote_listen_address,
+            &test_remote_listener,
             &build_remote_hello(
                 MIN_REMOTE_PROTOCOL_VERSION,
                 REMOTE_PROTOCOL_VERSION,
@@ -1417,6 +1534,7 @@ mod bridge_round_trip {
     use koshi_runtime::server::Server;
     use koshi_test_support::fake_pty::FakePtyBackend;
     use koshi_test_support::fixtures::build_test_runtime_directory;
+    use koshi_test_support::throttle::pump_throttled;
     use tempfile::TempDir;
 
     /// How long a test waits for the session server to advertise its socket,
@@ -1442,13 +1560,13 @@ mod bridge_round_trip {
     /// How long the pane's writes stay unchanged before they are read: 300 ms.
     const PANE_WRITE_SETTLE_DURATION: Duration = Duration::from_millis(300);
 
-    /// The bridge timeout a test client names when the bridge must outlive the
-    /// test: 50 s, what a viewer with the default link timeout names.
-    const VIEWER_BRIDGE_TIMEOUT_DURATION: Duration = Duration::from_secs(50);
+    /// The link timeout a test client names when the bridge must outlive the
+    /// test: 30 s, the default link timeout of a viewer.
+    const VIEWER_LINK_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 
-    /// The bridge timeout a test client names when the test waits for the
-    /// bridge to end: 500 ms.
-    const SHORT_BRIDGE_TIMEOUT_DURATION: Duration = Duration::from_millis(500);
+    /// The link timeout a test client names when the test waits for the
+    /// bridge to end: 1 s, the least link timeout the listener takes.
+    const SHORT_LINK_TIMEOUT_DURATION: Duration = Duration::from_secs(1);
 
     /// How long a test waits for a bridge to end once its timeout can pass:
     /// 10 s.
@@ -1456,6 +1574,22 @@ mod bridge_round_trip {
 
     /// The pause between two pings a test client sends: 100 ms.
     const TEST_PING_PAUSE_DURATION: Duration = Duration::from_millis(100);
+
+    /// The most bytes the throttled relay carries from the client per
+    /// [`THROTTLED_TIME_SLICE_DURATION`]: 1 KiB, so a 16 KiB TLS record takes
+    /// 1.6 s to cross.
+    const THROTTLED_SLICE_BYTE_COUNT: usize = 1024;
+
+    /// One time slice of the throttled relay: 100 ms.
+    const THROTTLED_TIME_SLICE_DURATION: Duration = Duration::from_millis(100);
+
+    /// The most bytes the throttled relay carries back to the client per read,
+    /// with no pause between reads: 64 KiB.
+    const UNTHROTTLED_SLICE_BYTE_COUNT: usize = 64 * 1024;
+
+    /// The size of the paste a test client sends over the throttled relay:
+    /// 32 KiB, two whole TLS records and part of a third.
+    const SLOW_PASTE_BYTE_COUNT: usize = 32 * 1024;
 
     /// How much sooner than its socket timeout a test accepts that a timed
     /// socket call ended: 100 ms. A timed socket call on Windows can end
@@ -1528,21 +1662,22 @@ mod bridge_round_trip {
             EndpointFile::resolve_endpoint_file_path(self.runtime_directory.path(), self.session_id)
         }
 
-        /// The bytes the session's only pane has been written, once they stop
-        /// changing for `PANE_WRITE_SETTLE_DURATION`.
+        /// The bytes the session's only pane has been written, once the pane
+        /// has had at least one write and the writes stop changing for
+        /// `PANE_WRITE_SETTLE_DURATION`.
         ///
         /// # Panics
         ///
-        /// Panics when the session has not spawned its pane within
-        /// [`SESSION_SERVER_START_TIMEOUT_DURATION`].
+        /// Panics when the session has not spawned its pane, or the pane has
+        /// had no write, within [`SESSION_SERVER_START_TIMEOUT_DURATION`].
         fn wait_for_settled_pane_write_bytes(&self) -> Vec<Vec<u8>> {
-            let spawn_deadline = Instant::now() + SESSION_SERVER_START_TIMEOUT_DURATION;
+            let wait_deadline = Instant::now() + SESSION_SERVER_START_TIMEOUT_DURATION;
             let pane_id = loop {
                 if let Some(pane_id) = self.fake_pty_backend.list_spawned_pane_ids().first() {
                     break *pane_id;
                 }
                 assert!(
-                    Instant::now() < spawn_deadline,
+                    Instant::now() < wait_deadline,
                     "the session never spawned a pane"
                 );
                 std::thread::sleep(SESSION_SERVER_POLL_INTERVAL_DURATION);
@@ -1554,9 +1689,10 @@ mod bridge_round_trip {
                     .fake_pty_backend
                     .list_pane_write_bytes(pane_id)
                     .expect("the pane is spawned");
-                if write_bytes == settled_write_bytes {
+                if !write_bytes.is_empty() && write_bytes == settled_write_bytes {
                     return settled_write_bytes;
                 }
+                assert!(Instant::now() < wait_deadline, "the pane had no write");
                 settled_write_bytes = write_bytes;
             }
         }
@@ -1695,6 +1831,8 @@ mod bridge_round_trip {
     struct TestRemoteListener {
         /// The address the client dials.
         remote_listen_address: String,
+        /// The fingerprint of the certificate the listener presents.
+        certificate_fingerprint: String,
         /// The id of each connection the listener reports ended.
         ended_connection_id_receiver: mpsc::Receiver<u64>,
     }
@@ -1704,9 +1842,11 @@ mod bridge_round_trip {
     /// is admitted host-wide as connection `7`, and every locate answers
     /// `session_endpoint_path`.
     fn start_test_remote_listener(session_endpoint_path: PathBuf) -> TestRemoteListener {
+        let certificate_file = build_test_certificate();
+        let certificate_fingerprint =
+            tls::compute_certificate_fingerprint(&certificate_file.cert_der);
         let tls_config = Arc::new(
-            build_remote_server_tls_config(&build_test_certificate())
-                .expect("the TLS config builds"),
+            build_remote_server_tls_config(&certificate_file).expect("the TLS config builds"),
         );
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind the test listener");
@@ -1764,21 +1904,78 @@ mod bridge_round_trip {
 
         TestRemoteListener {
             remote_listen_address,
+            certificate_fingerprint,
             ended_connection_id_receiver,
         }
     }
 
-    /// Dial the listener at `remote_listen_address` with the test secret, the
-    /// way `koshi attach --remote` does, and hand back the admitted link.
-    fn connect_test_remote_client(remote_listen_address: &str) -> remote_client::RemoteLink {
+    /// Dial `test_remote_listener` with the test secret, expecting the
+    /// certificate it presents, the way `koshi attach --remote` does, and hand
+    /// back the admitted link.
+    fn connect_test_remote_client(
+        test_remote_listener: &TestRemoteListener,
+    ) -> remote_client::RemoteLink {
+        connect_test_remote_client_at(
+            &test_remote_listener.remote_listen_address,
+            test_remote_listener,
+        )
+    }
+
+    /// Dial `server_address`, a relay in front of `test_remote_listener` or the
+    /// listener itself, as [`connect_test_remote_client`] does.
+    fn connect_test_remote_client_at(
+        server_address: &str,
+        test_remote_listener: &TestRemoteListener,
+    ) -> remote_client::RemoteLink {
         remote_client::connect_remote_server(
-            remote_listen_address,
+            server_address,
             &ConnectionToken::from_secret("testSecret"),
-            None,
+            &test_remote_listener.certificate_fingerprint,
             Duration::from_secs(5),
             None,
         )
         .expect("the listener admits the client")
+    }
+
+    /// Relay one connection from a loopback port to `listener_address`, and
+    /// return the address the client dials. The bytes from the client go on
+    /// at most [`THROTTLED_SLICE_BYTE_COUNT`] per
+    /// [`THROTTLED_TIME_SLICE_DURATION`]; the bytes back go on as they come.
+    fn start_throttled_relay(listener_address: &str) -> String {
+        let relay_listener =
+            TcpListener::bind("127.0.0.1:0").expect("a loopback port for the relay");
+        let relay_address = relay_listener
+            .local_addr()
+            .expect("read the relay's address")
+            .to_string();
+        let listener_address = listener_address.to_string();
+        std::thread::spawn(move || {
+            let (client_stream, _) = relay_listener
+                .accept()
+                .expect("the relay accepts the client");
+            let listener_stream =
+                TcpStream::connect(&listener_address).expect("the relay reaches the listener");
+            let relay_deadline = Instant::now() + SESSION_SERVER_START_TIMEOUT_DURATION;
+            pump_throttled(
+                client_stream
+                    .try_clone()
+                    .expect("the client stream is shared"),
+                listener_stream
+                    .try_clone()
+                    .expect("the listener stream is shared"),
+                THROTTLED_SLICE_BYTE_COUNT,
+                THROTTLED_TIME_SLICE_DURATION,
+                relay_deadline,
+            );
+            pump_throttled(
+                listener_stream,
+                client_stream,
+                UNTHROTTLED_SLICE_BYTE_COUNT,
+                Duration::ZERO,
+                relay_deadline,
+            );
+        });
+        relay_address
     }
 
     /// Submit `command` to the session over its own control connection, the
@@ -1838,11 +2035,11 @@ mod bridge_round_trip {
         let test_remote_listener =
             start_test_remote_listener(running_session.get_session_endpoint_path());
 
-        let remote_link = connect_test_remote_client(&test_remote_listener.remote_listen_address);
+        let remote_link = connect_test_remote_client(&test_remote_listener);
         let (mut reader, mut writer) = remote_client::attach_remote_session(
             remote_link,
             SessionSelector::SessionId(running_session.session_id),
-            VIEWER_BRIDGE_TIMEOUT_DURATION,
+            VIEWER_LINK_TIMEOUT_DURATION,
         )
         .expect("the attach request is written");
 
@@ -1928,11 +2125,11 @@ mod bridge_round_trip {
 
         // Dial through the real TLS listener and attach, the way
         // `koshi attach --remote` does.
-        let remote_link = connect_test_remote_client(&test_remote_listener.remote_listen_address);
+        let remote_link = connect_test_remote_client(&test_remote_listener);
         let (mut reader, mut writer) = remote_client::attach_remote_session(
             remote_link,
             SessionSelector::SessionId(running_session.session_id),
-            VIEWER_BRIDGE_TIMEOUT_DURATION,
+            VIEWER_LINK_TIMEOUT_DURATION,
         )
         .expect("the attach request is written");
 
@@ -2037,8 +2234,7 @@ mod bridge_round_trip {
             start_test_remote_listener(PathBuf::from("/home/user/no-session.json"));
 
         let dial_started_at = Instant::now();
-        let mut remote_link =
-            connect_test_remote_client(&test_remote_listener.remote_listen_address);
+        let mut remote_link = connect_test_remote_client(&test_remote_listener);
 
         assert_eq!(
             test_remote_listener
@@ -2061,13 +2257,13 @@ mod bridge_round_trip {
     }
 
     #[test]
-    fn an_attach_naming_the_largest_bridge_timeout_is_bridged() {
+    fn an_attach_naming_the_largest_link_timeout_is_bridged() {
         // An Attach naming 4294967295 ms, the largest a viewer names: the
         // session's Hello answer arrives through the bridge.
         let running_session = RunningSession::start_running_session();
         let test_remote_listener =
             start_test_remote_listener(running_session.get_session_endpoint_path());
-        let remote_link = connect_test_remote_client(&test_remote_listener.remote_listen_address);
+        let remote_link = connect_test_remote_client(&test_remote_listener);
 
         let (mut reader, _writer) = remote_client::attach_remote_session(
             remote_link,
@@ -2085,24 +2281,27 @@ mod bridge_round_trip {
         }
     }
 
-    #[test]
-    fn a_bridge_whose_attach_names_no_timeout_answers_after_the_admitted_frame_timeout() {
-        // An Attach with no `bridge_timeout_ms`, then no byte from the client
-        // for `SILENCE_PAST_TIMEOUT_DURATION` past
-        // `ADMITTED_FRAME_TIMEOUT_DURATION`: a Discovery sent after the
-        // silence is answered through the bridge.
+    /// Attach to a running session through a listener with an Attach naming
+    /// `link_timeout_ms`, read the session's Hello answer, send no byte for
+    /// `SILENCE_PAST_TIMEOUT_DURATION` past `ADMITTED_FRAME_TIMEOUT_DURATION`,
+    /// then send a Discovery.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless the session answers that Discovery, through the bridge,
+    /// with its own overview.
+    fn assert_discovery_after_admitted_frame_silence_is_answered(link_timeout_ms: Option<u32>) {
         let running_session = RunningSession::start_running_session();
         let test_remote_listener =
             start_test_remote_listener(running_session.get_session_endpoint_path());
         let remote_client::RemoteLink {
             mut frame_reader,
             mut frame_writer,
-            ..
-        } = connect_test_remote_client(&test_remote_listener.remote_listen_address);
+        } = connect_test_remote_client(&test_remote_listener);
         frame_writer
             .send(&RemoteClientFrame::Attach {
                 session_selector: SessionSelector::SessionId(running_session.session_id),
-                bridge_timeout_ms: None,
+                link_timeout_ms,
             })
             .expect("the attach request is written");
         let _hello_response: IpcResponse =
@@ -2133,22 +2332,77 @@ mod bridge_round_trip {
     }
 
     #[test]
-    fn an_attach_naming_a_zero_bridge_timeout_is_refused() {
-        // The session is up and reachable: the zero timeout is the only reason
-        // left for the refusal.
+    fn a_bridge_whose_attach_names_no_timeout_answers_after_the_admitted_frame_timeout() {
+        assert_discovery_after_admitted_frame_silence_is_answered(None);
+    }
+
+    #[test]
+    fn a_first_request_inside_a_link_timeout_longer_than_the_admitted_frame_timeout_is_answered() {
+        // 30000 ms, longer than the 20 s admitted-frame timeout.
+        assert_discovery_after_admitted_frame_silence_is_answered(Some(30_000));
+    }
+
+    #[test]
+    fn a_first_request_sent_past_the_link_timeout_after_the_hello_answer_reaches_the_session() {
+        // The client reads the session's Hello answer, then sends its session
+        // Attach `SILENCE_PAST_TIMEOUT_DURATION` past its 1 s link timeout, as a
+        // client whose round trip to the server takes that long does. The
+        // session's answer to that Attach arrives through the bridge.
+        let running_session = RunningSession::start_running_session();
+        let test_remote_listener =
+            start_test_remote_listener(running_session.get_session_endpoint_path());
+        let remote_link = connect_test_remote_client(&test_remote_listener);
+        let (mut reader, mut writer) = remote_client::attach_remote_session(
+            remote_link,
+            SessionSelector::SessionId(running_session.session_id),
+            SHORT_LINK_TIMEOUT_DURATION,
+        )
+        .expect("the attach request is written");
+        let _hello_response: IpcResponse = reader.recv().expect("the session answers the Hello");
+
+        std::thread::sleep(SHORT_LINK_TIMEOUT_DURATION + SILENCE_PAST_TIMEOUT_DURATION);
+        writer
+            .send(&IpcRequest {
+                request_id: 2,
+                request_kind: IpcRequestKind::Attach {
+                    viewport_size: TEST_VIEWPORT_SIZE,
+                    resume_client_id: None,
+                    resume_token: None,
+                    pane_area: None,
+                    graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
+                    cell_size: None,
+                    link_timeout_ms: Some(MIN_LINK_TIMEOUT_MS),
+                },
+            })
+            .expect("the attach is written");
+        reader.set_deadline(Some(Instant::now() + BRIDGE_END_TIMEOUT_DURATION));
+
+        let attach_response: IpcResponse = reader.recv().expect("the session answers the attach");
+        assert_eq!(attach_response.request_id, Some(2));
+        match attach_response.answer_result {
+            IpcResult::Attached { session_id, .. } => {
+                assert_eq!(session_id, running_session.session_id);
+            }
+            unexpected_response => panic!("the Attach was answered with {unexpected_response:?}"),
+        }
+    }
+
+    #[test]
+    fn an_attach_naming_a_link_timeout_below_the_minimum_is_refused() {
+        // The session is up and reachable: the link timeout of 999 ms is the
+        // only reason left for the refusal.
         let running_session = RunningSession::start_running_session();
         let test_remote_listener =
             start_test_remote_listener(running_session.get_session_endpoint_path());
         let remote_client::RemoteLink {
             mut frame_reader,
             mut frame_writer,
-            ..
-        } = connect_test_remote_client(&test_remote_listener.remote_listen_address);
+        } = connect_test_remote_client(&test_remote_listener);
 
         frame_writer
             .send(&RemoteClientFrame::Attach {
                 session_selector: SessionSelector::SessionId(running_session.session_id),
-                bridge_timeout_ms: Some(0),
+                link_timeout_ms: Some(MIN_LINK_TIMEOUT_MS - 1),
             })
             .expect("the attach request is written");
 
@@ -2171,26 +2425,35 @@ mod bridge_round_trip {
     }
 
     #[test]
-    fn a_bridged_client_that_sends_nothing_for_its_bridge_timeout_is_cut_and_reported_ended() {
-        // The client sends nothing after its Attach, and the session sends
-        // nothing after its Hello answer. The connection is reported ended no
-        // sooner than the bridge timeout, less `MAX_EARLY_TIMEOUT_DURATION`,
-        // after the Attach was sent, and the client's link reads the end of
-        // the stream.
+    fn a_bridged_client_that_sends_nothing_for_its_link_timeout_is_cut_and_reported_ended() {
+        // The client sends one Discovery after the session's Hello answer, then
+        // nothing, and the session sends nothing after its Discovery answer.
+        // The connection is reported ended no sooner than the link timeout,
+        // less `MAX_EARLY_TIMEOUT_DURATION`, after the Discovery was sent, and
+        // the client's link reads the end of the stream.
         let running_session = RunningSession::start_running_session();
         let test_remote_listener =
             start_test_remote_listener(running_session.get_session_endpoint_path());
-        let remote_link = connect_test_remote_client(&test_remote_listener.remote_listen_address);
-
-        let attach_sent_at = Instant::now();
-        let (mut reader, _writer) = remote_client::attach_remote_session(
+        let remote_link = connect_test_remote_client(&test_remote_listener);
+        let (mut reader, mut writer) = remote_client::attach_remote_session(
             remote_link,
             SessionSelector::SessionId(running_session.session_id),
-            SHORT_BRIDGE_TIMEOUT_DURATION,
+            SHORT_LINK_TIMEOUT_DURATION,
         )
         .expect("the attach request is written");
         let _hello_response: IpcResponse = reader.recv().expect("the session answers the Hello");
 
+        let discovery_sent_at = Instant::now();
+        writer
+            .send(&IpcRequest {
+                request_id: 2,
+                request_kind: IpcRequestKind::Discovery,
+            })
+            .expect("the Discovery request is written");
+        let discovery_response: IpcResponse =
+            reader.recv().expect("the session answers the Discovery");
+
+        assert_eq!(discovery_response.request_id, Some(2));
         assert_eq!(
             test_remote_listener
                 .ended_connection_id_receiver
@@ -2198,10 +2461,10 @@ mod bridge_round_trip {
                 .expect("the silent bridge is reported ended"),
             7
         );
-        let bridge_lifetime = attach_sent_at.elapsed();
+        let bridge_lifetime = discovery_sent_at.elapsed();
         assert!(
-            bridge_lifetime >= SHORT_BRIDGE_TIMEOUT_DURATION - MAX_EARLY_TIMEOUT_DURATION,
-            "the bridge ended {bridge_lifetime:?} after the attach, before its timeout"
+            bridge_lifetime >= SHORT_LINK_TIMEOUT_DURATION - MAX_EARLY_TIMEOUT_DURATION,
+            "the bridge ended {bridge_lifetime:?} after the Discovery, before its timeout"
         );
         match reader.recv::<IpcResponse>() {
             Err(IpcError::Disconnected) => {}
@@ -2212,18 +2475,18 @@ mod bridge_round_trip {
     }
 
     #[test]
-    fn a_bridged_client_that_takes_no_byte_for_its_bridge_timeout_is_cut_while_it_keeps_sending() {
+    fn a_bridged_client_that_takes_no_byte_for_its_link_timeout_is_cut_while_it_keeps_sending() {
         // The session floods the bridge, and the client reads nothing while it
         // sends a ping every `TEST_PING_PAUSE_DURATION`. The connection is
         // reported ended, and the client's next ping fails.
         let flooding_session = FloodingSession::start_flooding_session();
         let test_remote_listener =
             start_test_remote_listener(flooding_session.get_session_endpoint_path());
-        let remote_link = connect_test_remote_client(&test_remote_listener.remote_listen_address);
+        let remote_link = connect_test_remote_client(&test_remote_listener);
         let (_reader, mut writer) = remote_client::attach_remote_session(
             remote_link,
             SessionSelector::SessionId(flooding_session.session_id),
-            SHORT_BRIDGE_TIMEOUT_DURATION,
+            SHORT_LINK_TIMEOUT_DURATION,
         )
         .expect("the attach request is written");
 
@@ -2255,9 +2518,87 @@ mod bridge_round_trip {
             .recv_timeout(BRIDGE_END_TIMEOUT_DURATION)
             .expect("a ping after the cut fails");
     }
+
+    #[test]
+    fn a_paste_whose_bytes_keep_moving_keeps_the_link_past_its_link_timeout() {
+        // The relay carries the client's bytes at 1 KiB every 100 ms. Each
+        // 16 KiB TLS record of the paste takes 1.6 s to cross, longer than
+        // the 1 s link timeout, while some bytes cross every 100 ms.
+        let running_session = RunningSession::start_running_session();
+        let test_remote_listener =
+            start_test_remote_listener(running_session.get_session_endpoint_path());
+        let relay_address = start_throttled_relay(&test_remote_listener.remote_listen_address);
+        let remote_link = connect_test_remote_client_at(&relay_address, &test_remote_listener);
+        let (mut reader, mut writer) = remote_client::attach_remote_session(
+            remote_link,
+            SessionSelector::SessionId(running_session.session_id),
+            SHORT_LINK_TIMEOUT_DURATION,
+        )
+        .expect("the attach request is written");
+        let _hello_response: IpcResponse = reader.recv().expect("the session answers the Hello");
+        writer
+            .send(&IpcRequest {
+                request_id: 2,
+                request_kind: IpcRequestKind::Attach {
+                    viewport_size: TEST_VIEWPORT_SIZE,
+                    resume_client_id: None,
+                    resume_token: None,
+                    pane_area: None,
+                    graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
+                    cell_size: None,
+                    link_timeout_ms: Some(MIN_LINK_TIMEOUT_MS),
+                },
+            })
+            .expect("the attach is written");
+        let attach_response: IpcResponse = reader.recv().expect("the session answers the attach");
+        let IpcResult::Attached { .. } = attach_response.answer_result else {
+            panic!(
+                "expected an attach reply, got {:?}",
+                attach_response.answer_result
+            );
+        };
+        // The client reads every frame the session writes, as a viewer does.
+        std::thread::spawn(move || while reader.recv::<SessionEvent>().is_ok() {});
+
+        let pasted_text = "x".repeat(SLOW_PASTE_BYTE_COUNT);
+        let paste_started_at = Instant::now();
+        writer
+            .send(&IpcRequest {
+                request_id: 3,
+                request_kind: IpcRequestKind::Paste {
+                    pasted_text: pasted_text.clone(),
+                },
+            })
+            .expect("the paste is written");
+        // The client then sends a ping every `TEST_PING_PAUSE_DURATION`, as a
+        // viewer does.
+        std::thread::spawn(move || {
+            let ping_request = IpcRequest {
+                request_id: 4,
+                request_kind: IpcRequestKind::Ping,
+            };
+            while writer.send(&ping_request).is_ok() {
+                std::thread::sleep(TEST_PING_PAUSE_DURATION);
+            }
+        });
+        let pane_write_bytes = running_session.wait_for_settled_pane_write_bytes();
+        let paste_duration = paste_started_at.elapsed();
+
+        assert_eq!(pane_write_bytes, vec![pasted_text.into_bytes()]);
+        assert!(
+            paste_duration > SHORT_LINK_TIMEOUT_DURATION * 2,
+            "the paste took {paste_duration:?}, not longer than two link timeouts"
+        );
+        assert_eq!(
+            test_remote_listener.ended_connection_id_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty),
+            "the link stayed up through the paste"
+        );
+    }
 }
 
 /// A writer that records what it was given and the deadline it was handed.
+/// An idle timeout is taken and ignored.
 struct DeadlineWriter {
     /// Every byte written, in order.
     written_frame_bytes: Vec<u8>,
@@ -2280,6 +2621,8 @@ impl Deadlined for DeadlineWriter {
     fn set_deadline(&mut self, deadline: Option<Instant>) {
         self.deadline = deadline;
     }
+
+    fn set_idle_timeout(&mut self, _idle_timeout: Option<Duration>) {}
 }
 
 #[test]

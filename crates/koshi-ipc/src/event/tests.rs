@@ -111,6 +111,7 @@ fn build_test_painted_frame() -> PaintedFrame {
             active_tab_id: tab_id,
             focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }

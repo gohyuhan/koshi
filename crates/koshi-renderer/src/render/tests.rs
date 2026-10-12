@@ -4,9 +4,12 @@
 //! the mode tag tracks the client lock mode, its mouse-select state and a
 //! reconnecting viewer. Pane borders draw with focus and hover highlighting.
 //! Terminal cells paint into pane content rects with their styles, wide-glyph
-//! handling and highlight spans. Collapsed stack members render as
-//! theme-filled title strips. The committed region solve decides which chrome
-//! rows draw and where the pane rectangle sits.
+//! handling and highlight spans. Each drawn cell takes the columns that
+//! `compute_text_display_width` gives its symbol: a cell that holds `U+17D8`
+//! takes 1 column. Chrome text is measured and placed at the same widths, and
+//! a span stops at its first grapheme that does not fit. Collapsed stack
+//! members render as theme-filled title strips. The committed region solve
+//! decides which chrome rows draw and where the pane rectangle sits.
 //!
 //! The focused pane's cursor cell is reported, clamped inside its content
 //! area, and hidden for an unfocused pane, a pane with no grid, and a hidden or
@@ -132,6 +135,7 @@ fn build_render_snapshot(
             active_tab_id: tab_id,
             focused_pane_id,
             lock_mode,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }
@@ -855,8 +859,8 @@ fn tabline_scrolls_overflowing_tabs_behind_a_right_arrow() {
     );
 }
 
-/// Cells the tabline's version badge [`format_version_badge_text`] takes:
-/// `9` for `[v0.5.0] `.
+/// Cells the tabline's version badge [`format_version_badge_text`] takes,
+/// trailing space included: `9` for `[v0.5.0] `.
 ///
 /// A test that needs room beside the version badge asks for
 /// `compute_version_badge_column_count() + <room>`: the room beside the badge
@@ -2564,6 +2568,54 @@ fn wide_glyph_at_right_edge_is_padded() {
     // Padded to a blank; a half-glyph never bleeds onto the right border.
     assert_eq!(render_buffer[(5, 2)].symbol(), " ");
     assert_eq!(render_buffer[(6, 2)].symbol(), "│");
+}
+
+#[test]
+fn a_pane_cell_holding_the_khmer_sign_beyyal_takes_one_column_and_the_cell_after_it_is_written() {
+    let mut grid = Grid::build_blank(2, 5, TermStyle::default());
+    // Row 0: `U+17D8` in a 1-column cell, then `x`.
+    *grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('\u{17D8}', 1, TermStyle::default());
+    *grid.get_cell_mut(0, 1).unwrap() = Cell::from_character('x', 1, TermStyle::default());
+    // Row 1: `U+17D8` in a 2-column cell and its continuation, then `x`.
+    *grid.get_cell_mut(1, 0).unwrap() = Cell::from_character('\u{17D8}', 2, TermStyle::default());
+    *grid.get_cell_mut(1, 1).unwrap() = Cell::from_character(' ', 0, TermStyle::default());
+    *grid.get_cell_mut(1, 2).unwrap() = Cell::from_character('x', 1, TermStyle::default());
+    let render_snapshot = build_content_render_snapshot(
+        grid,
+        build_cell_rect(0, 1, 7, 4),
+        false,
+        Size {
+            column_count: 7,
+            row_count: 6,
+        },
+    );
+    let render_buffer = render_test_snapshot(&render_snapshot, 7, 6);
+
+    // Grid row 0 is frame row 2 and grid row 1 is frame row 3, both from
+    // column 1.
+    for row_index in [2, 3] {
+        assert_eq!(render_buffer[(1, row_index)].symbol(), "\u{17D8}");
+        assert_eq!(render_buffer[(1, row_index)].cell_width(), 1);
+    }
+    let written_cells: Vec<(u16, u16, &str)> = Buffer::empty(render_buffer.area)
+        .diff(&render_buffer)
+        .into_iter()
+        .filter(|(column_index, row_index, _)| {
+            (2..=3).contains(row_index) && (1..=5).contains(column_index)
+        })
+        .map(|(column_index, row_index, written_cell)| {
+            (column_index, row_index, written_cell.symbol())
+        })
+        .collect();
+    assert_eq!(
+        written_cells,
+        [
+            (1, 2, "\u{17D8}"),
+            (2, 2, "x"),
+            (1, 3, "\u{17D8}"),
+            (3, 3, "x")
+        ]
+    );
 }
 
 #[test]
@@ -4372,6 +4424,120 @@ fn line_width_sums_span_display_cells_and_saturates() {
         Span::raw(half_width_text),
     ]);
     assert_eq!(get_line_width(&oversized_line), u16::MAX);
+}
+
+#[test]
+fn text_width_counts_one_cell_for_each_halfwidth_katakana_sound_mark() {
+    // `ｶﾞﾊﾟ`: 4 cells.
+    let halfwidth_katakana_text = "\u{FF76}\u{FF9E}\u{FF8A}\u{FF9F}";
+    assert_eq!(get_text_width(halfwidth_katakana_text), 4);
+    // `ｶﾞ` then `x`: 3 cells.
+    let marked_line = Line::from(vec![Span::raw("\u{FF76}\u{FF9E}"), Span::raw("x")]);
+    assert_eq!(get_line_width(&marked_line), 3);
+}
+
+#[test]
+fn text_width_counts_one_cell_for_the_khmer_sign_beyyal() {
+    assert_eq!(get_text_width("\u{17D8}x"), 2);
+    let khmer_line = Line::from(vec![Span::raw("\u{17D8}"), Span::raw("漢")]);
+    assert_eq!(get_line_width(&khmer_line), 3);
+}
+
+#[test]
+fn a_line_puts_each_grapheme_at_its_display_width_in_the_line_and_span_style() {
+    let buffer_area = RatatuiRect::new(0, 0, 6, 1);
+    let mut render_buffer = Buffer::empty(buffer_area);
+    render_buffer.set_string(0, 0, "abcdef", Style::default());
+    let khmer_line = Line::from(vec![
+        Span::styled("\u{17D8}x", Style::default().bg(Color::Blue)),
+        Span::raw("漢"),
+    ])
+    .style(Style::default().fg(Color::Red));
+
+    set_line_clipped(&mut render_buffer, 0, 0, &khmer_line, 6);
+
+    let row_cells: Vec<&str> = (0..6)
+        .map(|column_index| render_buffer[(column_index, 0)].symbol())
+        .collect();
+    assert_eq!(row_cells, ["\u{17D8}", "x", "漢", " ", "e", "f"]);
+    assert_eq!(render_buffer[(0, 0)].fg, Color::Red);
+    assert_eq!(render_buffer[(0, 0)].bg, Color::Blue);
+    assert_eq!(render_buffer[(2, 0)].fg, Color::Red);
+    assert_eq!(render_buffer[(2, 0)].bg, Color::Reset);
+}
+
+#[test]
+fn a_span_stops_at_its_first_grapheme_that_does_not_fit_and_the_next_span_takes_the_columns_left() {
+    let buffer_area = RatatuiRect::new(0, 0, 4, 1);
+    let mut render_buffer = Buffer::empty(buffer_area);
+    render_buffer.set_string(0, 0, "wxyz", Style::default());
+    let clipped_line = Line::from(vec![Span::raw("a漢c"), Span::raw("b")]);
+
+    set_line_clipped(&mut render_buffer, 1, 0, &clipped_line, 2);
+
+    let row_cells: Vec<&str> = (0..4)
+        .map(|column_index| render_buffer[(column_index, 0)].symbol())
+        .collect();
+    assert_eq!(row_cells, ["w", "a", "b", "z"]);
+}
+
+#[test]
+fn a_line_leaves_out_each_grapheme_that_holds_a_control_character_or_takes_no_column() {
+    // `ESC` and `TAB` are control characters, and `U+200B` takes 0 columns.
+    let buffer_area = RatatuiRect::new(0, 0, 4, 1);
+    let mut render_buffer = Buffer::empty(buffer_area);
+    let left_out_line = Line::from("a\u{1b}b\tc\u{200B}");
+
+    set_line_clipped(&mut render_buffer, 0, 0, &left_out_line, 4);
+
+    let row_cells: Vec<&str> = (0..4)
+        .map(|column_index| render_buffer[(column_index, 0)].symbol())
+        .collect();
+    assert_eq!(row_cells, ["a", "b", "c", " "]);
+    assert_eq!(get_line_width(&left_out_line), 3);
+}
+
+#[test]
+fn a_line_on_a_row_outside_the_buffer_writes_nothing() {
+    let buffer_area = RatatuiRect::new(0, 0, 4, 1);
+    let mut render_buffer = Buffer::empty(buffer_area);
+
+    set_line_clipped(&mut render_buffer, 0, 1, &Line::from("ab"), 4);
+
+    assert_eq!(render_buffer, Buffer::empty(buffer_area));
+}
+
+#[test]
+fn display_widths_force_only_a_glyph_ratatui_measures_at_another_width() {
+    let buffer_area = RatatuiRect::new(0, 0, 8, 1);
+    let mut previous_buffer = Buffer::empty(buffer_area);
+    previous_buffer.set_string(0, 0, "abcdefgh", Style::default());
+    let mut render_buffer = Buffer::empty(buffer_area);
+    // ratatui places `U+17D8` in columns 0 to 2, `x` in column 3 and `漢` in
+    // columns 4 and 5.
+    render_buffer.set_string(0, 0, "\u{17D8}x漢", Style::default());
+
+    apply_display_widths(buffer_area, &mut render_buffer);
+
+    assert_eq!(render_buffer[(0, 0)].cell_width(), 1);
+    assert_eq!(render_buffer[(4, 0)].diff_option, CellDiffOption::None);
+    let written_cells: Vec<(u16, &str)> = previous_buffer
+        .diff(&render_buffer)
+        .into_iter()
+        .map(|(column_index, _, written_cell)| (column_index, written_cell.symbol()))
+        .collect();
+    assert_eq!(
+        written_cells,
+        [
+            (0, "\u{17D8}"),
+            (1, " "),
+            (2, " "),
+            (3, "x"),
+            (4, "漢"),
+            (6, " "),
+            (7, " ")
+        ]
+    );
 }
 
 /// A `60x12` client over the compiled-in regions, whose pane area starts at

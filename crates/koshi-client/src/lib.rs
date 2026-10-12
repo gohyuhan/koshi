@@ -204,6 +204,9 @@ pub(crate) struct PlacementState {
 pub(crate) struct ViewerRestorePoint {
     /// The base input mode.
     lock_mode: LockMode,
+    /// The lock command whose lock mode the viewer shows before the session
+    /// runs it.
+    pending_lock_command_id: Option<CommandId>,
     /// Whether mouse-select is on.
     is_mouse_selection_enabled: bool,
     /// The multi-chord binding being typed.
@@ -304,6 +307,12 @@ pub struct Client {
     /// The session keeps its own copy, which `koshi lock --client` reaches and
     /// `koshi list-clients` reports.
     lock_mode: LockMode,
+    /// The newest lock command this viewer sent, or holds to send, whose lock
+    /// mode [`lock_mode`](Self::lock_mode) shows before the session runs it.
+    /// While it is set, a painted frame that does not name it as the last
+    /// applied lock command leaves `lock_mode` as it is. `None` when no lock
+    /// command waits.
+    pending_lock_command_id: Option<CommandId>,
     /// Whether this viewer grabs the mouse for text selection. It decides what
     /// a press means before anything is sent. The session keeps its own copy,
     /// which the frame carries for the mode indicator and the hint bar's label.
@@ -400,6 +409,7 @@ impl Client {
             keymap_catalog,
             registry,
             lock_mode: LockMode::Normal,
+            pending_lock_command_id: None,
             is_mouse_selection_enabled: false,
             pending_key_sequence: None,
             last_mouse_press: None,
@@ -551,6 +561,13 @@ impl Client {
     /// [`set_lock_mode`](Self::set_lock_mode), and
     /// [`set_mouse_selection_enabled`](Self::set_mouse_selection_enabled)
     /// describe.
+    ///
+    /// The lock mode is taken only when no lock command is pending, or when
+    /// the snapshot names the pending one as the last applied lock command;
+    /// the pending command is then cleared. Example: after `<C-l>` sends lock
+    /// command `A` and shows `Locked`, a snapshot with `Normal` that names no
+    /// lock command leaves `Locked`, and the next snapshot that names `A` sets
+    /// its own lock mode.
     pub(crate) fn apply_render_snapshot(&mut self, render_snapshot: &RenderSnapshot) {
         self.set_placement_revisions(
             render_snapshot.session_snapshot.session_revision,
@@ -566,7 +583,13 @@ impl Client {
                 .map(|tab_metadata| tab_metadata.tab_id)
                 .collect(),
         );
-        self.set_lock_mode(render_snapshot.client_snapshot.lock_mode);
+        let is_lock_command_pending = self.pending_lock_command_id.is_some()
+            && self.pending_lock_command_id
+                != render_snapshot.client_snapshot.last_applied_lock_command_id;
+        if !is_lock_command_pending {
+            self.pending_lock_command_id = None;
+            self.set_lock_mode(render_snapshot.client_snapshot.lock_mode);
+        }
         self.note_active_tab(render_snapshot.client_snapshot.active_tab_id);
         self.set_mouse_selection_enabled(
             render_snapshot.client_snapshot.is_mouse_selection_enabled,
@@ -578,6 +601,7 @@ impl Client {
     pub(crate) fn build_viewer_restore_point(&self) -> ViewerRestorePoint {
         ViewerRestorePoint {
             lock_mode: self.lock_mode,
+            pending_lock_command_id: self.pending_lock_command_id,
             is_mouse_selection_enabled: self.is_mouse_selection_enabled,
             pending_key_sequence: self.pending_key_sequence.clone(),
             tabline_peek: self.tabline_peek,
@@ -592,6 +616,7 @@ impl Client {
     pub(crate) fn restore_viewer(&mut self, viewer_restore_point: ViewerRestorePoint) {
         let ViewerRestorePoint {
             lock_mode,
+            pending_lock_command_id,
             is_mouse_selection_enabled,
             pending_key_sequence,
             tabline_peek,
@@ -601,6 +626,7 @@ impl Client {
             placement_state,
         } = viewer_restore_point;
         self.lock_mode = lock_mode;
+        self.pending_lock_command_id = pending_lock_command_id;
         self.is_mouse_selection_enabled = is_mouse_selection_enabled;
         self.pending_key_sequence = pending_key_sequence;
         self.tabline_peek = tabline_peek;
@@ -1400,11 +1426,10 @@ impl Client {
     /// A [`Delivery::Frame`] is the picture composed for a client in another
     /// process. It is counted, and nothing is taken from it. So is a
     /// [`Delivery::MouseAnswer`], which answers that client's mouse round, a
-    /// [`Delivery::HostWrite`], which that client writes to its own terminal,
-    /// a [`Delivery::SwitchTo`], which moves that client to another session,
-    /// and a [`Delivery::Pong`], which answers that client's ping. A
-    /// [`Delivery::PlacementCommandRejected`] clears the matching pending
-    /// placement command.
+    /// [`Delivery::HostWrite`], which wakes the thread that writes that
+    /// client's connection, and a [`Delivery::SwitchTo`], which moves that
+    /// client to another session. A [`Delivery::PlacementCommandRejected`]
+    /// clears the matching pending placement command.
     pub fn apply_events(&mut self) -> usize {
         let mut delivery_count = 0;
         while let Ok(delivery) = self.delivery_receiver.try_recv() {
@@ -1423,16 +1448,15 @@ impl Client {
                     }
                     _ => {}
                 },
-                // A frame, a mouse round's answers, terminal bytes, a session
-                // move, and a ping's answer all belong to a client in another
-                // process, which reads them off its own connection.
+                // A frame, a placement preview or its refusal, a mouse round's
+                // answers, a host-write wake, and a session move all serve a
+                // client in another process.
                 Delivery::Frame(_)
                 | Delivery::PanePlacementSnapshot { .. }
                 | Delivery::PanePlacementRefused { .. }
                 | Delivery::MouseAnswer { .. }
-                | Delivery::HostWrite { .. }
-                | Delivery::SwitchTo(_)
-                | Delivery::Pong => {}
+                | Delivery::HostWrite
+                | Delivery::SwitchTo(_) => {}
                 Delivery::PlacementCommandRejected(command_id) => {
                     self.reject_placement_command(command_id);
                 }

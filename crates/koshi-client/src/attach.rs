@@ -10,8 +10,8 @@
 //!
 //! A session on another machine is joined over TLS through the server serving
 //! it: `koshi attach --remote <server> [session]` presents the secret that
-//! server saved, the certificate pinned on the first connection is the only one
-//! accepted, and the server resolves the session against the sessions that
+//! server saved, only a certificate with the fingerprint saved for that server
+//! is accepted, and the server resolves the session against the sessions that
 //! secret reaches. The server presents that session's endpoint token and writes
 //! the Hello on this client's behalf, since a caller on another machine cannot
 //! read that file. From the Attach on, both homes speak the same frames on the
@@ -47,13 +47,21 @@
 //! input typed during that restart is dropped. While pane placement is on,
 //! nothing is held.
 //!
-//! A link to a session on a server carries a `Ping` from this viewer every
-//! third of `remote-link-timeout-ms`, and the session answers each one with a
-//! `Pong`. A viewer that reads nothing on the link for `remote-link-timeout-ms`
-//! counts the link as dropped. Example: with the default `30000`, a laptop
-//! that sleeps, or a network that changes under the link, drops it 30 seconds
-//! after the last bytes read. A link to a session on this machine sends no
-//! `Ping` and has no limit.
+//! A viewer of a session on a server sends a `Ping` every third of
+//! `remote-link-timeout-ms` while it waits for the session's answer to its
+//! `Attach`. Once joined, its first request goes up at once: a `Ping` on the
+//! first link, the size report on each link it gets back. A `Ping` then
+//! follows every third of `remote-link-timeout-ms` after the last one. The
+//! session writes a `Pong` whenever it has written the viewer nothing for a
+//! third of `remote-link-timeout-ms`. A viewer that reads nothing on the link
+//! for `remote-link-timeout-ms` counts the link as dropped. A write to the
+//! session that puts no byte on the link for `remote-link-timeout-ms` ends the
+//! thread that writes the link, with the requests it holds. A paste that takes
+//! longer than that keeps the link while each socket write puts bytes on it,
+//! and the session's `Pong` frames keep reaching the viewer meanwhile.
+//! Example: with the default `30000`, a laptop that sleeps, or a network that
+//! changes under the link, drops it 30 seconds after the last bytes read. A
+//! link to a session on this machine sends no `Ping` and has no limit.
 //!
 //! A dropped link to a session on a server is not a way out either, while
 //! `remote-reconnect` is on. The viewer draws
@@ -62,7 +70,7 @@
 //! dial runs. It dials that server again — after 1 second, then 2, 4, 8, and 8
 //! seconds before every dial after that — until it joins or 120 seconds pass.
 //! A dial the server answers with a refusal — a certificate that
-//! is not the pinned one, a secret it does not admit, a session that secret does
+//! is not the expected one, a secret it does not admit, a session that secret does
 //! not reach, or a protocol version this build does not accept — is not dialed
 //! again: every identical dial gets the same answer, so the viewer stops there.
 //! Each dial presents the secret the last attach
@@ -83,10 +91,14 @@
 //! `is_returning` is `true` when the viewer dials again or comes back after a
 //! restart. It is `false` when this terminal goes away or the session moves
 //! this viewer to another session: the viewer then waits up to 1 second for
-//! the writer thread to hand it to the socket. This terminal goes away when a
-//! read of its input fails, as a read of a closed terminal does, on `SIGHUP`
-//! on Linux and macOS, and on the console close on Windows. A process that
-//! ignores `SIGHUP`, as one that `nohup` starts, keeps ignoring it.
+//! the writer thread to hand it to the socket. If the quit keybinding or this
+//! terminal going away ends the viewer before it takes the link that a rejoin
+//! attempt opens, that link gets `Leaving` with `is_returning` `true`, then
+//! closes. The first link of a terminal that cannot be set up does the same.
+//! This terminal goes away when a read of its input fails, as a read
+//! of a closed terminal does, on `SIGHUP` on Linux and macOS, and on the
+//! console close on Windows. A process that ignores `SIGHUP`, as one that
+//! `nohup` starts, keeps ignoring it.
 //!
 //! While the viewer has no link, each attempt to get one back runs on its own
 //! thread, and the loop keeps reading this terminal. The keys resolve against
@@ -132,6 +144,7 @@
 use std::io;
 use std::io::Write;
 use std::mem::take;
+use std::ops::ControlFlow;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
@@ -151,8 +164,10 @@ use crate::{compute_core_pane_area, Client, LinkStatus};
 use koshi_config::types::BoundAction;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTarget,
-    PanePlacementAnchor, PanePlacementTarget, PlacementRevision, SwitchSessionArgs, VisualCommand,
+    LockModeArgs, PanePlacementAnchor, PanePlacementTarget, PlacementRevision, SwitchSessionArgs,
+    ToggleLockModeArgs, VisualCommand,
 };
+use koshi_core::constant::compute_heartbeat_interval;
 use koshi_core::geometry::{Direction, PixelCellSize, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{KeyInput, KeySequence};
@@ -218,8 +233,7 @@ const FIRST_REDIAL_WAIT_DURATION: Duration = Duration::from_secs(1);
 const MAX_REDIAL_WAIT_DURATION: Duration = Duration::from_secs(8);
 
 /// How long a remote viewer keeps redialing after its link dropped: 120
-/// seconds, which is how long a session holds a detached client's view under
-/// its resume token.
+/// seconds.
 const REDIAL_WINDOW_DURATION: Duration = Duration::from_secs(120);
 
 /// The most keys, fired bindings and pastes a restart rejoin holds for the
@@ -1328,8 +1342,9 @@ enum Incoming {
 /// What one attempt to get the link back ended with, as its
 /// `koshi-attach-rejoin` thread puts it on the loop's channel.
 enum RejoinAnswer {
-    /// The attempt joined the session on a new connection.
-    Joined(JoinedSession),
+    /// The attempt joined the session on a new connection, held until the
+    /// loop takes it.
+    Joined(JoinedSessionGuard),
     /// The attempt did not reach the session, for the cause carried here. A
     /// redial dials again if its next pause fits the window.
     Unreachable(CliError),
@@ -1337,12 +1352,65 @@ enum RejoinAnswer {
     Ended(AttachmentEnding),
 }
 
+/// A connection that joined the session, held until the viewer takes it with
+/// [`release_joined_session`](Self::release_joined_session).
+///
+/// Dropped before the viewer takes it, it sends
+/// `Leaving { is_returning: true }` on its connection, then closes the
+/// connection: the session keeps running without this viewer. Example: a quit
+/// read before a rejoin attempt's join ends the loop, and the join still on
+/// the loop's channel says `Leaving` when the channel is dropped. A join whose
+/// rejoin attempt finds the loop's channel gone, and the first join of a
+/// terminal that cannot be set up, say `Leaving` the same way.
+struct JoinedSessionGuard {
+    /// The joined connection. `None` once the viewer took it.
+    joined_session: Option<JoinedSession>,
+}
+
+impl JoinedSessionGuard {
+    /// Hold `joined_session` until the viewer takes it.
+    fn from_joined_session(joined_session: JoinedSession) -> Self {
+        JoinedSessionGuard {
+            joined_session: Some(joined_session),
+        }
+    }
+
+    /// Hand the joined connection to the viewer. Nothing is sent on it.
+    fn release_joined_session(mut self) -> JoinedSession {
+        self.joined_session
+            .take()
+            .expect("the guard holds its connection until it is released")
+    }
+}
+
+impl Drop for JoinedSessionGuard {
+    /// Send `Leaving { is_returning: true }`, under the request id
+    /// [`FIRST_POST_ATTACH_REQUEST_ID`], on a connection that the viewer did
+    /// not take. A connection that the viewer took sends nothing here. A failed
+    /// write is logged.
+    fn drop(&mut self) {
+        let Some(mut joined_session) = self.joined_session.take() else {
+            return;
+        };
+        let leaving_request = IpcRequest {
+            request_id: FIRST_POST_ATTACH_REQUEST_ID,
+            request_kind: IpcRequestKind::Leaving { is_returning: true },
+        };
+        if let Err(write_error) = joined_session.writer.send(&leaving_request) {
+            tracing::warn!(
+                %write_error,
+                "could not tell the session that this viewer left a join it did not take"
+            );
+        }
+    }
+}
+
 /// This client's side of the connection: the writer thread that takes its
 /// requests, the action table a fired binding is resolved against, and the
 /// number the next request carries.
 struct Uplink {
     /// The writer thread every request the loop sends goes to, or `None` once
-    /// [`close_request_queue`](Self::close_request_queue) closed its queue.
+    /// [`drain_request_queue`](Self::drain_request_queue) closed its queue.
     uplink_writer: Option<UplinkWriter>,
     /// The action table a fired binding is turned into commands with. The
     /// session owns its own table and runs those commands; this one only names
@@ -1387,13 +1455,14 @@ impl Uplink {
     }
 
     /// Close the request queue and wait until its writer thread has written
-    /// every queued request and ended, or until `deadline`. Returns `true` when
-    /// the thread ended by `deadline`, and `true` at once with the queue
-    /// already closed. A `deadline` already passed waits for nothing.
+    /// every queued request and ended, or until `deadline`. Returns whether
+    /// the queue drained: `true` when the thread ended by `deadline`, and
+    /// `true` at once when no queue is open. A `deadline` already passed waits
+    /// for nothing.
     ///
     /// A writer thread still writing at `deadline` runs on with the queue it
     /// holds; the next request this client sends goes nowhere.
-    fn close_request_queue(&mut self, deadline: Instant) -> bool {
+    fn drain_request_queue(&mut self, deadline: Instant) -> bool {
         let Some(UplinkWriter {
             request_sender,
             writer_end_receiver,
@@ -1431,9 +1500,8 @@ impl Uplink {
         }))
     }
 
-    /// Queue placement command `command`, which `client` recorded as pending
-    /// under `command_id`.
-    fn submit_placement_command(
+    /// Queue `command` under `command_id`, issued by `client`'s key binding.
+    fn submit_key_binding_command(
         &mut self,
         client: &Client,
         command_id: CommandId,
@@ -1487,7 +1555,7 @@ impl Uplink {
                 command_id,
                 command,
             } => {
-                self.submit_placement_command(client, command_id, command);
+                self.submit_key_binding_command(client, command_id, command);
             }
             PlacementInputAction::Consumed => {}
         }
@@ -1514,46 +1582,104 @@ impl Uplink {
         .ok()
     }
 
-    /// Whether `bound_action` resolves to [`Command::Quit`], the command
-    /// `core:quit` runs.
-    fn is_quit_binding(&self, client: &Client, bound_action: &BoundAction) -> bool {
-        self.resolve_bound_action(client, bound_action)
-            .as_ref()
-            .is_some_and(is_quit_dispatch_plan)
+    /// Resolve one fired binding against the action table and run its plan.
+    /// Returns [`ControlFlow::Break`] when the plan is [`Command::Quit`], which
+    /// is queued like every other session command, and
+    /// [`ControlFlow::Continue`] for every other binding.
+    ///
+    /// A lock binding switches `client` to the lock mode it sets at once, as
+    /// [`Client::apply_lock_command`] says, and goes up as `SetLockMode` for
+    /// that mode under a new command id: `core:toggle-lock` in `Normal` goes
+    /// up as `SetLockMode` with `is_locked: true`. Every other plan runs as
+    /// [`Self::run_dispatch_plan`] runs it. An action the table refuses sends
+    /// nothing.
+    fn submit_bound_action(
+        &mut self,
+        client: &mut Client,
+        bound_action: BoundAction,
+    ) -> ControlFlow<()> {
+        let Some(dispatch_plan) = self.resolve_bound_action(client, &bound_action) else {
+            return ControlFlow::Continue(());
+        };
+        if let Some(lock_mode) = find_lock_mode_set_by(&dispatch_plan, client.get_lock_mode()) {
+            let lock_command_id = CommandId::new();
+            client.apply_lock_command(lock_command_id, lock_mode);
+            self.submit_key_binding_command(
+                client,
+                lock_command_id,
+                build_set_lock_mode_command(lock_mode),
+            );
+            return ControlFlow::Continue(());
+        }
+        let is_quit_plan = is_quit_dispatch_plan(&dispatch_plan);
+        self.run_dispatch_plan(client, dispatch_plan);
+        if is_quit_plan {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
     }
 
-    /// Resolve one fired binding against the action table and run its plan.
-    /// Returns `true` when the plan is [`Command::Quit`], which is queued like
-    /// every other session command.
-    ///
-    /// A viewer-local action runs here; an action the table refuses sends no
-    /// session command.
-    fn submit_bound_action(&mut self, client: &mut Client, bound_action: BoundAction) -> bool {
-        let Some(dispatch_plan) = self.resolve_bound_action(client, &bound_action) else {
-            return false;
-        };
-        let is_quit_plan = is_quit_dispatch_plan(&dispatch_plan);
+    /// Run `dispatch_plan`: queue its command under a new command id, issued by
+    /// `client`'s key binding, or run its viewer-local action on `client` and
+    /// send what that action asks of the session.
+    fn run_dispatch_plan(&mut self, client: &mut Client, dispatch_plan: DispatchPlan) {
         match dispatch_plan {
             DispatchPlan::Command(command) => {
-                let command_envelope = CommandEnvelope::from_parts(
-                    CommandId::new(),
-                    CommandSource::from_key_binding(client.get_client_id()),
-                    *command,
-                );
-                self.send_request(IpcRequestKind::SubmitCommand(Box::new(command_envelope)));
+                self.submit_key_binding_command(client, CommandId::new(), *command);
             }
             DispatchPlan::ClientAction(client_action_kind) => {
                 let placement_input_action = client.apply_client_action(client_action_kind);
                 self.submit_placement_input_action(client, placement_input_action);
             }
         }
-        is_quit_plan
     }
 }
 
 /// Whether `dispatch_plan` runs [`Command::Quit`].
 fn is_quit_dispatch_plan(dispatch_plan: &DispatchPlan) -> bool {
     matches!(dispatch_plan, DispatchPlan::Command(command) if **command == Command::Quit)
+}
+
+/// The lock mode `dispatch_plan` sets on the client that runs it while that
+/// client is in `current_lock_mode`, or `None` when the plan is no lock
+/// command for that client. `core:lock` gives `Locked` and `core:unlock` gives
+/// `Normal`. `core:toggle-lock` gives `Normal` in `Locked` and `Locked` in
+/// every other mode. A lock command that names a client gives `None`.
+fn find_lock_mode_set_by(
+    dispatch_plan: &DispatchPlan,
+    current_lock_mode: LockMode,
+) -> Option<LockMode> {
+    let DispatchPlan::Command(command) = dispatch_plan else {
+        return None;
+    };
+    match **command {
+        Command::SetLockMode(LockModeArgs {
+            is_locked: true,
+            client_id: None,
+        }) => Some(LockMode::Locked),
+        Command::SetLockMode(LockModeArgs {
+            is_locked: false,
+            client_id: None,
+        }) => Some(LockMode::Normal),
+        Command::ToggleLockMode(ToggleLockModeArgs { client_id: None }) => {
+            match current_lock_mode {
+                LockMode::Locked => Some(LockMode::Normal),
+                _ => Some(LockMode::Locked),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The `SetLockMode` command that puts the client that runs it in
+/// `lock_mode`: `is_locked` is `true` for `Locked` and `false` for every
+/// other mode, and no client is named.
+fn build_set_lock_mode_command(lock_mode: LockMode) -> Command {
+    Command::SetLockMode(LockModeArgs {
+        is_locked: lock_mode == LockMode::Locked,
+        client_id: None,
+    })
 }
 
 /// Where the session this client joins runs.
@@ -1573,7 +1699,7 @@ enum Home {
     /// A session on another machine, joined through the server serving it.
     Remote {
         /// The saved record every dial presents: the address, the secret, and
-        /// the certificate fingerprint pinned on the first connection.
+        /// the fingerprint the server's certificate must have.
         server: ServerReference,
     },
 }
@@ -1657,7 +1783,9 @@ pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
 /// Join a session on the machine `server` names in this terminal.
 ///
 /// `server` is either the name this machine saved that server under or the
-/// `host:port` it listens on. `save_as` is the name to save a server reached
+/// `host:port` it listens on. `certificate_fingerprint` is the fingerprint the
+/// certificate of a server reached for the first time must have; a server
+/// already saved refuses it. `save_as` is the name to save a server reached
 /// for the first time under; a server already saved refuses it.
 ///
 /// `selector` is a `session-<uuid>` id, a bare UUID, or a session display name,
@@ -1667,15 +1795,19 @@ pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
 /// here creates a session.
 ///
 /// # Errors
-/// [`CliError::Runtime`] when the server does not admit the secret, when the
-/// certificate it presents is not the pinned one, and when nothing this secret
-/// reaches is running on it.
+/// [`CliError::Runtime`] when the server does not admit the secret, and when
+/// nothing this secret reaches is running on it. [`CliError::IpcUnavailable`]
+/// when the certificate it presents is not the expected one.
+/// [`CliError::InvalidArgs`] when a server reached for the first time comes
+/// with no fingerprint or a malformed one, and when a saved server is given a
+/// fingerprint or holds none.
 pub fn attach_remote_session(
     server: &str,
+    certificate_fingerprint: Option<&str>,
     save_as: Option<&str>,
     selector: Option<&str>,
 ) -> Result<(), CliError> {
-    let server_reference = remote_client::resolve_server(server)?;
+    let server_reference = remote_client::resolve_server(server, certificate_fingerprint)?;
     // This connection carries one listing. The attachment below dials its own.
     let (mut server_connection, saved_server) = remote_client::connect_saved_server(
         &server_reference,
@@ -1714,7 +1846,7 @@ fn attach_selected_session_from_listing(
     runtime_directory: PathBuf,
     config_directory: Option<&Path>,
 ) -> Result<(), CliError> {
-    let reachable_session_rows = remote_client::list_saved_server_session_rows("attach");
+    let reachable_session_rows = remote_client::list_saved_server_session_rows();
     let remote_session_rows = reachable_session_rows
         .iter()
         .map(|(server_label, remote_session_row)| {
@@ -1746,7 +1878,7 @@ fn attach_selected_session_from_listing(
     };
     attach_home(
         &Home::Remote {
-            server: remote_client::resolve_server(server_label)?,
+            server: remote_client::resolve_server(server_label, None)?,
         },
         SessionSelector::SessionId(selected_session_row.session_id),
         config_directory,
@@ -1886,7 +2018,9 @@ fn attach_home(
 /// The terminal enters raw mode for its capability probe, then enters the
 /// alternate screen after Attach succeeds. This call owns both states and
 /// leaves them before it returns, so the terminal is restored between one
-/// session and the next.
+/// session and the next. A terminal that cannot be set up after the session
+/// accepted the client returns the error, and the connection sends `Leaving`
+/// with `is_returning` `true` before it closes: the session keeps running.
 ///
 /// A session that replaces its own process image is handled inside this one
 /// attachment: the client comes back as the same client — on the session's new
@@ -1915,14 +2049,7 @@ fn attach_once(
             .map_err(|detail| CliError::Runtime { detail })?;
     let graphics_support = terminal_owner.get_graphics_support();
     let mut cell_size_query = terminal_owner.build_cell_size_query();
-    let JoinedSession {
-        reader,
-        writer,
-        client_id,
-        session_id,
-        connection_token,
-        resume_token,
-    } = dial_session(
+    let joined_session = dial_session(
         home,
         session_selector,
         graphics_support,
@@ -1930,6 +2057,10 @@ fn attach_once(
         config_directory,
         client_config.remote_link_timeout_ms,
     )?;
+    let client_id = joined_session.client_id;
+    // Until the terminal is set up, the guard holds the join: a return before
+    // that sends `Leaving` with `is_returning` `true` and closes the connection.
+    let joined_session_guard = JoinedSessionGuard::from_joined_session(joined_session);
 
     // After the session accepts the client, the terminal changes mode. The
     // cleanup hooks undo every mode this function sets. The panic hook runs the
@@ -1950,6 +2081,14 @@ fn attach_once(
         .map_err(|activation_detail| CliError::Runtime {
             detail: activation_detail,
         })?;
+    let JoinedSession {
+        reader,
+        writer,
+        client_id: _,
+        session_id,
+        connection_token,
+        resume_token,
+    } = joined_session_guard.release_joined_session();
     if should_read_input {
         spawn_input_relay(input_receiver, incoming_sender.clone());
     } else {
@@ -2089,10 +2228,13 @@ fn attach_once(
 /// frame. With no link, the loop ends as
 /// [`AttachmentEnding::LeftWhileReconnecting`].
 ///
-/// On `Home::Remote`, the loop sends `Ping` once every
-/// [`compute_ping_interval`] of `remote-link-timeout-ms`, counted from the
-/// start and again from each link it gets back. Example: `30000` sends one
-/// every 10 seconds.
+/// On `Home::Remote`, the loop sends `Ping` in its first pass, after the first
+/// group of events already queued, at most
+/// [`MAX_INCOMING_EVENT_COUNT_PER_PASS`], then once every heartbeat interval of
+/// `remote-link-timeout-ms` ([`compute_heartbeat_interval`]) after the last
+/// one, on the link it holds then. A `Ping` that falls due while the loop
+/// holds no link goes up on the link it gets back, after that link's size
+/// report. Example: `30000` sends one at the start, then one every 10 seconds.
 ///
 /// A loop that ends as [`AttachmentEnding::TerminalGone`] or
 /// [`AttachmentEnding::SwitchSession`] queues `Leaving` with `is_returning`
@@ -2156,12 +2298,12 @@ fn run_attachment<B: Backend, W: Write>(
     // its last `HostWrite`. The next `HostWrite` writes them before its own
     // bytes, in one write. A new connection starts with none.
     let mut held_host_write_bytes: Vec<u8> = Vec::new();
-    // A link to another machine sends a `Ping` every third of the link
-    // timeout; a link on this machine sends none.
+    // A remote home sends a `Ping` at once, then every third of the link
+    // timeout on whichever link the loop holds; a local home sends none.
     let remote_link_timeout_ms = client.get_client_config().remote_link_timeout_ms;
-    let ping_interval = compute_ping_interval(remote_link_timeout_ms);
+    let ping_interval = compute_heartbeat_interval(remote_link_timeout_ms);
     let mut next_ping_at = match home {
-        Home::Remote { .. } => Some(Instant::now() + ping_interval),
+        Home::Remote { .. } => Some(Instant::now()),
         Home::Local { .. } => None,
     };
 
@@ -2415,9 +2557,10 @@ fn run_attachment<B: Backend, W: Write>(
                             let _ = terminal_writer.flush();
                             held_host_write_bytes = Vec::new();
                         }
-                        // Every other frame reports a change to the session's
-                        // structure, and the next painted frame carries that
-                        // change whole, so only a painted frame is drawn.
+                        // Every other frame is a `Pong`, which carries nothing,
+                        // or reports a change to the session's structure, which
+                        // the next painted frame carries whole. Only a painted
+                        // frame is drawn.
                         _ => {}
                     }
                 }
@@ -2460,7 +2603,9 @@ fn run_attachment<B: Backend, W: Write>(
                             uplink,
                             cell_size_query,
                             other_runtime_event,
-                        ) {
+                        )
+                        .is_break()
+                        {
                             attachment_ending = Some(leave_after_quit(uplink));
                             break;
                         }
@@ -2499,7 +2644,9 @@ fn run_attachment<B: Backend, W: Write>(
                                 cell_size,
                                 remote_link_timeout_ms,
                             ) {
-                                Ok(joined_session) => RejoinAnswer::Joined(joined_session),
+                                Ok(joined_session) => RejoinAnswer::Joined(
+                                    JoinedSessionGuard::from_joined_session(joined_session),
+                                ),
                                 Err(restart_ending) => RejoinAnswer::Ended(restart_ending),
                             }
                         }),
@@ -2535,7 +2682,7 @@ fn run_attachment<B: Backend, W: Write>(
             // writer thread ends once it has written it. This viewer attaches
             // again.
             uplink.send_request(IpcRequestKind::Leaving { is_returning: true });
-            uplink.close_request_queue(Instant::now());
+            let _ = uplink.drain_request_queue(Instant::now());
             client.prepare_placement_reconciliation();
             screen.set_placement_snapshot(None);
             let leftover_events: Vec<Incoming> = incoming_batch_events
@@ -2591,7 +2738,6 @@ fn run_attachment<B: Backend, W: Write>(
                 locally_measured_cell_size,
             );
             send_held_inputs(client, uplink, held_inputs);
-            next_ping_at = next_ping_at.map(|_| Instant::now() + ping_interval);
             // The new connection numbers its rounds from the start, so no
             // answer to a border move written on the old one can arrive. The
             // next move asks for its whole distance from the drag anchor.
@@ -2608,7 +2754,7 @@ fn run_attachment<B: Backend, W: Write>(
             uplink.send_request(IpcRequestKind::Ping);
             next_ping_at = Some(current_time + ping_interval);
         }
-        if fire_expired_key_sequence(client, uplink, current_time) {
+        if fire_expired_key_sequence(client, uplink, current_time).is_break() {
             break leave_after_quit(uplink);
         }
         if client.expire_placement_read(current_time) {
@@ -2660,7 +2806,7 @@ fn run_attachment<B: Backend, W: Write>(
         uplink.send_request(IpcRequestKind::Leaving {
             is_returning: false,
         });
-        if !uplink.close_request_queue(Instant::now() + MAX_QUIT_WRITE_WAIT_DURATION) {
+        if !uplink.drain_request_queue(Instant::now() + MAX_QUIT_WRITE_WAIT_DURATION) {
             tracing::warn!("the connection did not take the leave in time; leaving without it");
         }
     }
@@ -2719,11 +2865,11 @@ fn compute_incoming_image_byte_count(incoming_event: &Incoming) -> usize {
 /// protocol version is dialed again once it has restarted, and one that
 /// refuses the connection token is dialed again once it advertises another, as
 /// [`run_session_exchange_with_restart_wait`](ipc_client::run_session_exchange_with_restart_wait)
-/// states. On a server the whole admission runs — TLS with the
-/// pinned certificate, the secret, and the scope check on the session asked
-/// for — and the server resolves the name against the sessions that secret
-/// reaches. A server whose router answers that it is restarting is dialed
-/// again, as
+/// states. On a server the whole admission runs — TLS with the check of the
+/// certificate against the fingerprint the saved record holds, the secret, and
+/// the scope check on the session asked for — and the server resolves the name
+/// against the sessions that secret reaches. A server whose router answers
+/// that it is restarting is dialed again, as
 /// [`dial_through_router_restart`](remote_client::dial_through_router_restart)
 /// states, for up to [`RESTART_WINDOW_DURATION`].
 fn dial_session(
@@ -2791,30 +2937,16 @@ fn dial_session(
 }
 
 /// Dial `server`, ask it for the session `session_selector` names, and join that session
-/// as a client.
-///
-/// The serving machine presents that session's endpoint token and writes the
-/// Hello on this client's behalf, so the first frame read back is the session
-/// server's answer to that Hello. The Attach after it is this client's own,
-/// `resume_client_id` names the client record to come back as, and `resume_token` is the
-/// secret the last attach minted, presented to get that attach's view back.
-///
-/// `remote_link_timeout_ms` goes up in the session's Attach, and
-/// [`compute_bridge_timeout`] of it goes up in the serving machine's Attach.
-/// Once joined, each read on the returned reader waits at most
-/// `remote_link_timeout_ms` for the session's next bytes, and a read that
-/// waits longer fails with a timeout.
+/// as a client: open the connection, then [`join_remote_session`] over it. The
+/// join runs under a deadline of [`remote_client::JOIN_TIMEOUT_DURATION`] after
+/// the connection opens.
 ///
 /// # Errors
-/// [`DialError::Unreachable`] when the path to the server failed: the
-/// connection could not be opened, or a frame of the join could not be written
-/// or read. [`DialError::Restarting`] when the serving router refused the join
-/// with [`koshi_ipc::router::ROUTER_RESTARTING_MESSAGE`]. [`DialError::Refused`]
-/// when the server answered and every identical dial after it gets the same
-/// answer: the certificate it presents is not the pinned one, it does not admit
-/// the secret, the admitted secret does not reach `session_selector`, the
-/// protocol versions do not overlap, or its answer is a frame this attach
-/// cannot read.
+/// [`DialError::Unreachable`] when the connection could not be opened.
+/// [`DialError::Refused`] when the saved record holds no certificate
+/// fingerprint, the certificate the server presents is not the expected one,
+/// the server does not admit the secret, or the remote protocol versions do not
+/// overlap. Every error that [`join_remote_session`] returns.
 fn dial_remote(
     server: &ServerReference,
     session_selector: &SessionSelector,
@@ -2824,18 +2956,70 @@ fn dial_remote(
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, DialError> {
-    // The join is held to JOIN_TIMEOUT_DURATION; the clock comes off once it is joined.
-    let (link, saved_server) = remote_client::connect_saved_server(
+    let (remote_link, saved_server) = remote_client::connect_saved_server(
         server,
         None,
         Some(remote_client::JOIN_TIMEOUT_DURATION),
     )?;
-    let (mut reader, mut writer) = remote_client::attach_remote_session(
-        link,
-        session_selector.clone(),
-        compute_bridge_timeout(remote_link_timeout_ms),
+    join_remote_session(
+        remote_link,
+        saved_server.connection_token,
+        session_selector,
+        resume_client_id,
+        resume_token,
+        graphics_support,
+        cell_size,
+        remote_link_timeout_ms,
     )
-    .map_err(DialError::Unreachable)?;
+}
+
+/// Join the session `session_selector` names, as a client, over `remote_link`:
+/// an open connection to a server that admitted `connection_token`. The
+/// returned session carries `connection_token`.
+///
+/// The serving machine presents that session's endpoint token and writes the
+/// Hello on this client's behalf, so the first frame read back is the session
+/// server's answer to that Hello. The Attach after it is this client's own,
+/// `resume_client_id` names the client record to come back as, and `resume_token` is the
+/// secret the last attach minted, presented to get that attach's view back.
+///
+/// The join runs under the deadline that `remote_link` holds.
+/// `remote_link_timeout_ms` goes up in the serving machine's Attach and in the
+/// session's Attach. Until the session's answer to that Attach is read, a
+/// `Ping` carrying the Attach's `request_id`, `2`, goes up every heartbeat
+/// interval of `remote_link_timeout_ms` ([`compute_heartbeat_interval`]).
+/// Example: `3000` and a session that answers after 2.5 seconds send two
+/// `Ping` requests, at 1 and 2 seconds. Once joined, the returned reader and
+/// writer hold no deadline. Each socket read of the reader waits at most
+/// `remote_link_timeout_ms` for the session's next byte, and each socket
+/// write of the writer waits at most `remote_link_timeout_ms` for the link to
+/// take a byte
+/// ([`FrameReader::set_idle_timeout`], [`FrameWriter::set_idle_timeout`]).
+/// A read or a write that waits longer fails with a timeout.
+///
+/// # Errors
+/// [`DialError::Unreachable`] when a frame of the join could not be written or
+/// read. [`DialError::Restarting`] when the serving router refused the join
+/// with [`koshi_ipc::router::ROUTER_RESTARTING_MESSAGE`]. [`DialError::Refused`]
+/// when the server answered and every identical join after it gets the same
+/// answer: the admitted secret does not reach `session_selector`, the session
+/// protocol versions do not overlap, or its answer is a frame this attach
+/// cannot read.
+#[allow(clippy::too_many_arguments)]
+fn join_remote_session(
+    remote_link: remote_client::RemoteLink,
+    connection_token: ConnectionToken,
+    session_selector: &SessionSelector,
+    resume_client_id: Option<ClientId>,
+    resume_token: Option<&ConnectionToken>,
+    graphics_support: terminal::GraphicsSupport,
+    cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    remote_link_timeout_ms: u32,
+) -> Result<JoinedSession, DialError> {
+    let link_timeout = Duration::from_millis(u64::from(remote_link_timeout_ms));
+    let (mut reader, mut writer) =
+        remote_client::attach_remote_session(remote_link, session_selector.clone(), link_timeout)
+            .map_err(DialError::Unreachable)?;
     let hello_response = remote_client::read_forwarded_hello_answer(&mut reader, session_selector)?;
     talk::parse_session_hello_version(hello_response).map_err(DialError::Refused)?;
     writer
@@ -2847,23 +3031,47 @@ fn dial_remote(
             Some(remote_link_timeout_ms),
         ))
         .map_err(build_link_failure)?;
-    let attach_response = reader.recv_answer().map_err(build_link_failure)?;
+    let ping_interval = compute_heartbeat_interval(remote_link_timeout_ms);
+    let attach_response = thread::scope(|join_scope| {
+        // Dropped once the Attach answer is read, which ends the pings.
+        let (attach_answer_read_sender, attach_answer_read_receiver) = mpsc::channel::<()>();
+        let ping_writer = &mut writer;
+        thread::Builder::new()
+            .name("koshi-join-pinger".to_string())
+            .spawn_scoped(join_scope, move || {
+                while attach_answer_read_receiver.recv_timeout(ping_interval)
+                    == Err(mpsc::RecvTimeoutError::Timeout)
+                {
+                    let join_ping = IpcRequest {
+                        request_id: 2,
+                        request_kind: IpcRequestKind::Ping,
+                    };
+                    if ping_writer.send(&join_ping).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn join ping thread");
+        let attach_response = reader.recv_answer();
+        drop(attach_answer_read_sender);
+        attach_response
+    })
+    .map_err(build_link_failure)?;
     let (client_id, session_id, minted_resume_token) =
         parse_attached_session(attach_response).map_err(DialError::Refused)?;
 
-    // Joined: the writer blocks for as long as it takes from here, and each
-    // read waits at most the link timeout.
+    // Joined: the join's deadline is taken away, and each socket read and
+    // write waits at most the link timeout for a byte.
     reader.set_deadline(None);
-    reader.set_idle_timeout(Some(Duration::from_millis(u64::from(
-        remote_link_timeout_ms,
-    ))));
     writer.set_deadline(None);
+    reader.set_idle_timeout(Some(link_timeout));
+    writer.set_idle_timeout(Some(link_timeout));
     Ok(JoinedSession {
         reader,
         writer,
         client_id,
         session_id,
-        connection_token: saved_server.connection_token,
+        connection_token,
         resume_token: minted_resume_token,
     })
 }
@@ -3046,25 +3254,6 @@ fn can_redial_pause_fit(elapsed_duration: Duration, pause_duration: Duration) ->
     elapsed_duration + pause_duration < REDIAL_WINDOW_DURATION
 }
 
-/// The pause between two pings on a link to a session on another machine: a
-/// third of `remote_link_timeout_ms`. `30000` gives 10 seconds, and `1` gives
-/// 333333 nanoseconds.
-fn compute_ping_interval(remote_link_timeout_ms: u32) -> Duration {
-    Duration::from_millis(u64::from(remote_link_timeout_ms)) / 3
-}
-
-/// The bridge timeout a viewer names to the machine serving a session:
-/// [`JOIN_TIMEOUT_DURATION`](remote_client::JOIN_TIMEOUT_DURATION) plus
-/// `remote_link_timeout_ms`. `30000` gives 50 seconds.
-///
-/// The viewer is silent for at most `JOIN_TIMEOUT_DURATION` while it joins,
-/// then sends a ping every [`compute_ping_interval`] of
-/// `remote_link_timeout_ms`: a live viewer never goes this long without
-/// sending.
-fn compute_bridge_timeout(remote_link_timeout_ms: u32) -> Duration {
-    remote_client::JOIN_TIMEOUT_DURATION + Duration::from_millis(u64::from(remote_link_timeout_ms))
-}
-
 /// The wait one failed redial hands the next: `current_wait_duration`
 /// doubled, held at [`MAX_REDIAL_WAIT_DURATION`].
 ///
@@ -3189,7 +3378,13 @@ impl LinkRecovery {
     /// input past [`MAX_HELD_INPUT_COUNT`] inputs or past
     /// [`MAX_FRAME_BYTE_COUNT`] bytes of paste text drops everything held, and
     /// everything typed after it during this rejoin.
-    fn hold_input(&mut self, client: &Client, held_input: HeldInput) {
+    ///
+    /// A held [`HeldInput::LockCommand`] also switches `client` to its lock
+    /// mode, as [`Client::apply_lock_command`] says. A lock command that is
+    /// dropped switches nothing, and a drop of everything held puts back the
+    /// lock mode and the pending lock command that `client` had before the
+    /// first lock command this hold took.
+    fn hold_input(&mut self, client: &mut Client, held_input: HeldInput) {
         let LinkRecovery::RestartRejoin { input_hold } = self else {
             return;
         };
@@ -3199,13 +3394,34 @@ impl LinkRecovery {
         let Some(holding_input_hold) = input_hold else {
             return;
         };
+        let held_lock_command = match &held_input {
+            HeldInput::LockCommand {
+                lock_command_id,
+                lock_mode,
+            } => Some((*lock_command_id, *lock_mode)),
+            HeldInput::Keyboard(_) | HeldInput::DispatchPlan(_) | HeldInput::Paste(_) => None,
+        };
         if !holding_input_hold.hold_input(held_input) {
             tracing::warn!(
                 "more input arrived while the session restarted than this client holds; \
                  everything typed during the restart is dropped"
             );
+            if let Some((lock_mode, pending_lock_command_id)) =
+                holding_input_hold.lock_state_before_first_lock_command
+            {
+                client.set_lock_mode(lock_mode);
+                client.set_pending_lock_command_id(pending_lock_command_id);
+            }
             *input_hold = None;
+            return;
         }
+        let Some((lock_command_id, lock_mode)) = held_lock_command else {
+            return;
+        };
+        holding_input_hold
+            .lock_state_before_first_lock_command
+            .get_or_insert((client.get_lock_mode(), client.get_pending_lock_command_id()));
+        client.apply_lock_command(lock_command_id, lock_mode);
     }
 }
 
@@ -3218,6 +3434,10 @@ struct InputHold {
     /// The bytes of paste text in `held_inputs`. At most
     /// [`MAX_FRAME_BYTE_COUNT`].
     held_paste_byte_count: usize,
+    /// The viewer's lock mode and pending lock command id from before the
+    /// first [`HeldInput::LockCommand`] this hold took, or `None` while it
+    /// took none.
+    lock_state_before_first_lock_command: Option<(LockMode, Option<CommandId>)>,
 }
 
 impl InputHold {
@@ -3228,7 +3448,9 @@ impl InputHold {
     fn hold_input(&mut self, held_input: HeldInput) -> bool {
         let paste_byte_count = match &held_input {
             HeldInput::Paste(pasted_text) => pasted_text.len(),
-            HeldInput::Keyboard(_) | HeldInput::BoundAction(_) => 0,
+            HeldInput::Keyboard(_) | HeldInput::DispatchPlan(_) | HeldInput::LockCommand { .. } => {
+                0
+            }
         };
         let held_paste_byte_count = self.held_paste_byte_count.saturating_add(paste_byte_count);
         if self.held_inputs.len() >= MAX_HELD_INPUT_COUNT
@@ -3249,9 +3471,18 @@ enum HeldInput {
     /// A key the base keymap passed through, or a key release. Sent as
     /// [`IpcRequestKind::Keyboard`].
     Keyboard(KeyInput),
-    /// A binding the base keymap fired, other than the quit binding. Run as
-    /// [`Uplink::submit_bound_action`] runs it.
-    BoundAction(BoundAction),
+    /// The plan of a binding the base keymap fired, other than the quit
+    /// binding and a lock binding. Run as [`Uplink::run_dispatch_plan`] runs
+    /// it.
+    DispatchPlan(DispatchPlan),
+    /// A lock binding the base keymap fired. Sent as the `SetLockMode` command
+    /// for `lock_mode` under `lock_command_id`.
+    LockCommand {
+        /// The command id the viewer waits for, minted when the binding fired.
+        lock_command_id: CommandId,
+        /// The lock mode the binding set on the viewer when it fired.
+        lock_mode: LockMode,
+    },
     /// Pasted text. Sent as [`IpcRequestKind::Paste`].
     Paste(String),
 }
@@ -3272,9 +3503,14 @@ enum HeldInput {
 ///
 /// Keys resolve against the base keymap, never the pane placement keymap. The
 /// quit binding, including one an ambiguity deadline fires, returns
-/// [`AttachmentEnding::LeftWhileReconnecting`] at once. Every other key and
+/// [`AttachmentEnding::LeftWhileReconnecting`] at once. A join that is still
+/// on the channel then sends `Leaving { is_returning: true }` when the channel
+/// is dropped, as [`JoinedSessionGuard`] states. Every other key and
 /// paste is held through [`LinkRecovery::hold_input`] for a restart rejoin,
-/// and dropped for a redial; a key that opens a sequence keeps its breadcrumb.
+/// and dropped for a redial, as [`hold_fired_binding`] says for a binding; a
+/// key that opens a sequence keeps its breadcrumb. A held lock binding
+/// switches the lock mode the next key resolves in: `<C-l>` then `<C-l>`
+/// holds `SetLockMode` for `Locked`, then for `Normal`.
 /// A frame from the connection that ended is dropped. A resize and a mouse
 /// event are dropped and not recorded. A cell-size reply is taken by
 /// `cell_size_query` and not sent. Focus lost ends pane placement mode, as
@@ -3320,10 +3556,9 @@ fn run_without_link<B: Backend>(
         };
         client.set_link_status(link_status);
         if let Some(bound_action) = client.expire_key_sequence(current_time) {
-            if uplink.is_quit_binding(client, &bound_action) {
+            if hold_fired_binding(&mut link_recovery, client, uplink, bound_action).is_break() {
                 break Err(AttachmentEnding::LeftWhileReconnecting);
             }
-            link_recovery.hold_input(client, HeldInput::BoundAction(bound_action));
         }
         screen.refresh(client, active_tab_id);
         let incoming_event = match leftover_events.next() {
@@ -3365,7 +3600,9 @@ fn run_without_link<B: Backend>(
             // A frame read from the connection that ended.
             Incoming::Frame { .. } => {}
             Incoming::RejoinAnswer(rejoin_answer) => match *rejoin_answer {
-                RejoinAnswer::Joined(joined_session) => break Ok(joined_session),
+                RejoinAnswer::Joined(joined_session_guard) => {
+                    break Ok(joined_session_guard.release_joined_session())
+                }
                 RejoinAnswer::Ended(attachment_ending) => break Err(attachment_ending),
                 RejoinAnswer::Unreachable(dial_failure) => match &mut link_recovery {
                     LinkRecovery::Redial(redial_schedule) => {
@@ -3389,10 +3626,11 @@ fn run_without_link<B: Backend>(
                     };
                     match client.resolve_key(chord, Instant::now()) {
                         KeyOutcome::Fire(bound_action) => {
-                            if uplink.is_quit_binding(client, &bound_action) {
+                            if hold_fired_binding(&mut link_recovery, client, uplink, bound_action)
+                                .is_break()
+                            {
                                 break Err(AttachmentEnding::LeftWhileReconnecting);
                             }
-                            link_recovery.hold_input(client, HeldInput::BoundAction(bound_action));
                         }
                         KeyOutcome::PassThrough(_) => {
                             link_recovery.hold_input(client, HeldInput::Keyboard(key_input));
@@ -3430,8 +3668,9 @@ fn run_without_link<B: Backend>(
 /// [`Incoming::RejoinAnswer`].
 ///
 /// A panic in `attempt_rejoin` answers [`RejoinAnswer::Ended`] carrying
-/// [`AttachmentEnding::LinkLost`]. An answer the loop no longer reads is
-/// dropped, and a connection it joined closes with it.
+/// [`AttachmentEnding::LinkLost`]. An answer that the loop no longer reads is
+/// dropped: a connection it joined sends `Leaving { is_returning: true }`,
+/// then closes, as [`JoinedSessionGuard`] states.
 fn spawn_rejoin_attempt(
     attempt_rejoin: Arc<dyn Fn() -> RejoinAnswer + Send + Sync>,
     incoming_sender: mpsc::SyncSender<Incoming>,
@@ -3459,7 +3698,9 @@ fn spawn_rejoin_attempt(
 /// [`DialError::Unreachable`] or a [`DialError::Restarting`].
 fn build_redial_answer(dial_result: Result<JoinedSession, DialError>) -> RejoinAnswer {
     match dial_result {
-        Ok(joined_session) => RejoinAnswer::Joined(joined_session),
+        Ok(joined_session) => {
+            RejoinAnswer::Joined(JoinedSessionGuard::from_joined_session(joined_session))
+        }
         Err(DialError::Refused(dial_refusal)) => {
             tracing::warn!(%dial_refusal, "the server refused this client's dial");
             RejoinAnswer::Ended(AttachmentEnding::LinkLost(Box::new(dial_refusal)))
@@ -3470,17 +3711,68 @@ fn build_redial_answer(dial_result: Result<JoinedSession, DialError>) -> RejoinA
     }
 }
 
-/// Send what a restart rejoin held, oldest first: a key as
-/// [`IpcRequestKind::Keyboard`], a fired binding through
-/// [`Uplink::submit_bound_action`], and a paste as [`IpcRequestKind::Paste`].
+/// Answer one binding that fired while this viewer has no link, against the
+/// action table. Returns [`ControlFlow::Break`] for the quit binding, holding
+/// nothing, and [`ControlFlow::Continue`] for every other binding.
+///
+/// A lock binding is held as [`HeldInput::LockCommand`] for the lock mode it
+/// sets from `client`'s lock mode, under a new command id. Every other binding
+/// is held as its [`HeldInput::DispatchPlan`]. Both go through
+/// [`LinkRecovery::hold_input`]. An action the table refuses is held as
+/// nothing.
+fn hold_fired_binding(
+    link_recovery: &mut LinkRecovery,
+    client: &mut Client,
+    uplink: &Uplink,
+    bound_action: BoundAction,
+) -> ControlFlow<()> {
+    let Some(dispatch_plan) = uplink.resolve_bound_action(client, &bound_action) else {
+        return ControlFlow::Continue(());
+    };
+    if is_quit_dispatch_plan(&dispatch_plan) {
+        return ControlFlow::Break(());
+    }
+    let held_input = match find_lock_mode_set_by(&dispatch_plan, client.get_lock_mode()) {
+        Some(lock_mode) => HeldInput::LockCommand {
+            lock_command_id: CommandId::new(),
+            lock_mode,
+        },
+        None => HeldInput::DispatchPlan(dispatch_plan),
+    };
+    link_recovery.hold_input(client, held_input);
+    ControlFlow::Continue(())
+}
+
+/// Send what a restart rejoin held up a new connection, oldest first: a key as
+/// [`IpcRequestKind::Keyboard`], a binding's plan through
+/// [`Uplink::run_dispatch_plan`], a lock command as `SetLockMode` under its
+/// own command id, and a paste as [`IpcRequestKind::Paste`].
+///
+/// `client` stops waiting for a lock command sent on the connection that
+/// ended, and waits for the last held lock command sent here, as
+/// [`Client::set_pending_lock_command_id`] says. With no held lock command,
+/// the new connection's first frame sets the lock mode. The lock mode each
+/// held lock command set when it was held stays as it is.
 fn send_held_inputs(client: &mut Client, uplink: &mut Uplink, held_inputs: Vec<HeldInput>) {
+    client.set_pending_lock_command_id(None);
     for held_input in held_inputs {
         match held_input {
             HeldInput::Keyboard(key_input) => {
                 uplink.send_request(IpcRequestKind::Keyboard { key_input });
             }
-            HeldInput::BoundAction(bound_action) => {
-                uplink.submit_bound_action(client, bound_action);
+            HeldInput::DispatchPlan(dispatch_plan) => {
+                uplink.run_dispatch_plan(client, dispatch_plan);
+            }
+            HeldInput::LockCommand {
+                lock_command_id,
+                lock_mode,
+            } => {
+                uplink.submit_key_binding_command(
+                    client,
+                    lock_command_id,
+                    build_set_lock_mode_command(lock_mode),
+                );
+                client.set_pending_lock_command_id(Some(lock_command_id));
             }
             HeldInput::Paste(pasted_text) => {
                 uplink.send_request(IpcRequestKind::Paste { pasted_text });
@@ -3493,7 +3785,7 @@ fn send_held_inputs(client: &mut Client, uplink: &mut Uplink, held_inputs: Vec<H
 /// [`MAX_QUIT_WRITE_WAIT_DURATION`] for its writer thread to hand every queued
 /// request to the socket, and return [`AttachmentEnding::Detached`].
 fn leave_after_quit(uplink: &mut Uplink) -> AttachmentEnding {
-    if !uplink.close_request_queue(Instant::now() + MAX_QUIT_WRITE_WAIT_DURATION) {
+    if !uplink.drain_request_queue(Instant::now() + MAX_QUIT_WRITE_WAIT_DURATION) {
         tracing::warn!("the connection did not take the quit in time; leaving without it");
     }
     AttachmentEnding::Detached
@@ -3785,9 +4077,10 @@ fn join_session(
 /// `resume_client_id` names the client record to come back as, and is `None` on a first
 /// join. `resume_token` is the secret the last attach minted, presented to get
 /// that attach's view back, and is `None` on a first join and whenever no
-/// token was minted. `link_timeout_ms` is the longest the session waits for
-/// this client's next request: `remote-link-timeout-ms` on a link to another
-/// machine, and `None` on this machine. Reports the pane area left by the
+/// token was minted. `link_timeout_ms` is `remote-link-timeout-ms` on a link
+/// to another machine, and the session writes this client a `Pong` whenever it
+/// has written it nothing for a third of it. It is `None` on this machine,
+/// where the session writes no `Pong`. Reports the pane area left by the
 /// built-in two-row UI.
 fn build_attach_request(
     resume_client_id: Option<ClientId>,
@@ -4002,7 +4295,8 @@ fn spawn_frame_reader(
 ///
 /// A request over the frame cap — a paste of more text than one frame carries —
 /// is refused with nothing written, and that request alone is dropped; the next
-/// one goes out. Any other failed write ends the thread.
+/// one goes out. Any other failed write ends the thread, a write past the idle
+/// timeout of `writer` included.
 fn spawn_uplink_writer(mut writer: FrameWriter) -> UplinkWriter {
     let (request_sender, request_receiver) = mpsc::channel::<IpcRequest>();
     let (writer_end_sender, writer_end_receiver) = mpsc::channel::<()>();
@@ -4248,14 +4542,14 @@ fn build_input_channel() -> (mpsc::SyncSender<RuntimeEvent>, mpsc::Receiver<Runt
 /// `cell_size_query` holds the attachment's terminal query state: a resize
 /// invalidates it and a cell-size reply settles it.
 ///
-/// Returns `true` when the key fired the quit binding, after `core:quit` is
-/// queued, and `false` for every other event.
+/// Returns [`ControlFlow::Break`] when the key fired the quit binding, after
+/// `core:quit` is queued, and [`ControlFlow::Continue`] for every other event.
 fn process_runtime_input_with_cell_size(
     client: &mut Client,
     uplink: &mut Uplink,
     cell_size_query: &mut terminal::CellSizeQuery,
     runtime_event: RuntimeEvent,
-) -> bool {
+) -> ControlFlow<()> {
     match runtime_event {
         RuntimeEvent::CellSize { cell_size, .. } => {
             let (reported_cell_size, needs_cell_size_query) =
@@ -4276,7 +4570,7 @@ fn process_runtime_input_with_cell_size(
                 if !client.is_placement_mode_active() {
                     uplink.send_request(IpcRequestKind::Keyboard { key_input });
                 }
-                return false;
+                return ControlFlow::Continue(());
             };
             match client.resolve_key(chord, Instant::now()) {
                 KeyOutcome::Fire(bound_action) => {
@@ -4315,7 +4609,7 @@ fn process_runtime_input_with_cell_size(
         }
         RuntimeEvent::HostPaste { pasted_text, .. } => {
             if client.is_placement_mode_active() {
-                return false;
+                return ControlFlow::Continue(());
             }
             // The text belongs to the program in the pane, so a selection
             // gesture over it is over.
@@ -4324,7 +4618,7 @@ fn process_runtime_input_with_cell_size(
         }
         _ => {}
     }
-    false
+    ControlFlow::Continue(())
 }
 
 /// Start the newest placement read retained while an earlier read was in flight.
@@ -4336,8 +4630,8 @@ fn send_next_queued_placement_read(client: &mut Client, uplink: &mut Uplink) {
 
 /// Fire the viewer's open key sequence if its ambiguity deadline has passed at
 /// `current_time`, sending the commands it resolves to up the connection.
-/// Returns `true` when the sequence fired the quit binding, after `core:quit`
-/// is queued, and `false` otherwise.
+/// Returns [`ControlFlow::Break`] when the sequence fired the quit binding,
+/// after `core:quit` is queued, and [`ControlFlow::Continue`] otherwise.
 ///
 /// A sequence that is both a complete binding and a longer one's prefix fires
 /// when its deadline passes. The viewer holds it, so it decides; the session
@@ -4346,9 +4640,9 @@ fn fire_expired_key_sequence(
     client: &mut Client,
     uplink: &mut Uplink,
     current_time: Instant,
-) -> bool {
+) -> ControlFlow<()> {
     let Some(bound_action) = client.expire_key_sequence(current_time) else {
-        return false;
+        return ControlFlow::Continue(());
     };
     uplink.submit_bound_action(client, bound_action)
 }

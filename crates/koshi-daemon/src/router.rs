@@ -151,7 +151,8 @@ use koshi_runtime::server::is_binary_runnable;
 #[cfg(unix)]
 use crate::process;
 use crate::remote_listener::{
-    self, AdmissionAsk, LocateRefusal, RemoteConnectionAdmission, WarningRateLimiter,
+    self, AdmissionAsk, BoundRemoteListener, LocateRefusal, RemoteConnectionAdmission,
+    WarningRateLimiter,
 };
 use crate::session_server::{ALLOW_OTHER_USERS_FLAG, SESSION_SERVER_SUBCOMMAND};
 
@@ -691,8 +692,9 @@ struct AdmittedRemoteConnection {
 /// carries, and nothing is registered for it.
 pub(crate) const MAX_LIVE_REMOTE_CONNECTION_COUNT: usize = 128;
 
-/// What the router holds for remote clients: where the listener binds, whether
-/// it is open, and the connections it has admitted.
+/// What the router holds for remote clients: where the listener binds, the
+/// certificate it serves while it is open, and the connections it has
+/// admitted.
 ///
 /// Owned by the dispatcher loop alone, as the session list is.
 struct RemoteState {
@@ -702,8 +704,9 @@ struct RemoteState {
     /// The koshi data directory holding the certificate and the record of the
     /// operator's yes, or `None` when this machine has none.
     data_directory: Option<PathBuf>,
-    /// Whether the listener is open.
-    is_listening: bool,
+    /// The fingerprint of the certificate the open listener presents, as 64
+    /// lowercase hex characters, or `None` while the listener is not open.
+    served_certificate_fingerprint: Option<String>,
     /// The remote connections this machine has admitted, whether they have
     /// attached to a session or not. Never longer than [`MAX_LIVE_REMOTE_CONNECTION_COUNT`].
     admitted_remote_connections: Vec<AdmittedRemoteConnection>,
@@ -945,7 +948,7 @@ pub fn run_router(
         )
         .remote_listen_address,
         data_directory,
-        is_listening: false,
+        served_certificate_fingerprint: None,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -1070,39 +1073,49 @@ fn open_remote_listener(
         );
         return;
     };
-    let certificate_file = match load_or_create_certificate(&data_directory) {
-        Ok((certificate_file, _)) => certificate_file,
-        Err(certificate_error) => {
-            tracing::warn!(
-                "the remote listener could not open {remote_listen_address}: {certificate_error}; local clients are \
-                 unaffected"
-            );
-            return;
-        }
-    };
-    let bound_listener = match remote_listener::bind_remote_listener(
-        remote_listen_address,
-        &certificate_file,
-    ) {
-        Ok(bound_listener) => bound_listener,
-        Err(bind_error) => {
-            tracing::warn!(
-                "the remote listener could not open {remote_listen_address}: {bind_error}; local clients are \
-                 unaffected"
-            );
-            return;
-        }
-    };
+    let (bound_listener, certificate_fingerprint) =
+        match bind_remote_listener_with_certificate(&data_directory, remote_listen_address) {
+            Ok(bound_listener_and_fingerprint) => bound_listener_and_fingerprint,
+            Err(listener_open_error) => {
+                tracing::warn!("{listener_open_error}; local clients are unaffected");
+                return;
+            }
+        };
     bound_listener.start_serving(router_events_sender.clone(), Arc::clone(executable_watch));
-    remote_state.is_listening = true;
+    remote_state.served_certificate_fingerprint = Some(certificate_fingerprint);
+}
+
+/// Take the port at `remote_listen_address`, presenting this machine's
+/// certificate from `data_directory` ([`load_or_create_certificate`]), without
+/// serving on it yet ([`remote_listener::bind_remote_listener`]).
+///
+/// Returns the bound listener and the fingerprint of the certificate it
+/// presents.
+///
+/// # Errors
+/// The sentence `the remote listener could not open <address>: <cause>`. The
+/// cause is the certificate that could not be read, generated or written, or
+/// the address that could not be bound.
+fn bind_remote_listener_with_certificate(
+    data_directory: &Path,
+    remote_listen_address: SocketAddr,
+) -> Result<(BoundRemoteListener, String), String> {
+    let build_open_error = |open_error: &dyn fmt::Display| {
+        format!("the remote listener could not open {remote_listen_address}: {open_error}")
+    };
+    let (certificate_file, certificate_fingerprint) = load_or_create_certificate(data_directory)
+        .map_err(|certificate_error| build_open_error(&certificate_error))?;
+    let bound_listener =
+        remote_listener::bind_remote_listener(remote_listen_address, &certificate_file)
+            .map_err(|bind_error| build_open_error(&bind_error))?;
+    Ok((bound_listener, certificate_fingerprint))
 }
 
 /// This machine's certificate and its fingerprint, generating one when there is
 /// none to read.
 ///
-/// The certificate koshi generates names `koshi`. A dialling client pins the
-/// fingerprint of the certificate it was shown and checks nothing else about
-/// it.
+/// The certificate koshi generates names `koshi`. A dialling client checks the
+/// fingerprint of the certificate it is shown and nothing else about it.
 ///
 /// # Errors
 /// [`IpcError::RemoteFileUnreadable`] for an existing certificate that cannot
@@ -1930,29 +1943,23 @@ fn locate_remote_session(
 
 /// What this machine's remote access is set to: the address `koshi.kdl` names,
 /// whether the operator has switched remote access on, whether this router is
-/// holding the port right now, the fingerprint of the certificate this machine
-/// presents once it has one, and how many connections from another machine
-/// this router holds admitted.
+/// holding the port right now, the fingerprint of the certificate the open
+/// listener presents, and how many connections from another machine this
+/// router holds admitted.
 ///
 /// `is_remote_access_enabled` and `is_listening` are separate answers: an
 /// operator who said yes on a machine whose address something else holds reads
 /// `is_remote_access_enabled: true` and `is_listening: false`.
+/// `certificate_fingerprint` is `Some` exactly when `is_listening` is `true`.
 fn build_remote_status_result(remote_state: &RemoteState) -> RouterResult {
-    let data_directory = remote_state.data_directory.as_deref();
     RouterResult::RemoteStatus {
         remote_listen_address: remote_state.remote_listen_address,
-        is_remote_access_enabled: data_directory.is_some_and(is_remote_access_enabled),
-        is_listening: remote_state.is_listening,
-        certificate_fingerprint: data_directory
-            .and_then(|data_directory| {
-                CertificateFile::load_from_path(&CertificateFile::resolve_certificate_file_path(
-                    data_directory,
-                ))
-                .ok()
-            })
-            .map(|certificate_file| {
-                tls::compute_certificate_fingerprint(&certificate_file.cert_der)
-            }),
+        is_remote_access_enabled: remote_state
+            .data_directory
+            .as_deref()
+            .is_some_and(is_remote_access_enabled),
+        is_listening: remote_state.served_certificate_fingerprint.is_some(),
+        certificate_fingerprint: remote_state.served_certificate_fingerprint.clone(),
         remote_connection_count: remote_state.admitted_remote_connections.len(),
     }
 }
@@ -1961,11 +1968,14 @@ fn build_remote_status_result(remote_state: &RemoteState) -> RouterResult {
 /// it has none, take the port when it is not already held, write the record that
 /// reopens it on the next start, then serve.
 ///
-/// A port that cannot be taken writes no record. A record that cannot be written
-/// gives the port back. Serving is last and cannot fail.
+/// A certificate that cannot be made and a port that cannot be taken are refused
+/// with `the remote listener could not open <address>: <cause>`, and write no
+/// record. A record that cannot be written gives the port back. Serving is last
+/// and cannot fail.
 ///
-/// An address already being listened on skips the bind and the serve, and is
-/// answered with the fingerprint it presents.
+/// An address already being listened on skips the certificate, the bind and
+/// the serve, and is answered with the fingerprint of the certificate the
+/// listener presents. The certificate file is not read then.
 fn enable_remote_access(
     remote_state: &mut RemoteState,
     executable_watch: &Arc<ExecutableWatch>,
@@ -1983,21 +1993,15 @@ fn enable_remote_access(
                 .to_string(),
         );
     };
-    let (certificate_file, certificate_fingerprint) =
-        match load_or_create_certificate(&data_directory) {
-            Ok(loaded_certificate) => loaded_certificate,
-            Err(certificate_error) => return build_refused_result(certificate_error.to_string()),
-        };
-
-    let bound_listener = if remote_state.is_listening {
-        None
-    } else {
-        match remote_listener::bind_remote_listener(remote_listen_address, &certificate_file) {
-            Ok(bound_listener) => Some(bound_listener),
-            Err(bind_error) => {
-                return build_refused_result(format!(
-                    "the remote listener could not open {remote_listen_address}: {bind_error}"
-                ))
+    let served_certificate_fingerprint = remote_state.served_certificate_fingerprint.clone();
+    let (bound_listener, certificate_fingerprint) = match served_certificate_fingerprint {
+        Some(served_certificate_fingerprint) => (None, served_certificate_fingerprint),
+        None => {
+            match bind_remote_listener_with_certificate(&data_directory, remote_listen_address) {
+                Ok((bound_listener, certificate_fingerprint)) => {
+                    (Some(bound_listener), certificate_fingerprint)
+                }
+                Err(listener_open_error) => return build_refused_result(listener_open_error),
             }
         }
     };
@@ -2016,7 +2020,7 @@ fn enable_remote_access(
 
     if let Some(bound_listener) = bound_listener {
         bound_listener.start_serving(router_events_sender.clone(), Arc::clone(executable_watch));
-        remote_state.is_listening = true;
+        remote_state.served_certificate_fingerprint = Some(certificate_fingerprint.clone());
     }
     RouterResult::RemoteEnabled {
         remote_listen_address,

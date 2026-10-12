@@ -61,7 +61,7 @@ fn build_selection_runtime() -> (Server, ViewerClient, PaneId) {
 fn build_selection_runtime_with_outer_terminal(
 ) -> (Server, ViewerClient, PaneId, mpsc::Receiver<Delivery>) {
     let (mut server, client_id, pane_id) = build_selection_server();
-    let outer_terminal_receiver = server.subscribe(client_id);
+    let (outer_terminal_receiver, _) = server.subscribe(client_id);
     let viewer = build_viewer(&mut server, client_id);
     (server, viewer, pane_id, outer_terminal_receiver)
 }

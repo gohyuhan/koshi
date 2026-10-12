@@ -157,7 +157,13 @@ pub fn run_share_command(
                         has_replaced_active_grant,
                         || {
                             resolve_remote_ready_or_unknown(resolve_remote_access_ready(
-                                &runtime_directory,
+                                prompt::read_yes_answer,
+                                |router_request_kind| {
+                                    router_client::submit_router_request(
+                                        &runtime_directory,
+                                        router_request_kind,
+                                    )
+                                },
                             ))
                         },
                     )
@@ -390,49 +396,79 @@ fn resolve_remote_ready_or_unknown(
 /// What a fresh grant can reach, and the offer that changes the answer.
 ///
 /// Asks the router for the listen address, whether remote access is switched
-/// on, and whether the port is held right now, then:
+/// on, whether the port is held right now, and the fingerprint of the
+/// certificate the listener presents, then:
 ///
 /// - no address — [`RemoteReady::NoAddress`], nothing asked;
-/// - on and listening — [`RemoteReady::On`], nothing asked;
-/// - otherwise asks on standard error, and a yes sends
+/// - on and listening — [`RemoteReady::On`] carrying that fingerprint, nothing
+///   asked; a router that names no fingerprint then is a
+///   [`CliError::Runtime`];
+/// - otherwise asks `confirm_enable`, and a yes sends
 ///   [`RouterRequestKind::EnableRemote`]. With remote access off, the question
 ///   reads `remote access is off.` then `turn it on and open <address>? [y/N]`;
 ///   with it on and nothing listening, `remote access is on, and nothing is
 ///   listening on <address>.` then `try to open <address> now? [y/N]`.
 ///
-/// A yes that opens the port is [`RemoteReady::On`]. A no is
-/// [`RemoteReady::Off`] when remote access was off, and
-/// [`RemoteReady::Blocked`] when it was on. A refused enable is
+/// A yes that opens the port is [`RemoteReady::On`] carrying the fingerprint
+/// the enable answer names. A no is [`RemoteReady::Off`] when remote access
+/// was off, and [`RemoteReady::Blocked`] when it was on. A refused enable is
 /// [`RemoteReady::Blocked`].
-fn resolve_remote_access_ready(runtime_directory: &Path) -> Result<RemoteReady, CliError> {
-    let remote_status_response =
-        router_client::submit_router_request(runtime_directory, RouterRequestKind::RemoteStatus)?;
-    let (remote_listen_address, is_remote_access_enabled, is_remote_listener_active) =
-        match remote_status_response {
-            RouterResult::RemoteStatus {
-                remote_listen_address,
-                is_remote_access_enabled,
-                is_listening,
-                ..
-            } => (
-                remote_listen_address,
-                is_remote_access_enabled,
-                is_listening,
-            ),
-            unexpected_router_result => {
-                return Err(build_router_refusal(&unexpected_router_result))
-            }
-        };
+///
+/// `confirm_enable` is asked at most once, with the question to print; the
+/// command passes `prompt::read_yes_answer`, which prints it on standard error.
+/// `request_router` carries one control-plane request to the router and hands
+/// back its answer; the command passes
+/// [`router_client::submit_router_request`].
+///
+/// # Errors
+/// Whatever `request_router` reports. [`CliError::Runtime`] when the router
+/// refuses the status request, and when it serves and names no fingerprint.
+/// [`CliError::IpcUnavailable`] when an answer names a result its request
+/// cannot produce.
+fn resolve_remote_access_ready(
+    confirm_enable: impl FnOnce(&str) -> bool,
+    mut request_router: impl FnMut(RouterRequestKind) -> Result<RouterResult, CliError>,
+) -> Result<RemoteReady, CliError> {
+    let remote_status_response = request_router(RouterRequestKind::RemoteStatus)?;
+    let (
+        remote_listen_address,
+        is_remote_access_enabled,
+        is_remote_listener_active,
+        served_certificate_fingerprint,
+    ) = match remote_status_response {
+        RouterResult::RemoteStatus {
+            remote_listen_address,
+            is_remote_access_enabled,
+            is_listening,
+            certificate_fingerprint,
+            ..
+        } => (
+            remote_listen_address,
+            is_remote_access_enabled,
+            is_listening,
+            certificate_fingerprint,
+        ),
+        unexpected_router_result => return Err(build_router_refusal(&unexpected_router_result)),
+    };
     let Some(remote_listen_address) = remote_listen_address else {
         return Ok(RemoteReady::NoAddress);
     };
     if is_remote_access_enabled && is_remote_listener_active {
+        let Some(certificate_fingerprint) = served_certificate_fingerprint else {
+            return Err(CliError::Runtime {
+                detail: format!(
+                    "the router serves {remote_listen_address} and named no certificate \
+                     fingerprint"
+                ),
+            });
+        };
         return Ok(RemoteReady::On {
             host_addresses: list_host_addresses_for_listen_address(
                 remote_listen_address,
                 host_addresses::list_host_addresses,
             ),
             remote_listen_address,
+            certificate_fingerprint,
         });
     }
     let prompt_text = if is_remote_access_enabled {
@@ -443,7 +479,7 @@ fn resolve_remote_access_ready(runtime_directory: &Path) -> Result<RemoteReady, 
     } else {
         format!("remote access is off.\nturn it on and open {remote_listen_address}? [y/N] ")
     };
-    if !prompt::read_yes_answer(&prompt_text) {
+    if !confirm_enable(&prompt_text) {
         return Ok(if is_remote_access_enabled {
             RemoteReady::Blocked {
                 remote_listen_address,
@@ -452,17 +488,17 @@ fn resolve_remote_access_ready(runtime_directory: &Path) -> Result<RemoteReady, 
             RemoteReady::Off
         });
     }
-    match router_client::submit_router_request(runtime_directory, RouterRequestKind::EnableRemote)?
-    {
+    match request_router(RouterRequestKind::EnableRemote)? {
         RouterResult::RemoteEnabled {
             remote_listen_address,
-            ..
+            certificate_fingerprint,
         } => Ok(RemoteReady::On {
             host_addresses: list_host_addresses_for_listen_address(
                 remote_listen_address,
                 host_addresses::list_host_addresses,
             ),
             remote_listen_address,
+            certificate_fingerprint,
         }),
         RouterResult::Error(_) => Ok(RemoteReady::Blocked {
             remote_listen_address,

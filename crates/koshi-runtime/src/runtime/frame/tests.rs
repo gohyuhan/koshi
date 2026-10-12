@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use koshi_core::geometry::{Point, Rect, Size};
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_ipc::event::SessionEvent;
@@ -308,6 +308,7 @@ fn build_render_snapshot(content_pane_id: PaneId, empty_pane_id: PaneId) -> Rend
             active_tab_id: tab_id,
             focused_pane_id: Some(content_pane_id),
             lock_mode: LockMode::Locked,
+            last_applied_lock_command_id: Some(CommandId::new()),
             is_mouse_selection_enabled: true,
         },
     }
@@ -939,6 +940,9 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
             active_tab_id: render_snapshot.session_snapshot.active_tab_snapshot.tab_id,
             focused_pane_id: Some(focused_pane_id),
             lock_mode: LockMode::Locked,
+            last_applied_lock_command_id: render_snapshot
+                .client_snapshot
+                .last_applied_lock_command_id,
             is_mouse_selection_enabled: true,
         }
     );

@@ -1,6 +1,7 @@
 //! Unit tests for [`add_koshi_environment`]: the full variable set, the prefixed id
 //! forms, the omitted-variable cases (no designated client, no runtime
-//! directory), and the stand-in clipboard tool folder on `PATH`.
+//! directory), and the stand-in clipboard tool folder on `PATH` on Linux and
+//! macOS. On Windows the folder does not go on `PATH`.
 
 use super::*;
 
@@ -172,7 +173,6 @@ fn no_runtime_directory_omits_the_socket_variable() {
 /// The overlay of a spec whose own `PATH` is `spec_path`, after
 /// [`add_koshi_environment`] with the stand-in clipboard tools on and the
 /// runtime directory `runtime_directory_path`.
-#[cfg(unix)]
 fn build_environment_with_clipboard_tools(
     spec_path: Option<&str>,
     runtime_directory_path: Option<&Path>,
@@ -220,6 +220,19 @@ fn clipboard_tools_put_the_session_folder_in_front_of_the_process_path_when_the_
         _ => None,
     };
     assert_eq!(environment_variables.get("PATH").cloned(), expected_path);
+}
+
+#[cfg(windows)]
+#[test]
+fn clipboard_tools_leave_the_path_as_it_is_on_windows() {
+    let environment_variables = build_environment_with_clipboard_tools(
+        Some(r"C:\Windows\System32"),
+        Some(Path::new(r"C:\unused")),
+    );
+    assert_eq!(
+        environment_variables.get("PATH").map(String::as_str),
+        Some(r"C:\Windows\System32")
+    );
 }
 
 #[cfg(unix)]

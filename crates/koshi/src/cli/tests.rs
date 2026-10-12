@@ -2,7 +2,7 @@
 //! launch, the headless launch, lifecycle commands, the typed action
 //! subcommands and their command mapping, and usage-error diagnostics.
 
-use clap::error::ErrorKind;
+use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::CommandFactory;
 use clap::Parser;
 use koshi_config::app_config::parse_app_config;
@@ -60,6 +60,7 @@ fn bare_koshi_is_the_interactive_launch() {
             should_allow_other_users: false,
             profile_name: None,
             remote_server_reference: None,
+            certificate_fingerprint: None,
             command: None,
         }
     );
@@ -83,6 +84,7 @@ fn headless_creates_a_session_without_the_interactive_launch() {
             should_allow_other_users: false,
             profile_name: None,
             remote_server_reference: None,
+            certificate_fingerprint: None,
             command: None,
         }
     );
@@ -99,6 +101,7 @@ fn headless_takes_the_other_users_flag_beside_it() {
             should_allow_other_users: true,
             profile_name: None,
             remote_server_reference: None,
+            certificate_fingerprint: None,
             command: None,
         }
     );
@@ -122,6 +125,7 @@ fn attach_without_a_session_picks_one_at_runtime() {
             should_allow_other_users: false,
             profile_name: None,
             remote_server_reference: None,
+            certificate_fingerprint: None,
             command: Some(CliCommand::Attach {
                 session_argument: None,
                 save_as: None,
@@ -168,10 +172,132 @@ fn attach_takes_a_server_and_the_name_to_save_it_under() {
 
 #[test]
 fn a_name_to_save_a_server_under_without_a_server_is_a_usage_error() {
-    // `--save-as` is declared `requires = "remote"`.
+    // `--save-as` is declared `requires = "remote_server_reference"`.
     let cli_error = parse_cli_error(&["koshi", "attach", "--save-as", "work"]);
 
     assert_eq!(cli_error.kind(), ErrorKind::MissingRequiredArgument);
+}
+
+#[test]
+fn a_certificate_fingerprint_beside_a_server_reaches_each_verb_that_dials() {
+    let certificate_fingerprint_text = "ab".repeat(32);
+    let certificate_fingerprint = certificate_fingerprint_text.as_str();
+
+    for verb in ["attach", "list-sessions", "new-pane"] {
+        let cli = parse_cli_arguments(&[
+            "koshi",
+            verb,
+            "--remote",
+            "laptop.local:7654",
+            "--certificate-fingerprint",
+            certificate_fingerprint,
+        ]);
+
+        assert_eq!(
+            cli.remote_server_reference,
+            Some("laptop.local:7654".to_string()),
+            "{verb}"
+        );
+        assert_eq!(
+            cli.certificate_fingerprint,
+            Some(certificate_fingerprint_text.clone()),
+            "{verb}"
+        );
+    }
+}
+
+#[test]
+fn a_certificate_fingerprint_without_a_server_is_a_usage_error_naming_the_server_flag() {
+    // `--certificate-fingerprint` is declared
+    // `requires = "remote_server_reference"`.
+    let certificate_fingerprint_text = "ab".repeat(32);
+    let certificate_fingerprint = certificate_fingerprint_text.as_str();
+
+    for argument_values in [
+        [
+            "koshi",
+            "attach",
+            "--certificate-fingerprint",
+            certificate_fingerprint,
+        ],
+        [
+            "koshi",
+            "list-sessions",
+            "--certificate-fingerprint",
+            certificate_fingerprint,
+        ],
+        [
+            "koshi",
+            "--headless",
+            "--certificate-fingerprint",
+            certificate_fingerprint,
+        ],
+    ] {
+        let cli_error = parse_cli_error(&argument_values);
+
+        assert_eq!(
+            cli_error.kind(),
+            ErrorKind::MissingRequiredArgument,
+            "{argument_values:?}"
+        );
+        assert_eq!(
+            cli_error.get(ContextKind::InvalidArg),
+            Some(&ContextValue::Strings(
+                vec!["--remote <SERVER>".to_string()]
+            )),
+            "{argument_values:?}"
+        );
+        assert_eq!(cli_error.exit_code(), 2, "{argument_values:?}");
+    }
+}
+
+#[test]
+fn a_server_option_before_the_verb_is_a_usage_error_naming_that_option() {
+    let certificate_fingerprint_text = "ab".repeat(32);
+    let certificate_fingerprint = certificate_fingerprint_text.as_str();
+
+    for (argument_values, prior_option) in [
+        (
+            [
+                "koshi",
+                "--remote",
+                "laptop.local:7654",
+                "attach",
+                "--save-as",
+                "work",
+            ],
+            "--remote <SERVER>",
+        ),
+        (
+            [
+                "koshi",
+                "--certificate-fingerprint",
+                certificate_fingerprint,
+                "attach",
+                "--remote",
+                "laptop.local:7654",
+            ],
+            "--certificate-fingerprint <FINGERPRINT>",
+        ),
+    ] {
+        let cli_error = parse_cli_error(&argument_values);
+
+        assert_eq!(
+            cli_error.kind(),
+            ErrorKind::ArgumentConflict,
+            "{argument_values:?}"
+        );
+        assert_eq!(
+            cli_error.get(ContextKind::PriorArg),
+            Some(&ContextValue::String(prior_option.to_string())),
+            "{argument_values:?}"
+        );
+        assert_eq!(
+            cli_error.get(ContextKind::InvalidSubcommand),
+            Some(&ContextValue::String("attach".to_string())),
+            "{argument_values:?}"
+        );
+    }
 }
 
 #[test]
@@ -203,6 +329,7 @@ fn bare_detach_names_no_target_and_no_session() {
             should_allow_other_users: false,
             profile_name: None,
             remote_server_reference: None,
+            certificate_fingerprint: None,
             command: Some(CliCommand::Detach {
                 detach_target: None,
                 should_detach_all_clients: false,
@@ -1341,7 +1468,11 @@ fn resize_pane_help_renders_its_about_usage_and_flags() {
          place; defaults to the issuing client, else the session's only attached one\n\n      \
          --remote <SERVER>\n          \
          Run this invocation against the machine SERVER names — the name it was saved under, \
-         or the `host:port` it listens on — instead of this one\n\n  \
+         or the `host:port` it listens on — instead of this one\n\n      \
+         --certificate-fingerprint <FINGERPRINT>\n          \
+         The fingerprint of the certificate the server `--remote` names must present: 64 \
+         lowercase hex characters, as `koshi share grant` prints it on that machine. Needed \
+         for a server this machine has not saved, and refused for a server it has saved\n\n  \
          -h, --help\n          Print help (see a summary with '-h')\n"
     );
 }
@@ -3720,6 +3851,7 @@ fn a_bare_invocation_naming_a_server_is_not_the_interactive_launch() {
             should_allow_other_users: false,
             profile_name: None,
             remote_server_reference: Some("work".to_string()),
+            certificate_fingerprint: None,
             command: None,
         }
     );

@@ -431,11 +431,7 @@ impl Server {
         request_id: u64,
         mouse_answers: Vec<MouseAnswer>,
     ) {
-        let Some(&(subscriber_id, _)) = self
-            .subscriptions
-            .iter()
-            .find(|&&(_, viewed_client_id)| viewed_client_id == client_id)
-        else {
+        let Some(subscriber_id) = self.find_subscriber_id_by_client_id(client_id) else {
             return;
         };
         self.event_bus

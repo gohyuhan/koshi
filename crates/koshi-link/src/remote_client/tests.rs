@@ -1,5 +1,7 @@
 //! Tests for the dialling side: which strings count as an address, which saved
-//! names are refused, which of the three lookup answers leads to a pinned dial,
+//! names and certificate fingerprints are refused, which of the three lookup
+//! answers leads to a dial and with which fingerprint, which saved server is
+//! refused before any dial,
 //! which answer to a Hello reads as a refusal a repeat dial cannot change, what
 //! an open link makes of each frame a server can answer a listing with, what
 //! one sweep of the saved servers reports, and how the lock that guards a
@@ -105,10 +107,10 @@ fn build_saved_server() -> SavedServer {
 }
 
 #[test]
-fn a_saved_server_is_dialled_with_the_certificate_pinned_for_it() {
+fn a_saved_server_resolves_to_its_own_record_and_the_fingerprint_it_holds() {
     let saved_server = build_saved_server();
     let resolved_server_reference =
-        resolve_server_reference(SavedServerLookup::Saved(&saved_server), "work")
+        resolve_server_reference(SavedServerLookup::Saved(&saved_server), "work", None)
             .expect("a saved server resolves");
     assert_eq!(
         resolved_server_reference,
@@ -117,12 +119,36 @@ fn a_saved_server_is_dialled_with_the_certificate_pinned_for_it() {
 }
 
 #[test]
+fn a_fingerprint_given_for_a_saved_server_is_refused_rather_than_ignored() {
+    let saved_server = build_saved_server();
+
+    let refusal = resolve_server_reference(
+        SavedServerLookup::Saved(&saved_server),
+        "work",
+        Some(&"aa".repeat(32)),
+    )
+    .expect_err("a fingerprint for a server that is already saved is refused");
+
+    let CliError::InvalidArgs { detail } = refusal else {
+        panic!("a fingerprint that cannot be used is a bad argument");
+    };
+    assert_eq!(
+        detail,
+        "work is already saved, so --certificate-fingerprint would change nothing; run \
+         `koshi remote edit work` to change the fingerprint it expects"
+    );
+}
+
+#[test]
 fn an_ambiguous_selector_is_refused_and_never_dialled_as_a_new_server() {
-    // `ServerReference::New` dials with no pinned fingerprint and saves whichever
-    // certificate is presented. An ambiguous selector is refused even when it
-    // has the shape of an address.
-    let refusal = resolve_server_reference(SavedServerLookup::Ambiguous, "laptop.local:7654")
-        .expect_err("an ambiguous selector is refused");
+    // An ambiguous selector is refused even when it has the shape of an
+    // address and a fingerprint comes with it.
+    let refusal = resolve_server_reference(
+        SavedServerLookup::Ambiguous,
+        "laptop.local:7654",
+        Some(&"ab".repeat(32)),
+    )
+    .expect_err("an ambiguous selector is refused");
     let CliError::InvalidArgs { detail } = refusal else {
         panic!("an ambiguous selector is a bad argument");
     };
@@ -135,20 +161,89 @@ fn an_ambiguous_selector_is_refused_and_never_dialled_as_a_new_server() {
 
 #[test]
 fn an_address_nothing_is_saved_under_is_the_one_new_server_case() {
-    let resolved_server_reference =
-        resolve_server_reference(SavedServerLookup::NotSaved, "laptop.local:7654")
-            .expect("an address with nothing saved is a new server");
+    let resolved_server_reference = resolve_server_reference(
+        SavedServerLookup::NotSaved,
+        "laptop.local:7654",
+        Some(&"ab".repeat(32)),
+    )
+    .expect("an address with nothing saved is a new server");
     assert_eq!(
         resolved_server_reference,
         ServerReference::New {
-            server_address: "laptop.local:7654".to_string()
+            server_address: "laptop.local:7654".to_string(),
+            certificate_fingerprint: "ab".repeat(32),
         }
     );
 }
 
 #[test]
+fn an_address_nothing_is_saved_under_and_no_fingerprint_is_refused_before_any_dial() {
+    let refusal = resolve_server_reference(SavedServerLookup::NotSaved, "laptop.local:7654", None)
+        .expect_err("a new server with no fingerprint is refused");
+
+    let CliError::InvalidArgs { detail } = refusal else {
+        panic!("a missing fingerprint is a bad argument, not a runtime failure");
+    };
+    assert_eq!(
+        detail,
+        "laptop.local:7654 is not saved, so the fingerprint of its certificate is needed: add \
+         `--certificate-fingerprint <FINGERPRINT>` with the fingerprint `koshi share grant` \
+         printed on that machine"
+    );
+}
+
+#[test]
+fn an_address_nothing_is_saved_under_and_a_malformed_fingerprint_is_refused() {
+    let refusal = resolve_server_reference(
+        SavedServerLookup::NotSaved,
+        "laptop.local:7654",
+        Some(&"AB".repeat(32)),
+    )
+    .expect_err("an uppercase fingerprint is refused");
+
+    let CliError::InvalidArgs { detail } = refusal else {
+        panic!("a malformed fingerprint is a bad argument, not a runtime failure");
+    };
+    assert_eq!(
+        detail,
+        "a certificate fingerprint is 64 lowercase hex characters, as `koshi share grant` \
+         prints it on the machine that serves"
+    );
+}
+
+#[test]
+fn a_fingerprint_is_sixty_four_lowercase_hex_characters_and_nothing_else() {
+    for accepted_fingerprint in ["0123456789abcdef".repeat(4), "f".repeat(64)] {
+        assert!(
+            validate_certificate_fingerprint(&accepted_fingerprint).is_ok(),
+            "{accepted_fingerprint} is a fingerprint"
+        );
+    }
+    for refused_fingerprint in [
+        String::new(),
+        "a".repeat(63),
+        "a".repeat(65),
+        "A".repeat(64),
+        "g".repeat(64),
+        format!("{} ", "a".repeat(63)),
+        format!("sha256:{}", "a".repeat(64)),
+    ] {
+        let Err(CliError::InvalidArgs { detail }) =
+            validate_certificate_fingerprint(&refused_fingerprint)
+        else {
+            panic!("{refused_fingerprint:?} is not a fingerprint");
+        };
+        assert_eq!(
+            detail,
+            "a certificate fingerprint is 64 lowercase hex characters, as `koshi share grant` \
+             prints it on the machine that serves"
+        );
+    }
+}
+
+#[test]
 fn a_plain_word_nothing_is_saved_under_is_refused_rather_than_dialled() {
-    let refusal = resolve_server_reference(SavedServerLookup::NotSaved, "work")
+    let refusal = resolve_server_reference(SavedServerLookup::NotSaved, "work", None)
         .expect_err("a name with nothing saved is refused");
 
     let CliError::InvalidArgs { detail } = refusal else {
@@ -162,7 +257,7 @@ fn a_plain_word_nothing_is_saved_under_is_refused_rather_than_dialled() {
 
 #[test]
 fn a_selector_with_nothing_in_it_names_no_saved_server() {
-    let refusal = resolve_server_reference(SavedServerLookup::NotSaved, "")
+    let refusal = resolve_server_reference(SavedServerLookup::NotSaved, "", None)
         .expect_err("an empty selector names nothing");
 
     let CliError::InvalidArgs { detail } = refusal else {
@@ -173,7 +268,7 @@ fn a_selector_with_nothing_in_it_names_no_saved_server() {
 
 #[test]
 fn naming_a_server_that_is_already_saved_is_refused_rather_than_ignored() {
-    // `--save-as` names a server this machine has not connected to.
+    // `--save-as` names a server this machine has not saved.
     let saved_server = build_saved_server();
 
     let refusal = connect_saved_server(&ServerReference::Saved(saved_server), Some("home"), None)
@@ -322,10 +417,32 @@ fn a_saved_server_is_named_by_its_name_and_a_new_one_by_its_address() {
 
     assert_eq!(
         ServerReference::New {
-            server_address: "laptop.local:7654".to_string()
+            server_address: "laptop.local:7654".to_string(),
+            certificate_fingerprint: "ab".repeat(32),
         }
         .format_server_label(),
         "laptop.local:7654"
+    );
+}
+
+#[test]
+fn a_saved_server_holding_no_fingerprint_is_refused_before_any_dial() {
+    let mut saved_server = build_saved_server();
+    saved_server.certificate_fingerprint = None;
+    // An address nothing listens on: a dial there ends unreachable, so the
+    // exact refusal below proves no dial was made.
+    saved_server.server_address = "127.0.0.1:1".to_string();
+
+    let refusal = connect_saved_server(&ServerReference::Saved(saved_server), None, None)
+        .expect_err("a saved server with no fingerprint is refused");
+
+    let DialError::Refused(CliError::InvalidArgs { detail }) = refusal else {
+        panic!("a saved server with no fingerprint is a bad argument, not an unreachable one");
+    };
+    assert_eq!(
+        detail,
+        "work holds no certificate fingerprint, so it is not dialled; run `koshi remote edit \
+         work` and give the fingerprint `koshi share grant` printed on that machine"
     );
 }
 
@@ -367,25 +484,28 @@ fn any_other_refusal_keeps_the_servers_own_sentence_and_names_the_server() {
 }
 
 #[test]
-fn a_certificate_that_changed_carries_an_ipc_failure_and_never_a_runtime_one() {
+fn a_certificate_that_is_not_the_expected_one_carries_an_ipc_failure_and_never_a_runtime_one() {
     // `probe_saved_server` reads a refused dial carrying `CliError::IpcUnavailable` as the
-    // pinned-certificate check and answers `Reach::CertificateChanged`; every
+    // certificate check and answers `Reach::CertificateMismatch`; every
     // refusal `validate_remote_server_answer` builds carries `CliError::Runtime` instead.
-    let certificate_change_error = classify_dial_failure(IpcError::CertificateChanged {
+    let certificate_mismatch_error = classify_dial_failure(IpcError::CertificateMismatch {
         server_address: "desk.local:7654".to_string(),
-        pinned_certificate: "aa".repeat(32),
-        presented_certificate: "bb".repeat(32),
+        expected_certificate_fingerprint: "aa".repeat(32),
+        presented_certificate_fingerprint: "bb".repeat(32),
     });
 
-    let DialError::Refused(CliError::IpcUnavailable { detail }) = certificate_change_error else {
-        panic!("a changed certificate is the shape `probe_saved_server` reads");
+    let DialError::Refused(CliError::IpcUnavailable { detail }) = certificate_mismatch_error else {
+        panic!(
+            "a certificate that is not the expected one is the shape `probe_saved_server` reads"
+        );
     };
     assert_eq!(
         detail,
         format!(
-            "the certificate of desk.local:7654 changed: pinned {}, \
-             presented {}. if the server was reinstalled on purpose, run \
-             `koshi remote forget desk.local:7654` and connect again.",
+            "the certificate desk.local:7654 presented is not the expected one: expected {}, \
+             presented {}. the secret was not sent. if that machine's certificate changed on \
+             purpose, `koshi share grant` there prints the new fingerprint: give it with \
+             --certificate-fingerprint, or with `koshi remote edit` for a saved server.",
             "aa".repeat(32),
             "bb".repeat(32)
         )
@@ -395,9 +515,11 @@ fn a_certificate_that_changed_carries_an_ipc_failure_and_never_a_runtime_one() {
 #[test]
 fn a_sweep_answer_names_its_server_whatever_it_says() {
     assert_eq!(
-        get_reach_server_label(&Reach::CertificateChanged {
+        get_reach_server_label(&Reach::CertificateMismatch {
             server_label: "desk".to_string(),
-            certificate_error_detail: "the certificate of desk.local:7654 changed".to_string(),
+            certificate_error_detail: "the certificate desk.local:7654 presented is not the \
+                                       expected one"
+                .to_string(),
         }),
         "desk"
     );
@@ -545,7 +667,7 @@ fn a_sweep_that_heard_nothing_reports_every_asked_server() {
 }
 
 /// An in-memory byte source standing in for the server's half of a link. The
-/// deadline is taken and ignored.
+/// deadline and the idle timeout are taken and ignored.
 struct ServerFrameByteStream(std::io::Cursor<Vec<u8>>);
 
 impl Read for ServerFrameByteStream {
@@ -556,13 +678,16 @@ impl Read for ServerFrameByteStream {
 
 impl koshi_ipc::transport::Deadlined for ServerFrameByteStream {
     fn set_deadline(&mut self, _deadline: Option<Instant>) {}
+
+    fn set_idle_timeout(&mut self, _idle_timeout: Option<Duration>) {}
 }
 
 /// A shared byte buffer that keeps every write for a reader.
 type SharedWrittenByteBufferHandle = std::sync::Arc<std::sync::Mutex<Vec<u8>>>;
 
 /// An in-memory byte sink standing in for this client's half of a link,
-/// keeping every written byte. The deadline is taken and ignored.
+/// keeping every written byte. The deadline and the idle timeout are taken and
+/// ignored.
 struct SharedWrittenByteBuffer(SharedWrittenByteBufferHandle);
 
 impl Write for SharedWrittenByteBuffer {
@@ -581,6 +706,8 @@ impl Write for SharedWrittenByteBuffer {
 
 impl koshi_ipc::transport::Deadlined for SharedWrittenByteBuffer {
     fn set_deadline(&mut self, _deadline: Option<Instant>) {}
+
+    fn set_idle_timeout(&mut self, _idle_timeout: Option<Duration>) {}
 }
 
 /// Build a link reading `server_frame_bytes` as the bytes the server sent,
@@ -600,7 +727,6 @@ fn build_remote_link(server_frame_bytes: Vec<u8>) -> (RemoteLink, SharedWrittenB
         RemoteLink {
             frame_reader,
             frame_writer,
-            certificate_fingerprint: "00".repeat(32),
         },
         written_bytes,
     )
@@ -730,11 +856,11 @@ fn a_server_that_hangs_up_before_it_answers_reports_the_peer_disconnected() {
 }
 
 #[test]
-fn attaching_writes_one_attach_frame_naming_the_session_and_its_bridge_timeout() {
+fn attaching_writes_one_attach_frame_naming_the_session_and_its_link_timeout() {
     // Whole milliseconds go up; a timeout past `u32::MAX` milliseconds goes up
     // as `u32::MAX`.
-    for (bridge_timeout, expected_bridge_timeout_ms) in [
-        (Duration::from_secs(50), 50_000),
+    for (link_timeout, expected_link_timeout_ms) in [
+        (Duration::from_secs(30), 30_000),
         (Duration::from_micros(20_000_999), 20_000),
         (Duration::from_millis(u64::from(u32::MAX)), u32::MAX),
         (Duration::from_millis(u64::from(u32::MAX) + 1), u32::MAX),
@@ -745,7 +871,7 @@ fn attaching_writes_one_attach_frame_naming_the_session_and_its_bridge_timeout()
         let (_frame_reader, frame_writer) = attach_remote_session(
             remote_link,
             SessionSelector::SessionId(session_id),
-            bridge_timeout,
+            link_timeout,
         )
         .expect("the attach is written");
         drop(frame_writer);
@@ -758,15 +884,16 @@ fn attaching_writes_one_attach_frame_naming_the_session_and_its_bridge_timeout()
             deserialize_client_frame(sent_frame_bytes),
             RemoteClientFrame::Attach {
                 session_selector: SessionSelector::SessionId(session_id),
-                bridge_timeout_ms: Some(expected_bridge_timeout_ms),
+                link_timeout_ms: Some(expected_link_timeout_ms),
             }
         );
     }
 }
 
-// A saved server pinning no certificate is never dialled by the sweep.
+// A saved server holding no certificate fingerprint is never dialled by the
+// sweep.
 #[test]
-fn a_record_with_no_pinned_certificate_is_unchecked_and_is_not_dialled() {
+fn a_record_with_no_certificate_fingerprint_is_unchecked_and_is_not_dialled() {
     let mut saved_server = build_saved_server();
     saved_server.certificate_fingerprint = None;
     // An address nothing listens on: a dial would have to fail, and this
@@ -784,7 +911,7 @@ fn a_record_with_no_pinned_certificate_is_unchecked_and_is_not_dialled() {
 // A dial that reaches nothing is unreachable, not refused: a refusal is a
 // sentence the server sent.
 #[test]
-fn a_pinned_server_nothing_answers_for_is_unreachable() {
+fn a_saved_server_nothing_answers_for_is_unreachable() {
     let mut saved_server = build_saved_server();
     // Port 1 of the loopback address: a connect there is refused, and a
     // machine that drops it instead runs out of the deadline below.
@@ -853,68 +980,6 @@ fn read_hidden_terminal_line_replaces_bytes_that_are_not_utf_8() {
     assert_eq!(
         read_hidden_terminal_line(&mut non_utf8_secret_bytes).unwrap(),
         "se\u{fffd}cret"
-    );
-}
-
-// The pin a dial presents is read from the store by address or by name.
-#[test]
-fn the_pin_for_an_address_is_the_one_its_record_holds() {
-    let mut saved_server_store = ServerStore::new();
-    let mut saved_server = build_saved_server();
-    saved_server.certificate_fingerprint = Some("cd".repeat(32));
-    saved_server_store
-        .save_server(saved_server)
-        .expect("the store takes it");
-
-    assert_eq!(
-        find_pinned_certificate_fingerprint(&saved_server_store, "desk.local:7654"),
-        Some("cd".repeat(32)),
-        "the address finds the saved server that holds the pin"
-    );
-    assert_eq!(
-        find_pinned_certificate_fingerprint(&saved_server_store, "work"),
-        Some("cd".repeat(32)),
-        "and so does the name it was saved under"
-    );
-}
-
-#[test]
-fn an_address_no_record_holds_and_a_record_that_pins_nothing_both_pin_nothing() {
-    let mut saved_server_store = ServerStore::new();
-    let mut saved_server = build_saved_server();
-    saved_server.certificate_fingerprint = None;
-    saved_server_store
-        .save_server(saved_server)
-        .expect("the store takes it");
-
-    assert_eq!(
-        find_pinned_certificate_fingerprint(&saved_server_store, "desk.local:7654"),
-        None
-    );
-    assert_eq!(
-        find_pinned_certificate_fingerprint(&saved_server_store, "nobody.local:7654"),
-        None
-    );
-}
-
-// Two records answering to one word pin nothing for that word. A hand-written
-// file can hold such a pair; `ServerStore::save_server` refuses to make one.
-#[test]
-fn a_word_two_records_answer_to_pins_nothing() {
-    let mut saved_server_store = ServerStore::new();
-    let mut primary_saved_server = build_saved_server();
-    primary_saved_server.certificate_fingerprint = Some("cd".repeat(32));
-    let mut conflicting_saved_server = build_saved_server();
-    conflicting_saved_server.server_address = "laptop.local:7654".to_string();
-    conflicting_saved_server.certificate_fingerprint = Some("ef".repeat(32));
-    saved_server_store.saved_servers.push(primary_saved_server);
-    saved_server_store
-        .saved_servers
-        .push(conflicting_saved_server);
-
-    assert_eq!(
-        find_pinned_certificate_fingerprint(&saved_server_store, "work"),
-        None
     );
 }
 
@@ -1369,7 +1434,7 @@ fn a_refusal_after_a_restarting_answer_ends_the_dialing() {
                     ROUTER_RESTARTING_MESSAGE,
                 ))),
                 Err(DialError::Refused(build_dial_error_detail(
-                    "certificate changed",
+                    "the certificate is not the expected one",
                 ))),
             ],
             &dial_count,
@@ -1379,7 +1444,10 @@ fn a_refusal_after_a_restarting_answer_ends_the_dialing() {
     let Err(DialError::Refused(refusal)) = dial_result else {
         panic!("expected the refusal, got {dial_result:?}");
     };
-    assert_eq!(refusal.to_string(), "IPC unavailable: certificate changed");
+    assert_eq!(
+        refusal.to_string(),
+        "IPC unavailable: the certificate is not the expected one"
+    );
     assert_eq!(dial_count.get(), 2);
 }
 

@@ -12,27 +12,45 @@
 //! `KOSHI_*` variables of the session's root pane. The tests of a session's
 //! folder of stand-ins start a `koshi serve-session` process under a fresh test
 //! home, with a `PATH` that names one folder holding a fake `xclip`.
-#![cfg(unix)]
+//!
+//! The stand-in runs on Linux and macOS only, and the tests that run it are
+//! built there only. On Windows a session makes no folder of stand-ins, and a
+//! new pane's `PATH` names none.
 
 mod common;
 
+#[cfg(unix)]
 use std::ffi::OsString;
+#[cfg(unix)]
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::Stdio;
+#[cfg(unix)]
+use std::process::{Command, Output};
 use std::time::Instant;
 
+#[cfg(unix)]
 use koshi_config::layer::{PartialKoshiConfig, PartialPaneClipboardWriteConfig};
 use koshi_core::ids::SessionId;
 use koshi_ipc::endpoint::{resolve_clipboard_tool_directory_path, EndpointFile};
+#[cfg(unix)]
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
+#[cfg(unix)]
+use koshi_ipc::protocol::{
+    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MAX_CLIPBOARD_COPY_PART_BYTE_COUNT,
+};
+#[cfg(unix)]
 use koshi_ipc::transport::Connection;
-use koshi_test_support::fixtures::start_program_process;
+use koshi_test_support::fixtures::{start_program_process, write_printing_program};
 use tempfile::TempDir;
 
+#[cfg(unix)]
 use common::in_process_session::{attach_test_client, forward_session_events, RunningSession};
 use common::session_connection::{
     attach_client_on_connection, create_pane, open_session_connection,
@@ -44,17 +62,38 @@ use common::{
 };
 
 /// The folder of stand-ins, named as a session names its own.
+#[cfg(unix)]
 const CLIPBOARD_TOOL_DIRECTORY_NAME: &str =
     "session-0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b.clipboard-tools";
 
 /// The last command of a fake real `xclip` that exits with code 3.
+#[cfg(unix)]
 const EXIT_WITH_CODE_3_COMMAND: &str = "exit 3";
 
 /// The last command of a fake real `xclip` that ends itself with `SIGTERM`.
+#[cfg(unix)]
 const END_BY_SIGTERM_COMMAND: &str = "kill -TERM $$";
+
+/// The script a pane runs to write its `PATH` and a line end into
+/// `pane-path.tmp` in the test home, then rename that file to
+/// `pane-path.txt`. The pane starts in the test home.
+#[cfg(unix)]
+const WRITE_PANE_PATH_SCRIPT: &str = "printf '%s\\n' \"$PATH\" > \"$HOME/pane-path.tmp\"\n\
+                                      /bin/mv \"$HOME/pane-path.tmp\" \"$HOME/pane-path.txt\"\n";
+
+/// The script a pane runs to write its `PATH` and a line end into
+/// `pane-path.tmp` in the test home, then rename that file to
+/// `pane-path.txt`. The pane starts in the test home.
+#[cfg(windows)]
+const WRITE_PANE_PATH_SCRIPT: &str =
+    ">pane-path.tmp echo %PATH%& move /Y pane-path.tmp pane-path.txt >NUL";
+
+/// The line end that [`WRITE_PANE_PATH_SCRIPT`] writes after the `PATH`.
+const PANE_PATH_LINE_END: &str = if cfg!(windows) { "\r\n" } else { "\n" };
 
 /// One test folder: a folder of stand-ins that holds the link `xclip` to the
 /// `koshi` binary under test, and an empty folder for the fake real `xclip`.
+#[cfg(unix)]
 struct StandInFixture {
     /// The test folder. Dropping it removes every file the test made.
     test_directory: TempDir,
@@ -66,10 +105,11 @@ struct StandInFixture {
     real_tool_directory: PathBuf,
 }
 
+#[cfg(unix)]
 impl StandInFixture {
     /// The `PATH` that lists the folder of stand-ins, then the folder of the
     /// fake real `xclip`.
-    fn build_path(&self) -> OsString {
+    fn build_path_entries(&self) -> OsString {
         std::env::join_paths([&self.clipboard_tool_directory, &self.real_tool_directory])
             .expect("no folder holds the separator")
     }
@@ -85,6 +125,7 @@ impl StandInFixture {
 /// `real_tool_last_command` after it records its arguments and its standard
 /// input, or nothing when `real_tool_last_command` is `None`. The fake names
 /// every file and program by its absolute path, so it runs with any `PATH`.
+#[cfg(unix)]
 fn build_stand_in_fixture(real_tool_last_command: Option<&str>) -> StandInFixture {
     let test_directory = build_short_test_directory();
     let clipboard_tool_directory = test_directory.path().join(CLIPBOARD_TOOL_DIRECTORY_NAME);
@@ -113,20 +154,22 @@ fn build_stand_in_fixture(real_tool_last_command: Option<&str>) -> StandInFixtur
     }
 }
 
-/// Run the stand-in in `fixture` with `tool_arguments`, `standard_input_bytes`
-/// on its standard input, `path` as its `PATH`, and `pane_variables` as the
-/// only other environment variables, and hand back how it ended.
+/// Run the stand-in in `stand_in_fixture` with `tool_arguments`,
+/// `standard_input_bytes` on its standard input, `path_entries` as its `PATH`,
+/// and `pane_variables` as the only other environment variables, and hand
+/// back how it ended.
+#[cfg(unix)]
 fn run_stand_in(
-    fixture: &StandInFixture,
+    stand_in_fixture: &StandInFixture,
     tool_arguments: &[&str],
     standard_input_bytes: &[u8],
-    path: &OsString,
+    path_entries: &OsString,
     pane_variables: &[(&str, String)],
 ) -> Output {
-    let mut stand_in_process = Command::new(&fixture.stand_in_path)
+    let mut stand_in_process = Command::new(&stand_in_fixture.stand_in_path)
         .args(tool_arguments)
         .env_clear()
-        .env("PATH", path)
+        .env("PATH", path_entries)
         .envs(pane_variables.iter().cloned())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -146,6 +189,7 @@ fn run_stand_in(
 
 /// The `KOSHI_*` variables of `session`'s root pane, with `KOSHI_RUNTIME_DIR`
 /// naming the session's runtime directory.
+#[cfg(unix)]
 fn build_root_pane_variables(session: &RunningSession) -> Vec<(&'static str, String)> {
     let root_pane_id = session.list_pane_ids()[0];
     vec![
@@ -160,6 +204,7 @@ fn build_root_pane_variables(session: &RunningSession) -> Vec<(&'static str, Str
 }
 
 /// A session whose `pane-clipboard-writes` allows writes.
+#[cfg(unix)]
 fn start_session_allowing_pane_clipboard_writes() -> RunningSession {
     RunningSession::start_session_with_app_config(Some(PartialKoshiConfig {
         pane_clipboard_writes: Some(PartialPaneClipboardWriteConfig {
@@ -173,6 +218,7 @@ fn start_session_allowing_pane_clipboard_writes() -> RunningSession {
 /// Attach to `session` as a client on another machine: the connection's Hello
 /// says it carries a caller on another machine, as the router's Hello does.
 /// Hands back the session events the client reads.
+#[cfg(unix)]
 fn attach_client_from_another_machine(
     session: &RunningSession,
 ) -> std::sync::mpsc::Receiver<SessionEvent> {
@@ -206,6 +252,7 @@ fn attach_client_from_another_machine(
 ///
 /// # Panics
 /// When no host write comes within [`WAIT_DURATION`].
+#[cfg(unix)]
 fn wait_for_next_host_write(session_events: &std::sync::mpsc::Receiver<SessionEvent>) -> Vec<u8> {
     let wait_deadline = Instant::now() + WAIT_DURATION;
     loop {
@@ -218,57 +265,66 @@ fn wait_for_next_host_write(session_events: &std::sync::mpsc::Receiver<SessionEv
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_read_runs_the_real_tool_in_place_with_its_arguments_and_input() {
-    let fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
+    let stand_in_fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
 
     let stand_in_output = run_stand_in(
-        &fixture,
+        &stand_in_fixture,
         &["-o", "-selection", "clipboard"],
         b"unread",
-        &fixture.build_path(),
+        &stand_in_fixture.build_path_entries(),
         &[],
     );
 
     assert_eq!(stand_in_output.status.code(), Some(3));
     assert_eq!(
-        fixture.read_recorded_file("arguments.txt"),
+        stand_in_fixture.read_recorded_file("arguments.txt"),
         Some(b"-o\n-selection\nclipboard\n".to_vec())
     );
     assert_eq!(
-        fixture.read_recorded_file("input.bin"),
+        stand_in_fixture.read_recorded_file("input.bin"),
         Some(b"unread".to_vec())
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_copy_outside_a_session_runs_the_real_tool_with_every_byte_of_the_input() {
-    let fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
+    let stand_in_fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
 
     let stand_in_output = run_stand_in(
-        &fixture,
+        &stand_in_fixture,
         &["-selection", "clipboard", "-rmlastnl"],
         b"hi\n",
-        &fixture.build_path(),
+        &stand_in_fixture.build_path_entries(),
         &[],
     );
 
     assert_eq!(stand_in_output.status.code(), Some(3));
     assert_eq!(
-        fixture.read_recorded_file("arguments.txt"),
+        stand_in_fixture.read_recorded_file("arguments.txt"),
         Some(b"-selection\nclipboard\n-rmlastnl\n".to_vec())
     );
     assert_eq!(
-        fixture.read_recorded_file("input.bin"),
+        stand_in_fixture.read_recorded_file("input.bin"),
         Some(b"hi\n".to_vec())
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_stand_in_with_no_real_tool_on_path_exits_with_127() {
-    let fixture = build_stand_in_fixture(None);
+    let stand_in_fixture = build_stand_in_fixture(None);
 
-    let stand_in_output = run_stand_in(&fixture, &["-o"], b"", &fixture.build_path(), &[]);
+    let stand_in_output = run_stand_in(
+        &stand_in_fixture,
+        &["-o"],
+        b"",
+        &stand_in_fixture.build_path_entries(),
+        &[],
+    );
 
     assert_eq!(stand_in_output.status.code(), Some(127));
     assert_eq!(
@@ -277,67 +333,76 @@ fn a_stand_in_with_no_real_tool_on_path_exits_with_127() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_copy_whose_real_tool_a_signal_ends_exits_with_128_plus_the_signal_number() {
-    let fixture = build_stand_in_fixture(Some(END_BY_SIGTERM_COMMAND));
+    let stand_in_fixture = build_stand_in_fixture(Some(END_BY_SIGTERM_COMMAND));
 
-    let stand_in_output = run_stand_in(&fixture, &[], b"hi", &fixture.build_path(), &[]);
+    let stand_in_output = run_stand_in(
+        &stand_in_fixture,
+        &[],
+        b"hi",
+        &stand_in_fixture.build_path_entries(),
+        &[],
+    );
 
     assert_eq!(stand_in_output.status.signal(), None);
     assert_eq!(stand_in_output.status.code(), Some(128 + 15));
     assert_eq!(
-        fixture.read_recorded_file("input.bin"),
+        stand_in_fixture.read_recorded_file("input.bin"),
         Some(b"hi".to_vec())
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_copy_in_a_pane_only_a_client_on_another_machine_focuses_reaches_that_client_alone() {
     let session = start_session_allowing_pane_clipboard_writes();
     let remote_session_events = attach_client_from_another_machine(&session);
-    let fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
+    let stand_in_fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
 
     let stand_in_output = run_stand_in(
-        &fixture,
+        &stand_in_fixture,
         &["-selection", "clipboard", "-rmlastnl"],
         b"hi\n",
-        &fixture.build_path(),
+        &stand_in_fixture.build_path_entries(),
         &build_root_pane_variables(&session),
     );
 
     assert_eq!(stand_in_output.status.code(), Some(0));
-    assert_eq!(fixture.read_recorded_file("arguments.txt"), None);
+    assert_eq!(stand_in_fixture.read_recorded_file("arguments.txt"), None);
     assert_eq!(
         wait_for_next_host_write(&remote_session_events),
         b"\x1b]52;c;aGk=\x07"
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_copy_that_is_not_utf8_runs_the_real_tool_and_reaches_no_client() {
     let session = start_session_allowing_pane_clipboard_writes();
     let remote_session_events = attach_client_from_another_machine(&session);
-    let fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
+    let stand_in_fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
 
     let stand_in_output = run_stand_in(
-        &fixture,
+        &stand_in_fixture,
         &["-selection", "clipboard"],
         b"hi\xff",
-        &fixture.build_path(),
+        &stand_in_fixture.build_path_entries(),
         &build_root_pane_variables(&session),
     );
 
     assert_eq!(stand_in_output.status.code(), Some(3));
     assert_eq!(
-        fixture.read_recorded_file("input.bin"),
+        stand_in_fixture.read_recorded_file("input.bin"),
         Some(b"hi\xff".to_vec())
     );
     // The UTF-8 copy made next is the first copy the client gets.
     let utf8_stand_in_output = run_stand_in(
-        &fixture,
+        &stand_in_fixture,
         &["-selection", "clipboard"],
         b"ok",
-        &fixture.build_path(),
+        &stand_in_fixture.build_path_entries(),
         &build_root_pane_variables(&session),
     );
     assert_eq!(utf8_stand_in_output.status.code(), Some(0));
@@ -347,29 +412,55 @@ fn a_copy_that_is_not_utf8_runs_the_real_tool_and_reaches_no_client() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_copy_past_max_copy_bytes_runs_the_real_tool_with_every_byte_read_then_the_rest() {
+    // The first part holds 12582783 bytes, past the 8388608 of
+    // `max-copy-bytes`, and 4096 bytes follow the one byte read behind it.
+    let session = start_session_allowing_pane_clipboard_writes();
+    let _remote_session_events = attach_client_from_another_machine(&session);
+    let stand_in_fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
+    let input_bytes = vec![b'a'; MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 4097];
+
+    let stand_in_output = run_stand_in(
+        &stand_in_fixture,
+        &["-selection", "clipboard"],
+        &input_bytes,
+        &stand_in_fixture.build_path_entries(),
+        &build_root_pane_variables(&session),
+    );
+
+    assert_eq!(stand_in_output.status.code(), Some(3));
+    assert!(
+        stand_in_fixture.read_recorded_file("input.bin") == Some(input_bytes),
+        "the real tool reads every byte of the input"
+    );
+}
+
+#[cfg(unix)]
 #[test]
 fn a_copy_in_a_pane_a_client_on_this_machine_focuses_runs_the_real_tool_with_every_byte() {
     let session = start_session_allowing_pane_clipboard_writes();
     let _local_client = attach_test_client(&session);
-    let fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
+    let stand_in_fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
 
     let stand_in_output = run_stand_in(
-        &fixture,
+        &stand_in_fixture,
         &["-selection", "clipboard", "-rmlastnl"],
         b"hi\n",
-        &fixture.build_path(),
+        &stand_in_fixture.build_path_entries(),
         &build_root_pane_variables(&session),
     );
 
     assert_eq!(stand_in_output.status.code(), Some(3));
     assert_eq!(
-        fixture.read_recorded_file("input.bin"),
+        stand_in_fixture.read_recorded_file("input.bin"),
         Some(b"hi\n".to_vec())
     );
 }
 
 /// A `koshi serve-session` process under a fresh test home, whose `PATH`
-/// names only `tool_directory`, a folder that holds a fake `xclip`.
+/// names only `tools`, a folder in the test home that holds a fake `xclip`.
 struct SessionWithFakeTool {
     /// The test home. Dropping it removes every file the test made.
     home_directory: TempDir,
@@ -382,6 +473,7 @@ struct SessionWithFakeTool {
     /// The session server process. Dropping it ends the process.
     session_process: SessionProcess,
     /// The folder that holds the fake `xclip`, and the session's whole `PATH`.
+    #[cfg(unix)]
     tool_directory: PathBuf,
 }
 
@@ -394,10 +486,12 @@ fn start_session_with_fake_tool(config_text: &str) -> SessionWithFakeTool {
     std::fs::create_dir_all(&runtime_directory).expect("a runtime directory under the test home");
     let tool_directory = home_directory.path().join("tools");
     std::fs::create_dir(&tool_directory).expect("the tool folder is made");
-    let fake_tool_path = tool_directory.join("xclip");
-    std::fs::write(&fake_tool_path, "#!/bin/sh\nexit 0\n").expect("the fake xclip is written");
-    std::fs::set_permissions(&fake_tool_path, std::fs::Permissions::from_mode(0o755))
-        .expect("the fake xclip may run");
+    write_printing_program(
+        &tool_directory,
+        "xclip",
+        &home_directory.path().join("xclip-runs.log"),
+        "",
+    );
     let session_id = SessionId::new();
     let mut session_process = SessionProcess {
         child_process: start_program_process(
@@ -419,15 +513,18 @@ fn start_session_with_fake_tool(config_text: &str) -> SessionWithFakeTool {
         session_id,
         session_endpoint,
         session_process,
+        #[cfg(unix)]
         tool_directory,
     }
 }
 
-/// Open a pane in `session` that writes its `PATH` into `pane-path.txt` in
-/// the test home, and hand back that `PATH` once the file is there.
+/// Open a pane in `session` that runs [`WRITE_PANE_PATH_SCRIPT`], and hand
+/// back the `PATH` it wrote, without its line end, once `pane-path.txt` is
+/// in the test home.
 ///
 /// # Panics
-/// When the file is not there within [`WAIT_DURATION`].
+/// When the file is not there within [`WAIT_DURATION`], or does not end with
+/// [`PANE_PATH_LINE_END`].
 fn read_new_pane_path(session: &SessionWithFakeTool) -> String {
     let mut client_connection = open_session_connection(&session.session_endpoint);
     let client_id = attach_client_on_connection(&mut client_connection, session.session_id);
@@ -436,16 +533,16 @@ fn read_new_pane_path(session: &SessionWithFakeTool) -> String {
         &mut control_connection,
         session.session_id,
         client_id,
-        Some(build_shell_spawn_spec(
-            "printf '%s\\n' \"$PATH\" > \"$HOME/pane-path.tmp\"\n\
-             /bin/mv \"$HOME/pane-path.tmp\" \"$HOME/pane-path.txt\"\n",
-        )),
+        Some(build_shell_spawn_spec(WRITE_PANE_PATH_SCRIPT)),
     );
     let pane_path_file = session.home_directory.path().join("pane-path.txt");
     let wait_deadline = Instant::now() + WAIT_DURATION;
     loop {
         if let Ok(pane_path_text) = std::fs::read_to_string(&pane_path_file) {
-            return pane_path_text;
+            return pane_path_text
+                .strip_suffix(PANE_PATH_LINE_END)
+                .expect("the pane ends its PATH with a line end")
+                .to_string();
         }
         assert!(
             Instant::now() < wait_deadline,
@@ -480,6 +577,7 @@ fn kill_session(session: &mut SessionWithFakeTool) {
 }
 
 /// The name of each entry in `directory`, in name order.
+#[cfg(unix)]
 fn list_entry_names(directory: &Path) -> Vec<String> {
     let mut entry_names: Vec<String> = std::fs::read_dir(directory)
         .expect("the folder reads")
@@ -495,6 +593,7 @@ fn list_entry_names(directory: &Path) -> Vec<String> {
     entry_names
 }
 
+#[cfg(unix)]
 #[test]
 fn a_session_allowing_writes_puts_its_stand_ins_first_on_a_new_panes_path_until_it_quits() {
     let mut session =
@@ -522,7 +621,7 @@ fn a_session_allowing_writes_puts_its_stand_ins_first_on_a_new_panes_path_until_
     assert_eq!(
         read_new_pane_path(&session),
         format!(
-            "{}:{}\n",
+            "{}:{}",
             clipboard_tool_directory.display(),
             session.tool_directory.display()
         )
@@ -533,6 +632,7 @@ fn a_session_allowing_writes_puts_its_stand_ins_first_on_a_new_panes_path_until_
     assert!(!clipboard_tool_directory.exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_session_with_writes_off_makes_no_stand_ins_and_leaves_a_new_panes_path_alone() {
     let mut session = start_session_with_fake_tool("version 2\n");
@@ -542,7 +642,27 @@ fn a_session_with_writes_off_makes_no_stand_ins_and_leaves_a_new_panes_path_alon
     assert!(!clipboard_tool_directory.exists());
     assert_eq!(
         read_new_pane_path(&session),
-        format!("{}\n", session.tool_directory.display())
+        session.tool_directory.display().to_string()
+    );
+
+    kill_session(&mut session);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_session_on_windows_allowing_writes_makes_no_stand_ins_and_puts_none_on_a_new_panes_path() {
+    let mut session =
+        start_session_with_fake_tool("version 2\npane-clipboard-writes {\n    allow #true\n}\n");
+    let clipboard_tool_directory =
+        resolve_clipboard_tool_directory_path(&session.runtime_directory, session.session_id);
+
+    let pane_path = read_new_pane_path(&session);
+
+    assert!(!clipboard_tool_directory.exists());
+    let pane_path_folders: Vec<PathBuf> = std::env::split_paths(&pane_path).collect();
+    assert!(
+        !pane_path_folders.contains(&clipboard_tool_directory),
+        "the pane's PATH {pane_path:?} names the folder of stand-ins"
     );
 
     kill_session(&mut session);

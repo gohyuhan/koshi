@@ -180,7 +180,7 @@ fn build_test_client_with_config(
     client_id: ClientId,
     loaded_config: LoadedConfig,
 ) -> Client {
-    let frame_delivery_receiver = server.subscribe(client_id);
+    let (frame_delivery_receiver, _) = server.subscribe(client_id);
     build_client_with_loaded_config(
         client_id,
         TEST_VIEWPORT_SIZE,
@@ -3320,6 +3320,7 @@ fn proposed_same_tab_swap_replaces_slots_without_mutating_the_snapshot() {
                 active_tab_id: tab_id,
                 focused_pane_id: Some(source_pane_id),
                 lock_mode: LockMode::Normal,
+                last_applied_lock_command_id: None,
                 is_mouse_selection_enabled: false,
             },
             reported_pane_area: Some(PaneArea::Reported(Size {
@@ -3381,6 +3382,7 @@ fn placement_interpolation_reaches_the_target_without_overshooting() {
                 active_tab_id: tab_id,
                 focused_pane_id: Some(source_pane_id),
                 lock_mode: LockMode::Normal,
+                last_applied_lock_command_id: None,
                 is_mouse_selection_enabled: false,
             },
             reported_pane_area: Some(PaneArea::Reported(Size {

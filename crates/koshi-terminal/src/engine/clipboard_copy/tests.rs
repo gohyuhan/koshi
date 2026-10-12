@@ -81,6 +81,14 @@ fn a_payload_without_padding_decodes() {
 }
 
 #[test]
+fn a_payload_that_decodes_to_bytes_that_are_not_utf8_keeps_those_bytes() {
+    assert_eq!(
+        read_clipboard_copies(TEST_MAXIMUM_COPY_BYTE_COUNT, b"\x1b]52;c;/w==\x07"),
+        vec![build_clipboard_copy("c", &[0xff])]
+    );
+}
+
+#[test]
 fn a_read_request_makes_no_copy() {
     assert_eq!(
         read_clipboard_copies(TEST_MAXIMUM_COPY_BYTE_COUNT, b"\x1b]52;c;?\x07"),

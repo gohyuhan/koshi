@@ -2565,7 +2565,7 @@ fn build_server_with_mouse_event_queue() -> (
     mpsc::Receiver<Delivery>,
 ) {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
-    let mouse_event_queue = server.subscribe(client_id);
+    let (mouse_event_queue, _) = server.subscribe(client_id);
     (server, fake_pty_backend, client_id, mouse_event_queue)
 }
 
@@ -2881,7 +2881,7 @@ fn a_client_with_no_subscription_is_answered_nothing() {
     let pane_id = get_only_pane_id(&server);
     feed_pane_scrollback(&mut server, pane_id, 40);
     // Another client's queue, which would catch an answer sent to the wrong one.
-    let unrelated_event_queue = server.subscribe(ClientId::new());
+    let (unrelated_event_queue, _) = server.subscribe(ClientId::new());
 
     server.run_client_mouse(
         client_id,

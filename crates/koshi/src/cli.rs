@@ -62,6 +62,18 @@ pub struct Cli {
     #[arg(long = "remote", global = true, value_name = "SERVER")]
     pub remote_server_reference: Option<String>,
 
+    /// The fingerprint of the certificate the server `--remote` names must
+    /// present: 64 lowercase hex characters, as `koshi share grant` prints it
+    /// on that machine. Needed for a server this machine has not saved, and
+    /// refused for a server it has saved.
+    #[arg(
+        long = "certificate-fingerprint",
+        global = true,
+        requires = "remote_server_reference",
+        value_name = "FINGERPRINT"
+    )]
+    pub certificate_fingerprint: Option<String>,
+
     /// The verb to run; absent on the bare interactive launch.
     #[command(subcommand)]
     pub command: Option<CliCommand>,
@@ -821,17 +833,16 @@ pub enum ShareCommand {
     },
 }
 
-/// The `koshi remote` subcommands: the servers this machine has connected to,
-/// saved on this machine. Every verb reads or writes that store; none of them
-/// prints a saved secret.
+/// The `koshi remote` subcommands: the servers this machine has saved. Every
+/// verb reads or writes that store; none of them prints a saved secret.
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum RemoteCommand {
-    /// Save a server this machine can dial, asking for its name, its address
-    /// and its secret in turn.
+    /// Save a server this machine can dial, asking for its name, its address,
+    /// the fingerprint of its certificate and its secret in turn.
     New,
-    /// Change what one saved server holds, asking for its name, its address
-    /// and its secret in turn, with the current value kept on an empty
-    /// answer.
+    /// Change what one saved server holds, asking for its name, its address,
+    /// the fingerprint of its certificate and its secret in turn, with the
+    /// current value kept on an empty answer.
     Edit {
         /// Server to change, by the name it was saved under or its address.
         #[arg(value_name = "SERVER")]

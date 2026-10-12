@@ -24,9 +24,14 @@
 //! refusal replaces that deadline with `REFUSAL_WINDOW_DURATION`. Once the
 //! secret is admitted both halves lose their deadline. Each socket read and
 //! write then waits at most `ADMITTED_FRAME_TIMEOUT_DURATION`, the Welcome
-//! included, and once a bridge carries the connection, at most the Attach's
-//! `bridge_timeout_ms`, or with no limit when the Attach names none. A read or
-//! write that waits longer ends the connection, and its registration with it.
+//! included. Once a bridge carries the connection, each socket write, and each
+//! socket read after the client's first byte through the bridge, waits at most
+//! the Attach's `link_timeout_ms`. A socket read before that byte waits at most
+//! the larger of the two. An Attach that names no `link_timeout_ms` gives the
+//! bridge no limit. A read or write that waits longer ends the connection, and
+//! its registration with it. Example: with a `link_timeout_ms` of `30000`, a
+//! paste that takes two minutes to arrive keeps the connection while each
+//! socket read gets a byte inside 30 seconds.
 //!
 //! Every refusal closes the connection. An admitted caller whose attach
 //! arrives while the router is about to restart into a new build is refused
@@ -64,6 +69,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ServerConfig, ServerConnection};
 use serde::Deserialize;
 
+use koshi_core::constant::MIN_LINK_TIMEOUT_MS;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::protocol::{
     compute_agreed_protocol_version, ConnectionToken, IpcRequest, IpcRequestKind,
@@ -123,7 +129,8 @@ const REFUSAL_WINDOW_DURATION: Duration = Duration::from_secs(10);
 
 /// How long one socket read or write on an admitted connection waits before a
 /// bridge carries it: 20 s. A read that gets no byte, or a write that takes no
-/// byte, for that long ends the connection.
+/// byte, for that long ends the connection. A socket read through a bridge
+/// before the client's first byte there waits at least this long.
 const ADMITTED_FRAME_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
 
 /// When a refusal written inside the admission window must be on the socket:
@@ -261,15 +268,16 @@ impl BoundRemoteListener {
     }
 }
 
-/// The TLS configuration this machine serves with: `certificate_file`'s
-/// certificate and private key, and no client certificate asked for.
+/// The TLS configuration this machine serves with: TLS 1.3 only,
+/// `certificate_file`'s certificate and private key, and no client certificate
+/// asked for.
 fn build_remote_server_tls_config(certificate_file: &CertificateFile) -> io::Result<ServerConfig> {
     let certificate_chain = vec![CertificateDer::from(certificate_file.cert_der.clone())];
     let private_key =
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certificate_file.key_der.clone()));
     ServerConfig::builder_with_provider(koshi_ipc::tls::build_crypto_provider())
-        .with_safe_default_protocol_versions()
-        .expect("aws-lc-rs supports every default protocol version")
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("aws-lc-rs supports TLS 1.3")
         .with_no_client_auth()
         .with_single_cert(certificate_chain, private_key)
         .map_err(|certificate_error| io::Error::other(certificate_error.to_string()))
@@ -557,8 +565,7 @@ enum PreviousReleaseRemoteClientFrame {
 /// refusal written by [`send_refusal`] gets [`REFUSAL_WINDOW_DURATION`]
 /// instead. Once the caller is admitted both halves lose their deadlines, and
 /// each socket read and write waits at most [`ADMITTED_FRAME_TIMEOUT_DURATION`]
-/// until a bridge carries the connection. A socket that cannot take that
-/// timeout ends the connection with a refusal.
+/// for a byte until a bridge carries the connection.
 ///
 /// Admission registers the connection with the router, attached or not. The
 /// registration is dropped when the connection finishes, whichever step it
@@ -664,17 +671,11 @@ fn serve_remote_connection(
     drop(admission_slot);
 
     // Both halves lose their deadlines. Each socket read and write then waits
-    // at most ADMITTED_FRAME_TIMEOUT_DURATION.
+    // at most ADMITTED_FRAME_TIMEOUT_DURATION for a byte.
     reader.set_deadline(None);
     writer.set_deadline(None);
-    if set_socket_timeouts(&reader, &writer, Some(ADMITTED_FRAME_TIMEOUT_DURATION)).is_err() {
-        send_refusal(&mut writer);
-        report_remote_connection_ended(
-            dispatcher_events_sender,
-            admitted_connection.remote_connection_id,
-        );
-        return;
-    }
+    reader.set_idle_timeout(Some(ADMITTED_FRAME_TIMEOUT_DURATION));
+    writer.set_idle_timeout(Some(ADMITTED_FRAME_TIMEOUT_DURATION));
     if send_remote_frame(
         &mut writer,
         &RemoteServerFrame::Welcome {
@@ -704,12 +705,8 @@ fn serve_remote_connection(
 /// often as it asks, attach to one when it asks for that, and report the
 /// connection ended when no bridge took it over.
 ///
-/// Before the bridge starts, the reading half's read timeout and the writing
-/// half's write timeout are set to the Attach's `bridge_timeout_ms`, or taken
-/// away when it names none: from then on a read that gets no byte from the
-/// client, or a write that takes no byte, for that long ends its direction of
-/// the bridge. An Attach naming a timeout the socket cannot take, such as a
-/// zero one, is refused, and the session is not opened.
+/// The Attach's `link_timeout_ms` times the bridge, as
+/// [`bridge_remote_connection_to_session`] states.
 ///
 /// `session_protocol_versions` is the session protocol range the client named
 /// in its opening frame. [`bridge_remote_connection_to_session`] puts it in the
@@ -728,23 +725,13 @@ fn serve_admitted_remote_connection(
         &admitted_connection,
         dispatcher_events_sender,
     );
-    let Some((session_endpoint_path, bridge_timeout_ms)) = attached_session else {
+    let Some((session_endpoint_path, link_timeout_ms)) = attached_session else {
         report_remote_connection_ended(
             dispatcher_events_sender,
             admitted_connection.remote_connection_id,
         );
         return;
     };
-    let bridge_timeout = bridge_timeout_ms
-        .map(|bridge_timeout_ms| Duration::from_millis(u64::from(bridge_timeout_ms)));
-    if set_socket_timeouts(&reader, &writer, bridge_timeout).is_err() {
-        send_refusal(&mut writer);
-        report_remote_connection_ended(
-            dispatcher_events_sender,
-            admitted_connection.remote_connection_id,
-        );
-        return;
-    }
     bridge_remote_connection_to_session(
         reader,
         writer,
@@ -752,6 +739,7 @@ fn serve_admitted_remote_connection(
         session_endpoint_path,
         admitted_connection.remote_connection_id,
         session_protocol_versions,
+        link_timeout_ms.map(|link_timeout_ms| Duration::from_millis(u64::from(link_timeout_ms))),
         dispatcher_events_sender,
     );
 }
@@ -760,10 +748,13 @@ fn serve_admitted_remote_connection(
 ///
 /// A list is answered and the next frame is read, so one connection may list
 /// and then attach. `Some` is the endpoint file of the session an admitted
-/// attach reached, with that attach's `bridge_timeout_ms`; the bytes after
+/// attach reached, with that attach's `link_timeout_ms`; the bytes after
 /// that attach belong to that session's server. `None` means the connection
 /// is finished: it hung up, a read ran out of time, it sent something this
 /// loop does not serve, its attach was refused, or the dispatcher is gone.
+///
+/// An attach naming a `link_timeout_ms` below [`MIN_LINK_TIMEOUT_MS`],
+/// `1000`, is refused before the dispatcher is asked where its session is.
 fn process_admitted_remote_frames(
     reader: &mut impl Read,
     writer: &mut (impl Write + Deadlined),
@@ -803,8 +794,14 @@ fn process_admitted_remote_frames(
             }
             RemoteClientFrame::Attach {
                 session_selector,
-                bridge_timeout_ms,
+                link_timeout_ms,
             } => {
+                if link_timeout_ms
+                    .is_some_and(|link_timeout_ms| link_timeout_ms < MIN_LINK_TIMEOUT_MS)
+                {
+                    send_refusal(writer);
+                    return None;
+                }
                 let admitted_token_scope = admitted_connection.scope.clone();
                 let remote_connection_id = admitted_connection.remote_connection_id;
                 let locate_answer =
@@ -817,7 +814,7 @@ fn process_admitted_remote_frames(
                         }
                     })?;
                 return match locate_answer {
-                    Ok(session_endpoint_path) => Some((session_endpoint_path, bridge_timeout_ms)),
+                    Ok(session_endpoint_path) => Some((session_endpoint_path, link_timeout_ms)),
                     Err(LocateRefusal::NotReached) => {
                         send_refusal(writer);
                         None
@@ -897,6 +894,16 @@ fn open_local_session_bridge(
 /// session that cannot be opened is refused, and the connection is reported
 /// ended with nothing bridged.
 ///
+/// `link_timeout` is the Attach's `link_timeout_ms`. Each socket write to the
+/// client waits at most `link_timeout` for the client to take a byte. Each
+/// socket read from the client waits at most the larger of `link_timeout` and
+/// [`ADMITTED_FRAME_TIMEOUT_DURATION`] for a byte until the client's first byte
+/// crosses the bridge, and at most `link_timeout` after it. A wait past its
+/// limit ends its direction of the bridge. `None` waits with no limit.
+/// Example: with a `link_timeout` of 1 second, a client that sends its first
+/// request 2 seconds after the session's Hello answer reaches the session, and
+/// a client that then sends nothing for 1 second is cut.
+///
 /// Two threads carry the two directions. Whichever ends first shuts the TCP
 /// socket in both directions, ending the thread reading the TLS stream at once,
 /// and closes the local connection's read direction. On Unix that ends the
@@ -906,6 +913,7 @@ fn open_local_session_bridge(
 ///
 /// The connection is reported ended once, by whichever direction finishes
 /// first.
+#[allow(clippy::too_many_arguments)]
 fn bridge_remote_connection_to_session(
     reader: TlsReader,
     mut writer: TlsWriter,
@@ -913,8 +921,10 @@ fn bridge_remote_connection_to_session(
     session_endpoint_path: PathBuf,
     remote_connection_id: u64,
     session_protocol_versions: (u32, u32),
+    link_timeout: Option<Duration>,
     dispatcher_events_sender: &Sender<RouterEvent>,
 ) {
+    writer.set_idle_timeout(link_timeout);
     let Some((mut session_reader, mut session_writer, session_read_closer)) =
         open_local_session_bridge(&session_endpoint_path, session_protocol_versions)
     else {
@@ -933,13 +943,22 @@ fn bridge_remote_connection_to_session(
         return;
     };
     let mut remote_reader = reader;
+    remote_reader.set_idle_timeout(
+        link_timeout.map(|link_timeout| link_timeout.max(ADMITTED_FRAME_TIMEOUT_DURATION)),
+    );
     let inbound_end_report = Arc::clone(&remote_connection_end_report);
     let inbound_thread = std::thread::Builder::new()
         .name("koshi-remote-in".to_string())
         .spawn(move || {
             #[cfg(unix)]
             crate::process::block_sigpipe_on_this_thread();
-            let _ = io::copy(&mut remote_reader, &mut session_writer);
+            let mut first_client_byte = [0u8; 1];
+            if remote_reader.read_exact(&mut first_client_byte).is_ok()
+                && session_writer.write_all(&first_client_byte).is_ok()
+            {
+                remote_reader.set_idle_timeout(link_timeout);
+                let _ = io::copy(&mut remote_reader, &mut session_writer);
+            }
             session_read_closer.close();
             let _ = inbound_control_stream.shutdown(Shutdown::Both);
             inbound_end_report.report_once();
@@ -972,21 +991,6 @@ fn bridge_remote_connection_to_session(
         let _ = control_stream.shutdown(Shutdown::Both);
         remote_connection_end_report.report_once();
     }
-}
-
-/// Set the read timeout of `reader`'s handle and the write timeout of
-/// `writer`'s handle to `socket_timeout`, or take both away for `None`.
-///
-/// # Errors
-/// [`io::ErrorKind::InvalidInput`] for a zero `socket_timeout`, and the
-/// platform's own failure to set either timeout.
-fn set_socket_timeouts(
-    reader: &TlsReader,
-    writer: &TlsWriter,
-    socket_timeout: Option<Duration>,
-) -> io::Result<()> {
-    reader.set_read_timeout(socket_timeout)?;
-    writer.set_write_timeout(socket_timeout)
 }
 
 /// Report that one admitted connection has ended. It leaves the router's list

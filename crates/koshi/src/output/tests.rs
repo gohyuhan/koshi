@@ -779,6 +779,22 @@ fn table_column_width_counts_terminal_columns() {
 }
 
 #[test]
+fn table_column_width_counts_one_column_for_each_halfwidth_katakana_sound_mark() {
+    // `ｶﾞﾊﾟﾊﾟ` is 6 terminal columns wide. The `name` column widens to 6, and
+    // `kind` starts in column 8 on both lines.
+    assert_eq!(
+        render_table(
+            &["name", "kind"],
+            vec![vec![
+                "\u{FF76}\u{FF9E}\u{FF8A}\u{FF9F}\u{FF8A}\u{FF9F}".to_string(),
+                "tab".to_string()
+            ]]
+        ),
+        "name    kind\n\u{FF76}\u{FF9E}\u{FF8A}\u{FF9F}\u{FF8A}\u{FF9F}  tab\n"
+    );
+}
+
+#[test]
 fn explain_new_tab_reports_tab_scope_and_target() {
     let expected_text = "\
 action: core:new-tab

@@ -253,9 +253,10 @@ impl CommittedRegions {
 
 /// One item on a subscriber's queue: a live event, the frame composed for the
 /// subscriber's client, a fresh frame that resyncs a subscriber whose queue
-/// overflowed, the answers to one round of mouse actions, bytes for the
-/// subscriber's own terminal, the session its client moves to, or the answer
-/// to its client's ping.
+/// overflowed, a pane placement preview or its refusal, the answers to one
+/// round of mouse actions, a wake-up for the bytes that wait for the
+/// subscriber's own terminal, the session its client moves to, or a pane
+/// placement command the session rejected.
 ///
 /// All of them ride the same queue in order: a subscriber that missed events
 /// reads the backlog it already had, then the frame, then live events again.
@@ -299,23 +300,14 @@ pub enum Delivery {
         /// say.
         mouse_answers: Vec<koshi_core::mouse::MouseAnswer>,
     },
-    /// Bytes for the terminal the subscriber's client runs in, written to it
-    /// verbatim.
-    HostWrite {
-        /// The bytes, in the order the session queued them.
-        host_write_bytes: Vec<u8>,
-        /// One reference to the marker the session made for this host write.
-        /// The session counts the host write as in flight while any reference
-        /// to the marker exists: dropping this delivery, and each clone of it,
-        /// ends that.
-        in_flight_marker: Arc<()>,
-    },
+    /// Bytes for the terminal the subscriber's client runs in wait beside the
+    /// queue, and the thread that writes the client's connection writes them
+    /// verbatim. This item carries none of them: it wakes that thread.
+    HostWrite,
     /// The session the subscriber's client leaves this one for.
     SwitchTo(SessionId),
     /// A pane placement command from the subscriber was rejected.
     PlacementCommandRejected(CommandId),
-    /// The answer to one ping from the subscriber's client.
-    Pong,
 }
 
 /// The viewer-owned frame state: which pane the pointer is over, which top
@@ -1134,6 +1126,12 @@ pub struct ClientSnapshot {
     /// decides whether a paste from the client's own terminal reaches the pane,
     /// and is what `koshi list-clients` reports.
     pub lock_mode: LockMode,
+    /// The last lock command that the client's own connection sent and the
+    /// session ran before it built this snapshot. `None` before the session
+    /// runs one, and again after the session restarts. A viewer that sent a
+    /// lock command keeps its own lock mode until a frame names that command
+    /// here.
+    pub last_applied_lock_command_id: Option<CommandId>,
     /// Whether this client grabs the mouse for text selection. Adds the `SELECT`
     /// tag to the mode indicator. It is independent of
     /// [`lock_mode`](Self::lock_mode): both can be on at once. The viewer also reads it off a painted frame

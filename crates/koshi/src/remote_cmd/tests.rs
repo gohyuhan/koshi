@@ -1,9 +1,8 @@
 //! Tests for the `remote` verbs: how the subcommands parse, what each answer
 //! renders to, that no rendering prints a secret, which names and addresses a
-//! saved server may take, which fingerprint a changed saved server keeps, what the store a
-//! settled saved server goes into holds, that a refused placement changes nothing,
-//! and which change another koshi made while the questions were open refuses
-//! an edit.
+//! saved server may take, what the store a settled saved server goes into
+//! holds, that a refused placement changes nothing, and which change another
+//! koshi made while the questions were open refuses an edit.
 
 use super::*;
 
@@ -271,8 +270,8 @@ fn an_edit_with_no_server_is_a_usage_error() {
 }
 
 #[test]
-fn a_checked_record_renders_its_name_and_address_and_an_unchecked_one_says_when_it_pins() {
-    let mut saved_server = build_two_saved_server_records().remove(0);
+fn a_settled_record_renders_its_name_and_address() {
+    let saved_server = build_two_saved_server_records().remove(0);
     assert_eq!(
         output::render_remote_saved(&saved_server),
         "saved work at laptop.local:7654.\n"
@@ -280,12 +279,6 @@ fn a_checked_record_renders_its_name_and_address_and_an_unchecked_one_says_when_
     assert_eq!(
         output::render_remote_updated(&saved_server),
         "updated work at laptop.local:7654.\n"
-    );
-
-    saved_server.certificate_fingerprint = None;
-    assert_eq!(
-        output::render_remote_saved(&saved_server),
-        "saved work at laptop.local:7654; its certificate is pinned on the first connection.\n"
     );
 }
 
@@ -405,32 +398,14 @@ fn an_address_another_record_answers_to_is_refused_naming_the_edit_command() {
     );
 }
 
-/// What a changed saved server offers the check and keeps afterwards: the pinned
-/// fingerprint while the address is unchanged, and nothing once the user
-/// changed the address.
-#[test]
-fn an_address_that_changed_drops_what_was_held_and_an_unchanged_one_keeps_it() {
-    let build_held_certificate_fingerprint = || Some("bb".repeat(32));
-
-    assert_eq!(
-        resolve_certificate_fingerprint(build_held_certificate_fingerprint(), false),
-        build_held_certificate_fingerprint()
-    );
-    assert_eq!(
-        resolve_certificate_fingerprint(build_held_certificate_fingerprint(), true),
-        None
-    );
-    assert_eq!(resolve_certificate_fingerprint(None, false), None);
-    assert_eq!(resolve_certificate_fingerprint(None, true), None);
-}
-
-/// A saved server named `desk` at `desk.local:7654`, pinning nothing.
+/// A saved server named `desk` at `desk.local:7654`, expecting the
+/// certificate whose fingerprint is 64 `c` characters.
 fn build_new_saved_server_record() -> SavedServer {
     SavedServer {
         server_name: Some("desk".to_string()),
         server_address: "desk.local:7654".to_string(),
         connection_token: ConnectionToken::from_secret("cafe"),
-        certificate_fingerprint: None,
+        certificate_fingerprint: Some("cc".repeat(32)),
         added_at: build_test_system_time_at_seconds(40),
         last_used_at: None,
     }
@@ -678,24 +653,26 @@ fn a_secret_another_koshi_replaced_meanwhile_refuses_the_edit() {
     );
 }
 
-/// Another koshi's first connection pinned a certificate while the questions
-/// were open. Writing the edit would drop that pin, so it is refused.
+/// Another koshi's `remote edit` wrote a fingerprint while the questions were
+/// open: one where none was held, or another one where one was held.
 #[test]
-fn a_fingerprint_another_koshi_pinned_meanwhile_refuses_the_edit() {
-    let mut held_saved_server = build_two_saved_server_records().remove(0);
-    held_saved_server.certificate_fingerprint = None;
+fn a_fingerprint_another_koshi_wrote_meanwhile_refuses_the_edit() {
+    for held_certificate_fingerprint in [None, Some("cc".repeat(32))] {
+        let mut held_saved_server = build_two_saved_server_records().remove(0);
+        held_saved_server.certificate_fingerprint = held_certificate_fingerprint;
 
-    assert_eq!(
-        find_unchanged_saved_server(
-            &build_server_store(build_two_saved_server_records()),
-            "work",
-            &held_saved_server
-        )
-        .expect_err("a fingerprint appeared")
-        .to_string(),
-        "invalid arguments: work changed while the questions were open, so nothing \
-         was saved; run `koshi remote edit work` again"
-    );
+        assert_eq!(
+            find_unchanged_saved_server(
+                &build_server_store(build_two_saved_server_records()),
+                "work",
+                &held_saved_server
+            )
+            .expect_err("the fingerprint is not the one that was asked about")
+            .to_string(),
+            "invalid arguments: work changed while the questions were open, so nothing \
+             was saved; run `koshi remote edit work` again"
+        );
+    }
 }
 
 #[test]

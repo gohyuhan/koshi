@@ -15,7 +15,7 @@ use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcResponse, MIN_PROTOC
 use koshi_ipc::transport::Listener;
 use koshi_layout::tree::LayoutNode;
 use koshi_test_support::fixtures::{
-    build_counting_bytes, build_test_runtime_directory, close_connection_after_peer_hangs_up,
+    build_test_runtime_directory, close_connection_after_peer_hangs_up,
     spawn_previous_release_session, spawn_session_listening_before_it_advertises,
     write_koshi_0_1_0_window_endpoint_file, write_session_endpoint_file,
     KOSHI_0_2_0_HELLO_ANSWER_TEXT, KOSHI_0_2_0_RESTART_REFUSAL_TEXT, KOSHI_0_4_0_HELLO_ANSWER_TEXT,
@@ -4288,8 +4288,8 @@ fn wait_for_refused_session_restart_waits_through_a_restart_that_has_started() {
 
 // --- Handing the copy of a stand-in clipboard tool to its session -----------
 
-/// How long a test copy exchange has before its answer deadline.
-const TEST_COPY_ANSWER_WAIT_DURATION: Duration = Duration::from_secs(60);
+/// How long the session has to answer each part of a test copy.
+const TEST_COPY_ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How the stand-in session answers one connection of a copy exchange.
 struct CopyConnectionScript {
@@ -4388,7 +4388,7 @@ fn spawn_copying_session(
 }
 
 #[test]
-fn a_copy_within_one_part_goes_as_one_clipboard_copy_and_returns_the_routing() {
+fn a_copy_in_one_part_opens_with_one_clipboard_copy_and_returns_the_routing() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let in_session_context = build_in_session_context(session_id);
@@ -4402,17 +4402,24 @@ fn a_copy_within_one_part_goes_as_one_clipboard_copy_and_returns_the_routing() {
         ])],
     );
 
-    let should_run_clipboard_tool = submit_clipboard_copy(
+    let (copy_exchange, copy_answer) = open_clipboard_copy_exchange(
         runtime_directory.path(),
         &in_session_context,
         "c",
         b"echo hi",
-        Instant::now() + TEST_COPY_ANSWER_WAIT_DURATION,
+        true,
+        TEST_COPY_ANSWER_TIMEOUT,
     )
     .expect("the session routes the copy");
+    drop(copy_exchange);
 
     session_server_thread.join().expect("fake session exits");
-    assert!(!should_run_clipboard_tool);
+    assert_eq!(
+        copy_answer,
+        ClipboardCopyAnswer::Routed {
+            should_run_clipboard_tool: false
+        }
+    );
     assert_eq!(
         copy_requests.try_iter().collect::<Vec<IpcRequest>>(),
         vec![IpcRequest {
@@ -4441,17 +4448,24 @@ fn an_empty_copy_goes_as_one_clipboard_copy_with_no_bytes() {
         ])],
     );
 
-    let should_run_clipboard_tool = submit_clipboard_copy(
+    let (copy_exchange, copy_answer) = open_clipboard_copy_exchange(
         runtime_directory.path(),
         &in_session_context,
         "p",
         b"",
-        Instant::now() + TEST_COPY_ANSWER_WAIT_DURATION,
+        true,
+        TEST_COPY_ANSWER_TIMEOUT,
     )
     .expect("the session routes the copy");
+    drop(copy_exchange);
 
     session_server_thread.join().expect("fake session exits");
-    assert!(should_run_clipboard_tool);
+    assert_eq!(
+        copy_answer,
+        ClipboardCopyAnswer::Routed {
+            should_run_clipboard_tool: true
+        }
+    );
     assert_eq!(
         copy_requests.try_iter().collect::<Vec<IpcRequest>>(),
         vec![IpcRequest {
@@ -4466,11 +4480,10 @@ fn an_empty_copy_goes_as_one_clipboard_copy_with_no_bytes() {
 }
 
 #[test]
-fn a_copy_one_byte_past_a_part_goes_as_a_part_then_a_clipboard_copy_of_one_byte() {
+fn a_part_the_session_takes_is_followed_by_the_last_part_under_the_next_request_id() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let in_session_context = build_in_session_context(session_id);
-    let copied_bytes = build_counting_bytes(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 1);
     let (session_server_thread, copy_requests) = spawn_copying_session(
         runtime_directory.path(),
         session_id,
@@ -4482,58 +4495,55 @@ fn a_copy_one_byte_past_a_part_goes_as_a_part_then_a_clipboard_copy_of_one_byte(
         ])],
     );
 
-    let should_run_clipboard_tool = submit_clipboard_copy(
+    let (mut copy_exchange, first_copy_answer) = open_clipboard_copy_exchange(
         runtime_directory.path(),
         &in_session_context,
         "cp",
-        &copied_bytes,
-        Instant::now() + TEST_COPY_ANSWER_WAIT_DURATION,
+        b"echo ",
+        false,
+        TEST_COPY_ANSWER_TIMEOUT,
     )
-    .expect("the session routes the copy");
+    .expect("the session takes the first part");
+    let last_copy_answer = copy_exchange
+        .send_copy_part(b"hi", true)
+        .expect("the session routes the copy");
+    drop(copy_exchange);
 
     session_server_thread.join().expect("fake session exits");
-    assert!(!should_run_clipboard_tool);
-    let sent_copy_requests: Vec<IpcRequest> = copy_requests.try_iter().collect();
-    let [first_copy_request, last_copy_request] = sent_copy_requests.as_slice() else {
-        panic!(
-            "expected two copy requests, got {}",
-            sent_copy_requests.len()
-        );
-    };
-    assert_eq!(first_copy_request.request_id, 2);
-    let IpcRequestKind::ClipboardCopyPart {
-        copied_bytes: first_part_bytes,
-    } = &first_copy_request.request_kind
-    else {
-        panic!(
-            "expected a ClipboardCopyPart first, got {}",
-            first_copy_request.request_kind.get_request_kind_name()
-        );
-    };
-    assert!(
-        first_part_bytes[..] == copied_bytes[..MAX_CLIPBOARD_COPY_PART_BYTE_COUNT],
-        "the part holds the first 12582783 bytes of the copy"
+    assert_eq!(first_copy_answer, ClipboardCopyAnswer::PartTaken);
+    assert_eq!(
+        last_copy_answer,
+        ClipboardCopyAnswer::Routed {
+            should_run_clipboard_tool: false
+        }
     );
     assert_eq!(
-        last_copy_request,
-        &IpcRequest {
-            request_id: 3,
-            request_kind: IpcRequestKind::ClipboardCopy {
-                pane_id: in_session_context.pane_id,
-                clipboard_targets: "cp".to_string(),
-                copied_bytes: copied_bytes[MAX_CLIPBOARD_COPY_PART_BYTE_COUNT..].to_vec(),
+        copy_requests.try_iter().collect::<Vec<IpcRequest>>(),
+        vec![
+            IpcRequest {
+                request_id: 2,
+                request_kind: IpcRequestKind::ClipboardCopyPart {
+                    copied_bytes: b"echo ".to_vec(),
+                },
             },
-        }
+            IpcRequest {
+                request_id: 3,
+                request_kind: IpcRequestKind::ClipboardCopy {
+                    pane_id: in_session_context.pane_id,
+                    clipboard_targets: "cp".to_string(),
+                    copied_bytes: b"hi".to_vec(),
+                },
+            },
+        ]
     );
 }
 
 #[test]
-fn a_part_the_session_does_not_take_ends_the_copy_with_no_request_after_it() {
+fn a_part_the_session_does_not_take_is_answered_as_routed_and_the_caller_hangs_up() {
     // The session answers the first part with `ClipboardCopyRouted`, then
     // requires the caller to hang up with no further request.
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
-    let copied_bytes = build_counting_bytes(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 1);
     let (session_server_thread, copy_requests) = spawn_copying_session(
         runtime_directory.path(),
         session_id,
@@ -4544,38 +4554,135 @@ fn a_part_the_session_does_not_take_ends_the_copy_with_no_request_after_it() {
         ])],
     );
 
-    let should_run_clipboard_tool = submit_clipboard_copy(
+    let (copy_exchange, copy_answer) = open_clipboard_copy_exchange(
         runtime_directory.path(),
         &build_in_session_context(session_id),
         "c",
-        &copied_bytes,
-        Instant::now() + TEST_COPY_ANSWER_WAIT_DURATION,
+        b"echo ",
+        false,
+        TEST_COPY_ANSWER_TIMEOUT,
     )
-    .expect("the session routes the copy");
+    .expect("the session answers the part");
+    drop(copy_exchange);
 
     session_server_thread.join().expect("fake session exits");
-    assert!(should_run_clipboard_tool);
-    let sent_copy_requests: Vec<IpcRequest> = copy_requests.try_iter().collect();
-    let [first_copy_request] = sent_copy_requests.as_slice() else {
-        panic!(
-            "expected one copy request, got {}",
-            sent_copy_requests.len()
-        );
-    };
-    assert_eq!(first_copy_request.request_id, 2);
-    let IpcRequestKind::ClipboardCopyPart {
-        copied_bytes: first_part_bytes,
-    } = &first_copy_request.request_kind
-    else {
-        panic!(
-            "expected a ClipboardCopyPart, got {}",
-            first_copy_request.request_kind.get_request_kind_name()
-        );
-    };
-    assert!(
-        first_part_bytes[..] == copied_bytes[..MAX_CLIPBOARD_COPY_PART_BYTE_COUNT],
-        "the part holds the first 12582783 bytes of the copy"
+    assert_eq!(
+        copy_answer,
+        ClipboardCopyAnswer::Routed {
+            should_run_clipboard_tool: true
+        }
     );
+    assert_eq!(
+        copy_requests.try_iter().collect::<Vec<IpcRequest>>(),
+        vec![IpcRequest {
+            request_id: 2,
+            request_kind: IpcRequestKind::ClipboardCopyPart {
+                copied_bytes: b"echo ".to_vec(),
+            },
+        }]
+    );
+}
+
+#[test]
+fn a_later_part_has_its_own_answer_timeout_counted_from_its_send() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let (session_server_thread, _copy_requests) = spawn_copying_session(
+        runtime_directory.path(),
+        session_id,
+        vec![build_accepting_copy_script(vec![
+            IpcResult::ClipboardCopyPartTaken,
+            IpcResult::ClipboardCopyRouted {
+                should_run_clipboard_tool: false,
+            },
+        ])],
+    );
+    let answer_timeout = Duration::from_secs(1);
+
+    let (mut copy_exchange, _) = open_clipboard_copy_exchange(
+        runtime_directory.path(),
+        &build_in_session_context(session_id),
+        "c",
+        b"echo ",
+        false,
+        answer_timeout,
+    )
+    .expect("the session takes the first part");
+    std::thread::sleep(answer_timeout + Duration::from_millis(200));
+    let last_copy_answer = copy_exchange
+        .send_copy_part(b"hi", true)
+        .expect("the last part has its own answer timeout");
+    drop(copy_exchange);
+
+    session_server_thread.join().expect("fake session exits");
+    assert_eq!(
+        last_copy_answer,
+        ClipboardCopyAnswer::Routed {
+            should_run_clipboard_tool: false
+        }
+    );
+}
+
+#[test]
+fn a_later_part_the_session_never_answers_ends_at_its_answer_timeout() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let session_socket_address =
+        koshi_ipc::endpoint::compute_socket_address(runtime_directory.path(), session_id);
+    let session_listener = Listener::bind(&session_socket_address).expect("bind fake session");
+    EndpointFile {
+        socket_address: session_socket_address,
+        connection_token: ConnectionToken::generate(),
+        process_id: std::process::id(),
+    }
+    .write_to_path(&EndpointFile::resolve_endpoint_file_path(
+        runtime_directory.path(),
+        session_id,
+    ))
+    .expect("write endpoint file");
+    let session_server_thread = std::thread::spawn(move || {
+        let mut session_connection = session_listener.accept().expect("accept the stand-in");
+        let hello_request: IpcRequest = session_connection.recv().expect("read hello");
+        let first_copy_request: IpcRequest = session_connection
+            .recv()
+            .expect("read the copy request behind the Hello");
+        send_ipc_result_best_effort(
+            &mut session_connection,
+            hello_request.request_id,
+            IpcResult::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                build_version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+        );
+        send_ipc_result_best_effort(
+            &mut session_connection,
+            first_copy_request.request_id,
+            IpcResult::ClipboardCopyPartTaken,
+        );
+        let _: IpcRequest = session_connection
+            .recv()
+            .expect("read the last part, which gets no answer");
+        close_connection_after_peer_hangs_up(session_connection);
+    });
+
+    let (mut copy_exchange, _) = open_clipboard_copy_exchange(
+        runtime_directory.path(),
+        &build_in_session_context(session_id),
+        "c",
+        b"echo ",
+        false,
+        Duration::from_millis(300),
+    )
+    .expect("the session takes the first part");
+    let copy_error = copy_exchange
+        .send_copy_part(b"hi", true)
+        .expect_err("the session never answers the last part");
+    drop(copy_exchange);
+
+    session_server_thread.join().expect("fake session exits");
+    let CliError::SessionAnswerTimedOut = copy_error else {
+        panic!("expected SessionAnswerTimedOut, got {copy_error:?}");
+    };
 }
 
 #[test]
@@ -4603,14 +4710,16 @@ fn a_copy_the_session_refuses_or_does_not_know_carries_the_sessions_sentence() {
             )])],
         );
 
-        let copy_error = submit_clipboard_copy(
+        let Err(copy_error) = open_clipboard_copy_exchange(
             runtime_directory.path(),
             &build_in_session_context(session_id),
             "c",
             b"echo hi",
-            Instant::now() + TEST_COPY_ANSWER_WAIT_DURATION,
-        )
-        .expect_err("the session refuses the copy");
+            true,
+            TEST_COPY_ANSWER_TIMEOUT,
+        ) else {
+            panic!("the session refuses the copy");
+        };
 
         session_server_thread.join().expect("fake session exits");
         let CliError::IpcUnavailable { detail } = copy_error else {
@@ -4632,14 +4741,16 @@ fn a_last_part_answered_as_taken_names_that_reply() {
         ])],
     );
 
-    let copy_error = submit_clipboard_copy(
+    let Err(copy_error) = open_clipboard_copy_exchange(
         runtime_directory.path(),
         &build_in_session_context(session_id),
         "c",
         b"echo hi",
-        Instant::now() + TEST_COPY_ANSWER_WAIT_DURATION,
-    )
-    .expect_err("a ClipboardCopyPartTaken does not answer the last part");
+        true,
+        TEST_COPY_ANSWER_TIMEOUT,
+    ) else {
+        panic!("a ClipboardCopyPartTaken does not answer the last part");
+    };
 
     session_server_thread.join().expect("fake session exits");
     let CliError::IpcUnavailable { detail } = copy_error else {
@@ -4677,17 +4788,24 @@ fn a_copy_refused_for_its_token_goes_again_once_the_session_advertises_another()
         ],
     );
 
-    let should_run_clipboard_tool = submit_clipboard_copy(
+    let (copy_exchange, copy_answer) = open_clipboard_copy_exchange(
         runtime_directory.path(),
         &in_session_context,
         "c",
         b"echo hi",
-        Instant::now() + TEST_COPY_ANSWER_WAIT_DURATION,
+        true,
+        TEST_COPY_ANSWER_TIMEOUT,
     )
     .expect("the second Hello presents the session's new token");
+    drop(copy_exchange);
 
     session_server_thread.join().expect("fake session exits");
-    assert!(!should_run_clipboard_tool);
+    assert_eq!(
+        copy_answer,
+        ClipboardCopyAnswer::Routed {
+            should_run_clipboard_tool: false
+        }
+    );
     let expected_copy_request = IpcRequest {
         request_id: 2,
         request_kind: IpcRequestKind::ClipboardCopy {
@@ -4724,14 +4842,16 @@ fn a_copy_to_a_session_that_never_answers_ends_at_the_answer_deadline() {
         close_connection_after_peer_hangs_up(session_connection);
     });
 
-    let copy_error = submit_clipboard_copy(
+    let Err(copy_error) = open_clipboard_copy_exchange(
         runtime_directory.path(),
         &build_in_session_context(session_id),
         "c",
         b"echo hi",
-        Instant::now() + Duration::from_millis(300),
-    )
-    .expect_err("the session never answers");
+        true,
+        Duration::from_millis(300),
+    ) else {
+        panic!("the session never answers");
+    };
 
     session_server_thread.join().expect("fake session exits");
     let CliError::SessionAnswerTimedOut = copy_error else {
@@ -4744,14 +4864,16 @@ fn a_copy_to_a_session_with_no_endpoint_file_reports_the_session_not_running() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
 
-    let copy_error = submit_clipboard_copy(
+    let Err(copy_error) = open_clipboard_copy_exchange(
         runtime_directory.path(),
         &build_in_session_context(session_id),
         "c",
         b"echo hi",
-        Instant::now() + TEST_COPY_ANSWER_WAIT_DURATION,
-    )
-    .expect_err("no endpoint file exists");
+        true,
+        TEST_COPY_ANSWER_TIMEOUT,
+    ) else {
+        panic!("no endpoint file exists");
+    };
 
     let CliError::SessionNotFound {
         session_name: found_session_name,

@@ -2,7 +2,8 @@
 //! colors it reads from its own config files, the keymap it validates before
 //! trusting, the hints one frame is painted from, and what it takes off its
 //! subscription — live events, the frame it resumes from after a lag, and the
-//! items meant for a client in another process.
+//! items meant for a client in another process — and the lock mode it shows
+//! until a frame names the lock command it sent.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{mpsc, Arc};
@@ -1413,6 +1414,7 @@ fn build_render_snapshot(
             active_tab_id,
             focused_pane_id: None,
             lock_mode,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled,
         },
     })
@@ -2787,19 +2789,16 @@ fn taking_a_new_client_id_moves_the_id_the_viewers_commands_carry() {
 }
 
 #[test]
-fn terminal_bytes_are_counted_and_move_nothing_in_the_viewer() {
-    // Bytes a pane aimed at a terminal belong to the attached viewer that owns
-    // that terminal, and reach it over its own connection.
+fn a_host_write_wake_is_counted_and_moves_nothing_in_the_viewer() {
+    // A host-write wake belongs to the thread that writes an attached
+    // viewer's connection.
     let (mut client, delivery_sender) = build_test_client_with_event_sender();
     client.set_lock_mode(LockMode::Locked);
     let client_id = client.get_client_id();
     let viewport_size = client.get_viewport_size();
 
     delivery_sender
-        .send(Delivery::HostWrite {
-            host_write_bytes: vec![0x1b, b']', b'5', b'2'],
-            in_flight_marker: Arc::new(()),
-        })
+        .send(Delivery::HostWrite)
         .expect("the viewer's queue has room");
 
     assert_eq!(client.apply_events(), 1, "the write was seen");
@@ -2807,4 +2806,81 @@ fn terminal_bytes_are_counted_and_move_nothing_in_the_viewer() {
     assert!(!client.is_mouse_selection_enabled());
     assert_eq!(client.get_viewport_size(), viewport_size);
     assert_eq!(client.get_client_id(), client_id);
+}
+
+#[test]
+fn a_frame_that_does_not_name_the_pending_lock_command_leaves_the_lock_mode_the_viewer_set() {
+    let (mut client, _delivery_sender) = build_test_client_with_event_sender();
+    let client_id = client.get_client_id();
+    let lock_command_id = CommandId::new();
+    client.apply_lock_command(lock_command_id, LockMode::Locked);
+
+    let mut unanswered_snapshot = build_render_snapshot(client_id, LockMode::Normal, false);
+    client.apply_render_snapshot(&unanswered_snapshot);
+
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(client.get_pending_lock_command_id(), Some(lock_command_id));
+
+    unanswered_snapshot
+        .client_snapshot
+        .last_applied_lock_command_id = Some(CommandId::new());
+    client.apply_render_snapshot(&unanswered_snapshot);
+
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(client.get_pending_lock_command_id(), Some(lock_command_id));
+}
+
+#[test]
+fn the_frame_that_names_the_pending_lock_command_sets_the_lock_mode_and_ends_the_wait() {
+    let (mut client, _delivery_sender) = build_test_client_with_event_sender();
+    let client_id = client.get_client_id();
+    let lock_command_id = CommandId::new();
+    client.apply_lock_command(lock_command_id, LockMode::Locked);
+
+    // `koshi unlock --client` ran after the lock command.
+    let mut answering_snapshot = build_render_snapshot(client_id, LockMode::Normal, false);
+    answering_snapshot
+        .client_snapshot
+        .last_applied_lock_command_id = Some(lock_command_id);
+    client.apply_render_snapshot(&answering_snapshot);
+
+    assert_eq!(client.get_lock_mode(), LockMode::Normal);
+    assert_eq!(client.get_pending_lock_command_id(), None);
+
+    client.apply_render_snapshot(&build_render_snapshot(client_id, LockMode::Locked, false));
+
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+}
+
+#[test]
+fn a_viewer_waiting_for_no_lock_command_takes_each_frames_lock_mode() {
+    let (mut client, _delivery_sender) = build_test_client_with_event_sender();
+    let client_id = client.get_client_id();
+
+    client.apply_render_snapshot(&build_render_snapshot(client_id, LockMode::Locked, false));
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+
+    client.apply_render_snapshot(&build_render_snapshot(client_id, LockMode::Normal, false));
+    assert_eq!(client.get_lock_mode(), LockMode::Normal);
+    assert_eq!(client.get_pending_lock_command_id(), None);
+}
+
+#[test]
+fn a_rejected_paint_puts_back_the_lock_command_the_viewer_waited_for() {
+    let (mut client, _delivery_sender) = build_test_client_with_event_sender();
+    let client_id = client.get_client_id();
+    let lock_command_id = CommandId::new();
+    client.apply_lock_command(lock_command_id, LockMode::Locked);
+    let viewer_restore_point = client.build_viewer_restore_point();
+    let mut answering_snapshot = build_render_snapshot(client_id, LockMode::Normal, false);
+    answering_snapshot
+        .client_snapshot
+        .last_applied_lock_command_id = Some(lock_command_id);
+    client.apply_render_snapshot(&answering_snapshot);
+    assert_eq!(client.get_pending_lock_command_id(), None);
+
+    client.restore_viewer(viewer_restore_point);
+
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(client.get_pending_lock_command_id(), Some(lock_command_id));
 }

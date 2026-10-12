@@ -467,11 +467,13 @@ fn waited_out_is_true_for_a_timeout_and_false_for_any_other_kind() {
 
 // --- the frame shape on a stream that is not a local socket ---
 
-/// An in-memory stream half that records the last deadline it was given.
+/// An in-memory stream half that records the last deadline and the last idle
+/// timeout it was given.
 struct RecordedStream {
     read_cursor: Cursor<Vec<u8>>,
     written_bytes: Arc<Mutex<Vec<u8>>>,
     deadline: Arc<Mutex<Option<Instant>>>,
+    idle_timeout: Arc<Mutex<Option<Duration>>>,
 }
 
 impl Read for RecordedStream {
@@ -498,26 +500,34 @@ impl Deadlined for RecordedStream {
     fn set_deadline(&mut self, deadline_instant: Option<Instant>) {
         *self.deadline.lock().expect("deadline") = deadline_instant;
     }
+
+    fn set_idle_timeout(&mut self, idle_timeout: Option<Duration>) {
+        *self.idle_timeout.lock().expect("idle timeout") = idle_timeout;
+    }
 }
 
 #[test]
-fn frame_halves_speak_the_frame_shape_and_hand_each_deadline_to_its_half() {
+fn frame_halves_speak_the_frame_shape_and_hand_each_limit_to_its_half() {
     let mut framed: Vec<u8> = Vec::new();
     write_message(&mut framed, &build_hello_request(5)).expect("frame");
     let written_bytes = Arc::new(Mutex::new(Vec::new()));
     let read_deadline = Arc::new(Mutex::new(None));
     let write_deadline = Arc::new(Mutex::new(None));
+    let read_idle_timeout = Arc::new(Mutex::new(None));
+    let write_idle_timeout = Arc::new(Mutex::new(None));
 
     let (mut reader, mut writer) = build_frame_halves(
         Box::new(RecordedStream {
             read_cursor: Cursor::new(framed),
             written_bytes: Arc::clone(&written_bytes),
             deadline: Arc::clone(&read_deadline),
+            idle_timeout: Arc::clone(&read_idle_timeout),
         }),
         Box::new(RecordedStream {
             read_cursor: Cursor::new(Vec::new()),
             written_bytes: Arc::clone(&written_bytes),
             deadline: Arc::clone(&write_deadline),
+            idle_timeout: Arc::clone(&write_idle_timeout),
         }),
     );
 
@@ -545,122 +555,70 @@ fn frame_halves_speak_the_frame_shape_and_hand_each_deadline_to_its_half() {
     );
     reader.set_deadline(None);
     assert_eq!(*read_deadline.lock().expect("deadline"), None);
-}
 
-/// An in-memory reading half that hands out one byte per read and records the
-/// deadline it holds when each read starts.
-struct ByteAtATimeStream {
-    read_cursor: Cursor<Vec<u8>>,
-    deadline: Option<Instant>,
-    deadlines_at_reads: Arc<Mutex<Vec<Option<Instant>>>>,
-}
-
-impl Read for ByteAtATimeStream {
-    fn read(&mut self, read_buffer: &mut [u8]) -> io::Result<usize> {
-        self.deadlines_at_reads
-            .lock()
-            .expect("deadlines_at_reads")
-            .push(self.deadline);
-        let byte_count = read_buffer.len().min(1);
-        self.read_cursor.read(&mut read_buffer[..byte_count])
-    }
-}
-
-impl Deadlined for ByteAtATimeStream {
-    fn set_deadline(&mut self, deadline_instant: Option<Instant>) {
-        self.deadline = deadline_instant;
-    }
-}
-
-/// A frame reader over a [`ByteAtATimeStream`] that holds `framed_bytes`, and
-/// the deadlines its reads record.
-fn build_byte_at_a_time_reader(
-    framed_bytes: Vec<u8>,
-) -> (FrameReader, Arc<Mutex<Vec<Option<Instant>>>>) {
-    let deadlines_at_reads = Arc::new(Mutex::new(Vec::new()));
-    let (reader, _) = build_frame_halves(
-        Box::new(ByteAtATimeStream {
-            read_cursor: Cursor::new(framed_bytes),
-            deadline: None,
-            deadlines_at_reads: Arc::clone(&deadlines_at_reads),
-        }),
-        Box::new(RecordedStream {
-            read_cursor: Cursor::new(Vec::new()),
-            written_bytes: Arc::new(Mutex::new(Vec::new())),
-            deadline: Arc::new(Mutex::new(None)),
-        }),
-    );
-    (reader, deadlines_at_reads)
-}
-
-#[test]
-fn an_idle_timeout_gives_each_read_of_a_frame_its_own_deadline() {
-    let mut framed_bytes: Vec<u8> = Vec::new();
-    write_message(&mut framed_bytes, &build_hello_request(5)).expect("frame");
-    let framed_byte_count = framed_bytes.len();
-    let (mut reader, deadlines_at_reads) = build_byte_at_a_time_reader(framed_bytes);
-    let idle_timeout = Duration::from_secs(30);
-    reader.set_idle_timeout(Some(idle_timeout));
-
-    let receive_started_at = Instant::now();
-    assert_eq!(
-        reader.recv::<IpcRequest>().expect("recv"),
-        build_hello_request(5)
-    );
-    let receive_ended_at = Instant::now();
-
-    let deadlines_at_reads = deadlines_at_reads.lock().expect("deadlines_at_reads");
-    assert_eq!(deadlines_at_reads.len(), framed_byte_count);
-    let mut previous_deadline = receive_started_at + idle_timeout;
-    for deadline_at_read in deadlines_at_reads.iter() {
-        let deadline = deadline_at_read.expect("each read carries a deadline");
-        assert!(
-            deadline >= previous_deadline,
-            "each read moves the deadline on"
-        );
-        assert!(deadline <= receive_ended_at + idle_timeout);
-        previous_deadline = deadline;
-    }
-}
-
-#[test]
-fn without_an_idle_timeout_reads_keep_the_deadline_set_before() {
-    let mut framed_bytes: Vec<u8> = Vec::new();
-    write_message(&mut framed_bytes, &build_hello_request(5)).expect("frame");
-    let (mut reader, deadlines_at_reads) = build_byte_at_a_time_reader(framed_bytes);
-    let deadline_instant = Instant::now() + Duration::from_secs(10);
-    reader.set_deadline(Some(deadline_instant));
     reader.set_idle_timeout(Some(Duration::from_secs(30)));
-    reader.set_idle_timeout(None);
-
     assert_eq!(
-        reader.recv::<IpcRequest>().expect("recv"),
-        build_hello_request(5)
+        *read_idle_timeout.lock().expect("idle timeout"),
+        Some(Duration::from_secs(30))
     );
-    assert!(deadlines_at_reads
-        .lock()
-        .expect("deadlines_at_reads")
-        .iter()
-        .all(|deadline_at_read| *deadline_at_read == Some(deadline_instant)));
+    assert_eq!(*write_idle_timeout.lock().expect("idle timeout"), None);
+    writer.set_idle_timeout(Some(Duration::from_secs(20)));
+    assert_eq!(
+        *write_idle_timeout.lock().expect("idle timeout"),
+        Some(Duration::from_secs(20))
+    );
+    reader.set_idle_timeout(None);
+    assert_eq!(*read_idle_timeout.lock().expect("idle timeout"), None);
 }
 
 #[test]
-fn an_idle_timeout_too_large_to_add_takes_the_deadline_away() {
-    let mut framed_bytes: Vec<u8> = Vec::new();
-    write_message(&mut framed_bytes, &build_hello_request(5)).expect("frame");
-    let (mut reader, deadlines_at_reads) = build_byte_at_a_time_reader(framed_bytes);
-    reader.set_deadline(Some(Instant::now()));
-    reader.set_idle_timeout(Some(Duration::MAX));
-
+fn a_step_ends_by_the_earlier_of_the_deadline_and_the_idle_timeout() {
+    let idle_timeout = Duration::from_secs(30);
+    let near_deadline = Instant::now() + Duration::from_secs(10);
     assert_eq!(
-        reader.recv::<IpcRequest>().expect("recv"),
-        build_hello_request(5)
+        compute_step_deadline(Some(near_deadline), Some(idle_timeout)),
+        Some(near_deadline)
     );
-    assert!(deadlines_at_reads
-        .lock()
-        .expect("deadlines_at_reads")
-        .iter()
-        .all(Option::is_none));
+
+    let far_deadline = Instant::now() + Duration::from_secs(60);
+    let computed_before = Instant::now();
+    let step_deadline = compute_step_deadline(Some(far_deadline), Some(idle_timeout))
+        .expect("an idle timeout limits the step");
+    let computed_after = Instant::now();
+    assert!(
+        step_deadline >= computed_before + idle_timeout
+            && step_deadline <= computed_after + idle_timeout,
+        "the step ends 30 seconds after it starts"
+    );
+}
+
+#[test]
+fn a_step_under_an_idle_timeout_alone_ends_that_long_after_it_starts() {
+    let idle_timeout = Duration::from_secs(30);
+
+    let computed_before = Instant::now();
+    let step_deadline =
+        compute_step_deadline(None, Some(idle_timeout)).expect("an idle timeout limits the step");
+    let computed_after = Instant::now();
+
+    assert!(
+        step_deadline >= computed_before + idle_timeout
+            && step_deadline <= computed_after + idle_timeout,
+        "the step ends 30 seconds after it starts"
+    );
+}
+
+#[test]
+fn an_idle_timeout_absent_or_too_large_to_add_leaves_the_step_to_the_deadline() {
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    assert_eq!(compute_step_deadline(None, None), None);
+    assert_eq!(compute_step_deadline(Some(deadline), None), Some(deadline));
+    assert_eq!(compute_step_deadline(None, Some(Duration::MAX)), None);
+    assert_eq!(
+        compute_step_deadline(Some(deadline), Some(Duration::MAX)),
+        Some(deadline)
+    );
 }
 
 // --- address mapping ---
@@ -719,6 +677,33 @@ fn request_and_response_cross_a_real_socket() {
         }
     );
     assert_eq!(server.join().expect("server thread"), hello_request_message);
+}
+
+#[test]
+fn a_write_the_peer_takes_no_byte_of_fails_once_its_idle_timeout_passes() {
+    let socket_address = build_test_socket_address("write-idle-timeout");
+    let listener = Listener::bind(&socket_address).expect("bind");
+    let (test_done_sender, test_done_receiver) = std::sync::mpsc::channel::<()>();
+    let server = thread::spawn(move || {
+        let _connection = listener.accept().expect("accept");
+        let _ = test_done_receiver.recv();
+    });
+    let (_reader, mut writer) = Connection::connect(&socket_address)
+        .expect("connect")
+        .split();
+    let idle_timeout = Duration::from_millis(200);
+    writer.set_idle_timeout(Some(idle_timeout));
+
+    let send_started_at = Instant::now();
+    let send_result = writer.send(&"x".repeat(4 * 1024 * 1024));
+
+    assert!(send_started_at.elapsed() >= idle_timeout - MINIMUM_STEP_TIME_LEFT_DURATION);
+    let Err(IpcError::Transport { error_detail }) = &send_result else {
+        panic!("a write the peer takes no byte of times out, got {send_result:?}");
+    };
+    assert_eq!(error_detail, "this step ran out of time");
+    test_done_sender.send(()).expect("the server waits");
+    server.join().expect("server thread");
 }
 
 /// On Windows this pins the shared pipe's security descriptor from both sides:
@@ -980,6 +965,94 @@ fn a_read_after_the_deadline_is_cleared_waits_past_the_old_deadline() {
         (1, 2)
     );
     assert!(deadline_given_at.elapsed() >= Duration::from_millis(600));
+    drop(answering_thread.join().expect("answering thread"));
+}
+
+#[test]
+fn a_read_under_an_idle_timeout_ends_once_the_peer_stays_silent_that_long() {
+    let (caller, silent_peer) = connect_caller_and_peer("read-idle-timeout");
+    let (mut reader, _writer) = caller.split();
+    reader.set_idle_timeout(Some(Duration::from_millis(200)));
+    let read_started_at = Instant::now();
+
+    let receive_error = reader.recv::<IpcResponse>().unwrap_err();
+
+    let read_duration = read_started_at.elapsed();
+    assert_eq!(
+        read_transport_error_detail(receive_error),
+        "this step ran out of time"
+    );
+    assert!(
+        read_duration >= Duration::from_millis(199),
+        "the read runs to its idle timeout, it took {read_duration:?}"
+    );
+    assert!(
+        read_duration < Duration::from_secs(2),
+        "the read ends at its idle timeout, it took {read_duration:?}"
+    );
+    drop(silent_peer);
+}
+
+#[test]
+fn a_frame_whose_parts_arrive_within_the_idle_timeout_of_each_other_is_read_whole() {
+    // At least twelve parts 100 ms apart: the last part leaves at least 1.1
+    // seconds after the read starts, later than the 1-second idle timeout, and
+    // no part leaves more than 100 ms after the one before it.
+    let (caller, sending_peer) = connect_caller_and_peer("read-idle-parts");
+    let (mut reader, _writer) = caller.split();
+    reader.set_idle_timeout(Some(Duration::from_secs(1)));
+    let mut framed_bytes: Vec<u8> = Vec::new();
+    write_message(&mut framed_bytes, &build_hello_request(5)).expect("frame");
+    let part_byte_count = framed_bytes.len() / 12;
+    let (_peer_reader, mut peer_writer) = sending_peer.split_raw();
+    let read_started_at = Instant::now();
+    let sending_thread = thread::spawn(move || {
+        for (part_index, frame_part) in framed_bytes.chunks(part_byte_count).enumerate() {
+            if part_index > 0 {
+                thread::sleep(Duration::from_millis(100));
+            }
+            peer_writer.write_all(frame_part).expect("peer write");
+        }
+        peer_writer
+    });
+
+    let received_request: IpcRequest = reader.recv().expect("the frame is read whole");
+
+    assert_eq!(received_request, build_hello_request(5));
+    assert!(
+        read_started_at.elapsed() > Duration::from_secs(1),
+        "the frame took longer than one idle timeout to arrive"
+    );
+    drop(sending_thread.join().expect("sending thread"));
+}
+
+#[test]
+fn a_read_after_the_idle_timeout_is_taken_away_waits_past_it() {
+    // The first frame waits on the socket before the read under the 300 ms
+    // idle timeout starts. The second leaves 600 ms later, once the idle
+    // timeout is taken away.
+    let (caller, mut answering_peer) = connect_caller_and_peer("cleared-idle-timeout");
+    let (mut reader, _writer) = caller.split();
+    reader.set_idle_timeout(Some(Duration::from_millis(300)));
+    answering_peer
+        .send(&build_hello_request(1))
+        .expect("peer send");
+    let answering_thread = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(600));
+        answering_peer
+            .send(&build_hello_request(2))
+            .expect("peer send");
+        answering_peer
+    });
+
+    let first_request: IpcRequest = reader.recv().expect("the first frame is read");
+    reader.set_idle_timeout(None);
+    let second_request: IpcRequest = reader.recv().expect("the second frame is read");
+
+    assert_eq!(
+        (first_request.request_id, second_request.request_id),
+        (1, 2)
+    );
     drop(answering_thread.join().expect("answering thread"));
 }
 

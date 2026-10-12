@@ -32,9 +32,9 @@
 //! the session the client leaves this one for.
 //! [`PlacementCommandRejected`](crate::event::SessionEvent::PlacementCommandRejected)
 //! is the sixth: it names a placement command that the session rejected.
-//! [`Pong`](crate::event::SessionEvent::Pong) is the seventh: it answers one
-//! [`IpcRequestKind::Ping`](crate::protocol::IpcRequestKind::Ping) from the
-//! client.
+//! [`Pong`](crate::event::SessionEvent::Pong) is the seventh: the session
+//! writes one to a client whose `Attach` named a `link_timeout_ms` whenever it
+//! has written that client nothing for a third of it.
 
 use koshi_core::command::PanePlacementTarget;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
@@ -265,9 +265,9 @@ pub enum SessionEvent {
         /// The rejected command.
         command_id: CommandId,
     },
-    /// The answer to one
-    /// [`IpcRequestKind::Ping`](crate::protocol::IpcRequestKind::Ping) from
-    /// this client. Carries nothing.
+    /// A heartbeat from the session. Written to a client whose `Attach` named
+    /// a `link_timeout_ms` whenever the session has written that client
+    /// nothing for a third of it. Carries nothing.
     Pong,
 }
 

@@ -15,7 +15,6 @@ koshi-sixel.workspace = true
 percent-encoding.workspace = true
 serde = { workspace = true, features = ["rc"] }
 unicode-segmentation.workspace = true
-unicode-width.workspace = true
 vte.workspace = true
 
 [dev-dependencies]

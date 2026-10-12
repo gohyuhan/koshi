@@ -143,9 +143,8 @@ impl Server {
             let client = session.clients.get_client_by_id(claimed_client_id)?;
             let client_active_tab_id = client.get_active_tab_id();
             let is_streaming = self
-                .subscriptions
-                .iter()
-                .any(|&(_, viewed_client_id)| viewed_client_id == claimed_client_id);
+                .find_subscriber_id_by_client_id(claimed_client_id)
+                .is_some();
             (session.tabs.contains_key(&client_active_tab_id) && !is_streaming)
                 .then_some((claimed_client_id, client_active_tab_id))
         });
@@ -204,7 +203,7 @@ impl Server {
         }
         self.publish_events(&emitted_events);
 
-        let deliveries = self.subscribe(client_id);
+        let (deliveries, waiting_host_writes) = self.subscribe(client_id);
         let resume_token = self.saved_view_store.mint_resume_token(client_id);
         let session = self
             .session_by_id
@@ -215,6 +214,7 @@ impl Server {
             session_id,
             session_structure: build_session_structure_snapshot(session),
             deliveries,
+            waiting_host_writes,
             ending_notice: Arc::clone(self.event_bus.get_ending_notice()),
             resume_token,
             pane_area,
@@ -839,8 +839,8 @@ impl Server {
     /// Handle [`Command::SetLockMode`]: set the target client to
     /// [`LockMode::Locked`] when `command_args.locked`, else [`LockMode::Normal`].
     ///
-    /// Setting the mode the client already holds is a no-op: applied, zero
-    /// events.
+    /// Setting the mode the client already holds leaves the mode as it is:
+    /// applied, zero events.
     pub(super) fn handle_set_lock_mode(
         &mut self,
         command_id: CommandId,
@@ -867,7 +867,13 @@ impl Server {
     /// Lock mode targets a client alone — the explicit `client` argument when
     /// set, else the acting client — no pane is resolved, so a client with no
     /// focused pane still locks. Nothing in the layout, focus, or any PTY
-    /// changes; a no-op change mutates nothing.
+    /// changes.
+    ///
+    /// A command whose source is [`CommandSource::KeyBinding`] naming the
+    /// target client came from that client's own connection: the client
+    /// records `command_id` as its last applied lock command, also when the
+    /// mode stays as it was. A command from any other source changes only the
+    /// mode.
     fn set_lock_mode(
         &mut self,
         command_id: CommandId,
@@ -878,6 +884,9 @@ impl Server {
         let (client_id, client) =
             self.resolve_acting_client_mut(command_source, explicit_client_id)?;
 
+        if *command_source == CommandSource::from_key_binding(client_id) {
+            client.set_last_applied_lock_command_id(command_id);
+        }
         let current_lock_mode = client.get_lock_mode();
         let next_lock_mode = resolve_lock_mode(current_lock_mode);
         let mut transaction_scope = TransactionScope::new();

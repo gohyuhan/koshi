@@ -146,10 +146,11 @@ fn typed_keys_write_to_the_focused_pane() {
     // `ls` + Enter, key by key. The viewer resolves each one, binds none of
     // them, and hands the press to the session, which writes it to the focused
     // pane as it is made.
+    let (delivery_receiver, _) = server.subscribe(client_id);
     let mut viewer = koshi_client::Client::from_client_id_and_viewport_size(
         client_id,
         TEST_VIEWPORT_SIZE,
-        server.subscribe(client_id),
+        delivery_receiver,
         TerminalCleanupGuard::new(),
     );
     for key in [Key::Char('l'), Key::Char('s'), Key::Named(NamedKey::Enter)] {

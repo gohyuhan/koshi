@@ -1054,6 +1054,7 @@ fn build_test_painted_frame() -> crate::frame::PaintedFrame {
             active_tab_id: TabId::new(),
             focused_pane_id: None,
             lock_mode: koshi_core::lock::LockMode::default(),
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }

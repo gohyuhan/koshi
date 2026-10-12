@@ -68,6 +68,7 @@ fn build_tabline_frame(
             active_tab_id: tab_id,
             focused_pane_id: None,
             lock_mode,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled,
         },
     };

@@ -99,7 +99,6 @@ impl Server {
                 };
                 self.publish_events(&client_detach_events);
             }
-            RuntimeEvent::ClientPing { client_id } => self.send_pong(client_id),
             RuntimeEvent::Resize {
                 client_id,
                 viewport_size,
@@ -185,7 +184,6 @@ impl Server {
             RuntimeEvent::IpcRestart { response_sender } => {
                 let _ = response_sender.send(self.handle_ipc_restart());
             }
-            RuntimeEvent::HostWriteSent { client_id } => self.handle_host_write_sent(client_id),
             RuntimeEvent::IpcClipboardCopyPart {
                 held_copy_byte_count,
                 response_sender,
@@ -199,11 +197,9 @@ impl Server {
                 copied_bytes,
                 response_sender,
             } => {
-                let _ = response_sender.send(self.route_clipboard_tool_copy(
-                    pane_id,
-                    &clipboard_targets,
-                    &copied_bytes,
-                ));
+                let is_routed =
+                    self.route_clipboard_tool_copy(pane_id, &clipboard_targets, &copied_bytes);
+                let _ = response_sender.send(!is_routed);
             }
             RuntimeEvent::DropUnclaimedClients {
                 unclaimed_client_deadline,

@@ -40,6 +40,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use kdl::KdlNode;
+use koshi_core::constant::MIN_LINK_TIMEOUT_MS;
 use koshi_core::geometry::Direction;
 use koshi_core::key::ExtendedKeysMode;
 use koshi_core::log::{LogFormat, LogLevel};
@@ -707,14 +708,15 @@ fn parse_maximum_copy_byte_count(field_node: &KdlNode) -> Result<usize, String> 
     Ok(usize::try_from(maximum_copy_byte_count).unwrap_or(usize::MAX))
 }
 
-/// Reads the remote link timeout in milliseconds. A value below `1` gives
-/// `must be at least 1`, and a value above `4294967295` gives `must be at most
-/// 4294967295`. `remote-link-timeout-ms 0` is an error, and
-/// `remote-link-timeout-ms 1` yields `1`.
+/// Reads the remote link timeout in milliseconds. A value below
+/// [`MIN_LINK_TIMEOUT_MS`], `1000`, gives `must be at least 1000`, and a value
+/// above `4294967295` gives `must be at most 4294967295`.
+/// `remote-link-timeout-ms 999` is an error, and `remote-link-timeout-ms 1000`
+/// yields `1000`.
 fn parse_remote_link_timeout_ms(config_node: &KdlNode) -> Result<u32, String> {
     let remote_link_timeout_ms = parse_integer_kdl_value(config_node)?;
-    if remote_link_timeout_ms < 1 {
-        return Err("must be at least 1".to_string());
+    if remote_link_timeout_ms < i128::from(MIN_LINK_TIMEOUT_MS) {
+        return Err(format!("must be at least {MIN_LINK_TIMEOUT_MS}"));
     }
     u32::try_from(remote_link_timeout_ms).map_err(|_| "must be at most 4294967295".to_string())
 }

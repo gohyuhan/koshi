@@ -11,7 +11,7 @@ use std::time::SystemTime;
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::command::GridPosition;
 use koshi_core::geometry::{PaneArea, Point, SplitDirection, DEFAULT_FLOATING_PANE_SIZE};
-use koshi_core::ids::SessionId;
+use koshi_core::ids::{CommandId, SessionId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
 use koshi_layout::tree::{LayoutNode, SplitNode};
@@ -224,8 +224,13 @@ fn build_snapshot_carries_the_clients_lock_mode_and_mouse_select() {
 
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     assert_eq!(render_snapshot.client_snapshot.lock_mode, LockMode::Normal);
+    assert_eq!(
+        render_snapshot.client_snapshot.last_applied_lock_command_id,
+        None
+    );
     assert!(!render_snapshot.client_snapshot.is_mouse_selection_enabled);
 
+    let lock_command_id = CommandId::new();
     let client = server
         .session_by_id
         .get_mut(&session_id)
@@ -234,10 +239,15 @@ fn build_snapshot_carries_the_clients_lock_mode_and_mouse_select() {
         .get_client_mut_by_id(client_id)
         .expect("client");
     client.update_lock_mode(LockMode::Locked);
+    client.set_last_applied_lock_command_id(lock_command_id);
     client.toggle_mouse_selection();
 
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     assert_eq!(render_snapshot.client_snapshot.lock_mode, LockMode::Locked);
+    assert_eq!(
+        render_snapshot.client_snapshot.last_applied_lock_command_id,
+        Some(lock_command_id)
+    );
     assert!(render_snapshot.client_snapshot.is_mouse_selection_enabled);
 }
 

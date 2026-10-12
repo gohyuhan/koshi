@@ -61,9 +61,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::command::{CommandEnvelope, CommandSource};
+use koshi_core::constant::{compute_heartbeat_interval, MIN_LINK_TIMEOUT_MS};
 use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_ipc::endpoint::{
     compute_socket_address, delete_advertisement_marker, delete_socket_file,
@@ -92,7 +93,7 @@ use koshi_renderer::snapshot::{
 use koshi_terminal::graphics::ImageRecord;
 
 use crate::executable_watch::ExecutableWatch;
-use crate::runtime::bus::{build_wire_event, build_wire_host_write_events};
+use crate::runtime::bus::{build_wire_event, build_wire_host_write_events, WaitingHostWrites};
 use crate::runtime::event::{EndingNotice, RuntimeEvent, SessionEnding};
 use crate::runtime::frame::{
     build_wire_frame, build_wire_frame_with_content_ids, build_wire_image_chunk_sources,
@@ -232,6 +233,19 @@ impl Intake {
             reader.close();
         }
     }
+
+    /// Close the read direction of the connection filed under
+    /// `connection_number`, as [`ReadCloser::close`] states. A number that no
+    /// served connection is filed under changes nothing.
+    fn close_read_direction(&self, connection_number: u64) {
+        let intake_state = self.intake_state.read().expect("intake");
+        if let Some(reader) = intake_state
+            .reader_by_connection_number
+            .get(&connection_number)
+        {
+            reader.close();
+        }
+    }
 }
 
 /// One attached client's connection, counted in the [`Intake`] while the thread
@@ -280,17 +294,26 @@ struct AttachedStream {
     client_id: ClientId,
     /// Deliveries waiting to be written to the client.
     deliveries: Receiver<Delivery>,
+    /// The host-write bytes that wait for the client's own terminal, which the
+    /// writer takes before each delivery and before its last frame.
+    waiting_host_writes: Arc<WaitingHostWrites>,
     /// Shared session-ending notice read by the writer.
     ending_notice: Arc<EndingNotice>,
     /// Graphics capabilities reported by this connection.
     graphics_capabilities: GraphicsCapabilities,
-    /// The longest the reading half waits for the client's next bytes: the
-    /// Attach request's `link_timeout_ms`. `None` waits with no limit.
-    link_timeout: Option<Duration>,
+    /// How long the writing thread lets the connection go without a frame
+    /// before it writes a [`SessionEvent::Pong`]: a third of the Attach
+    /// request's `link_timeout_ms`. `None` writes no `Pong`.
+    heartbeat_interval: Option<Duration>,
     /// Whether the connection came from another machine. A connection that
-    /// ends with no `Leaving` request reports its client as returning when
-    /// this is `true`.
+    /// ends with no `Leaving` request, after the reading loop read its first
+    /// request, reports its client as returning when this is `true`.
     is_remote: bool,
+    /// Whether a connection that ends with no `Leaving` request, before the
+    /// reading loop reads its first request, reports its client as returning:
+    /// `true` when the connection came from another machine, or when its
+    /// Attach named a client to come back as (`resume_client_id`).
+    is_returning_before_first_request: bool,
 }
 
 /// The serving side of one session's control socket: the bound listener's
@@ -734,7 +757,14 @@ fn run_accept_loop(
 ///
 /// An answered `Attach` ends the request loop: the connection is handed to
 /// [`stream_events`], which carries that client's events out and that client's
-/// input in for as long as the connection lives.
+/// input in for as long as the connection lives. An `Attached` answer that
+/// cannot be written detaches the client: as returning when the connection
+/// came from another machine or the `Attach` names a client to come back as
+/// (`resume_client_id`), and as not returning otherwise. An `Attach` whose
+/// `link_timeout_ms` is below [`MIN_LINK_TIMEOUT_MS`], `1000`, reaches no
+/// dispatcher: it is refused with [`IpcErrorCode::RequestFailed`] and the
+/// sentence `a link timeout of 999 ms is below the minimum of 1000 ms` for
+/// `999`, and the connection keeps serving.
 ///
 /// `live_setting` is the live read of the `allow-other-users` setting on a
 /// connection from another local user, and `None` on one from the user who
@@ -823,6 +853,19 @@ fn serve_connection(
                 }
             }
             IpcRequestKind::Attach {
+                link_timeout_ms: Some(link_timeout_ms),
+                ..
+            } if link_timeout_ms < MIN_LINK_TIMEOUT_MS => IpcResponse {
+                request_id,
+                answer_result: IpcResult::Error(IpcErrorPayload {
+                    code: IpcErrorCode::RequestFailed,
+                    message: format!(
+                        "a link timeout of {link_timeout_ms} ms is below the minimum of \
+                         {MIN_LINK_TIMEOUT_MS} ms"
+                    ),
+                }),
+            },
+            IpcRequestKind::Attach {
                 viewport_size,
                 resume_client_id,
                 resume_token,
@@ -831,6 +874,12 @@ fn serve_connection(
                 cell_size,
                 link_timeout_ms,
             } => {
+                // A connection that ends before its first request after this
+                // attach reports its client as returning when it came from
+                // another machine, or when the attach names a client to come
+                // back as.
+                let is_returning_before_first_request =
+                    handshake.is_remote_caller() || resume_client_id.is_some();
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
                     inbox_sender,
@@ -872,7 +921,7 @@ fn serve_connection(
                             client_id: accepted_client.client_id,
                             detached_at: SystemTime::now(),
                             is_streamed: false,
-                            is_returning: handshake.is_remote_caller(),
+                            is_returning: is_returning_before_first_request,
                         },
                     );
                     return;
@@ -884,12 +933,12 @@ fn serve_connection(
                     AttachedStream {
                         client_id: accepted_client.client_id,
                         deliveries: accepted_client.deliveries,
+                        waiting_host_writes: accepted_client.waiting_host_writes,
                         ending_notice: accepted_client.ending_notice,
                         graphics_capabilities,
-                        link_timeout: link_timeout_ms.map(|link_timeout_ms| {
-                            Duration::from_millis(u64::from(link_timeout_ms))
-                        }),
+                        heartbeat_interval: link_timeout_ms.map(compute_heartbeat_interval),
                         is_remote: handshake.is_remote_caller(),
+                        is_returning_before_first_request,
                     },
                     inbox_sender,
                     live_setting,
@@ -1066,20 +1115,32 @@ fn serve_connection(
 /// [`SessionEvent::PlacementCommandRejected`] carrying its `command_id`; and
 /// a `Mouse` round is answered on the writing half by exactly one
 /// [`SessionEvent::MouseAnswer`] carrying that round's `request_id`. A `Ping`
-/// crosses as [`RuntimeEvent::ClientPing`], and the writing half answers it
-/// with one [`SessionEvent::Pong`]. A request of any other kind, end of stream,
-/// a transport fault, an oversize frame, or a dispatcher that is gone all end
-/// the reading loop.
+/// is read and dropped: nothing crosses for it, and nothing answers it. A
+/// request of any other kind, end of stream, a transport fault, an oversize
+/// frame, or a dispatcher that is gone all end the reading loop. Each read of
+/// the client's next bytes waits with no limit.
 ///
-/// With a `link_timeout`, each read of the client's next bytes waits at most
-/// that long, and a read that waits longer ends the reading loop. Example: a
-/// 30-second link timeout ends the loop when the client sends nothing,
-/// a `Ping` included, for 30 seconds.
+/// With a `heartbeat_interval`, the writing thread writes one
+/// [`SessionEvent::Pong`] whenever it has written nothing to the connection
+/// for that long. Example: a 10-second interval, a third of a 30-second link
+/// timeout, sends a client whose panes stay still one `Pong` every 10
+/// seconds, also while that client's own 20-second paste is still arriving.
+/// A delivery that writes nothing does not put the `Pong` off: a `Pong` that
+/// is due goes out before the next delivery is taken. Example: while painted
+/// frames over [`MAX_FRAME_BYTE_COUNT`](transport::MAX_FRAME_BYTE_COUNT) keep
+/// the queue busy, a `Pong` that falls due while the writing thread works on
+/// one frame goes out before the next frame is taken.
 ///
-/// A host write goes out as the frames [`build_wire_host_write_events`] gives.
-/// Once they are written, the writing thread drops the delivery and its
-/// in-flight marker, then hands over [`RuntimeEvent::HostWriteSent`] for
-/// `client_id`.
+/// Before each delivery it reads, the writing thread takes every byte in the
+/// stream's waiting host writes and writes them as the frames
+/// [`build_wire_host_write_events`] gives. A [`Delivery::HostWrite`] only
+/// wakes it for that. When the writing thread ends, it drops its queue's
+/// receiver, then clears the wake it did not read
+/// ([`WaitingHostWrites::clear_queued_wake`]). The next host write that the
+/// bus adds for this client then finds the receiver gone, and the bus takes
+/// none. Example: a write that fails on a large frame, with a wake queued
+/// behind that frame, ends the thread. A clipboard tool copy for this client
+/// after that is not routed.
 ///
 /// A frame that arrives whole and does not decode costs the client that one
 /// request. The reading half drops it and reads the next frame, and the client
@@ -1092,30 +1153,48 @@ fn serve_connection(
 ///
 /// The reading loop ending detaches the client: it hands over one
 /// [`RuntimeEvent::ClientDetached`], whose `is_returning` is the value of the
-/// `Leaving` request that ended the loop, and with no such request,
-/// `is_remote`. The detach removes the client's record and drops its
+/// `Leaving` request that ended the loop. With no such request, it is
+/// `is_returning_before_first_request` when the loop read no request, and
+/// `is_remote` after the loop read one. Example: a client on this machine
+/// whose Attach names its own id, after the session replaced its own process
+/// image, and that ends before its first request, detaches as returning. The
+/// same client ending after its first request detaches as not returning. The
+/// detach removes the client's record and drops its
 /// subscription; the closed queue, or the terminal `Quit` or `Restarting`
 /// frame, then ends the writing thread. The writing thread hands over no
-/// detach: a write that fails is a connection whose peer closed, and the
-/// reading loop then reads end of stream. A detach for a client already gone
+/// detach. A write that fails ends the writing thread and closes this
+/// connection's read direction ([`Intake::close_read_direction`]), and the
+/// reading loop then ends on a failed read. Example: on Linux, a write to a
+/// client that shut its read direction fails with `EPIPE`, and that client is
+/// detached while it still sends. A failed write of the goodbye or of the
+/// session's last frame closes nothing. A detach for a client already gone
 /// changes nothing.
 ///
 /// A detach the server starts closes the client's queue: the writing thread
-/// writes what is already queued, then [`SessionEvent::Detached`] as its last
-/// frame, and ends. A session ending at the same moment writes only the host
-/// writes still queued, and the goodbye is still what this client reads. The
-/// reading half keeps reading until the client closes its end, and that close
-/// reads as end of stream — a second detach for a client already gone. A
-/// `Leaving` request ends the reading half the same way: the client says it
-/// sends nothing more, and every key it sent has already been handed over.
+/// writes what is already queued and the waiting host-write bytes, then
+/// [`SessionEvent::Detached`] as its last frame, and ends. A session ending at
+/// the same moment writes only the waiting host-write bytes, and the goodbye
+/// is still what this client reads. The reading half keeps reading until the
+/// client closes its end, and that close reads as end of stream — a second
+/// detach for a client already gone. A `Leaving` request ends the reading half
+/// the same way: the client says it sends nothing more, and every key it sent
+/// has already been handed over.
+///
+/// A reading loop that ends on a failed read — end of stream, a read direction
+/// the writing thread closed, a transport fault, or an oversize frame — gets
+/// no goodbye. Once the detach closes the queue, the writing thread writes
+/// nothing more and ends, and the connection closes. Example: a client on
+/// another machine whose router closed its connection reads the connection
+/// close, not [`SessionEvent::Detached`].
 ///
 /// `ending_notice` is what the session raises when it ends — see
 /// [`EndingNotice`]. The writing thread reads it at the top of each turn. It
-/// writes each host write still queued, then the frame the notice names,
-/// [`SessionEvent::Quit`] or [`SessionEvent::Restarting`]. Every other delivery
-/// still queued goes unwritten. A client whose queue the server closed before
-/// that reads [`SessionEvent::Detached`] instead: it left before the session
-/// did. The thread counts itself on the notice for as long as it runs.
+/// writes the waiting host-write bytes, then the frame the notice names,
+/// [`SessionEvent::Quit`] or [`SessionEvent::Restarting`]. Every delivery still
+/// queued goes unwritten. A client whose queue the server closed before that
+/// reads [`SessionEvent::Detached`] instead, or no goodbye after a failed
+/// read: it left before the session did. The thread counts itself on the
+/// notice for as long as it runs.
 ///
 /// `live_setting` is the live read of the `allow-other-users` setting on a
 /// connection from another local user, and `None` on one from the user who
@@ -1127,9 +1206,11 @@ fn serve_connection(
 /// caller: taken before the `Attached` frame is written, dropped once this
 /// returns.
 ///
-/// `served_connection` is this connection's entry in the [`Intake`]: the intake holds this
-/// connection's read direction through it. The client's record stays as it is:
-/// the image swap that cut the connection carries it across.
+/// `served_connection` is this connection's entry in the [`Intake`]: the
+/// intake holds this connection's read direction through it, and the writing
+/// thread closes that read direction through the intake after a failed write.
+/// The client's record stays as it is: the image swap that cut the connection
+/// carries it across.
 fn stream_events(
     connection: Connection,
     attached_stream: AttachedStream,
@@ -1140,34 +1221,32 @@ fn stream_events(
     let AttachedStream {
         client_id,
         deliveries,
+        waiting_host_writes,
         ending_notice,
         graphics_capabilities,
-        link_timeout,
+        heartbeat_interval,
         is_remote,
+        is_returning_before_first_request,
     } = attached_stream;
     let (mut frame_reader, mut frame_writer) = connection.split();
-    frame_reader.set_idle_timeout(link_timeout);
-    let writer_inbox_sender = inbox_sender.clone();
+    // Set by the reading loop when it ends on a failed read, before it hands
+    // over the detach.
+    let is_link_lost = Arc::new(AtomicBool::new(false));
+    let writer_is_link_lost = Arc::clone(&is_link_lost);
     let writer_intake = Arc::clone(&served_connection.intake);
+    let connection_number = served_connection.connection_number;
     ending_notice.record_writer_started();
     std::thread::spawn(move || {
         let mut image_cache = ConnectionImageCache::new();
-        loop {
-            // The session is ending. This client is told at once: each host
-            // write still queued for it goes out first, and everything else
+        let has_write_failed = loop {
+            // The session is ending. This client is told at once: the
+            // host-write bytes that wait for it go out first, and everything
             // still queued goes unwritten. A queue the server already closed
-            // detached this client before the session ended: its own goodbye
-            // is what it reads.
+            // detached this client before the session ended: its own goodbye,
+            // or none after a failed read, is what it reads.
             if let Some(session_ending) = ending_notice.get_session_ending() {
                 let terminal_event = loop {
                     match deliveries.try_recv() {
-                        Ok(Delivery::HostWrite {
-                            host_write_bytes, ..
-                        }) => {
-                            if send_host_write(&mut frame_writer, &host_write_bytes) {
-                                break None;
-                            }
-                        }
                         Ok(_) => {}
                         Err(mpsc::TryRecvError::Empty) => {
                             break Some(match session_ending {
@@ -1176,23 +1255,61 @@ fn stream_events(
                             })
                         }
                         Err(mpsc::TryRecvError::Disconnected) => {
-                            break Some(SessionEvent::Detached)
+                            break build_detach_goodbye(&writer_is_link_lost)
                         }
                     }
                 };
                 if let Some(terminal_event) = terminal_event {
-                    let _ = frame_writer.send(&terminal_event);
+                    if send_waiting_host_writes(&mut frame_writer, &waiting_host_writes).is_ok() {
+                        let _ = frame_writer.send(&terminal_event);
+                    }
                 }
-                break;
+                break false;
             }
-            let Ok(delivery) = deliveries.recv() else {
-                // The queue closed, which the server does when it detaches this
-                // client. `recv` hands back everything queued before the close:
-                // the goodbye follows the events that preceded it.
-                let _ = frame_writer.send(&SessionEvent::Detached);
-                break;
+            if send_waiting_host_writes(&mut frame_writer, &waiting_host_writes).is_err() {
+                break true;
+            }
+            let delivery_wait_result = match heartbeat_interval {
+                // The next `Pong` is due `heartbeat_interval` after the last
+                // frame that went out. A `Pong` that is due goes out before
+                // the next delivery is taken.
+                Some(heartbeat_interval) => {
+                    let time_left_before_pong = (frame_writer.get_last_frame_written_at()
+                        + heartbeat_interval)
+                        .saturating_duration_since(Instant::now());
+                    if time_left_before_pong.is_zero() {
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    } else {
+                        deliveries.recv_timeout(time_left_before_pong)
+                    }
+                }
+                None => deliveries
+                    .recv()
+                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
             };
-            let has_write_failed = match &delivery {
+            let delivery = match delivery_wait_result {
+                Ok(delivery) => delivery,
+                // No frame went out for `heartbeat_interval`.
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if frame_writer.send(&SessionEvent::Pong).is_err() {
+                        break true;
+                    }
+                    continue;
+                }
+                // The queue closed, which the server does when it detaches this
+                // client. The wait hands back everything queued before the
+                // close: the goodbye follows the events that preceded it.
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if let Some(detach_goodbye) = build_detach_goodbye(&writer_is_link_lost) {
+                        if send_waiting_host_writes(&mut frame_writer, &waiting_host_writes).is_ok()
+                        {
+                            let _ = frame_writer.send(&detach_goodbye);
+                        }
+                    }
+                    break false;
+                }
+            };
+            let send_result = match &delivery {
                 Delivery::Frame(render_snapshot) => send_painted_frame(
                     &mut frame_writer,
                     &mut image_cache,
@@ -1211,23 +1328,16 @@ fn stream_events(
                     graphics_capabilities,
                     client_id,
                 ),
-                Delivery::HostWrite {
-                    host_write_bytes, ..
-                } => send_host_write(&mut frame_writer, host_write_bytes),
-                _ => false,
+                // The wake is read. The top of the next turn writes the
+                // waiting bytes.
+                Delivery::HostWrite => {
+                    waiting_host_writes.clear_queued_wake();
+                    continue;
+                }
+                _ => Ok(()),
             };
-            if has_write_failed {
-                break;
-            }
-            if matches!(delivery, Delivery::HostWrite { .. }) {
-                // The delivery and its in-flight marker drop before the session
-                // reads that the bytes went out.
-                drop(delivery);
-                writer_intake.hand_over_event(
-                    &writer_inbox_sender,
-                    RuntimeEvent::HostWriteSent { client_id },
-                );
-                continue;
+            if send_result.is_err() {
+                break true;
             }
             if matches!(
                 delivery,
@@ -1237,7 +1347,7 @@ fn stream_events(
             }
             let session_event = build_wire_event(&delivery);
             if let Some(session_event) = session_event {
-                let has_write_failed = match frame_writer.send(&session_event) {
+                let has_event_write_failed = match frame_writer.send(&session_event) {
                     Ok(()) => false,
                     Err(IpcError::FrameTooLarge {
                         frame_byte_count,
@@ -1253,22 +1363,33 @@ fn stream_events(
                     }
                     Err(_) => true,
                 };
-                if has_write_failed {
-                    break;
+                if has_event_write_failed {
+                    break true;
                 }
                 // `Quit` and `Restarting` are the stream's terminal frames; the
                 // loop ends on either without waiting for the queue to close.
                 if matches!(session_event, SessionEvent::Quit | SessionEvent::Restarting) {
-                    break;
+                    break false;
                 }
             }
+        };
+        // The queue's receiver goes before the wake clears. A host write that
+        // the bus adds after this queues a new wake, finds the receiver gone,
+        // and removes this client's subscriber.
+        drop(deliveries);
+        waiting_host_writes.clear_queued_wake();
+        // A failed write closes the read direction: the reading loop then ends
+        // on a failed read and hands over the detach.
+        if has_write_failed {
+            writer_intake.close_read_direction(connection_number);
         }
         ending_notice.record_writer_ended();
     });
 
     // A connection that ends with no `Leaving` request reports its client as
-    // returning when it came from another machine.
-    let mut is_returning = is_remote;
+    // returning: `is_returning_before_first_request` until the first request
+    // is read, then `is_remote`.
+    let mut is_returning = is_returning_before_first_request;
     loop {
         let incoming_request_result = frame_reader.recv::<IncomingRequest>();
         // The setting is read again after each read on this connection,
@@ -1291,10 +1412,15 @@ fn stream_events(
                 tracing::debug!(%client_id, "frame this build cannot read");
                 continue;
             }
-            // An oversize frame leaves its payload unread, and a disconnect
-            // or a transport fault leaves no stream. All three end this loop.
-            Err(_) => break,
+            // An oversize frame leaves its payload unread, and a disconnect or
+            // a transport fault leaves no stream. Each one ends this loop, and
+            // the client gets no goodbye.
+            Err(_) => {
+                is_link_lost.store(true, Ordering::SeqCst);
+                break;
+            }
         };
+        is_returning = is_remote;
         let request_kind = match incoming_request.request_kind {
             MaybeKnown::Known(request_kind) => request_kind,
             // A kind this build does not have comes from a newer koshi. The
@@ -1354,7 +1480,7 @@ fn stream_events(
                 source_pane_id: pane_id,
                 destination_tab_id,
             },
-            IpcRequestKind::Ping => RuntimeEvent::ClientPing { client_id },
+            IpcRequestKind::Ping => continue,
             // The client sends nothing more on this connection, and everything
             // it did send is handed over above.
             IpcRequestKind::Leaving {
@@ -1646,19 +1772,47 @@ fn is_same_image_record(
     }
 }
 
+/// The goodbye a writing thread writes once the server closed its client's
+/// queue: [`SessionEvent::Detached`], or `None` when `is_link_lost` says the
+/// reading loop ended on a failed read.
+fn build_detach_goodbye(is_link_lost: &AtomicBool) -> Option<SessionEvent> {
+    if is_link_lost.load(Ordering::SeqCst) {
+        return None;
+    }
+    Some(SessionEvent::Detached)
+}
+
+/// Take every byte in `waiting_host_writes` and send them as one host write,
+/// as [`send_host_write`] does. Sends nothing when no byte waits.
+///
+/// # Errors
+/// The [`IpcError`] of the first frame that could not be written.
+fn send_waiting_host_writes(
+    frame_writer: &mut FrameWriter,
+    waiting_host_writes: &WaitingHostWrites,
+) -> Result<(), IpcError> {
+    let host_write_bytes = waiting_host_writes.take_host_write_bytes();
+    if host_write_bytes.is_empty() {
+        return Ok(());
+    }
+    send_host_write(frame_writer, &host_write_bytes)
+}
+
 /// Send one painted frame and each new image record after it.
 ///
 /// A client whose terminal has no native image protocol receives every image
 /// placement through [`hide_image_records`], and no image record.
 ///
-/// Returns `true` when the connection is no longer usable.
+/// # Errors
+/// The [`IpcError`] of a write that left the connection unusable, as
+/// [`report_image_send_error`] sorts it.
 fn send_painted_frame(
     frame_writer: &mut FrameWriter,
     image_cache: &mut ConnectionImageCache,
     render_snapshot: &RenderSnapshot,
     graphics_capabilities: GraphicsCapabilities,
     client_id: ClientId,
-) -> bool {
+) -> Result<(), IpcError> {
     if !graphics_capabilities.has_native_image_protocol() {
         let mut painted_frame = build_wire_frame(render_snapshot);
         for pane_snapshot in &mut painted_frame.pane_snapshots {
@@ -1668,7 +1822,7 @@ fn send_painted_frame(
             frame: Box::new(painted_frame),
         };
         return match frame_writer.send(&painted_frame_event) {
-            Ok(()) => false,
+            Ok(()) => Ok(()),
             Err(write_error) => {
                 report_image_send_error(image_cache, client_id, write_error, "the painted frame")
             }
@@ -1704,14 +1858,16 @@ fn send_painted_frame(
 /// bytes, then one `HostWrite` frame with the bytes that are left. The first
 /// failed write stops the sending.
 ///
-/// Returns `true` when the connection is no longer usable.
-fn send_host_write(frame_writer: &mut FrameWriter, host_write_bytes: &[u8]) -> bool {
+/// # Errors
+/// The [`IpcError`] of the first frame that could not be written.
+fn send_host_write(
+    frame_writer: &mut FrameWriter,
+    host_write_bytes: &[u8],
+) -> Result<(), IpcError> {
     for host_write_event in build_wire_host_write_events(host_write_bytes) {
-        if frame_writer.send(&host_write_event).is_err() {
-            return true;
-        }
+        frame_writer.send(&host_write_event)?;
     }
-    false
+    Ok(())
 }
 
 /// Send one placement preview and each new image record after it.
@@ -1719,7 +1875,9 @@ fn send_host_write(frame_writer: &mut FrameWriter, host_write_bytes: &[u8]) -> b
 /// A client whose terminal has no native image protocol receives every image
 /// placement through [`hide_image_records`], and no image record.
 ///
-/// Returns `true` when the connection is no longer usable.
+/// # Errors
+/// The [`IpcError`] of a write that left the connection unusable, as
+/// [`report_image_send_error`] sorts it.
 fn send_placement_snapshot(
     frame_writer: &mut FrameWriter,
     image_cache: &mut ConnectionImageCache,
@@ -1727,7 +1885,7 @@ fn send_placement_snapshot(
     placement_snapshot: &PlacementSnapshot,
     graphics_capabilities: GraphicsCapabilities,
     client_id: ClientId,
-) -> bool {
+) -> Result<(), IpcError> {
     if !graphics_capabilities.has_native_image_protocol() {
         let mut wire_placement_snapshot = build_wire_placement_snapshot(placement_snapshot);
         hide_placement_image_records(&mut wire_placement_snapshot);
@@ -1736,7 +1894,7 @@ fn send_placement_snapshot(
             snapshot: Box::new(wire_placement_snapshot),
         };
         return match frame_writer.send(&placement_snapshot_event) {
-            Ok(()) => false,
+            Ok(()) => Ok(()),
             Err(write_error) => report_image_send_error(
                 image_cache,
                 client_id,
@@ -1778,7 +1936,12 @@ fn send_placement_snapshot(
 /// `leading_event_part` names `leading_event` in the warning a failed write
 /// logs, and a failed record write logs `an image transfer start after
 /// <leading_event_part>` or `an image transfer chunk after <leading_event_part>`.
-/// Returns `true` when the connection is no longer usable.
+/// A write the connection survives, a frame over the cap, stops the sending
+/// and returns `Ok`.
+///
+/// # Errors
+/// The [`IpcError`] of a write that left the connection unusable, as
+/// [`report_image_send_error`] sorts it.
 fn send_image_uploads(
     frame_writer: &mut FrameWriter,
     image_cache: &mut ConnectionImageCache,
@@ -1786,7 +1949,7 @@ fn send_image_uploads(
     leading_event: &SessionEvent,
     leading_event_part: &str,
     image_uploads: Vec<(u64, Arc<ImageRecord>)>,
-) -> bool {
+) -> Result<(), IpcError> {
     if let Err(write_error) = frame_writer.send(leading_event) {
         return report_image_send_error(image_cache, client_id, write_error, leading_event_part);
     }
@@ -1833,7 +1996,7 @@ fn send_image_uploads(
             }
         }
     }
-    false
+    Ok(())
 }
 
 /// Run [`hide_image_records`] on every pane of the source tab and of the
@@ -1865,14 +2028,17 @@ fn hide_image_records(image_placements: &mut [FrameImagePlacement]) {
 }
 
 /// Log one image-stream write failure. A frame over the cap clears
-/// `image_cache` and returns `false`: the connection stays usable. Any other
-/// failure returns `true`: the connection is no longer usable.
+/// `image_cache` and returns `Ok`: the connection stays usable.
+///
+/// # Errors
+/// Every other failure, `write_error` itself: the connection is no longer
+/// usable.
 fn report_image_send_error(
     image_cache: &mut ConnectionImageCache,
     client_id: ClientId,
     write_error: IpcError,
     failed_image_transfer_part: &str,
-) -> bool {
+) -> Result<(), IpcError> {
     match write_error {
         IpcError::FrameTooLarge {
             frame_byte_count,
@@ -1886,7 +2052,7 @@ fn report_image_send_error(
                 "image transfer part exceeded the frame cap"
             );
             image_cache.clear_image_cache();
-            false
+            Ok(())
         }
         write_error => {
             tracing::warn!(
@@ -1895,7 +2061,7 @@ fn report_image_send_error(
                 %write_error,
                 "image transfer write failed"
             );
-            true
+            Err(write_error)
         }
     }
 }

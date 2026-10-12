@@ -106,9 +106,10 @@ focused pane is the pane that wrote it. That terminal sets its own clipboard
 when it reads `OSC 52`. The copy keeps the clipboards it names: `c` for the
 clipboard, `p` for the primary selection, `q` for the secondary selection, `s`
 for the selection, and `0` to `7` for the cut buffers. A copy that names none,
-such as `ESC ] 52 ; ; aGk= BEL`, lets that terminal choose. A copy longer than
-`max-copy-bytes` reaches no terminal. An `OSC 52` request to read the clipboard
-gets no answer.
+such as `ESC ] 52 ; ; aGk= BEL`, lets that terminal choose. The copy keeps the
+decoded bytes unchanged, UTF-8 text or not: `ESC ] 52 ; c ; /w== BEL` copies
+the one byte `0xff`. A copy longer than `max-copy-bytes` reaches no terminal.
+An `OSC 52` request to read the clipboard gets no answer.
 
 On Linux and macOS, `allow #true` also puts a folder of stand-in clipboard
 tools first on the `PATH` of each pane started while it is on. The folder holds
@@ -117,7 +118,12 @@ session finds on its own `PATH` when it starts. A copy made through a stand-in
 goes to the terminal of each client on another machine, a terminal that joined
 with `koshi attach --remote`, whose focused pane is that pane. The real tool
 runs too, with the same arguments and the same input, unless every client that
-focuses the pane is on another machine and each one got the copy.
+focuses the pane is on another machine and each one's link took the copy. A
+link that dropped still takes copies until koshi notices the drop, as
+[`remote-link-timeout-ms`](#remote-link-timeout-ms) describes, but its terminal
+does not get them. Example: when the only client that focuses the pane is a
+laptop whose network dropped, the laptop's link takes the copy, the real tool
+does not run, and the copy reaches no clipboard.
 
 Example: `printf hi | xclip -selection clipboard` in a pane that only a
 terminal on another machine focuses puts `hi` on that terminal's clipboard, and
@@ -133,7 +139,13 @@ The real tool runs alone, as it does outside koshi, for these calls:
 - a read, a clear, or a copy of another type than plain text, such as
   `xclip -o`, `wl-copy --clear` or `xclip -target image/png`;
 - a copy longer than `max-copy-bytes`, and a copy that is not UTF-8 text;
-- a copy that the session does not answer within 5 seconds.
+- a copy that the session does not answer within 5 seconds. A copy goes to
+  the session in parts of up to 12582783 bytes as the stand-in reads it, and
+  the session has 5 seconds to answer each part.
+
+The stand-in keeps every byte of input it read until the copy ends, at most
+`max-copy-bytes` plus 12582784 bytes. When the real tool runs, it reads those
+bytes, then the rest of the input.
 
 No stand-in sees these copies:
 
@@ -411,7 +423,7 @@ keybinding sends the quit to the session and leaves without waiting for the
 session's answer.
 
 A refusal no dial can change stops the dialing at once, without waiting the 120
-seconds out: the certificate the server presents is not the pinned one, the
+seconds out: the certificate the server presents is not the expected one, the
 server does not admit the token, the token does not reach the session, or the
 two builds share no protocol version. Every identical dial gets that same
 answer, so no dial follows it.
@@ -436,33 +448,38 @@ Each terminal reads this for itself. It applies only to a terminal viewing a
 session on another machine, reached with `koshi attach --remote`. A terminal
 viewing a session on this machine sends no ping and has no time limit.
 
-The terminal sends the session a ping once every third of this time, and the
-session answers each ping. A link over which no byte reaches the terminal for
+The terminal sends the session a ping once every third of this time. The
+session sends the terminal a pong whenever it has sent the terminal nothing
+for a third of this time. A link over which no byte reaches the terminal for
 this long has dropped: with `remote-reconnect` on, the terminal dials again,
-and with it off, the terminal ends.
+and with it off, the terminal ends. A write from the terminal that puts no
+byte on the link for this long ends the terminal's writing on that link.
 
-The terminal gives the session this value when it joins. The session removes a
-terminal from which no byte arrives for this long, and keeps that terminal's
+The terminal gives the serving machine this value when it joins. That machine
+closes its connection to the terminal once no byte arrives from the terminal
+for this long, or the terminal takes no byte for this long. While the terminal
+joins, that machine waits at least 20 seconds for the terminal's first request
+to the session. The connection then leaves the `remote connections` count of
+`koshi doctor`, and the session removes the terminal and keeps that terminal's
 view. The terminal gets the view back when it joins again. That removal never
 ends the session, also with `auto-close-session` on.
 
-The terminal also gives the serving machine this value plus 20 seconds. That
-machine closes its connection to the terminal once no byte arrives from the
-terminal for that long, or the terminal takes no byte for that long. The
-connection then leaves the `remote connections` count of `koshi doctor`.
+A paste keeps the link for as long as its bytes keep moving, also when it takes
+longer than this time to send.
 
 Example: with `remote-link-timeout-ms 30000`, the terminal sends a ping every
 10 seconds. A laptop that loses its network shows `RECONNECTING` at most 30
 seconds after the last byte arrived. The serving machine closes the laptop's
-connection at most 50 seconds after the last byte from the laptop arrived.
+connection at most 30 seconds after the last byte from the laptop arrived. A
+paste that takes two minutes to send over a slow link keeps the link.
 
-The value is in milliseconds, from `1` to `4294967295`. The first answer to a
-ping arrives one third of this time plus one round trip after the join. A value
-under one and a half round trips of the link drops a link that works.
+The value is in milliseconds, from `1000` to `4294967295`. A value under `1000`
+is ignored with the warning `must be at least 1000`. A value under one and a
+half times the longest one-way delay of the link can drop a link that works.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `remote-link-timeout-ms` | integer, `1` to `4294967295` — the milliseconds with no byte from the other side after which a link to a session on another machine has dropped | `30000` | ≥ 0.6.0 |
+| `remote-link-timeout-ms` | integer, `1000` to `4294967295` — the milliseconds with no byte from the other side after which a link to a session on another machine has dropped | `30000` | ≥ 0.6.0 |
 
 ## `reduced-motion`
 
@@ -532,7 +549,9 @@ A terminal on another machine whose link drops has not left, so the session
 keeps running, also when that terminal was the last one. That terminal can
 join again. A terminal that ends with no word to the session, such as one
 killed with `kill -9`, counts as a dropped link when it is on another machine,
-and as a leaving when it is on this machine.
+and as a leaving when it is on this machine. If koshi cannot set up a terminal
+after the session accepts it, such as a terminal that cannot enter raw mode,
+that terminal has not left, so the session keeps running.
 
 A restart into a new build, such as the one `koshi update` starts, is not a
 leaving. Each attached terminal reconnects by itself. Keys and pastes typed
@@ -541,8 +560,10 @@ the order they were typed. A terminal holds at most 1024 of them, and at most
 one frame of pasted text; past either limit, everything typed during that
 restart is dropped. The quit keybinding leaves at once. A terminal that does not
 come back is dropped, for example a terminal that runs koshi 0.4.0, which
-cannot attach to a newer session. The session keeps running even when no
-terminal is left; rejoin it with `koshi attach <session>`.
+cannot attach to a newer session. A terminal on this machine that ends while
+it joins the restarted session, before it has sent anything there, has not
+left either. The session keeps running even when no terminal is left; rejoin
+it with `koshi attach <session>`.
 
 Quit leaves the session; it never ends one on its own. With this setting off,
 `<leader>q` detaches your terminal and the session keeps running. With it on,

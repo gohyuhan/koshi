@@ -2887,7 +2887,18 @@ fn the_update_lock_is_held_until_its_file_is_dropped() {
 
     assert!(is_update_restarting_servers(runtime_directory.path()));
     drop(update_lock_file);
-    assert!(!is_update_restarting_servers(runtime_directory.path()));
+    // On Unix, a process that another test starts at this moment holds a copy
+    // of the lock file until that process runs its program or exits, and the
+    // lock stays taken until then. The lock is free within 5 seconds of the
+    // drop.
+    let release_deadline = Instant::now() + Duration::from_secs(5);
+    while is_update_restarting_servers(runtime_directory.path()) {
+        assert!(
+            Instant::now() < release_deadline,
+            "the update lock is still taken 5 seconds after its file was dropped"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 #[test]

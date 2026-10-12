@@ -53,6 +53,12 @@ fn explain_reports_file_default_and_meaning_for_each_config_file_kind() {
              End the session when its last client leaves.\n",
         ),
         (
+            "koshi.remote-link-timeout-ms",
+            "koshi.remote-link-timeout-ms\nfile: koshi.kdl\ndefault: 30000\n\
+             Milliseconds a link to a session on another machine may carry no byte before it \
+             drops, from 1000.\n",
+        ),
+        (
             "theme.colors.border-hover",
             "theme.colors.border-hover\nfile: themes/<name>.kdl\ndefault: \"#af5fff\"\n\
              Pane border under the pointer.\n",

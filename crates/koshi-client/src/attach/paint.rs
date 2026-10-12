@@ -128,6 +128,9 @@ fn build_render_snapshot_with_images(
             active_tab_id: painted_frame.client_snapshot.active_tab_id,
             focused_pane_id: painted_frame.client_snapshot.focused_pane_id,
             lock_mode: painted_frame.client_snapshot.lock_mode,
+            last_applied_lock_command_id: painted_frame
+                .client_snapshot
+                .last_applied_lock_command_id,
             is_mouse_selection_enabled: painted_frame.client_snapshot.is_mouse_selection_enabled,
         },
     }
@@ -198,6 +201,7 @@ fn build_placement_render_snapshot(
                 active_tab_id: placement_snapshot.client_snapshot.active_tab_id,
                 focused_pane_id: placement_snapshot.client_snapshot.focused_pane_id,
                 lock_mode: LockMode::Normal,
+                last_applied_lock_command_id: None,
                 is_mouse_selection_enabled: false,
             },
             reported_pane_area: placement_snapshot.client_snapshot.pane_area,

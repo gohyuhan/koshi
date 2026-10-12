@@ -40,7 +40,7 @@ use crate::{
         SCREEN_NOT_RESTORED_NOTICE_BYTES,
     },
     runtime::{
-        bus::EventBus,
+        bus::{EventBus, HostWrite, WaitingHostWrites},
         event::RuntimeEvent,
         reload::{merge_app_layer_into_client_config, merge_app_layer_into_server_config},
         render_schedule::RenderScheduler,
@@ -539,18 +539,22 @@ impl Server {
         self.dispatch(envelope)
     }
 
-    /// The server→client door: register a subscriber for the events `filter`
-    /// selects and hand back the receiving end of its own bounded queue.
-    /// Dropping the receiver ends the subscription.
+    /// The server→client door: register a subscriber for every published
+    /// event and hand back the receiving end of its own bounded queue, with the
+    /// host-write bytes that wait for `client_id`'s own terminal
+    /// ([`WaitingHostWrites`]). Dropping the receiver ends the subscription.
     ///
     /// `client_id` is the client the subscriber views as: the one whose frame
     /// [`push_frames`](Self::push_frames) queues each due render, and the one
     /// [`resync_lagged`](Self::resync_lagged) builds when an event does
     /// not fit the queue.
-    pub fn subscribe(&mut self, client_id: ClientId) -> Receiver<Delivery> {
-        let (subscriber_id, receiver) = self.event_bus.subscribe();
+    pub fn subscribe(
+        &mut self,
+        client_id: ClientId,
+    ) -> (Receiver<Delivery>, Arc<WaitingHostWrites>) {
+        let (subscriber_id, delivery_receiver, waiting_host_writes) = self.event_bus.subscribe();
         self.subscriptions.push((subscriber_id, client_id));
-        receiver
+        (delivery_receiver, waiting_host_writes)
     }
 
     /// Drop every subscription registered as viewing `client_id`, closing the
@@ -559,8 +563,8 @@ impl Server {
     /// own view state, which is gone with the record.
     ///
     /// A client with no subscription of its own leaves the bus untouched.
-    /// Bytes still waiting for the client's own terminal are dropped with its
-    /// subscription: the terminal that was to be written to is gone.
+    /// Bytes still waiting for the client's own terminal stay with the thread
+    /// that writes the client's connection, and nothing adds to them.
     pub(crate) fn unsubscribe_client(&mut self, client_id: ClientId) {
         let bus = &mut self.event_bus;
         self.subscriptions
@@ -654,22 +658,21 @@ impl Server {
     /// client has no subscriber, or every queue was full: a full queue drops
     /// the move and desyncs that subscriber, and the move is never replayed.
     pub(crate) fn send_switch(&mut self, client_id: ClientId, session_id: SessionId) -> bool {
-        let subscriber_ids: Vec<SubscriberId> = self
-            .subscriptions
-            .iter()
-            .filter(|&&(_, viewed)| viewed == client_id)
-            .map(|&(subscriber_id, _)| subscriber_id)
-            .collect();
         let mut has_sent_switch = false;
-        for subscriber_id in subscriber_ids {
-            has_sent_switch |= self.event_bus.try_send_switch(subscriber_id, session_id);
+        for &(subscriber_id, viewed_client_id) in &self.subscriptions {
+            if viewed_client_id == client_id {
+                has_sent_switch |= self.event_bus.try_send_switch(subscriber_id, session_id);
+            }
         }
         has_sent_switch
     }
 
     /// The subscriber that views `client_id`, or `None` when no subscriber
     /// does. The first in subscription order when several do.
-    fn find_subscriber_id_by_client_id(&self, client_id: ClientId) -> Option<SubscriberId> {
+    pub(crate) fn find_subscriber_id_by_client_id(
+        &self,
+        client_id: ClientId,
+    ) -> Option<SubscriberId> {
         self.subscriptions
             .iter()
             .find(|&&(_, viewed_client_id)| viewed_client_id == client_id)
@@ -715,15 +718,6 @@ impl Server {
             .try_send_placement_command_rejection(subscriber_id, command_id)
     }
 
-    /// Put the answer to one ping on the queue of the client `client_id`, as
-    /// [`EventBus::try_send_pong`] states. A client that no subscriber views
-    /// gets nothing.
-    pub(crate) fn send_pong(&mut self, client_id: ClientId) {
-        if let Some(subscriber_id) = self.find_subscriber_id_by_client_id(client_id) {
-            self.event_bus.try_send_pong(subscriber_id);
-        }
-    }
-
     /// Log each of `events`, add it to the recent-events ring, then deliver it
     /// to every subscriber. The shared tail of every handler that emits events
     /// outside a command transaction (attach, detach, resize, child exit); a
@@ -744,36 +738,22 @@ impl Server {
         }
     }
 
-    /// Queue `host_write_bytes`, one whole escape sequence, for `client_id`'s
-    /// outer terminal on the first subscriber that views `client_id`, as
+    /// Queue `host_write` for `client_id`'s outer terminal on the first
+    /// subscriber that views `client_id`, as
     /// [`EventBus::queue_host_write`](crate::runtime::bus::EventBus::queue_host_write)
     /// states.
     ///
-    /// Returns `false`, and drops the bytes, when no subscriber views
-    /// `client_id`: the client is not connected. Returns `false` when the
-    /// subscriber's queue drops the bytes, as
+    /// Returns `true` once `host_write` waits for that subscriber's
+    /// connection. Returns `false`, and queues nothing, when no subscriber
+    /// views `client_id`, which a client that is not connected matches.
+    /// Returns `false` when the subscriber's waiting host writes refuse
+    /// `host_write`, or the wake finds the subscriber's receiver gone, as
     /// [`EventBus::queue_host_write`](crate::runtime::bus::EventBus::queue_host_write)
     /// states.
-    pub(crate) fn queue_host_write(
-        &mut self,
-        client_id: ClientId,
-        host_write_bytes: &[u8],
-    ) -> bool {
+    pub(crate) fn queue_host_write(&mut self, client_id: ClientId, host_write: &HostWrite) -> bool {
         match self.find_subscriber_id_by_client_id(client_id) {
-            Some(subscriber_id) => self
-                .event_bus
-                .queue_host_write(subscriber_id, host_write_bytes),
+            Some(subscriber_id) => self.event_bus.queue_host_write(subscriber_id, host_write),
             None => false,
-        }
-    }
-
-    /// Send the bytes waiting for `client_id`'s own terminal once its
-    /// connection writer reports the last host write written, as
-    /// [`EventBus::send_pending_host_write`](crate::runtime::bus::EventBus::send_pending_host_write)
-    /// states. A client with no subscriber sends nothing.
-    pub(crate) fn handle_host_write_sent(&mut self, client_id: ClientId) {
-        if let Some(subscriber_id) = self.find_subscriber_id_by_client_id(client_id) {
-            let _ = self.event_bus.send_pending_host_write(subscriber_id);
         }
     }
 

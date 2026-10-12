@@ -15,8 +15,10 @@
 //! joins once the session advertises its own. It also
 //! covers the stretch with no link: the redial countdown and its window, what
 //! a restart holds and sends after the join, what a redial drops, that the quit
-//! keybinding leaves at once with a link and without one, a restarted session
-//! that never answers the join, and what a viewer that stopped dialing or left
+//! keybinding leaves at once with a link and without one, that a lock key
+//! switches the mode the next key resolves in before the session answers, with
+//! a link and during a restart, a restarted session that never answers the
+//! join, and what a viewer that stopped dialing or left
 //! while reconnecting prints and exits with. It also covers how a typed value
 //! reads as a session id or as a display name, and that `SIGHUP` puts a quit
 //! on the loop's channel unless this process ignores `SIGHUP`.
@@ -35,12 +37,14 @@ use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Size as RatatuiSize};
 
 use koshi_config::layer::PartialKeybindingsConfig;
-use koshi_config::types::{ModeBindings, ModeName};
+use koshi_config::types::{KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::action::ActionReference;
 use koshi_core::command::{
-    ClearSelectionArgs, CliExitCode, GridPosition, NewTabArgs, PanePlacementTarget, PlacePaneArgs,
-    PlacementRevision, Selection, SelectionKind, SetSelectionArgs, VisualCommand,
+    ClearSelectionArgs, CliExitCode, FocusTabArgs, GridPosition, NewTabArgs, PanePlacementTarget,
+    PlacePaneArgs, PlacementRevision, Selection, SelectionKind, SetSelectionArgs, TabTarget,
+    VisualCommand,
 };
+use koshi_core::constant::MIN_LINK_TIMEOUT_MS;
 use koshi_core::geometry::{Direction, PaneArea, Point, Rect, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_core::key::{
@@ -58,11 +62,14 @@ use koshi_ipc::protocol::{
     PROTOCOL_VERSION,
 };
 use koshi_ipc::remote_servers::SavedServer;
+use koshi_ipc::remote_wire::RemoteClientFrame;
 use koshi_ipc::router::{
     compute_router_socket_address, resolve_router_endpoint_path, RouterRequest, RouterResponse,
     ROUTER_PROTOCOL_VERSION,
 };
-use koshi_ipc::transport::{Connection, Listener, MAX_FRAME_BYTE_COUNT};
+use koshi_ipc::transport::{
+    build_frame_halves, Connection, Deadlined, Listener, MAX_FRAME_BYTE_COUNT,
+};
 use koshi_ipc::wire::MaybeKnown;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::{LayoutNode, SplitNode};
@@ -121,10 +128,14 @@ fn report_terminal_size(client: &mut Client, uplink: &mut Uplink) {
     report_terminal_size_with_cell_size(client, uplink, &mut cell_size_query, None);
 }
 
-/// [`process_runtime_input_with_cell_size`] with a fresh terminal query state.
+/// [`process_runtime_input_with_cell_size`] with a fresh terminal query state,
+/// for an event that does not fire the quit binding.
 fn process_runtime_input(client: &mut Client, uplink: &mut Uplink, runtime_event: RuntimeEvent) {
     let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
-    process_runtime_input_with_cell_size(client, uplink, &mut cell_size_query, runtime_event);
+    assert_eq!(
+        process_runtime_input_with_cell_size(client, uplink, &mut cell_size_query, runtime_event),
+        ControlFlow::Continue(())
+    );
 }
 
 /// The smallest frame a session can paint: one empty tab, no panes, the client
@@ -179,6 +190,7 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
             active_tab_id,
             focused_pane_id: None,
             lock_mode,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }
@@ -621,6 +633,7 @@ fn a_server_with_no_name_is_named_by_its_address_in_the_way_back() {
     let remote_home = Home::Remote {
         server: ServerReference::New {
             server_address: "laptop.local:7654".to_string(),
+            certificate_fingerprint: "ab".repeat(32),
         },
     };
     let ending_error = report_attachment_ending(
@@ -1091,6 +1104,288 @@ fn an_attach_answer_is_taken_whether_or_not_it_echoes_a_pane_area() {
 
     assert_eq!(echoed_attached_session, (client_id, session_id, None));
     assert_eq!(silent_attached_session, (client_id, session_id, None));
+}
+
+/// A stream half over bytes held in memory: reads come from `read_bytes`,
+/// writes land in `written_bytes`, and each read and each write records the
+/// deadline and the idle timeout the half held when it started.
+struct RecordedLinkHalf {
+    /// The bytes the reads return, in order.
+    read_bytes: io::Cursor<Vec<u8>>,
+    /// Every byte written, in order.
+    written_bytes: Arc<Mutex<Vec<u8>>>,
+    /// The deadline the last [`Deadlined::set_deadline`] gave and the idle
+    /// timeout the last [`Deadlined::set_idle_timeout`] gave.
+    link_limits: LinkLimits,
+    /// The limits the half held when each read or write started, in order.
+    link_limits_at_steps: Arc<Mutex<Vec<LinkLimits>>>,
+}
+
+/// The deadline and the idle timeout a [`RecordedLinkHalf`] holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LinkLimits {
+    /// When every read or write must be finished by, or `None` for no limit.
+    deadline: Option<Instant>,
+    /// The longest one read or write waits for a byte, or `None` for no limit.
+    idle_timeout: Option<Duration>,
+}
+
+/// A [`RecordedLinkHalf`] whose reads return `read_bytes`, with no deadline,
+/// no idle timeout, nothing written and no step recorded.
+fn build_recorded_link_half(read_bytes: Vec<u8>) -> RecordedLinkHalf {
+    RecordedLinkHalf {
+        read_bytes: io::Cursor::new(read_bytes),
+        written_bytes: Arc::new(Mutex::new(Vec::new())),
+        link_limits: LinkLimits {
+            deadline: None,
+            idle_timeout: None,
+        },
+        link_limits_at_steps: Arc::new(Mutex::new(Vec::new())),
+    }
+}
+
+impl io::Read for RecordedLinkHalf {
+    fn read(&mut self, read_buffer: &mut [u8]) -> io::Result<usize> {
+        self.link_limits_at_steps
+            .lock()
+            .expect("the record outlives every panic")
+            .push(self.link_limits);
+        io::Read::read(&mut self.read_bytes, read_buffer)
+    }
+}
+
+impl io::Write for RecordedLinkHalf {
+    fn write(&mut self, frame_bytes: &[u8]) -> io::Result<usize> {
+        self.link_limits_at_steps
+            .lock()
+            .expect("the record outlives every panic")
+            .push(self.link_limits);
+        self.written_bytes
+            .lock()
+            .expect("the record outlives every panic")
+            .extend_from_slice(frame_bytes);
+        Ok(frame_bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Deadlined for RecordedLinkHalf {
+    fn set_deadline(&mut self, deadline: Option<Instant>) {
+        self.link_limits.deadline = deadline;
+    }
+
+    fn set_idle_timeout(&mut self, idle_timeout: Option<Duration>) {
+        self.link_limits.idle_timeout = idle_timeout;
+    }
+}
+
+/// The frames a serving machine sends to join a client to `session_id` as
+/// `client_id`, as bytes: the session's answer to the Hello, its answer to the
+/// Attach, then the string `after the join`.
+fn encode_remote_join_answers(client_id: ClientId, session_id: SessionId) -> Vec<u8> {
+    let encoding_half = build_recorded_link_half(Vec::new());
+    let encoded_bytes = Arc::clone(&encoding_half.written_bytes);
+    let (_, mut frame_writer) = build_frame_halves(
+        Box::new(build_recorded_link_half(Vec::new())),
+        Box::new(encoding_half),
+    );
+    frame_writer
+        .send(&IpcResponse {
+            request_id: Some(1),
+            answer_result: IpcResult::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                build_version: String::from("0.0.0"),
+            },
+        })
+        .expect("the Hello answer is encoded");
+    frame_writer
+        .send(&IpcResponse {
+            request_id: Some(2),
+            answer_result: build_attached_result(client_id, session_id, None),
+        })
+        .expect("the Attach answer is encoded");
+    frame_writer
+        .send(&"after the join")
+        .expect("the frame after the join is encoded");
+    let remote_join_answer_bytes = encoded_bytes
+        .lock()
+        .expect("the record outlives every panic")
+        .clone();
+    remote_join_answer_bytes
+}
+
+/// Asserts that `link_limits_at_steps` holds at least one step, that every
+/// step held `expected_link_limits`, and then clears the record.
+#[track_caller]
+fn assert_every_step_held_and_clear(
+    link_limits_at_steps: &Mutex<Vec<LinkLimits>>,
+    expected_link_limits: LinkLimits,
+) {
+    let mut link_limits_at_steps = link_limits_at_steps
+        .lock()
+        .expect("the record outlives every panic");
+    assert!(!link_limits_at_steps.is_empty());
+    assert_eq!(
+        *link_limits_at_steps,
+        vec![expected_link_limits; link_limits_at_steps.len()]
+    );
+    link_limits_at_steps.clear();
+}
+
+#[test]
+fn a_remote_join_runs_under_the_join_deadline_then_gives_each_half_only_the_link_idle_timeout() {
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let link_reader_half =
+        build_recorded_link_half(encode_remote_join_answers(client_id, session_id));
+    let read_link_limits = Arc::clone(&link_reader_half.link_limits_at_steps);
+    let link_writer_half = build_recorded_link_half(Vec::new());
+    let write_link_limits = Arc::clone(&link_writer_half.link_limits_at_steps);
+    let (mut frame_reader, mut frame_writer) =
+        build_frame_halves(Box::new(link_reader_half), Box::new(link_writer_half));
+    let join_deadline = Instant::now() + remote_client::JOIN_TIMEOUT_DURATION;
+    frame_reader.set_deadline(Some(join_deadline));
+    frame_writer.set_deadline(Some(join_deadline));
+    let connection_token = ConnectionToken::generate();
+
+    let joined_session = join_remote_session(
+        remote_client::RemoteLink {
+            frame_reader,
+            frame_writer,
+        },
+        connection_token.clone(),
+        &SessionSelector::SessionId(session_id),
+        None,
+        None,
+        terminal::GraphicsSupport::Unsupported,
+        None,
+        MIN_LINK_TIMEOUT_MS,
+    )
+    .expect("the session joins");
+
+    assert_eq!(joined_session.client_id, client_id);
+    assert_eq!(joined_session.session_id, session_id);
+    assert_eq!(joined_session.connection_token, connection_token);
+    assert_eq!(joined_session.resume_token, None);
+    let join_link_limits = LinkLimits {
+        deadline: Some(join_deadline),
+        idle_timeout: None,
+    };
+    assert_every_step_held_and_clear(&read_link_limits, join_link_limits);
+    assert_every_step_held_and_clear(&write_link_limits, join_link_limits);
+    let JoinedSession {
+        mut reader,
+        mut writer,
+        ..
+    } = joined_session;
+
+    writer
+        .send(&"from the client")
+        .expect("the frame is written");
+    let received_text: String = reader.recv().expect("the frame after the join is read");
+
+    assert_eq!(received_text, "after the join");
+    let joined_link_limits = LinkLimits {
+        deadline: None,
+        idle_timeout: Some(Duration::from_millis(u64::from(MIN_LINK_TIMEOUT_MS))),
+    };
+    assert_every_step_held_and_clear(&read_link_limits, joined_link_limits);
+    assert_every_step_held_and_clear(&write_link_limits, joined_link_limits);
+}
+
+#[test]
+fn a_remote_join_pings_every_third_of_the_link_timeout_until_the_attach_answer_arrives() {
+    let (client_connection, serving_connection) = connect_test_socket_pair();
+    let (client_frame_reader, client_frame_writer) = client_connection.split();
+    let (mut serving_frame_reader, mut serving_frame_writer) = serving_connection.split();
+    serving_frame_reader.set_deadline(Some(Instant::now() + Duration::from_secs(10)));
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let (join_result_sender, join_result_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let join_result = join_remote_session(
+            remote_client::RemoteLink {
+                frame_reader: client_frame_reader,
+                frame_writer: client_frame_writer,
+            },
+            ConnectionToken::generate(),
+            &SessionSelector::SessionId(session_id),
+            None,
+            None,
+            terminal::GraphicsSupport::Unsupported,
+            None,
+            MIN_LINK_TIMEOUT_MS,
+        );
+        let _ = join_result_sender.send(
+            join_result.map(|joined_session| (joined_session.client_id, joined_session.session_id)),
+        );
+    });
+
+    let remote_attach: RemoteClientFrame = serving_frame_reader
+        .recv()
+        .expect("the serving machine's Attach arrives");
+    // The session's Attach goes up after the Hello answer arrives.
+    let hello_answer_sent_at = Instant::now();
+    serving_frame_writer
+        .send(&IpcResponse {
+            request_id: Some(1),
+            answer_result: IpcResult::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                build_version: String::from("0.0.0"),
+            },
+        })
+        .expect("the Hello answer is written");
+    let session_attach: IpcRequest = serving_frame_reader
+        .recv()
+        .expect("the session's Attach arrives");
+    // The Attach answer is held back until two pings have arrived.
+    let pings_before_the_answer: Vec<IpcRequest> = (0..2)
+        .map(|_| {
+            serving_frame_reader
+                .recv()
+                .expect("a ping arrives while the Attach waits")
+        })
+        .collect();
+    let second_ping_delay = hello_answer_sent_at.elapsed();
+    serving_frame_writer
+        .send(&IpcResponse {
+            request_id: Some(2),
+            answer_result: build_attached_result(client_id, session_id, None),
+        })
+        .expect("the Attach answer is written");
+    let joined_ids = join_result_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the join ends")
+        .expect("the session joins");
+
+    assert_eq!(
+        remote_attach,
+        RemoteClientFrame::Attach {
+            session_selector: SessionSelector::SessionId(session_id),
+            link_timeout_ms: Some(MIN_LINK_TIMEOUT_MS),
+        }
+    );
+    assert_eq!(session_attach.request_id, 2);
+    let IpcRequestKind::Attach {
+        link_timeout_ms, ..
+    } = session_attach.request_kind
+    else {
+        panic!("the second frame is the session's Attach");
+    };
+    assert_eq!(link_timeout_ms, Some(MIN_LINK_TIMEOUT_MS));
+    let join_ping = IpcRequest {
+        request_id: 2,
+        request_kind: IpcRequestKind::Ping,
+    };
+    assert_eq!(pings_before_the_answer, vec![join_ping.clone(), join_ping]);
+    assert!(
+        second_ping_delay >= compute_heartbeat_interval(MIN_LINK_TIMEOUT_MS) * 2,
+        "the second ping came {second_ping_delay:?} after the Hello answer"
+    );
+    assert_eq!(joined_ids, (client_id, session_id));
 }
 
 #[test]
@@ -1884,6 +2179,7 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
             active_tab_id: tab_id,
             focused_pane_id: mouse_panes.first().map(|mouse_pane| mouse_pane.pane_id),
             lock_mode: LockMode::Normal,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: false,
         },
         committed_regions: CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
@@ -2016,7 +2312,9 @@ fn build_test_uplink(request_sender: mpsc::Sender<IpcRequest>) -> Uplink {
     }
 }
 
-fn build_test_control_socket() -> TestControlSocket {
+/// Open one local socket connection at a fresh address and return its two
+/// ends: the one that connected, then the one that accepted.
+fn connect_test_socket_pair() -> (Connection, Connection) {
     // On Unix the address is a socket-file path under `/tmp`. On Windows it is
     // a pipe name, and the directory is unused. A new session id makes each
     // address unique.
@@ -2030,6 +2328,11 @@ fn build_test_control_socket() -> TestControlSocket {
     let client_connection =
         Connection::connect(&socket_address).expect("connect to the control socket");
     let session_connection = accept_thread.join().expect("the accepting thread finished");
+    (client_connection, session_connection)
+}
+
+fn build_test_control_socket() -> TestControlSocket {
+    let (client_connection, session_connection) = connect_test_socket_pair();
     let (frame_reader, frame_writer) = client_connection.split();
     TestControlSocket {
         _frame_reader: frame_reader,
@@ -4195,19 +4498,22 @@ fn a_terminal_resize_reports_its_measured_cell_size() {
     let measured_cell_size = koshi_core::geometry::PixelCellSize::from_pixel_dimensions(10, 20)
         .expect("positive cell dimensions");
 
-    process_runtime_input_with_cell_size(
-        &mut client,
-        &mut control_socket.uplink,
-        &mut cell_size_query,
-        RuntimeEvent::Resize {
-            client_id,
-            viewport_size: Size {
-                column_count: 100,
-                row_count: 40,
+    assert_eq!(
+        process_runtime_input_with_cell_size(
+            &mut client,
+            &mut control_socket.uplink,
+            &mut cell_size_query,
+            RuntimeEvent::Resize {
+                client_id,
+                viewport_size: Size {
+                    column_count: 100,
+                    row_count: 40,
+                },
+                pane_area: None,
+                cell_size: Some(measured_cell_size),
             },
-            pane_area: None,
-            cell_size: Some(measured_cell_size),
-        },
+        ),
+        ControlFlow::Continue(())
     );
 
     control_socket
@@ -4657,6 +4963,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
             active_tab_id: tab_id,
             focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }
@@ -6782,6 +7089,27 @@ fn build_plain_chord(character: char) -> KeyChord {
     KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char(character))
 }
 
+/// `<C-l>`, the chord the built-in keymap binds to `core:lock` in normal mode
+/// and to `core:unlock` in locked mode.
+fn build_lock_chord() -> KeyChord {
+    KeybindingsConfig::RESERVED_UNLOCK
+}
+
+/// `<Tab>`, the key the built-in keymap binds to `core:next-tab` in normal
+/// mode and passes to the pane in locked mode.
+fn build_tab_chord() -> KeyChord {
+    KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Tab))
+}
+
+/// The `SetLockMode` command a lock binding sends: `is_locked` for
+/// `is_locked`, naming no client.
+fn build_expected_lock_command(is_locked: bool) -> Command {
+    Command::SetLockMode(LockModeArgs {
+        is_locked,
+        client_id: None,
+    })
+}
+
 /// An attempt that adds one to the returned count each time it runs and
 /// answers unreachable.
 fn build_counted_attempt() -> (
@@ -6831,19 +7159,46 @@ fn build_blocked_attempt() -> (
     )
 }
 
-/// An attempt answer that joined `client_id` to a session on a fresh local
-/// connection, and the session end of that connection.
-fn build_joined_answer(client_id: ClientId) -> (Incoming, Connection) {
+/// A session that `client_id` joined on a fresh local connection, and the
+/// session end of that connection.
+fn build_joined_session(client_id: ClientId) -> (JoinedSession, Connection) {
     let (session_connection, reader, writer) = build_test_event_stream();
-    let joined_answer = Incoming::RejoinAnswer(Box::new(RejoinAnswer::Joined(JoinedSession {
+    let joined_session = JoinedSession {
         reader,
         writer,
         client_id,
         session_id: SessionId::new(),
         connection_token: ConnectionToken::from_secret(NEW_CONNECTION_TOKEN),
         resume_token: None,
-    })));
+    };
+    (joined_session, session_connection)
+}
+
+/// An attempt answer that joined `client_id` to a session on a fresh local
+/// connection, and the session end of that connection.
+fn build_joined_answer(client_id: ClientId) -> (Incoming, Connection) {
+    let (joined_session, session_connection) = build_joined_session(client_id);
+    let joined_answer = Incoming::RejoinAnswer(Box::new(RejoinAnswer::Joined(
+        JoinedSessionGuard::from_joined_session(joined_session),
+    )));
     (joined_answer, session_connection)
+}
+
+/// Read the `Leaving { is_returning: true }` request that a join the loop did
+/// not take sends, then the close of its connection, from `session_connection`.
+fn assert_joined_connection_leaves_then_closes(session_connection: &mut Connection) {
+    assert_eq!(
+        session_connection
+            .recv::<IpcRequest>()
+            .expect("the joined connection says it leaves"),
+        IpcRequest {
+            request_id: FIRST_POST_ATTACH_REQUEST_ID,
+            request_kind: IpcRequestKind::Leaving { is_returning: true },
+        }
+    );
+    let Err(IpcError::Disconnected) = session_connection.recv::<IpcRequest>() else {
+        panic!("the joined connection closes after it says it leaves");
+    };
 }
 
 /// The `RECONNECTING` tag in the tabline the screen last drew, from
@@ -7033,19 +7388,19 @@ fn a_restart_hold_takes_inputs_up_to_its_count_and_paste_caps() {
 
 #[test]
 fn an_overflowing_restart_hold_drops_everything_typed_during_that_restart() {
-    let client = build_test_client();
+    let mut client = build_test_client();
     let mut link_recovery = LinkRecovery::RestartRejoin {
         input_hold: Some(InputHold::default()),
     };
     for _ in 0..=MAX_HELD_INPUT_COUNT {
         link_recovery.hold_input(
-            &client,
+            &mut client,
             HeldInput::Keyboard(crate::tests::build_key_input_for_chord(build_plain_chord(
                 'a',
             ))),
         );
     }
-    link_recovery.hold_input(&client, HeldInput::Paste(String::from("after")));
+    link_recovery.hold_input(&mut client, HeldInput::Paste(String::from("after")));
 
     let LinkRecovery::RestartRejoin { input_hold } = link_recovery else {
         panic!("holding never changes the recovery");
@@ -7067,7 +7422,7 @@ fn a_restart_during_pane_placement_holds_nothing() {
     let mut restart_recovery = LinkRecovery::RestartRejoin {
         input_hold: Some(InputHold::default()),
     };
-    restart_recovery.hold_input(&client, HeldInput::Paste(String::from("typed")));
+    restart_recovery.hold_input(&mut client, HeldInput::Paste(String::from("typed")));
     let LinkRecovery::RestartRejoin { input_hold } = restart_recovery else {
         panic!("holding never changes the recovery");
     };
@@ -7318,7 +7673,7 @@ fn a_redial_that_joins_hands_back_the_session_and_holds_nothing_typed() {
         client_id,
         pasted_text: String::from("pasted"),
     })));
-    let (joined_answer, _session_connection) = build_joined_answer(client_id);
+    let (joined_answer, mut session_connection) = build_joined_answer(client_id);
     viewer.queue_incoming_event(joined_answer);
     let (attempt_rejoin, _attempt_count) = build_counted_attempt();
 
@@ -7339,6 +7694,11 @@ fn a_redial_that_joins_hands_back_the_session_and_holds_nothing_typed() {
         None,
         "the join draws the screen once more without the tag"
     );
+    // The loop took the join: closing it sends no `Leaving`.
+    drop(joined_session);
+    let Err(IpcError::Disconnected) = session_connection.recv::<IpcRequest>() else {
+        panic!("a join the loop took closes with no request on it");
+    };
 }
 
 #[test]
@@ -7479,10 +7839,6 @@ fn held_inputs_go_up_in_the_order_they_were_typed() {
     let mut client = build_test_client();
     let (request_sender, request_receiver) = mpsc::channel();
     let mut uplink = build_test_uplink(request_sender);
-    let new_tab_binding = BoundAction {
-        action_reference: ActionReference::from_core_action_name("new-tab")
-            .expect("valid core action name"),
-    };
 
     send_held_inputs(
         &mut client,
@@ -7491,7 +7847,9 @@ fn held_inputs_go_up_in_the_order_they_were_typed() {
             HeldInput::Keyboard(crate::tests::build_key_input_for_chord(build_plain_chord(
                 'a',
             ))),
-            HeldInput::BoundAction(new_tab_binding),
+            HeldInput::DispatchPlan(DispatchPlan::Command(Box::new(Command::NewTab(
+                NewTabArgs::default(),
+            )))),
             HeldInput::Paste(String::from("pasted")),
         ],
     );
@@ -7570,6 +7928,392 @@ fn a_restart_whose_hold_overflowed_joins_with_nothing_held() {
 }
 
 #[test]
+fn keys_typed_after_the_lock_key_resolve_in_locked_mode_before_the_session_answers() {
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+
+    for key_chord in [build_lock_chord(), build_tab_chord()] {
+        process_runtime_input(
+            &mut client,
+            &mut uplink,
+            RuntimeEvent::KeyInput {
+                client_id,
+                key_input: crate::tests::build_key_input_for_chord(key_chord),
+            },
+        );
+    }
+
+    let sent_request_kinds: Vec<IpcRequestKind> = request_receiver
+        .try_iter()
+        .map(|sent_request| sent_request.request_kind)
+        .collect();
+    let [IpcRequestKind::SubmitCommand(lock_command_envelope), tab_request_kind] =
+        sent_request_kinds.as_slice()
+    else {
+        panic!("the lock key and Tab send two requests, not {sent_request_kinds:?}");
+    };
+    assert_eq!(
+        lock_command_envelope.command,
+        build_expected_lock_command(true)
+    );
+    assert_eq!(
+        lock_command_envelope.command_source,
+        CommandSource::from_key_binding(client_id)
+    );
+    assert_eq!(
+        *tab_request_kind,
+        IpcRequestKind::Keyboard {
+            key_input: crate::tests::build_key_input_for_chord(build_tab_chord()),
+        }
+    );
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(
+        client.get_pending_lock_command_id(),
+        Some(lock_command_envelope.command_id)
+    );
+}
+
+#[test]
+fn a_quit_key_bound_in_normal_mode_alone_reaches_the_pane_right_after_the_lock_key() {
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let quit_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('x'));
+    bind_quit_in_normal_mode(&mut client, KeySequence::from(quit_chord));
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+
+    for key_chord in [build_lock_chord(), quit_chord] {
+        process_runtime_input(
+            &mut client,
+            &mut uplink,
+            RuntimeEvent::KeyInput {
+                client_id,
+                key_input: crate::tests::build_key_input_for_chord(key_chord),
+            },
+        );
+    }
+
+    let sent_request_kinds: Vec<IpcRequestKind> = request_receiver
+        .try_iter()
+        .map(|sent_request| sent_request.request_kind)
+        .collect();
+    let [IpcRequestKind::SubmitCommand(lock_command_envelope), quit_key_request_kind] =
+        sent_request_kinds.as_slice()
+    else {
+        panic!("the lock key and <C-x> send two requests, not {sent_request_kinds:?}");
+    };
+    assert_eq!(
+        lock_command_envelope.command,
+        build_expected_lock_command(true)
+    );
+    assert_eq!(
+        *quit_key_request_kind,
+        IpcRequestKind::Keyboard {
+            key_input: crate::tests::build_key_input_for_chord(quit_chord),
+        }
+    );
+}
+
+#[test]
+fn a_toggle_lock_binding_goes_up_as_the_lock_mode_it_sets() {
+    let mut client = build_test_client();
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    let toggle_lock_binding = BoundAction {
+        action_reference: ActionReference::from_core_action_name("toggle-lock")
+            .expect("valid core action name"),
+    };
+
+    assert_eq!(
+        uplink.submit_bound_action(&mut client, toggle_lock_binding.clone()),
+        ControlFlow::Continue(())
+    );
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(
+        uplink.submit_bound_action(&mut client, toggle_lock_binding),
+        ControlFlow::Continue(())
+    );
+
+    let sent_commands: Vec<(CommandId, Command)> = request_receiver
+        .try_iter()
+        .map(|sent_request| match sent_request.request_kind {
+            IpcRequestKind::SubmitCommand(command_envelope) => {
+                (command_envelope.command_id, command_envelope.command)
+            }
+            other_request_kind => panic!("a toggle sends a command, not {other_request_kind:?}"),
+        })
+        .collect();
+    assert_eq!(
+        sent_commands
+            .iter()
+            .map(|(_, command)| command.clone())
+            .collect::<Vec<Command>>(),
+        vec![
+            build_expected_lock_command(true),
+            build_expected_lock_command(false)
+        ]
+    );
+    assert_ne!(sent_commands[0].0, sent_commands[1].0);
+    assert_eq!(client.get_lock_mode(), LockMode::Normal);
+    assert_eq!(
+        client.get_pending_lock_command_id(),
+        Some(sent_commands[1].0)
+    );
+}
+
+#[test]
+fn lock_keys_during_a_restart_switch_the_mode_the_next_key_resolves_in() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let client_id = viewer.client.get_client_id();
+    for key_chord in [
+        build_lock_chord(),
+        build_tab_chord(),
+        build_lock_chord(),
+        build_tab_chord(),
+    ] {
+        viewer.queue_incoming_event(viewer.build_key_press_event(key_chord));
+    }
+    let (joined_answer, _session_connection) = build_joined_answer(client_id);
+    viewer.queue_incoming_event(joined_answer);
+    let (attempt_rejoin, _attempt_start_receiver, _attempt_release_sender) =
+        build_blocked_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::RestartRejoin {
+            input_hold: Some(InputHold::default()),
+        },
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    let Ok((_joined_session, held_inputs)) = stretch_result else {
+        panic!("the queued join ends the stretch");
+    };
+    let [HeldInput::LockCommand {
+        lock_command_id: first_lock_command_id,
+        lock_mode: LockMode::Locked,
+    }, HeldInput::Keyboard(locked_tab_key_input), HeldInput::LockCommand {
+        lock_command_id: second_lock_command_id,
+        lock_mode: LockMode::Normal,
+    }, HeldInput::DispatchPlan(next_tab_plan)] = held_inputs.as_slice()
+    else {
+        panic!("lock, Tab, unlock and Tab are held as they resolved, not {held_inputs:?}");
+    };
+    assert_ne!(first_lock_command_id, second_lock_command_id);
+    assert_eq!(
+        *locked_tab_key_input,
+        crate::tests::build_key_input_for_chord(build_tab_chord())
+    );
+    assert_eq!(
+        *next_tab_plan,
+        DispatchPlan::Command(Box::new(Command::FocusTab(FocusTabArgs {
+            focus_target: TabTarget::Next,
+            client_id: None,
+        })))
+    );
+    assert_eq!(viewer.client.get_lock_mode(), LockMode::Normal);
+    assert_eq!(
+        viewer.client.get_pending_lock_command_id(),
+        Some(*second_lock_command_id)
+    );
+}
+
+#[test]
+fn a_lock_key_during_a_redial_is_dropped_and_switches_nothing() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let client_id = viewer.client.get_client_id();
+    viewer.queue_incoming_event(viewer.build_key_press_event(build_lock_chord()));
+    let (joined_answer, _session_connection) = build_joined_answer(client_id);
+    viewer.queue_incoming_event(joined_answer);
+    let (attempt_rejoin, _attempt_count) = build_counted_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::Redial(RedialSchedule::from_link_drop_at(Instant::now())),
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    let Ok((_joined_session, held_inputs)) = stretch_result else {
+        panic!("the queued join ends the stretch");
+    };
+    assert_eq!(held_inputs, Vec::new());
+    assert_eq!(viewer.client.get_lock_mode(), LockMode::Normal);
+    assert_eq!(viewer.client.get_pending_lock_command_id(), None);
+}
+
+#[test]
+fn a_binding_the_action_table_refuses_is_held_as_nothing() {
+    let mut client = build_test_client();
+    let (request_sender, _request_receiver) = mpsc::channel();
+    let uplink = build_test_uplink(request_sender);
+    let mut link_recovery = LinkRecovery::RestartRejoin {
+        input_hold: Some(InputHold::default()),
+    };
+    let unregistered_binding = BoundAction {
+        action_reference: ActionReference::from_core_action_name("no-such-action")
+            .expect("valid core action name"),
+    };
+
+    assert_eq!(
+        hold_fired_binding(
+            &mut link_recovery,
+            &mut client,
+            &uplink,
+            unregistered_binding
+        ),
+        ControlFlow::Continue(())
+    );
+
+    let LinkRecovery::RestartRejoin { input_hold } = link_recovery else {
+        panic!("holding never changes the recovery");
+    };
+    assert_eq!(
+        input_hold.map(|input_hold| input_hold.held_inputs),
+        Some(Vec::new())
+    );
+}
+
+#[test]
+fn an_overflowing_hold_puts_back_the_lock_mode_from_before_its_first_lock_command() {
+    let mut client = build_test_client();
+    let lock_command_id_sent_before_the_restart = CommandId::new();
+    client.apply_lock_command(lock_command_id_sent_before_the_restart, LockMode::Locked);
+    let mut link_recovery = LinkRecovery::RestartRejoin {
+        input_hold: Some(InputHold::default()),
+    };
+    let held_unlock_command_id = CommandId::new();
+    link_recovery.hold_input(
+        &mut client,
+        HeldInput::LockCommand {
+            lock_command_id: held_unlock_command_id,
+            lock_mode: LockMode::Normal,
+        },
+    );
+    assert_eq!(client.get_lock_mode(), LockMode::Normal);
+    assert_eq!(
+        client.get_pending_lock_command_id(),
+        Some(held_unlock_command_id)
+    );
+    let held_lock_command_id = CommandId::new();
+    link_recovery.hold_input(
+        &mut client,
+        HeldInput::LockCommand {
+            lock_command_id: held_lock_command_id,
+            lock_mode: LockMode::Locked,
+        },
+    );
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(
+        client.get_pending_lock_command_id(),
+        Some(held_lock_command_id)
+    );
+
+    for _ in 0..MAX_HELD_INPUT_COUNT - 1 {
+        link_recovery.hold_input(
+            &mut client,
+            HeldInput::Keyboard(crate::tests::build_key_input_for_chord(build_plain_chord(
+                'a',
+            ))),
+        );
+    }
+
+    let LinkRecovery::RestartRejoin { input_hold } = link_recovery else {
+        panic!("holding never changes the recovery");
+    };
+    assert_eq!(input_hold.map(|input_hold| input_hold.held_inputs), None);
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(
+        client.get_pending_lock_command_id(),
+        Some(lock_command_id_sent_before_the_restart)
+    );
+}
+
+#[test]
+fn held_lock_commands_go_up_under_their_own_ids_and_leave_the_mode_and_open_sequence_alone() {
+    let mut client = build_test_client();
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    client.apply_lock_command(CommandId::new(), LockMode::Normal);
+    let open_sequence_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p'));
+    assert_eq!(
+        client.resolve_key(open_sequence_chord, Instant::now()),
+        KeyOutcome::Pending
+    );
+    let first_lock_command_id = CommandId::new();
+    let second_lock_command_id = CommandId::new();
+
+    send_held_inputs(
+        &mut client,
+        &mut uplink,
+        vec![
+            HeldInput::LockCommand {
+                lock_command_id: first_lock_command_id,
+                lock_mode: LockMode::Locked,
+            },
+            HeldInput::Keyboard(crate::tests::build_key_input_for_chord(build_tab_chord())),
+            HeldInput::LockCommand {
+                lock_command_id: second_lock_command_id,
+                lock_mode: LockMode::Normal,
+            },
+        ],
+    );
+
+    let sent_requests: Vec<IpcRequest> = request_receiver.try_iter().collect();
+    let [first_lock_request, tab_request, second_lock_request] = sent_requests.as_slice() else {
+        panic!("three held inputs send three requests, not {sent_requests:?}");
+    };
+    let IpcRequestKind::SubmitCommand(first_lock_envelope) = &first_lock_request.request_kind
+    else {
+        panic!("a held lock command goes up as a command");
+    };
+    assert_eq!(first_lock_envelope.command_id, first_lock_command_id);
+    assert_eq!(
+        first_lock_envelope.command,
+        build_expected_lock_command(true)
+    );
+    assert_eq!(
+        tab_request.request_kind,
+        IpcRequestKind::Keyboard {
+            key_input: crate::tests::build_key_input_for_chord(build_tab_chord()),
+        }
+    );
+    let IpcRequestKind::SubmitCommand(second_lock_envelope) = &second_lock_request.request_kind
+    else {
+        panic!("a held lock command goes up as a command");
+    };
+    assert_eq!(second_lock_envelope.command_id, second_lock_command_id);
+    assert_eq!(
+        second_lock_envelope.command,
+        build_expected_lock_command(false)
+    );
+    assert_eq!(client.get_lock_mode(), LockMode::Normal);
+    assert_eq!(
+        client.get_pending_lock_command_id(),
+        Some(second_lock_command_id)
+    );
+    assert_eq!(
+        client.get_pending_key_sequence(),
+        Some(&KeySequence::from(open_sequence_chord))
+    );
+}
+
+#[test]
+fn a_new_connection_with_no_held_lock_command_waits_for_no_lock_command() {
+    let mut client = build_test_client();
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    client.apply_lock_command(CommandId::new(), LockMode::Locked);
+
+    send_held_inputs(&mut client, &mut uplink, Vec::new());
+
+    assert_eq!(request_receiver.try_iter().count(), 0);
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(client.get_pending_lock_command_id(), None);
+}
+
+#[test]
 fn a_join_read_before_a_quit_hands_the_quit_to_the_new_link() {
     let mut viewer = TestViewerWithoutLink::new();
     let client_id = viewer.client.get_client_id();
@@ -7627,9 +8371,27 @@ fn a_quit_read_before_a_join_leaves_and_closes_the_joined_connection() {
     );
     drop(viewer);
 
-    let Err(IpcError::Disconnected) = session_connection.recv::<IpcRequest>() else {
-        panic!("the joined connection closed with the channel that held it");
-    };
+    assert_joined_connection_leaves_then_closes(&mut session_connection);
+}
+
+#[test]
+fn a_join_whose_attempt_finds_the_channel_gone_leaves_and_closes_the_joined_connection() {
+    let (joined_session, mut session_connection) = build_joined_session(ClientId::new());
+    let unanswered_joined_session = Mutex::new(Some(joined_session));
+    let attempt_rejoin: Arc<dyn Fn() -> RejoinAnswer + Send + Sync> = Arc::new(move || {
+        let joined_session = unanswered_joined_session
+            .lock()
+            .expect("the join outlives every panic")
+            .take()
+            .expect("the attempt runs once");
+        RejoinAnswer::Joined(JoinedSessionGuard::from_joined_session(joined_session))
+    });
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
+    drop(incoming_receiver);
+
+    spawn_rejoin_attempt(attempt_rejoin, incoming_sender);
+
+    assert_joined_connection_leaves_then_closes(&mut session_connection);
 }
 
 #[test]
@@ -7717,15 +8479,18 @@ fn quitting_with_a_link_writes_the_quit_and_leaves_without_the_sessions_answer()
     let mut client = build_test_client();
     let client_id = client.get_client_id();
 
-    assert!(process_runtime_input_with_cell_size(
-        &mut client,
-        &mut test_control_socket.uplink,
-        &mut terminal::CellSizeQuery::from_current_measurement(None, false, false),
-        RuntimeEvent::KeyInput {
-            client_id,
-            key_input: crate::tests::build_key_input_for_chord(build_quit_chord()),
-        },
-    ));
+    assert_eq!(
+        process_runtime_input_with_cell_size(
+            &mut client,
+            &mut test_control_socket.uplink,
+            &mut terminal::CellSizeQuery::from_current_measurement(None, false, false),
+            RuntimeEvent::KeyInput {
+                client_id,
+                key_input: crate::tests::build_key_input_for_chord(build_quit_chord()),
+            },
+        ),
+        ControlFlow::Break(())
+    );
     assert_eq!(
         leave_after_quit(&mut test_control_socket.uplink),
         AttachmentEnding::Detached
@@ -9220,26 +9985,6 @@ fn a_committed_placement_records_only_the_tab_ids_it_names() {
 }
 
 #[test]
-fn the_ping_interval_is_a_third_of_the_link_timeout() {
-    assert_eq!(compute_ping_interval(30_000), Duration::from_secs(10));
-    assert_eq!(compute_ping_interval(1), Duration::from_nanos(333_333));
-    assert_eq!(
-        compute_ping_interval(u32::MAX),
-        Duration::from_millis(u64::from(u32::MAX)) / 3
-    );
-}
-
-#[test]
-fn the_bridge_timeout_is_the_join_timeout_plus_the_link_timeout() {
-    assert_eq!(compute_bridge_timeout(30_000), Duration::from_secs(50));
-    assert_eq!(compute_bridge_timeout(1), Duration::from_millis(20_001));
-    assert_eq!(
-        compute_bridge_timeout(u32::MAX),
-        Duration::from_millis(20_000 + u64::from(u32::MAX))
-    );
-}
-
-#[test]
 fn an_attach_request_carries_the_link_timeout_it_is_given() {
     for link_timeout_ms in [None, Some(30_000)] {
         let attach_request = build_attach_request(
@@ -9260,24 +10005,58 @@ fn an_attach_request_carries_the_link_timeout_it_is_given() {
     }
 }
 
-/// Run one attachment in `home` with `remote_link_timeout_ms`, feed it
-/// `first_incoming_events`, then after `terminal_gone_delay` tell it this
-/// terminal went away. Returns how it ended and every request it queued.
+/// Run one attachment in `home` with `remote_link_timeout_ms`, with
+/// `first_incoming_events` queued before it starts, then after
+/// `terminal_gone_delay` tell it this terminal went away. Returns how it ended
+/// and every request it queued.
 fn run_attachment_until_the_terminal_goes(
     home: Home,
     remote_link_timeout_ms: u32,
     first_incoming_events: Vec<Incoming>,
     terminal_gone_delay: Duration,
 ) -> (AttachmentEnding, Vec<IpcRequestKind>) {
+    let (incoming_sender, request_receiver, attachment_ending_receiver) =
+        start_test_attachment(home, remote_link_timeout_ms, first_incoming_events);
+    thread::sleep(terminal_gone_delay);
+    let _ = incoming_sender.send(Incoming::Input(Box::new(RuntimeEvent::Quit)));
+    let attachment_ending = attachment_ending_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the attachment ended");
+    let sent_request_kinds: Vec<IpcRequestKind> = request_receiver
+        .try_iter()
+        .map(|sent_request| sent_request.request_kind)
+        .collect();
+    (attachment_ending, sent_request_kinds)
+}
+
+/// Start one attachment in `home` with `remote_link_timeout_ms` on its own
+/// thread, with `first_incoming_events` queued in the loop's channel before
+/// it starts. Returns the sender into the loop's channel, the receiver of
+/// every request the loop queues, and the receiver of how the attachment
+/// ended.
+fn start_test_attachment(
+    home: Home,
+    remote_link_timeout_ms: u32,
+    first_incoming_events: Vec<Incoming>,
+) -> (
+    mpsc::SyncSender<Incoming>,
+    mpsc::Receiver<IpcRequest>,
+    mpsc::Receiver<AttachmentEnding>,
+) {
     let (incoming_sender, incoming_receiver) = build_incoming_channel();
+    for incoming_event in first_incoming_events {
+        incoming_sender
+            .send(incoming_event)
+            .expect("the loop's channel takes it");
+    }
     let loop_incoming_sender = incoming_sender.clone();
-    let (attachment_result_sender, attachment_result_receiver) = mpsc::channel();
+    let (request_sender, request_receiver) = mpsc::channel();
+    let (attachment_ending_sender, attachment_ending_receiver) = mpsc::channel();
     thread::spawn(move || {
         let mut client = build_test_client();
         client.client_config.remote_link_timeout_ms = remote_link_timeout_ms;
         let client_id = client.get_client_id();
         let mut screen = build_test_screen();
-        let (request_sender, request_receiver) = mpsc::channel();
         let mut uplink = build_test_uplink(request_sender);
         let mut cell_size_query =
             terminal::CellSizeQuery::from_current_measurement(None, false, false);
@@ -9296,22 +10075,47 @@ fn run_attachment_until_the_terminal_goes(
             loop_incoming_sender,
             incoming_receiver,
         );
-        let sent_request_kinds: Vec<IpcRequestKind> = request_receiver
-            .try_iter()
-            .map(|sent_request| sent_request.request_kind)
-            .collect();
-        let _ = attachment_result_sender.send((attachment_ending, sent_request_kinds));
+        let _ = attachment_ending_sender.send(attachment_ending);
     });
-    for incoming_event in first_incoming_events {
-        incoming_sender
-            .send(incoming_event)
-            .expect("the loop's channel takes it");
-    }
-    thread::sleep(terminal_gone_delay);
-    let _ = incoming_sender.send(Incoming::Input(Box::new(RuntimeEvent::Quit)));
-    attachment_result_receiver
+    (
+        incoming_sender,
+        request_receiver,
+        attachment_ending_receiver,
+    )
+}
+
+#[test]
+fn a_remote_link_sends_its_first_ping_as_soon_as_the_attachment_starts() {
+    // A 60-second link timeout pings every 20 seconds after the first ping.
+    let (incoming_sender, request_receiver, attachment_ending_receiver) =
+        start_test_attachment(build_remote_home(), 60_000, Vec::new());
+
+    let first_request = request_receiver
         .recv_timeout(Duration::from_secs(10))
-        .expect("the attachment ended")
+        .expect("the loop queues a request inside 10 seconds");
+    let _ = incoming_sender.send(Incoming::Input(Box::new(RuntimeEvent::Quit)));
+    let attachment_ending = attachment_ending_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the attachment ended");
+
+    assert_eq!(
+        first_request,
+        IpcRequest {
+            request_id: FIRST_POST_ATTACH_REQUEST_ID,
+            request_kind: IpcRequestKind::Ping,
+        }
+    );
+    assert_eq!(attachment_ending, AttachmentEnding::TerminalGone);
+    let later_request_kinds: Vec<IpcRequestKind> = request_receiver
+        .try_iter()
+        .map(|sent_request| sent_request.request_kind)
+        .collect();
+    assert_eq!(
+        later_request_kinds,
+        vec![IpcRequestKind::Leaving {
+            is_returning: false
+        }]
+    );
 }
 
 #[test]
@@ -9392,7 +10196,9 @@ fn a_viewer_the_session_moves_away_says_it_does_not_return() {
 
 #[test]
 fn a_remote_viewer_leaving_a_dropped_link_to_dial_again_says_it_returns() {
-    // The terminal goes away before the first dial is due, so no dial runs.
+    // Both events wait in the queue before the loop starts, so the loop reads
+    // the dropped link before its first ping. The terminal goes away before
+    // the first dial is due, so no dial runs.
     let (attachment_ending, sent_request_kinds) = run_attachment_until_the_terminal_goes(
         build_remote_home(),
         30_000,

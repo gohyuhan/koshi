@@ -18,8 +18,10 @@
 //! Once an [`Attach`](crate::remote_wire::RemoteClientFrame::Attach) is
 //! admitted, these frames stop. The next bytes on the stream are the session
 //! server's own answer frames, carried through unparsed. From then on the
-//! server ends the stream once the client sends nothing for the Attach's
-//! `bridge_timeout_ms`, or one write to the client takes no byte for that long.
+//! server ends the stream once a socket write to the client takes no byte, or
+//! a socket read from the client gets no byte, for the Attach's
+//! `link_timeout_ms`. A socket read before the client's first byte after the
+//! Attach waits for the larger of that and 20 seconds.
 //!
 //! Every refusal carries the same sentence,
 //! [`REMOTE_REFUSED`](crate::remote_wire::REMOTE_REFUSED), but two: a remote
@@ -89,7 +91,7 @@ pub fn format_version_refusal(
 /// One message from a remote client to the machine serving it.
 ///
 /// A field this build does not know is ignored. A client that adds one still
-/// decodes here. Every field below but `bridge_timeout_ms` is required: a
+/// decodes here. Every field below but `link_timeout_ms` is required: a
 /// misspelled name is the missing-field error for the name it displaced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RemoteClientFrame {
@@ -120,13 +122,16 @@ pub enum RemoteClientFrame {
     Attach {
         /// Which session to attach to.
         session_selector: SessionSelector,
-        /// The longest the server waits, once it carries the stream to the
-        /// session, for the client's next bytes, and for one write to the
-        /// client to take a byte, in milliseconds. A wait past it ends the
-        /// stream. `0` is refused. `None` sets no limit. Left off the wire
-        /// when `None`; absent, it reads as `None`.
+        /// The client's link timeout, in milliseconds. Once the server
+        /// carries the stream to the session, each socket write to the client
+        /// waits at most this long for the client to take a byte. Each socket
+        /// read from the client waits at most the larger of this and 20
+        /// seconds for the client's first byte, and at most this long after
+        /// it. A wait past it ends the stream. A value below `1000` is refused.
+        /// `None` sets no limit. Left off the wire when `None`; absent, it
+        /// reads as `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        bridge_timeout_ms: Option<u32>,
+        link_timeout_ms: Option<u32>,
     },
 }
 
@@ -162,8 +167,8 @@ pub enum RemoteServerFrame {
 /// Open a TLS stream to `server_address`, send `hello_frame`, and read the one frame the
 /// server answers it with.
 ///
-/// `pinned_certificate_fingerprint` is the fingerprint saved from an earlier connection, or `None`
-/// on the first connection to this server.
+/// `expected_certificate_fingerprint` is the fingerprint the server's certificate must have.
+/// `hello_frame` is written only after the server presented that certificate.
 ///
 /// `connection_timeout` bounds everything after the name lookup: the connect, the TLS
 /// handshake, the Hello and the answer share one deadline. A server that
@@ -175,15 +180,14 @@ pub enum RemoteServerFrame {
 /// - `Some(wait)` — every read and write on them finishes inside `wait`,
 ///   counted from when the answer arrives.
 ///
-/// Returns the two framed halves, the sha256 of the certificate the server
-/// presented as 64 lowercase hex characters, and the answer.
+/// Returns the two framed halves and the answer.
 ///
 /// # Errors
 /// [`IpcError::ConnectRefused`] when nothing accepts the TCP connection,
 /// [`IpcError::ConnectTimedOut`] when the connect deadline passes,
 /// [`IpcError::TlsHandshakeFailed`] when the handshake fails, and
-/// [`IpcError::CertificateChanged`] when the presented certificate does not
-/// match the pinned fingerprint. [`IpcError::Transport`] naming what failed
+/// [`IpcError::CertificateMismatch`] when the presented certificate does not
+/// have `expected_certificate_fingerprint`. [`IpcError::Transport`] naming what failed
 /// for the lookup, the stream split, and a Hello or answer that ran out of
 /// time. [`IpcError::Disconnected`] when the server hung up,
 /// [`IpcError::FrameTooLarge`] when its answer's length prefix is past
@@ -191,17 +195,16 @@ pub enum RemoteServerFrame {
 /// [`IpcError::MalformedFrame`] when its answer does not decode.
 pub fn open_remote_connection(
     server_address: &str,
-    pinned_certificate_fingerprint: Option<&str>,
+    expected_certificate_fingerprint: &str,
     hello_frame: &RemoteClientFrame,
     connection_timeout: Duration,
     reply_timeout: Option<Duration>,
-) -> Result<(FrameReader, FrameWriter, String, RemoteServerFrame), IpcError> {
-    let (mut tls_reader, mut tls_writer, presented_certificate_fingerprint) =
-        tls::connect_tls_stream(
-            server_address,
-            pinned_certificate_fingerprint,
-            connection_timeout,
-        )?;
+) -> Result<(FrameReader, FrameWriter, RemoteServerFrame), IpcError> {
+    let (mut tls_reader, mut tls_writer) = tls::connect_tls_stream(
+        server_address,
+        expected_certificate_fingerprint,
+        connection_timeout,
+    )?;
     write_message(&mut tls_writer, hello_frame)?;
     let server_response = read_message::<RemoteServerFrame>(&mut tls_reader)?;
     let reply_deadline = reply_timeout.map(|reply_timeout| Instant::now() + reply_timeout);
@@ -209,12 +212,7 @@ pub fn open_remote_connection(
     tls_writer.set_deadline(reply_deadline);
     let (frame_reader, frame_writer) =
         build_frame_halves(Box::new(tls_reader), Box::new(tls_writer));
-    Ok((
-        frame_reader,
-        frame_writer,
-        presented_certificate_fingerprint,
-        server_response,
-    ))
+    Ok((frame_reader, frame_writer, server_response))
 }
 
 /// One session as a remote client may see it.

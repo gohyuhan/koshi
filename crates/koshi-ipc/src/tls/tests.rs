@@ -1,13 +1,16 @@
-//! Tests for the TLS stream: the certificate fingerprint, what the pinning
-//! verifier accepts and refuses, the key exchange groups the provider offers
-//! and the one a handshake settles on, the frames that cross a real loopback
+//! Tests for the TLS stream: the certificate fingerprint, what the
+//! fingerprint verifier accepts and refuses, the refusal of a server that
+//! presents the expected certificate without its private key, the protocol
+//! version a dial offers, the key exchange groups the provider offers and the
+//! one a handshake settles on, the frames that cross a real loopback
 //! stream, the cause a failed dial carries and the words it prints, the
 //! deadline a handshake, an opening exchange, a read and a write finish
 //! inside, against a peer that answers nothing and against one that sends a
 //! byte at a time, how a read ends when the peer closes the stream, cuts it
 //! or sends bytes that do not decrypt, how much of one write is taken, both
-//! ends writing at once over a slow link, and the socket timeouts a deadline
-//! sets and takes away.
+//! ends writing at once over a slow link, the socket timeouts a deadline and
+//! an idle timeout set and take away, and the reads and writes an idle timeout
+//! ends and lets finish.
 //!
 //! The loopback tests bind `127.0.0.1:0`, so the operating system picks a free
 //! port and two runs of the suite never meet on one address.
@@ -17,6 +20,7 @@ use std::net::TcpListener;
 
 use koshi_core::ids::SessionId;
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime};
+use rustls::sign::{CertifiedKey, SingleCertAndKey};
 use rustls::{NamedGroup, ServerConfig, ServerConnection};
 
 use super::*;
@@ -56,6 +60,11 @@ const DRIP_INTERVAL_DURATION: Duration = Duration::from_millis(50);
 /// [`DEADLINE_SLACK_DURATION`].
 const DRIP_BYTE_COUNT: usize = 200;
 
+/// A fingerprint no test certificate has: 64 `0` characters. The dials that
+/// end before a certificate arrives expect it.
+const UNMATCHED_CERTIFICATE_FINGERPRINT: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
 /// The header of a TLS record of `tls_record_type`, the version, and a payload of 256
 /// bytes. The drip helper that follows never reaches that many, so the TLS record is
 /// never whole and the reader keeps wanting more.
@@ -83,12 +92,12 @@ fn build_test_server_name() -> ServerName<'static> {
     ServerName::try_from("127.0.0.1".to_string()).expect("a loopback address is a server name")
 }
 
-/// Ask `pin_verifier` about `certificate_der_bytes`.
+/// Ask `fingerprint_verifier` about `certificate_der_bytes`.
 fn verify_test_certificate(
-    pin_verifier: &PinVerifier,
+    fingerprint_verifier: &FingerprintVerifier,
     certificate_der_bytes: &[u8],
 ) -> Result<ServerCertVerified, rustls::Error> {
-    pin_verifier.verify_server_cert(
+    fingerprint_verifier.verify_server_cert(
         &CertificateDer::from(certificate_der_bytes.to_vec()),
         &[],
         &build_test_server_name(),
@@ -106,42 +115,37 @@ fn the_fingerprint_is_the_sha256_as_sixty_four_lowercase_hex_characters() {
 }
 
 #[test]
-fn a_first_connection_takes_the_certificate_and_records_its_fingerprint() {
-    let pin_verifier = PinVerifier::from_expected_certificate_fingerprint(None);
-    assert_eq!(pin_verifier.get_presented_certificate_fingerprint(), None);
-    verify_test_certificate(&pin_verifier, b"a certificate")
-        .expect("a first connection takes any certificate");
-    assert_eq!(
-        pin_verifier.get_presented_certificate_fingerprint(),
-        Some(compute_certificate_fingerprint(b"a certificate"))
+fn the_expected_fingerprint_is_taken_and_every_other_one_is_refused() {
+    let expected_certificate_fingerprint =
+        compute_certificate_fingerprint(b"the first certificate");
+    let fingerprint_verifier = FingerprintVerifier::from_expected_certificate_fingerprint(
+        &expected_certificate_fingerprint,
     );
-}
-
-#[test]
-fn the_pinned_fingerprint_is_taken_and_every_other_one_is_refused() {
-    let pinned_certificate_fingerprint = compute_certificate_fingerprint(b"the first certificate");
-    let pin_verifier =
-        PinVerifier::from_expected_certificate_fingerprint(Some(&pinned_certificate_fingerprint));
-    verify_test_certificate(&pin_verifier, b"the first certificate")
-        .expect("the pinned certificate is taken");
     assert_eq!(
-        pin_verifier.get_presented_certificate_fingerprint(),
-        Some(pinned_certificate_fingerprint.clone())
+        fingerprint_verifier.get_presented_certificate_fingerprint(),
+        None
+    );
+    verify_test_certificate(&fingerprint_verifier, b"the first certificate")
+        .expect("the expected certificate is taken");
+    assert_eq!(
+        fingerprint_verifier.get_presented_certificate_fingerprint(),
+        Some(expected_certificate_fingerprint.clone())
     );
 
-    let pin_verifier =
-        PinVerifier::from_expected_certificate_fingerprint(Some(&pinned_certificate_fingerprint));
-    let verification_error = verify_test_certificate(&pin_verifier, b"another certificate")
-        .expect_err("a changed certificate");
+    let fingerprint_verifier = FingerprintVerifier::from_expected_certificate_fingerprint(
+        &expected_certificate_fingerprint,
+    );
+    let verification_error = verify_test_certificate(&fingerprint_verifier, b"another certificate")
+        .expect_err("another certificate is refused");
     assert_eq!(
         verification_error,
         rustls::Error::General(format!(
-            "the pinned certificate is {pinned_certificate_fingerprint}, the server presented {}",
+            "the expected certificate is {expected_certificate_fingerprint}, the server presented {}",
             compute_certificate_fingerprint(b"another certificate")
         ))
     );
     assert_eq!(
-        pin_verifier.get_presented_certificate_fingerprint(),
+        fingerprint_verifier.get_presented_certificate_fingerprint(),
         Some(compute_certificate_fingerprint(b"another certificate"))
     );
 }
@@ -154,9 +158,12 @@ fn a_port_nothing_listens_on_refuses_the_dial_and_names_the_way_to_open_it() {
     let server_address = listener.local_addr().expect("read the bound address");
     drop(listener);
 
-    let ipc_error =
-        connect_tls_stream(&server_address.to_string(), None, LOOPBACK_TIMEOUT_DURATION)
-            .expect_err("a port nothing listens on refuses the connection");
+    let ipc_error = connect_tls_stream(
+        &server_address.to_string(),
+        UNMATCHED_CERTIFICATE_FINGERPRINT,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect_err("a port nothing listens on refuses the connection");
 
     let rendered_error = ipc_error.to_string();
     let IpcError::ConnectRefused {
@@ -182,8 +189,12 @@ fn a_dial_with_no_time_left_times_out_before_it_connects() {
     // before it opens a socket, and no bytes reach the address.
     let server_address = "127.0.0.1:1";
 
-    let ipc_error = connect_tls_stream(server_address, None, Duration::ZERO)
-        .expect_err("a dial with no time left never connects");
+    let ipc_error = connect_tls_stream(
+        server_address,
+        UNMATCHED_CERTIFICATE_FINGERPRINT,
+        Duration::ZERO,
+    )
+    .expect_err("a dial with no time left never connects");
 
     let rendered_error = ipc_error.to_string();
     let IpcError::ConnectTimedOut {
@@ -221,8 +232,12 @@ fn a_server_that_answers_nothing_ends_the_dial_at_the_deadline() {
     let server_address = listener.local_addr().expect("read the bound address");
 
     let handshake_started_at = Instant::now();
-    let ipc_error = connect_tls_stream(&server_address.to_string(), None, SHORT_TIMEOUT_DURATION)
-        .expect_err("a server that sends nothing never finishes the handshake");
+    let ipc_error = connect_tls_stream(
+        &server_address.to_string(),
+        UNMATCHED_CERTIFICATE_FINGERPRINT,
+        SHORT_TIMEOUT_DURATION,
+    )
+    .expect_err("a server that sends nothing never finishes the handshake");
     let handshake_elapsed_duration = handshake_started_at.elapsed();
 
     let IpcError::TlsHandshakeFailed {
@@ -253,8 +268,12 @@ fn a_server_that_sends_one_byte_at_a_time_ends_the_dial_at_the_deadline() {
     });
 
     let handshake_started_at = Instant::now();
-    let ipc_error = connect_tls_stream(&server_address.to_string(), None, SHORT_TIMEOUT_DURATION)
-        .expect_err("a server that drips its bytes never finishes the handshake");
+    let ipc_error = connect_tls_stream(
+        &server_address.to_string(),
+        UNMATCHED_CERTIFICATE_FINGERPRINT,
+        SHORT_TIMEOUT_DURATION,
+    )
+    .expect_err("a server that drips its bytes never finishes the handshake");
     let handshake_elapsed_duration = handshake_started_at.elapsed();
 
     let IpcError::TlsHandshakeFailed {
@@ -274,38 +293,40 @@ fn a_server_that_sends_one_byte_at_a_time_ends_the_dial_at_the_deadline() {
     let _ = server_thread.join();
 }
 
-/// A fresh self-signed certificate and a server configuration serving it with
-/// `crypto_provider`.
+/// A server configuration serving a fresh self-signed certificate with
+/// `crypto_provider`, and the fingerprint of that certificate.
 fn build_server_config_with_provider(
     crypto_provider: Arc<CryptoProvider>,
-) -> (ServerConfig, Vec<u8>) {
+) -> (ServerConfig, String) {
     let generated_certificate = rcgen::generate_simple_self_signed(vec!["koshi".to_string()])
         .expect("generate a self-signed certificate");
     let certificate_der_bytes = generated_certificate.cert.der().to_vec();
+    let certificate_fingerprint = compute_certificate_fingerprint(&certificate_der_bytes);
     let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
         generated_certificate.signing_key.serialize_der(),
     ));
     let server_config = ServerConfig::builder_with_provider(crypto_provider)
-        .with_safe_default_protocol_versions()
-        .expect("aws-lc-rs supports every default protocol version")
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("aws-lc-rs supports TLS 1.3")
         .with_no_client_auth()
         .with_single_cert(
-            vec![CertificateDer::from(certificate_der_bytes.clone())],
+            vec![CertificateDer::from(certificate_der_bytes)],
             private_key,
         )
         .expect("a certificate and its key make a server configuration");
-    (server_config, certificate_der_bytes)
+    (server_config, certificate_fingerprint)
 }
 
-/// A fresh self-signed certificate and the TLS configuration serving it, the
-/// way this machine's own certificate is served.
-fn build_fresh_server_config() -> (ServerConfig, Vec<u8>) {
+/// A TLS configuration serving a fresh self-signed certificate, the way this
+/// machine's own certificate is served, and the fingerprint of that
+/// certificate.
+fn build_fresh_server_config() -> (ServerConfig, String) {
     build_server_config_with_provider(build_crypto_provider())
 }
 
-/// A fresh self-signed certificate and a server configuration whose key
-/// exchange list holds `X25519` alone.
-fn build_classical_only_server_config() -> (ServerConfig, Vec<u8>) {
+/// A server configuration whose key exchange list holds `X25519` alone, and
+/// the fingerprint of the fresh self-signed certificate it serves.
+fn build_classical_only_server_config() -> (ServerConfig, String) {
     let mut crypto_provider = rustls::crypto::aws_lc_rs::default_provider();
     crypto_provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::X25519];
     build_server_config_with_provider(Arc::new(crypto_provider))
@@ -319,10 +340,13 @@ fn build_remote_session_row() -> RemoteSessionRow {
     }
 }
 
-/// Serve `server_config` on a loopback port, dial it, and report the key exchange
-/// group the handshake settled on together with the fingerprint the client
-/// was shown.
-fn negotiate_key_exchange_group(server_config: ServerConfig) -> (Option<NamedGroup>, String) {
+/// Serve `server_config` on a loopback port, dial it expecting
+/// `certificate_fingerprint`, and report the key exchange group the handshake
+/// settled on.
+fn negotiate_key_exchange_group(
+    server_config: ServerConfig,
+    certificate_fingerprint: &str,
+) -> Option<NamedGroup> {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let server_address = listener.local_addr().expect("read the bound address");
 
@@ -342,14 +366,13 @@ fn negotiate_key_exchange_group(server_config: ServerConfig) -> (Option<NamedGro
             .map(|key_exchange_group| key_exchange_group.name())
     });
 
-    let (_reader, _writer, presented_certificate_fingerprint) =
-        connect_tls_stream(&server_address.to_string(), None, LOOPBACK_TIMEOUT_DURATION)
-            .expect("the dial opens");
-    let negotiated_key_exchange_group = server_thread.join().expect("the server thread finishes");
-    (
-        negotiated_key_exchange_group,
-        presented_certificate_fingerprint,
+    let (_reader, _writer) = connect_tls_stream(
+        &server_address.to_string(),
+        certificate_fingerprint,
+        LOOPBACK_TIMEOUT_DURATION,
     )
+    .expect("the dial opens");
+    server_thread.join().expect("the server thread finishes")
 }
 
 /// Two koshi peers settle on `X25519MLKEM768`: the X25519 elliptic curve
@@ -357,18 +380,11 @@ fn negotiate_key_exchange_group(server_config: ServerConfig) -> (Option<NamedGro
 /// koshi offers that group ahead of every classical one.
 #[test]
 fn a_loopback_handshake_settles_on_the_hybrid_post_quantum_key_exchange() {
-    let (server_config, certificate_der_bytes) = build_fresh_server_config();
-
-    let (negotiated_key_exchange_group, presented_certificate_fingerprint) =
-        negotiate_key_exchange_group(server_config);
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
 
     assert_eq!(
-        negotiated_key_exchange_group,
+        negotiate_key_exchange_group(server_config, &certificate_fingerprint),
         Some(NamedGroup::X25519MLKEM768)
-    );
-    assert_eq!(
-        presented_certificate_fingerprint,
-        compute_certificate_fingerprint(&certificate_der_bytes)
     );
 }
 
@@ -376,21 +392,17 @@ fn a_loopback_handshake_settles_on_the_hybrid_post_quantum_key_exchange() {
 /// and the handshake settles on `X25519` rather than failing.
 #[test]
 fn a_server_that_offers_only_classical_key_exchange_still_accepts_a_dial() {
-    let (server_config, certificate_der_bytes) = build_classical_only_server_config();
+    let (server_config, certificate_fingerprint) = build_classical_only_server_config();
 
-    let (negotiated_key_exchange_group, presented_certificate_fingerprint) =
-        negotiate_key_exchange_group(server_config);
-
-    assert_eq!(negotiated_key_exchange_group, Some(NamedGroup::X25519));
     assert_eq!(
-        presented_certificate_fingerprint,
-        compute_certificate_fingerprint(&certificate_der_bytes)
+        negotiate_key_exchange_group(server_config, &certificate_fingerprint),
+        Some(NamedGroup::X25519)
     );
 }
 
 #[test]
-fn frames_cross_a_loopback_stream_both_ways_and_the_client_pins_what_it_was_shown() {
-    let (server_config, certificate_der_bytes) = build_fresh_server_config();
+fn frames_cross_a_loopback_stream_both_ways_once_the_expected_certificate_is_shown() {
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let server_address = listener.local_addr().expect("read the bound address");
     let session_row = build_remote_session_row();
@@ -429,13 +441,12 @@ fn frames_cross_a_loopback_stream_both_ways_and_the_client_pins_what_it_was_show
         (opening_frame, requested_frame)
     });
 
-    let (reader, writer, presented_certificate_fingerprint) =
-        connect_tls_stream(&server_address.to_string(), None, LOOPBACK_TIMEOUT_DURATION)
-            .expect("the dial opens");
-    assert_eq!(
-        presented_certificate_fingerprint,
-        compute_certificate_fingerprint(&certificate_der_bytes)
-    );
+    let (reader, writer) = connect_tls_stream(
+        &server_address.to_string(),
+        &certificate_fingerprint,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect("the dial opens");
     let (mut frame_reader, mut frame_writer) =
         build_frame_halves(Box::new(reader), Box::new(writer));
 
@@ -477,7 +488,7 @@ fn frames_cross_a_loopback_stream_both_ways_and_the_client_pins_what_it_was_show
 
 #[test]
 fn a_peer_that_drips_after_the_handshake_ends_a_read_at_the_readers_deadline() {
-    let (server_config, _) = build_fresh_server_config();
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let server_address = listener.local_addr().expect("read the bound address");
 
@@ -501,9 +512,12 @@ fn a_peer_that_drips_after_the_handshake_ends_a_read_at_the_readers_deadline() {
         send_test_drip_bytes(&mut socket, build_test_tls_record_header(0x17));
     });
 
-    let (mut reader, writer, _presented_certificate_fingerprint) =
-        connect_tls_stream(&server_address.to_string(), None, LOOPBACK_TIMEOUT_DURATION)
-            .expect("the dial opens");
+    let (mut reader, writer) = connect_tls_stream(
+        &server_address.to_string(),
+        &certificate_fingerprint,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect("the dial opens");
     reader.set_deadline(Some(Instant::now() + SHORT_TIMEOUT_DURATION));
 
     let read_started_at = Instant::now();
@@ -529,8 +543,8 @@ fn a_peer_that_drips_after_the_handshake_ends_a_read_at_the_readers_deadline() {
 }
 
 #[test]
-fn a_second_connection_presenting_another_certificate_is_refused_by_the_pinned_fingerprint() {
-    let (server_config, certificate_der_bytes) = build_fresh_server_config();
+fn a_server_presenting_another_certificate_than_the_expected_one_is_refused() {
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let server_address = listener.local_addr().expect("read the bound address");
 
@@ -550,30 +564,185 @@ fn a_second_connection_presenting_another_certificate_is_refused_by_the_pinned_f
     });
 
     // The fingerprint of a certificate this server does not hold.
-    let pinned_certificate_fingerprint =
+    let expected_certificate_fingerprint =
         compute_certificate_fingerprint(b"a certificate from another machine");
     let ipc_error = connect_tls_stream(
         &server_address.to_string(),
-        Some(&pinned_certificate_fingerprint),
+        &expected_certificate_fingerprint,
         LOOPBACK_TIMEOUT_DURATION,
     )
-    .expect_err("a changed certificate is refused");
+    .expect_err("another certificate is refused");
 
-    let IpcError::CertificateChanged {
+    let IpcError::CertificateMismatch {
         server_address: named_server_address,
-        pinned_certificate,
-        presented_certificate,
+        expected_certificate_fingerprint: named_expected_certificate_fingerprint,
+        presented_certificate_fingerprint,
     } = ipc_error
     else {
-        panic!("a changed certificate is its own refusal, not a transport failure");
+        panic!("another certificate is its own refusal, not a transport failure");
     };
     assert_eq!(named_server_address, server_address.to_string());
-    assert_eq!(pinned_certificate, pinned_certificate_fingerprint);
     assert_eq!(
-        presented_certificate,
-        compute_certificate_fingerprint(&certificate_der_bytes)
+        named_expected_certificate_fingerprint,
+        expected_certificate_fingerprint
     );
+    assert_eq!(presented_certificate_fingerprint, certificate_fingerprint);
     let _ = server_thread.join();
+}
+
+#[test]
+fn a_server_presenting_the_expected_certificate_without_its_private_key_is_refused() {
+    // The server presents one certificate and signs the handshake with the
+    // private key of another. The certificate check takes the presented
+    // certificate, and the handshake signature check refuses the signature.
+    let presented_certificate = rcgen::generate_simple_self_signed(vec!["koshi".to_string()])
+        .expect("generate the presented certificate");
+    let signing_certificate = rcgen::generate_simple_self_signed(vec!["koshi".to_string()])
+        .expect("generate the certificate whose private key signs");
+    let presented_certificate_der_bytes = presented_certificate.cert.der().to_vec();
+    let presented_certificate_fingerprint =
+        compute_certificate_fingerprint(&presented_certificate_der_bytes);
+    let crypto_provider = build_crypto_provider();
+    let unrelated_signing_key = crypto_provider
+        .key_provider
+        .load_private_key(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            signing_certificate.signing_key.serialize_der(),
+        )))
+        .expect("the provider loads the private key");
+    let server_config = ServerConfig::builder_with_provider(crypto_provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("aws-lc-rs supports TLS 1.3")
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(SingleCertAndKey::from(CertifiedKey::new(
+            vec![CertificateDer::from(presented_certificate_der_bytes)],
+            unrelated_signing_key,
+        ))));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let server_address = listener.local_addr().expect("read the bound address");
+
+    let server_thread = std::thread::spawn(move || {
+        let Ok((mut socket, _)) = listener.accept() else {
+            return;
+        };
+        let Ok(server_connection) = ServerConnection::new(Arc::new(server_config)) else {
+            return;
+        };
+        let mut tls_connection = rustls::Connection::Server(server_connection);
+        let _ = run_tls_handshake(
+            &mut tls_connection,
+            &mut socket,
+            Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+        );
+    });
+
+    let ipc_error = connect_tls_stream(
+        &server_address.to_string(),
+        &presented_certificate_fingerprint,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect_err("a handshake signature the certificate's key did not make is refused");
+
+    let IpcError::TlsHandshakeFailed {
+        server_address: named_server_address,
+        error_detail,
+    } = ipc_error
+    else {
+        panic!("the presented certificate is the expected one, so the handshake refuses it");
+    };
+    assert_eq!(named_server_address, server_address.to_string());
+    assert_eq!(error_detail, "invalid peer certificate: BadSignature");
+    let _ = server_thread.join();
+}
+
+/// The type number of the `supported_versions` extension, RFC 8446 section
+/// 4.2: `43`.
+const SUPPORTED_VERSIONS_EXTENSION_TYPE: u16 = 43;
+
+/// The protocol versions the `supported_versions` extension of one
+/// ClientHello names, in the order it names them, or none when the hello
+/// carries no such extension.
+///
+/// `client_hello_bytes` is the ClientHello after its 4-byte handshake header:
+/// the 2-byte legacy version, the 32-byte random, the session id, the cipher
+/// suites, the compression methods, and the extensions. Example — the
+/// extension bytes `00 2b 00 05 04 03 04 03 03` give `[0x0304, 0x0303]`.
+fn list_offered_protocol_versions(client_hello_bytes: &[u8]) -> Vec<u16> {
+    let read_big_endian_u16 = |byte_index: usize| {
+        u16::from_be_bytes([
+            client_hello_bytes[byte_index],
+            client_hello_bytes[byte_index + 1],
+        ])
+    };
+    let session_id_index = 2 + 32;
+    let cipher_suites_index =
+        session_id_index + 1 + usize::from(client_hello_bytes[session_id_index]);
+    let compression_methods_index =
+        cipher_suites_index + 2 + usize::from(read_big_endian_u16(cipher_suites_index));
+    let mut extension_index = compression_methods_index
+        + 1
+        + usize::from(client_hello_bytes[compression_methods_index])
+        + 2;
+    while extension_index + 4 <= client_hello_bytes.len() {
+        let extension_type = read_big_endian_u16(extension_index);
+        let extension_byte_count = usize::from(read_big_endian_u16(extension_index + 2));
+        let extension_body_index = extension_index + 4;
+        if extension_type == SUPPORTED_VERSIONS_EXTENSION_TYPE {
+            let version_list_byte_count = usize::from(client_hello_bytes[extension_body_index]);
+            return (0..version_list_byte_count / 2)
+                .map(|version_index| {
+                    read_big_endian_u16(extension_body_index + 1 + version_index * 2)
+                })
+                .collect();
+        }
+        extension_index = extension_body_index + extension_byte_count;
+    }
+    Vec::new()
+}
+
+#[test]
+fn a_dial_offers_tls_1_3_alone() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let server_address = listener.local_addr().expect("read the bound address");
+
+    // Reads the first TLS record the client sends, then hangs up.
+    let capture_thread = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept the client");
+        let mut record_header = [0u8; 5];
+        socket
+            .read_exact(&mut record_header)
+            .expect("the record header arrives");
+        let record_byte_count =
+            usize::from(u16::from_be_bytes([record_header[3], record_header[4]]));
+        let mut record_body = vec![0u8; record_byte_count];
+        socket
+            .read_exact(&mut record_body)
+            .expect("the record arrives whole");
+        (record_header[0], record_body)
+    });
+
+    let ipc_error = connect_tls_stream(
+        &server_address.to_string(),
+        UNMATCHED_CERTIFICATE_FINGERPRINT,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect_err("a server that hangs up after the first record never finishes the handshake");
+    let (record_type, record_body) = capture_thread.join().expect("the capture thread finished");
+
+    let IpcError::TlsHandshakeFailed {
+        server_address: named_server_address,
+        ..
+    } = ipc_error
+    else {
+        panic!("a peer gone mid-handshake is a handshake failure: {ipc_error}");
+    };
+    assert_eq!(named_server_address, server_address.to_string());
+    // Record type 22 is a handshake record, and handshake type 1 a ClientHello.
+    assert_eq!(record_type, 22);
+    assert_eq!(record_body[0], 1);
+    assert_eq!(
+        list_offered_protocol_versions(&record_body[4..]),
+        vec![u16::from(rustls::ProtocolVersion::TLSv1_3)]
+    );
 }
 
 /// The opening frame a dialling client sends.
@@ -589,7 +758,7 @@ fn build_opening_frame() -> RemoteClientFrame {
 
 #[test]
 fn a_server_that_drips_its_answer_ends_the_opening_exchange_at_the_deadline() {
-    let (server_config, _) = build_fresh_server_config();
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let server_address = listener.local_addr().expect("read the bound address");
 
@@ -617,7 +786,7 @@ fn a_server_that_drips_its_answer_ends_the_opening_exchange_at_the_deadline() {
     let exchange_started_at = Instant::now();
     let ipc_error = open_remote_connection(
         &server_address.to_string(),
-        None,
+        &certificate_fingerprint,
         &build_opening_frame(),
         OPENING_TIMEOUT_DURATION,
         None,
@@ -638,7 +807,7 @@ fn a_server_that_drips_its_answer_ends_the_opening_exchange_at_the_deadline() {
 
 #[test]
 fn a_caller_that_asked_to_wait_reads_however_long_the_server_takes() {
-    let (server_config, _) = build_fresh_server_config();
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let server_address = listener.local_addr().expect("read the bound address");
     let session_row = build_remote_session_row();
@@ -675,15 +844,14 @@ fn a_caller_that_asked_to_wait_reads_however_long_the_server_takes() {
         opening_frame
     });
 
-    let (mut frame_reader, _frame_writer, _presented_certificate_fingerprint, opening_response) =
-        open_remote_connection(
-            &server_address.to_string(),
-            None,
-            &build_opening_frame(),
-            OPENING_TIMEOUT_DURATION,
-            None,
-        )
-        .expect("the opening exchange finishes");
+    let (mut frame_reader, _frame_writer, opening_response) = open_remote_connection(
+        &server_address.to_string(),
+        &certificate_fingerprint,
+        &build_opening_frame(),
+        OPENING_TIMEOUT_DURATION,
+        None,
+    )
+    .expect("the opening exchange finishes");
     assert_eq!(
         opening_response,
         RemoteServerFrame::Welcome {
@@ -708,7 +876,7 @@ fn a_caller_that_asked_for_a_bounded_wait_stops_reading_at_it() {
     // What a one-shot command needs. The server admits the connection and then
     // says nothing more; without the bound the read never returns and the
     // command has nothing to print and no reason to stop.
-    let (server_config, _) = build_fresh_server_config();
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let server_address = listener.local_addr().expect("read the bound address");
 
@@ -739,15 +907,14 @@ fn a_caller_that_asked_for_a_bounded_wait_stops_reading_at_it() {
     });
 
     let bounded_wait_duration = PAUSE_AFTER_OPENING_RESPONSE_DURATION / 2;
-    let (mut frame_reader, _frame_writer, _presented_certificate_fingerprint, opening_response) =
-        open_remote_connection(
-            &server_address.to_string(),
-            None,
-            &build_opening_frame(),
-            OPENING_TIMEOUT_DURATION,
-            Some(bounded_wait_duration),
-        )
-        .expect("the opening exchange finishes");
+    let (mut frame_reader, _frame_writer, opening_response) = open_remote_connection(
+        &server_address.to_string(),
+        &certificate_fingerprint,
+        &build_opening_frame(),
+        OPENING_TIMEOUT_DURATION,
+        Some(bounded_wait_duration),
+    )
+    .expect("the opening exchange finishes");
     assert_eq!(
         opening_response,
         RemoteServerFrame::Welcome {
@@ -781,7 +948,7 @@ fn a_framed_half_keeps_the_deadline_it_was_dialled_with_and_can_be_told_to_drop_
     // could not remove it would hold a clock over frames that arrive when a
     // person types; a caller whose deadline the box swallowed would wait for
     // good on a server that admits a connection and then says nothing.
-    let (server_config, _) = build_fresh_server_config();
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let server_address = listener.local_addr().expect("read the bound address");
     let session_row = build_remote_session_row();
@@ -817,15 +984,14 @@ fn a_framed_half_keeps_the_deadline_it_was_dialled_with_and_can_be_told_to_drop_
     });
 
     let bounded_wait_duration = PAUSE_AFTER_OPENING_RESPONSE_DURATION / 2;
-    let (mut frame_reader, mut frame_writer, _presented_certificate_fingerprint, opening_response) =
-        open_remote_connection(
-            &server_address.to_string(),
-            None,
-            &build_opening_frame(),
-            OPENING_TIMEOUT_DURATION,
-            Some(bounded_wait_duration),
-        )
-        .expect("the opening exchange finishes");
+    let (mut frame_reader, mut frame_writer, opening_response) = open_remote_connection(
+        &server_address.to_string(),
+        &certificate_fingerprint,
+        &build_opening_frame(),
+        OPENING_TIMEOUT_DURATION,
+        Some(bounded_wait_duration),
+    )
+    .expect("the opening exchange finishes");
     assert_eq!(
         opening_response,
         RemoteServerFrame::Welcome {
@@ -865,7 +1031,7 @@ const BURST_BYTE_COUNT: usize = 400 * 1024;
 
 #[test]
 fn a_burst_larger_than_one_socket_read_arrives_whole() {
-    let (server_config, _certificate_der_bytes) = build_fresh_server_config();
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let server_address = listener.local_addr().expect("read the bound address");
 
@@ -889,9 +1055,12 @@ fn a_burst_larger_than_one_socket_read_arrives_whole() {
             .expect("the burst is written");
     });
 
-    let (mut reader, _writer, _presented_certificate_fingerprint) =
-        connect_tls_stream(&server_address.to_string(), None, LOOPBACK_TIMEOUT_DURATION)
-            .expect("the dial opens");
+    let (mut reader, _writer) = connect_tls_stream(
+        &server_address.to_string(),
+        &certificate_fingerprint,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect("the dial opens");
     reader.set_deadline(Some(Instant::now() + LOOPBACK_TIMEOUT_DURATION));
     let mut received_bytes = vec![0u8; BURST_BYTE_COUNT];
     reader
@@ -931,8 +1100,12 @@ fn the_provider_offers_the_hybrid_group_first_and_the_classical_ones_after() {
 
 #[test]
 fn an_address_with_no_port_is_a_lookup_failure_and_no_connection_is_made() {
-    let ipc_error = connect_tls_stream("127.0.0.1", None, LOOPBACK_TIMEOUT_DURATION)
-        .expect_err("an address with no port names nothing to dial");
+    let ipc_error = connect_tls_stream(
+        "127.0.0.1",
+        UNMATCHED_CERTIFICATE_FINGERPRINT,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect_err("an address with no port names nothing to dial");
 
     let rendered_error = ipc_error.to_string();
     let IpcError::Transport { error_detail } = ipc_error else {
@@ -950,8 +1123,12 @@ fn an_address_with_no_port_is_a_lookup_failure_and_no_connection_is_made() {
 
 #[test]
 fn an_address_whose_port_is_not_a_number_is_a_lookup_failure() {
-    let ipc_error = connect_tls_stream("127.0.0.1:seven", None, LOOPBACK_TIMEOUT_DURATION)
-        .expect_err("a port that is not a number names nothing to dial");
+    let ipc_error = connect_tls_stream(
+        "127.0.0.1:seven",
+        UNMATCHED_CERTIFICATE_FINGERPRINT,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect_err("a port that is not a number names nothing to dial");
 
     let IpcError::Transport { error_detail } = ipc_error else {
         panic!("a failed lookup is a transport failure: {ipc_error}");
@@ -972,9 +1149,12 @@ fn a_server_that_hangs_up_during_the_handshake_is_a_handshake_failure() {
         let _ = listener.accept();
     });
 
-    let ipc_error =
-        connect_tls_stream(&server_address.to_string(), None, LOOPBACK_TIMEOUT_DURATION)
-            .expect_err("a server that hangs up never finishes the handshake");
+    let ipc_error = connect_tls_stream(
+        &server_address.to_string(),
+        UNMATCHED_CERTIFICATE_FINGERPRINT,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect_err("a server that hangs up never finishes the handshake");
 
     let IpcError::TlsHandshakeFailed {
         server_address: named_server_address,
@@ -1081,15 +1261,17 @@ fn a_deadline_ahead_sets_only_the_named_socket_timeout_to_the_time_left() {
     );
 }
 
-/// The client configuration [`connect_tls_stream`] builds, with a verifier that takes any
-/// certificate.
+/// The client configuration [`connect_tls_stream`] builds, with a verifier that expects
+/// [`UNMATCHED_CERTIFICATE_FINGERPRINT`].
 fn build_test_client_config() -> ClientConfig {
     ClientConfig::builder_with_provider(build_crypto_provider())
-        .with_safe_default_protocol_versions()
-        .expect("aws-lc-rs supports every default protocol version")
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("aws-lc-rs supports TLS 1.3")
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(
-            PinVerifier::from_expected_certificate_fingerprint(None),
+            FingerprintVerifier::from_expected_certificate_fingerprint(
+                UNMATCHED_CERTIFICATE_FINGERPRINT,
+            ),
         ))
         .with_no_client_auth()
 }
@@ -1171,71 +1353,102 @@ fn taking_a_halfs_deadline_away_clears_only_its_own_timeout_on_its_handle() {
 }
 
 #[test]
-fn a_readers_read_timeout_goes_on_its_own_handle_and_none_takes_it_away() {
-    let (reader, _writer, _peer) = build_split_tls_without_handshake();
-
+fn giving_a_half_an_idle_timeout_stores_it_and_leaves_the_socket_timeouts_alone() {
+    let (mut reader, mut writer, _peer) = build_split_tls_without_handshake();
     reader
+        .socket
         .set_read_timeout(Some(Duration::from_secs(7)))
-        .expect("set the read timeout");
+        .expect("set a read timeout");
+    writer
+        .socket
+        .set_write_timeout(Some(Duration::from_secs(9)))
+        .expect("set a write timeout");
 
+    reader.set_idle_timeout(Some(Duration::from_secs(30)));
+    writer.set_idle_timeout(Some(Duration::from_secs(20)));
+
+    assert_eq!(reader.idle_timeout, Some(Duration::from_secs(30)));
+    assert_eq!(writer.idle_timeout, Some(Duration::from_secs(20)));
     assert_eq!(
         reader.socket.read_timeout().expect("read the timeout"),
         Some(Duration::from_secs(7))
     );
-
-    reader
-        .set_read_timeout(None)
-        .expect("take the read timeout away");
-
-    assert_eq!(
-        reader.socket.read_timeout().expect("read the timeout"),
-        None
-    );
-}
-
-#[test]
-fn a_writers_write_timeout_goes_on_its_own_handle_and_none_takes_it_away() {
-    let (_reader, writer, _peer) = build_split_tls_without_handshake();
-
-    writer
-        .set_write_timeout(Some(Duration::from_secs(9)))
-        .expect("set the write timeout");
-
     assert_eq!(
         writer.socket.write_timeout().expect("read the timeout"),
         Some(Duration::from_secs(9))
     );
-
-    writer
-        .set_write_timeout(None)
-        .expect("take the write timeout away");
-
-    assert_eq!(
-        writer.socket.write_timeout().expect("read the timeout"),
-        None
-    );
 }
 
 #[test]
-fn a_zero_read_or_write_timeout_is_refused_and_leaves_each_handle_as_it_was() {
-    let (reader, writer, _peer) = build_split_tls_without_handshake();
+fn taking_a_halfs_idle_timeout_away_clears_only_its_own_timeout_on_its_handle() {
+    let (mut reader, mut writer, _peer) = build_split_tls_without_handshake();
+    for half_socket in [&reader.socket, &writer.socket] {
+        half_socket
+            .set_read_timeout(Some(Duration::from_secs(7)))
+            .expect("set a read timeout");
+        half_socket
+            .set_write_timeout(Some(Duration::from_secs(9)))
+            .expect("set a write timeout");
+    }
+    reader.set_idle_timeout(Some(Duration::from_secs(30)));
 
-    let read_timeout_error = reader
-        .set_read_timeout(Some(Duration::ZERO))
-        .expect_err("a zero read timeout is refused");
-    let write_timeout_error = writer
-        .set_write_timeout(Some(Duration::ZERO))
-        .expect_err("a zero write timeout is refused");
+    reader.set_idle_timeout(None);
 
-    assert_eq!(read_timeout_error.kind(), io::ErrorKind::InvalidInput);
-    assert_eq!(write_timeout_error.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(reader.idle_timeout, None);
     assert_eq!(
         reader.socket.read_timeout().expect("read the timeout"),
         None
     );
     assert_eq!(
+        reader.socket.write_timeout().expect("read the timeout"),
+        Some(Duration::from_secs(9))
+    );
+
+    writer
+        .socket
+        .set_read_timeout(Some(Duration::from_secs(7)))
+        .expect("set a read timeout");
+    writer.set_idle_timeout(Some(Duration::from_secs(30)));
+
+    writer.set_idle_timeout(None);
+
+    assert_eq!(writer.idle_timeout, None);
+    assert_eq!(
         writer.socket.write_timeout().expect("read the timeout"),
         None
+    );
+    assert_eq!(
+        writer.socket.read_timeout().expect("read the timeout"),
+        Some(Duration::from_secs(7))
+    );
+}
+
+#[test]
+fn a_zero_idle_timeout_ends_a_read_and_a_write_before_the_socket_is_touched() {
+    let (mut reader, mut writer, peer) = build_split_tls_without_handshake();
+    reader.set_idle_timeout(Some(Duration::ZERO));
+    writer.set_idle_timeout(Some(Duration::ZERO));
+    let mut probe_byte = [0u8; 1];
+
+    let read_error = reader
+        .read(&mut probe_byte)
+        .expect_err("a zero idle timeout leaves no time to read");
+    let write_error = writer
+        .write(b"never sent")
+        .expect_err("a zero idle timeout leaves no time to write");
+
+    assert_eq!(read_error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(read_error.to_string(), "this step ran out of time");
+    assert_eq!(write_error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(write_error.to_string(), "this step ran out of time");
+    peer.set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("set a read timeout");
+    let peer_read_error = (&peer)
+        .read(&mut probe_byte)
+        .expect_err("no byte reached the peer");
+    assert!(
+        is_io_timeout(&peer_read_error),
+        "the peer's read ended on its timeout, not on bytes: {peer_read_error:?}"
     );
 }
 
@@ -1260,7 +1473,7 @@ fn a_read_under_the_readers_deadline_leaves_the_write_timeout_unset() {
 }
 
 #[test]
-fn a_reader_prints_its_socket_and_deadline_and_none_of_its_buffer() {
+fn a_reader_prints_its_socket_deadline_and_idle_timeout_and_none_of_its_buffer() {
     let (reader, _writer, _peer) = build_split_tls_without_handshake();
 
     let rendered_debug = format!("{reader:?}");
@@ -1270,7 +1483,7 @@ fn a_reader_prints_its_socket_and_deadline_and_none_of_its_buffer() {
         "{rendered_debug}"
     );
     assert!(
-        rendered_debug.ends_with(", deadline: None, .. }"),
+        rendered_debug.ends_with(", deadline: None, idle_timeout: None, .. }"),
         "{rendered_debug}"
     );
 }
@@ -1334,7 +1547,7 @@ fn serve_after_tls_handshake<T: Send + 'static>(
 
 #[test]
 fn a_peer_that_closes_the_stream_cleanly_reads_as_end_of_stream_every_time() {
-    let (server_config, _certificate_der_bytes) = build_fresh_server_config();
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
     let (server_address, server_thread) =
         serve_after_tls_handshake(server_config, |mut tls_connection, mut socket| {
             tls_connection.send_close_notify();
@@ -1345,9 +1558,12 @@ fn a_peer_that_closes_the_stream_cleanly_reads_as_end_of_stream_every_time() {
             }
         });
 
-    let (mut reader, _writer, _presented_certificate_fingerprint) =
-        connect_tls_stream(&server_address, None, LOOPBACK_TIMEOUT_DURATION)
-            .expect("the dial opens");
+    let (mut reader, _writer) = connect_tls_stream(
+        &server_address,
+        &certificate_fingerprint,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect("the dial opens");
     let mut probe_byte = [0u8; 1];
 
     assert_eq!(
@@ -1367,13 +1583,16 @@ fn a_peer_that_closes_the_stream_cleanly_reads_as_end_of_stream_every_time() {
 
 #[test]
 fn a_peer_that_drops_the_socket_without_closing_the_stream_is_an_unexpected_eof_every_time() {
-    let (server_config, _certificate_der_bytes) = build_fresh_server_config();
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
     let (server_address, server_thread) =
         serve_after_tls_handshake(server_config, |_tls_connection, socket| drop(socket));
 
-    let (mut reader, _writer, _presented_certificate_fingerprint) =
-        connect_tls_stream(&server_address, None, LOOPBACK_TIMEOUT_DURATION)
-            .expect("the dial opens");
+    let (mut reader, _writer) = connect_tls_stream(
+        &server_address,
+        &certificate_fingerprint,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect("the dial opens");
     let mut probe_byte = [0u8; 1];
 
     let unexpected_eof_error = reader
@@ -1390,7 +1609,7 @@ fn a_peer_that_drops_the_socket_without_closing_the_stream_is_an_unexpected_eof_
 
 #[test]
 fn bytes_that_do_not_decrypt_end_the_read_with_invalid_data() {
-    let (server_config, _certificate_der_bytes) = build_fresh_server_config();
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
     let (server_address, server_thread) =
         serve_after_tls_handshake(server_config, |_tls_connection, mut socket| {
             // A TLS record of application data whose 32 bytes were never encrypted.
@@ -1401,9 +1620,12 @@ fn bytes_that_do_not_decrypt_end_the_read_with_invalid_data() {
                 .expect("the TLS record bytes are written");
         });
 
-    let (mut reader, _writer, _presented_certificate_fingerprint) =
-        connect_tls_stream(&server_address, None, LOOPBACK_TIMEOUT_DURATION)
-            .expect("the dial opens");
+    let (mut reader, _writer) = connect_tls_stream(
+        &server_address,
+        &certificate_fingerprint,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect("the dial opens");
     let mut probe_byte = [0u8; 1];
 
     let io_error = reader
@@ -1419,7 +1641,7 @@ const MAX_PLAINTEXT_WRITE_BYTE_COUNT: usize = 64 * 1024;
 
 #[test]
 fn one_write_takes_at_most_sixty_four_kib_and_write_all_delivers_the_rest() {
-    let (server_config, _certificate_der_bytes) = build_fresh_server_config();
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
     let sent_bytes = build_counting_bytes(MAX_PLAINTEXT_WRITE_BYTE_COUNT + 1000);
     let sent_byte_count = sent_bytes.len();
     let (server_address, server_thread) =
@@ -1433,9 +1655,12 @@ fn one_write_takes_at_most_sixty_four_kib_and_write_all_delivers_the_rest() {
             received_bytes
         });
 
-    let (_reader, mut writer, _presented_certificate_fingerprint) =
-        connect_tls_stream(&server_address, None, LOOPBACK_TIMEOUT_DURATION)
-            .expect("the dial opens");
+    let (_reader, mut writer) = connect_tls_stream(
+        &server_address,
+        &certificate_fingerprint,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect("the dial opens");
     let written_byte_count = writer
         .write(&sent_bytes)
         .expect("the first write is taken in part");
@@ -1454,7 +1679,7 @@ fn one_write_takes_at_most_sixty_four_kib_and_write_all_delivers_the_rest() {
 fn a_write_after_a_write_that_ran_out_of_time_still_takes_bytes() {
     // The timed-out write leaves 64 KiB of encrypted bytes queued. The next
     // write drains them first, so it has room for its own plaintext.
-    let (server_config, _certificate_der_bytes) = build_fresh_server_config();
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
     // The server reads the exact byte count the client writes, so it finishes
     // without waiting for end of stream and the client holds the connection
     // open until it has.
@@ -1469,9 +1694,12 @@ fn a_write_after_a_write_that_ran_out_of_time_still_takes_bytes() {
             received.len()
         });
 
-    let (reader, mut writer, _presented_certificate_fingerprint) =
-        connect_tls_stream(&server_address, None, LOOPBACK_TIMEOUT_DURATION)
-            .expect("the dial opens");
+    let (reader, mut writer) = connect_tls_stream(
+        &server_address,
+        &certificate_fingerprint,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect("the dial opens");
     writer.set_deadline(Some(Instant::now()));
     let timeout_error = writer
         .write(&[0u8; MAX_PLAINTEXT_WRITE_BYTE_COUNT])
@@ -1499,7 +1727,7 @@ const UNREAD_BYTE_COUNT: usize = 32 * 1024 * 1024;
 
 #[test]
 fn a_write_to_a_peer_that_does_not_read_ends_at_the_writers_deadline() {
-    let (server_config, _certificate_der_bytes) = build_fresh_server_config();
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
     let (given_up_sender, given_up_receiver) = std::sync::mpsc::channel::<()>();
     let (server_address, server_thread) =
         serve_after_tls_handshake(server_config, move |_tls_connection, socket| {
@@ -1508,9 +1736,12 @@ fn a_write_to_a_peer_that_does_not_read_ends_at_the_writers_deadline() {
             drop(socket);
         });
 
-    let (_reader, mut writer, _presented_certificate_fingerprint) =
-        connect_tls_stream(&server_address, None, LOOPBACK_TIMEOUT_DURATION)
-            .expect("the dial opens");
+    let (_reader, mut writer) = connect_tls_stream(
+        &server_address,
+        &certificate_fingerprint,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect("the dial opens");
     writer.set_deadline(Some(Instant::now() + SHORT_TIMEOUT_DURATION));
 
     let write_started_at = Instant::now();
@@ -1528,6 +1759,125 @@ fn a_write_to_a_peer_that_does_not_read_ends_at_the_writers_deadline() {
         write_elapsed_duration < SHORT_TIMEOUT_DURATION + DEADLINE_SLACK_DURATION,
         "the write returned {write_elapsed_duration:?} after it started, inside its {SHORT_TIMEOUT_DURATION:?} deadline"
     );
+    server_thread.join().expect("the server thread finished");
+}
+
+#[test]
+fn a_read_whose_bytes_arrive_within_the_idle_timeout_of_each_other_is_read_whole() {
+    // The server sends the 16 KiB record in twenty pieces 100 ms apart once
+    // the read starts. The last piece leaves 1.9 seconds after the read
+    // starts, later than the 1-second idle timeout, and no piece leaves more
+    // than 100 ms after the one before it.
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
+    let sent_plaintext = build_counting_bytes(16 * 1024);
+    let server_plaintext = sent_plaintext.clone();
+    let (read_started_sender, read_started_receiver) = std::sync::mpsc::channel::<()>();
+    let (server_address, server_thread) =
+        serve_after_tls_handshake(server_config, move |mut tls_connection, mut socket| {
+            tls_connection
+                .writer()
+                .write_all(&server_plaintext)
+                .expect("the plaintext is taken");
+            let mut encrypted_bytes = Vec::new();
+            while tls_connection.wants_write() {
+                tls_connection
+                    .write_tls(&mut encrypted_bytes)
+                    .expect("the records are taken");
+            }
+            read_started_receiver
+                .recv_timeout(LOOPBACK_TIMEOUT_DURATION)
+                .expect("the read starts");
+            let piece_byte_count = encrypted_bytes.len().div_ceil(20);
+            for (piece_index, encrypted_piece) in
+                encrypted_bytes.chunks(piece_byte_count).enumerate()
+            {
+                if piece_index > 0 {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                socket
+                    .write_all(encrypted_piece)
+                    .expect("the piece is written");
+            }
+            socket
+        });
+
+    let (mut reader, _writer) = connect_tls_stream(
+        &server_address,
+        &certificate_fingerprint,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect("the dial opens");
+    reader.set_deadline(None);
+    reader.set_idle_timeout(Some(Duration::from_secs(1)));
+    let read_started_at = Instant::now();
+    read_started_sender
+        .send(())
+        .expect("the server waits for the read");
+    let mut received_plaintext = vec![0u8; sent_plaintext.len()];
+
+    reader
+        .read_exact(&mut received_plaintext)
+        .expect("every byte arrives");
+
+    assert_eq!(received_plaintext, sent_plaintext);
+    assert!(
+        read_started_at.elapsed() > Duration::from_secs(1),
+        "the plaintext took longer than one idle timeout to arrive"
+    );
+    drop(server_thread.join().expect("the server thread finished"));
+}
+
+#[test]
+fn each_socket_write_waits_at_most_the_earlier_of_the_deadline_and_the_idle_timeout() {
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
+    let (written_sender, written_receiver) = std::sync::mpsc::channel::<()>();
+    let (server_address, server_thread) =
+        serve_after_tls_handshake(server_config, move |_tls_connection, socket| {
+            // Reads nothing, and holds the socket open until both writes are
+            // taken.
+            let _ = written_receiver.recv_timeout(LOOPBACK_TIMEOUT_DURATION);
+            drop(socket);
+        });
+    let (_reader, mut writer) = connect_tls_stream(
+        &server_address,
+        &certificate_fingerprint,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect("the dial opens");
+    writer.set_deadline(None);
+    writer.set_idle_timeout(Some(Duration::from_secs(30)));
+
+    writer
+        .write_all(b"first")
+        .expect("the first write is taken");
+
+    let idle_write_timeout = writer
+        .socket
+        .write_timeout()
+        .expect("read the timeout")
+        .expect("a write timeout is set");
+    assert!(
+        idle_write_timeout > Duration::from_secs(29)
+            && idle_write_timeout <= Duration::from_secs(30),
+        "the socket write waits at most the idle timeout: {idle_write_timeout:?}"
+    );
+
+    writer.set_deadline(Some(Instant::now() + Duration::from_secs(10)));
+    writer
+        .write_all(b"second")
+        .expect("the second write is taken");
+
+    let deadline_write_timeout = writer
+        .socket
+        .write_timeout()
+        .expect("read the timeout")
+        .expect("a write timeout is set");
+    assert!(
+        deadline_write_timeout > Duration::from_secs(9)
+            && deadline_write_timeout <= Duration::from_secs(10),
+        "the socket write waits at most the time left until the deadline: {deadline_write_timeout:?}"
+    );
+    let _ = written_sender.send(());
     server_thread.join().expect("the server thread finished");
 }
 
@@ -1593,15 +1943,18 @@ fn start_slow_link_to(server_address: &str) -> String {
 
 #[test]
 fn both_ends_writing_more_than_a_slow_link_holds_at_once_deliver_every_byte_both_ways() {
-    let (server_config, _certificate_der_bytes) = build_fresh_server_config();
+    let (server_config, certificate_fingerprint) = build_fresh_server_config();
     let (server_address, server_thread) =
         serve_after_tls_handshake(server_config, |tls_connection, socket| {
             split_tls_stream(tls_connection, socket).expect("split the loopback stream")
         });
     let slow_link_address = start_slow_link_to(&server_address);
-    let (mut client_reader, mut client_writer, _presented_certificate_fingerprint) =
-        connect_tls_stream(&slow_link_address, None, LOOPBACK_TIMEOUT_DURATION)
-            .expect("the dial opens");
+    let (mut client_reader, mut client_writer) = connect_tls_stream(
+        &slow_link_address,
+        &certificate_fingerprint,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect("the dial opens");
     let (mut server_reader, mut server_writer) =
         server_thread.join().expect("the server thread finished");
     client_reader.set_deadline(None);
@@ -1746,19 +2099,32 @@ fn an_empty_write_takes_zero_bytes() {
 }
 
 #[test]
-fn the_deadline_trait_reaches_the_halves_own_deadline() {
+fn the_deadline_trait_reaches_the_halves_own_deadline_and_idle_timeout() {
     let (mut reader, mut writer, _peer) = build_split_tls_without_handshake();
     let deadline = Instant::now() + Duration::from_secs(60);
+    let idle_timeout = Duration::from_secs(30);
     writer
         .socket
         .set_write_timeout(Some(Duration::from_secs(9)))
         .expect("set a write timeout");
+    reader
+        .socket
+        .set_read_timeout(Some(Duration::from_secs(9)))
+        .expect("set a read timeout");
 
     Deadlined::set_deadline(&mut reader, Some(deadline));
     Deadlined::set_deadline(&mut writer, None);
+    Deadlined::set_idle_timeout(&mut reader, None);
+    Deadlined::set_idle_timeout(&mut writer, Some(idle_timeout));
 
     assert_eq!(reader.deadline, Some(deadline));
     assert_eq!(writer.deadline, None);
+    assert_eq!(reader.idle_timeout, None);
+    assert_eq!(writer.idle_timeout, Some(idle_timeout));
+    assert_eq!(
+        reader.socket.read_timeout().expect("read the timeout"),
+        None
+    );
     assert_eq!(
         writer.socket.write_timeout().expect("read the timeout"),
         None
@@ -1806,9 +2172,12 @@ fn a_server_whose_bytes_are_not_a_handshake_is_a_handshake_failure_carrying_its_
         let _ = socket.read_to_end(&mut remaining_bytes);
     });
 
-    let ipc_error =
-        connect_tls_stream(&server_address.to_string(), None, LOOPBACK_TIMEOUT_DURATION)
-            .expect_err("a server that does not speak TLS never finishes the handshake");
+    let ipc_error = connect_tls_stream(
+        &server_address.to_string(),
+        UNMATCHED_CERTIFICATE_FINGERPRINT,
+        LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect_err("a server that does not speak TLS never finishes the handshake");
 
     let IpcError::TlsHandshakeFailed {
         server_address: named_server_address,
@@ -1826,39 +2195,42 @@ fn a_server_whose_bytes_are_not_a_handshake_is_a_handshake_failure_carrying_its_
 }
 
 #[test]
-fn the_pinned_fingerprint_is_compared_byte_for_byte() {
+fn the_expected_fingerprint_is_compared_byte_for_byte() {
     let lowercase_certificate_fingerprint =
         compute_certificate_fingerprint(b"the first certificate");
     let uppercase_certificate_fingerprint = lowercase_certificate_fingerprint.to_uppercase();
-    let pin_verifier = PinVerifier::from_expected_certificate_fingerprint(Some(
+    let fingerprint_verifier = FingerprintVerifier::from_expected_certificate_fingerprint(
         &uppercase_certificate_fingerprint,
-    ));
+    );
 
-    let verification_error = verify_test_certificate(&pin_verifier, b"the first certificate")
-        .expect_err("an uppercase pin does not match the lowercase fingerprint");
+    let verification_error =
+        verify_test_certificate(&fingerprint_verifier, b"the first certificate")
+            .expect_err("an uppercase fingerprint does not match the lowercase one");
 
     assert_eq!(
         verification_error,
         rustls::Error::General(format!(
-            "the pinned certificate is {uppercase_certificate_fingerprint}, the server presented {lowercase_certificate_fingerprint}"
+            "the expected certificate is {uppercase_certificate_fingerprint}, the server presented {lowercase_certificate_fingerprint}"
         ))
     );
     assert_eq!(
-        pin_verifier.get_presented_certificate_fingerprint(),
+        fingerprint_verifier.get_presented_certificate_fingerprint(),
         Some(lowercase_certificate_fingerprint)
     );
 }
 
 #[test]
 fn a_verifier_remembers_the_last_certificate_it_was_shown() {
-    let pin_verifier = PinVerifier::from_expected_certificate_fingerprint(None);
-    verify_test_certificate(&pin_verifier, b"the first certificate")
-        .expect("a first connection takes any certificate");
-    verify_test_certificate(&pin_verifier, b"the second certificate")
-        .expect("and the next one too");
+    let fingerprint_verifier = FingerprintVerifier::from_expected_certificate_fingerprint(
+        &compute_certificate_fingerprint(b"the second certificate"),
+    );
+    verify_test_certificate(&fingerprint_verifier, b"the first certificate")
+        .expect_err("a certificate other than the expected one is refused");
+    verify_test_certificate(&fingerprint_verifier, b"the second certificate")
+        .expect("the expected certificate is taken");
 
     assert_eq!(
-        pin_verifier.get_presented_certificate_fingerprint(),
+        fingerprint_verifier.get_presented_certificate_fingerprint(),
         Some(compute_certificate_fingerprint(b"the second certificate"))
     );
 }

@@ -1,6 +1,8 @@
 //! Tests for the stand-in clipboard tools: how the arguments of `pbcopy`,
 //! `xclip`, `xsel` and `wl-copy` read as a copy or a pass-through, the `xclip`
-//! option prefixes, the `xsel` option letters, and the plain text types.
+//! option prefixes, the `xsel` option letters, the plain text types, how the
+//! input of a copy is read part by part, and how the real tool reads every
+//! byte of it.
 
 use super::*;
 
@@ -616,4 +618,274 @@ fn only_the_exact_plain_text_type_names_count_as_plain_text() {
     ] {
         assert!(!is_plain_text_type(content_type), "{content_type:?}");
     }
+}
+
+/// A reader whose every read fails with `the pipe broke`.
+struct BrokenPipeReader;
+
+impl Read for BrokenPipeReader {
+    fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("the pipe broke"))
+    }
+}
+
+/// A reader whose first read is interrupted, and whose later reads give
+/// `rest_bytes`.
+struct InterruptedOnceReader {
+    /// Whether the interrupted read happened.
+    is_interrupted: bool,
+    /// The bytes the reads after the interrupted one give.
+    rest_bytes: &'static [u8],
+}
+
+impl Read for InterruptedOnceReader {
+    fn read(&mut self, read_bytes: &mut [u8]) -> std::io::Result<usize> {
+        if !self.is_interrupted {
+            self.is_interrupted = true;
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        self.rest_bytes.read(read_bytes)
+    }
+}
+
+/// The bytes of `byte_count` letters `a`.
+fn build_letter_bytes(byte_count: usize) -> Vec<u8> {
+    vec![b'a'; byte_count]
+}
+
+#[test]
+fn an_empty_input_is_one_empty_last_part() {
+    let mut copy_input = CopyInput::from_input_reader(&b""[..], false);
+
+    assert_eq!(
+        copy_input.read_next_copy_part().expect("a slice reads"),
+        Some((&b""[..], true))
+    );
+}
+
+#[test]
+fn the_newline_that_ends_the_input_is_left_out_of_the_last_part_only_when_trimmed() {
+    let mut trimmed_copy_input = CopyInput::from_input_reader(&b"hi\n"[..], true);
+    let mut kept_copy_input = CopyInput::from_input_reader(&b"hi\n"[..], false);
+
+    assert_eq!(
+        trimmed_copy_input
+            .read_next_copy_part()
+            .expect("a slice reads"),
+        Some((&b"hi"[..], true))
+    );
+    assert_eq!(
+        kept_copy_input
+            .read_next_copy_part()
+            .expect("a slice reads"),
+        Some((&b"hi\n"[..], true))
+    );
+}
+
+#[test]
+fn an_input_of_one_part_is_one_last_part() {
+    let input_bytes = build_letter_bytes(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT);
+    let mut copy_input = CopyInput::from_input_reader(input_bytes.as_slice(), false);
+
+    let (copy_part, is_last_part) = copy_input
+        .read_next_copy_part()
+        .expect("a slice reads")
+        .expect("the input is UTF-8");
+
+    assert!(
+        copy_part == input_bytes.as_slice(),
+        "the part holds the input"
+    );
+    assert!(is_last_part);
+}
+
+#[test]
+fn an_input_one_byte_past_a_part_gives_a_part_then_a_last_part_of_one_byte() {
+    let input_bytes = build_letter_bytes(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 1);
+    let mut copy_input = CopyInput::from_input_reader(input_bytes.as_slice(), false);
+
+    let (first_copy_part, is_first_part_last) = copy_input
+        .read_next_copy_part()
+        .expect("a slice reads")
+        .expect("the input is UTF-8");
+    assert!(
+        first_copy_part == &input_bytes[..MAX_CLIPBOARD_COPY_PART_BYTE_COUNT],
+        "the first part holds the first 12582783 bytes"
+    );
+    assert!(!is_first_part_last);
+    assert_eq!(
+        copy_input.read_next_copy_part().expect("a slice reads"),
+        Some((&b"a"[..], true))
+    );
+}
+
+#[test]
+fn a_newline_that_ends_a_part_but_not_the_input_stays_in_the_part() {
+    let mut input_bytes = build_letter_bytes(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT - 1);
+    input_bytes.extend_from_slice(b"\nx");
+    let mut copy_input = CopyInput::from_input_reader(input_bytes.as_slice(), true);
+
+    let (first_copy_part, is_first_part_last) = copy_input
+        .read_next_copy_part()
+        .expect("a slice reads")
+        .expect("the input is UTF-8");
+    assert!(
+        first_copy_part == &input_bytes[..MAX_CLIPBOARD_COPY_PART_BYTE_COUNT],
+        "the first part ends with the newline"
+    );
+    assert!(!is_first_part_last);
+    assert_eq!(
+        copy_input.read_next_copy_part().expect("a slice reads"),
+        Some((&b"x"[..], true))
+    );
+}
+
+#[test]
+fn a_trimmed_newline_alone_behind_the_last_full_part_leaves_an_empty_last_part() {
+    let mut input_bytes = build_letter_bytes(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT);
+    input_bytes.push(b'\n');
+    let mut copy_input = CopyInput::from_input_reader(input_bytes.as_slice(), true);
+
+    let (first_copy_part, is_first_part_last) = copy_input
+        .read_next_copy_part()
+        .expect("a slice reads")
+        .expect("the input is UTF-8");
+    assert!(
+        first_copy_part == &input_bytes[..MAX_CLIPBOARD_COPY_PART_BYTE_COUNT],
+        "the first part holds every letter"
+    );
+    assert!(!is_first_part_last);
+    assert_eq!(
+        copy_input.read_next_copy_part().expect("a slice reads"),
+        Some((&b""[..], true))
+    );
+}
+
+#[test]
+fn a_character_cut_by_the_end_of_a_part_and_of_a_read_is_whole_with_the_next_bytes() {
+    // `€` is `e2 82 ac`. The first part ends after `e2`, and the first read
+    // after `82`.
+    let mut input_bytes = build_letter_bytes(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT - 1);
+    input_bytes.extend_from_slice("€".as_bytes());
+    let mut copy_input = CopyInput::from_input_reader(input_bytes.as_slice(), false);
+
+    let (first_copy_part, is_first_part_last) = copy_input
+        .read_next_copy_part()
+        .expect("a slice reads")
+        .expect("the cut character is whole once the next byte is read");
+    assert_eq!(first_copy_part.len(), MAX_CLIPBOARD_COPY_PART_BYTE_COUNT);
+    assert_eq!(first_copy_part.last(), Some(&0xe2));
+    assert!(!is_first_part_last);
+    assert_eq!(
+        copy_input.read_next_copy_part().expect("a slice reads"),
+        Some((&[0x82, 0xac][..], true))
+    );
+}
+
+#[test]
+fn an_input_that_is_not_utf8_gives_no_part() {
+    for input_bytes in [&b"hi\xff"[..], &b"h\xc3"[..], &b"\xa9"[..]] {
+        let mut copy_input = CopyInput::from_input_reader(input_bytes, false);
+
+        assert_eq!(
+            copy_input.read_next_copy_part().expect("a slice reads"),
+            None,
+            "{input_bytes:?}"
+        );
+    }
+}
+
+#[test]
+fn a_failed_read_of_the_input_is_handed_back() {
+    let mut copy_input = CopyInput::from_input_reader(BrokenPipeReader, false);
+
+    let read_error = copy_input
+        .read_next_copy_part()
+        .expect_err("the read fails");
+
+    assert_eq!(read_error.to_string(), "the pipe broke");
+}
+
+#[test]
+fn the_whole_input_is_every_byte_read_untrimmed_then_the_rest_of_the_input() {
+    let mut trimmed_copy_input = CopyInput::from_input_reader(&b"hi\n"[..], true);
+    trimmed_copy_input
+        .read_next_copy_part()
+        .expect("a slice reads");
+    let mut trimmed_whole_input = Vec::new();
+    trimmed_copy_input
+        .write_whole_input(&mut trimmed_whole_input)
+        .expect("a slice reads");
+    assert_eq!(trimmed_whole_input, b"hi\n");
+
+    let input_bytes = build_letter_bytes(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 4097);
+    let mut copy_input = CopyInput::from_input_reader(input_bytes.as_slice(), false);
+    copy_input.read_next_copy_part().expect("a slice reads");
+    let mut whole_input = Vec::new();
+    copy_input
+        .write_whole_input(&mut whole_input)
+        .expect("a slice reads");
+    assert!(
+        whole_input == input_bytes,
+        "the real tool reads every byte of the input"
+    );
+}
+
+#[test]
+fn an_interrupted_read_of_the_rest_of_the_input_is_read_again() {
+    let read_input_bytes = build_letter_bytes(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 1);
+    let input_reader = read_input_bytes.as_slice().chain(InterruptedOnceReader {
+        is_interrupted: false,
+        rest_bytes: b"bc",
+    });
+    let mut copy_input = CopyInput::from_input_reader(input_reader, false);
+    copy_input
+        .read_next_copy_part()
+        .expect("the first part reads");
+
+    let mut whole_input = Vec::new();
+    copy_input
+        .write_whole_input(&mut whole_input)
+        .expect("the interrupted read is read again");
+
+    let mut expected_whole_input = read_input_bytes.clone();
+    expected_whole_input.extend_from_slice(b"bc");
+    assert!(
+        whole_input == expected_whole_input,
+        "the real tool reads every byte of the input"
+    );
+}
+
+#[test]
+fn a_failed_read_of_the_rest_of_the_input_is_handed_back_after_every_byte_read() {
+    let read_input_bytes = build_letter_bytes(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 1);
+    let input_reader = read_input_bytes.as_slice().chain(BrokenPipeReader);
+    let mut copy_input = CopyInput::from_input_reader(input_reader, false);
+    copy_input
+        .read_next_copy_part()
+        .expect("the first part reads");
+
+    let mut whole_input = Vec::new();
+    let read_error = copy_input
+        .write_whole_input(&mut whole_input)
+        .expect_err("the read of the rest fails");
+
+    assert_eq!(read_error.to_string(), "the pipe broke");
+    assert!(
+        whole_input == read_input_bytes,
+        "the real tool reads every byte read before the failure"
+    );
+}
+
+#[test]
+fn a_failed_write_to_the_real_tool_ends_the_writing_with_no_error() {
+    let mut copy_input = CopyInput::from_input_reader(&b"abc"[..], false);
+    copy_input.read_next_copy_part().expect("a slice reads");
+    let mut real_tool_input_bytes = [0; 2];
+
+    copy_input
+        .write_whole_input(&mut &mut real_tool_input_bytes[..])
+        .expect("a failed write is no error");
+
+    assert_eq!(&real_tool_input_bytes, b"ab");
 }

@@ -7,13 +7,13 @@
 //! [`transport::build_frame_halves`](crate::transport::build_frame_halves) puts koshi's
 //! frame shape on it.
 //!
-//! The dialling side does not use a certificate authority. It remembers the
-//! sha256 of the certificate the server presented on the first connection —
-//! its fingerprint, 64 lowercase hex characters — and refuses every later
-//! connection that presents a different one.
-//! [`PinVerifier`](crate::tls::PinVerifier) holds that rule and still checks
-//! the server's handshake signature: the proof that the server holds the
-//! private key of the certificate it presented.
+//! Both sides speak TLS 1.3 only. The dialling side does not use a
+//! certificate authority. Every dial names the fingerprint of the certificate
+//! the server must present — its sha256, 64 lowercase hex characters — and a
+//! server that presents another certificate ends the handshake.
+//! [`FingerprintVerifier`](crate::tls::FingerprintVerifier) holds that rule
+//! and still checks the server's handshake signature: the proof that the
+//! server holds the private key of the certificate it presented.
 //!
 //! [`connect_tls_stream`](crate::tls::connect_tls_stream) takes one timeout and turns it into one
 //! deadline. The connect and the whole handshake finish inside it, whatever
@@ -35,7 +35,7 @@ use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureSch
 use sha2::{Digest, Sha256};
 
 use crate::error::IpcError;
-use crate::transport::{compute_time_left_until, is_io_timeout};
+use crate::transport::{compute_step_deadline, compute_time_left_until, is_io_timeout};
 
 /// How many raw bytes [`TlsReader`] takes off the socket in one read.
 const TLS_READ_BUFFER_BYTE_COUNT: usize = 16 * 1024;
@@ -91,10 +91,11 @@ fn decrypt_pending_tls_records(tls_connection: &mut rustls::Connection) -> io::R
 ///
 /// The reading half sets only the read timeout of its own handle, and the
 /// writing half only the write timeout of its own handle. A half with a
-/// deadline sets its timeout to the time left before each of its socket
-/// calls. A half with no deadline sets nothing, and its socket calls run
-/// under the timeout its own handle carries. A deadline on one half never
-/// limits the other half's socket calls.
+/// deadline or an idle timeout sets its timeout before each of its socket
+/// calls, to the time left until the instant [`compute_step_deadline`] gives.
+/// A half with neither sets nothing, and its socket calls run under the
+/// timeout its own handle carries. The limits of one half never limit the
+/// other half's socket calls.
 ///
 /// Both handles start with the timeouts `socket` carries at the split, such
 /// as the ones [`run_tls_handshake`] left on it. On Unix the two handles
@@ -102,7 +103,7 @@ fn decrypt_pending_tls_records(tls_connection: &mut rustls::Connection) -> io::R
 /// carries its own, and a timeout set through one handle does not reach the
 /// other.
 ///
-/// Neither half starts with a deadline.
+/// Neither half starts with a deadline or an idle timeout.
 ///
 /// # Errors
 /// Returns the failure of duplicating the socket handle.
@@ -117,6 +118,7 @@ pub fn split_tls_stream(
             tls_connection: Arc::clone(&shared_connection),
             socket: read_socket,
             deadline: None,
+            idle_timeout: None,
             encrypted_read_buffer: Box::new([0u8; TLS_READ_BUFFER_BYTE_COUNT]),
             encrypted_bytes_consumed: 0,
             encrypted_byte_count: 0,
@@ -125,25 +127,10 @@ pub fn split_tls_stream(
             tls_connection: shared_connection,
             socket,
             deadline: None,
+            idle_timeout: None,
             unsent_encrypted_bytes: Vec::new(),
         },
     ))
-}
-
-/// Store `deadline` in `deadline_slot`. When it is `None`, also clear the
-/// timeout of `socket` that `set_socket_timeout` sets
-/// ([`TcpStream::set_read_timeout`] or [`TcpStream::set_write_timeout`]); a
-/// failure to clear it is ignored.
-fn store_socket_deadline(
-    socket: &TcpStream,
-    deadline_slot: &mut Option<Instant>,
-    deadline: Option<Instant>,
-    set_socket_timeout: fn(&TcpStream, Option<Duration>) -> io::Result<()>,
-) {
-    *deadline_slot = deadline;
-    if deadline.is_none() {
-        let _ = set_socket_timeout(socket, None);
-    }
 }
 
 /// The reading half of a TLS stream: plaintext out of the encrypted bytes the
@@ -156,6 +143,8 @@ pub struct TlsReader {
     /// When every read this half has left must be finished by, or `None` to
     /// block for as long as it takes.
     deadline: Option<Instant>,
+    /// The longest one socket read waits for a byte, or `None` for no limit.
+    idle_timeout: Option<Duration>,
     /// The buffer each socket read lands in before decryption, allocated once
     /// for the half's lifetime.
     encrypted_read_buffer: Box<[u8; TLS_READ_BUFFER_BYTE_COUNT]>,
@@ -168,13 +157,14 @@ pub struct TlsReader {
 }
 
 impl fmt::Debug for TlsReader {
-    /// Writes the socket and the deadline, and none of the read buffer's
-    /// bytes.
+    /// Writes the socket, the deadline and the idle timeout, and none of the
+    /// read buffer's bytes.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("TlsReader")
             .field("socket", &self.socket)
             .field("deadline", &self.deadline)
+            .field("idle_timeout", &self.idle_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -184,30 +174,33 @@ impl TlsReader {
     ///
     /// Every socket read this half makes ends by `deadline`, however many
     /// reads it takes to produce one helping of plaintext. `None` clears the
-    /// read timeout on this half's handle; a read after it blocks for as long
-    /// as it takes, until [`TlsReader::set_read_timeout`] sets a new one.
+    /// read timeout on this half's handle, and a failure to clear it is
+    /// ignored; a read after it with no idle timeout blocks for as long as it
+    /// takes.
     pub fn set_deadline(&mut self, deadline: Option<Instant>) {
-        store_socket_deadline(
-            &self.socket,
-            &mut self.deadline,
-            deadline,
-            TcpStream::set_read_timeout,
-        );
+        if deadline.is_none() {
+            let _ = self.socket.set_read_timeout(None);
+        }
+        self.deadline = deadline;
     }
 
-    /// Set the read timeout of this half's handle to `read_timeout`, or take
-    /// it away for `None`. With no deadline set, each socket read this half
-    /// makes waits at most `read_timeout`, and with no limit for `None`.
+    /// Give each socket read this half makes at most `idle_timeout` to get a
+    /// byte, or `None` to take the idle timeout away. One read that takes many
+    /// socket reads to produce plaintext gives each socket read its own
+    /// `idle_timeout`, and the deadline still applies to each one. `None`
+    /// clears the read timeout on this half's handle, and a failure to clear
+    /// it is ignored; a read after it with no deadline blocks for as long as
+    /// it takes. A zero `idle_timeout` ends every socket read before it
+    /// starts.
     ///
-    /// A deadline set with [`TlsReader::set_deadline`] replaces the read
-    /// timeout before each socket read, and `set_deadline(None)` takes it
-    /// away.
-    ///
-    /// # Errors
-    /// [`io::ErrorKind::InvalidInput`] for a zero `read_timeout`, and the
-    /// platform's own failure to set it.
-    pub fn set_read_timeout(&self, read_timeout: Option<Duration>) -> io::Result<()> {
-        self.socket.set_read_timeout(read_timeout)
+    /// Example: with a 1-second idle timeout, a TLS record whose bytes arrive
+    /// 200 ms apart over 2 seconds is read whole, and a peer that sends
+    /// nothing for 1 second ends the read.
+    pub fn set_idle_timeout(&mut self, idle_timeout: Option<Duration>) {
+        if idle_timeout.is_none() {
+            let _ = self.socket.set_read_timeout(None);
+        }
+        self.idle_timeout = idle_timeout;
     }
 }
 
@@ -222,9 +215,10 @@ impl Read for TlsReader {
     /// on every read after it, and bytes that do not decrypt are
     /// [`io::ErrorKind::InvalidData`].
     ///
-    /// With a deadline set, each socket read is given the time left until that
-    /// deadline. No time left before a socket read ends the read with
-    /// [`io::ErrorKind::TimedOut`]; the deadline passing during a socket read
+    /// With a deadline or an idle timeout set, each socket read is given the
+    /// time left until the instant [`compute_step_deadline`] gives when that
+    /// socket read starts. No time left before a socket read ends the read with
+    /// [`io::ErrorKind::TimedOut`]; that instant passing during a socket read
     /// ends it with the socket's own timeout error, which [`is_io_timeout`]
     /// recognises on every platform.
     ///
@@ -252,7 +246,11 @@ impl Read for TlsReader {
                 decrypt_pending_tls_records(&mut tls_connection)?;
                 continue;
             }
-            set_socket_timeout_until(&self.socket, self.deadline, TcpStream::set_read_timeout)?;
+            set_socket_timeout_until(
+                &self.socket,
+                compute_step_deadline(self.deadline, self.idle_timeout),
+                TcpStream::set_read_timeout,
+            )?;
             // No lock is held during the socket read; the writing half keeps
             // working while this half waits.
             self.encrypted_byte_count = self.socket.read(&mut self.encrypted_read_buffer[..])?;
@@ -280,6 +278,9 @@ pub struct TlsWriter {
     /// When every write this half has left must be finished by, or `None` to
     /// block for as long as it takes.
     deadline: Option<Instant>,
+    /// The longest one socket write waits for the socket to take a byte, or
+    /// `None` for no limit.
+    idle_timeout: Option<Duration>,
     /// Encrypted bytes taken out of `tls_connection` and not yet on the socket.
     /// Empty except after a socket write that failed or ran out of time.
     unsent_encrypted_bytes: Vec<u8>,
@@ -290,31 +291,33 @@ impl TlsWriter {
     ///
     /// Every socket write this half makes ends by `deadline`, however many
     /// writes it takes to put one helping of plaintext on the socket. `None`
-    /// clears the write timeout on this half's handle; a write after it blocks
-    /// for as long as it takes, until [`TlsWriter::set_write_timeout`] sets a
-    /// new one.
+    /// clears the write timeout on this half's handle, and a failure to clear
+    /// it is ignored; a write after it with no idle timeout blocks for as long
+    /// as it takes.
     pub fn set_deadline(&mut self, deadline: Option<Instant>) {
-        store_socket_deadline(
-            &self.socket,
-            &mut self.deadline,
-            deadline,
-            TcpStream::set_write_timeout,
-        );
+        if deadline.is_none() {
+            let _ = self.socket.set_write_timeout(None);
+        }
+        self.deadline = deadline;
     }
 
-    /// Set the write timeout of this half's handle to `write_timeout`, or
-    /// take it away for `None`. With no deadline set, each socket write this
-    /// half makes waits at most `write_timeout`, and with no limit for `None`.
+    /// Give each socket write this half makes at most `idle_timeout` for the
+    /// socket to take a byte, or `None` to take the idle timeout away. One
+    /// write that takes many socket writes to put its records on the socket
+    /// gives each socket write its own `idle_timeout`, and the deadline still
+    /// applies to each one. `None` clears the write timeout on this half's
+    /// handle, and a failure to clear it is ignored; a write after it with no
+    /// deadline blocks for as long as it takes. A zero `idle_timeout` ends
+    /// every socket write before it starts.
     ///
-    /// A deadline set with [`TlsWriter::set_deadline`] replaces the write
-    /// timeout before each socket write, and `set_deadline(None)` takes it
-    /// away.
-    ///
-    /// # Errors
-    /// [`io::ErrorKind::InvalidInput`] for a zero `write_timeout`, and the
-    /// platform's own failure to set it.
-    pub fn set_write_timeout(&self, write_timeout: Option<Duration>) -> io::Result<()> {
-        self.socket.set_write_timeout(write_timeout)
+    /// Example: with a 1-second idle timeout, 64 KiB that the peer takes 4 KiB
+    /// every 200 ms goes out whole, and a peer that takes no byte for 1 second
+    /// ends the write.
+    pub fn set_idle_timeout(&mut self, idle_timeout: Option<Duration>) {
+        if idle_timeout.is_none() {
+            let _ = self.socket.set_write_timeout(None);
+        }
+        self.idle_timeout = idle_timeout;
     }
 }
 
@@ -335,11 +338,12 @@ impl Write for TlsWriter {
     /// of the next write. The plaintext a failed write handed to rustls stays
     /// taken: its records go out on the next write.
     ///
-    /// With a deadline set, each socket write is given the time left until
-    /// that deadline. No time left before a socket write ends the call with
-    /// [`io::ErrorKind::TimedOut`]; the deadline passing during one ends it
-    /// with the socket's own timeout error, which [`is_io_timeout`] recognises
-    /// on every platform.
+    /// With a deadline or an idle timeout set, each socket write is given the
+    /// time left until the instant [`compute_step_deadline`] gives when that
+    /// socket write starts. No time left before a socket write ends the call
+    /// with [`io::ErrorKind::TimedOut`]; that instant passing during one ends
+    /// it with the socket's own timeout error, which [`is_io_timeout`]
+    /// recognises on every platform.
     fn write(&mut self, plaintext_bytes: &[u8]) -> io::Result<usize> {
         self.send_unsent_encrypted_bytes()?;
         let written_plaintext_byte_count = {
@@ -364,7 +368,8 @@ impl Write for TlsWriter {
 impl TlsWriter {
     /// Put `unsent_encrypted_bytes` on the socket, front first, and remove each
     /// byte the socket takes. Each socket write is given the time left until
-    /// `deadline`; `None` lets it block for as long as it takes.
+    /// the instant [`compute_step_deadline`] gives when it starts; with no
+    /// deadline and no idle timeout it blocks for as long as it takes.
     ///
     /// # Errors
     /// [`io::ErrorKind::TimedOut`] when no time is left before a write,
@@ -372,7 +377,11 @@ impl TlsWriter {
     /// otherwise the socket write's own failure. The bytes not taken stay.
     fn send_unsent_encrypted_bytes(&mut self) -> io::Result<()> {
         while !self.unsent_encrypted_bytes.is_empty() {
-            set_socket_timeout_until(&self.socket, self.deadline, TcpStream::set_write_timeout)?;
+            set_socket_timeout_until(
+                &self.socket,
+                compute_step_deadline(self.deadline, self.idle_timeout),
+                TcpStream::set_write_timeout,
+            )?;
             let sent_byte_count = self.socket.write(&self.unsent_encrypted_bytes)?;
             if sent_byte_count == 0 {
                 return Err(io::Error::from(io::ErrorKind::WriteZero));
@@ -387,11 +396,19 @@ impl crate::transport::Deadlined for TlsReader {
     fn set_deadline(&mut self, deadline: Option<Instant>) {
         TlsReader::set_deadline(self, deadline);
     }
+
+    fn set_idle_timeout(&mut self, idle_timeout: Option<Duration>) {
+        TlsReader::set_idle_timeout(self, idle_timeout);
+    }
 }
 
 impl crate::transport::Deadlined for TlsWriter {
     fn set_deadline(&mut self, deadline: Option<Instant>) {
         TlsWriter::set_deadline(self, deadline);
+    }
+
+    fn set_idle_timeout(&mut self, idle_timeout: Option<Duration>) {
+        TlsWriter::set_idle_timeout(self, idle_timeout);
     }
 }
 
@@ -498,30 +515,29 @@ fn get_supported_signature_algorithms() -> WebPkiSupportedAlgorithms {
     build_crypto_provider().signature_verification_algorithms
 }
 
-/// Checks a server's certificate against the fingerprint saved from an
-/// earlier connection to it.
+/// Checks a server's certificate against the fingerprint the dial expects.
 ///
 /// The certificate is never checked against a certificate authority. The
 /// handshake signature is checked in full: the proof that the server holds
 /// the private key of the certificate it presented.
 #[derive(Debug)]
-pub struct PinVerifier {
-    /// The fingerprint saved from an earlier connection, or `None` on the
-    /// first connection to this server.
-    expected_certificate_fingerprint: Option<String>,
+pub struct FingerprintVerifier {
+    /// The fingerprint the server's certificate must have, as 64 lowercase
+    /// hex characters.
+    expected_certificate_fingerprint: String,
     /// The fingerprint the server presented, filled in during the handshake.
     presented_certificate_fingerprint: Mutex<Option<String>>,
 }
 
-impl PinVerifier {
-    /// A verifier that accepts whatever certificate the server presents when
-    /// `expected_certificate_fingerprint` is `None`, and only that one fingerprint otherwise.
+impl FingerprintVerifier {
+    /// A verifier that accepts only a certificate whose fingerprint is
+    /// `expected_certificate_fingerprint`.
     #[must_use]
     pub fn from_expected_certificate_fingerprint(
-        expected_certificate_fingerprint: Option<&str>,
-    ) -> PinVerifier {
-        PinVerifier {
-            expected_certificate_fingerprint: expected_certificate_fingerprint.map(str::to_string),
+        expected_certificate_fingerprint: &str,
+    ) -> FingerprintVerifier {
+        FingerprintVerifier {
+            expected_certificate_fingerprint: expected_certificate_fingerprint.to_string(),
             presented_certificate_fingerprint: Mutex::new(None),
         }
     }
@@ -532,16 +548,16 @@ impl PinVerifier {
     pub fn get_presented_certificate_fingerprint(&self) -> Option<String> {
         self.presented_certificate_fingerprint
             .lock()
-            .expect("pinned certificate")
+            .expect("presented certificate fingerprint")
             .clone()
     }
 }
 
-impl ServerCertVerifier for PinVerifier {
+impl ServerCertVerifier for FingerprintVerifier {
     /// Records the fingerprint of `end_entity_certificate` as
     /// [`get_presented_certificate_fingerprint`](Self::get_presented_certificate_fingerprint), then
-    /// accepts it when no fingerprint is pinned or the pinned one is equal,
-    /// and refuses it otherwise with `the pinned certificate is <pinned>, the
+    /// accepts it when it equals the expected fingerprint byte for byte, and
+    /// refuses it otherwise with `the expected certificate is <expected>, the
     /// server presented <presented>`.
     fn verify_server_cert(
         &self,
@@ -556,18 +572,15 @@ impl ServerCertVerifier for PinVerifier {
         *self
             .presented_certificate_fingerprint
             .lock()
-            .expect("pinned certificate") = Some(presented_certificate_fingerprint.clone());
-        match &self.expected_certificate_fingerprint {
-            None => Ok(ServerCertVerified::assertion()),
-            Some(pinned_certificate_fingerprint)
-                if *pinned_certificate_fingerprint == presented_certificate_fingerprint =>
-            {
-                Ok(ServerCertVerified::assertion())
-            }
-            Some(pinned_certificate_fingerprint) => Err(rustls::Error::General(format!(
-                "the pinned certificate is {pinned_certificate_fingerprint}, the server presented {presented_certificate_fingerprint}"
-            ))),
+            .expect("presented certificate fingerprint") =
+            Some(presented_certificate_fingerprint.clone());
+        if presented_certificate_fingerprint == self.expected_certificate_fingerprint {
+            return Ok(ServerCertVerified::assertion());
         }
+        Err(rustls::Error::General(format!(
+            "the expected certificate is {}, the server presented {presented_certificate_fingerprint}",
+            self.expected_certificate_fingerprint
+        )))
     }
 
     fn verify_tls12_signature(
@@ -603,13 +616,12 @@ impl ServerCertVerifier for PinVerifier {
     }
 }
 
-/// Open a TLS stream to `server_address`, refusing a certificate whose
+/// Open a TLS 1.3 stream to `server_address`, refusing a certificate whose
 /// fingerprint is not `expected_certificate_fingerprint`.
 ///
 /// `server_address` is `host:port`. The lookup is the operating system's own, and
 /// the first address it returns is the one dialled. Returns the two halves of
-/// the stream and the fingerprint the server presented, which the caller
-/// saves on a first connection.
+/// the stream.
 ///
 /// `connection_timeout` bounds everything after the name lookup: the connect and the
 /// whole handshake share one deadline, and both halves come back holding
@@ -623,17 +635,17 @@ impl ServerCertVerifier for PinVerifier {
 /// cannot reach, when no time is left after the lookup, or when the connect is
 /// unanswered at the deadline, and
 /// [`IpcError::TlsHandshakeFailed`] when the handshake on an open connection
-/// does not finish, carrying [`run_tls_handshake`]'s own words. A fingerprint that
-/// does not match the pinned one is [`IpcError::CertificateChanged`].
+/// does not finish, carrying [`run_tls_handshake`]'s own words. A certificate
+/// whose fingerprint is not `expected_certificate_fingerprint` is
+/// [`IpcError::CertificateMismatch`].
 /// [`IpcError::Transport`] names the rest: the lookup (`<address> could not
 /// be looked up: invalid socket address` for an address with no port), a
-/// connect that failed for another reason, a server that presented no
-/// certificate, and a stream that did not split.
+/// connect that failed for another reason, and a stream that did not split.
 pub fn connect_tls_stream(
     server_address: &str,
-    expected_certificate_fingerprint: Option<&str>,
+    expected_certificate_fingerprint: &str,
     connection_timeout: Duration,
-) -> Result<(TlsReader, TlsWriter, String), IpcError> {
+) -> Result<(TlsReader, TlsWriter), IpcError> {
     let deadline = Instant::now()
         .checked_add(connection_timeout)
         .ok_or_else(|| IpcError::ConnectTimedOut {
@@ -668,12 +680,13 @@ pub fn connect_tls_stream(
                 )),
             })?;
 
-    let certificate_verifier = Arc::new(PinVerifier::from_expected_certificate_fingerprint(
-        expected_certificate_fingerprint,
-    ));
+    let certificate_verifier =
+        Arc::new(FingerprintVerifier::from_expected_certificate_fingerprint(
+            expected_certificate_fingerprint,
+        ));
     let client_config = ClientConfig::builder_with_provider(build_crypto_provider())
-        .with_safe_default_protocol_versions()
-        .expect("aws-lc-rs supports every default protocol version")
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("aws-lc-rs supports TLS 1.3")
         .dangerous()
         .with_custom_certificate_verifier(
             Arc::clone(&certificate_verifier) as Arc<dyn ServerCertVerifier>
@@ -698,17 +711,15 @@ pub fn connect_tls_stream(
 
     if let Err(handshake_error) = run_tls_handshake(&mut tls_connection, &mut socket, deadline) {
         return Err(
-            match (
-                expected_certificate_fingerprint,
-                certificate_verifier.get_presented_certificate_fingerprint(),
-            ) {
-                (Some(pinned_certificate_fingerprint), Some(presented_certificate_fingerprint))
-                    if pinned_certificate_fingerprint != presented_certificate_fingerprint =>
+            match certificate_verifier.get_presented_certificate_fingerprint() {
+                Some(presented_certificate_fingerprint)
+                    if presented_certificate_fingerprint != expected_certificate_fingerprint =>
                 {
-                    IpcError::CertificateChanged {
+                    IpcError::CertificateMismatch {
                         server_address: server_address.to_string(),
-                        pinned_certificate: pinned_certificate_fingerprint.to_string(),
-                        presented_certificate: presented_certificate_fingerprint,
+                        expected_certificate_fingerprint: expected_certificate_fingerprint
+                            .to_string(),
+                        presented_certificate_fingerprint,
                     }
                 }
                 _ => IpcError::TlsHandshakeFailed {
@@ -718,11 +729,6 @@ pub fn connect_tls_stream(
             },
         );
     }
-    let presented_certificate_fingerprint = certificate_verifier
-        .get_presented_certificate_fingerprint()
-        .ok_or_else(|| {
-            build_transport_error(format!("{server_address} presented no certificate"))
-        })?;
     let (mut reader, mut writer) =
         split_tls_stream(tls_connection, socket).map_err(|io_error| {
             build_transport_error(format!(
@@ -731,7 +737,7 @@ pub fn connect_tls_stream(
         })?;
     reader.set_deadline(Some(deadline));
     writer.set_deadline(Some(deadline));
-    Ok((reader, writer, presented_certificate_fingerprint))
+    Ok((reader, writer))
 }
 
 /// Build a transport error for a connection step that did not open.

@@ -398,6 +398,7 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
             active_tab_id,
             focused_pane_id: Some(content_pane_id),
             lock_mode: LockMode::Locked,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: true,
         },
     }

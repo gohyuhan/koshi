@@ -3,13 +3,17 @@
 //! visible content is cut to the pane area. The panes draw back to front over
 //! the tiled panes and the letterbox, each with its border, titlebar,
 //! separator, cells, border style, grab handle hover tint, unavailable-image text
-//! and scroll position. No floating pane is placed or drawn while pane
+//! and scroll position. A glyph two columns wide that starts in the column
+//! left of a floating pane turns blank, and the frame diff writes the pane's
+//! left border beside it. `U+17D8` there takes 1 column and stays, and in a
+//! title it takes 1 column. No floating pane is placed or drawn while pane
 //! placement shows or every pane is suppressed.
 
 use super::*;
 
 use std::sync::Arc;
 
+use ratatui::buffer::CellWidth;
 use ratatui::style::{Color, Modifier};
 
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -100,6 +104,7 @@ fn build_tiled_render_snapshot(viewport_size: Size, tab_size: Size) -> RenderSna
             active_tab_id: tab_id,
             focused_pane_id: Some(tiled_pane_id),
             lock_mode: LockMode::Normal,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }
@@ -320,6 +325,139 @@ fn a_floating_pane_draws_its_box_titlebar_separator_and_cells_over_the_tiled_pan
             "row {row_index}"
         );
     }
+}
+
+#[test]
+fn wide_glyphs_cut_by_a_floating_pane_are_blanked_and_the_border_beside_them_is_written() {
+    let mut render_snapshot = build_forty_by_twelve_render_snapshot();
+    let tiled_pane_id = render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[0]
+        .pane_id;
+    let mut glyph_style = TerminalStyle::default();
+    glyph_style.set_bold(true);
+    let mut grid = Grid::build_blank(8, 38, TerminalStyle::default());
+    // Grid cell `(4, 4)` is frame cell `(5, 6)`: `世` covers columns `5` and `6`.
+    *grid.get_cell_mut(4, 4).expect("the glyph fits the grid") =
+        Cell::from_character('世', 2, glyph_style);
+    *grid.get_cell_mut(4, 5).expect("the glyph fits the grid") =
+        Cell::from_character(' ', 0, glyph_style);
+    // Grid cell `(5, 3)` is frame cell `(4, 7)`: `世ﾞ` has a cell width of `3`
+    // and covers columns `4` to `6`.
+    let mut marked_glyph_cell = Cell::from_character('世', 2, glyph_style);
+    marked_glyph_cell.push_combining('\u{FF9E}');
+    *grid.get_cell_mut(5, 3).expect("the glyph fits the grid") = marked_glyph_cell;
+    *grid.get_cell_mut(5, 4).expect("the glyph fits the grid") =
+        Cell::from_character(' ', 0, glyph_style);
+    get_pane_snapshot_mut(&mut render_snapshot, tiled_pane_id).terminal_grid_view =
+        Some(GridView {
+            grid: Arc::new(grid),
+            view_row_offset: 0,
+        });
+    let previous_buffer = render_default_core_frame(&render_snapshot);
+    // The floating pane's left border is column `6`.
+    push_floating_pane(&mut render_snapshot, build_cell_rect(6, 2, 26, 6), "htop");
+
+    let render_buffer = render_default_core_frame(&render_snapshot);
+
+    assert_eq!(previous_buffer[(5, 6)].symbol(), "世");
+    assert_eq!(previous_buffer[(4, 7)].symbol(), "世\u{FF9E}");
+    for (column_index, row_index) in [(5, 6), (4, 7)] {
+        assert_eq!(render_buffer[(column_index, row_index)].symbol(), " ");
+        assert_eq!(
+            render_buffer[(column_index, row_index)].modifier,
+            Modifier::BOLD
+        );
+        assert_eq!(render_buffer[(6, row_index)].symbol(), "│");
+    }
+    let written_cells: Vec<(u16, u16, &str)> = previous_buffer
+        .diff(&render_buffer)
+        .into_iter()
+        .filter(|(column_index, row_index, _)| (6..=7).contains(row_index) && *column_index <= 6)
+        .map(|(column_index, row_index, written_cell)| {
+            (column_index, row_index, written_cell.symbol())
+        })
+        .collect();
+    assert_eq!(
+        written_cells,
+        [(5, 6, " "), (6, 6, "│"), (4, 7, " "), (6, 7, "│")]
+    );
+}
+
+#[test]
+fn the_khmer_sign_beyyal_beside_a_floating_pane_stays_and_a_wide_glyph_after_it_is_blanked() {
+    let mut render_snapshot = build_forty_by_twelve_render_snapshot();
+    let tiled_pane_id = render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[0]
+        .pane_id;
+    let mut grid = Grid::build_blank(8, 38, TerminalStyle::default());
+    // Grid cell `(4, 4)` is frame cell `(5, 6)`: `U+17D8` covers column `5`.
+    *grid.get_cell_mut(4, 4).expect("the glyph fits the grid") =
+        Cell::from_character('\u{17D8}', 1, TerminalStyle::default());
+    // Grid cell `(5, 2)` is frame cell `(3, 7)`: `U+17D8` covers column `3`,
+    // and `世` at frame cell `(5, 7)` covers columns `5` and `6`.
+    *grid.get_cell_mut(5, 2).expect("the glyph fits the grid") =
+        Cell::from_character('\u{17D8}', 1, TerminalStyle::default());
+    *grid.get_cell_mut(5, 4).expect("the glyph fits the grid") =
+        Cell::from_character('世', 2, TerminalStyle::default());
+    *grid.get_cell_mut(5, 5).expect("the glyph fits the grid") =
+        Cell::from_character(' ', 0, TerminalStyle::default());
+    get_pane_snapshot_mut(&mut render_snapshot, tiled_pane_id).terminal_grid_view =
+        Some(GridView {
+            grid: Arc::new(grid),
+            view_row_offset: 0,
+        });
+    let previous_buffer = render_default_core_frame(&render_snapshot);
+    // The floating pane's left border is column `6`.
+    push_floating_pane(&mut render_snapshot, build_cell_rect(6, 2, 26, 6), "htop");
+
+    let render_buffer = render_default_core_frame(&render_snapshot);
+
+    assert_eq!(render_buffer[(5, 6)].symbol(), "\u{17D8}");
+    assert_eq!(render_buffer[(3, 7)].symbol(), "\u{17D8}");
+    assert_eq!(previous_buffer[(5, 7)].symbol(), "世");
+    assert_eq!(render_buffer[(5, 7)].symbol(), " ");
+    let written_cells: Vec<(u16, u16, &str)> = previous_buffer
+        .diff(&render_buffer)
+        .into_iter()
+        .filter(|(column_index, row_index, _)| (6..=7).contains(row_index) && *column_index <= 6)
+        .map(|(column_index, row_index, written_cell)| {
+            (column_index, row_index, written_cell.symbol())
+        })
+        .collect();
+    assert_eq!(written_cells, [(6, 6, "│"), (5, 7, " "), (6, 7, "│")]);
+}
+
+#[test]
+fn a_floating_pane_title_takes_one_column_for_the_khmer_sign_beyyal() {
+    let mut render_snapshot = build_forty_by_twelve_render_snapshot();
+    // A `22`-column box at frame `(2, 2)` has a 2-column title area: frame
+    // columns `8` and `9` of row `3`.
+    push_floating_pane(
+        &mut render_snapshot,
+        build_cell_rect(2, 1, 22, 5),
+        "\u{17D8}x",
+    );
+    // A `30`-column box at frame `(2, 7)` has a 10-column title area from
+    // frame column `8` of row `8`.
+    push_floating_pane(
+        &mut render_snapshot,
+        build_cell_rect(2, 6, 30, 4),
+        "\u{17D8}xy",
+    );
+
+    let render_buffer = render_default_core_frame(&render_snapshot);
+
+    assert_eq!(render_buffer[(8, 3)].symbol(), "\u{17D8}");
+    assert_eq!(render_buffer[(8, 3)].cell_width(), 1);
+    assert_eq!(render_buffer[(9, 3)].symbol(), "x");
+    let wide_title_cells: Vec<&str> = (8..12)
+        .map(|column_index| render_buffer[(column_index, 8)].symbol())
+        .collect();
+    assert_eq!(wide_title_cells, ["\u{17D8}", "x", "y", " "]);
 }
 
 #[test]

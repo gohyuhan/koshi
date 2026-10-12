@@ -113,6 +113,33 @@ impl Client {
         }
     }
 
+    /// Switch to `lock_mode`, the mode that lock command `lock_command_id`
+    /// sets, before the session runs that command, and wait for it: painted
+    /// frames leave the lock mode as it is until one names `lock_command_id`
+    /// as the last applied lock command. The switch is
+    /// [`set_lock_mode`](Self::set_lock_mode).
+    pub(crate) fn apply_lock_command(&mut self, lock_command_id: CommandId, lock_mode: LockMode) {
+        self.set_lock_mode(lock_mode);
+        self.pending_lock_command_id = Some(lock_command_id);
+    }
+
+    /// The lock command whose lock mode this viewer shows before the session
+    /// runs it, or `None` when no lock command waits.
+    #[must_use]
+    pub(crate) fn get_pending_lock_command_id(&self) -> Option<CommandId> {
+        self.pending_lock_command_id
+    }
+
+    /// Wait for lock command `pending_lock_command_id` before painted frames
+    /// set the lock mode again, or, with `None`, let the next painted frame set
+    /// it.
+    pub(crate) fn set_pending_lock_command_id(
+        &mut self,
+        pending_lock_command_id: Option<CommandId>,
+    ) {
+        self.pending_lock_command_id = pending_lock_command_id;
+    }
+
     /// The chords of an open sequence, for the hint bar's breadcrumb.
     #[must_use]
     pub fn get_pending_key_sequence(&self) -> Option<&KeySequence> {

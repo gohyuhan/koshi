@@ -29,6 +29,8 @@
 //! - The payload `?` asks to read the clipboard, and makes no copy.
 //! - A payload that is not base64, with or without `=` padding, makes an empty
 //!   copy. The empty payload makes an empty copy too.
+//! - A payload whose decoded bytes are not UTF-8 makes a copy of those bytes,
+//!   unchanged: `ESC ] 52 ; c ; /w== BEL` gives a copy of the one byte `0xff`.
 //! - A payload longer than `maximum_copy_byte_count` bytes rounded up to a
 //!   multiple of 3, then multiplied by 4/3, makes no copy, and the parser holds
 //!   none of its bytes. A payload whose decoded bytes are more than

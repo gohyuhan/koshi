@@ -100,6 +100,13 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "Dial a session on another machine again when the link drops.",
     ),
     build_config_field_help(
+        "koshi.remote-link-timeout-ms",
+        "koshi.kdl",
+        "30000",
+        "Milliseconds a link to a session on another machine may carry no byte before it \
+         drops, from 1000.",
+    ),
+    build_config_field_help(
         "koshi.image-support",
         "koshi.kdl",
         "#true",

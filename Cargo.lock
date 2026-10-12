@@ -1037,7 +1037,6 @@ dependencies = [
  "tar",
  "tempfile",
  "tracing",
- "unicode-width 0.2.2",
  "ureq",
  "uuid",
  "windows-sys 0.61.2",
@@ -1103,6 +1102,7 @@ version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
+ "unicode-width 0.2.2",
  "uuid",
 ]
 
@@ -1389,7 +1389,6 @@ dependencies = [
  "serde",
  "serde_json",
  "unicode-segmentation",
- "unicode-width 0.2.2",
  "vte",
 ]
 

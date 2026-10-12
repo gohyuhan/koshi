@@ -102,11 +102,11 @@ fn every_frame_a_client_opens_with_reads_back_as_itself() {
         RemoteClientFrame::List,
         RemoteClientFrame::Attach {
             session_selector: SessionSelector::SessionName("quiet-lake".to_string()),
-            bridge_timeout_ms: None,
+            link_timeout_ms: None,
         },
         RemoteClientFrame::Attach {
             session_selector: SessionSelector::SessionId(SessionId::new()),
-            bridge_timeout_ms: Some(50_000),
+            link_timeout_ms: Some(30_000),
         },
     ] {
         let framed_remote_client_bytes = build_framed_remote_client_frame(&frame);
@@ -306,7 +306,7 @@ fn every_client_frame_travels_as_these_exact_bytes() {
         (
             RemoteClientFrame::Attach {
                 session_selector: SessionSelector::SessionName("quiet-lake".to_string()),
-                bridge_timeout_ms: None,
+                link_timeout_ms: None,
             },
             r#"{"Attach":{"session_selector":{"SessionName":"quiet-lake"}}}"#,
         ),
@@ -315,9 +315,9 @@ fn every_client_frame_travels_as_these_exact_bytes() {
                 session_selector: SessionSelector::SessionId(SessionId::from_uuid(
                     build_fixed_test_uuid(),
                 )),
-                bridge_timeout_ms: Some(50_000),
+                link_timeout_ms: Some(30_000),
             },
-            r#"{"Attach":{"session_selector":{"SessionId":"00000000-0000-0000-0000-000000000001"},"bridge_timeout_ms":50000}}"#,
+            r#"{"Attach":{"session_selector":{"SessionId":"00000000-0000-0000-0000-000000000001"},"link_timeout_ms":30000}}"#,
         ),
     ] {
         assert_eq!(
@@ -388,43 +388,43 @@ fn a_field_a_struct_variant_does_not_know_is_ignored() {
         frame_read_result.expect("a field this build does not know is ignored"),
         RemoteClientFrame::Attach {
             session_selector: SessionSelector::SessionName("quiet-lake".to_string()),
-            bridge_timeout_ms: None,
+            link_timeout_ms: None,
         }
     );
     assert_eq!(consumed_byte_count, frame_payload_bytes.len() as u64 + 4);
 }
 
 #[test]
-fn an_attach_with_no_bridge_timeout_reads_as_naming_none() {
+fn an_attach_with_no_link_timeout_reads_as_naming_none() {
     let frame_payload_bytes = br#"{"Attach":{"session_selector":{"SessionName":"quiet-lake"}}}"#;
 
     let (frame_read_result, consumed_byte_count) =
         read_one_remote_client_frame(build_length_prefixed_payload(frame_payload_bytes));
 
     assert_eq!(
-        frame_read_result.expect("an Attach with no bridge timeout reads"),
+        frame_read_result.expect("an Attach with no link timeout reads"),
         RemoteClientFrame::Attach {
             session_selector: SessionSelector::SessionName("quiet-lake".to_string()),
-            bridge_timeout_ms: None,
+            link_timeout_ms: None,
         }
     );
     assert_eq!(consumed_byte_count, frame_payload_bytes.len() as u64 + 4);
 }
 
 #[test]
-fn a_bridge_timeout_that_is_not_a_u32_is_a_malformed_frame() {
+fn a_link_timeout_that_is_not_a_u32_is_a_malformed_frame() {
     for (frame_payload_bytes, expected_malformed_detail) in [
         (
-            &br#"{"Attach":{"session_selector":{"SessionName":"quiet-lake"},"bridge_timeout_ms":-1}}"#[..],
-            "invalid value: integer `-1`, expected u32 at line 1 column 81",
+            &br#"{"Attach":{"session_selector":{"SessionName":"quiet-lake"},"link_timeout_ms":-1}}"#[..],
+            "invalid value: integer `-1`, expected u32 at line 1 column 79",
         ),
         (
-            &br#"{"Attach":{"session_selector":{"SessionName":"quiet-lake"},"bridge_timeout_ms":4294967296}}"#[..],
-            "invalid value: integer `4294967296`, expected u32 at line 1 column 89",
+            &br#"{"Attach":{"session_selector":{"SessionName":"quiet-lake"},"link_timeout_ms":4294967296}}"#[..],
+            "invalid value: integer `4294967296`, expected u32 at line 1 column 87",
         ),
         (
-            &br#"{"Attach":{"session_selector":{"SessionName":"quiet-lake"},"bridge_timeout_ms":"50000"}}"#[..],
-            "invalid type: string \"50000\", expected u32 at line 1 column 86",
+            &br#"{"Attach":{"session_selector":{"SessionName":"quiet-lake"},"link_timeout_ms":"30000"}}"#[..],
+            "invalid type: string \"30000\", expected u32 at line 1 column 84",
         ),
     ] {
         let (frame_read_result, consumed_byte_count) =

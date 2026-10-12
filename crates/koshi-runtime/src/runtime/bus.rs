@@ -1,13 +1,15 @@
 //! Event fan-out: the bounded per-subscriber delivery hub.
 //!
-//! `EventBus::subscribe` registers a subscriber and hands back its id plus
-//! the receiving end of that subscriber's own bounded queue.
-//! `EventBus::publish` clones each event into every subscriber's queue, `EventBus::try_send_frame` puts the frame the session composed
-//! for one subscriber's client on that subscriber's own queue,
+//! `EventBus::subscribe` registers a subscriber and hands back its id, the
+//! receiving end of that subscriber's own bounded queue, and its
+//! [`WaitingHostWrites`].
+//! `EventBus::publish` clones each event into every subscriber's queue,
+//! `EventBus::try_send_frame` puts the frame the session composed for one
+//! subscriber's client on that subscriber's own queue,
 //! `EventBus::try_send_mouse_answer` puts one round of mouse answers on it,
-//! `EventBus::try_send_host_write` puts bytes aimed at that subscriber's own
-//! terminal on it, and `EventBus::try_send_switch` puts the session that
-//! subscriber's client moves to on it. Delivery
+//! `EventBus::queue_host_write` adds bytes aimed at that subscriber's own
+//! terminal to its waiting host writes, and `EventBus::try_send_switch` puts
+//! the session that subscriber's client moves to on its queue. Delivery
 //! never blocks the dispatcher: a subscriber whose receiver was dropped is
 //! removed on the next publish.
 //!
@@ -17,10 +19,15 @@
 //! [`RenderSnapshot`] on its queue and returns it to live delivery. The
 //! snapshot rides the same queue as events, so the subscriber reads the
 //! backlog it already had, then the snapshot, then live events again. A mouse
-//! answer, host write, session switch, placement preview, placement refusal,
-//! or placement command rejection that does not fit marks the subscriber
-//! desynced the same way; a frame that does not fit is dropped and the
-//! subscriber stays live.
+//! answer, session switch, placement preview, placement refusal, or placement
+//! command rejection that does not fit marks the subscriber desynced the same
+//! way; a frame that does not fit is dropped and the subscriber stays live.
+//!
+//! Host-write bytes never wait for room on the queue. They wait in the
+//! subscriber's [`WaitingHostWrites`], which the thread that writes the
+//! subscriber's connection empties before each delivery it reads. A
+//! [`Delivery::HostWrite`] on the queue only wakes that thread, and a full
+//! queue drops the wake and pauses no one.
 //!
 //! [`Event::Quit`] and [`Event::Restarting`] are the exception: each is the
 //! stream's last frame, so it reaches a desynced subscriber as well as a live
@@ -32,15 +39,12 @@
 //!
 //! A subscriber in another process works in the wire spellings from
 //! `koshi-ipc` instead. [`build_wire_event`] turns one queue item into the
-//! frame that client is sent, and [`build_wire_host_write_events`] turns one
-//! host write into the frames that client is sent.
-//!
-//! `EventBus::has_host_write_in_flight` says whether the last host write put
-//! on a subscriber's queue is still on that queue or with the thread writing
-//! it. That thread drops the delivery once it wrote the bytes.
+//! frame that client is sent, and [`build_wire_host_write_events`] turns the
+//! waiting host-write bytes into the frames that client is sent.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex};
 
 use koshi_core::event::{Event, SubscriberLagged};
 use koshi_core::ids::{CommandId, SessionId, SubscriberId};
@@ -50,6 +54,7 @@ use koshi_renderer::snapshot::{
     Delivery, PlacementSnapshot, PlacementSnapshotError, PlacementSnapshotErrorCode, RenderSnapshot,
 };
 
+use crate::runtime::clipboard::encode_osc52_copy;
 use crate::runtime::event::{EndingNotice, SessionEnding};
 use crate::runtime::frame::build_wire_frame;
 
@@ -85,7 +90,7 @@ enum QueueDeliveryStatus {
 }
 
 /// One registered subscriber: its id, its delivery state, the sending end of
-/// its queue, and the host-write bytes that wait for that queue.
+/// its queue, and the host-write bytes that wait for its client's terminal.
 #[derive(Debug)]
 struct Subscriber {
     /// Stable subscriber ID assigned at subscription, named in log lines about this
@@ -97,15 +102,81 @@ struct Subscriber {
     /// Sending end of the subscriber's bounded queue; the receiver lives with
     /// the subscriber.
     delivery_sender: SyncSender<Delivery>,
-    /// Bytes for the terminal the subscriber's client runs in that wait to go
-    /// on the queue as one host write: whole escape sequences, in the order
-    /// they were queued.
-    pending_host_write_bytes: Vec<u8>,
-    /// The marker of the last host write put on this subscriber's queue. The
-    /// host write is in flight while the marker exists, and the marker exists
-    /// while the delivery that holds it is on the queue or with the thread
-    /// writing it.
-    host_write_in_flight: Weak<()>,
+    /// The host writes that wait for the terminal the subscriber's client runs
+    /// in, shared with the thread that writes the client's connection.
+    waiting_host_writes: Arc<WaitingHostWrites>,
+}
+
+/// The host writes that wait for the terminal one subscriber's client runs
+/// in: whole `OSC 52` sequences, oldest first. The bus adds to them, and the
+/// thread that writes the client's connection takes all of them before each
+/// delivery it reads.
+#[derive(Debug, Default)]
+pub struct WaitingHostWrites {
+    /// The host writes that wait, oldest first.
+    host_writes: Mutex<Vec<HostWrite>>,
+    /// Whether a [`Delivery::HostWrite`] that wakes the writing thread is on
+    /// the subscriber's queue. The bus sets it when it queues the wake, and
+    /// clears it when a full queue drops the wake. The writing thread clears it
+    /// when it reads the wake, and when it ends, after its receiver is gone.
+    is_wake_queued: AtomicBool,
+}
+
+/// One write for the terminal a client runs in: a whole `OSC 52` sequence,
+/// and the clipboard targets it sets.
+#[derive(Debug, Clone)]
+pub(crate) struct HostWrite {
+    /// The clipboard targets the sequence sets, in byte order: targets `pc`
+    /// are kept as `cp`.
+    sorted_clipboard_targets: Vec<u8>,
+    /// The whole sequence.
+    host_write_bytes: Vec<u8>,
+}
+
+impl HostWrite {
+    /// The `OSC 52` sequence that [`encode_osc52_copy`] writes for
+    /// `clipboard_targets` and `copied_bytes`, with the targets it sets.
+    ///
+    /// Example: `pc` and `hello` give the sequence `\x1b]52;pc;aGVsbG8=\x07`,
+    /// which sets the targets `cp`.
+    #[must_use]
+    pub(crate) fn from_clipboard_copy(clipboard_targets: &str, copied_bytes: &[u8]) -> HostWrite {
+        let mut sorted_clipboard_targets = clipboard_targets.as_bytes().to_vec();
+        sorted_clipboard_targets.sort_unstable();
+        HostWrite {
+            sorted_clipboard_targets,
+            host_write_bytes: encode_osc52_copy(clipboard_targets, copied_bytes),
+        }
+    }
+}
+
+impl WaitingHostWrites {
+    /// Take the bytes of every host write that waits, oldest first, and leave
+    /// none. Empty when none waits.
+    ///
+    /// # Panics
+    /// When a thread panicked while it held the host writes.
+    #[must_use]
+    pub fn take_host_write_bytes(&self) -> Vec<u8> {
+        let mut waiting_host_writes =
+            std::mem::take(&mut *self.host_writes.lock().expect("waiting host writes")).into_iter();
+        let Some(oldest_host_write) = waiting_host_writes.next() else {
+            return Vec::new();
+        };
+        let mut host_write_bytes = oldest_host_write.host_write_bytes;
+        for waiting_host_write in waiting_host_writes {
+            host_write_bytes.extend_from_slice(&waiting_host_write.host_write_bytes);
+        }
+        host_write_bytes
+    }
+
+    /// Record that no [`Delivery::HostWrite`] waits on the subscriber's queue:
+    /// the next bytes the bus adds queue a new wake. The writing thread calls
+    /// it when it reads the wake, and when it ends, after its receiver is
+    /// gone. The bus calls it when a full queue drops the wake.
+    pub fn clear_queued_wake(&self) {
+        self.is_wake_queued.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Event fan-out hub: every published event is delivered to each live
@@ -135,29 +206,30 @@ impl EventBus {
         &self.ending_notice
     }
 
-    /// Register a subscriber for every published event and hand back its id
-    /// plus the receiving end of its queue. The subscriber starts live.
-    /// Dropping the receiver ends the subscription; the bus removes it on the
-    /// next publish or delivery to it.
-    pub(crate) fn subscribe(&mut self) -> (SubscriberId, Receiver<Delivery>) {
+    /// Register a subscriber for every published event and hand back its id,
+    /// the receiving end of its queue, and its [`WaitingHostWrites`], with no
+    /// host write waiting. The subscriber starts live. Dropping the receiver
+    /// ends the subscription; the bus removes it on the next publish or
+    /// delivery to it.
+    pub(crate) fn subscribe(
+        &mut self,
+    ) -> (SubscriberId, Receiver<Delivery>, Arc<WaitingHostWrites>) {
         let (delivery_sender, delivery_receiver) = sync_channel(SUBSCRIBER_QUEUE_CAPACITY);
         let subscriber_id = SubscriberId::new();
+        let waiting_host_writes = Arc::new(WaitingHostWrites::default());
         self.subscribers.push(Subscriber {
             subscriber_id,
             delivery_state: DeliveryState::Live,
             delivery_sender,
-            pending_host_write_bytes: Vec::new(),
-            host_write_in_flight: Weak::new(),
+            waiting_host_writes: Arc::clone(&waiting_host_writes),
         });
-        (subscriber_id, delivery_receiver)
+        (subscriber_id, delivery_receiver, waiting_host_writes)
     }
 
     /// Deliver `event` to every live subscriber, and to every desynced one
-    /// when `event` ends the stream. An event that ends the stream first puts
-    /// each live subscriber's waiting host-write bytes on its queue, as
-    /// [`flush_pending_host_write`](Self::flush_pending_host_write) states,
-    /// then raises the [`EndingNotice`], so a subscriber whose queue has no
-    /// room for the event is told over the notice instead.
+    /// when `event` ends the stream. An event that ends the stream first
+    /// raises the [`EndingNotice`], so a subscriber whose queue has no room
+    /// for the event is told over the notice instead.
     ///
     /// A desynced subscriber receives nothing else, and counts what it misses.
     /// A live subscriber whose queue is full misses the event and becomes
@@ -177,14 +249,6 @@ impl EventBus {
             _ => None,
         };
         if let Some(session_ending) = session_ending {
-            let subscriber_ids: Vec<SubscriberId> = self
-                .subscribers
-                .iter()
-                .map(|subscriber| subscriber.subscriber_id)
-                .collect();
-            for subscriber_id in subscriber_ids {
-                let _ = self.flush_pending_host_write(subscriber_id);
-            }
             self.ending_notice.raise_session_ending(session_ending);
         }
         let is_stream_ending = session_ending.is_some();
@@ -260,19 +324,6 @@ impl EventBus {
         self.find_subscriber_index(subscriber_id).is_some()
     }
 
-    /// Whether the last host write put on `subscriber_id`'s queue is still on
-    /// that queue or with the thread writing it. `false` for a subscriber that
-    /// is not registered.
-    pub(crate) fn has_host_write_in_flight(&self, subscriber_id: SubscriberId) -> bool {
-        self.find_subscriber_index(subscriber_id)
-            .is_some_and(|subscriber_index| {
-                self.subscribers[subscriber_index]
-                    .host_write_in_flight
-                    .strong_count()
-                    > 0
-            })
-    }
-
     /// Where `subscriber_id` sits in the subscription-ordered list, or `None` when `subscriber_id`
     /// is not registered.
     fn find_subscriber_index(&self, subscriber_id: SubscriberId) -> Option<usize> {
@@ -288,10 +339,7 @@ impl EventBus {
     }
 
     /// Put `snapshot` on desynced subscriber `subscriber_id`'s queue and return it to live
-    /// delivery, reporting how many deliveries it missed. The host-write bytes
-    /// that waited while it was paused then go on its queue after the
-    /// snapshot, as [`send_pending_host_write`](Self::send_pending_host_write)
-    /// states.
+    /// delivery, reporting how many deliveries it missed.
     ///
     /// Returns `true` once the snapshot is queued. Returns `false` when `subscriber_id` is
     /// unknown, when it is already live, or when its queue is still full — the
@@ -327,7 +375,6 @@ impl EventBus {
                     dropped_event_count,
                     "snapshot queued; subscriber resynced"
                 );
-                let _ = self.send_pending_host_write(subscriber_id);
                 true
             }
             Err(TrySendError::Full(_)) => false,
@@ -487,123 +534,99 @@ impl EventBus {
         }
     }
 
-    /// Queue `host_write_bytes`, one whole escape sequence, for the terminal
-    /// subscriber `subscriber_id`'s client runs in, behind the bytes already
-    /// waiting, then send the waiting bytes as
-    /// [`send_pending_host_write`](Self::send_pending_host_write) states.
+    /// Add `host_write` behind the host writes that wait for the terminal
+    /// subscriber `subscriber_id`'s client runs in, live or paused alike. Each
+    /// waiting host write that sets the same clipboard targets, in any order,
+    /// is removed first: `pc` and `cp` are the same targets, and `c` and `pc`
+    /// are not. Then, when no wake is on its queue, put one
+    /// [`Delivery::HostWrite`] there to wake the thread that writes the
+    /// client's connection. A full queue drops that wake and changes no
+    /// delivery state: the thread takes the waiting host writes before the
+    /// next delivery it reads.
     ///
-    /// When bytes wait, and they and `host_write_bytes` together are more than
-    /// [`MAX_HOST_WRITE_BYTE_COUNT`], every waiting byte is dropped first and a
-    /// warning is logged: the newest sequence always waits. Example: 12 MiB
-    /// waiting and a copy of 1 MiB leave the 1 MiB copy alone. A sequence
-    /// longer than [`MAX_HOST_WRITE_BYTE_COUNT`] with no bytes waiting drops
-    /// nothing and logs nothing.
+    /// When host writes that set other clipboard targets wait, and their bytes
+    /// and the bytes of `host_write` together are more than
+    /// [`MAX_HOST_WRITE_BYTE_COUNT`], `host_write` is refused: no waiting host
+    /// write changes, no wake is queued, and a warning is logged. Example:
+    /// while a 7 MiB sequence for `c` waits, a 7 MiB sequence for `p` is
+    /// refused, and a 7 MiB sequence for `c` replaces the one that waits. A
+    /// sequence longer than [`MAX_HOST_WRITE_BYTE_COUNT`] waits when no host
+    /// write that sets other clipboard targets waits.
     ///
-    /// Returns `false` when `subscriber_id` is not registered, and drops
-    /// `host_write_bytes`. Returns `false` when the send drops the bytes, as
-    /// [`send_pending_host_write`](Self::send_pending_host_write) states.
+    /// Returns `true` once `host_write` waits. Returns `false`, and adds
+    /// nothing, when `subscriber_id` is not registered or `host_write` is
+    /// refused. Returns `false` when the wake finds the receiver gone: the
+    /// subscriber is removed with every host write that waits for it. A
+    /// subscriber with a wake already on its queue takes no new wake, and its
+    /// receiver is not checked. The thread that writes the client's connection
+    /// clears that wake when it ends, after its receiver is gone: the next host
+    /// write finds the receiver gone.
+    ///
+    /// # Panics
+    /// When a thread panicked while it held the waiting host writes.
     pub(crate) fn queue_host_write(
         &mut self,
         subscriber_id: SubscriberId,
-        host_write_bytes: &[u8],
+        host_write: &HostWrite,
     ) -> bool {
         let Some(subscriber_index) = self.find_subscriber_index(subscriber_id) else {
             return false;
         };
-        let pending_host_write_bytes =
-            &mut self.subscribers[subscriber_index].pending_host_write_bytes;
-        if !pending_host_write_bytes.is_empty()
-            && pending_host_write_bytes.len() + host_write_bytes.len() > MAX_HOST_WRITE_BYTE_COUNT
+        let subscriber = &self.subscribers[subscriber_index];
         {
-            tracing::warn!(
-                subscriber_id = %subscriber_id,
-                dropped_byte_count = pending_host_write_bytes.len(),
-                "older host writes dropped; the client reads them slower than they arrive"
-            );
-            pending_host_write_bytes.clear();
-        }
-        pending_host_write_bytes.extend_from_slice(host_write_bytes);
-        self.send_pending_host_write(subscriber_id)
-    }
-
-    /// Put the bytes waiting for subscriber `subscriber_id`'s client's terminal
-    /// on its queue as one host write, unless the last host write put on that
-    /// queue is still in flight
-    /// ([`has_host_write_in_flight`](Self::has_host_write_in_flight)). The rest
-    /// is as [`flush_pending_host_write`](Self::flush_pending_host_write)
-    /// states.
-    ///
-    /// Returns `false` when the bytes were dropped, and `true` when they are
-    /// on the queue, wait there, or no bytes wait.
-    pub(crate) fn send_pending_host_write(&mut self, subscriber_id: SubscriberId) -> bool {
-        if self.has_host_write_in_flight(subscriber_id) {
-            return true;
-        }
-        self.flush_pending_host_write(subscriber_id)
-    }
-
-    /// Put the bytes waiting for subscriber `subscriber_id`'s client's terminal
-    /// on its queue as one host write, whether or not an earlier host write is
-    /// in flight. Sends nothing when no bytes wait, and when the subscriber is
-    /// unknown or paused: a paused subscriber keeps its bytes waiting. Bytes
-    /// that do not fit the queue are dropped as
-    /// [`try_send_host_write`](Self::try_send_host_write) states.
-    ///
-    /// Returns `false` when the bytes were dropped: the queue was full, or its
-    /// receiver is gone. Returns `true` in every other case.
-    fn flush_pending_host_write(&mut self, subscriber_id: SubscriberId) -> bool {
-        let Some(subscriber_index) = self.find_subscriber_index(subscriber_id) else {
-            return true;
-        };
-        let subscriber = &mut self.subscribers[subscriber_index];
-        if subscriber.delivery_state != DeliveryState::Live
-            || subscriber.pending_host_write_bytes.is_empty()
-        {
-            return true;
-        }
-        let host_write_bytes = std::mem::take(&mut subscriber.pending_host_write_bytes);
-        self.try_send_host_write(subscriber_id, host_write_bytes)
-    }
-
-    /// Put `host_write_bytes` for the terminal live subscriber `subscriber_id`'s client runs in on
-    /// that subscriber's queue, with a fresh in-flight marker
-    /// ([`has_host_write_in_flight`](Self::has_host_write_in_flight)).
-    ///
-    /// Returns `true` once the bytes are queued, `false` otherwise
-    /// ([`Self::try_send_delivery`]). Dropped bytes leave a clipboard copy
-    /// unwritten, and leave no host write in flight.
-    fn try_send_host_write(
-        &mut self,
-        subscriber_id: SubscriberId,
-        host_write_bytes: Vec<u8>,
-    ) -> bool {
-        let in_flight_marker = Arc::new(());
-        if let Some(subscriber_index) = self.find_subscriber_index(subscriber_id) {
-            self.subscribers[subscriber_index].host_write_in_flight =
-                Arc::downgrade(&in_flight_marker);
-        }
-        match self.try_send_delivery(
-            subscriber_id,
-            Delivery::HostWrite {
-                host_write_bytes,
-                in_flight_marker,
-            },
-        ) {
-            QueueDeliveryStatus::Sent => true,
-            QueueDeliveryStatus::Dropped => {
+            let mut waiting_host_writes = subscriber
+                .waiting_host_writes
+                .host_writes
+                .lock()
+                .expect("waiting host writes");
+            let kept_byte_count: usize = waiting_host_writes
+                .iter()
+                .filter(|waiting_host_write| {
+                    waiting_host_write.sorted_clipboard_targets
+                        != host_write.sorted_clipboard_targets
+                })
+                .map(|waiting_host_write| waiting_host_write.host_write_bytes.len())
+                .sum();
+            if kept_byte_count > 0
+                && kept_byte_count + host_write.host_write_bytes.len() > MAX_HOST_WRITE_BYTE_COUNT
+            {
                 tracing::warn!(
                     subscriber_id = %subscriber_id,
-                    "host write dropped; subscriber desynced, awaiting snapshot"
+                    waiting_byte_count = kept_byte_count,
+                    refused_byte_count = host_write.host_write_bytes.len(),
+                    "host write refused; the client reads host writes slower than they arrive"
                 );
+                return false;
+            }
+            waiting_host_writes.retain(|waiting_host_write| {
+                waiting_host_write.sorted_clipboard_targets != host_write.sorted_clipboard_targets
+            });
+            waiting_host_writes.push(host_write.clone());
+        }
+        if subscriber
+            .waiting_host_writes
+            .is_wake_queued
+            .swap(true, Ordering::SeqCst)
+        {
+            return true;
+        }
+        match subscriber.delivery_sender.try_send(Delivery::HostWrite) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                subscriber.waiting_host_writes.clear_queued_wake();
+                true
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.subscribers.remove(subscriber_index);
                 false
             }
-            QueueDeliveryStatus::Skipped => false,
         }
     }
 
     /// Put the session live subscriber `subscriber_id`'s client moves to on that
-    /// subscriber's queue, after the host-write bytes that wait for it, as
-    /// [`flush_pending_host_write`](Self::flush_pending_host_write) states.
+    /// subscriber's queue. The thread that writes the client's connection
+    /// writes the host-write bytes that waited before the switch was queued
+    /// ahead of it.
     ///
     /// Returns `true` once the switch is queued, `false` otherwise
     /// ([`Self::try_send_delivery`]). A dropped switch leaves the client in this
@@ -613,7 +636,6 @@ impl EventBus {
         subscriber_id: SubscriberId,
         session_id: SessionId,
     ) -> bool {
-        let _ = self.flush_pending_host_write(subscriber_id);
         match self.try_send_delivery(subscriber_id, Delivery::SwitchTo(session_id)) {
             QueueDeliveryStatus::Sent => true,
             QueueDeliveryStatus::Dropped => {
@@ -653,15 +675,6 @@ impl EventBus {
             QueueDeliveryStatus::Skipped => false,
         }
     }
-
-    /// Put the answer to one ping on live subscriber `subscriber_id`'s queue.
-    ///
-    /// A full queue drops the answer and marks the subscriber desynced, as
-    /// [`Self::try_send_delivery`] states. A subscriber that is unknown,
-    /// desynced, or disconnected takes nothing.
-    pub(crate) fn try_send_pong(&mut self, subscriber_id: SubscriberId) {
-        let _ = self.try_send_delivery(subscriber_id, Delivery::Pong);
-    }
 }
 
 /// The frame an attached client is sent for one item off its queue, or `None`
@@ -679,16 +692,15 @@ impl EventBus {
 /// A [`Delivery::MouseAnswer`] becomes [`SessionEvent::MouseAnswer`] carrying
 /// the id of the round it answers and that round's answers.
 ///
-/// A [`Delivery::HostWrite`] gives `None`: its bytes go out as the frames
-/// [`build_wire_host_write_events`] lists.
+/// A [`Delivery::HostWrite`] gives `None`: it only wakes the writing thread,
+/// and the waiting bytes go out as the frames [`build_wire_host_write_events`]
+/// lists.
 ///
 /// A [`Delivery::SwitchTo`] becomes [`SessionEvent::SwitchTo`] carrying the id
 /// of the session the client attaches to next.
 ///
 /// A [`Delivery::PlacementCommandRejected`] becomes
 /// [`SessionEvent::PlacementCommandRejected`] carrying the rejected command id.
-///
-/// A [`Delivery::Pong`] becomes [`SessionEvent::Pong`].
 ///
 /// Every [`Event`] variant with no [`SessionEvent`] spelling is named here and
 /// returns `None`. The match takes no wildcard arm, so a new variant is a
@@ -812,7 +824,7 @@ pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             request_id: *request_id,
             mouse_answers: mouse_answers.clone(),
         }),
-        Delivery::HostWrite { .. } => None,
+        Delivery::HostWrite => None,
         Delivery::SwitchTo(session_id) => Some(SessionEvent::SwitchTo {
             session_id: *session_id,
         }),
@@ -821,7 +833,6 @@ pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
                 command_id: *command_id,
             })
         }
-        Delivery::Pong => Some(SessionEvent::Pong),
     }
 }
 
