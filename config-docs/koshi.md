@@ -1,8 +1,9 @@
 # `koshi.kdl` — app settings
 
 Main settings for theme, panes, scrollback, layout, mouse, terminal values,
-logging, updates, beta features, session closing, and who else on this machine
-may reach your sessions. `version` is required. Other settings are optional.
+logging, updates, beta features, session closing, who else on this machine may
+reach your sessions, and whether programs in panes may write your clipboard.
+`version` is required. Other settings are optional.
 
 **Where it goes:** directly in the config directory — `~/.config/koshi/koshi.kdl`
 on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
@@ -15,8 +16,8 @@ launch.
 
 Settings use blocks. `theme`, `image-support`, `reduced-motion`,
 `stay-in-pane-placement-mode-after-placement`, `allow-beta-features`, `allow-other-users`,
-`remote-listen`, `remote-reconnect`, `shared-sessions-dir` and
-`auto-close-session` are top-level.
+`remote-listen`, `remote-reconnect`, `remote-link-timeout-ms`,
+`shared-sessions-dir` and `auto-close-session` are top-level.
 
 **Whose settings they are:** some belong to the session and are shared by every
 terminal looking at it; the rest belong to the terminal you are sitting at,
@@ -83,6 +84,91 @@ dragged.
 | Key | Value / type | Default | Since |
 |---|---|---|---|
 | `trim-trailing-whitespace` | boolean — drop trailing blanks from copied lines | `#true` | ≥ 0.1.0 |
+
+## `pane-clipboard-writes`
+
+A program in a pane can copy text to the clipboard in two ways:
+
+- It writes `OSC 52`, the escape sequence that sets the clipboard of the
+  terminal it runs in. Example: `printf '\033]52;c;aGk=\a'` copies `hi`.
+- It runs a clipboard tool: `pbcopy`, `xclip`, `xsel` or `wl-copy`.
+
+This block decides whether koshi passes those copies on to your terminal. The
+session reads it: the session server takes it from the `koshi.kdl` it read when
+the session started, and reads it again when the session restarts into a new
+build, such as the one `koshi update` starts.
+
+With `allow #false`, the default, an `OSC 52` copy reaches no clipboard, and a
+clipboard tool runs as it does outside koshi.
+
+With `allow #true`, an `OSC 52` copy goes to the terminal of every client whose
+focused pane is the pane that wrote it. That terminal sets its own clipboard
+when it reads `OSC 52`. The copy keeps the clipboards it names: `c` for the
+clipboard, `p` for the primary selection, `q` for the secondary selection, `s`
+for the selection, and `0` to `7` for the cut buffers. A copy that names none,
+such as `ESC ] 52 ; ; aGk= BEL`, lets that terminal choose. The copy keeps the
+decoded bytes unchanged, UTF-8 text or not: `ESC ] 52 ; c ; /w== BEL` copies
+the one byte `0xff`. A copy longer than `max-copy-bytes` reaches no terminal.
+An `OSC 52` request to read the clipboard gets no answer.
+
+On Linux and macOS, `allow #true` also puts a folder of stand-in clipboard
+tools first on the `PATH` of each pane started while it is on. The folder holds
+one stand-in for each of `pbcopy`, `xclip`, `xsel` and `wl-copy` that the
+session finds on its own `PATH` when it starts. A copy made through a stand-in
+goes to the terminal of each client on another machine, a terminal that joined
+with `koshi attach --remote`, whose focused pane is that pane. The real tool
+runs too, with the same arguments and the same input, unless every client that
+focuses the pane is on another machine and each one's link took the copy. A
+link that dropped still takes copies until koshi notices the drop, as
+[`remote-link-timeout-ms`](#remote-link-timeout-ms) describes, but its terminal
+does not get them. Example: when the only client that focuses the pane is a
+laptop whose network dropped, the laptop's link takes the copy, the real tool
+does not run, and the copy reaches no clipboard.
+
+Example: `printf hi | xclip -selection clipboard` in a pane that only a
+terminal on another machine focuses puts `hi` on that terminal's clipboard, and
+the real `xclip` does not run. In a pane that your terminal on the session's
+machine focuses, the real `xclip` runs as it does outside koshi.
+
+A terminal on another machine gets every copy as text. Example: `pbcopy` input
+that begins with an RTF header, which the real `pbcopy` keeps as rich text,
+arrives there as its RTF source.
+
+The real tool runs alone, as it does outside koshi, for these calls:
+
+- a read, a clear, or a copy of another type than plain text, such as
+  `xclip -o`, `wl-copy --clear` or `xclip -target image/png`;
+- a copy longer than `max-copy-bytes`, and a copy that is not UTF-8 text;
+- a copy that the session does not answer within 5 seconds. A copy goes to
+  the session in parts of up to 12582783 bytes as the stand-in reads it, and
+  the session has 5 seconds to answer each part.
+
+The stand-in keeps every byte of input it read until the copy ends, at most
+`max-copy-bytes` plus 12582784 bytes. When the real tool runs, it reads those
+bytes, then the rest of the input.
+
+No stand-in sees these copies:
+
+- a tool started by its full path, such as `/usr/bin/xclip`;
+- a tool started through `sudo`, or inside a container;
+- a tool in a folder that a shell startup file puts in front of the stand-ins
+  on `PATH`;
+- a tool installed after the session started, until the session restarts into
+  a new build;
+- a copy in a pane started before `allow #true` took effect.
+
+Example: on macOS, a login shell, such as `zsh -l`, reads `/etc/zprofile`, and
+that file runs `path_helper`. `path_helper` puts the folders that `/etc/paths`
+lists, `/usr/bin` among them, in front of the stand-ins, and `pbcopy` then runs
+from `/usr/bin`. The shell that koshi starts in a new pane is not a login shell.
+
+On Windows, no stand-in replaces a clipboard tool: `clip.exe` copies on the
+session's machine only.
+
+| Key | Value / type | Default | Since |
+|---|---|---|---|
+| `allow` | boolean — pass the clipboard copies that programs in panes make on to your terminal | `#false` | ≥ 0.6.0 |
+| `max-copy-bytes` | integer, at least `1` — the longest copy in decoded bytes | `8388608` (8 MiB) | ≥ 0.6.0 |
 
 ## `terminal`
 
@@ -308,22 +394,36 @@ terminal keeps the text and image placeholders but sends no native image output.
 Each terminal reads this for itself. It applies only to a terminal viewing a
 session on another machine, reached with `koshi attach --remote`.
 
+A link drops when it breaks, or when no byte arrives over it for
+[`remote-link-timeout-ms`](#remote-link-timeout-ms).
+
 On, a link that drops dials that machine again — after 1 second, then 2, 4, 8,
 and 8 before every dial after that — for up to 120 seconds. While it waits, the
 tab strip reads a tag shaped like `RECONNECTING (attempt 4, retry in 8s)`: the
 first number is the dial it is about to make, and the second is the seconds left
-before that dial. The seconds count down by one each second. The attempt number
-rises by one on every dial, so the fourth dial and every dial after it waits the
-full 8 seconds. Joining again puts back the tab you were on, the focused pane of
+before that dial. The seconds count down by one each second. While a dial runs,
+the tag reads `RECONNECTING (attempt 4, dialing)`. The attempt number rises by
+one on every dial, so the fourth dial and every dial after it waits the full 8
+seconds. Joining again puts back the tab you were on, the focused pane of
 each tab, the fullscreened pane of each tab, and the scroll offset of each pane.
 It also puts back your floating panes: which ones show, where each one sits,
 which ones you pinned or minimized, and which one takes your keys. If that
 floating pane closed while the link was down, your keys go to the shown floating
 pane you focused most recently, else to the tab's focused pane.
-Keys typed while the link is down are dropped; a resize is kept.
+Keys and pastes typed while the link is down are dropped. A resize is not sent
+while the link is down; the link that comes back reports the size the terminal
+has then.
+
+The quit keybinding (`<leader>q` by default, in normal and locked mode) leaves
+at once while the link is down, also while a dial runs. koshi then prints `left
+session <session> while reconnecting`, then `the session continues without
+you`, then the command that lists the session on that server and the command
+that joins it again. It exits with status zero. With the link up, the quit
+keybinding sends the quit to the session and leaves without waiting for the
+session's answer.
 
 A refusal no dial can change stops the dialing at once, without waiting the 120
-seconds out: the certificate the server presents is not the pinned one, the
+seconds out: the certificate the server presents is not the expected one, the
 server does not admit the token, the token does not reach the session, or the
 two builds share no protocol version. Every identical dial gets that same
 answer, so no dial follows it.
@@ -341,6 +441,45 @@ A link to a session on this machine ends the terminal either way.
 | Key | Value / type | Default | Since |
 |---|---|---|---|
 | `remote-reconnect` | boolean — dial a session on another machine again when the link drops | `#true` | ≥ 0.3.0 |
+
+## `remote-link-timeout-ms`
+
+Each terminal reads this for itself. It applies only to a terminal viewing a
+session on another machine, reached with `koshi attach --remote`. A terminal
+viewing a session on this machine sends no ping and has no time limit.
+
+The terminal sends the session a ping once every third of this time. The
+session sends the terminal a pong whenever it has sent the terminal nothing
+for a third of this time. A link over which no byte reaches the terminal for
+this long has dropped: with `remote-reconnect` on, the terminal dials again,
+and with it off, the terminal ends. A write from the terminal that puts no
+byte on the link for this long ends the terminal's writing on that link.
+
+The terminal gives the serving machine this value when it joins. That machine
+closes its connection to the terminal once no byte arrives from the terminal
+for this long, or the terminal takes no byte for this long. While the terminal
+joins, that machine waits at least 20 seconds for the terminal's first request
+to the session. The connection then leaves the `remote connections` count of
+`koshi doctor`, and the session removes the terminal and keeps that terminal's
+view. The terminal gets the view back when it joins again. That removal never
+ends the session, also with `auto-close-session` on.
+
+A paste keeps the link for as long as its bytes keep moving, also when it takes
+longer than this time to send.
+
+Example: with `remote-link-timeout-ms 30000`, the terminal sends a ping every
+10 seconds. A laptop that loses its network shows `RECONNECTING` at most 30
+seconds after the last byte arrived. The serving machine closes the laptop's
+connection at most 30 seconds after the last byte from the laptop arrived. A
+paste that takes two minutes to send over a slow link keeps the link.
+
+The value is in milliseconds, from `1000` to `4294967295`. A value under `1000`
+is ignored with the warning `must be at least 1000`. A value under one and a
+half times the longest one-way delay of the link can drop a link that works.
+
+| Key | Value / type | Default | Since |
+|---|---|---|---|
+| `remote-link-timeout-ms` | integer, `1000` to `4294967295` — the milliseconds with no byte from the other side after which a link to a session on another machine has dropped | `30000` | ≥ 0.6.0 |
 
 ## `reduced-motion`
 
@@ -401,13 +540,30 @@ attaches later cannot change it from its own file.
 Every way of leaving counts: the quit keybinding (`<leader>q` by default),
 `koshi detach`, closing the terminal, and moving the terminal to another
 session with `koshi attach <session>` from inside a pane. A terminal that moves
-away has left, so a session it leaves empty ends.
+away has left, so a session it leaves empty ends. On Linux and macOS, a
+`SIGHUP`, such as one that `kill -HUP` sends, is a leaving too, unless koshi
+ignores `SIGHUP`, as one started with `nohup` does. Closing the terminal is a
+leaving either way.
+
+A terminal on another machine whose link drops has not left, so the session
+keeps running, also when that terminal was the last one. That terminal can
+join again. A terminal that ends with no word to the session, such as one
+killed with `kill -9`, counts as a dropped link when it is on another machine,
+and as a leaving when it is on this machine. If koshi cannot set up a terminal
+after the session accepts it, such as a terminal that cannot enter raw mode,
+that terminal has not left, so the session keeps running.
 
 A restart into a new build, such as the one `koshi update` starts, is not a
-leaving. Each attached terminal reconnects by itself. A terminal that does not
+leaving. Each attached terminal reconnects by itself. Keys and pastes typed
+while it reconnects go to the restarted session once the terminal joins it, in
+the order they were typed. A terminal holds at most 1024 of them, and at most
+one frame of pasted text; past either limit, everything typed during that
+restart is dropped. The quit keybinding leaves at once. A terminal that does not
 come back is dropped, for example a terminal that runs koshi 0.4.0, which
-cannot attach to a newer session. The session keeps running even when no
-terminal is left; rejoin it with `koshi attach <session>`.
+cannot attach to a newer session. A terminal on this machine that ends while
+it joins the restarted session, before it has sent anything there, has not
+left either. The session keeps running even when no terminal is left; rejoin
+it with `koshi attach <session>`.
 
 Quit leaves the session; it never ends one on its own. With this setting off,
 `<leader>q` detaches your terminal and the session keeps running. With it on,
@@ -566,6 +722,7 @@ image-support #true
 reduced-motion #false
 stay-in-pane-placement-mode-after-placement #true
 remote-reconnect #true
+remote-link-timeout-ms 30000
 
 pane {
     min-cols 2
@@ -591,6 +748,11 @@ mouse {
 
 copy {
     trim-trailing-whitespace #true
+}
+
+pane-clipboard-writes {
+    allow #false
+    max-copy-bytes 8388608   // 8 MiB
 }
 
 terminal {

@@ -1,22 +1,8 @@
 //! Tests for layout assertion helpers.
 
 use super::*;
+use crate::fixtures::build_cell_rect;
 use koshi_core::geometry::Point;
-
-/// Create a [`Rect`] at (`origin_column`, `origin_row`), `column_count` columns
-/// wide and `row_count` rows tall.
-fn build_cell_rect(origin_column: u16, origin_row: u16, column_count: u16, row_count: u16) -> Rect {
-    Rect::from_origin_and_size(
-        Point {
-            column: origin_column,
-            row: origin_row,
-        },
-        Size {
-            column_count,
-            row_count,
-        },
-    )
-}
 
 /// Create a standard 80×24 cell tab rectangle.
 fn build_tab_rect() -> Rect {

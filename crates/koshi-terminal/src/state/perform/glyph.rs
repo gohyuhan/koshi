@@ -4,11 +4,15 @@
 //! those continuations (combining marks, ZWJ — zero-width joiner — emoji
 //! parts, variation selectors) onto a base cell, places narrow and wide
 //! glyphs, and keeps wide-glyph pairs intact across edits.
+//!
+//! A cluster takes at most 2 columns. A halfwidth katakana sound mark
+//! (`U+FF9E`, `U+FF9F`), and a continuation that makes its cluster wider than
+//! 2 columns, start a new cell.
 
 use crate::grid::state::{Cell, RowEnd};
 use crate::state::{rebuild_cell_with_width, TerminalState};
+use koshi_core::display_width::{compute_text_display_width, is_halfwidth_katakana_sound_mark};
 use unicode_segmentation::GraphemeCursor;
-use unicode_width::UnicodeWidthStr;
 
 /// Upper bound on the continuation code points one cell keeps in its
 /// `combining` tail. A continuation that arrives when the base already holds
@@ -33,31 +37,45 @@ impl TerminalState {
 
     /// Whether `character` continues the current grapheme cluster: `true` when there is
     /// no grapheme-cluster boundary between the cluster built so far and `character`,
-    /// `false` when `character` starts a new cluster. This folds combining marks, ZWJ
-    /// (zero-width joiner) emoji sequences, variation selectors, skin-tone
-    /// modifiers, and regional-indicator flags onto one base. An incomplete or
-    /// invalid boundary result counts as a boundary.
+    /// and the cluster with `character` is at most 2 columns wide
+    /// ([`compute_text_display_width`]). `false` when `character` starts a new
+    /// cluster. This folds combining marks, ZWJ (zero-width joiner) emoji
+    /// sequences, variation selectors, skin-tone modifiers, and
+    /// regional-indicator flags onto one base. An incomplete or invalid boundary
+    /// result counts as a boundary.
     ///
-    /// Runs on `cluster` itself: `character` is appended, the boundary is read at the
-    /// join, then `cluster` is truncated back to its original bytes.
+    /// A halfwidth katakana sound mark (`U+FF9E`, `U+FF9F`) always starts a new
+    /// cluster: `ｶﾞ` is two clusters of 1 column each. A character that makes
+    /// the cluster wider than 2 columns starts a new cluster: `क्ष` is 2 columns
+    /// wide, `क्षि` is 3, so the vowel sign `ि` (`U+093F`) starts a new cluster.
+    ///
+    /// Runs on `cluster` itself: `character` is appended, the boundary is read,
+    /// and with no boundary the width too, then `cluster` is truncated back to
+    /// its original bytes.
     pub(super) fn is_character_continuing_cluster(&mut self, character: char) -> bool {
+        if is_halfwidth_katakana_sound_mark(character) {
+            return false;
+        }
         let cluster_byte_length = self.cluster.len();
         self.cluster.push(character);
         let mut grapheme_cursor =
             GraphemeCursor::new(cluster_byte_length, self.cluster.len(), true);
-        let is_cluster_continuation = !grapheme_cursor
+        let is_grapheme_continuation = !grapheme_cursor
             .is_boundary(&self.cluster, 0)
             .unwrap_or(true);
+        let is_continuation_within_two_columns =
+            is_grapheme_continuation && compute_text_display_width(&self.cluster) <= 2;
         self.cluster.truncate(cluster_byte_length);
-        is_cluster_continuation
+        is_continuation_within_two_columns
     }
 
     /// Fold `character` into the current cluster: push it onto the base cell's
     /// combining tail without consuming a column, and re-fit the base when the
-    /// cluster's display width changes — one column to two (e.g. VS16,
-    /// `U+FE0F`, giving a text glyph its emoji form) widens it, two to one
-    /// (e.g. VS15, `U+FE0E`) narrows it. With no cluster base, or with the base
-    /// already holding [`MAX_GRAPHEME_CONTINUATION_COUNT`], `character` is dropped.
+    /// cluster's display width ([`compute_text_display_width`]) changes — one
+    /// column to two (e.g. VS16, `U+FE0F`, giving a text glyph its emoji form)
+    /// widens it, two to one (e.g. VS15, `U+FE0E`) narrows it. With no cluster
+    /// base, or with the base already holding [`MAX_GRAPHEME_CONTINUATION_COUNT`],
+    /// `character` is dropped.
     pub(super) fn extend_cluster(&mut self, character: char) {
         let Some((row_index, column_index)) = self.cluster_base else {
             return;
@@ -72,9 +90,9 @@ impl TerminalState {
         {
             return;
         }
-        let old_cluster_display_width = UnicodeWidthStr::width(self.cluster.as_str());
+        let old_cluster_display_width = compute_text_display_width(&self.cluster);
         self.cluster.push(character);
-        let new_cluster_display_width = UnicodeWidthStr::width(self.cluster.as_str());
+        let new_cluster_display_width = compute_text_display_width(&self.cluster);
 
         if let Some(cell) = self
             .get_active_grid_mut()

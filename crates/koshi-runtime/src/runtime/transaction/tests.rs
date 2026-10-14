@@ -115,7 +115,7 @@ fn commit_delivers_the_batch_to_a_subscriber_in_emission_order() {
     let command_id = CommandId::new();
     let tab = TabId::new();
     let mut bus = EventBus::new();
-    let (_id, event_receiver) = bus.subscribe();
+    let (_id, event_receiver, _) = bus.subscribe();
     let mut scope = TransactionScope::new();
     scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
     scope.emit(Event::LayoutChanged(LayoutChanged { tab_id: tab }));
@@ -136,8 +136,8 @@ fn commit_delivers_the_batch_to_every_subscriber() {
     let command_id = CommandId::new();
     let tab = TabId::new();
     let mut bus = EventBus::new();
-    let (_first_id, first_rx) = bus.subscribe();
-    let (_second_id, second_rx) = bus.subscribe();
+    let (_first_id, first_rx, _) = bus.subscribe();
+    let (_second_id, second_rx, _) = bus.subscribe();
     let mut scope = TransactionScope::new();
     scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
 
@@ -162,8 +162,8 @@ fn commit_still_applies_when_a_subscribers_receiver_is_gone() {
     let command_id = CommandId::new();
     let tab = TabId::new();
     let mut bus = EventBus::new();
-    let (_gone_id, gone_rx) = bus.subscribe();
-    let (_live_id, live_rx) = bus.subscribe();
+    let (_gone_id, gone_rx, _) = bus.subscribe();
+    let (_live_id, live_rx, _) = bus.subscribe();
     drop(gone_rx);
     let mut scope = TransactionScope::new();
     scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));

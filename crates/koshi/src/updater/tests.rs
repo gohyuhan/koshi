@@ -2168,26 +2168,31 @@ fn taking_the_install_lock_waits_until_its_holder_drops_it() {
     assert_eq!(answer_once_free.map(|_| ()), Ok(()));
 }
 
-#[test]
-fn stale_backups_stay_while_the_install_lock_is_held_and_are_deleted_once_it_is_free() {
+/// A program directory that holds `koshi.exe`, its backups `koshi.old` and
+/// `koshi.2.old`, and the unrelated file `notes.old`. Hands back the directory
+/// and the path of `koshi.exe`.
+fn build_program_directory_with_backups() -> (tempfile::TempDir, PathBuf) {
     let test_directory = Builder::new()
         .prefix("koshi-test-")
         .tempdir()
         .expect("program directory");
-    let executable_path = test_directory.path().join("koshi.exe");
     for entry_name in ["koshi.exe", "koshi.old", "koshi.2.old", "notes.old"] {
         fs::write(test_directory.path().join(entry_name), b"").expect("write a directory entry");
     }
+    let executable_path = test_directory.path().join("koshi.exe");
+    (test_directory, executable_path)
+}
+
+#[test]
+fn stale_backups_stay_while_another_install_holds_the_install_lock() {
+    let (test_directory, executable_path) = build_program_directory_with_backups();
     let holding_lock_file =
         take_install_lock(&executable_path).expect("another install holds the install lock");
 
     delete_stale_backups_beside(&executable_path);
-    let entry_names_while_held = list_sorted_entry_names(test_directory.path());
-    drop(holding_lock_file);
-    delete_stale_backups_beside(&executable_path);
 
     assert_eq!(
-        entry_names_while_held,
+        list_sorted_entry_names(test_directory.path()),
         vec![
             "koshi.2.old",
             "koshi.exe",
@@ -2196,6 +2201,15 @@ fn stale_backups_stay_while_the_install_lock_is_held_and_are_deleted_once_it_is_
             "notes.old"
         ]
     );
+    drop(holding_lock_file);
+}
+
+#[test]
+fn stale_backups_are_deleted_while_the_install_lock_is_free() {
+    let (test_directory, executable_path) = build_program_directory_with_backups();
+
+    delete_stale_backups_beside(&executable_path);
+
     assert_eq!(
         list_sorted_entry_names(test_directory.path()),
         vec!["koshi.exe", "koshi.lock", "notes.old"]
@@ -2873,7 +2887,18 @@ fn the_update_lock_is_held_until_its_file_is_dropped() {
 
     assert!(is_update_restarting_servers(runtime_directory.path()));
     drop(update_lock_file);
-    assert!(!is_update_restarting_servers(runtime_directory.path()));
+    // On Unix, a process that another test starts at this moment holds a copy
+    // of the lock file until that process runs its program or exits, and the
+    // lock stays taken until then. The lock is free within 5 seconds of the
+    // drop.
+    let release_deadline = Instant::now() + Duration::from_secs(5);
+    while is_update_restarting_servers(runtime_directory.path()) {
+        assert!(
+            Instant::now() < release_deadline,
+            "the update lock is still taken 5 seconds after its file was dropped"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 #[test]

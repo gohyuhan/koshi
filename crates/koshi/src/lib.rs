@@ -19,6 +19,11 @@
 /// Command-line grammar: root parser, root flags, subcommand tree.
 pub mod cli;
 
+/// The stand-in clipboard tools: koshi run as `pbcopy`, `xclip`, `xsel` or
+/// `wl-copy` inside a pane.
+#[cfg(unix)]
+pub mod clipboard_tool;
+
 /// Local config path, explanation, validation, and migration commands.
 pub mod config_command;
 

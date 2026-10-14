@@ -18,42 +18,13 @@ use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::{solve_region_rects, Edge, RegionGeometry};
 use koshi_layout::solver::StackHeader;
+use koshi_test_support::fixtures::build_cell_rect;
 
-use crate::snapshot::{CommittedRegions, MouseFrame, ViewerChrome};
-
-/// Cells the tabline's version badge takes, measured from the badge the tabline
-/// actually paints.
-///
-/// A test that needs room beside the badge asks for `compute_version_badge_column_count() + room`
-/// rather than a fixed total, so a longer version string moves the layout
-/// instead of failing the test. A semver version is ASCII, so counting
-/// characters counts display cells.
-fn compute_version_badge_column_count() -> u16 {
-    format!("[v{}] ", env!("CARGO_PKG_VERSION")).chars().count() as u16
-}
-
-/// A viewer with nothing hovered and its tab strip following the active tab.
-fn build_default_viewer_chrome() -> ViewerChrome {
-    ViewerChrome::default()
-}
-
+use crate::render::tests::compute_version_badge_column_count;
 use crate::snapshot::{
-    ClientSnapshot, PaneSlot, RenderSnapshot, SessionSnapshot, TabMetadata, TabSnapshot,
+    ClientSnapshot, CommittedRegions, MouseFrame, PaneSlot, RenderSnapshot, SessionSnapshot,
+    TabMetadata, TabSnapshot, ViewerChrome,
 };
-
-/// Constructs a cell rectangle with the given origin and dimensions.
-fn build_cell_rect(origin_column: u16, origin_row: u16, column_count: u16, row_count: u16) -> Rect {
-    Rect::from_origin_and_size(
-        Point {
-            column: origin_column,
-            row: origin_row,
-        },
-        Size {
-            column_count,
-            row_count,
-        },
-    )
-}
 
 fn build_screen_point(screen_column: u16, screen_row: u16) -> Point {
     Point {
@@ -115,6 +86,7 @@ fn build_render_snapshot(
                 gap_cell_count: 0,
             },
             tabs_metadata,
+            floating_pane_slots: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {
@@ -124,6 +96,7 @@ fn build_render_snapshot(
             active_tab_id,
             focused_pane_id: None,
             lock_mode: LockMode::Normal,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }
@@ -160,7 +133,7 @@ fn full_pane_content_border_and_chrome() {
     // Inside the border → content.
     assert_eq!(
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(20, 5)
         ),
         HitRegion::PaneContent { pane_id }
@@ -168,7 +141,7 @@ fn full_pane_content_border_and_chrome() {
     // Left and right border columns.
     assert_eq!(
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(0, 5)
         ),
         HitRegion::PaneBorder {
@@ -178,7 +151,7 @@ fn full_pane_content_border_and_chrome() {
     );
     assert_eq!(
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(39, 5)
         ),
         HitRegion::PaneBorder {
@@ -189,7 +162,7 @@ fn full_pane_content_border_and_chrome() {
     // Top row is the tabline (drawn over the pane), off any tab ribbon here.
     assert_eq!(
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(20, 0)
         ),
         HitRegion::Tabline
@@ -197,7 +170,7 @@ fn full_pane_content_border_and_chrome() {
     // Bottom row is the statusline.
     assert_eq!(
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(20, 9)
         ),
         HitRegion::Statusline
@@ -226,7 +199,7 @@ fn centered_layout_exposes_top_bottom_borders_and_letterbox() {
 
     assert_eq!(
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(22, 7)
         ),
         HitRegion::PaneContent { pane_id }
@@ -234,7 +207,7 @@ fn centered_layout_exposes_top_bottom_borders_and_letterbox() {
     // Top border row of the pane, now below the tabline.
     assert_eq!(
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(22, 2)
         ),
         HitRegion::PaneBorder {
@@ -245,7 +218,7 @@ fn centered_layout_exposes_top_bottom_borders_and_letterbox() {
     // Bottom border row of the pane, above the statusline.
     assert_eq!(
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(22, 11)
         ),
         HitRegion::PaneBorder {
@@ -256,7 +229,7 @@ fn centered_layout_exposes_top_bottom_borders_and_letterbox() {
     // Left of the content rect → letterbox margin.
     assert_eq!(
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(0, 7)
         ),
         HitRegion::None
@@ -264,7 +237,7 @@ fn centered_layout_exposes_top_bottom_borders_and_letterbox() {
     // A non-chrome row above the content rect → letterbox margin.
     assert_eq!(
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(22, 1)
         ),
         HitRegion::None
@@ -319,21 +292,21 @@ fn mouse_hit_testing_stays_on_the_painted_region_revision() {
     let painted_mouse_frame = MouseFrame::from_snapshot(&render_snapshot, default_regions.clone());
     assert_eq!(
         resolve_hit_region(
-            painted_mouse_frame.build_frame_layout(build_default_viewer_chrome()),
+            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
             build_screen_point(12, 2)
         ),
         HitRegion::PaneContent { pane_id }
     );
     assert_eq!(
         resolve_hit_region(
-            painted_mouse_frame.build_frame_layout(build_default_viewer_chrome()),
+            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
             build_screen_point(1, 0)
         ),
         HitRegion::Tabline
     );
     assert_eq!(
         resolve_hit_region(
-            painted_mouse_frame.build_frame_layout(build_default_viewer_chrome()),
+            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
             build_screen_point(1, 39)
         ),
         HitRegion::Statusline
@@ -346,7 +319,7 @@ fn mouse_hit_testing_stays_on_the_painted_region_revision() {
     let replacement_mouse_frame = MouseFrame::from_snapshot(&render_snapshot, side_regions);
     assert_eq!(
         resolve_hit_region(
-            replacement_mouse_frame.build_frame_layout(build_default_viewer_chrome()),
+            replacement_mouse_frame.build_frame_layout(ViewerChrome::default()),
             build_screen_point(12, 2)
         ),
         HitRegion::None
@@ -408,7 +381,7 @@ fn a_left_region_shifts_the_pane_area_right() {
     );
     let resolve_screen_hit_region = |screen_column, screen_row| {
         resolve_hit_region(
-            painted_mouse_frame.build_frame_layout(build_default_viewer_chrome()),
+            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
             build_screen_point(screen_column, screen_row),
         )
     };
@@ -433,14 +406,14 @@ fn a_left_region_shifts_the_pane_area_right() {
 
     assert_eq!(
         find_pane_content_rect(
-            painted_mouse_frame.build_frame_layout(build_default_viewer_chrome()),
+            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
             pane_id
         ),
         Some(build_cell_rect(21, 2, 98, 36))
     );
     assert_eq!(
         compute_pane_local_cell(
-            painted_mouse_frame.build_frame_layout(build_default_viewer_chrome()),
+            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
             pane_id,
             build_screen_point(21, 2)
         ),
@@ -448,7 +421,7 @@ fn a_left_region_shifts_the_pane_area_right() {
     );
     assert_eq!(
         compute_clamped_pane_cell(
-            painted_mouse_frame.build_frame_layout(build_default_viewer_chrome()),
+            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
             pane_id,
             build_screen_point(0, 0)
         ),
@@ -479,7 +452,7 @@ fn the_gap_between_two_panes_hits_nothing() {
     );
     let resolve_screen_hit_region = |screen_column, screen_row| {
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(screen_column, screen_row),
         )
     };
@@ -526,7 +499,7 @@ fn a_committed_solve_with_no_regions_leaves_every_row_to_the_panes() {
     );
     let resolve_screen_hit_region = |screen_column, screen_row| {
         resolve_hit_region(
-            painted_mouse_frame.build_frame_layout(build_default_viewer_chrome()),
+            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
             build_screen_point(screen_column, screen_row),
         )
     };
@@ -553,7 +526,7 @@ fn a_committed_solve_with_no_regions_leaves_every_row_to_the_panes() {
     );
     assert_eq!(
         find_first_visible_tab_index(
-            painted_mouse_frame.build_frame_layout(build_default_viewer_chrome()),
+            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
         ),
         None
     );
@@ -578,7 +551,7 @@ fn a_pane_with_a_zero_cell_content_area_clamps_every_cell_to_its_origin() {
         &[],
         &[],
     );
-    let build_frame_layout = || render_snapshot.build_frame_layout(build_default_viewer_chrome());
+    let build_frame_layout = || render_snapshot.build_frame_layout(ViewerChrome::default());
 
     // The outer box spans (0, 5)-(1, 5); the inset content is empty at (1, 6).
     assert_eq!(
@@ -639,7 +612,7 @@ fn a_hidden_pane_does_not_swallow_a_click_on_the_pane_behind_it() {
 
     assert_eq!(
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(20, 5)
         ),
         HitRegion::PaneContent {
@@ -671,7 +644,7 @@ fn a_stack_header_wins_a_cell_over_the_pane_under_it() {
     );
     let resolve_screen_hit_region = |screen_column, screen_row| {
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(screen_column, screen_row),
         )
     };
@@ -709,7 +682,7 @@ fn a_one_row_viewport_is_all_tabline() {
     );
     let resolve_screen_hit_region = |screen_column, screen_row| {
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(screen_column, screen_row),
         )
     };
@@ -720,9 +693,7 @@ fn a_one_row_viewport_is_all_tabline() {
     // There is no second row to hit.
     assert_eq!(resolve_screen_hit_region(20, 1), HitRegion::None);
     assert_eq!(
-        find_first_visible_tab_index(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome())
-        ),
+        find_first_visible_tab_index(render_snapshot.build_frame_layout(ViewerChrome::default())),
         Some(0)
     );
 }
@@ -749,7 +720,7 @@ fn stack_header_hits_its_pane() {
     );
     assert_eq!(
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(20, 3)
         ),
         HitRegion::StackHeader {
@@ -788,7 +759,7 @@ fn tabs_hit_by_column() {
     );
     let visible_tab_spans = solve_tabline_layout(
         render_snapshot
-            .build_frame_layout(build_default_viewer_chrome())
+            .build_frame_layout(ViewerChrome::default())
             .get_tabline_inputs(),
         RatatuiRect {
             x: 0,
@@ -802,7 +773,7 @@ fn tabs_hit_by_column() {
 
     assert_eq!(
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(visible_tab_spans[0].start_column + 1, 0),
         ),
         HitRegion::Tab {
@@ -811,7 +782,7 @@ fn tabs_hit_by_column() {
     );
     assert_eq!(
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(visible_tab_spans[1].start_column + 1, 0),
         ),
         HitRegion::Tab {
@@ -821,7 +792,7 @@ fn tabs_hit_by_column() {
     // The one-cell gap between the two ribbons.
     assert_eq!(
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(visible_tab_spans[1].start_column - 1, 0),
         ),
         HitRegion::Tabline
@@ -829,7 +800,7 @@ fn tabs_hit_by_column() {
     // The session block on the left.
     assert_eq!(
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(1, 0)
         ),
         HitRegion::Tabline
@@ -938,7 +909,7 @@ fn degenerate_frames_hit_nothing() {
         .is_every_pane_suppressed = true;
     assert_eq!(
         resolve_hit_region(
-            suppressed.build_frame_layout(build_default_viewer_chrome()),
+            suppressed.build_frame_layout(ViewerChrome::default()),
             build_screen_point(20, 5)
         ),
         HitRegion::None
@@ -959,7 +930,7 @@ fn degenerate_frames_hit_nothing() {
     );
     assert_eq!(
         resolve_hit_region(
-            zero_size_render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            zero_size_render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(0, 0)
         ),
         HitRegion::None
@@ -988,7 +959,7 @@ fn a_border_corner_reads_as_its_vertical_side() {
     );
     let resolve_border_corner_hit_region = |screen_column, screen_row| {
         resolve_hit_region(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(screen_column, screen_row),
         )
     };
@@ -1058,7 +1029,7 @@ fn a_pane_content_rect_is_its_border_inset_shifted_into_the_centered_layout() {
     // in on both axes and loses one cell on each side.
     assert_eq!(
         find_pane_content_rect(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             pane_id
         ),
         Some(build_cell_rect(3, 3, 38, 8))
@@ -1066,14 +1037,14 @@ fn a_pane_content_rect_is_its_border_inset_shifted_into_the_centered_layout() {
     // A hidden pane and a pane that is not in this frame have no content rect.
     assert_eq!(
         find_pane_content_rect(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             hidden_pane_id
         ),
         None
     );
     assert_eq!(
         find_pane_content_rect(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             PaneId::new()
         ),
         None
@@ -1087,7 +1058,7 @@ fn a_pane_content_rect_is_its_border_inset_shifted_into_the_centered_layout() {
         .is_every_pane_suppressed = true;
     assert_eq!(
         find_pane_content_rect(
-            suppressed.build_frame_layout(build_default_viewer_chrome()),
+            suppressed.build_frame_layout(ViewerChrome::default()),
             pane_id
         ),
         None
@@ -1101,7 +1072,7 @@ fn a_pane_content_rect_is_its_border_inset_shifted_into_the_centered_layout() {
     };
     assert_eq!(
         find_pane_content_rect(
-            zero_size_render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            zero_size_render_snapshot.build_frame_layout(ViewerChrome::default()),
             pane_id,
         ),
         None
@@ -1116,7 +1087,7 @@ fn a_pane_local_cell_counts_from_one_and_refuses_a_cell_outside_the_pane() {
     let render_snapshot = build_centered_render_snapshot(pane_id, PaneId::new());
     let compute_screen_point_pane_local_cell = |screen_column, screen_row| {
         compute_pane_local_cell(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             pane_id,
             build_screen_point(screen_column, screen_row),
         )
@@ -1133,7 +1104,7 @@ fn a_pane_local_cell_counts_from_one_and_refuses_a_cell_outside_the_pane() {
     // A pane that is not drawn this frame names no cell at all.
     assert_eq!(
         compute_pane_local_cell(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             PaneId::new(),
             build_screen_point(20, 7)
         ),
@@ -1149,7 +1120,7 @@ fn a_pane_cell_clamped_pulls_an_outside_cell_to_the_nearest_edge() {
     let render_snapshot = build_centered_render_snapshot(pane_id, PaneId::new());
     let compute_clamped_screen_point_pane_cell = |screen_column, screen_row| {
         compute_clamped_pane_cell(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             pane_id,
             build_screen_point(screen_column, screen_row),
         )
@@ -1177,7 +1148,7 @@ fn a_pane_cell_clamped_pulls_an_outside_cell_to_the_nearest_edge() {
     // A pane that is not drawn this frame names no cell at all.
     assert_eq!(
         compute_clamped_pane_cell(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
             PaneId::new(),
             build_screen_point(3, 3),
         ),
@@ -1224,9 +1195,7 @@ fn tabline_first_visible_reports_the_first_tab_drawn() {
     );
     // Following the active tab, which is the first one, starts at the start.
     assert_eq!(
-        find_first_visible_tab_index(
-            render_snapshot.build_frame_layout(build_default_viewer_chrome())
-        ),
+        find_first_visible_tab_index(render_snapshot.build_frame_layout(ViewerChrome::default())),
         Some(0)
     );
 }
@@ -1254,7 +1223,7 @@ fn tabline_first_visible_is_none_when_no_tabline_is_drawn() {
         .active_tab_snapshot
         .is_every_pane_suppressed = true;
     assert_eq!(
-        find_first_visible_tab_index(suppressed.build_frame_layout(build_default_viewer_chrome())),
+        find_first_visible_tab_index(suppressed.build_frame_layout(ViewerChrome::default())),
         None
     );
 
@@ -1273,7 +1242,7 @@ fn tabline_first_visible_is_none_when_no_tabline_is_drawn() {
     );
     assert_eq!(
         find_first_visible_tab_index(
-            zero_size_render_snapshot.build_frame_layout(build_default_viewer_chrome())
+            zero_size_render_snapshot.build_frame_layout(ViewerChrome::default())
         ),
         None
     );
@@ -1314,7 +1283,7 @@ fn two_clients_hit_test_independently() {
     // The small client fills the viewport: (22, 7) is content.
     assert_eq!(
         resolve_hit_region(
-            small_client_render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            small_client_render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(22, 7)
         ),
         HitRegion::PaneContent { pane_id }
@@ -1323,14 +1292,14 @@ fn two_clients_hit_test_independently() {
     // cell in its margin — where the small client had content — hits nothing.
     assert_eq!(
         resolve_hit_region(
-            large_client_render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            large_client_render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(22, 7)
         ),
         HitRegion::PaneContent { pane_id }
     );
     assert_eq!(
         resolve_hit_region(
-            large_client_render_snapshot.build_frame_layout(build_default_viewer_chrome()),
+            large_client_render_snapshot.build_frame_layout(ViewerChrome::default()),
             build_screen_point(1, 7)
         ),
         HitRegion::None

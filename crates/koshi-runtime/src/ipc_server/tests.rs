@@ -5,7 +5,7 @@
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, ToggleLockModeArgs,
@@ -25,12 +25,14 @@ use koshi_ipc::protocol::{
 };
 use koshi_layout::mode::LayoutMode;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, ImagePlacementSnapshot, PaneSnapshot, RenderSnapshot,
+    ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, PaneSnapshot, RenderSnapshot,
     ScrollbackMetadata, SessionSnapshot, TabSnapshot,
 };
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
 };
+use koshi_terminal::grid::state::{Cell, Grid};
+use koshi_terminal::style::Style;
 use koshi_test_support::fixtures::{
     build_key_input_for_chord, count_program_runs, write_printing_program,
 };
@@ -120,12 +122,14 @@ fn build_attached_structure(session_id: SessionId) -> AttachedSessionStructureSn
 
 /// The attach answer a stand-in dispatcher sends: `client_id` in `session_id`,
 /// with the structure [`build_attached_structure`] gives, `deliveries` as the
-/// client's queue, `ending_notice`, the [`MINTED_CONNECTION_TOKEN`] resume
+/// client's queue, `waiting_host_writes` as the bytes that wait for the
+/// client's terminal, `ending_notice`, the [`MINTED_CONNECTION_TOKEN`] resume
 /// token, and no pane area.
 fn build_attach_accepted(
     client_id: ClientId,
     session_id: SessionId,
     deliveries: Receiver<Delivery>,
+    waiting_host_writes: Arc<WaitingHostWrites>,
     ending_notice: Arc<EndingNotice>,
 ) -> AttachAccepted {
     AttachAccepted {
@@ -133,6 +137,7 @@ fn build_attach_accepted(
         session_id,
         session_structure: build_attached_structure(session_id),
         deliveries,
+        waiting_host_writes,
         ending_notice,
         resume_token: ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN),
         pane_area: None,
@@ -161,6 +166,7 @@ fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> 
                 gap_cell_count: 0,
             },
             tabs_metadata: Vec::new(),
+            floating_pane_slots: Vec::new(),
         },
         pane_snapshots: vec![PaneSnapshot {
             pane_id,
@@ -200,6 +206,7 @@ fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> 
             active_tab_id: tab_id,
             focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }
@@ -222,9 +229,48 @@ fn build_image_record(red_byte: u8) -> Arc<ImageRecord> {
     })
 }
 
+/// One frame for `client_id` whose one pane holds `row_count` rows by
+/// `column_count` columns of alternating `a` and `b`, and no image. No two
+/// neighbors fold into one run: each cell is its own run on the wire.
+fn build_alternating_grid_snapshot(
+    client_id: ClientId,
+    row_count: u16,
+    column_count: u16,
+) -> RenderSnapshot {
+    let mut alternating_grid = Grid::build_blank(row_count, column_count, Style::default());
+    for row_index in 0..row_count {
+        for column_index in 0..column_count {
+            let character = if column_index % 2 == 0 { 'a' } else { 'b' };
+            *alternating_grid
+                .get_cell_mut(row_index, column_index)
+                .expect("the grid holds every cell") =
+                Cell::from_character(character, 1, Style::default());
+        }
+    }
+    let mut render_snapshot = build_image_snapshot(client_id, build_image_record(0));
+    render_snapshot.pane_snapshots[0]
+        .image_placement_snapshots
+        .clear();
+    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
+        grid: Arc::new(alternating_grid),
+        view_row_offset: 0,
+    });
+    render_snapshot
+}
+
+/// How many bytes the [`SessionEvent::Painted`] frame of `render_snapshot`
+/// encodes to.
+fn compute_painted_frame_byte_count(render_snapshot: &RenderSnapshot) -> usize {
+    serde_json::to_vec(&SessionEvent::Painted {
+        frame: Box::new(build_wire_frame(render_snapshot)),
+    })
+    .expect("encode the painted frame")
+    .len()
+}
+
 /// A stand-in dispatcher that answers the first attach as `client_id` in
-/// `session_id`, and returns the sender of the delivery queue that attach
-/// streams.
+/// `session_id`, with no host-write byte waiting, and returns the sender of the
+/// delivery queue that attach streams.
 fn spawn_frame_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
     client_id: ClientId,
@@ -237,6 +283,7 @@ fn spawn_frame_dispatcher(
             client_id,
             session_id,
             delivery_receiver,
+            Arc::new(WaitingHostWrites::default()),
             Arc::new(EndingNotice::default()),
         );
     });
@@ -268,6 +315,7 @@ fn spawn_attaching_dispatcher(
                         client_id,
                         session_id,
                         delivery_receiver,
+                        Arc::new(WaitingHostWrites::default()),
                         Arc::clone(&ending_notice),
                     )));
                 }
@@ -289,13 +337,14 @@ fn spawn_attaching_dispatcher(
 }
 
 /// A stand-in dispatcher that answers the first attach with
-/// `delivery_receiver` and `ending_notice`, and drops everything else it
-/// drains. Exits when every inbox sender is gone.
+/// `delivery_receiver`, `waiting_host_writes` and `ending_notice`, and drops
+/// everything else it drains. Exits when every inbox sender is gone.
 fn spawn_ending_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
     client_id: ClientId,
     session_id: SessionId,
     delivery_receiver: Receiver<Delivery>,
+    waiting_host_writes: Arc<WaitingHostWrites>,
     ending_notice: Arc<EndingNotice>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
@@ -304,6 +353,7 @@ fn spawn_ending_dispatcher(
             client_id,
             session_id,
             delivery_receiver,
+            waiting_host_writes,
             ending_notice,
         );
     })
@@ -311,13 +361,14 @@ fn spawn_ending_dispatcher(
 
 /// Drain `inbox_receiver` until every inbox sender is gone. The first attach
 /// is answered as `client_id` in `session_id`, streaming `delivery_receiver`
-/// under `ending_notice`. Every attach after it and every other event is
-/// dropped.
+/// and `waiting_host_writes` under `ending_notice`. Every attach after it and
+/// every other event is dropped.
 fn answer_first_attach(
     inbox_receiver: &Receiver<RuntimeEvent>,
     client_id: ClientId,
     session_id: SessionId,
     delivery_receiver: Receiver<Delivery>,
+    waiting_host_writes: Arc<WaitingHostWrites>,
     ending_notice: Arc<EndingNotice>,
 ) {
     let mut unanswered_delivery_receiver = Some(delivery_receiver);
@@ -335,6 +386,7 @@ fn answer_first_attach(
             client_id,
             session_id,
             delivery_receiver,
+            Arc::clone(&waiting_host_writes),
             Arc::clone(&ending_notice),
         )));
     }
@@ -363,14 +415,16 @@ fn wait_until(timeout_duration: Duration, mut is_done: impl FnMut() -> bool) -> 
 }
 
 /// Serve a socket whose stand-in dispatcher answers the first attach with
-/// `delivery_receiver` under `ending_notice`, attach one client, and return
-/// the first frame that client reads. Asserts that the client's writing thread
-/// ends after that frame.
-fn read_first_frame_of_ending_session(
+/// `delivery_receiver` and `waiting_host_writes` under `ending_notice`, attach
+/// one client, and return the first `frame_count` frames that client reads, in
+/// order. Asserts that the client's writing thread ends after those frames.
+fn read_frames_of_ending_session(
     directory_tag: &str,
     delivery_receiver: Receiver<Delivery>,
+    waiting_host_writes: Arc<WaitingHostWrites>,
     ending_notice: &Arc<EndingNotice>,
-) -> SessionEvent {
+    frame_count: usize,
+) -> Vec<SessionEvent> {
     let client_id = ClientId::new();
     let session_id = SessionId::new();
     let runtime_directory = build_test_runtime_directory(directory_tag);
@@ -380,15 +434,20 @@ fn read_first_frame_of_ending_session(
         client_id,
         session_id,
         delivery_receiver,
+        waiting_host_writes,
         Arc::clone(ending_notice),
     );
     let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
         .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
 
-    let first_frame = connection
-        .recv::<SessionEvent>()
-        .expect("the client is told");
+    let read_frames: Vec<SessionEvent> = (0..frame_count)
+        .map(|_| {
+            connection
+                .recv::<SessionEvent>()
+                .expect("the client is told")
+        })
+        .collect();
     assert_eq!(
         wait_for_running_writer_count(ending_notice),
         0,
@@ -399,7 +458,7 @@ fn read_first_frame_of_ending_session(
     ipc_server.shutdown();
     dispatcher_thread.join().expect("dispatcher exits");
     delete_test_directory(&runtime_directory);
-    first_frame
+    read_frames
 }
 
 #[test]
@@ -425,7 +484,7 @@ fn a_client_whose_queue_is_full_is_still_told_the_session_is_ending() {
         ),
     ] {
         let mut event_bus = EventBus::new();
-        let (_, delivery_receiver) = event_bus.subscribe();
+        let (_, delivery_receiver, waiting_host_writes) = event_bus.subscribe();
         let tab_id = TabId::new();
         for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
             event_bus.publish(&Event::TabCreated(TabCreated { tab_id }));
@@ -435,8 +494,14 @@ fn a_client_whose_queue_is_full_is_still_told_the_session_is_ending() {
         assert_eq!(ending_notice.get_session_ending(), Some(session_ending));
 
         assert_eq!(
-            read_first_frame_of_ending_session(directory_tag, delivery_receiver, &ending_notice),
-            ending_frame
+            read_frames_of_ending_session(
+                directory_tag,
+                delivery_receiver,
+                waiting_host_writes,
+                &ending_notice,
+                1
+            ),
+            vec![ending_frame]
         );
     }
 }
@@ -452,7 +517,7 @@ fn a_client_the_server_detached_reads_its_own_goodbye_when_the_session_ends() {
     use crate::runtime::bus::EventBus;
 
     let mut event_bus = EventBus::new();
-    let (subscriber_id, delivery_receiver) = event_bus.subscribe();
+    let (subscriber_id, delivery_receiver, waiting_host_writes) = event_bus.subscribe();
     event_bus.publish(&Event::TabCreated(TabCreated {
         tab_id: TabId::new(),
     }));
@@ -465,8 +530,14 @@ fn a_client_the_server_detached_reads_its_own_goodbye_when_the_session_ends() {
     );
 
     assert_eq!(
-        read_first_frame_of_ending_session("detach-then-quit", delivery_receiver, &ending_notice),
-        SessionEvent::Detached
+        read_frames_of_ending_session(
+            "detach-then-quit",
+            delivery_receiver,
+            waiting_host_writes,
+            &ending_notice,
+            1
+        ),
+        vec![SessionEvent::Detached]
     );
 }
 
@@ -479,7 +550,7 @@ fn a_client_reads_the_quit_frame_alone_when_the_events_that_ended_the_session_ar
     use crate::runtime::bus::EventBus;
 
     let mut event_bus = EventBus::new();
-    let (_, delivery_receiver) = event_bus.subscribe();
+    let (_, delivery_receiver, waiting_host_writes) = event_bus.subscribe();
     event_bus.publish(&Event::PaneProcessExited(PaneProcessExited {
         pane_id: PaneId::new(),
         exit_code: Some(0),
@@ -493,9 +564,255 @@ fn a_client_reads_the_quit_frame_alone_when_the_events_that_ended_the_session_ar
     );
 
     assert_eq!(
-        read_first_frame_of_ending_session("quit-behind-queue", delivery_receiver, &ending_notice),
-        SessionEvent::Quit
+        read_frames_of_ending_session(
+            "quit-behind-queue",
+            delivery_receiver,
+            waiting_host_writes,
+            &ending_notice,
+            1
+        ),
+        vec![SessionEvent::Quit]
     );
+}
+
+#[test]
+fn host_writes_queued_before_the_session_ends_reach_the_client_ahead_of_its_last_frame() {
+    // Both host writes wait behind one wake. The ending drops the pane's exit
+    // and the wake, writes the waiting bytes as one host write, then the last
+    // frame.
+    use koshi_core::event::{Event, PaneProcessExited, QuitCause};
+
+    use crate::runtime::bus::{EventBus, HostWrite};
+
+    for (ending_event, ending_frame, directory_tag) in [
+        (
+            Event::Restarting,
+            SessionEvent::Restarting,
+            "restart-host-writes",
+        ),
+        (
+            Event::Quit(QuitCause::Requested),
+            SessionEvent::Quit,
+            "quit-host-writes",
+        ),
+    ] {
+        let mut event_bus = EventBus::new();
+        let (subscriber_id, delivery_receiver, waiting_host_writes) = event_bus.subscribe();
+        event_bus.publish(&Event::PaneProcessExited(PaneProcessExited {
+            pane_id: PaneId::new(),
+            exit_code: Some(0),
+            signal: None,
+        }));
+        assert!(
+            event_bus.queue_host_write(subscriber_id, &HostWrite::from_clipboard_copy("c", b"one"))
+        );
+        assert!(
+            event_bus.queue_host_write(subscriber_id, &HostWrite::from_clipboard_copy("p", b"two"))
+        );
+        let ending_notice = Arc::clone(event_bus.get_ending_notice());
+        event_bus.publish(&ending_event);
+
+        assert_eq!(
+            read_frames_of_ending_session(
+                directory_tag,
+                delivery_receiver,
+                waiting_host_writes,
+                &ending_notice,
+                2
+            ),
+            vec![
+                SessionEvent::HostWrite {
+                    host_write_bytes: b"\x1b]52;c;b25l\x07\x1b]52;p;dHdv\x07".to_vec(),
+                },
+                ending_frame,
+            ]
+        );
+    }
+}
+
+#[test]
+fn host_writes_that_wait_reach_the_client_ahead_of_the_deliveries_queued_after_them() {
+    // Both host writes wait behind one wake, which the switch and the closed
+    // queue follow.
+    use crate::runtime::bus::{EventBus, HostWrite};
+
+    let next_session_id = SessionId::new();
+    let mut event_bus = EventBus::new();
+    let (subscriber_id, delivery_receiver, waiting_host_writes) = event_bus.subscribe();
+    assert!(event_bus.queue_host_write(subscriber_id, &HostWrite::from_clipboard_copy("c", b"one")));
+    assert!(event_bus.queue_host_write(subscriber_id, &HostWrite::from_clipboard_copy("p", b"two")));
+    assert!(event_bus.try_send_switch(subscriber_id, next_session_id));
+    event_bus.unsubscribe(subscriber_id);
+    let ending_notice = Arc::clone(event_bus.get_ending_notice());
+
+    assert_eq!(
+        read_frames_of_ending_session(
+            "host-writes-before-switch",
+            delivery_receiver,
+            waiting_host_writes,
+            &ending_notice,
+            3
+        ),
+        vec![
+            SessionEvent::HostWrite {
+                host_write_bytes: b"\x1b]52;c;b25l\x07\x1b]52;p;dHdv\x07".to_vec(),
+            },
+            SessionEvent::SwitchTo {
+                session_id: next_session_id,
+            },
+            SessionEvent::Detached,
+        ]
+    );
+}
+
+#[test]
+fn a_host_write_whose_wake_found_the_queue_full_still_reaches_the_client() {
+    // The queue holds its full 1024 deliveries, so the wake is dropped. The
+    // waiting bytes go out before the first delivery the writing thread
+    // reads.
+    use koshi_core::event::{Event, TabCreated};
+
+    use crate::runtime::bus::{EventBus, HostWrite, SUBSCRIBER_QUEUE_CAPACITY};
+
+    let tab_id = TabId::new();
+    let mut event_bus = EventBus::new();
+    let (subscriber_id, delivery_receiver, waiting_host_writes) = event_bus.subscribe();
+    for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
+        event_bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+    }
+    assert!(event_bus.queue_host_write(subscriber_id, &HostWrite::from_clipboard_copy("c", b"one")));
+    event_bus.unsubscribe(subscriber_id);
+    let ending_notice = Arc::clone(event_bus.get_ending_notice());
+
+    let read_frames = read_frames_of_ending_session(
+        "host-write-full-queue",
+        delivery_receiver,
+        waiting_host_writes,
+        &ending_notice,
+        SUBSCRIBER_QUEUE_CAPACITY + 2,
+    );
+
+    let mut expected_frames = vec![SessionEvent::HostWrite {
+        host_write_bytes: b"\x1b]52;c;b25l\x07".to_vec(),
+    }];
+    expected_frames.extend(vec![
+        SessionEvent::TabCreated { tab_id };
+        SUBSCRIBER_QUEUE_CAPACITY
+    ]);
+    expected_frames.push(SessionEvent::Detached);
+    assert_eq!(read_frames, expected_frames);
+}
+
+#[test]
+fn a_host_write_longer_than_one_frame_reaches_the_client_as_parts_then_its_last_run() {
+    use koshi_ipc::event::MAX_HOST_WRITE_BYTE_COUNT;
+
+    use crate::runtime::bus::{EventBus, HostWrite};
+    use crate::runtime::clipboard::encode_osc52_copy;
+
+    let mut event_bus = EventBus::new();
+    let (subscriber_id, delivery_receiver, waiting_host_writes) = event_bus.subscribe();
+    let copied_bytes = vec![b'a'; MAX_HOST_WRITE_BYTE_COUNT];
+    let host_write_bytes = encode_osc52_copy("c", &copied_bytes);
+    assert_eq!(host_write_bytes.len(), 16_777_180);
+    assert!(event_bus.queue_host_write(
+        subscriber_id,
+        &HostWrite::from_clipboard_copy("c", &copied_bytes)
+    ));
+    event_bus.unsubscribe(subscriber_id);
+    let ending_notice = Arc::clone(event_bus.get_ending_notice());
+
+    assert_eq!(
+        read_frames_of_ending_session(
+            "host-write-parts",
+            delivery_receiver,
+            waiting_host_writes,
+            &ending_notice,
+            3
+        ),
+        vec![
+            SessionEvent::HostWritePart {
+                host_write_bytes: host_write_bytes[..MAX_HOST_WRITE_BYTE_COUNT].to_vec(),
+            },
+            SessionEvent::HostWrite {
+                host_write_bytes: host_write_bytes[MAX_HOST_WRITE_BYTE_COUNT..].to_vec(),
+            },
+            SessionEvent::Detached,
+        ]
+    );
+}
+
+#[test]
+fn a_host_write_after_the_writing_thread_ended_with_its_wake_unread_is_not_taken() {
+    use crate::runtime::bus::{EventBus, HostWrite};
+
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let mut event_bus = EventBus::new();
+    let (subscriber_id, delivery_receiver, waiting_host_writes) = event_bus.subscribe();
+    // One pane of 100 rows by 200 columns of alternating `a` and `b`: the
+    // painted frame is inside the frame cap, and larger than a connection
+    // holds while its client reads nothing.
+    let large_snapshot = build_alternating_grid_snapshot(client_id, 100, 200);
+    let painted_frame_byte_count = compute_painted_frame_byte_count(&large_snapshot);
+    assert!(
+        painted_frame_byte_count > 1024 * 1024
+            && painted_frame_byte_count < transport::MAX_FRAME_BYTE_COUNT as usize,
+        "the painted frame is {painted_frame_byte_count} bytes"
+    );
+    // The frame, then a host write and its wake, wait on the queue before the
+    // client attaches. The writing thread writes the host write first, then
+    // stays on the frame: it never reads the wake.
+    assert!(event_bus.try_send_frame(subscriber_id, Box::new(large_snapshot)));
+    let host_write = HostWrite::from_clipboard_copy("c", b"hi");
+    assert!(event_bus.queue_host_write(subscriber_id, &host_write));
+    let ending_notice = Arc::new(EndingNotice::default());
+    let runtime_directory = build_test_runtime_directory("host-write-after-writer-end");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let dispatcher_thread = spawn_ending_dispatcher(
+        inbox_receiver,
+        client_id,
+        session_id,
+        delivery_receiver,
+        waiting_host_writes,
+        Arc::clone(&ending_notice),
+    );
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+        .expect("start serving");
+    let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("the host write that waited"),
+        SessionEvent::HostWrite {
+            host_write_bytes: b"\x1b]52;c;aGk=\x07".to_vec(),
+        }
+    );
+
+    // The client closes the connection: the frame write fails, and the
+    // writing thread ends with the wake still on the queue.
+    drop(connection);
+    assert_eq!(
+        wait_for_running_writer_count(&ending_notice),
+        0,
+        "the writing thread must end once its frame write fails"
+    );
+
+    assert!(!event_bus.queue_host_write(subscriber_id, &host_write));
+    assert!(!event_bus.has_subscriber(subscriber_id));
+
+    ipc_server.shutdown();
+    dispatcher_thread.join().expect("dispatcher exits");
+    delete_test_directory(&runtime_directory);
+}
+
+#[test]
+fn a_detach_goodbye_is_written_only_while_the_link_is_not_lost() {
+    assert_eq!(
+        build_detach_goodbye(&AtomicBool::new(false)),
+        Some(SessionEvent::Detached)
+    );
+    assert_eq!(build_detach_goodbye(&AtomicBool::new(true)), None);
 }
 
 /// A served socket whose stand-in dispatcher accepts an attach as `client_id`,
@@ -524,6 +841,28 @@ fn start_attachable_test_server(
         dispatcher_thread,
         received_runtime_events,
     )
+}
+
+/// The `Attach` request with id `2` for a [`CLIENT_VIEWPORT_SIZE`] viewport
+/// that names `resume_client_id` to come back as and carries
+/// `link_timeout_ms`, with no resume token, no pane area, no cell size, and
+/// the default graphics capabilities.
+fn build_attach_request(
+    resume_client_id: Option<ClientId>,
+    link_timeout_ms: Option<u32>,
+) -> IpcRequest {
+    IpcRequest {
+        request_id: 2,
+        request_kind: IpcRequestKind::Attach {
+            viewport_size: CLIENT_VIEWPORT_SIZE,
+            resume_client_id,
+            resume_token: None,
+            pane_area: None,
+            graphics_capabilities: GraphicsCapabilities::default(),
+            cell_size: None,
+            link_timeout_ms,
+        },
+    }
 }
 
 /// Open a connection, say hello, attach on it, and read both replies back.
@@ -560,6 +899,7 @@ fn attach_test_client_with_graphics(
                 pane_area: None,
                 graphics_capabilities,
                 cell_size: None,
+                link_timeout_ms: None,
             },
         })
         .expect("send attach");
@@ -603,6 +943,7 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
                 pane_area: None,
                 graphics_capabilities: GraphicsCapabilities::default(),
                 cell_size: Some(measured_cell_size),
+                link_timeout_ms: None,
             },
         })
         .expect("send attach");
@@ -624,6 +965,7 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
             client_id,
             session_id,
             delivery_receiver,
+            Arc::new(WaitingHostWrites::default()),
             Arc::new(EndingNotice::default()),
         )))
         .expect("the dispatcher receives the accepted attach");
@@ -710,6 +1052,15 @@ impl AttachedFrameStream {
             .expect("the writing thread holds the delivery queue");
     }
 
+    /// Queue a [`Delivery::PlacementCommandRejected`] with a new command id
+    /// after every delivery already queued, and return the event the client
+    /// reads for it.
+    fn send_rejected_placement_command(&self) -> SessionEvent {
+        let command_id = CommandId::new();
+        self.send_delivery(Delivery::PlacementCommandRejected(command_id));
+        SessionEvent::PlacementCommandRejected { command_id }
+    }
+
     /// Read the next frame the attached client receives.
     fn read_session_event(&mut self) -> SessionEvent {
         self.connection
@@ -757,7 +1108,7 @@ fn an_unsupported_terminal_receives_placement_geometry_and_no_pixel_events() {
     );
     let render_snapshot = build_image_snapshot(frame_stream.client_id, build_image_record(1));
     frame_stream.send_delivery(Delivery::Frame(Box::new(render_snapshot.clone())));
-    frame_stream.send_delivery(Delivery::HostWrite(vec![9]));
+    let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
 
     let mut expected_painted_frame = build_wire_frame(&render_snapshot);
     let expected_image_placement =
@@ -772,9 +1123,7 @@ fn an_unsupported_terminal_receives_placement_geometry_and_no_pixel_events() {
     );
     assert_eq!(
         frame_stream.read_session_event(),
-        SessionEvent::HostWrite {
-            host_output_bytes: vec![9]
-        }
+        rejected_placement_command_event
     );
 
     frame_stream.close_frame_stream();
@@ -790,7 +1139,7 @@ fn a_kitty_terminal_receives_pixels_once_then_placement_only_frames() {
     let render_snapshot = build_image_snapshot(frame_stream.client_id, Arc::clone(&image_record));
     frame_stream.send_delivery(Delivery::Frame(Box::new(render_snapshot.clone())));
     frame_stream.send_delivery(Delivery::Frame(Box::new(render_snapshot.clone())));
-    frame_stream.send_delivery(Delivery::HostWrite(vec![9]));
+    let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
 
     let painted_frame_event = SessionEvent::Painted {
         frame: Box::new(build_wire_frame(&render_snapshot)),
@@ -802,9 +1151,7 @@ fn a_kitty_terminal_receives_pixels_once_then_placement_only_frames() {
     assert_eq!(frame_stream.read_session_event(), painted_frame_event);
     assert_eq!(
         frame_stream.read_session_event(),
-        SessionEvent::HostWrite {
-            host_output_bytes: vec![9]
-        }
+        rejected_placement_command_event
     );
 
     frame_stream.close_frame_stream();
@@ -844,7 +1191,7 @@ fn image_scroll_return_uses_a_new_identity_and_complete_transfer() {
     ] {
         frame_stream.send_delivery(Delivery::Frame(Box::new(render_snapshot.clone())));
     }
-    frame_stream.send_delivery(Delivery::HostWrite(vec![9]));
+    let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
 
     for (render_snapshot, image_content_id, image_record) in [
         (&visible_image_snapshot, 1, Some(&first_image_record)),
@@ -877,9 +1224,7 @@ fn image_scroll_return_uses_a_new_identity_and_complete_transfer() {
     }
     assert_eq!(
         frame_stream.read_session_event(),
-        SessionEvent::HostWrite {
-            host_output_bytes: vec![9]
-        }
+        rejected_placement_command_event
     );
 
     frame_stream.close_frame_stream();
@@ -1003,7 +1348,7 @@ fn a_kitty_terminal_receives_more_than_4096_placements_in_bounded_batches() {
     .expect("the image placement is valid")];
     render_snapshot.pane_snapshots.push(second_pane_snapshot);
     frame_stream.send_delivery(Delivery::Frame(Box::new(render_snapshot.clone())));
-    frame_stream.send_delivery(Delivery::HostWrite(vec![9]));
+    let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
     let painted_frame_event = SessionEvent::Painted {
         frame: Box::new(build_wire_frame(&render_snapshot)),
     };
@@ -1028,9 +1373,7 @@ fn a_kitty_terminal_receives_more_than_4096_placements_in_bounded_batches() {
     assert_eq!(frame_stream.read_session_event(), last_image_chunk_event);
     assert_eq!(
         frame_stream.read_session_event(),
-        SessionEvent::HostWrite {
-            host_output_bytes: vec![9]
-        }
+        rejected_placement_command_event
     );
 
     frame_stream.close_frame_stream();
@@ -2995,17 +3338,7 @@ fn attach_as_other_user(
     let hello_response: IpcResponse = caller_connection.recv().expect("hello reply");
     assert_eq!(hello_response.answer_result, build_accepted_hello_result());
     caller_connection
-        .send(&IpcRequest {
-            request_id: 2,
-            request_kind: IpcRequestKind::Attach {
-                viewport_size: CLIENT_VIEWPORT_SIZE,
-                resume_client_id: None,
-                resume_token: None,
-                pane_area: None,
-                graphics_capabilities: GraphicsCapabilities::default(),
-                cell_size: None,
-            },
-        })
+        .send(&build_attach_request(None, None))
         .expect("send attach");
     let attach_response: IpcResponse = caller_connection.recv().expect("attach reply");
     assert_eq!(
@@ -3649,7 +3982,7 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
     connection
         .send(&IpcRequest {
             request_id: 6,
-            request_kind: IpcRequestKind::Leaving,
+            request_kind: IpcRequestKind::Leaving { is_returning: true },
         })
         .expect("send leaving");
 
@@ -3671,6 +4004,7 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
     let RuntimeEvent::ClientDetached {
         client_id: detached_client_id,
         is_streamed,
+        is_returning,
         ..
     } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
@@ -3683,6 +4017,10 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
         "leaving detaches the client that left"
     );
     assert!(is_streamed, "the client that left was carrying a stream");
+    assert!(
+        is_returning,
+        "the detach carries the value the Leaving request named"
+    );
     assert_eq!(
         wait_for_attached_connection_count(&ipc_server, 0),
         0,
@@ -3717,7 +4055,9 @@ fn a_control_connection_that_leaves_is_closed_with_no_answer() {
     connection
         .send(&IpcRequest {
             request_id: 2,
-            request_kind: IpcRequestKind::Leaving,
+            request_kind: IpcRequestKind::Leaving {
+                is_returning: false,
+            },
         })
         .expect("send leaving");
     assert!(
@@ -3809,17 +4149,7 @@ fn rotating_the_token_takes_connections_again_after_the_intake_closed() {
     // What this connection sends reaches the dispatcher again.
     let typed_key_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('r'));
     connection
-        .send(&IpcRequest {
-            request_id: 2,
-            request_kind: IpcRequestKind::Attach {
-                viewport_size: CLIENT_VIEWPORT_SIZE,
-                resume_client_id: None,
-                resume_token: None,
-                pane_area: None,
-                graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
-                cell_size: None,
-            },
-        })
+        .send(&build_attach_request(None, None))
         .expect("send attach");
     let attach_reply: IpcResponse = connection.recv().expect("attach reply");
     assert_eq!(attach_reply.request_id, Some(2));
@@ -3965,6 +4295,7 @@ fn a_request_a_client_sends_after_the_intake_closes_never_reaches_the_dispatcher
             client_id,
             detached_at: SystemTime::UNIX_EPOCH,
             is_streamed: true,
+            is_returning: false,
         })
         .expect("the detach is queued");
     drop(inbox_sender);
@@ -4001,12 +4332,14 @@ fn a_connection_accepted_after_the_intake_closes_is_not_served() {
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
 }
 
-/// A detach event for `client_id` at timestamp `0`.
+/// A detach event for `client_id` at timestamp `0`, for a client that does not
+/// return.
 fn build_detach_event(client_id: ClientId) -> RuntimeEvent {
     RuntimeEvent::ClientDetached {
         client_id,
         detached_at: SystemTime::UNIX_EPOCH,
         is_streamed: true,
+        is_returning: false,
     }
 }
 
@@ -4068,6 +4401,50 @@ fn an_attached_clients_connection_is_counted_until_its_attachment_guard_is_dropp
     assert_eq!(intake.count_attached_connections(), 0);
 }
 
+#[test]
+fn closing_a_served_connections_read_direction_ends_only_its_reads() {
+    let socket_address = build_test_socket_address("intake-read-direction");
+    delete_socket_file(&socket_address);
+    let listener = Listener::bind(&socket_address).expect("bind");
+    let accepting_thread = std::thread::spawn(move || listener.accept().expect("accept"));
+    let mut caller_connection = Connection::connect(&socket_address).expect("connect");
+    let mut accepted_connection = accepting_thread.join().expect("accepting thread");
+    let intake = Arc::new(Intake::default());
+    let served_connection = intake
+        .accept_connection(&accepted_connection)
+        .expect("the intake takes it");
+    let ping_request = IpcRequest {
+        request_id: 1,
+        request_kind: IpcRequestKind::Ping,
+    };
+
+    caller_connection
+        .send(&ping_request)
+        .expect("send the first ping");
+    intake.close_read_direction(served_connection.connection_number + 1);
+    assert_eq!(
+        accepted_connection
+            .recv::<IpcRequest>()
+            .expect("the first ping"),
+        ping_request
+    );
+
+    caller_connection
+        .send(&ping_request)
+        .expect("send the second ping");
+    intake.close_read_direction(served_connection.connection_number);
+    match accepted_connection.recv::<IpcRequest>() {
+        Err(IpcError::Disconnected) => {}
+        unexpected_read_result => {
+            panic!("the closed read direction read {unexpected_read_result:?}")
+        }
+    }
+
+    drop(served_connection);
+    drop(caller_connection);
+    delete_socket_file(&socket_address);
+}
+
 /// A stand-in dispatcher that reports the `is_remote` flag of every attach it
 /// is asked for and accepts each one as `client_id`. Holds the delivery queues
 /// it hands out open, and the writing threads stay blocked. Exits when every
@@ -4097,6 +4474,7 @@ fn spawn_origin_reporting_dispatcher(
                         client_id,
                         session_id,
                         delivery_receiver,
+                        Arc::new(WaitingHostWrites::default()),
                         Arc::clone(&ending_notice),
                     )));
                 }
@@ -4134,17 +4512,7 @@ fn attach_saying_remote(
     assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
 
     connection
-        .send(&IpcRequest {
-            request_id: 2,
-            request_kind: IpcRequestKind::Attach {
-                viewport_size: CLIENT_VIEWPORT_SIZE,
-                resume_client_id: None,
-                resume_token: None,
-                pane_area: None,
-                graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
-                cell_size: None,
-            },
-        })
+        .send(&build_attach_request(None, None))
         .expect("send attach");
     let attach_reply: IpcResponse = connection.recv().expect("attach reply");
     assert_eq!(
@@ -4614,4 +4982,1082 @@ fn an_accepted_restart_into_the_installed_version_schedules_no_retry() {
     let (restart_retry_at, _started_at, _finished_at) = run_restart_into_installed_version(Ok(()));
 
     assert_eq!(restart_retry_at, None);
+}
+
+/// A stand-in dispatcher that answers the first attach as `client_id` in
+/// `session_id`, streaming the delivery queue whose sender it hands back, and
+/// forwards every other event it drains to the returned receiver. Exits when
+/// every inbox sender is gone.
+fn spawn_forwarding_frame_dispatcher(
+    inbox_receiver: Receiver<RuntimeEvent>,
+    client_id: ClientId,
+    session_id: SessionId,
+) -> (JoinHandle<()>, Sender<Delivery>, Receiver<RuntimeEvent>) {
+    let (delivery_sender, delivery_receiver) = mpsc::channel();
+    let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
+    let dispatcher_thread = std::thread::spawn(move || {
+        let mut unanswered_delivery_receiver = Some(delivery_receiver);
+        while let Ok(runtime_event) = inbox_receiver.recv() {
+            match runtime_event {
+                RuntimeEvent::IpcAttach {
+                    response_sender, ..
+                } => {
+                    let Some(delivery_receiver) = unanswered_delivery_receiver.take() else {
+                        continue;
+                    };
+                    let _ = response_sender.send(Some(build_attach_accepted(
+                        client_id,
+                        session_id,
+                        delivery_receiver,
+                        Arc::new(WaitingHostWrites::default()),
+                        Arc::new(EndingNotice::default()),
+                    )));
+                }
+                forwarded_runtime_event => {
+                    if runtime_event_sender.send(forwarded_runtime_event).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    (dispatcher_thread, delivery_sender, runtime_event_receiver)
+}
+
+/// One clipboard request a stand-in clipboard dispatcher was asked, in the
+/// order it was asked.
+#[derive(Debug, PartialEq, Eq)]
+enum ClipboardRequestReport {
+    /// A `ClipboardCopyPart` asked whether the session takes a copy of
+    /// `held_copy_byte_count` bytes.
+    CopyPart { held_copy_byte_count: usize },
+    /// A `ClipboardCopy` handed over a whole copy.
+    Copy {
+        pane_id: PaneId,
+        clipboard_targets: String,
+        copied_bytes: Vec<u8>,
+    },
+}
+
+/// A stand-in dispatcher that takes a copy of at most
+/// `maximum_copy_byte_count` bytes, answers every whole copy with
+/// `should_run_clipboard_tool`, and reports each clipboard request on the
+/// returned receiver. Every other event it drains is dropped. Exits when every
+/// inbox sender is gone.
+fn spawn_clipboard_dispatcher(
+    inbox_receiver: Receiver<RuntimeEvent>,
+    maximum_copy_byte_count: usize,
+    should_run_clipboard_tool: bool,
+) -> (JoinHandle<()>, Receiver<ClipboardRequestReport>) {
+    let (request_report_sender, request_report_receiver) = mpsc::channel();
+    let dispatcher_thread = std::thread::spawn(move || {
+        while let Ok(runtime_event) = inbox_receiver.recv() {
+            let request_report = match runtime_event {
+                RuntimeEvent::IpcClipboardCopyPart {
+                    held_copy_byte_count,
+                    response_sender,
+                } => {
+                    let _ = response_sender.send(held_copy_byte_count <= maximum_copy_byte_count);
+                    ClipboardRequestReport::CopyPart {
+                        held_copy_byte_count,
+                    }
+                }
+                RuntimeEvent::IpcClipboardCopy {
+                    pane_id,
+                    clipboard_targets,
+                    copied_bytes,
+                    response_sender,
+                } => {
+                    let _ = response_sender.send(should_run_clipboard_tool);
+                    ClipboardRequestReport::Copy {
+                        pane_id,
+                        clipboard_targets,
+                        copied_bytes,
+                    }
+                }
+                _ => continue,
+            };
+            if request_report_sender.send(request_report).is_err() {
+                break;
+            }
+        }
+    });
+    (dispatcher_thread, request_report_receiver)
+}
+
+/// A served socket in a fresh runtime directory whose stand-in dispatcher is
+/// [`spawn_clipboard_dispatcher`] with `maximum_copy_byte_count` and
+/// `should_run_clipboard_tool`.
+fn start_clipboard_test_server(
+    directory_tag: &str,
+    maximum_copy_byte_count: usize,
+    should_run_clipboard_tool: bool,
+) -> (
+    IpcServer,
+    SessionId,
+    PathBuf,
+    JoinHandle<()>,
+    Receiver<ClipboardRequestReport>,
+) {
+    let runtime_directory = build_test_runtime_directory(directory_tag);
+    let session_id = SessionId::new();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (dispatcher_thread, request_reports) = spawn_clipboard_dispatcher(
+        inbox_receiver,
+        maximum_copy_byte_count,
+        should_run_clipboard_tool,
+    );
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+        .expect("start serving");
+    (
+        ipc_server,
+        session_id,
+        runtime_directory,
+        dispatcher_thread,
+        request_reports,
+    )
+}
+
+/// Send `request_kind` as request `request_id` on `connection`, and hand back
+/// the answer.
+fn exchange_request(
+    connection: &mut Connection,
+    request_id: u64,
+    request_kind: IpcRequestKind,
+) -> IpcResponse {
+    connection
+        .send(&IpcRequest {
+            request_id,
+            request_kind,
+        })
+        .expect("send the request");
+    connection.recv().expect("the request is answered")
+}
+
+/// A `ClipboardCopyPart` carrying `copied_bytes`.
+fn build_copy_part_request(copied_bytes: &[u8]) -> IpcRequestKind {
+    IpcRequestKind::ClipboardCopyPart {
+        copied_bytes: copied_bytes.to_vec(),
+    }
+}
+
+/// A `ClipboardCopy` for `pane_id` and the targets `c`, carrying
+/// `copied_bytes`.
+fn build_copy_request(pane_id: PaneId, copied_bytes: &[u8]) -> IpcRequestKind {
+    IpcRequestKind::ClipboardCopy {
+        pane_id,
+        clipboard_targets: "c".to_string(),
+        copied_bytes: copied_bytes.to_vec(),
+    }
+}
+
+/// The answer to request `request_id` that routes a copy and tells the caller
+/// whether to run the real clipboard tool.
+fn build_copy_routed_response(request_id: u64, should_run_clipboard_tool: bool) -> IpcResponse {
+    IpcResponse {
+        request_id: Some(request_id),
+        answer_result: IpcResult::ClipboardCopyRouted {
+            should_run_clipboard_tool,
+        },
+    }
+}
+
+/// The refusal a clipboard request from another machine or another local
+/// user gets, as the answer to request `request_id`.
+fn build_clipboard_refusal_response(request_id: u64) -> IpcResponse {
+    IpcResponse {
+        request_id: Some(request_id),
+        answer_result: IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::RequestFailed,
+            message: "a pane clipboard copy must come from this machine and this user".to_string(),
+        }),
+    }
+}
+
+#[test]
+fn a_copy_in_one_request_reaches_the_dispatcher_as_it_is_and_carries_its_answer_back() {
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, request_reports) =
+        start_clipboard_test_server("clipboard-one-request", 8, false);
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+    let pane_id = PaneId::new();
+
+    let copy_response = exchange_request(
+        &mut connection,
+        2,
+        IpcRequestKind::ClipboardCopy {
+            pane_id,
+            clipboard_targets: "pX".to_string(),
+            copied_bytes: b"hi".to_vec(),
+        },
+    );
+
+    assert_eq!(copy_response, build_copy_routed_response(2, false));
+    assert_eq!(
+        request_reports.recv_timeout(Duration::from_secs(5)),
+        Ok(ClipboardRequestReport::Copy {
+            pane_id,
+            clipboard_targets: "pX".to_string(),
+            copied_bytes: b"hi".to_vec(),
+        })
+    );
+
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+}
+
+#[test]
+fn taken_copy_parts_reach_the_dispatcher_with_the_last_request_as_one_copy() {
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, request_reports) =
+        start_clipboard_test_server("clipboard-parts", 8, true);
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+    let pane_id = PaneId::new();
+
+    for (request_id, part_bytes, held_copy_byte_count) in [(2, b"ab", 2), (3, b"cd", 4)] {
+        assert_eq!(
+            exchange_request(
+                &mut connection,
+                request_id,
+                build_copy_part_request(part_bytes)
+            ),
+            IpcResponse {
+                request_id: Some(request_id),
+                answer_result: IpcResult::ClipboardCopyPartTaken,
+            }
+        );
+        assert_eq!(
+            request_reports.recv_timeout(Duration::from_secs(5)),
+            Ok(ClipboardRequestReport::CopyPart {
+                held_copy_byte_count
+            })
+        );
+    }
+    assert_eq!(
+        exchange_request(&mut connection, 4, build_copy_request(pane_id, b"ef")),
+        build_copy_routed_response(4, true)
+    );
+    assert_eq!(
+        request_reports.recv_timeout(Duration::from_secs(5)),
+        Ok(ClipboardRequestReport::Copy {
+            pane_id,
+            clipboard_targets: "c".to_string(),
+            copied_bytes: b"abcdef".to_vec(),
+        })
+    );
+    // The connection holds nothing once the copy is routed.
+    assert_eq!(
+        exchange_request(&mut connection, 5, build_copy_request(pane_id, b"x")),
+        build_copy_routed_response(5, true)
+    );
+    assert_eq!(
+        request_reports.recv_timeout(Duration::from_secs(5)),
+        Ok(ClipboardRequestReport::Copy {
+            pane_id,
+            clipboard_targets: "c".to_string(),
+            copied_bytes: b"x".to_vec(),
+        })
+    );
+
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+}
+
+#[test]
+fn a_copy_part_the_session_does_not_take_drops_every_held_byte_and_says_run_the_real_tool() {
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, request_reports) =
+        start_clipboard_test_server("clipboard-part-refused", 3, false);
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+    let pane_id = PaneId::new();
+
+    assert_eq!(
+        exchange_request(&mut connection, 2, build_copy_part_request(b"ab")),
+        IpcResponse {
+            request_id: Some(2),
+            answer_result: IpcResult::ClipboardCopyPartTaken,
+        }
+    );
+    assert_eq!(
+        exchange_request(&mut connection, 3, build_copy_part_request(b"cd")),
+        build_copy_routed_response(3, true)
+    );
+    assert_eq!(
+        exchange_request(&mut connection, 4, build_copy_request(pane_id, b"x")),
+        build_copy_routed_response(4, false)
+    );
+
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+    assert_eq!(
+        request_reports
+            .try_iter()
+            .collect::<Vec<ClipboardRequestReport>>(),
+        vec![
+            ClipboardRequestReport::CopyPart {
+                held_copy_byte_count: 2
+            },
+            ClipboardRequestReport::CopyPart {
+                held_copy_byte_count: 4
+            },
+            ClipboardRequestReport::Copy {
+                pane_id,
+                clipboard_targets: "c".to_string(),
+                copied_bytes: b"x".to_vec(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_clipboard_request_from_another_machine_is_refused_and_the_connection_keeps_serving() {
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, request_reports) =
+        start_clipboard_test_server("clipboard-remote", 8, false);
+    let endpoint_file = load_test_endpoint_file(&runtime_directory, session_id);
+    let mut connection = connect_to_session_socket(&runtime_directory, session_id);
+    let hello_response = exchange_request(
+        &mut connection,
+        1,
+        IpcRequestKind::Hello {
+            minimum_protocol_version: MIN_PROTOCOL_VERSION,
+            maximum_protocol_version: PROTOCOL_VERSION,
+            connection_token: endpoint_file.connection_token,
+            is_remote: true,
+        },
+    );
+    assert_eq!(hello_response.answer_result, build_accepted_hello_result());
+
+    assert_eq!(
+        exchange_request(&mut connection, 2, build_copy_part_request(b"ab")),
+        build_clipboard_refusal_response(2)
+    );
+    assert_eq!(
+        exchange_request(&mut connection, 3, build_copy_request(PaneId::new(), b"x")),
+        build_clipboard_refusal_response(3)
+    );
+
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+    assert_eq!(
+        request_reports
+            .try_iter()
+            .collect::<Vec<ClipboardRequestReport>>(),
+        Vec::new()
+    );
+}
+
+#[test]
+fn a_clipboard_request_from_another_local_user_is_refused_and_the_connection_keeps_serving() {
+    let is_other_user_access_enabled = Arc::new(AtomicBool::new(true));
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (dispatcher_thread, request_reports) = spawn_clipboard_dispatcher(inbox_receiver, 8, false);
+    let (mut caller_connection, serving_thread, socket_address) =
+        serve_other_user("clipboard", &is_other_user_access_enabled, inbox_sender);
+    caller_connection
+        .send(&build_other_user_hello())
+        .expect("send hello");
+    let hello_response: IpcResponse = caller_connection.recv().expect("hello reply");
+    assert_eq!(hello_response.answer_result, build_accepted_hello_result());
+
+    assert_eq!(
+        exchange_request(&mut caller_connection, 2, build_copy_part_request(b"ab")),
+        build_clipboard_refusal_response(2)
+    );
+    assert_eq!(
+        exchange_request(
+            &mut caller_connection,
+            3,
+            build_copy_request(PaneId::new(), b"x")
+        ),
+        build_clipboard_refusal_response(3)
+    );
+
+    drop(caller_connection);
+    serving_thread.join().expect("serving thread");
+    dispatcher_thread.join().expect("dispatcher exits");
+    delete_socket_file(&socket_address);
+    assert_eq!(
+        request_reports
+            .try_iter()
+            .collect::<Vec<ClipboardRequestReport>>(),
+        Vec::new()
+    );
+}
+
+#[test]
+fn a_clipboard_request_with_no_dispatcher_closes_the_connection() {
+    for (directory_tag, clipboard_request_kind) in [
+        ("clipboard-part-gone", build_copy_part_request(b"ab")),
+        (
+            "clipboard-copy-gone",
+            build_copy_request(PaneId::new(), b"x"),
+        ),
+    ] {
+        let runtime_directory = build_test_runtime_directory(directory_tag);
+        let session_id = SessionId::new();
+        let (inbox_sender, inbox_receiver) = mpsc::channel();
+        drop(inbox_receiver);
+        let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+            .expect("start serving");
+        let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+
+        connection
+            .send(&IpcRequest {
+                request_id: 2,
+                request_kind: clipboard_request_kind,
+            })
+            .expect("send the clipboard request");
+        assert!(
+            matches!(
+                connection.recv::<IpcResponse>(),
+                Err(IpcError::Disconnected)
+            ),
+            "no answer comes back once the dispatcher is gone",
+        );
+
+        drop(connection);
+        ipc_server.shutdown();
+        delete_test_directory(&runtime_directory);
+    }
+}
+
+/// Open a connection whose Hello carries `is_remote`, attach on it with the
+/// request [`build_attach_request`] gives for `resume_client_id` and
+/// `link_timeout_ms`, and read both replies back. The connection comes back
+/// carrying `client_id`'s stream.
+fn attach_test_client_over_link(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    client_id: ClientId,
+    is_remote: bool,
+    link_timeout_ms: Option<u32>,
+    resume_client_id: Option<ClientId>,
+) -> Connection {
+    let mut connection = connect_to_session_socket(runtime_directory, session_id);
+    connection
+        .send(&IpcRequest {
+            request_id: 1,
+            request_kind: IpcRequestKind::Hello {
+                minimum_protocol_version: MIN_PROTOCOL_VERSION,
+                maximum_protocol_version: PROTOCOL_VERSION,
+                connection_token: load_test_endpoint_file(runtime_directory, session_id)
+                    .connection_token,
+                is_remote,
+            },
+        })
+        .expect("send hello");
+    let hello_reply: IpcResponse = connection.recv().expect("hello reply");
+    assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
+    connection
+        .send(&build_attach_request(resume_client_id, link_timeout_ms))
+        .expect("send attach");
+    let attach_reply: IpcResponse = connection.recv().expect("attach reply");
+    assert_eq!(attach_reply.request_id, Some(2));
+    assert_eq!(
+        attach_reply.answer_result,
+        IpcResult::Attached {
+            client_id,
+            session_id,
+            session_structure: build_attached_structure(session_id),
+            resume_token: Some(ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN)),
+            pane_area: None,
+        },
+    );
+    connection
+}
+
+/// The next event the dispatcher was handed, within 5 seconds.
+fn receive_forwarded_event(received_runtime_events: &Receiver<RuntimeEvent>) -> RuntimeEvent {
+    received_runtime_events
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the dispatcher was handed an event")
+}
+
+#[test]
+fn a_ping_on_an_attached_stream_crosses_nothing_and_gets_no_answer() {
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory("ping-dropped");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (dispatcher_thread, delivery_sender, forwarded_runtime_events) =
+        spawn_forwarding_frame_dispatcher(inbox_receiver, client_id, session_id);
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+        .expect("start serving");
+    let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
+
+    for request_id in [3, 4] {
+        connection
+            .send(&IpcRequest {
+                request_id,
+                request_kind: IpcRequestKind::Ping,
+            })
+            .expect("send the ping");
+    }
+    connection
+        .send(&IpcRequest {
+            request_id: 5,
+            request_kind: IpcRequestKind::Leaving { is_returning: true },
+        })
+        .expect("send leaving");
+    // The reading loop read both pings before the `Leaving`.
+    let RuntimeEvent::ClientDetached {
+        client_id: detached_client_id,
+        is_returning,
+        ..
+    } = receive_forwarded_event(&forwarded_runtime_events)
+    else {
+        panic!("the first event handed over is the detach");
+    };
+    let rejected_command_id = CommandId::new();
+    delivery_sender
+        .send(Delivery::PlacementCommandRejected(rejected_command_id))
+        .expect("the writing thread holds the delivery queue");
+
+    assert_eq!(detached_client_id, client_id);
+    assert!(is_returning);
+    assert_eq!(
+        connection.recv::<SessionEvent>().expect("the client reads"),
+        SessionEvent::PlacementCommandRejected {
+            command_id: rejected_command_id
+        }
+    );
+
+    drop(delivery_sender);
+    drop(connection);
+    ipc_server.shutdown();
+    dispatcher_thread.join().expect("dispatcher exits");
+    delete_test_directory(&runtime_directory);
+}
+
+#[test]
+fn a_ping_on_a_connection_with_no_attached_client_closes_it_with_no_answer() {
+    let client_id = ClientId::new();
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
+        start_attachable_test_server("ping-control", client_id);
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            request_kind: IpcRequestKind::Ping,
+        })
+        .expect("send the ping");
+    assert!(
+        matches!(
+            connection.recv::<IpcResponse>(),
+            Err(IpcError::Disconnected)
+        ),
+        "a ping with no attached client closes the connection unanswered",
+    );
+    assert_eq!(
+        received_runtime_events
+            .recv_timeout(Duration::from_millis(300))
+            .unwrap_err(),
+        mpsc::RecvTimeoutError::Timeout,
+    );
+
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+}
+
+#[test]
+fn a_silent_client_with_a_link_timeout_stays_attached_and_reads_a_pong_every_third_of_it() {
+    let client_id = ClientId::new();
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
+        start_attachable_test_server("link-heartbeat", client_id);
+    let attach_started_at = Instant::now();
+    let connection = attach_test_client_over_link(
+        &runtime_directory,
+        session_id,
+        client_id,
+        true,
+        Some(MIN_LINK_TIMEOUT_MS),
+        None,
+    );
+    // The client's writing half stays open, and sends nothing, until the end
+    // of the test.
+    let (mut frame_reader, frame_writer) = connection.split();
+    frame_reader.set_deadline(Some(attach_started_at + Duration::from_secs(10)));
+    let heartbeat_interval = compute_heartbeat_interval(MIN_LINK_TIMEOUT_MS);
+
+    // Four pongs reach past the link timeout itself.
+    let mut pong_read_times: Vec<Duration> = Vec::new();
+    for _ in 0..4 {
+        assert_eq!(
+            frame_reader
+                .recv::<SessionEvent>()
+                .expect("a pong arrives inside 10 seconds"),
+            SessionEvent::Pong
+        );
+        pong_read_times.push(attach_started_at.elapsed());
+    }
+
+    for (pong_index, pong_read_time) in (1u32..).zip(&pong_read_times) {
+        assert!(
+            *pong_read_time >= heartbeat_interval * pong_index,
+            "pong {pong_index} came {pong_read_time:?} after the attach"
+        );
+    }
+    assert!(
+        pong_read_times[3] < Duration::from_millis(u64::from(MIN_LINK_TIMEOUT_MS)) * 4,
+        "four pongs take four heartbeat intervals, not four link timeouts: {pong_read_times:?}"
+    );
+    assert_eq!(
+        received_runtime_events.try_recv().unwrap_err(),
+        mpsc::TryRecvError::Empty,
+        "nothing detached the silent client"
+    );
+
+    drop(frame_writer);
+    drop(frame_reader);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+}
+
+#[test]
+fn a_frame_that_goes_out_puts_off_the_next_pong_by_a_whole_heartbeat_interval() {
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory("pong-after-frame");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (dispatcher_thread, delivery_sender, _forwarded_runtime_events) =
+        spawn_forwarding_frame_dispatcher(inbox_receiver, client_id, session_id);
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+        .expect("start serving");
+    let connection = attach_test_client_over_link(
+        &runtime_directory,
+        session_id,
+        client_id,
+        true,
+        Some(MIN_LINK_TIMEOUT_MS),
+        None,
+    );
+    let (mut frame_reader, frame_writer) = connection.split();
+    frame_reader.set_deadline(Some(Instant::now() + Duration::from_secs(10)));
+    let heartbeat_interval = compute_heartbeat_interval(MIN_LINK_TIMEOUT_MS);
+
+    // Half an interval after the first pong, a rejection is queued. A pong
+    // that went out before the rejection is read past.
+    assert_eq!(
+        frame_reader.recv::<SessionEvent>().expect("the first pong"),
+        SessionEvent::Pong
+    );
+    std::thread::sleep(heartbeat_interval / 2);
+    let rejected_command_id = CommandId::new();
+    let rejection_queued_at = Instant::now();
+    delivery_sender
+        .send(Delivery::PlacementCommandRejected(rejected_command_id))
+        .expect("the writing thread holds the delivery queue");
+    let rejection_event = loop {
+        let session_event = frame_reader.recv::<SessionEvent>().expect("the rejection");
+        if session_event != SessionEvent::Pong {
+            break session_event;
+        }
+    };
+    let next_event = frame_reader.recv::<SessionEvent>().expect("the next pong");
+    let next_pong_delay = rejection_queued_at.elapsed();
+
+    assert_eq!(
+        rejection_event,
+        SessionEvent::PlacementCommandRejected {
+            command_id: rejected_command_id
+        }
+    );
+    assert_eq!(next_event, SessionEvent::Pong);
+    assert!(
+        next_pong_delay >= heartbeat_interval,
+        "the next pong came {next_pong_delay:?} after the rejection was queued"
+    );
+
+    drop(delivery_sender);
+    drop(frame_writer);
+    drop(frame_reader);
+    ipc_server.shutdown();
+    dispatcher_thread.join().expect("dispatcher exits");
+    delete_test_directory(&runtime_directory);
+}
+
+#[test]
+fn a_pong_goes_out_while_painted_frames_over_the_frame_cap_keep_the_queue_busy() {
+    let client_id = ClientId::new();
+
+    // One pane of 200 rows by 1000 columns of alternating `a` and `b`: the
+    // painted frame is over the frame cap, and the writing thread writes
+    // nothing for it.
+    let oversize_snapshot = build_alternating_grid_snapshot(client_id, 200, 1000);
+    let painted_frame_byte_count = compute_painted_frame_byte_count(&oversize_snapshot);
+    assert!(
+        painted_frame_byte_count > transport::MAX_FRAME_BYTE_COUNT as usize,
+        "the painted frame is {painted_frame_byte_count} bytes, inside the frame cap"
+    );
+
+    let session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory("pong-under-oversize-frames");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (dispatcher_thread, delivery_sender, _forwarded_runtime_events) =
+        spawn_forwarding_frame_dispatcher(inbox_receiver, client_id, session_id);
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+        .expect("start serving");
+
+    // 400 of these frames, then one rejection, wait in the queue before the
+    // client attaches. The writing thread takes them in that order from its
+    // first turn, and writes the rejection only after it took every frame.
+    for _ in 0..400 {
+        delivery_sender
+            .send(Delivery::Frame(Box::new(oversize_snapshot.clone())))
+            .expect("the stand-in dispatcher holds the delivery queue");
+    }
+    delivery_sender
+        .send(Delivery::PlacementCommandRejected(CommandId::new()))
+        .expect("the stand-in dispatcher holds the delivery queue");
+    let connection = attach_test_client_over_link(
+        &runtime_directory,
+        session_id,
+        client_id,
+        true,
+        Some(MIN_LINK_TIMEOUT_MS),
+        None,
+    );
+    let (mut frame_reader, frame_writer) = connection.split();
+    frame_reader.set_deadline(Some(Instant::now() + Duration::from_secs(10)));
+
+    // The first frame on the wire is a pong: the writing thread wrote it while
+    // frames and the rejection still waited in the queue.
+    assert_eq!(
+        frame_reader
+            .recv::<SessionEvent>()
+            .expect("a pong while the frames wait"),
+        SessionEvent::Pong
+    );
+
+    drop(delivery_sender);
+    drop(frame_writer);
+    drop(frame_reader);
+    ipc_server.shutdown();
+    dispatcher_thread.join().expect("dispatcher exits");
+    delete_test_directory(&runtime_directory);
+}
+
+#[test]
+fn an_attach_with_a_link_timeout_below_the_minimum_is_refused_and_the_connection_keeps_serving() {
+    let client_id = ClientId::new();
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, _received_runtime_events) =
+        start_attachable_test_server("link-timeout-minimum", client_id);
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+    let build_attach_request = |request_id: u64, link_timeout_ms: u32| IpcRequest {
+        request_id,
+        request_kind: IpcRequestKind::Attach {
+            viewport_size: CLIENT_VIEWPORT_SIZE,
+            resume_client_id: None,
+            resume_token: None,
+            pane_area: None,
+            graphics_capabilities: GraphicsCapabilities::default(),
+            cell_size: None,
+            link_timeout_ms: Some(link_timeout_ms),
+        },
+    };
+
+    connection
+        .send(&build_attach_request(2, MIN_LINK_TIMEOUT_MS - 1))
+        .expect("send the attach below the minimum");
+    let refusal: IpcResponse = connection.recv().expect("the refusal");
+    assert_eq!(refusal.request_id, Some(2));
+    assert_eq!(
+        refusal.answer_result,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::RequestFailed,
+            message: "a link timeout of 999 ms is below the minimum of 1000 ms".to_owned(),
+        })
+    );
+
+    connection
+        .send(&build_attach_request(3, MIN_LINK_TIMEOUT_MS))
+        .expect("send the attach at the minimum");
+    let attach_reply: IpcResponse = connection.recv().expect("attach reply");
+    assert_eq!(attach_reply.request_id, Some(3));
+    assert_eq!(
+        attach_reply.answer_result,
+        IpcResult::Attached {
+            client_id,
+            session_id,
+            session_structure: build_attached_structure(session_id),
+            resume_token: Some(ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN)),
+            pane_area: None,
+        },
+    );
+
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+}
+
+#[test]
+fn a_connection_that_ends_with_no_leaving_reports_its_client_returning_only_from_another_machine() {
+    for is_remote in [false, true] {
+        let client_id = ClientId::new();
+        let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
+            start_attachable_test_server("end-without-leaving", client_id);
+        let connection = attach_test_client_over_link(
+            &runtime_directory,
+            session_id,
+            client_id,
+            is_remote,
+            None,
+            None,
+        );
+
+        drop(connection);
+        let RuntimeEvent::ClientDetached {
+            client_id: detached_client_id,
+            is_returning,
+            ..
+        } = receive_forwarded_event(&received_runtime_events)
+        else {
+            panic!("the closed connection detaches its client");
+        };
+        assert_eq!(detached_client_id, client_id);
+        assert_eq!(is_returning, is_remote, "is_remote {is_remote}");
+
+        stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+    }
+}
+
+#[test]
+fn leaving_from_another_machine_reports_whether_the_client_returns() {
+    for is_client_returning in [false, true] {
+        let client_id = ClientId::new();
+        let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
+            start_attachable_test_server("leaving-remote", client_id);
+        let mut connection = attach_test_client_over_link(
+            &runtime_directory,
+            session_id,
+            client_id,
+            true,
+            None,
+            None,
+        );
+
+        connection
+            .send(&IpcRequest {
+                request_id: 3,
+                request_kind: IpcRequestKind::Leaving {
+                    is_returning: is_client_returning,
+                },
+            })
+            .expect("send leaving");
+        let RuntimeEvent::ClientDetached { is_returning, .. } =
+            receive_forwarded_event(&received_runtime_events)
+        else {
+            panic!("leaving detaches the client");
+        };
+        assert_eq!(is_returning, is_client_returning);
+        // The session closes the queue on the detach: the client reads its
+        // goodbye.
+        assert_eq!(
+            connection
+                .recv::<SessionEvent>()
+                .expect("the goodbye frame"),
+            SessionEvent::Detached
+        );
+
+        drop(connection);
+        stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+    }
+}
+
+#[test]
+fn a_local_attach_that_names_a_client_to_come_back_as_reports_it_returning_until_its_first_request()
+{
+    for has_sent_request in [false, true] {
+        let client_id = ClientId::new();
+        let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
+            start_attachable_test_server("end-before-first-request", client_id);
+        let mut connection = attach_test_client_over_link(
+            &runtime_directory,
+            session_id,
+            client_id,
+            false,
+            None,
+            Some(client_id),
+        );
+        if has_sent_request {
+            connection
+                .send(&IpcRequest {
+                    request_id: 3,
+                    request_kind: IpcRequestKind::Resize {
+                        viewport_size: CLIENT_VIEWPORT_SIZE,
+                        pane_area: None,
+                        cell_size: None,
+                    },
+                })
+                .expect("send the size report");
+            let RuntimeEvent::Resize {
+                client_id: resized_client_id,
+                ..
+            } = receive_forwarded_event(&received_runtime_events)
+            else {
+                panic!("the size report reaches the dispatcher");
+            };
+            assert_eq!(resized_client_id, client_id);
+        }
+
+        drop(connection);
+        let RuntimeEvent::ClientDetached {
+            client_id: detached_client_id,
+            is_streamed,
+            is_returning,
+            ..
+        } = receive_forwarded_event(&received_runtime_events)
+        else {
+            panic!("the closed connection detaches its client");
+        };
+        assert_eq!(detached_client_id, client_id);
+        assert!(is_streamed);
+        assert_eq!(
+            is_returning, !has_sent_request,
+            "has_sent_request {has_sent_request}"
+        );
+
+        stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+    }
+}
+
+#[test]
+fn an_attach_whose_answer_cannot_be_written_reports_its_client_returning_only_when_it_names_a_client_to_come_back_as(
+) {
+    for resume_client_id in [None, Some(ClientId::new())] {
+        let client_id = ClientId::new();
+        let session_id = SessionId::new();
+        let runtime_directory = build_test_runtime_directory("attach-answer-unwritten");
+        let (inbox_sender, inbox_receiver) = mpsc::channel();
+        let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+            .expect("start serving");
+        let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+        connection
+            .send(&build_attach_request(resume_client_id, None))
+            .expect("send attach");
+        let RuntimeEvent::IpcAttach {
+            response_sender, ..
+        } = receive_forwarded_event(&inbox_receiver)
+        else {
+            panic!("the attach reaches the dispatcher");
+        };
+
+        // The client closes its connection before the session writes the
+        // answer.
+        drop(connection);
+        let (_delivery_sender, delivery_receiver) = mpsc::channel();
+        response_sender
+            .send(Some(build_attach_accepted(
+                client_id,
+                session_id,
+                delivery_receiver,
+                Arc::new(WaitingHostWrites::default()),
+                Arc::new(EndingNotice::default()),
+            )))
+            .expect("the session waits for the answer");
+        let RuntimeEvent::ClientDetached {
+            client_id: detached_client_id,
+            is_streamed,
+            is_returning,
+            ..
+        } = receive_forwarded_event(&inbox_receiver)
+        else {
+            panic!("the answer that cannot be written detaches its client");
+        };
+        assert_eq!(detached_client_id, client_id);
+        assert!(!is_streamed);
+        assert_eq!(
+            is_returning,
+            resume_client_id.is_some(),
+            "resume_client_id {resume_client_id:?}"
+        );
+
+        ipc_server.shutdown();
+        delete_test_directory(&runtime_directory);
+    }
+}
+
+#[test]
+fn a_stream_the_session_closed_hands_over_one_detach_when_the_client_closes() {
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory("one-detach");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (dispatcher_thread, delivery_sender, forwarded_runtime_events) =
+        spawn_forwarding_frame_dispatcher(inbox_receiver, client_id, session_id);
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+        .expect("start serving");
+    let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
+
+    // The closed queue ends the writing thread after its goodbye.
+    drop(delivery_sender);
+    assert_eq!(
+        connection
+            .recv::<SessionEvent>()
+            .expect("the goodbye frame"),
+        SessionEvent::Detached
+    );
+    assert_eq!(
+        forwarded_runtime_events
+            .recv_timeout(Duration::from_millis(300))
+            .unwrap_err(),
+        mpsc::RecvTimeoutError::Timeout,
+        "the writing thread hands over no detach"
+    );
+
+    drop(connection);
+    let RuntimeEvent::ClientDetached {
+        client_id: detached_client_id,
+        ..
+    } = receive_forwarded_event(&forwarded_runtime_events)
+    else {
+        panic!("the reading half detaches the client");
+    };
+    assert_eq!(detached_client_id, client_id);
+    assert_eq!(
+        forwarded_runtime_events
+            .recv_timeout(Duration::from_millis(300))
+            .unwrap_err(),
+        mpsc::RecvTimeoutError::Timeout,
+        "the client is detached once"
+    );
+
+    ipc_server.shutdown();
+    dispatcher_thread.join().expect("dispatcher exits");
+    delete_test_directory(&runtime_directory);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_write_detaches_a_client_whose_connection_stays_open() {
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory("failed-write");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (dispatcher_thread, delivery_sender, forwarded_runtime_events) =
+        spawn_forwarding_frame_dispatcher(inbox_receiver, client_id, session_id);
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+        .expect("start serving");
+    let connection = attach_test_client(&runtime_directory, session_id, client_id);
+    // On Linux, a write to a peer that shut its read direction fails with
+    // `EPIPE`. The client keeps its writing direction open.
+    connection
+        .create_read_closer()
+        .expect("the client's read direction")
+        .close();
+
+    delivery_sender
+        .send(Delivery::PlacementCommandRejected(CommandId::new()))
+        .expect("the writing thread holds the delivery queue");
+
+    let RuntimeEvent::ClientDetached {
+        client_id: detached_client_id,
+        ..
+    } = receive_forwarded_event(&forwarded_runtime_events)
+    else {
+        panic!("the failed write detaches the client");
+    };
+    assert_eq!(detached_client_id, client_id);
+
+    drop(delivery_sender);
+    drop(connection);
+    ipc_server.shutdown();
+    dispatcher_thread.join().expect("dispatcher exits");
+    delete_test_directory(&runtime_directory);
 }

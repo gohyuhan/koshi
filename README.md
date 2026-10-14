@@ -74,7 +74,7 @@ same machine or another one, and the panes are where you left them.
 - 🎹 **Complete keyboard events** — preserve key presses, repeats, releases, text, and modifiers from the outer terminal to pane programs through the kitty keyboard protocol.
 - 🔒 **Lock mode** — send keys directly to the active program.
 - 🖱️ **Mouse support** — focus panes, resize borders, scroll, and select text; `Shift`+drag selects even while a program owns the mouse.
-- 📋 **Clipboard copy** — copy mouse selections through OSC 52, including remote sessions.
+- 📋 **Clipboard copy** — copy mouse selections through OSC 52, including remote sessions. With `pane-clipboard-writes` on, a copy that a program in a pane makes, through OSC 52 or `pbcopy`, `xclip`, `xsel` or `wl-copy`, reaches your clipboard too.
 - 🎯 **Mouse selection mode** — select text while a program owns mouse input.
 - 👥 **Multi-client sessions** — attach several terminals to one session; each keeps its own focus, active tab, and zoom.
 - 📜 **Per-pane history** — keep separate scrollback and scroll positions.
@@ -86,7 +86,7 @@ same machine or another one, and the panes are where you left them.
 - ⚙️ **Config files** — keep app settings, themes, keybindings, and layouts separate.
 - 💾 **Saved layouts** — start tabs, panes, commands, directories, environment values, and locked input from a profile.
 - 🪵 **Logging** — write optional per-session text or JSON logs without terminal content.
-- 🌐 **Remote sessions** — attach to a session on another machine over TLS with hybrid post-quantum key exchange, a pinned certificate, and an access token.
+- 🌐 **Remote sessions** — attach to a session on another machine over TLS 1.3 with hybrid post-quantum key exchange, a certificate fingerprint check, and an access token.
 - 🔑 **Access tokens** — grant, revoke, and list the tokens that reach your sessions; each grant covers one session or every session.
 - 🔁 **Reconnect** — a dropped remote link dials again for two minutes and puts your tabs, focus, and scroll position back.
 - 👤 **Same-machine sharing** — let the other users of this machine list, attach to, and kill your sessions.
@@ -203,8 +203,9 @@ sudo rm -f /usr/local/bin/koshi
 ```
 
 Remove all Koshi config, logs, update state, cache, runtime files, and the
-remote data — the saved server secrets, the pinned certificates, and the access
-tokens this machine granted:
+remote data — the saved servers with their secrets and certificate
+fingerprints, this machine's certificate, and the access tokens this machine
+granted:
 
 ```bash
 rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/koshi"
@@ -230,8 +231,9 @@ brew untap gohyuhan/koshi
 ```
 
 Remove all Koshi config, logs, update state, cache, runtime files, and the
-remote data — the saved server secrets, the pinned certificates, and the access
-tokens this machine granted:
+remote data — the saved servers with their secrets and certificate
+fingerprints, this machine's certificate, and the access tokens this machine
+granted:
 
 ```bash
 rm -rf "$HOME/Library/Application Support/koshi"
@@ -269,8 +271,9 @@ Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
 ```
 
 Remove all remaining Koshi config, logs, update state, cache, runtime files,
-and the remote data — the saved server secrets, the pinned certificates, and
-the access tokens this machine granted:
+and the remote data — the saved servers with their secrets and certificate
+fingerprints, this machine's certificate, and the access tokens this machine
+granted:
 
 ```powershell
 Remove-Item (Join-Path $env:APPDATA "koshi") `
@@ -347,7 +350,7 @@ the user.
 
 | File | Contents |
 |---|---|
-| `koshi.kdl` | Theme, image, reduced-motion, pane placement, pane, scrollback, layout, mouse, copy, terminal, logging, update, beta-feature, session-closing, other-user access, and remote access settings |
+| `koshi.kdl` | Theme, image, reduced-motion, pane placement, pane, scrollback, layout, mouse, copy, pane clipboard write, terminal, logging, update, beta-feature, session-closing, other-user access, and remote access settings |
 | `themes/<name>.kdl` | Koshi interface colors |
 | `keybinding.kdl` | Keybindings and input modes |
 | `profile/<name>.kdl` | Tabs, pane layouts, commands, directories, environment values, and the starting input mode |
@@ -475,17 +478,20 @@ holding a `fail` row exits 1, and a run of only `ok` and `warn` rows exits 0.
 The global `--remote <SERVER>` flag runs one invocation against the machine
 `SERVER` names instead of this one. It works with `attach`, with
 `list-sessions`, and with the verbs that act on panes, tabs, and input.
-Every other verb refuses it.
+Every other verb refuses it. A server this machine has not saved also needs
+the global `--certificate-fingerprint <FINGERPRINT>` flag, with the
+fingerprint `koshi share grant` prints on that machine. A saved server
+refuses that flag.
 
 | Command | Result |
 |---|---|
 | `koshi share grant <IDENTITY> [--session <SESSION>] [--expires <DURATION>]` | Grant an identity a remote access token |
 | `koshi share revoke <IDENTITY> [--session <SESSION>]` | Revoke the tokens an identity holds |
 | `koshi share list [--session <SESSION>] [--format table\|json]` | List the tokens granted on this machine |
-| `koshi attach --remote <SERVER> [--save-as <NAME>] [SESSION]` | Attach to a session on the machine `SERVER` names |
-| `koshi list-sessions --remote <SERVER>` | List the sessions on the machine `SERVER` names |
-| `koshi remote new` | Save a server, asking for its name, address and secret |
-| `koshi remote edit <SERVER>` | Change one saved server's name, address or secret |
+| `koshi attach --remote <SERVER> [--certificate-fingerprint <FINGERPRINT>] [--save-as <NAME>] [SESSION]` | Attach to a session on the machine `SERVER` names |
+| `koshi list-sessions --remote <SERVER> [--certificate-fingerprint <FINGERPRINT>]` | List the sessions on the machine `SERVER` names |
+| `koshi remote new` | Save a server, asking for its name, address, certificate fingerprint and secret |
+| `koshi remote edit <SERVER>` | Change one saved server's name, address, certificate fingerprint or secret |
 | `koshi remote list [--format table\|json]` | List the servers this machine has saved |
 | `koshi remote forget <SERVER>` | Drop one saved server |
 | `koshi remote set-secret <SERVER>` | Replace the secret of one saved server |
@@ -495,8 +501,11 @@ the machine connecting to it.
 
 After an update, the router converts the remote listener's certificate,
 access mark, and token grants. The first read of saved servers converts their
-file. For example, a saved server keeps its secret and certificate pin, and a
-grant keeps its scope and expiry; no re-enrollment is needed.
+file. For example, a saved server keeps its secret and certificate
+fingerprint, and a grant keeps its scope and expiry; no re-enrollment is
+needed. A saved server that holds no fingerprint, such as one an older koshi
+saved before it ever connected, is not dialled until `koshi remote edit` gives
+it one.
 
 ### Debugging
 

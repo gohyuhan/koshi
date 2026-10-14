@@ -55,6 +55,7 @@ fn default_server_and_client_configs_match_expected_settings() {
     assert!(!client_config.should_reduce_motion);
     assert!(client_config.should_stay_in_pane_placement_mode_after_placement);
     assert!(client_config.should_reconnect_remote_session);
+    assert_eq!(client_config.remote_link_timeout_ms, 30_000);
 
     assert_eq!(client_config.keybindings.chord_timeout_ms, 500);
     assert_eq!(client_config.keybindings.which_key_delay_ms, 300);

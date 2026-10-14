@@ -33,6 +33,10 @@ const WATCHED_FROM_ANOTHER_MACHINE_HELP: &str =
 const EXPECTED_EXPIRY_ERROR: &str =
     "expected a length such as 30s, 15m, 24h or 7d, or the word never";
 
+/// The certificate fingerprint every `RemoteReady::On` in these tests carries.
+const TEST_CERTIFICATE_FINGERPRINT: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 /// The parsed `share` subcommand of `argv`.
 fn parse_share_command(argv: &[&str]) -> ShareCommand {
     match Cli::try_parse_from(argv)
@@ -254,18 +258,22 @@ fn a_grant_block_with_remote_access_on_ends_with_the_command_that_connects() {
                 &RemoteReady::On {
                     remote_listen_address: parse_listen_address("192.168.1.20:7654"),
                     host_addresses: Vec::new(),
+                    certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
                 },
             );
 
     assert_eq!(
         rendered_output,
-        "anyone holding this token can run anything you can.\n\
-         f00d\n\
-         connect from another machine:\n\
-         \x20 koshi attach --remote 192.168.1.20:7654 --save-as alice [SESSION]\n\
-         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-         this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); the \
-         other machine must connect to that address.\n"
+        format!(
+            "anyone holding this token can run anything you can.\n\
+             f00d\n\
+             connect from another machine:\n\
+             \x20 koshi attach --remote 192.168.1.20:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+             this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); \
+             the other machine must connect to that address.\n"
+        )
     );
 }
 
@@ -421,16 +429,20 @@ fn an_identity_shaped_like_an_address_is_not_offered_as_a_saved_name() {
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("192.168.1.20:7654"),
             host_addresses: Vec::new(),
+            certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         },
     );
 
     assert_eq!(
         rendered_output,
-        "connect from another machine:\n\
-         \x20 koshi attach --remote 192.168.1.20:7654 [SESSION]\n\
-         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-         this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); the \
-         other machine must connect to that address.\n"
+        format!(
+            "connect from another machine:\n\
+             \x20 koshi attach --remote 192.168.1.20:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
+             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+             this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); \
+             the other machine must connect to that address.\n"
+        )
     );
 }
 
@@ -442,16 +454,20 @@ fn an_identity_with_a_space_in_it_is_not_offered_as_a_saved_name() {
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("192.168.1.20:7654"),
             host_addresses: Vec::new(),
+            certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         },
     );
 
     assert_eq!(
         rendered_output,
-        "connect from another machine:\n\
-         \x20 koshi attach --remote 192.168.1.20:7654 [SESSION]\n\
-         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-         this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); the \
-         other machine must connect to that address.\n"
+        format!(
+            "connect from another machine:\n\
+             \x20 koshi attach --remote 192.168.1.20:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
+             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+             this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); \
+             the other machine must connect to that address.\n"
+        )
     );
 }
 
@@ -462,16 +478,20 @@ fn a_plain_identity_is_still_offered_as_the_saved_name() {
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("192.168.1.20:7654"),
             host_addresses: Vec::new(),
+            certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         },
     );
 
     assert_eq!(
         rendered_output,
-        "connect from another machine:\n\
-         \x20 koshi attach --remote 192.168.1.20:7654 --save-as alice [SESSION]\n\
-         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-         this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); the \
-         other machine must connect to that address.\n"
+        format!(
+            "connect from another machine:\n\
+             \x20 koshi attach --remote 192.168.1.20:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+             this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); \
+             the other machine must connect to that address.\n"
+        )
     );
 }
 
@@ -487,12 +507,14 @@ fn a_router_that_could_not_answer_leaves_the_state_unread_rather_than_off() {
     let answered_remote_ready = resolve_remote_ready_or_unknown(Ok(RemoteReady::On {
         remote_listen_address: parse_listen_address("192.168.1.20:7654"),
         host_addresses: Vec::new(),
+        certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
     }));
     assert_eq!(
         answered_remote_ready,
         RemoteReady::On {
             remote_listen_address: parse_listen_address("192.168.1.20:7654"),
             host_addresses: Vec::new(),
+            certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         },
         "an answer is passed through as it stands"
     );
@@ -502,6 +524,99 @@ fn a_router_that_could_not_answer_leaves_the_state_unread_rather_than_off() {
         off_remote_ready,
         RemoteReady::Off,
         "including a machine that really is off"
+    );
+}
+
+/// A `RemoteStatus` answer for the listen address `192.168.1.20:7654`.
+fn build_remote_status(
+    is_remote_access_enabled: bool,
+    is_listening: bool,
+    certificate_fingerprint: Option<String>,
+) -> RouterResult {
+    RouterResult::RemoteStatus {
+        remote_listen_address: Some(parse_listen_address("192.168.1.20:7654")),
+        is_remote_access_enabled,
+        is_listening,
+        certificate_fingerprint,
+        remote_connection_count: 0,
+    }
+}
+
+#[test]
+fn a_serving_router_gives_the_fingerprint_it_names_and_nothing_is_asked() {
+    let remote_ready = resolve_remote_access_ready(
+        |_| panic!("a serving router is not asked to open anything"),
+        |router_request_kind| match router_request_kind {
+            RouterRequestKind::RemoteStatus => Ok(build_remote_status(
+                true,
+                true,
+                Some(TEST_CERTIFICATE_FINGERPRINT.to_string()),
+            )),
+            unexpected_request_kind => panic!("unexpected request {unexpected_request_kind:?}"),
+        },
+    )
+    .expect("the router answers");
+
+    assert_eq!(
+        remote_ready,
+        RemoteReady::On {
+            remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+            host_addresses: Vec::new(),
+            certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+        }
+    );
+}
+
+#[test]
+fn a_serving_router_that_names_no_fingerprint_gives_no_connect_command() {
+    let remote_ready_error = resolve_remote_access_ready(
+        |_| panic!("a serving router is not asked to open anything"),
+        |router_request_kind| match router_request_kind {
+            RouterRequestKind::RemoteStatus => Ok(build_remote_status(true, true, None)),
+            unexpected_request_kind => panic!("unexpected request {unexpected_request_kind:?}"),
+        },
+    )
+    .expect_err("a connect command needs a fingerprint");
+
+    let CliError::Runtime { detail } = remote_ready_error else {
+        panic!("expected a runtime failure, got {remote_ready_error:?}");
+    };
+    assert_eq!(
+        detail,
+        "the router serves 192.168.1.20:7654 and named no certificate fingerprint"
+    );
+}
+
+#[test]
+fn an_enable_the_user_confirms_gives_the_fingerprint_the_router_answers_with() {
+    let mut asked_prompt_texts = Vec::new();
+    let remote_ready = resolve_remote_access_ready(
+        |prompt_text| {
+            asked_prompt_texts.push(prompt_text.to_string());
+            true
+        },
+        |router_request_kind| match router_request_kind {
+            RouterRequestKind::RemoteStatus => Ok(build_remote_status(false, false, None)),
+            RouterRequestKind::EnableRemote => Ok(RouterResult::RemoteEnabled {
+                remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+                certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+            }),
+            unexpected_request_kind => panic!("unexpected request {unexpected_request_kind:?}"),
+        },
+    )
+    .expect("the router answers");
+
+    assert_eq!(
+        asked_prompt_texts,
+        vec!["remote access is off.\nturn it on and open 192.168.1.20:7654? [y/N] ".to_string()]
+    );
+    assert_eq!(
+        remote_ready,
+        RemoteReady::On {
+            remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+            host_addresses: Vec::new(),
+            certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+        }
     );
 }
 
@@ -1192,15 +1307,20 @@ fn a_listener_on_every_ipv4_address_names_each_address_of_this_machine_with_its_
                 build_host_address("192.168.1.20", "en0"),
                 build_host_address("100.64.0.2", "utun3"),
             ],
+            certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         },
     );
 
     assert_eq!(
         rendered_output,
-        "connect from another machine, at the address of this one it can reach:\n\
-         \x20 koshi attach --remote 192.168.1.20:7654 --save-as alice [SESSION]   # en0\n\
-         \x20 koshi attach --remote 100.64.0.2:7654 --save-as alice [SESSION]   # utun3\n\
-         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+        format!(
+            "connect from another machine, at the address of this one it can reach:\n\
+             \x20 koshi attach --remote 192.168.1.20:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # en0\n\
+             \x20 koshi attach --remote 100.64.0.2:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # utun3\n\
+             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+        )
     );
 }
 
@@ -1211,14 +1331,18 @@ fn a_listener_on_every_ipv6_address_names_each_address_in_brackets() {
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("[::]:7654"),
             host_addresses: vec![build_host_address("2001:db8::20", "Wi-Fi")],
+            certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         },
     );
 
     assert_eq!(
         rendered_output,
-        "connect from another machine, at the address of this one it can reach:\n\
-         \x20 koshi attach --remote [2001:db8::20]:7654 [SESSION]   # Wi-Fi\n\
-         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+        format!(
+            "connect from another machine, at the address of this one it can reach:\n\
+             \x20 koshi attach --remote [2001:db8::20]:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} [SESSION]   # Wi-Fi\n\
+             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+        )
     );
 }
 
@@ -1229,14 +1353,18 @@ fn an_interface_name_is_printed_without_its_control_characters() {
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("0.0.0.0:7654"),
             host_addresses: vec![build_host_address("192.168.1.20", "en0\u{1b}]0;x\u{7}")],
+            certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         },
     );
 
     assert_eq!(
         rendered_output,
-        "connect from another machine, at the address of this one it can reach:\n\
-         \x20 koshi attach --remote 192.168.1.20:7654 --save-as alice [SESSION]   # en0]0;x\n\
-         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+        format!(
+            "connect from another machine, at the address of this one it can reach:\n\
+             \x20 koshi attach --remote 192.168.1.20:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # en0]0;x\n\
+             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+        )
     );
 }
 
@@ -1247,14 +1375,18 @@ fn a_listener_on_every_address_of_a_machine_with_none_names_a_placeholder() {
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("0.0.0.0:7654"),
             host_addresses: Vec::new(),
+            certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         },
     );
 
     assert_eq!(
         rendered_output,
-        "this machine has no network address right now. Connect from another machine with:\n\
-         \x20 koshi attach --remote <this machine's address>:7654 --save-as alice [SESSION]\n\
-         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+        format!(
+            "this machine has no network address right now. Connect from another machine with:\n\
+             \x20 koshi attach --remote <this machine's address>:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+        )
     );
 }
 
@@ -1265,16 +1397,20 @@ fn a_listener_on_one_address_names_it_and_says_it_is_the_only_one() {
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("192.168.1.20:7654"),
             host_addresses: Vec::new(),
+            certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         },
     );
 
     assert_eq!(
         rendered_output,
-        "connect from another machine:\n\
-         \x20 koshi attach --remote 192.168.1.20:7654 --save-as alice [SESSION]\n\
-         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-         this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); the \
-         other machine must connect to that address.\n"
+        format!(
+            "connect from another machine:\n\
+             \x20 koshi attach --remote 192.168.1.20:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+             this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); \
+             the other machine must connect to that address.\n"
+        )
     );
 }
 
@@ -1299,6 +1435,7 @@ fn a_listener_on_a_loopback_address_says_no_other_machine_can_connect() {
             &RemoteReady::On {
                 remote_listen_address: parse_listen_address(remote_listen_address),
                 host_addresses: Vec::new(),
+                certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
             },
         );
 

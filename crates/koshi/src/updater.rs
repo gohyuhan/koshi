@@ -1725,7 +1725,7 @@ fn get_binary_file_name() -> &'static str {
 
 /// On Windows, deletes the backups beside the file the running executable's
 /// path names once every symbolic link and junction in it is followed, as
-/// [`delete_stale_backups_beside`] states. A path that cannot be read or
+/// `delete_stale_backups_beside` states. A path that cannot be read or
 /// followed deletes nothing. A no-op on other platforms, where the swap leaves
 /// no file behind.
 fn delete_stale_backups() {

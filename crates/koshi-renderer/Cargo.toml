@@ -10,3 +10,6 @@ koshi-core.workspace = true
 koshi-layout.workspace = true
 koshi-terminal.workspace = true
 ratatui.workspace = true
+
+[dev-dependencies]
+koshi-test-support.workspace = true

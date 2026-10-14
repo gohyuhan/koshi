@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use koshi_core::command::{Command, CommandResult, CommandSource};
 use koshi_core::ids::PaneId;
 use koshi_core::process::KillPolicy;
-use koshi_terminal::engine::TerminalEngine;
 
 use crate::runtime::event::RuntimeEvent;
 use crate::server::Server;
@@ -84,6 +83,7 @@ impl Server {
                 client_id,
                 detached_at,
                 is_streamed,
+                is_returning,
             } => {
                 // The view is filed before the detach, which removes the record
                 // it is read from.
@@ -92,7 +92,11 @@ impl Server {
                 } else {
                     self.saved_view_store.forget_client_resume_token(client_id);
                 }
-                let client_detach_events = self.handle_client_detach(client_id);
+                let client_detach_events = if is_returning {
+                    self.handle_returning_client_detach(client_id)
+                } else {
+                    self.handle_client_detach(client_id)
+                };
                 self.publish_events(&client_detach_events);
             }
             RuntimeEvent::Resize {
@@ -180,6 +184,23 @@ impl Server {
             RuntimeEvent::IpcRestart { response_sender } => {
                 let _ = response_sender.send(self.handle_ipc_restart());
             }
+            RuntimeEvent::IpcClipboardCopyPart {
+                held_copy_byte_count,
+                response_sender,
+            } => {
+                let _ =
+                    response_sender.send(self.can_take_clipboard_tool_copy(held_copy_byte_count));
+            }
+            RuntimeEvent::IpcClipboardCopy {
+                pane_id,
+                clipboard_targets,
+                copied_bytes,
+                response_sender,
+            } => {
+                let is_routed =
+                    self.route_clipboard_tool_copy(pane_id, &clipboard_targets, &copied_bytes);
+                let _ = response_sender.send(!is_routed);
+            }
             RuntimeEvent::DropUnclaimedClients {
                 unclaimed_client_deadline,
             } => {
@@ -191,17 +212,18 @@ impl Server {
         ControlFlow::Continue(())
     }
 
-    /// How long the loop may block before the next render is due: `None` to
-    /// sleep until an event, `Some(ZERO)` to render now, else the time left on
-    /// the current cadence.
+    /// How long the loop may block at `current_time` before
+    /// [`poll_render`](Self::poll_render) must run: `None` to sleep until an
+    /// event, else the shortest of the time left on the render cadence
+    /// (`Some(ZERO)` to render now), the time until the next image animation
+    /// frame (`Some(ZERO)` for an animation whose clock has not started), and
+    /// the time until an open synchronized-output group must be released.
     pub fn compute_next_render_wakeup(&self, current_time: Instant) -> Option<Duration> {
         let animation_wakeup = self
             .terminal_engine_by_pane_id
             .values()
-            .filter_map(TerminalEngine::get_next_image_animation_delay)
-            .map(|animation_delay| {
-                animation_delay
-                    .saturating_sub(current_time.saturating_duration_since(self.animation_clock))
+            .filter_map(|terminal_engine| {
+                terminal_engine.get_next_image_animation_delay(current_time)
             })
             .min();
         let synchronized_output_wakeup = self
@@ -221,8 +243,17 @@ impl Server {
         .min()
     }
 
-    /// Whether a render is due at `current_time`. When `true`, the scheduler records the
-    /// render and clears its pending reasons, so the caller must repaint.
+    /// Whether a render is due at `current_time`, in three steps:
+    ///
+    /// 1. Releases each pane's open synchronized-output group whose time ran
+    ///    out at `current_time`.
+    /// 2. Advances the image animations of every pane to `current_time`. An
+    ///    animation whose clock has not started starts it at `current_time`.
+    ///    A changed frame in any pane requests a render.
+    /// 3. Asks the render scheduler whether a render is due.
+    ///
+    /// When `true`, the scheduler records the render and clears its pending
+    /// reasons, so the caller must repaint.
     pub fn poll_render(&mut self, current_time: Instant) -> bool {
         let expired_pane_ids: Vec<PaneId> = self
             .terminal_engine_by_pane_id
@@ -236,12 +267,10 @@ impl Server {
         for pane_id in expired_pane_ids {
             self.expire_synchronized_output(pane_id, current_time);
         }
-        let elapsed_duration = current_time.saturating_duration_since(self.animation_clock);
-        self.animation_clock = current_time;
-        let has_animation_changes = self
-            .terminal_engine_by_pane_id
-            .values_mut()
-            .any(|terminal_engine| terminal_engine.advance_image_animations(elapsed_duration));
+        let mut has_animation_changes = false;
+        for terminal_engine in self.terminal_engine_by_pane_id.values_mut() {
+            has_animation_changes |= terminal_engine.advance_image_animations(current_time);
+        }
         if has_animation_changes {
             self.render_scheduler.invalidate();
         }

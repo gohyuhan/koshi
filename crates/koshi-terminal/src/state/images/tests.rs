@@ -1,7 +1,7 @@
 //! Tests for retained image animation state and frame timing.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use koshi_core::process::PtySize;
 use koshi_image::{AnimationFrame, DecodedAnimation, DecodedImage, FrameDelay, LoopPolicy};
@@ -77,8 +77,8 @@ fn build_animated_image_record(loop_policy: LoopPolicy, delay_milliseconds: u32)
     }
 }
 
-#[test]
-fn animation_frame_changes_after_its_delay() {
+/// A 2x2 terminal state with 1x1-pixel cells that shows `image_record` at (0, 0).
+fn build_terminal_state_showing(image_record: &ImageRecord) -> TerminalState {
     let mut terminal_state = TerminalState::from_pty_size(PtySize {
         column_count: 2,
         row_count: 2,
@@ -87,80 +87,161 @@ fn animation_frame_changes_after_its_delay() {
         koshi_core::geometry::PixelCellSize::from_pixel_dimensions(1, 1).expect("cell size"),
     );
     terminal_state
-        .apply_image_record(&build_animated_image_record(LoopPolicy::Infinite, 10))
-        .expect("the animated image fits");
+        .apply_image_record(image_record)
+        .expect("the image fits");
+    terminal_state
+}
+
+/// The pixels that the first image placement of `terminal_state` shows.
+fn get_shown_rgba_bytes(terminal_state: &TerminalState) -> Vec<u8> {
+    terminal_state.list_image_placements()[0]
+        .get_image_record()
+        .image
+        .rgba_bytes
+        .clone()
+}
+
+#[test]
+fn animation_frame_changes_after_its_delay() {
+    let mut terminal_state =
+        build_terminal_state_showing(&build_animated_image_record(LoopPolicy::Infinite, 10));
+    let start_time = Instant::now();
+    assert!(!terminal_state.advance_image_animations(start_time));
 
     assert_eq!(
-        terminal_state.get_next_image_animation_delay(),
+        terminal_state.get_next_image_animation_delay(start_time),
         Some(Duration::from_millis(10))
     );
-    assert!(!terminal_state.advance_image_animations(Duration::from_millis(9)));
+    assert!(!terminal_state.advance_image_animations(start_time + Duration::from_millis(9)));
+    assert_eq!(get_shown_rgba_bytes(&terminal_state), [255, 0, 0, 255]);
+    assert!(terminal_state.advance_image_animations(start_time + Duration::from_millis(10)));
+    assert_eq!(get_shown_rgba_bytes(&terminal_state), [0, 255, 0, 255]);
+}
+
+#[test]
+fn an_animation_clock_starts_at_its_first_advance_and_counts_no_earlier_time() {
+    let mut terminal_state =
+        build_terminal_state_showing(&build_animated_image_record(LoopPolicy::Infinite, 10));
+    let shown_time = Instant::now();
+    let first_advance_time = shown_time + Duration::from_secs(1);
+
     assert_eq!(
-        terminal_state.list_image_placements()[0]
-            .get_image_record()
-            .image
-            .rgba_bytes,
-        [255, 0, 0, 255]
+        terminal_state.get_next_image_animation_delay(shown_time),
+        Some(Duration::ZERO)
     );
-    assert!(terminal_state.advance_image_animations(Duration::from_millis(1)));
+    assert!(!terminal_state.advance_image_animations(first_advance_time));
+    assert_eq!(get_shown_rgba_bytes(&terminal_state), [255, 0, 0, 255]);
     assert_eq!(
-        terminal_state.list_image_placements()[0]
-            .get_image_record()
-            .image
-            .rgba_bytes,
-        [0, 255, 0, 255]
+        terminal_state.get_next_image_animation_delay(first_advance_time),
+        Some(Duration::from_millis(10))
+    );
+    assert!(terminal_state.advance_image_animations(first_advance_time + Duration::from_millis(10)));
+    assert_eq!(get_shown_rgba_bytes(&terminal_state), [0, 255, 0, 255]);
+}
+
+#[test]
+fn an_advance_that_crosses_no_frame_boundary_keeps_every_placement() {
+    let mut terminal_state =
+        build_terminal_state_showing(&build_animated_image_record(LoopPolicy::Infinite, 10));
+    let start_time = Instant::now();
+    assert!(!terminal_state.advance_image_animations(start_time));
+    let placements_before_advance = terminal_state.list_image_placements();
+
+    assert!(!terminal_state.advance_image_animations(start_time + Duration::from_millis(9)));
+
+    assert!(std::ptr::eq(
+        placements_before_advance[0].get_image_record(),
+        terminal_state.list_image_placements()[0].get_image_record()
+    ));
+    assert_eq!(
+        terminal_state.get_next_image_animation_delay(start_time + Duration::from_millis(9)),
+        Some(Duration::from_millis(1))
+    );
+}
+
+#[test]
+fn an_animation_that_misses_a_whole_cycle_keeps_the_time_shown_in_its_frame() {
+    let mut terminal_state =
+        build_terminal_state_showing(&build_animated_image_record(LoopPolicy::Infinite, 10));
+    let start_time = Instant::now();
+    assert!(!terminal_state.advance_image_animations(start_time));
+
+    assert!(!terminal_state.advance_image_animations(start_time + Duration::from_millis(25)));
+
+    assert_eq!(get_shown_rgba_bytes(&terminal_state), [255, 0, 0, 255]);
+    assert_eq!(
+        terminal_state.get_next_image_animation_delay(start_time + Duration::from_millis(25)),
+        Some(Duration::from_millis(5))
+    );
+}
+
+#[test]
+fn a_restored_animation_keeps_the_time_its_frame_showed_before_the_snapshot() {
+    let frame_delay = Duration::from_secs(3_600);
+    let mut terminal_state = build_terminal_state_showing(&build_animated_image_record(
+        LoopPolicy::Infinite,
+        3_600_000,
+    ));
+    let clock_start_time = Instant::now()
+        .checked_sub(Duration::from_secs(3))
+        .expect("the monotonic clock reaches 3 s back");
+    assert!(!terminal_state.advance_image_animations(clock_start_time));
+
+    let before_serialization_time = Instant::now();
+    let serialized_terminal_state =
+        serde_json::to_vec(&terminal_state).expect("the state serializes");
+    let after_serialization_time = Instant::now();
+    let mut restored_terminal_state: TerminalState =
+        serde_json::from_slice(&serialized_terminal_state).expect("the state restores");
+    let restored_time = Instant::now();
+    assert!(!restored_terminal_state.advance_image_animations(restored_time));
+
+    let next_frame_delay = restored_terminal_state
+        .get_next_image_animation_delay(restored_time)
+        .expect("the animation runs");
+    let shortest_next_frame_delay = frame_delay - (after_serialization_time - clock_start_time);
+    let longest_next_frame_delay = frame_delay - (before_serialization_time - clock_start_time);
+    assert!(
+        next_frame_delay >= shortest_next_frame_delay
+            && next_frame_delay <= longest_next_frame_delay,
+        "next frame in {next_frame_delay:?}, not in \
+         {shortest_next_frame_delay:?}..={longest_next_frame_delay:?}"
     );
 }
 
 #[test]
 fn zero_delay_animation_uses_the_normal_render_interval() {
-    let mut terminal_state = TerminalState::from_pty_size(PtySize {
-        column_count: 2,
-        row_count: 2,
-    });
-    terminal_state.set_cell_size(
-        koshi_core::geometry::PixelCellSize::from_pixel_dimensions(1, 1).expect("cell size"),
-    );
-    terminal_state
-        .apply_image_record(&build_animated_image_record(LoopPolicy::Infinite, 0))
-        .expect("the animated image fits");
+    let mut terminal_state =
+        build_terminal_state_showing(&build_animated_image_record(LoopPolicy::Infinite, 0));
+    let start_time = Instant::now();
+    assert!(!terminal_state.advance_image_animations(start_time));
 
     assert_eq!(
-        terminal_state.get_next_image_animation_delay(),
+        terminal_state.get_next_image_animation_delay(start_time),
         Some(Duration::from_millis(8))
     );
 }
 
 #[test]
 fn finite_animation_stops_on_its_last_frame() {
-    let mut terminal_state = TerminalState::from_pty_size(PtySize {
-        column_count: 2,
-        row_count: 2,
-    });
-    terminal_state.set_cell_size(
-        koshi_core::geometry::PixelCellSize::from_pixel_dimensions(1, 1).expect("cell size"),
-    );
-    terminal_state
-        .apply_image_record(&build_animated_image_record(
-            LoopPolicy::from_finite_playback_count(1).expect("one playback is valid"),
-            10,
-        ))
-        .expect("the animated image fits");
+    let mut terminal_state = build_terminal_state_showing(&build_animated_image_record(
+        LoopPolicy::from_finite_playback_count(1).expect("one playback is valid"),
+        10,
+    ));
+    let start_time = Instant::now();
+    assert!(!terminal_state.advance_image_animations(start_time));
 
-    assert!(terminal_state.advance_image_animations(Duration::from_millis(10)));
+    assert!(terminal_state.advance_image_animations(start_time + Duration::from_millis(10)));
     assert_eq!(
-        terminal_state.get_next_image_animation_delay(),
+        terminal_state.get_next_image_animation_delay(start_time + Duration::from_millis(10)),
         Some(Duration::from_millis(10))
     );
-    assert!(!terminal_state.advance_image_animations(Duration::from_millis(10)));
+    assert!(!terminal_state.advance_image_animations(start_time + Duration::from_millis(20)));
+    assert_eq!(get_shown_rgba_bytes(&terminal_state), [0, 255, 0, 255]);
     assert_eq!(
-        terminal_state.list_image_placements()[0]
-            .get_image_record()
-            .image
-            .rgba_bytes,
-        [0, 255, 0, 255]
+        terminal_state.get_next_image_animation_delay(start_time + Duration::from_millis(20)),
+        None
     );
-    assert_eq!(terminal_state.get_next_image_animation_delay(), None);
 }
 
 #[test]
@@ -213,43 +294,22 @@ fn gapless_kitty_style_frames_are_skipped_without_a_visible_intermediate_frame()
         },
         anchor: (0, 0),
     };
-    let mut terminal_state = TerminalState::from_pty_size(PtySize {
-        column_count: 2,
-        row_count: 2,
-    });
-    terminal_state.set_cell_size(
-        koshi_core::geometry::PixelCellSize::from_pixel_dimensions(1, 1).expect("cell size"),
-    );
-    terminal_state
-        .apply_image_record(&image_record)
-        .expect("the image fits");
+    let mut terminal_state = build_terminal_state_showing(&image_record);
+    let start_time = Instant::now();
+    assert!(!terminal_state.advance_image_animations(start_time));
 
     assert_eq!(
-        terminal_state.get_next_image_animation_delay(),
+        terminal_state.get_next_image_animation_delay(start_time),
         Some(Duration::from_millis(10))
     );
-    assert!(terminal_state.advance_image_animations(Duration::from_millis(10)));
-    assert_eq!(
-        terminal_state.list_image_placements()[0]
-            .get_image_record()
-            .image
-            .rgba_bytes,
-        [0, 255, 0, 255]
-    );
+    assert!(terminal_state.advance_image_animations(start_time + Duration::from_millis(10)));
+    assert_eq!(get_shown_rgba_bytes(&terminal_state), [0, 255, 0, 255]);
 }
 
 #[test]
 fn image_storage_counts_shared_animation_and_raster_pixels_once() {
-    let mut terminal_state = TerminalState::from_pty_size(PtySize {
-        column_count: 2,
-        row_count: 2,
-    });
-    terminal_state.set_cell_size(
-        koshi_core::geometry::PixelCellSize::from_pixel_dimensions(1, 1).expect("cell size"),
-    );
-    terminal_state
-        .apply_image_record(&build_animated_image_record(LoopPolicy::Infinite, 10))
-        .expect("the animated image fits");
+    let mut terminal_state =
+        build_terminal_state_showing(&build_animated_image_record(LoopPolicy::Infinite, 10));
     let image_content = Arc::clone(&terminal_state.primary_image_placements[0].image_content);
     terminal_state.primary_image_placements[0].raster =
         Some(Arc::clone(&image_content.decoded_image));

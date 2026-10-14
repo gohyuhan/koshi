@@ -2040,11 +2040,15 @@ impl PtyBackend for PortablePtyBackend {
         }
 
         //    ...including the environment. `CommandBuilder` is never cleared:
-        //    the child inherits the full parent env, kept as `OsString`, and
-        //    non-UTF-8 vars survive intact. `build_environment_overlay` returns only koshi's
-        //    overlay (terminal identity + shell bootstrap + the spawn
-        //    specification's environment variables), and
-        //    applying each key with `command_builder.env` overwrites the inherited value.
+        //    the child starts from the full parent env, kept as `OsString`, and
+        //    non-UTF-8 vars survive intact. On Windows, `CommandBuilder::new`
+        //    then sets each variable of the registry's system environment and
+        //    of the user's environment over the parent env, and `PATH` becomes
+        //    the system `PATH`, `;`, then the user `PATH`. `build_environment_overlay`
+        //    returns only koshi's overlay (terminal identity + shell bootstrap +
+        //    the spawn specification's environment variables), and applying
+        //    each key with `command_builder.env` replaces the value that the
+        //    child gets without it.
         //    On Windows `portable-pty` folds env names case-insensitively: an
         //    override such as `PATH` replaces a differently-cased inherited
         //    key (`Path`).

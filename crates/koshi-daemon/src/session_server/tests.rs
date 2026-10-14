@@ -477,15 +477,16 @@ fn a_copy_applied_while_the_swap_runs_reaches_the_clients_own_terminal() {
     apply_queued_runtime_events(&mut server, DetachPolicy::Apply);
 
     // base64("hello") = aGVsbG8=
-    let host_write_bytes: Vec<Vec<u8>> = attached_client
+    let host_write_wake_count = attached_client
         .deliveries
         .try_iter()
-        .filter_map(|delivery| match delivery {
-            Delivery::HostWrite(written_bytes) => Some(written_bytes),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(host_write_bytes, vec![b"\x1b]52;c;aGVsbG8=\x07".to_vec()]);
+        .filter(|delivery| matches!(delivery, Delivery::HostWrite))
+        .count();
+    assert_eq!(host_write_wake_count, 1);
+    assert_eq!(
+        attached_client.waiting_host_writes.take_host_write_bytes(),
+        b"\x1b]52;c;aGVsbG8=\x07".to_vec()
+    );
 }
 
 #[test]
@@ -587,6 +588,7 @@ fn a_client_that_hung_up_before_the_swap_told_anyone_is_detached() {
             client_id: leaving_client.client_id,
             detached_at: SystemTime::now(),
             is_streamed: true,
+            is_returning: false,
         })
         .expect("the detach is queued");
 
@@ -600,8 +602,8 @@ fn a_client_that_hung_up_before_the_swap_told_anyone_is_detached() {
 
 #[test]
 fn the_record_of_a_client_the_swap_told_survives_the_pass_after_the_announce() {
-    // Both halves of a told client's connection queue a detach once it reads
-    // the restart frame.
+    // The reading half of a told client's connection queues a detach once the
+    // client reads the restart frame and sends `Leaving`.
     let (mut server, _, runtime_event_sender) = build_test_server();
     seed_test_session(&mut server);
     let told_client = attach_test_client(&mut server);
@@ -610,6 +612,7 @@ fn the_record_of_a_client_the_swap_told_survives_the_pass_after_the_announce() {
             client_id: told_client.client_id,
             detached_at: SystemTime::now(),
             is_streamed: true,
+            is_returning: true,
         })
         .expect("the detach is queued");
 

@@ -356,12 +356,12 @@ fn build_right_block(tabline_inputs: TablineInputs<'_>, theme: &Theme) -> Line<'
 const KOSHI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The `[v…] ` badge text the tabline paints, trailing space included.
-pub(crate) fn create_version_badge_text() -> String {
+pub(crate) fn format_version_badge_text() -> String {
     format!("[v{KOSHI_VERSION}] ")
 }
 
 /// The tabline's left-anchored block text: the session name with a space each
-/// side, then the `[v…] ` badge from [`create_version_badge_text`]. Session `my-session`
+/// side, then the `[v…] ` badge from [`format_version_badge_text`]. Session `my-session`
 /// gives ` my-session ` followed by that badge.
 ///
 /// `session_block_room` is the cells the block has before the right-anchored
@@ -372,7 +372,7 @@ pub(crate) fn create_version_badge_text() -> String {
 /// wider than `session_block_room` carries its own full width out.
 fn build_session_block(session_name: &str, session_block_room: u16) -> SessionBlock {
     let session_name_text = format!(" {} ", session_name);
-    let version_badge_text = create_version_badge_text();
+    let version_badge_text = format_version_badge_text();
     let session_name_width = get_text_width(&session_name_text);
     let version_badge_width = get_text_width(&version_badge_text);
     let combined_width = session_name_width.saturating_add(version_badge_width);

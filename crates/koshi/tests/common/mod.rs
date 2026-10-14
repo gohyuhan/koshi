@@ -5,6 +5,11 @@
 //! a test pane runs.
 //! [`in_process_session`] runs one session server on a thread of the test
 //! process. [`session_connection`] speaks to a session server either way.
+//! [`RunningClient`] holds a `koshi` client the test started, and the waits
+//! below read what it did. [`spawn_stand_in_remote_server`] answers one remote
+//! connection with the frames a test gives it.
+//! [`write_saved_server_store`] writes the saved-server store under a test
+//! home, and [`list_saved_server_records`] reads it.
 //!
 //! Every test binary declaring `mod common;` compiles all of it. No single
 //! binary uses every helper, and an unused helper is allowed here.
@@ -15,20 +20,27 @@ pub mod session_connection;
 
 use std::collections::BTreeMap;
 use std::io::Read;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::ids::SessionId;
 use koshi_core::process::{ShellKind, SpawnSpec};
 use koshi_ipc::endpoint::EndpointFile;
-use koshi_ipc::protocol::{IpcErrorCode, IpcErrorPayload};
+use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
+use koshi_ipc::remote_servers::{resolve_server_store_path, SavedServer, ServerStore};
+use koshi_ipc::remote_wire::{RemoteClientFrame, RemoteServerFrame};
 use koshi_ipc::router::{
     resolve_router_endpoint_path, RouterRequest, RouterRequestKind, RouterResponse, RouterResult,
     SessionAddress, SessionSelector,
 };
-use koshi_ipc::transport::Connection;
+use koshi_ipc::tls;
+use koshi_ipc::transport::{build_frame_halves, Connection};
 use koshi_test_support::fixtures::start_program_process;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::{ServerConfig, ServerConnection};
 use tempfile::TempDir;
 
 /// How long a poll waits for something a started process or a session server
@@ -563,4 +575,227 @@ pub fn build_no_such_session_result(session_id: SessionId) -> RouterResult {
         code: IpcErrorCode::NotFound,
         message: format!("no session {session_id} is running"),
     })
+}
+
+/// A `koshi` client the test started. Dropping it ends the process.
+pub struct RunningClient {
+    pub child_process: Child,
+}
+
+impl Drop for RunningClient {
+    fn drop(&mut self) {
+        let _ = self.child_process.kill();
+        let _ = self.child_process.wait();
+    }
+}
+
+/// `the client exited <status>: <what it wrote to its error stream>` once
+/// `running_client` has ended, for a failure message. `None` while it runs,
+/// or while its state cannot be read.
+pub fn format_client_exit(running_client: &mut RunningClient) -> Option<String> {
+    let exit_status = running_client.child_process.try_wait().ok().flatten()?;
+    let mut client_error_text = String::new();
+    if let Some(client_error_stream) = running_client.child_process.stderr.as_mut() {
+        let _ = client_error_stream.read_to_string(&mut client_error_text);
+    }
+    Some(format!(
+        "the client exited {exit_status}: {}",
+        client_error_text.trim()
+    ))
+}
+
+/// Poll the overview of session `session_id` in `runtime_directory` every
+/// [`POLL_INTERVAL_DURATION`] until it lists `client_count` attached clients.
+///
+/// # Panics
+/// When the overview cannot be read, or lists another count after
+/// [`WAIT_DURATION`]. The message names how `running_client` exited, when it
+/// has.
+pub fn wait_for_attached_client_count(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    client_count: usize,
+    running_client: &mut RunningClient,
+) {
+    let wait_deadline = Instant::now() + WAIT_DURATION;
+    loop {
+        let session_overview = koshi_link::discovery::fetch_session_overview(
+            runtime_directory,
+            None,
+            session_id,
+            None,
+        )
+        .expect("the session server describes itself");
+        if session_overview.clients.len() == client_count {
+            return;
+        }
+        assert!(
+            Instant::now() < wait_deadline,
+            "session {session_id} lists {} clients, not {client_count}; {}",
+            session_overview.clients.len(),
+            format_client_exit(running_client)
+                .unwrap_or_else(|| "the client is still running".to_string())
+        );
+        std::thread::sleep(POLL_INTERVAL_DURATION);
+    }
+}
+
+/// Wait for `running_client` to end, polling every [`POLL_INTERVAL_DURATION`],
+/// and hand back its exit status and its error stream.
+///
+/// # Panics
+/// When it still runs after [`WAIT_DURATION`], or its error stream is not a
+/// pipe of UTF-8 text.
+pub fn wait_for_client_exit(running_client: &mut RunningClient) -> (ExitStatus, String) {
+    let wait_deadline = Instant::now() + WAIT_DURATION;
+    let exit_status = loop {
+        if let Some(exit_status) = running_client
+            .child_process
+            .try_wait()
+            .expect("the client's state can be read")
+        {
+            break exit_status;
+        }
+        assert!(Instant::now() < wait_deadline, "the client kept running");
+        std::thread::sleep(POLL_INTERVAL_DURATION);
+    };
+    let mut client_error_text = String::new();
+    running_client
+        .child_process
+        .stderr
+        .take()
+        .expect("the client's errors are a pipe")
+        .read_to_string(&mut client_error_text)
+        .expect("the client's errors read as text");
+    (exit_status, client_error_text)
+}
+
+/// What `running_client` wrote to its standard output, read to the end.
+///
+/// # Panics
+/// When its standard output is not a pipe of UTF-8 text.
+pub fn read_client_output_text(running_client: &mut RunningClient) -> String {
+    let mut client_output_text = String::new();
+    running_client
+        .child_process
+        .stdout
+        .take()
+        .expect("the client's output is a pipe")
+        .read_to_string(&mut client_output_text)
+        .expect("the client's output reads as text");
+    client_output_text
+}
+
+/// Start a TLS server on a loopback port that presents a certificate made for
+/// this call, and serve one connection on a thread of its own. For each frame
+/// of `answer_frames`, in order, the thread reads one client frame, then sends
+/// that answer frame. The thread ends after the last answer, or at the first
+/// handshake, read or write that fails.
+///
+/// Returns the server's address and the fingerprint of its certificate.
+pub fn spawn_stand_in_remote_server(answer_frames: Vec<RemoteServerFrame>) -> (String, String) {
+    let generated_certificate = rcgen::generate_simple_self_signed(vec!["koshi".to_string()])
+        .expect("the test certificate is generated");
+    let certificate_der_bytes = generated_certificate.cert.der().to_vec();
+    let certificate_fingerprint = tls::compute_certificate_fingerprint(&certificate_der_bytes);
+    let server_config = ServerConfig::builder_with_provider(tls::build_crypto_provider())
+        .with_safe_default_protocol_versions()
+        .expect("aws-lc-rs supports every default protocol version")
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from(certificate_der_bytes)],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                generated_certificate.signing_key.serialize_der(),
+            )),
+        )
+        .expect("the test certificate is usable");
+    let server_listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+    let server_address = server_listener
+        .local_addr()
+        .expect("the bound loopback address")
+        .to_string();
+
+    std::thread::spawn(move || {
+        let Ok((mut socket, _)) = server_listener.accept() else {
+            return;
+        };
+        let mut tls_connection = rustls::Connection::Server(
+            ServerConnection::new(Arc::new(server_config)).expect("the TLS server side starts"),
+        );
+        let handshake_deadline = Instant::now() + WAIT_DURATION;
+        if tls::run_tls_handshake(&mut tls_connection, &mut socket, handshake_deadline).is_err() {
+            return;
+        }
+        let (tls_reader, tls_writer) =
+            tls::split_tls_stream(tls_connection, socket).expect("the TLS stream splits");
+        let (mut frame_reader, mut frame_writer) =
+            build_frame_halves(Box::new(tls_reader), Box::new(tls_writer));
+        for answer_frame in answer_frames {
+            if frame_reader.recv::<RemoteClientFrame>().is_err()
+                || frame_writer.send(&answer_frame).is_err()
+            {
+                return;
+            }
+        }
+    });
+    (server_address, certificate_fingerprint)
+}
+
+/// A saved server named `server_name` at `server_address`, holding
+/// `certificate_fingerprint` and the secret `test-secret`, saved at timestamp
+/// `0` and never used.
+pub fn build_saved_server(
+    server_name: &str,
+    server_address: String,
+    certificate_fingerprint: Option<String>,
+) -> SavedServer {
+    SavedServer {
+        server_name: Some(server_name.to_string()),
+        server_address,
+        connection_token: ConnectionToken::from_secret("test-secret"),
+        certificate_fingerprint,
+        added_at: SystemTime::UNIX_EPOCH,
+        last_used_at: None,
+    }
+}
+
+/// Write the saved-server store under `home_directory`, holding
+/// `saved_servers` in that order.
+///
+/// # Panics
+/// When the store cannot be written.
+pub fn write_saved_server_store(home_directory: &Path, saved_servers: Vec<SavedServer>) {
+    let server_store = ServerStore {
+        saved_servers,
+        ..ServerStore::new()
+    };
+    server_store
+        .write_server_store_to_path(&resolve_server_store_path(
+            &resolve_data_directory_under_home(home_directory),
+        ))
+        .expect("the saved-server store is written");
+}
+
+/// The name, the address and the certificate fingerprint of each server the
+/// saved-server store under `home_directory` holds, in store order.
+///
+/// # Panics
+/// When the store cannot be read.
+pub fn list_saved_server_records(
+    home_directory: &Path,
+) -> Vec<(Option<String>, String, Option<String>)> {
+    ServerStore::load_server_store_from_path(&resolve_server_store_path(
+        &resolve_data_directory_under_home(home_directory),
+    ))
+    .expect("the saved-server store is read")
+    .saved_servers
+    .into_iter()
+    .map(|saved_server| {
+        (
+            saved_server.server_name,
+            saved_server.server_address,
+            saved_server.certificate_fingerprint,
+        )
+    })
+    .collect()
 }

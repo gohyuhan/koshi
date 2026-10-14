@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use koshi_core::ids::SessionId;
+use koshi_host::clipboard_tool::CLIPBOARD_TOOL_DIRECTORY_SUFFIX;
 use koshi_host::process_tree::{find_process_record, ProcessRecord};
 use serde::{Deserialize, Serialize};
 
@@ -116,6 +117,17 @@ pub const RESTART_WINDOW_DURATION: Duration = Duration::from_secs(30);
 #[must_use]
 pub fn resolve_resume_file_path(runtime_directory: &Path, session_id: SessionId) -> PathBuf {
     runtime_directory.join(format!("{session_id}{RESUME_SUFFIX}"))
+}
+
+/// Where the folder of stand-in clipboard tools for `session_id` lives:
+/// `session-<uuid>.clipboard-tools`, directly beside that session's endpoint
+/// file inside `runtime_directory`.
+#[must_use]
+pub fn resolve_clipboard_tool_directory_path(
+    runtime_directory: &Path,
+    session_id: SessionId,
+) -> PathBuf {
+    runtime_directory.join(format!("{session_id}{CLIPBOARD_TOOL_DIRECTORY_SUFFIX}"))
 }
 
 /// Whether `session_id` is replacing its own process image right now: its

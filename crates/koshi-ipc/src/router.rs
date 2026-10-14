@@ -283,8 +283,9 @@ pub enum RouterResult {
         /// `false` means the answer was given and the port could not be taken this start —
         /// something else is on the address.
         is_listening: bool,
-        /// The fingerprint of this machine's certificate, as 64 lowercase
-        /// hex characters, or `None` when no certificate has been generated.
+        /// The fingerprint of the certificate the remote listener presents,
+        /// as 64 lowercase hex characters, or `None` while the listener is
+        /// not open.
         certificate_fingerprint: Option<String>,
         /// How many connections from another machine this router holds
         /// admitted right now, whether they have attached to a session or
@@ -296,8 +297,9 @@ pub enum RouterResult {
         /// The IP address and port remote clients are served on, such as
         /// `192.168.1.20:7654`.
         remote_listen_address: SocketAddr,
-        /// The fingerprint of this machine's certificate, as 64 lowercase
-        /// hex characters. The dialling side pins it.
+        /// The fingerprint of the certificate the remote listener presents,
+        /// as 64 lowercase hex characters. A dialling client gives it with
+        /// `--certificate-fingerprint`.
         certificate_fingerprint: String,
     },
     /// The request was refused.

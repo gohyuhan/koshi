@@ -114,9 +114,7 @@ fn pty_output_received_through_the_inbox_reaches_the_client_snapshot() {
 
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     let pane_snapshot = render_snapshot
-        .pane_snapshots
-        .iter()
-        .find(|pane_snapshot| pane_snapshot.pane_id == pane_id)
+        .find_pane_snapshot(pane_id)
         .expect("pane in snapshot");
     let terminal_grid = &pane_snapshot
         .terminal_grid_view
@@ -148,10 +146,11 @@ fn typed_keys_write_to_the_focused_pane() {
     // `ls` + Enter, key by key. The viewer resolves each one, binds none of
     // them, and hands the press to the session, which writes it to the focused
     // pane as it is made.
+    let (delivery_receiver, _) = server.subscribe(client_id);
     let mut viewer = koshi_client::Client::from_client_id_and_viewport_size(
         client_id,
         TEST_VIEWPORT_SIZE,
-        server.subscribe(client_id),
+        delivery_receiver,
         TerminalCleanupGuard::new(),
     );
     for key in [Key::Char('l'), Key::Char('s'), Key::Named(NamedKey::Enter)] {

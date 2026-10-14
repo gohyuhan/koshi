@@ -1,4 +1,5 @@
-//! Numeric bounds and fixed sizes that more than one crate reads.
+//! Numeric bounds and fixed sizes that more than one crate reads, and the
+//! heartbeat interval a link timeout gives.
 
 use std::time::Duration;
 
@@ -23,3 +24,21 @@ pub const FLOATING_PANE_CHROME_SIZE: Size = Size {
 /// Default timeout of a `Graceful` close: the time a child gets to exit on its
 /// own before the close escalates to a forced kill.
 pub const GRACEFUL_TIMEOUT_DURATION: Duration = Duration::from_secs(3);
+
+/// The least link timeout, in milliseconds: the least
+/// `remote-link-timeout-ms` that `koshi.kdl` takes, and the least
+/// `link_timeout_ms` that a session takes in an `Attach` request.
+pub const MIN_LINK_TIMEOUT_MS: u32 = 1000;
+
+/// The heartbeat interval of a link whose link timeout is `link_timeout_ms`:
+/// a third of it. A viewer on another machine sends a `Ping` once every
+/// heartbeat interval, and the session writes the viewer a `Pong` whenever it
+/// has written it nothing for one. `30000` gives 10 seconds, and `1000` gives
+/// 333333333 nanoseconds.
+#[must_use]
+pub fn compute_heartbeat_interval(link_timeout_ms: u32) -> Duration {
+    Duration::from_millis(u64::from(link_timeout_ms)) / 3
+}
+
+#[cfg(test)]
+mod tests;

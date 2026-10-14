@@ -45,6 +45,16 @@ fn the_resolve_resume_file_path_sits_beside_the_endpoint_file_under_the_same_nam
 }
 
 #[test]
+fn the_clipboard_tool_directory_sits_beside_the_endpoint_file_under_the_same_name() {
+    let uuid = Uuid::parse_str("0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b").expect("valid uuid");
+    let session_id = SessionId::from_uuid(uuid);
+    assert_eq!(
+        resolve_clipboard_tool_directory_path(Path::new("/run/koshi"), session_id),
+        Path::new("/run/koshi/session-0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b.clipboard-tools")
+    );
+}
+
+#[test]
 fn a_fresh_resume_file_reads_as_a_swap_in_flight_and_a_stale_one_does_not() {
     let runtime_directory_fixture = TempDir::new().expect("create runtime directory fixture");
     let session_id = SessionId::new();

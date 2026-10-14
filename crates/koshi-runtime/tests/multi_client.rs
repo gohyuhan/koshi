@@ -103,6 +103,7 @@ fn attach_test_client_with_pane_area(
                 pane_area,
                 graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
+                link_timeout_ms: None,
             },
         })
         .expect("send attach");

@@ -927,8 +927,8 @@ impl Server {
     ///   ([`solve_floating_pane_size`]); with no shared floating viewport the
     ///   pane takes the floating minimum
     ///   ([`compute_floating_pane_minimum_size`]).
-    /// - The PTY takes the solved outer size less
-    ///   [`FLOATING_PANE_CHROME_SIZE`].
+    /// - The PTY takes [`compute_floating_pane_content_size`] of the solved
+    ///   outer size.
     /// - The designated client's position is `Moved(top_left_cell)`,
     ///   `Pinned(top_left_cell)` when `is_pinned`, the drawn default placement
     ///   pinned when `is_pinned` without `top_left_cell`, and
@@ -1035,8 +1035,8 @@ impl Server {
     /// [`RejectReason::TargetNotFound`]. The resized axis is the width
     /// for `Left` and `Right` and the height for `Up` and `Down`: the solved
     /// outer size plus `resize_amount_cells`, kept between the floating minimum
-    /// (the pane minimum plus [`FLOATING_PANE_CHROME_SIZE`]) and the shared
-    /// floating viewport, and stored as cells. A growth also stops at the edge
+    /// ([`compute_floating_pane_minimum_size`]) and the shared floating
+    /// viewport, and stored as cells. A growth also stops at the edge
     /// of the acting client's pane area on the moved side, so the edge
     /// opposite the moved border keeps its cell. A shrink never grows the axis
     /// and a growth never shrinks it, also for an axis outside that range. A
@@ -1762,11 +1762,7 @@ impl Server {
     ) -> Result<(usize, FloatingMember), Rejection> {
         session
             .floating_set
-            .list_members()
-            .iter()
-            .copied()
-            .enumerate()
-            .find(|(_, floating_member)| floating_member.pane_id == pane_id)
+            .find_member(pane_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))
     }
 

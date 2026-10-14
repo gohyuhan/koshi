@@ -42,7 +42,7 @@ use koshi_layout::placement::{
 };
 use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
 
-use crate::{Client, PendingPlacementCommand, PlacementInputAction};
+use crate::{Client, LinkStatus, PendingPlacementCommand, PlacementInputAction};
 
 #[cfg(test)]
 mod tests;
@@ -84,10 +84,12 @@ impl Client {
     ///
     /// Placement is a local submode layered over the stored normal or locked
     /// mode. Entering it changes key resolution only; it does not change the
-    /// session lock state.
+    /// session lock state. Placement owns the keyboard only while the viewer is
+    /// [`LinkStatus::Linked`]: with no link, the stored base mode does, and
+    /// `<C-q>` in the default keymap reaches `core:quit`.
     #[must_use]
     pub(crate) fn get_active_input_mode(&self) -> LockMode {
-        if self.is_placement_mode_active() {
+        if self.link_status == LinkStatus::Linked && self.is_placement_mode_active() {
             LockMode::PanePlacement
         } else {
             self.lock_mode
@@ -109,6 +111,33 @@ impl Client {
             self.lock_mode = lock_mode;
             self.pending_key_sequence = None;
         }
+    }
+
+    /// Switch to `lock_mode`, the mode that lock command `lock_command_id`
+    /// sets, before the session runs that command, and wait for it: painted
+    /// frames leave the lock mode as it is until one names `lock_command_id`
+    /// as the last applied lock command. The switch is
+    /// [`set_lock_mode`](Self::set_lock_mode).
+    pub(crate) fn apply_lock_command(&mut self, lock_command_id: CommandId, lock_mode: LockMode) {
+        self.set_lock_mode(lock_mode);
+        self.pending_lock_command_id = Some(lock_command_id);
+    }
+
+    /// The lock command whose lock mode this viewer shows before the session
+    /// runs it, or `None` when no lock command waits.
+    #[must_use]
+    pub(crate) fn get_pending_lock_command_id(&self) -> Option<CommandId> {
+        self.pending_lock_command_id
+    }
+
+    /// Wait for lock command `pending_lock_command_id` before painted frames
+    /// set the lock mode again, or, with `None`, let the next painted frame set
+    /// it.
+    pub(crate) fn set_pending_lock_command_id(
+        &mut self,
+        pending_lock_command_id: Option<CommandId>,
+    ) {
+        self.pending_lock_command_id = pending_lock_command_id;
     }
 
     /// The chords of an open sequence, for the hint bar's breadcrumb.
@@ -428,11 +457,9 @@ impl Client {
         let open_key_sequence = self.pending_key_sequence.take();
 
         // In locked base mode the unlock chord fires before the keymap is
-        // read. While placement mode is active, this check is skipped and the
-        // placement keymap resolves the chord.
-        if !self.is_placement_mode_active()
-            && self.lock_mode == LockMode::Locked
-            && chord == self.keymap_catalog.get_unlock_chord()
+        // read. While placement mode owns the keyboard, this check is skipped
+        // and the placement keymap resolves the chord.
+        if active_input_mode == LockMode::Locked && chord == self.keymap_catalog.get_unlock_chord()
         {
             return KeyOutcome::Fire(build_unlock_bound_action());
         }

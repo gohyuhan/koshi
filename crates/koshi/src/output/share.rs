@@ -37,6 +37,9 @@ pub enum RemoteReady {
         /// order [`list_host_addresses`](koshi_host::host_addresses::list_host_addresses)
         /// gives. Empty for every other address.
         host_addresses: Vec<HostAddress>,
+        /// The fingerprint of the certificate the remote listener presents,
+        /// as 64 lowercase hex characters.
+        certificate_fingerprint: String,
     },
 }
 
@@ -95,7 +98,13 @@ pub fn render_remote_ready(token_identity: &str, remote_ready: &RemoteReady) -> 
         RemoteReady::On {
             remote_listen_address,
             host_addresses,
-        } => render_connect_commands(token_identity, *remote_listen_address, host_addresses),
+            certificate_fingerprint,
+        } => render_connect_commands(
+            token_identity,
+            *remote_listen_address,
+            host_addresses,
+            certificate_fingerprint,
+        ),
     }
 }
 
@@ -105,8 +114,10 @@ const REMOTE_SECRET_LINE: &str =
     "set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n";
 
 /// Render the commands that connect to this machine's remote listener at
-/// `remote_listen_address`. Each command carries `--save-as {token_identity}`
-/// when `token_identity` is one word without the `host:port` shape.
+/// `remote_listen_address`. Each command carries
+/// `--certificate-fingerprint {certificate_fingerprint}`, and
+/// `--save-as {token_identity}` when `token_identity` is one word without the
+/// `host:port` shape.
 ///
 /// - `0.0.0.0` or `[::]`: one command per entry of `host_addresses`, each
 ///   ending in `# <interface name>`. No entry gives one command with
@@ -116,14 +127,19 @@ const REMOTE_SECRET_LINE: &str =
 /// - Any other address, such as `192.168.1.20:7654`: one command with it, and
 ///   a line saying this machine accepts connections on that address only.
 ///
-/// Example: `0.0.0.0:7654`, `alice`, and `192.168.1.20` on `en0` give
-/// `  koshi attach --remote 192.168.1.20:7654 --save-as alice [SESSION]   # en0`.
+/// Example: `0.0.0.0:7654`, `alice`, `192.168.1.20` on `en0`, and the
+/// fingerprint `9c…1e` give
+/// `  koshi attach --remote 192.168.1.20:7654 --certificate-fingerprint 9c…1e --save-as alice [SESSION]   # en0`.
 fn render_connect_commands(
     token_identity: &str,
     remote_listen_address: SocketAddr,
     host_addresses: &[HostAddress],
+    certificate_fingerprint: &str,
 ) -> String {
-    let save_as_option = build_save_as_option(token_identity);
+    let connect_options = format!(
+        " --certificate-fingerprint {certificate_fingerprint}{}",
+        build_save_as_option(token_identity)
+    );
     let listen_ip_address = remote_listen_address.ip();
     let listen_port = remote_listen_address.port();
     if listen_ip_address.is_loopback() {
@@ -136,7 +152,7 @@ fn render_connect_commands(
     if !listen_ip_address.is_unspecified() {
         return format!(
             "connect from another machine:\n  \
-             koshi attach --remote {remote_listen_address}{save_as_option} [SESSION]\n\
+             koshi attach --remote {remote_listen_address}{connect_options} [SESSION]\n\
              {REMOTE_SECRET_LINE}\
              this machine accepts connections on {listen_ip_address} only (remote-listen in \
              koshi.kdl); the other machine must connect to that address.\n"
@@ -145,7 +161,7 @@ fn render_connect_commands(
     if host_addresses.is_empty() {
         return format!(
             "this machine has no network address right now. Connect from another machine with:\n  \
-             koshi attach --remote <this machine's address>:{listen_port}{save_as_option} [SESSION]\n\
+             koshi attach --remote <this machine's address>:{listen_port}{connect_options} [SESSION]\n\
              {REMOTE_SECRET_LINE}"
         );
     }
@@ -154,7 +170,7 @@ fn render_connect_commands(
     for host_address in host_addresses {
         let connect_address = SocketAddr::new(host_address.ip_address, listen_port);
         rendered_output.push_str(&format!(
-            "  koshi attach --remote {connect_address}{save_as_option} [SESSION]   # {}\n",
+            "  koshi attach --remote {connect_address}{connect_options} [SESSION]   # {}\n",
             sanitize_reported_text(&host_address.interface_name)
         ));
     }

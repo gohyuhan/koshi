@@ -2,7 +2,8 @@
 //! takes it back once, what an unminted token finds, when a filed view stops
 //! standing, what happens past the record count, what a second save for one
 //! client files, what `forget` leaves behind, how an untouched view
-//! round-trips, and which saved view records a save drops.
+//! round-trips, which saved view records a save drops, and which attached
+//! client a token finds.
 
 use koshi_core::geometry::{Point, Size};
 use koshi_core::ids::SessionId;
@@ -137,7 +138,8 @@ fn a_token_nobody_minted_takes_back_nothing() {
 }
 
 #[test]
-fn a_filed_view_stands_for_one_hundred_and_twenty_seconds() {
+fn a_filed_view_stands_for_twenty_four_hours() {
+    assert_eq!(SAVED_VIEW_LIFETIME_DURATION, Duration::from_secs(86_400));
     let tab_id = TabId::new();
     let client = build_client(ClientId::new(), tab_id);
 
@@ -146,7 +148,7 @@ fn a_filed_view_stands_for_one_hundred_and_twenty_seconds() {
     standing_view_store.save_client_view(&client, build_system_time_at_seconds(100));
     assert_eq!(
         standing_view_store
-            .take_saved_view(&resume_token, build_system_time_at_seconds(219))
+            .take_saved_view(&resume_token, build_system_time_at_seconds(86_499))
             .map(|saved_view| saved_view.active_tab_id),
         Some(tab_id)
     );
@@ -155,7 +157,7 @@ fn a_filed_view_stands_for_one_hundred_and_twenty_seconds() {
     let resume_token = expired_view_store.mint_resume_token(client.get_client_id());
     expired_view_store.save_client_view(&client, build_system_time_at_seconds(100));
     assert_eq!(
-        expired_view_store.take_saved_view(&resume_token, build_system_time_at_seconds(221)),
+        expired_view_store.take_saved_view(&resume_token, build_system_time_at_seconds(86_501)),
         None
     );
 }
@@ -322,7 +324,7 @@ fn a_view_taken_at_the_exact_second_it_stops_standing_takes_back_nothing() {
     saved_view_store.save_client_view(&client, build_system_time_at_seconds(100));
 
     assert_eq!(
-        saved_view_store.take_saved_view(&resume_token, build_system_time_at_seconds(220)),
+        saved_view_store.take_saved_view(&resume_token, build_system_time_at_seconds(86_500)),
         None
     );
     assert_eq!(saved_view_store.saved_view_records.len(), 0);
@@ -338,17 +340,73 @@ fn filing_a_view_drops_the_records_that_stopped_standing() {
     let stale_resume_token = saved_view_store.mint_resume_token(stale_client.get_client_id());
     saved_view_store.save_client_view(&stale_client, build_system_time_at_seconds(100));
     let fresh_resume_token = saved_view_store.mint_resume_token(fresh_client.get_client_id());
-    saved_view_store.save_client_view(&fresh_client, build_system_time_at_seconds(300));
+    saved_view_store.save_client_view(&fresh_client, build_system_time_at_seconds(86_500));
 
     assert_eq!(saved_view_store.saved_view_records.len(), 1);
     assert_eq!(
-        saved_view_store.take_saved_view(&stale_resume_token, build_system_time_at_seconds(300)),
+        saved_view_store.take_saved_view(&stale_resume_token, build_system_time_at_seconds(86_500)),
         None
     );
     assert_eq!(
         saved_view_store
-            .take_saved_view(&fresh_resume_token, build_system_time_at_seconds(300))
+            .take_saved_view(&fresh_resume_token, build_system_time_at_seconds(86_500))
             .map(|saved_view| saved_view.active_tab_id),
         Some(fresh_tab_id)
+    );
+}
+
+#[test]
+fn a_token_finds_the_still_attached_client_its_attach_minted_and_changes_nothing() {
+    let first_client_id = ClientId::new();
+    let second_client_id = ClientId::new();
+    let mut saved_view_store = SavedViewStore::default();
+    let first_resume_token = saved_view_store.mint_resume_token(first_client_id);
+    let second_resume_token = saved_view_store.mint_resume_token(second_client_id);
+
+    assert_eq!(
+        saved_view_store.find_client_id_by_resume_token(&first_resume_token),
+        Some(first_client_id)
+    );
+    assert_eq!(
+        saved_view_store.find_client_id_by_resume_token(&second_resume_token),
+        Some(second_client_id)
+    );
+    assert_eq!(
+        saved_view_store.find_client_id_by_resume_token(&first_resume_token),
+        Some(first_client_id)
+    );
+    assert_eq!(saved_view_store.connection_token_hash_by_client_id.len(), 2);
+}
+
+#[test]
+fn a_token_finds_no_client_once_unminted_replaced_filed_or_forgotten() {
+    let mut saved_view_store = SavedViewStore::default();
+    assert_eq!(
+        saved_view_store.find_client_id_by_resume_token(&ConnectionToken::generate()),
+        None
+    );
+
+    let replaced_client_id = ClientId::new();
+    let replaced_resume_token = saved_view_store.mint_resume_token(replaced_client_id);
+    saved_view_store.mint_resume_token(replaced_client_id);
+    assert_eq!(
+        saved_view_store.find_client_id_by_resume_token(&replaced_resume_token),
+        None
+    );
+
+    let filed_client = build_client(ClientId::new(), TabId::new());
+    let filed_resume_token = saved_view_store.mint_resume_token(filed_client.get_client_id());
+    saved_view_store.save_client_view(&filed_client, build_system_time_at_seconds(100));
+    assert_eq!(
+        saved_view_store.find_client_id_by_resume_token(&filed_resume_token),
+        None
+    );
+
+    let forgotten_client_id = ClientId::new();
+    let forgotten_resume_token = saved_view_store.mint_resume_token(forgotten_client_id);
+    saved_view_store.forget_client_resume_token(forgotten_client_id);
+    assert_eq!(
+        saved_view_store.find_client_id_by_resume_token(&forgotten_resume_token),
+        None
     );
 }

@@ -403,12 +403,15 @@ impl TerminalState {
             u32::try_from(animation_frame_index).unwrap_or(0);
         next_image_content.decoded_image =
             animation.list_frames()[animation_frame_index].clone_decoded_image();
+        if kitty_command.frame_number.is_some() {
+            next_image_content.clear_animation_elapsed_time();
+        }
         match kitty_command.playback_state {
             Some(1) => {
                 next_image_content.is_animation_running = false;
                 next_image_content.is_animation_loading = false;
                 next_image_content.animation_loop_count = 0;
-                next_image_content.animation_elapsed_nanos = 0;
+                next_image_content.clear_animation_elapsed_time();
             }
             Some(2) => {
                 next_image_content.is_animation_running = true;
@@ -572,7 +575,7 @@ impl TerminalState {
             next_image_content.animation = None;
             next_image_content.animation_frame_index = 0;
             next_image_content.animation_loop_count = 0;
-            next_image_content.animation_elapsed_nanos = 0;
+            next_image_content.clear_animation_elapsed_time();
             next_image_content.is_animation_running = false;
             next_image_content.is_animation_loading = false;
             return Ok(Arc::new(next_image_content));
@@ -591,6 +594,9 @@ impl TerminalState {
             u32::try_from(animation_frame_index).unwrap_or(0);
         next_image_content.decoded_image =
             animation.list_frames()[animation_frame_index].clone_decoded_image();
+        if image_content.animation_frame_index as usize == deleted_frame_index {
+            next_image_content.clear_animation_elapsed_time();
+        }
         Ok(Arc::new(next_image_content))
     }
 

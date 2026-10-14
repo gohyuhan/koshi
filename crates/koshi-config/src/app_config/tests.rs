@@ -160,21 +160,21 @@ fn an_absent_allow_beta_features_sets_no_layer() {
 
 #[test]
 fn a_non_boolean_allow_beta_features_is_skipped_with_a_warning() {
-    let (layer, warnings) = parse_with_warnings("allow-beta-features \"yes\"");
-    assert_eq!(layer.should_allow_beta_features, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("allow-beta-features \"yes\"");
+    assert_eq!(app_config_layer.should_allow_beta_features, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored `allow-beta-features`: expected a boolean (#true or #false)".to_string()]
     );
 }
 
 #[test]
 fn a_repeated_allow_beta_features_line_keeps_the_first_and_warns() {
-    let (layer, warnings) =
+    let (app_config_layer, parse_warnings) =
         parse_with_warnings("allow-beta-features #true\nallow-beta-features #false");
-    assert_eq!(layer.should_allow_beta_features, Some(true));
+    assert_eq!(app_config_layer.should_allow_beta_features, Some(true));
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored duplicate `allow-beta-features` section".to_string()]
     );
 }
@@ -199,21 +199,21 @@ fn an_absent_allow_other_users_sets_no_layer() {
 
 #[test]
 fn a_non_boolean_allow_other_users_is_skipped_with_a_warning() {
-    let (layer, warnings) = parse_with_warnings("allow-other-users \"yes\"");
-    assert_eq!(layer.should_allow_other_users, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("allow-other-users \"yes\"");
+    assert_eq!(app_config_layer.should_allow_other_users, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored `allow-other-users`: expected a boolean (#true or #false)".to_string()]
     );
 }
 
 #[test]
 fn a_repeated_allow_other_users_line_keeps_the_first_and_warns() {
-    let (layer, warnings) =
+    let (app_config_layer, parse_warnings) =
         parse_with_warnings("allow-other-users #true\nallow-other-users #false");
-    assert_eq!(layer.should_allow_other_users, Some(true));
+    assert_eq!(app_config_layer.should_allow_other_users, Some(true));
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored duplicate `allow-other-users` section".to_string()]
     );
 }
@@ -234,10 +234,10 @@ fn an_absent_remote_listen_sets_no_layer() {
 
 #[test]
 fn a_non_string_remote_listen_is_skipped_with_a_warning() {
-    let (layer, warnings) = parse_with_warnings("remote-listen 7654");
-    assert_eq!(layer.remote_listen_address, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("remote-listen 7654");
+    assert_eq!(app_config_layer.remote_listen_address, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored `remote-listen`: expected a string".to_string()]
     );
 }
@@ -245,10 +245,10 @@ fn a_non_string_remote_listen_is_skipped_with_a_warning() {
 #[test]
 fn a_blank_remote_listen_is_skipped_with_a_warning() {
     // An empty value is skipped; the field stays unset.
-    let (layer, warnings) = parse_with_warnings("remote-listen \"\"");
-    assert_eq!(layer.remote_listen_address, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("remote-listen \"\"");
+    assert_eq!(app_config_layer.remote_listen_address, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored `remote-listen`: must not be empty".to_string()]
     );
 }
@@ -263,10 +263,11 @@ fn an_ipv6_remote_listen_records_the_address_it_names() {
 
 #[test]
 fn a_host_name_remote_listen_is_skipped_with_a_warning() {
-    let (layer, warnings) = parse_with_warnings("remote-listen \"localhost:7654\"");
-    assert_eq!(layer.remote_listen_address, None);
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("remote-listen \"localhost:7654\"");
+    assert_eq!(app_config_layer.remote_listen_address, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec![
             "ignored `remote-listen`: `localhost:7654` is not an IP address and port, such as \
              `192.168.1.20:7654`"
@@ -277,10 +278,10 @@ fn a_host_name_remote_listen_is_skipped_with_a_warning() {
 
 #[test]
 fn a_remote_listen_with_no_port_is_skipped_with_a_warning() {
-    let (layer, warnings) = parse_with_warnings("remote-listen \"192.168.1.20\"");
-    assert_eq!(layer.remote_listen_address, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("remote-listen \"192.168.1.20\"");
+    assert_eq!(app_config_layer.remote_listen_address, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec![
             "ignored `remote-listen`: `192.168.1.20` is not an IP address and port, such as \
              `192.168.1.20:7654`"
@@ -291,14 +292,14 @@ fn a_remote_listen_with_no_port_is_skipped_with_a_warning() {
 
 #[test]
 fn a_repeated_remote_listen_line_keeps_the_first_and_warns() {
-    let (layer, warnings) =
+    let (app_config_layer, parse_warnings) =
         parse_with_warnings("remote-listen \"127.0.0.1:7654\"\nremote-listen \"0.0.0.0:9000\"");
     assert_eq!(
-        layer.remote_listen_address,
+        app_config_layer.remote_listen_address,
         Some(Some(SocketAddr::from(([127, 0, 0, 1], 7654))))
     );
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored duplicate `remote-listen` section".to_string()]
     );
 }
@@ -320,10 +321,10 @@ fn an_absent_shared_sessions_dir_sets_no_layer() {
 
 #[test]
 fn a_non_string_shared_sessions_dir_is_skipped_with_a_warning() {
-    let (layer, warnings) = parse_with_warnings("shared-sessions-dir 42");
-    assert_eq!(layer.shared_sessions_directory, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("shared-sessions-dir 42");
+    assert_eq!(app_config_layer.shared_sessions_directory, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored `shared-sessions-dir`: expected a string".to_string()]
     );
 }
@@ -331,25 +332,25 @@ fn a_non_string_shared_sessions_dir_is_skipped_with_a_warning() {
 #[test]
 fn a_blank_shared_sessions_dir_is_skipped_with_a_warning() {
     // An empty value is skipped; the platform's machine-wide directory stands.
-    let (layer, warnings) = parse_with_warnings("shared-sessions-dir \"\"");
-    assert_eq!(layer.shared_sessions_directory, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("shared-sessions-dir \"\"");
+    assert_eq!(app_config_layer.shared_sessions_directory, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored `shared-sessions-dir`: must not be empty".to_string()]
     );
 }
 
 #[test]
 fn a_repeated_shared_sessions_dir_line_keeps_the_first_and_warns() {
-    let (layer, warnings) = parse_with_warnings(
+    let (app_config_layer, parse_warnings) = parse_with_warnings(
         "shared-sessions-dir \"/var/run/koshi\"\nshared-sessions-dir \"/tmp/koshi\"",
     );
     assert_eq!(
-        layer.shared_sessions_directory,
+        app_config_layer.shared_sessions_directory,
         Some(Some(PathBuf::from("/var/run/koshi")))
     );
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored duplicate `shared-sessions-dir` section".to_string()]
     );
 }
@@ -374,11 +375,123 @@ fn an_absent_auto_close_session_sets_no_layer() {
 
 #[test]
 fn a_non_boolean_auto_close_session_is_skipped_with_a_warning() {
-    let (layer, warnings) = parse_with_warnings("auto-close-session \"yes\"");
-    assert_eq!(layer.should_auto_close_session, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("auto-close-session \"yes\"");
+    assert_eq!(app_config_layer.should_auto_close_session, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored `auto-close-session`: expected a boolean (#true or #false)".to_string()]
+    );
+}
+
+#[test]
+fn pane_clipboard_writes_records_both_fields() {
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("pane-clipboard-writes {\n    allow #true\n    max-copy-bytes 1\n}");
+    assert_eq!(
+        app_config_layer.pane_clipboard_writes,
+        Some(PartialPaneClipboardWriteConfig {
+            should_allow_writes: Some(true),
+            maximum_copy_byte_count: Some(1),
+        })
+    );
+    assert_eq!(parse_warnings, Vec::<String>::new());
+}
+
+#[test]
+fn an_absent_pane_clipboard_writes_section_sets_no_layer() {
+    assert_eq!(parse_config("").pane_clipboard_writes, None);
+}
+
+#[test]
+fn a_pane_clipboard_writes_section_sets_only_the_fields_it_lists() {
+    assert_eq!(
+        parse_config("pane-clipboard-writes {\n    allow #false\n}").pane_clipboard_writes,
+        Some(PartialPaneClipboardWriteConfig {
+            should_allow_writes: Some(false),
+            maximum_copy_byte_count: None,
+        })
+    );
+}
+
+#[test]
+fn a_max_copy_bytes_below_one_is_skipped_with_a_warning() {
+    for max_copy_bytes_text in ["0", "-5"] {
+        let (app_config_layer, parse_warnings) = parse_with_warnings(&format!(
+            "pane-clipboard-writes {{\n    allow #true\n    max-copy-bytes {max_copy_bytes_text}\n}}"
+        ));
+        assert_eq!(
+            app_config_layer.pane_clipboard_writes,
+            Some(PartialPaneClipboardWriteConfig {
+                should_allow_writes: Some(true),
+                maximum_copy_byte_count: None,
+            })
+        );
+        assert_eq!(
+            parse_warnings,
+            vec!["ignored `pane-clipboard-writes.max-copy-bytes`: must be at least 1".to_string()]
+        );
+    }
+}
+
+#[test]
+fn a_max_copy_bytes_that_is_not_an_integer_is_skipped_with_a_warning() {
+    for max_copy_bytes_text in ["\"8388608\"", "1.5", "#true"] {
+        let (app_config_layer, parse_warnings) = parse_with_warnings(&format!(
+            "pane-clipboard-writes {{\n    max-copy-bytes {max_copy_bytes_text}\n}}"
+        ));
+        assert_eq!(
+            app_config_layer.pane_clipboard_writes,
+            Some(PartialPaneClipboardWriteConfig::default())
+        );
+        assert_eq!(
+            parse_warnings,
+            vec!["ignored `pane-clipboard-writes.max-copy-bytes`: expected an integer".to_string()]
+        );
+    }
+}
+
+#[test]
+fn a_max_copy_bytes_past_the_largest_size_becomes_the_largest_size() {
+    assert_eq!(
+        parse_config(
+            "pane-clipboard-writes {\n    max-copy-bytes 999999999999999999999999999999\n}"
+        )
+        .pane_clipboard_writes,
+        Some(PartialPaneClipboardWriteConfig {
+            should_allow_writes: None,
+            maximum_copy_byte_count: Some(usize::MAX),
+        })
+    );
+}
+
+#[test]
+fn a_non_boolean_pane_clipboard_writes_allow_is_skipped_with_a_warning() {
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("pane-clipboard-writes {\n    allow \"yes\"\n}");
+    assert_eq!(
+        app_config_layer.pane_clipboard_writes,
+        Some(PartialPaneClipboardWriteConfig::default())
+    );
+    assert_eq!(
+        parse_warnings,
+        vec![
+            "ignored `pane-clipboard-writes.allow`: expected a boolean (#true or #false)"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn an_unknown_pane_clipboard_writes_key_warns_with_the_nearest_key() {
+    let (_, parse_warnings) =
+        parse_with_warnings("pane-clipboard-writes {\n    max-copy-byte 10\n}");
+    assert_eq!(
+        parse_warnings,
+        vec![
+            "ignored unknown key `pane-clipboard-writes.max-copy-byte`; did you mean \
+             `pane-clipboard-writes.max-copy-bytes`?"
+                .to_string()
+        ]
     );
 }
 
@@ -440,24 +553,24 @@ fn empty_update_block_sets_an_all_none_section() {
 
 #[test]
 fn an_unknown_top_level_node_warns_with_a_suggestion() {
-    let (layer, warnings) = parse_with_warnings("frobnicate {\n    whatever 5\n}");
-    assert_eq!(layer.update, None);
-    assert_eq!(layer.mouse, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("frobnicate {\n    whatever 5\n}");
+    assert_eq!(app_config_layer.update, None);
+    assert_eq!(app_config_layer.mouse, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored unknown key `frobnicate`; did you mean `update`?".to_string()]
     );
 }
 
 #[test]
 fn unknown_field_inside_update_warns() {
-    let (layer, warnings) =
+    let (app_config_layer, parse_warnings) =
         parse_with_warnings("update {\n    auto-check #true\n    frequency 5\n}");
-    let update = layer.update.expect("update section present");
+    let update = app_config_layer.update.expect("update section present");
     assert_eq!(update.should_auto_check_for_updates, Some(true));
     assert_eq!(update.check_interval_days, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         ["ignored unknown key `update.frequency`; did you mean `update.auto-check`?"]
     );
 }
@@ -534,9 +647,9 @@ fn a_duplicate_update_section_is_a_validation_error() {
 
 #[test]
 fn a_current_schema_version_is_accepted() {
-    let layer = parse_config("version 2\nupdate {\n    auto-check #false\n}");
+    let app_config_layer = parse_config("version 2\nupdate {\n    auto-check #false\n}");
     assert_eq!(
-        layer
+        app_config_layer
             .update
             .expect("update section present")
             .should_auto_check_for_updates,
@@ -679,14 +792,14 @@ fn stay_in_pane_placement_mode_after_placement_defaults_to_enabled_and_accepts_f
 
 #[test]
 fn a_non_boolean_stay_in_pane_placement_mode_after_placement_is_skipped_with_a_warning() {
-    let (layer, warnings) =
+    let (app_config_layer, parse_warnings) =
         parse_with_warnings("stay-in-pane-placement-mode-after-placement \"no\"");
     assert_eq!(
-        layer.should_stay_in_pane_placement_mode_after_placement,
+        app_config_layer.should_stay_in_pane_placement_mode_after_placement,
         None
     );
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec![
             "ignored `stay-in-pane-placement-mode-after-placement`: expected a boolean (#true or #false)"
                 .to_string()
@@ -696,10 +809,10 @@ fn a_non_boolean_stay_in_pane_placement_mode_after_placement_is_skipped_with_a_w
 
 #[test]
 fn a_non_boolean_reduced_motion_is_skipped_with_a_warning() {
-    let (layer, warnings) = parse_with_warnings("reduced-motion \"yes\"");
-    assert_eq!(layer.should_reduce_motion, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("reduced-motion \"yes\"");
+    assert_eq!(app_config_layer.should_reduce_motion, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored `reduced-motion`: expected a boolean (#true or #false)".to_string()]
     );
 }
@@ -713,21 +826,95 @@ fn an_absent_remote_reconnect_leaves_dialing_again_on() {
 
 #[test]
 fn a_non_boolean_remote_reconnect_is_skipped_with_a_warning() {
-    let (layer, warnings) = parse_with_warnings("remote-reconnect \"yes\"");
-    assert_eq!(layer.should_reconnect_remote_session, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("remote-reconnect \"yes\"");
+    assert_eq!(app_config_layer.should_reconnect_remote_session, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored `remote-reconnect`: expected a boolean (#true or #false)".to_string()]
     );
 }
 
 #[test]
 fn a_repeated_remote_reconnect_line_keeps_the_first_and_warns() {
-    let (layer, warnings) = parse_with_warnings("remote-reconnect #false\nremote-reconnect #true");
-    assert_eq!(layer.should_reconnect_remote_session, Some(false));
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("remote-reconnect #false\nremote-reconnect #true");
     assert_eq!(
-        warnings,
+        app_config_layer.should_reconnect_remote_session,
+        Some(false)
+    );
+    assert_eq!(
+        parse_warnings,
         vec!["ignored duplicate `remote-reconnect` section".to_string()]
+    );
+}
+
+#[test]
+fn remote_link_timeout_records_what_it_is_set_to_down_to_one_second() {
+    assert_eq!(
+        parse_config("remote-link-timeout-ms 45000").remote_link_timeout_ms,
+        Some(45_000)
+    );
+    assert_eq!(
+        parse_config("remote-link-timeout-ms 1000").remote_link_timeout_ms,
+        Some(1_000)
+    );
+    assert_eq!(
+        parse_config("remote-link-timeout-ms 4294967295").remote_link_timeout_ms,
+        Some(u32::MAX)
+    );
+}
+
+#[test]
+fn an_absent_remote_link_timeout_leaves_thirty_seconds() {
+    assert_eq!(parse_config("").remote_link_timeout_ms, None);
+    assert_eq!(ClientConfig::default().remote_link_timeout_ms, 30_000);
+}
+
+#[test]
+fn a_remote_link_timeout_out_of_range_or_not_an_integer_is_skipped_with_a_warning() {
+    for (config_text, expected_warning) in [
+        (
+            "remote-link-timeout-ms 999",
+            "ignored `remote-link-timeout-ms`: must be at least 1000",
+        ),
+        (
+            "remote-link-timeout-ms 0",
+            "ignored `remote-link-timeout-ms`: must be at least 1000",
+        ),
+        (
+            "remote-link-timeout-ms -5",
+            "ignored `remote-link-timeout-ms`: must be at least 1000",
+        ),
+        (
+            "remote-link-timeout-ms 4294967296",
+            "ignored `remote-link-timeout-ms`: must be at most 4294967295",
+        ),
+        (
+            "remote-link-timeout-ms \"30s\"",
+            "ignored `remote-link-timeout-ms`: expected an integer",
+        ),
+    ] {
+        let (app_config_layer, parse_warnings) = parse_with_warnings(config_text);
+        assert_eq!(
+            app_config_layer.remote_link_timeout_ms, None,
+            "{config_text}"
+        );
+        assert_eq!(
+            parse_warnings,
+            vec![expected_warning.to_string()],
+            "{config_text}"
+        );
+    }
+}
+
+#[test]
+fn a_repeated_remote_link_timeout_line_keeps_the_first_and_warns() {
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("remote-link-timeout-ms 5000\nremote-link-timeout-ms 9000");
+    assert_eq!(app_config_layer.remote_link_timeout_ms, Some(5_000));
+    assert_eq!(
+        parse_warnings,
+        vec!["ignored duplicate `remote-link-timeout-ms` section".to_string()]
     );
 }
 
@@ -765,15 +952,16 @@ fn extended_keys_parses_both_modes_and_warns_on_any_other_value() {
         .expect("terminal section present");
     assert_eq!(always.extended_keys_mode, Some(ExtendedKeysMode::Always));
 
-    let (layer, warnings) = parse_with_warnings("terminal {\n    extended-keys \"sometimes\"\n}");
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("terminal {\n    extended-keys \"sometimes\"\n}");
     assert_eq!(
-        layer
+        app_config_layer
             .terminal
             .and_then(|terminal| terminal.extended_keys_mode),
         None
     );
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored `terminal.extended-keys`: expected \"on-request\" or \"always\"".to_string()]
     );
 }
@@ -782,13 +970,13 @@ fn extended_keys_parses_both_modes_and_warns_on_any_other_value() {
 fn a_blank_term_or_colorterm_is_skipped_so_the_built_in_identity_stands() {
     // A blank or whitespace-only `term`/`colorterm` is dropped like any bad
     // field; the built-in `xterm-256color`/`truecolor` identity applies.
-    let (layer, warnings) =
+    let (app_config_layer, parse_warnings) =
         parse_with_warnings("terminal {\n    term \"\"\n    colorterm \"  \"\n}");
-    let terminal = layer.terminal.expect("terminal section present");
+    let terminal = app_config_layer.terminal.expect("terminal section present");
     assert_eq!(terminal.term, None);
     assert_eq!(terminal.colorterm, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec![
             "ignored `terminal.term`: must not be empty".to_string(),
             "ignored `terminal.colorterm`: must not be empty".to_string(),
@@ -801,13 +989,16 @@ fn an_empty_default_shell_is_skipped_so_the_shell_falls_back_to_the_environment(
     // An empty or whitespace-only `default-shell` is dropped like any bad
     // field; `default_shell` stays unset and the spawn path falls back to
     // `$SHELL`/`%COMSPEC%`.
-    let (layer, warnings) = parse_with_warnings("terminal {\n    default-shell \"\"\n}");
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("terminal {\n    default-shell \"\"\n}");
     assert_eq!(
-        layer.terminal.and_then(|terminal| terminal.default_shell),
+        app_config_layer
+            .terminal
+            .and_then(|terminal| terminal.default_shell),
         None
     );
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored `terminal.default-shell`: must not be empty".to_string()]
     );
 }
@@ -894,9 +1085,9 @@ fn logging_level_and_format_accept_each_variant() {
 fn a_bad_logging_level_is_skipped_with_a_warning() {
     // `verbose` is not a level: it is dropped with a warning, and `enabled`
     // beside it still applies.
-    let (layer, warnings) =
+    let (app_config_layer, parse_warnings) =
         parse_with_warnings("logging {\n    level \"verbose\"\n    enabled #true\n}");
-    let logging = layer.logging.expect("logging section present");
+    let logging = app_config_layer.logging.expect("logging section present");
     assert_eq!(logging.log_level, None, "the bad level is dropped");
     assert_eq!(
         logging.is_enabled,
@@ -904,7 +1095,7 @@ fn a_bad_logging_level_is_skipped_with_a_warning() {
         "the sibling field still applies"
     );
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec![r#"ignored `logging.level`: expected "info", "warning", or "error""#.to_string()]
     );
 }
@@ -913,13 +1104,15 @@ fn a_bad_logging_level_is_skipped_with_a_warning() {
 fn a_bad_field_is_skipped_and_the_rest_of_the_section_applies() {
     // `max-lines` is a string where a number is required: it is dropped, but
     // `max-bytes` beside it still applies, and the whole parse still succeeds.
-    let (layer, warnings) =
+    let (app_config_layer, parse_warnings) =
         parse_with_warnings("scrollback {\n    max-lines \"oops\"\n    max-bytes 500\n}");
-    let scrollback = layer.scrollback.expect("scrollback section present");
+    let scrollback = app_config_layer
+        .scrollback
+        .expect("scrollback section present");
     assert_eq!(scrollback.maximum_line_count, None);
     assert_eq!(scrollback.maximum_byte_count, Some(500));
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored `scrollback.max-lines`: expected an integer".to_string()]
     );
 }
@@ -927,29 +1120,34 @@ fn a_bad_field_is_skipped_and_the_rest_of_the_section_applies() {
 #[test]
 fn a_negative_scrollback_cap_becomes_zero() {
     // A negative cap is clamped to 0 ("no scrollback"), with no warning.
-    let (layer, warnings) = parse_with_warnings("scrollback {\n    max-lines -5\n}");
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("scrollback {\n    max-lines -5\n}");
     assert_eq!(
-        layer
+        app_config_layer
             .scrollback
             .expect("scrollback present")
             .maximum_line_count,
         Some(0)
     );
-    assert!(warnings.is_empty(), "a negative cap is clamped, not warned");
+    assert!(
+        parse_warnings.is_empty(),
+        "a negative cap is clamped, not warned"
+    );
 }
 
 #[test]
 fn a_bad_direction_value_is_skipped_with_a_warning() {
-    let (layer, warnings) = parse_with_warnings("layout {\n    new-pane-direction \"sideways\"\n}");
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("layout {\n    new-pane-direction \"sideways\"\n}");
     assert_eq!(
-        layer
+        app_config_layer
             .layout
             .expect("layout section present")
             .new_pane_direction,
         None
     );
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec![
             r#"ignored `layout.new-pane-direction`: expected "left", "right", "up", or "down""#
                 .to_string()
@@ -959,9 +1157,9 @@ fn a_bad_direction_value_is_skipped_with_a_warning() {
 
 #[test]
 fn an_unknown_field_in_a_section_warns() {
-    let (_, warnings) = parse_with_warnings("scrollback {\n    frequency 5\n}");
+    let (_, parse_warnings) = parse_with_warnings("scrollback {\n    frequency 5\n}");
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec![
             "ignored unknown key `scrollback.frequency`; did you mean `scrollback.max-lines`?"
                 .to_string()
@@ -971,18 +1169,18 @@ fn an_unknown_field_in_a_section_warns() {
 
 #[test]
 fn a_duplicate_field_partial_section_warns_and_keeps_the_first() {
-    let (layer, warnings) = parse_with_warnings(
+    let (app_config_layer, parse_warnings) = parse_with_warnings(
         "scrollback {\n    max-lines 100\n}\nscrollback {\n    max-lines 200\n}",
     );
     assert_eq!(
-        layer
+        app_config_layer
             .scrollback
             .expect("scrollback present")
             .maximum_line_count,
         Some(100)
     );
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored duplicate `scrollback` section".to_string()]
     );
 }
@@ -1013,40 +1211,56 @@ fn a_pane_block_without_a_gap_line_leaves_the_gap_unset() {
 
 #[test]
 fn a_string_pane_dimension_is_skipped_as_a_non_integer() {
-    let (layer, warnings) = parse_with_warnings("pane {\n    min-cols \"wide\"\n}");
-    assert_eq!(layer.pane.expect("pane present").minimum_column_count, None);
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("pane {\n    min-cols \"wide\"\n}");
     assert_eq!(
-        warnings,
+        app_config_layer
+            .pane
+            .expect("pane present")
+            .minimum_column_count,
+        None
+    );
+    assert_eq!(
+        parse_warnings,
         vec!["ignored `pane.min-cols`: expected an integer".to_string()]
     );
 }
 
 #[test]
 fn a_string_pane_gap_is_skipped_as_a_non_integer() {
-    let (layer, warnings) = parse_with_warnings("pane {\n    gap \"wide\"\n}");
-    assert_eq!(layer.pane.expect("pane present").gap_cell_count, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("pane {\n    gap \"wide\"\n}");
     assert_eq!(
-        warnings,
+        app_config_layer.pane.expect("pane present").gap_cell_count,
+        None
+    );
+    assert_eq!(
+        parse_warnings,
         vec!["ignored `pane.gap`: expected an integer".to_string()]
     );
 }
 
 #[test]
 fn a_negative_pane_gap_is_skipped_not_clamped() {
-    let (layer, warnings) = parse_with_warnings("pane {\n    gap -1\n}");
-    assert_eq!(layer.pane.expect("pane present").gap_cell_count, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("pane {\n    gap -1\n}");
     assert_eq!(
-        warnings,
+        app_config_layer.pane.expect("pane present").gap_cell_count,
+        None
+    );
+    assert_eq!(
+        parse_warnings,
         vec!["ignored `pane.gap`: must be between 0 and 65535".to_string()]
     );
 }
 
 #[test]
 fn a_pane_gap_past_the_cell_count_limit_is_skipped() {
-    let (layer, warnings) = parse_with_warnings("pane {\n    gap 70000\n}");
-    assert_eq!(layer.pane.expect("pane present").gap_cell_count, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("pane {\n    gap 70000\n}");
     assert_eq!(
-        warnings,
+        app_config_layer.pane.expect("pane present").gap_cell_count,
+        None
+    );
+    assert_eq!(
+        parse_warnings,
         vec!["ignored `pane.gap`: must be between 0 and 65535".to_string()]
     );
 }
@@ -1055,12 +1269,13 @@ fn a_pane_gap_past_the_cell_count_limit_is_skipped() {
 fn an_out_of_range_pane_dimension_is_skipped_with_the_range_reason() {
     // 70000 overflows u16 and -1 underflows it; both are skipped with the same
     // bound reason, and the default dimension stands.
-    let (layer, warnings) = parse_with_warnings("pane {\n    min-cols 70000\n    min-rows -1\n}");
-    let pane = layer.pane.expect("pane present");
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("pane {\n    min-cols 70000\n    min-rows -1\n}");
+    let pane = app_config_layer.pane.expect("pane present");
     assert_eq!(pane.minimum_column_count, None);
     assert_eq!(pane.minimum_row_count, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec![
             "ignored `pane.min-cols`: must be between 0 and 65535".to_string(),
             "ignored `pane.min-rows`: must be between 0 and 65535".to_string(),
@@ -1072,10 +1287,16 @@ fn an_out_of_range_pane_dimension_is_skipped_with_the_range_reason() {
 fn a_negative_scroll_lines_is_skipped_not_clamped() {
     // Scroll lines is a plain u16 field: a negative value is dropped with a
     // warning. Only the scrollback caps clamp.
-    let (layer, warnings) = parse_with_warnings("mouse {\n    scroll-lines -5\n}");
-    assert_eq!(layer.mouse.expect("mouse present").scroll_line_count, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("mouse {\n    scroll-lines -5\n}");
     assert_eq!(
-        warnings,
+        app_config_layer
+            .mouse
+            .expect("mouse present")
+            .scroll_line_count,
+        None
+    );
+    assert_eq!(
+        parse_warnings,
         vec!["ignored `mouse.scroll-lines`: must be between 0 and 65535".to_string()]
     );
 }
@@ -1104,9 +1325,10 @@ fn a_negative_version_is_a_validation_error() {
 
 #[test]
 fn a_comments_only_file_sets_no_layer_and_no_warnings() {
-    let (layer, warnings) = parse_with_warnings("// only a comment\n// and another\n");
-    assert_eq!(layer, PartialKoshiConfig::default());
-    assert!(warnings.is_empty());
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("// only a comment\n// and another\n");
+    assert_eq!(app_config_layer, PartialKoshiConfig::default());
+    assert!(parse_warnings.is_empty());
 }
 
 #[test]
@@ -1127,9 +1349,9 @@ fn carriage_return_line_endings_parse_like_line_feeds() {
 fn a_whitespace_only_file_sets_no_layer_and_no_warnings() {
     // Spaces, tabs, and blank lines with no node at all leave every section
     // unset, the same as an empty file, and raise no warning.
-    let (layer, warnings) = parse_with_warnings("   \n\t  \n \n");
-    assert_eq!(layer, PartialKoshiConfig::default());
-    assert!(warnings.is_empty());
+    let (app_config_layer, parse_warnings) = parse_with_warnings("   \n\t  \n \n");
+    assert_eq!(app_config_layer, PartialKoshiConfig::default());
+    assert!(parse_warnings.is_empty());
 }
 
 #[test]
@@ -1137,15 +1359,16 @@ fn a_leading_byte_order_mark_is_tolerated() {
     // An editor that saves UTF-8 with a leading BOM prepends U+FEFF; the file
     // must still parse, with the first section read exactly as if the BOM were
     // absent, on every platform.
-    let (layer, warnings) = parse_with_warnings("\u{feff}scrollback {\n    max-lines 5\n}");
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("\u{feff}scrollback {\n    max-lines 5\n}");
     assert_eq!(
-        layer
+        app_config_layer
             .scrollback
             .expect("scrollback present")
             .maximum_line_count,
         Some(5)
     );
-    assert!(warnings.is_empty());
+    assert!(parse_warnings.is_empty());
 }
 
 #[test]
@@ -1153,10 +1376,16 @@ fn a_float_where_an_integer_is_required_is_skipped_as_a_non_integer() {
     // `1.5` parses as a KDL float, which is the wrong kind for a u16 dimension:
     // the field is dropped with the same reason a string would give, and the
     // default dimension stands.
-    let (layer, warnings) = parse_with_warnings("pane {\n    min-cols 1.5\n}");
-    assert_eq!(layer.pane.expect("pane present").minimum_column_count, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("pane {\n    min-cols 1.5\n}");
     assert_eq!(
-        warnings,
+        app_config_layer
+            .pane
+            .expect("pane present")
+            .minimum_column_count,
+        None
+    );
+    assert_eq!(
+        parse_warnings,
         vec!["ignored `pane.min-cols`: expected an integer".to_string()]
     );
 }
@@ -1200,22 +1429,32 @@ fn a_repeated_field_inside_one_section_keeps_the_last_value() {
     // Two `min-cols` lines in one `pane` block is not a duplicate section: the
     // subsequent value wins and no warning is raised, matching KDL's last-node-wins
     // reading of repeated fields.
-    let (layer, warnings) = parse_with_warnings("pane {\n    min-cols 5\n    min-cols 10\n}");
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("pane {\n    min-cols 5\n    min-cols 10\n}");
     assert_eq!(
-        layer.pane.expect("pane present").minimum_column_count,
+        app_config_layer
+            .pane
+            .expect("pane present")
+            .minimum_column_count,
         Some(10)
     );
-    assert!(warnings.is_empty());
+    assert!(parse_warnings.is_empty());
 }
 
 #[test]
 fn a_field_with_no_value_is_skipped_with_a_warning() {
     // A bare `min-cols` with no argument has zero values where exactly one is
     // required: it is dropped like any bad field and the default stands.
-    let (layer, warnings) = parse_with_warnings("pane {\n    min-cols\n}");
-    assert_eq!(layer.pane.expect("pane present").minimum_column_count, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("pane {\n    min-cols\n}");
     assert_eq!(
-        warnings,
+        app_config_layer
+            .pane
+            .expect("pane present")
+            .minimum_column_count,
+        None
+    );
+    assert_eq!(
+        parse_warnings,
         vec!["ignored `pane.min-cols`: expected exactly one value".to_string()]
     );
 }
@@ -1310,9 +1549,12 @@ fn a_version_with_a_named_property_is_a_validation_error() {
 #[test]
 fn a_version_after_the_last_section_still_counts() {
     // `version` may appear anywhere in the file, not only on the first line.
-    let layer = parse_config("pane {\n    min-cols 2\n}\nversion 1");
+    let app_config_layer = parse_config("pane {\n    min-cols 2\n}\nversion 1");
     assert_eq!(
-        layer.pane.expect("pane present").minimum_column_count,
+        app_config_layer
+            .pane
+            .expect("pane present")
+            .minimum_column_count,
         Some(2)
     );
 }
@@ -1321,16 +1563,19 @@ fn a_version_after_the_last_section_still_counts() {
 fn a_section_line_with_no_block_sets_an_all_none_section() {
     // A bare `pane` line has no `{ … }` block: the section is marked present
     // with every field unset, and no warning is raised.
-    let (layer, warnings) = parse_with_warnings("pane");
-    assert_eq!(layer.pane, Some(PartialPaneConfig::default()));
-    assert!(warnings.is_empty());
+    let (app_config_layer, parse_warnings) = parse_with_warnings("pane");
+    assert_eq!(app_config_layer.pane, Some(PartialPaneConfig::default()));
+    assert!(parse_warnings.is_empty());
 }
 
 #[test]
 fn a_bare_update_line_sets_an_all_none_section() {
-    let (layer, warnings) = parse_with_warnings("update");
-    assert_eq!(layer.update, Some(PartialUpdateConfig::default()));
-    assert!(warnings.is_empty());
+    let (app_config_layer, parse_warnings) = parse_with_warnings("update");
+    assert_eq!(
+        app_config_layer.update,
+        Some(PartialUpdateConfig::default())
+    );
+    assert!(parse_warnings.is_empty());
 }
 
 #[test]
@@ -1382,24 +1627,24 @@ fn an_update_field_with_a_child_block_is_a_validation_error() {
 fn a_repeated_update_field_keeps_the_last_value() {
     // Two `auto-check` lines in one `update` block read like repeated fields
     // in a field-partial section: the subsequent value wins, with no warning.
-    let (layer, warnings) =
+    let (app_config_layer, parse_warnings) =
         parse_with_warnings("update {\n    auto-check #true\n    auto-check #false\n}");
     assert_eq!(
-        layer
+        app_config_layer
             .update
             .expect("update present")
             .should_auto_check_for_updates,
         Some(false)
     );
-    assert!(warnings.is_empty());
+    assert!(parse_warnings.is_empty());
 }
 
 #[test]
 fn unknown_top_level_nodes_warn_once_each() {
     // Unknown names are not deduplicated: each occurrence warns.
-    let (_, warnings) = parse_with_warnings("frobnicate 1\nfrobnicate 2");
+    let (_, parse_warnings) = parse_with_warnings("frobnicate 1\nfrobnicate 2");
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec![
             "ignored unknown key `frobnicate`; did you mean `update`?".to_string(),
             "ignored unknown key `frobnicate`; did you mean `update`?".to_string(),
@@ -1409,10 +1654,10 @@ fn unknown_top_level_nodes_warn_once_each() {
 
 #[test]
 fn warnings_arrive_in_file_order() {
-    let (_, warnings) =
+    let (_, parse_warnings) =
         parse_with_warnings("theme \"\"\npane {\n    min-cols \"x\"\n}\nfrobnicate 1");
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec![
             "ignored `theme`: must not be empty".to_string(),
             "ignored `pane.min-cols`: expected an integer".to_string(),
@@ -1425,16 +1670,16 @@ fn warnings_arrive_in_file_order() {
 fn a_scrollback_cap_above_usize_max_becomes_usize_max() {
     // 18446744073709551616 is one past u64::MAX; the cap saturates at
     // usize::MAX with no warning.
-    let (layer, warnings) =
+    let (app_config_layer, parse_warnings) =
         parse_with_warnings("scrollback {\n    max-lines 18446744073709551616\n}");
     assert_eq!(
-        layer
+        app_config_layer
             .scrollback
             .expect("scrollback present")
             .maximum_line_count,
         Some(usize::MAX)
     );
-    assert!(warnings.is_empty());
+    assert!(parse_warnings.is_empty());
 }
 
 #[test]
@@ -1445,10 +1690,17 @@ fn scroll_lines_at_the_u16_ceiling_is_accepted_and_one_past_is_skipped() {
         Some(65535)
     );
 
-    let (layer, warnings) = parse_with_warnings("mouse {\n    scroll-lines 65536\n}");
-    assert_eq!(layer.mouse.expect("mouse present").scroll_line_count, None);
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("mouse {\n    scroll-lines 65536\n}");
     assert_eq!(
-        warnings,
+        app_config_layer
+            .mouse
+            .expect("mouse present")
+            .scroll_line_count,
+        None
+    );
+    assert_eq!(
+        parse_warnings,
         vec!["ignored `mouse.scroll-lines`: must be between 0 and 65535".to_string()]
     );
 }
@@ -1457,10 +1709,16 @@ fn scroll_lines_at_the_u16_ceiling_is_accepted_and_one_past_is_skipped() {
 fn a_field_with_a_named_property_is_skipped_with_a_warning() {
     // `min-cols x=5` carries a named property where one plain value is
     // required.
-    let (layer, warnings) = parse_with_warnings("pane {\n    min-cols x=5\n}");
-    assert_eq!(layer.pane.expect("pane present").minimum_column_count, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("pane {\n    min-cols x=5\n}");
     assert_eq!(
-        warnings,
+        app_config_layer
+            .pane
+            .expect("pane present")
+            .minimum_column_count,
+        None
+    );
+    assert_eq!(
+        parse_warnings,
         vec!["ignored `pane.min-cols`: expected exactly one value".to_string()]
     );
 }
@@ -1486,20 +1744,30 @@ fn wheel_accepts_each_variant() {
 
 #[test]
 fn a_bad_wheel_value_is_skipped_with_a_warning() {
-    let (layer, warnings) = parse_with_warnings("mouse {\n    wheel \"zoom\"\n}");
-    assert_eq!(layer.mouse.expect("mouse present").wheel_scroll, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("mouse {\n    wheel \"zoom\"\n}");
     assert_eq!(
-        warnings,
+        app_config_layer.mouse.expect("mouse present").wheel_scroll,
+        None
+    );
+    assert_eq!(
+        parse_warnings,
         vec![r#"ignored `mouse.wheel`: expected "scroll-scrollback" or "ignore""#.to_string()]
     );
 }
 
 #[test]
 fn a_bad_logging_format_is_skipped_with_a_warning() {
-    let (layer, warnings) = parse_with_warnings("logging {\n    format \"xml\"\n}");
-    assert_eq!(layer.logging.expect("logging present").log_format, None);
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("logging {\n    format \"xml\"\n}");
     assert_eq!(
-        warnings,
+        app_config_layer
+            .logging
+            .expect("logging present")
+            .log_format,
+        None
+    );
+    assert_eq!(
+        parse_warnings,
         vec![r#"ignored `logging.format`: expected "pretty" or "json""#.to_string()]
     );
 }
@@ -1554,9 +1822,9 @@ fn an_unknown_field_in_each_section_suggests_its_nearest_key() {
             "ignored unknown key `logging.levl`; did you mean `logging.level`?",
         ),
     ] {
-        let (_, warnings) = parse_with_warnings(config_source_text);
+        let (_, parse_warnings) = parse_with_warnings(config_source_text);
         assert_eq!(
-            warnings,
+            parse_warnings,
             vec![expected_warning.to_string()],
             "source {config_source_text:?}"
         );
@@ -1567,48 +1835,52 @@ fn an_unknown_field_in_each_section_suggests_its_nearest_key() {
 fn a_section_written_with_a_value_instead_of_a_block_is_named_in_the_warnings() {
     // `scrollback 5000` reads as a section with no block, so nothing of it is
     // applied. The warning says so rather than leaving the user guessing.
-    let (layer, warnings) = parse_with_warnings("scrollback 5000");
+    let (app_config_layer, parse_warnings) = parse_with_warnings("scrollback 5000");
 
-    assert_eq!(layer.scrollback, Some(PartialScrollbackConfig::default()));
     assert_eq!(
-        warnings,
+        app_config_layer.scrollback,
+        Some(PartialScrollbackConfig::default())
+    );
+    assert_eq!(
+        parse_warnings,
         vec!["ignored `scrollback` value: a section takes a `{ … }` block".to_string()]
     );
 }
 
 #[test]
 fn a_section_carrying_both_a_value_and_a_block_reads_the_block_and_names_the_value() {
-    let (layer, warnings) = parse_with_warnings("pane 7 { min-cols 12 }");
+    let (app_config_layer, parse_warnings) = parse_with_warnings("pane 7 { min-cols 12 }");
 
     assert_eq!(
-        layer.pane,
+        app_config_layer.pane,
         Some(PartialPaneConfig {
             minimum_column_count: Some(12),
             ..PartialPaneConfig::default()
         })
     );
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored `pane` value: a section takes a `{ … }` block".to_string()]
     );
 }
 
 #[test]
 fn a_non_boolean_image_support_is_skipped_with_a_warning() {
-    let (layer, warnings) = parse_with_warnings("image-support \"yes\"");
-    assert_eq!(layer.supports_image_protocols, None);
+    let (app_config_layer, parse_warnings) = parse_with_warnings("image-support \"yes\"");
+    assert_eq!(app_config_layer.supports_image_protocols, None);
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored `image-support`: expected a boolean (#true or #false)".to_string()]
     );
 }
 
 #[test]
 fn a_repeated_image_support_line_keeps_the_first_and_warns() {
-    let (layer, warnings) = parse_with_warnings("image-support #false\nimage-support #true");
-    assert_eq!(layer.supports_image_protocols, Some(false));
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("image-support #false\nimage-support #true");
+    assert_eq!(app_config_layer.supports_image_protocols, Some(false));
     assert_eq!(
-        warnings,
+        parse_warnings,
         vec!["ignored duplicate `image-support` section".to_string()]
     );
 }

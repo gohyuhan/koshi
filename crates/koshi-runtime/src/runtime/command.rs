@@ -22,7 +22,7 @@ use std::thread;
 use std::time::SystemTime;
 
 use crate::runtime::{
-    bus::EventBus, spawn_env::build_koshi_environment, transaction::TransactionScope,
+    bus::EventBus, spawn_env::add_koshi_environment, transaction::TransactionScope,
 };
 use crate::server::Server;
 use koshi_core::{
@@ -35,7 +35,6 @@ use koshi_core::{
         SetPaneMinimizedArgs, SetPanePinnedArgs, SetSelectionArgs, SwitchSessionArgs, TabTarget,
         ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
     },
-    constant::FLOATING_PANE_CHROME_SIZE,
     event::{
         Event, FloatingPaneMoved, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused,
         PaneMinimizedChanged, PanePinChanged, PanePlacementCommitted, PaneProcessExited,
@@ -64,6 +63,7 @@ use koshi_layout::{
 use koshi_pane::pane::{lifecycle::PaneLifecycle, policy::PaneClosePolicy, state::PaneRecord};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::resize::{compute_pty_size, resize_for_layout_change};
+use koshi_renderer::floating_pane_chrome::compute_floating_pane_content_size;
 use koshi_session::client::{place_floating_pane, Client, ClientOrigin, FloatingPanePosition};
 use koshi_session::error::FloatingSetError;
 use koshi_session::session::{
@@ -157,20 +157,6 @@ fn list_floating_pane_kill_policies(
             ))
         })
         .collect()
-}
-
-/// The PTY size of a floating pane whose outer size is `outer_size`: the outer
-/// size less [`FLOATING_PANE_CHROME_SIZE`] on each axis, never below `0`.
-/// `40x12` → `38x8`.
-fn compute_floating_pane_content_size(outer_size: Size) -> Size {
-    Size {
-        column_count: outer_size
-            .column_count
-            .saturating_sub(FLOATING_PANE_CHROME_SIZE.column_count),
-        row_count: outer_size
-            .row_count
-            .saturating_sub(FLOATING_PANE_CHROME_SIZE.row_count),
-    }
 }
 
 /// Refuse a transaction when its shared placement generation cannot advance.
@@ -1086,9 +1072,9 @@ impl Server {
     /// or no client with a floating viewport — every solved size and every PTY
     /// size stays as it is. Otherwise [`FloatingSet::update_member_sizes`]
     /// solves each pane with the pane minimum of [`Server::get_pane_sizing`],
-    /// and each pane's PTY takes its outer size less
-    /// [`FLOATING_PANE_CHROME_SIZE`]: `40x12` → `38x8`. A session this server
-    /// does not hold changes nothing.
+    /// and each pane's PTY takes [`compute_floating_pane_content_size`] of its
+    /// outer size: `40x12` → `38x8`. A session this server does not hold
+    /// changes nothing.
     ///
     /// [`FloatingSet::update_member_sizes`]: koshi_session::session::state::FloatingSet::update_member_sizes
     fn reflow_floating_panes(

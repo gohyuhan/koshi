@@ -1,7 +1,8 @@
 //! Tests for the wire messages: every request and response variant survives a
 //! round trip and keeps its own tag, an unknown field is refused on the
-//! envelope and ignored on the payload, and the connection token prints as
-//! `***` and is equal only to a token holding the same bytes.
+//! envelope and ignored on the payload, the connection token prints as
+//! `***` and is equal only to a token holding the same bytes, and a clipboard
+//! copy of [`MAX_CLIPBOARD_COPY_PART_BYTE_COUNT`] bytes fits one frame.
 
 use std::num::NonZeroU16;
 use std::path::PathBuf;
@@ -299,6 +300,7 @@ pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
             pane_area: None,
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
+            link_timeout_ms: None,
         },
         IpcRequestKind::Keyboard {
             key_input: build_control_c_key_input(),
@@ -328,7 +330,16 @@ pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
         },
         IpcRequestKind::RecentEvents,
         IpcRequestKind::Restart,
-        IpcRequestKind::Leaving,
+        IpcRequestKind::Leaving { is_returning: true },
+        IpcRequestKind::Ping,
+        IpcRequestKind::ClipboardCopyPart {
+            copied_bytes: b"hel".to_vec(),
+        },
+        IpcRequestKind::ClipboardCopy {
+            pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+            clipboard_targets: "c".to_string(),
+            copied_bytes: b"lo".to_vec(),
+        },
     ]
 }
 
@@ -358,6 +369,10 @@ pub(crate) fn list_all_ipc_results() -> Vec<IpcResult> {
             code: IpcErrorCode::BadToken,
             message: "the token does not match".to_string(),
         }),
+        IpcResult::ClipboardCopyPartTaken,
+        IpcResult::ClipboardCopyRouted {
+            should_run_clipboard_tool: false,
+        },
     ]
 }
 
@@ -721,6 +736,7 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
             pane_area: None,
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
+            link_timeout_ms: None,
         },
     };
 
@@ -795,6 +811,7 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
                 supports_sixel: false,
             },
             cell_size: None,
+            link_timeout_ms: None,
         },
     };
     assert_eq!(
@@ -844,6 +861,7 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
                     supports_sixel: false,
                 },
                 cell_size: None,
+                link_timeout_ms: None,
             },
         }
     );
@@ -1028,6 +1046,7 @@ fn attach_request_round_trips() {
             pane_area: None,
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
+            link_timeout_ms: None,
         },
     };
 
@@ -1050,6 +1069,7 @@ fn attach_and_resize_keep_cell_measurements_and_default_omitted_optional_fields(
             pane_area: None,
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: Some(cell_size),
+            link_timeout_ms: None,
         },
     };
     let resize_request = IpcRequest {
@@ -1085,6 +1105,7 @@ fn attach_and_resize_keep_cell_measurements_and_default_omitted_optional_fields(
                 pane_area: None,
                 graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
+                link_timeout_ms: None,
             },
         }
     );
@@ -1121,6 +1142,7 @@ fn an_attach_request_naming_a_client_to_come_back_as_round_trips() {
             pane_area: None,
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
+            link_timeout_ms: None,
         },
     };
 
@@ -1141,6 +1163,7 @@ fn an_attach_request_carrying_a_resume_token_keeps_the_secret_whole() {
             pane_area: None,
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
+            link_timeout_ms: None,
         },
     };
 
@@ -1181,6 +1204,7 @@ fn an_attach_request_written_without_a_resume_token_beside_a_resume_decodes_as_n
                 pane_area: None,
                 graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
+                link_timeout_ms: None,
             },
         }
     );
@@ -1216,6 +1240,7 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
             })),
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
+            link_timeout_ms: None,
         },
     };
 
@@ -1250,6 +1275,7 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
             pane_area: Some(PaneArea::Starving),
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
+            link_timeout_ms: None,
         },
     };
 
@@ -1429,6 +1455,7 @@ fn an_attach_naming_where_it_connected_from_carries_none_of_it() {
                 pane_area: None,
                 graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
+                link_timeout_ms: None,
             },
         }
     );
@@ -1460,6 +1487,7 @@ fn an_attach_naming_its_own_authority_carries_none_of_it() {
             pane_area: None,
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
+            link_timeout_ms: None,
         },
     };
 
@@ -1723,16 +1751,76 @@ fn recent_events_request_round_trips() {
 }
 
 #[test]
-fn leaving_request_round_trips() {
+fn leaving_request_round_trips_with_whether_the_client_returns() {
+    for is_returning in [false, true] {
+        let ipc_request = IpcRequest {
+            request_id: 10,
+            request_kind: IpcRequestKind::Leaving { is_returning },
+        };
+
+        assert_eq!(round_trip_wire_message(&ipc_request), ipc_request);
+        assert_eq!(
+            serde_json::to_value(&ipc_request).expect("request encodes"),
+            json!({
+                "request_id": 10,
+                "request_kind": { "Leaving": { "is_returning": is_returning } }
+            })
+        );
+    }
+}
+
+#[test]
+fn ping_request_round_trips_as_its_bare_name() {
     let ipc_request = IpcRequest {
-        request_id: 10,
-        request_kind: IpcRequestKind::Leaving,
+        request_id: 11,
+        request_kind: IpcRequestKind::Ping,
     };
 
     assert_eq!(round_trip_wire_message(&ipc_request), ipc_request);
     assert_eq!(
         serde_json::to_value(&ipc_request).expect("request encodes"),
-        json!({ "request_id": 10, "request_kind": "Leaving" })
+        json!({ "request_id": 11, "request_kind": "Ping" })
+    );
+}
+
+#[test]
+fn attach_carries_a_link_timeout_only_when_it_has_one() {
+    let build_attach = |link_timeout_ms: Option<u32>| IpcRequest {
+        request_id: 2,
+        request_kind: IpcRequestKind::Attach {
+            viewport_size: Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            resume_client_id: None,
+            resume_token: None,
+            pane_area: None,
+            graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
+            cell_size: None,
+            link_timeout_ms,
+        },
+    };
+    let attach_with_timeout = build_attach(Some(30_000));
+    let attach_without_timeout = build_attach(None);
+
+    assert_eq!(
+        round_trip_wire_message(&attach_with_timeout),
+        attach_with_timeout
+    );
+    assert_eq!(
+        round_trip_wire_message(&attach_without_timeout),
+        attach_without_timeout
+    );
+    let encoded_with_timeout = serde_json::to_value(&attach_with_timeout).expect("request encodes");
+    assert_eq!(
+        encoded_with_timeout["request_kind"]["Attach"]["link_timeout_ms"],
+        json!(30_000)
+    );
+    let encoded_without_timeout =
+        serde_json::to_value(&attach_without_timeout).expect("request encodes");
+    assert_eq!(
+        encoded_without_timeout["request_kind"]["Attach"].get("link_timeout_ms"),
+        None
     );
 }
 
@@ -2444,4 +2532,94 @@ fn a_generated_token_is_64_lowercase_hex_characters() {
 #[test]
 fn two_generated_tokens_differ() {
     assert_ne!(ConnectionToken::generate(), ConnectionToken::generate());
+}
+
+/// A `ClipboardCopy` with the longest request id and target field this build
+/// sends, carrying `copied_byte_count` bytes of `0xff`.
+fn build_largest_clipboard_copy_request(copied_byte_count: usize) -> IpcRequest {
+    IpcRequest {
+        request_id: u64::MAX,
+        request_kind: IpcRequestKind::ClipboardCopy {
+            pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+            clipboard_targets: "cpqs01234567".to_string(),
+            copied_bytes: vec![0xff; copied_byte_count],
+        },
+    }
+}
+
+#[test]
+fn a_clipboard_copy_of_the_largest_part_fills_one_frame_exactly() {
+    let clipboard_copy_request =
+        build_largest_clipboard_copy_request(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT);
+
+    assert_eq!(
+        serde_json::to_vec(&clipboard_copy_request)
+            .expect("request encodes")
+            .len(),
+        crate::transport::MAX_FRAME_BYTE_COUNT as usize
+    );
+    let mut written_frame_bytes = Vec::new();
+    crate::transport::write_message(&mut written_frame_bytes, &clipboard_copy_request)
+        .expect("the largest part fits one frame");
+    assert_eq!(
+        written_frame_bytes.len(),
+        4 + crate::transport::MAX_FRAME_BYTE_COUNT as usize
+    );
+}
+
+#[test]
+fn a_clipboard_copy_three_bytes_past_the_largest_part_is_refused_by_the_frame_limit() {
+    let clipboard_copy_request =
+        build_largest_clipboard_copy_request(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 3);
+
+    assert_eq!(
+        serde_json::to_vec(&clipboard_copy_request)
+            .expect("request encodes")
+            .len(),
+        crate::transport::MAX_FRAME_BYTE_COUNT as usize + 4
+    );
+    let mut written_frame_bytes = Vec::new();
+    let Err(crate::error::IpcError::FrameTooLarge {
+        maximum_frame_byte_count,
+        ..
+    }) = crate::transport::write_message(&mut written_frame_bytes, &clipboard_copy_request)
+    else {
+        panic!("a part three bytes past the largest one must not fit one frame");
+    };
+    assert_eq!(
+        maximum_frame_byte_count,
+        crate::transport::MAX_FRAME_BYTE_COUNT
+    );
+    assert_eq!(written_frame_bytes, Vec::<u8>::new());
+}
+
+#[test]
+fn a_clipboard_copy_part_round_trips_as_base64() {
+    let clipboard_copy_part = IpcRequestKind::ClipboardCopyPart {
+        copied_bytes: vec![0x1b, b']', 0xc3, 0xa9],
+    };
+
+    assert_eq!(
+        serde_json::to_value(&clipboard_copy_part).expect("request kind encodes"),
+        json!({ "ClipboardCopyPart": { "copied_bytes": "G13DqQ==" } })
+    );
+    assert_eq!(
+        round_trip_wire_message(&clipboard_copy_part),
+        clipboard_copy_part
+    );
+}
+
+#[test]
+fn a_clipboard_copy_answer_names_whether_the_tool_runs() {
+    assert_eq!(
+        serde_json::to_value(IpcResult::ClipboardCopyRouted {
+            should_run_clipboard_tool: true,
+        })
+        .expect("result encodes"),
+        json!({ "ClipboardCopyRouted": { "should_run_clipboard_tool": true } })
+    );
+    assert_eq!(
+        serde_json::to_value(IpcResult::ClipboardCopyPartTaken).expect("result encodes"),
+        json!("ClipboardCopyPartTaken")
+    );
 }

@@ -1,7 +1,8 @@
 //! Integration cover for attaching over a real control socket: what one
 //! attach registers, what the reply carries and when it is written, what a
 //! second attach sees, what an attach naming a field this build does not know
-//! still sets, what a client's key presses and resizes reach, what a client's
+//! still sets, which lock command of a client the frame that shows its lock
+//! names, what a client's key presses and resizes reach, what a client's
 //! mouse rounds do to its panes and what the one answer each round is given
 //! carries, what a detach leaves behind for the clients that stay and for the
 //! panes, what a dropped connection leaves behind, and what a frame this build
@@ -20,13 +21,14 @@ use common::{
 
 use koshi_core::command::{
     CloseTabArgs, Command, CommandEnvelope, CommandSource, DetachArgs, FocusPaneArgs, FocusTabArgs,
-    FocusTarget, NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor,
+    FocusTarget, LockModeArgs, NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor,
     PanePlacementTarget, PlacePaneArgs, PlacementRevision, TabTarget,
 };
 use koshi_core::event::Event;
 use koshi_core::geometry::{Direction, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord};
+use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseButton, MouseInput, MouseKind, MouseTracking};
 use koshi_core::process::{ExitStatus, PtySize};
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
@@ -94,6 +96,7 @@ fn attach_test_client_with_resume_token(
                 pane_area: None,
                 graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
+                link_timeout_ms: None,
             },
         })
         .expect("send attach");
@@ -231,6 +234,67 @@ fn one_attach_registers_the_client_the_server_minted() {
         client.get_label()
     );
     assert_eq!(label_parts[0], "C");
+}
+
+#[test]
+fn the_frame_that_shows_a_viewers_lock_names_the_lock_command_it_sent() {
+    let (_server, _fake_pty_backend, (lock_command_id, frames_client_snapshots)) =
+        serve_test_session(
+            "lock-answer",
+            |runtime_directory, session_id, _fake_pty_backend| {
+                let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
+                let (client_id, _, _, _) = attach_test_client(&mut viewer_connection, 2);
+                let lock_command_id = CommandId::new();
+                viewer_connection
+                    .send(&IpcRequest {
+                        request_id: 3,
+                        request_kind: IpcRequestKind::SubmitCommand(Box::new(
+                            CommandEnvelope::from_parts(
+                                lock_command_id,
+                                CommandSource::from_key_binding(client_id),
+                                Command::SetLockMode(LockModeArgs {
+                                    is_locked: true,
+                                    client_id: None,
+                                }),
+                            ),
+                        )),
+                    })
+                    .expect("send the lock command");
+                let (viewer_connection, session_events) =
+                    read_session_frames_until(viewer_connection, |session_event| {
+                        matches!(
+                            session_event,
+                            SessionEvent::Painted { frame: painted_frame }
+                                if painted_frame.client_snapshot.lock_mode == LockMode::Locked
+                        )
+                    });
+                let frames_client_snapshots: Vec<_> = session_events
+                    .iter()
+                    .filter_map(|session_event| match session_event {
+                        SessionEvent::Painted {
+                            frame: painted_frame,
+                        } => Some(painted_frame.client_snapshot.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                (
+                    vec![viewer_connection],
+                    (lock_command_id, frames_client_snapshots),
+                )
+            },
+        );
+
+    let (locked_client_snapshot, earlier_client_snapshots) = frames_client_snapshots
+        .split_last()
+        .expect("the run ends with the locked frame");
+    assert_eq!(
+        locked_client_snapshot.last_applied_lock_command_id,
+        Some(lock_command_id)
+    );
+    for earlier_client_snapshot in earlier_client_snapshots {
+        assert_eq!(earlier_client_snapshot.lock_mode, LockMode::Normal);
+        assert_eq!(earlier_client_snapshot.last_applied_lock_command_id, None);
+    }
 }
 
 #[test]
@@ -452,11 +516,11 @@ fn the_event_stream_ends_with_the_quit_frame() {
                 });
             assert_eq!(session_events.last(), Some(&SessionEvent::Quit));
 
-            // The quit frame ends the stream: its writing thread exits and
-            // detaches the client. The viewer connection is still open: the
-            // record goes away only through that exit.
+            // The quit frame ends the stream. The viewer closes its connection
+            // once it reads that frame, and the record goes with it.
+            drop(viewer_connection);
             wait_for_client_count(&mut caller_connection, 0, 5);
-            (vec![caller_connection, viewer_connection], session_id)
+            (vec![caller_connection], session_id)
         },
     );
 

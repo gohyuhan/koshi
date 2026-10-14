@@ -28,6 +28,8 @@ use koshi_core::process::PtySize;
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
+mod clipboard_copy;
+
 pub use crate::graphics::GraphicsTransportState;
 use crate::graphics::{
     GraphicsError, GraphicsOperation, GraphicsParser, GraphicsProtocol, ImageRecord,
@@ -35,6 +37,8 @@ use crate::graphics::{
 };
 use crate::scrollback::ScrollbackLimit;
 use crate::state::{ShellIntegrationFact, TerminalState};
+pub use clipboard_copy::ClipboardCopy;
+use clipboard_copy::ClipboardCopyParser;
 
 /// The byte every escape sequence starts with: `ESC`, `0x1b`.
 const ESCAPE_BYTE: u8 = 0x1b;
@@ -780,6 +784,10 @@ pub struct TerminalEngine {
     dropped_graphics_event_count: usize,
     /// Number of dropped events that were graphics errors.
     dropped_graphics_error_count: usize,
+    /// Reads the `OSC 52` clipboard copies in the bytes `parser` reads. `None`
+    /// until [`start_reading_clipboard_copies`](Self::start_reading_clipboard_copies)
+    /// runs: the engine then reads no copy and spends no work on one.
+    clipboard_copy_parser: Option<ClipboardCopyParser>,
 }
 
 impl TerminalEngine {
@@ -811,6 +819,7 @@ impl TerminalEngine {
             queued_graphics_rgba_byte_count: 0,
             dropped_graphics_event_count: 0,
             dropped_graphics_error_count: 0,
+            clipboard_copy_parser: None,
         }
     }
 
@@ -882,6 +891,9 @@ impl TerminalEngine {
         let terminal_input =
             remove_terminal_inert_bytes(normalized_bytes, &graphics_advance.terminal_inert_ranges);
         let terminal_bytes = terminal_input.as_ref();
+        if let Some(clipboard_copy_parser) = &mut self.clipboard_copy_parser {
+            clipboard_copy_parser.process_terminal_bytes(terminal_bytes);
+        }
         let mut parser_byte_index = 0;
         for (graphics_byte_offset, graphics_event) in graphics_advance.completed_graphics_events {
             let graphics_event_end_index = compute_terminal_byte_offset_without_inert_ranges(
@@ -1158,6 +1170,31 @@ impl TerminalEngine {
         })
     }
 
+    /// Start reading the `OSC 52` clipboard copies in this pane's output, each
+    /// of at most `maximum_copy_byte_count` decoded bytes, by the rules of the
+    /// module `clipboard_copy`. A reader already running is replaced.
+    ///
+    /// The new reader reads [`get_undecoded_terminal_bytes`](Self::get_undecoded_terminal_bytes)
+    /// first. A copy that a process-image swap cut within its first 64 KiB
+    /// completes in the next chunk. Example:
+    /// the previous engine stopped after `ESC ] 52 ; c ; aG`, and the chunk
+    /// `k= BEL` gives the copy `hi`.
+    pub fn start_reading_clipboard_copies(&mut self, maximum_copy_byte_count: usize) {
+        let mut clipboard_copy_parser =
+            ClipboardCopyParser::with_maximum_copy_byte_count(maximum_copy_byte_count);
+        clipboard_copy_parser.process_terminal_bytes(&self.undecoded_terminal_bytes);
+        self.clipboard_copy_parser = Some(clipboard_copy_parser);
+    }
+
+    /// Hand back the clipboard copies finished since the last call, in the
+    /// order their sequences ended. Empty when the engine reads no copy.
+    pub fn take_clipboard_copies(&mut self) -> Vec<ClipboardCopy> {
+        match &mut self.clipboard_copy_parser {
+            Some(clipboard_copy_parser) => clipboard_copy_parser.take_clipboard_copies(),
+            None => Vec::new(),
+        }
+    }
+
     /// The screen model, for reads (rendering, cursor and mode queries).
     pub fn get_terminal_state(&self) -> &TerminalState {
         &self.terminal_state
@@ -1168,16 +1205,22 @@ impl TerminalEngine {
         self.terminal_state.set_cell_size(pixel_cell_size);
     }
 
-    /// Return the time until the next retained image animation frame is due.
+    /// Return the time from `monotonic_timestamp` until the next retained image
+    /// animation frame is due. A running animation whose clock has not started
+    /// is due at once.
     #[must_use]
-    pub fn get_next_image_animation_delay(&self) -> Option<Duration> {
-        self.terminal_state.get_next_image_animation_delay()
+    pub fn get_next_image_animation_delay(&self, monotonic_timestamp: Instant) -> Option<Duration> {
+        self.terminal_state
+            .get_next_image_animation_delay(monotonic_timestamp)
     }
 
-    /// Advance retained image animations and report whether visible pixels changed.
-    pub fn advance_image_animations(&mut self, elapsed_duration: Duration) -> bool {
+    /// Advance retained image animations to `monotonic_timestamp` and report
+    /// whether visible pixels changed. Each animation keeps its own clock: the
+    /// first advance after an animation starts running starts that clock at
+    /// `monotonic_timestamp`.
+    pub fn advance_image_animations(&mut self, monotonic_timestamp: Instant) -> bool {
         self.terminal_state
-            .advance_image_animations(elapsed_duration)
+            .advance_image_animations(monotonic_timestamp)
     }
 
     /// Resize the terminal state to `pty_size` (see [`TerminalState::resize_terminal_state`]).

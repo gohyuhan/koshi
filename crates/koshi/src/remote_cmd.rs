@@ -6,12 +6,12 @@
 //! through koshi's atomic replace. A change another koshi makes meanwhile is
 //! never written over. A listing never prints a secret.
 //!
-//! `new` and `edit` ask three questions in turn — the name, the address and
-//! the secret — and then dial the server once to check that it admits the
-//! secret. A server that admits it pins the certificate it presented. A
-//! server that does not is named, and the user answers whether to save what
-//! they typed anyway. A saved server saved that way pins a certificate on its first
-//! connection.
+//! `new` and `edit` ask four questions in turn — the name, the address, the
+//! fingerprint of the server's certificate, and the secret — and then dial the
+//! server once to check that it presents that certificate and admits the
+//! secret. A server that does not pass is named, and the user answers whether
+//! to save what they typed anyway. Either way the saved server holds the
+//! fingerprint the user typed.
 //!
 //! `forget` and `set-secret` open no connection. A server that is switched
 //! off is still forgotten, and still takes a fresh secret.
@@ -26,8 +26,8 @@ use crate::{output, prompt};
 use koshi_link::error::CliError;
 use koshi_link::remote_client::{
     self, is_server_address, load_saved_server_store, prompt_line, prompt_secret,
-    update_saved_server_store, validate_saved_server_name, DIAL_TIMEOUT_DURATION,
-    REPLY_TIMEOUT_DURATION,
+    update_saved_server_store, validate_certificate_fingerprint, validate_saved_server_name,
+    DIAL_TIMEOUT_DURATION, REPLY_TIMEOUT_DURATION,
 };
 
 #[cfg(test)]
@@ -36,13 +36,12 @@ mod tests;
 /// What the check of one server settled on.
 #[derive(Debug, PartialEq, Eq)]
 enum ServerCheckOutcome {
-    /// The server admitted the secret, presenting this certificate
-    /// fingerprint.
-    Pinned(String),
-    /// The server did not admit the secret, and the user said to save what
-    /// they typed.
-    Unpinned,
-    /// The server did not admit the secret, and the user said not to save.
+    /// The server presented the expected certificate and admitted the
+    /// secret.
+    Passed,
+    /// The check did not pass, and the user said to save what they typed.
+    Kept,
+    /// The check did not pass, and the user said not to save.
     Discarded,
 }
 
@@ -97,12 +96,14 @@ pub fn run_remote_command(command: &RemoteCommand) -> Result<(), CliError> {
     }
 }
 
-/// Save one server the user describes: ask for the name, the address and the
-/// secret, check them against that server, and write the saved server.
+/// Save one server the user describes: ask for the name, the address, the
+/// fingerprint of its certificate and the secret, check them against that
+/// server, and write the saved server.
 ///
-/// Every answer is needed, and an empty one asks again. A saved server whose check
-/// did not pass is saved with no pinned fingerprint once the user answers to
-/// save it. Its first connection pins the certificate it meets.
+/// Every answer is needed, and an empty one asks again. A fingerprint that is
+/// not 64 lowercase hex characters asks again. A saved server whose check did
+/// not pass is saved with the fingerprint typed, once the user answers to save
+/// it.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the terminal could not be read, when the
@@ -117,50 +118,48 @@ fn create_saved_server_from_prompts(server_store: &ServerStore) -> Result<(), Cl
     let server_address = prompt_until_valid_answer("address", None, |entered_address| {
         validate_saved_server_address_is_available(server_store, entered_address)
     })?;
+    let certificate_fingerprint =
+        prompt_until_valid_answer("fingerprint", None, validate_certificate_fingerprint)?;
     let connection_token = ask_secret(None)?;
 
-    let certificate_fingerprint = match check_saved_server_connection(
+    let server_check_outcome = check_saved_server_connection(
         &server_address,
         &connection_token,
-        None,
+        &certificate_fingerprint,
         "save it anyway?",
-    )? {
-        ServerCheckOutcome::Pinned(certificate_fingerprint) => Some(certificate_fingerprint),
-        ServerCheckOutcome::Unpinned => None,
-        ServerCheckOutcome::Discarded => {
-            print!("{}", output::render_remote_discarded());
-            return Ok(());
-        }
-    };
+    )?;
+    if server_check_outcome == ServerCheckOutcome::Discarded {
+        print!("{}", output::render_remote_discarded());
+        return Ok(());
+    }
 
     let current_time = SystemTime::now();
     let saved_server = SavedServer {
         server_name: Some(server_name),
         server_address,
         connection_token,
-        last_used_at: certificate_fingerprint.is_some().then_some(current_time),
-        certificate_fingerprint,
+        certificate_fingerprint: Some(certificate_fingerprint),
         added_at: current_time,
+        last_used_at: (server_check_outcome == ServerCheckOutcome::Passed).then_some(current_time),
     };
     update_saved_server_store(|server_store| save_saved_server(server_store, &saved_server, None))?;
     print!("{}", output::render_remote_saved(&saved_server));
     Ok(())
 }
 
-/// Change what one saved server holds: ask for the name, the address and the
-/// secret with what it holds now offered, check them against that server, and
-/// write the saved server back.
+/// Change what one saved server holds: ask for the name, the address, the
+/// fingerprint of its certificate and the secret with what it holds now
+/// offered, check them against that server, and write the saved server back.
 ///
 /// An empty answer keeps the value in brackets, and an empty secret keeps the
-/// saved secret. The saved server leaves the store before the questions, so its own
-/// name and address are free to keep. It goes back once every answer has
-/// settled, and nothing is written before that.
+/// saved secret. A saved server holding no fingerprint offers none, and an
+/// empty answer to that question asks again. The saved server leaves the store
+/// before the questions, so its own name and address are free to keep. It goes
+/// back once every answer has settled, and nothing is written before that.
 ///
-/// An address the user left alone requires the pinned fingerprint on the
-/// check, and keeps it when the check does not pass. An address the user
-/// changed requires none, and keeps none when the check does not pass; the
-/// next connection to that address pins the certificate it meets. A check that
-/// passes pins the certificate the server presented, either way.
+/// The check requires the fingerprint the answers settled on, and the saved
+/// server keeps that fingerprint whether the check passes or the user saves
+/// the change anyway.
 ///
 /// The saved server on disk must still hold the name, the address, the secret and
 /// the fingerprint it held when the questions opened, or nothing is written.
@@ -199,32 +198,23 @@ fn edit_saved_server_from_prompts(
         Some(&saved_server.server_address),
         |entered_address| validate_saved_server_address_is_available(server_store, entered_address),
     )?;
+    let certificate_fingerprint = prompt_until_valid_answer(
+        "fingerprint",
+        saved_server.certificate_fingerprint.as_deref(),
+        validate_certificate_fingerprint,
+    )?;
     let connection_token = ask_secret(Some(&saved_server.connection_token))?;
 
-    let is_address_changed = server_address != saved_server.server_address;
-    let confirmation_prompt = if is_address_changed {
-        "save the change anyway? The certificate at that address is pinned on the \
-         first connection to it."
-    } else {
-        "save the change anyway?"
-    };
-    let previous_certificate_fingerprint = resolve_certificate_fingerprint(
-        saved_server.certificate_fingerprint.clone(),
-        is_address_changed,
-    );
-    let certificate_fingerprint = match check_saved_server_connection(
+    let server_check_outcome = check_saved_server_connection(
         &server_address,
         &connection_token,
-        previous_certificate_fingerprint.as_deref(),
-        confirmation_prompt,
-    )? {
-        ServerCheckOutcome::Pinned(certificate_fingerprint) => Some(certificate_fingerprint),
-        ServerCheckOutcome::Unpinned => None,
-        ServerCheckOutcome::Discarded => {
-            print!("{}", output::render_remote_discarded());
-            return Ok(());
-        }
-    };
+        &certificate_fingerprint,
+        "save the change anyway?",
+    )?;
+    if server_check_outcome == ServerCheckOutcome::Discarded {
+        print!("{}", output::render_remote_discarded());
+        return Ok(());
+    }
 
     let current_time = SystemTime::now();
     let updated_saved_server = update_saved_server_store(|server_store| {
@@ -234,13 +224,13 @@ fn edit_saved_server_from_prompts(
             server_name: (!server_name.is_empty()).then_some(server_name),
             server_address,
             connection_token,
-            last_used_at: if certificate_fingerprint.is_some() {
+            certificate_fingerprint: Some(certificate_fingerprint),
+            added_at: disk_saved_server.added_at,
+            last_used_at: if server_check_outcome == ServerCheckOutcome::Passed {
                 Some(current_time)
             } else {
                 disk_saved_server.last_used_at
             },
-            certificate_fingerprint: certificate_fingerprint.or(previous_certificate_fingerprint),
-            added_at: disk_saved_server.added_at,
         };
         save_saved_server(server_store, &updated_saved_server, Some(server_reference))?;
         Ok(updated_saved_server)
@@ -280,24 +270,6 @@ fn find_unchanged_saved_server(
         });
     }
     Ok(current_saved_server.clone())
-}
-
-/// The fingerprint a saved server still holds after its address settles.
-///
-/// `held_certificate_fingerprint` is what it pinned before. The answer keeps
-/// it when `is_address_changed` is false, and returns `None` when it is true.
-///
-/// Example — a saved server pinning `aa…aa` whose address the user left alone keeps
-/// `aa…aa`. The same saved server moved to another address keeps nothing.
-fn resolve_certificate_fingerprint(
-    held_certificate_fingerprint: Option<String>,
-    is_address_changed: bool,
-) -> Option<String> {
-    if is_address_changed {
-        None
-    } else {
-        held_certificate_fingerprint
-    }
 }
 
 /// Put `saved_server` in `server_store`, replacing the saved server named by
@@ -397,13 +369,12 @@ fn ask_secret(
     }
 }
 
-/// Dial the server at `server_address` once to check that it admits `connection_token`, and ask
+/// Dial the server at `server_address` once to check that it presents the certificate
+/// `expected_certificate_fingerprint` names and admits `connection_token`, and ask
 /// `confirmation_prompt` when it does not.
 ///
-/// `pinned_certificate_fingerprint` is the fingerprint the server must present, or `None` to take
-/// whatever certificate it presents. The connection closes as soon as the
-/// server admits the secret. No session is listed, and a server serving no
-/// session passes this check.
+/// The connection closes as soon as the server admits the secret. No session
+/// is listed, and a server serving no session passes this check.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the terminal could not be read, and when the
@@ -411,24 +382,22 @@ fn ask_secret(
 fn check_saved_server_connection(
     server_address: &str,
     connection_token: &ConnectionToken,
-    pinned_certificate_fingerprint: Option<&str>,
+    expected_certificate_fingerprint: &str,
     confirmation_prompt: &str,
 ) -> Result<ServerCheckOutcome, CliError> {
     println!("checking {server_address} …");
     match remote_client::connect_remote_server(
         server_address,
         connection_token,
-        pinned_certificate_fingerprint,
+        expected_certificate_fingerprint,
         DIAL_TIMEOUT_DURATION,
         Some(REPLY_TIMEOUT_DURATION),
     ) {
-        Ok(remote_link) => Ok(ServerCheckOutcome::Pinned(
-            remote_link.certificate_fingerprint,
-        )),
+        Ok(_) => Ok(ServerCheckOutcome::Passed),
         Err(connection_error) => {
             eprintln!("koshi: {}", CliError::from(connection_error));
             if read_confirmation_answer(confirmation_prompt)? {
-                Ok(ServerCheckOutcome::Unpinned)
+                Ok(ServerCheckOutcome::Kept)
             } else {
                 Ok(ServerCheckOutcome::Discarded)
             }

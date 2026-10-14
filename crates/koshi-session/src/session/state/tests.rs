@@ -2492,6 +2492,37 @@ fn has_pane_finds_each_member_and_no_other_pane() {
 }
 
 #[test]
+fn find_member_returns_each_member_with_its_creation_index() {
+    let mut floating_set = FloatingSet::default();
+    let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
+    for pane_id in [first_pane_id, second_pane_id] {
+        floating_set
+            .add_member(build_floating_member(pane_id))
+            .expect("the floating set has room");
+    }
+
+    assert_eq!(
+        floating_set.find_member(first_pane_id),
+        Some((0, build_floating_member(first_pane_id)))
+    );
+    assert_eq!(
+        floating_set.find_member(second_pane_id),
+        Some((1, build_floating_member(second_pane_id)))
+    );
+}
+
+#[test]
+fn find_member_returns_none_for_a_pane_the_set_does_not_hold() {
+    let mut floating_set = FloatingSet::default();
+    assert_eq!(floating_set.find_member(PaneId::new()), None);
+    floating_set
+        .add_member(build_floating_member(PaneId::new()))
+        .expect("the floating set has room");
+
+    assert_eq!(floating_set.find_member(PaneId::new()), None);
+}
+
+#[test]
 fn add_member_refuses_a_pane_the_set_already_holds() {
     let mut floating_set = FloatingSet::default();
     let pane_id = PaneId::new();
@@ -3421,22 +3452,26 @@ fn floating_pane_minimum_adds_the_chrome_and_caps_each_axis_at_u16_max() {
 }
 
 #[test]
-fn update_member_desired_size_changes_a_member_and_refuses_any_other_pane() {
+fn update_member_desired_size_changes_only_that_member_and_refuses_any_other_pane() {
     let mut session = build_empty_session();
-    let pane_id = register_floating_pane(&mut session);
+    let first_pane_id = register_floating_pane(&mut session);
+    let second_pane_id = register_floating_pane(&mut session);
     let resized_desired_size = build_cells_size(43, 10);
 
     assert!(session
         .floating_set
-        .update_member_desired_size(pane_id, resized_desired_size));
-    let resized_member = FloatingMember {
-        desired_size: resized_desired_size,
-        ..build_floating_member(pane_id)
-    };
-    assert_eq!(session.floating_set.list_members(), [resized_member]);
+        .update_member_desired_size(second_pane_id, resized_desired_size));
+    let expected_members = [
+        build_floating_member(first_pane_id),
+        FloatingMember {
+            desired_size: resized_desired_size,
+            ..build_floating_member(second_pane_id)
+        },
+    ];
+    assert_eq!(session.floating_set.list_members(), expected_members);
 
     assert!(!session
         .floating_set
         .update_member_desired_size(PaneId::new(), build_cells_size(9, 9)));
-    assert_eq!(session.floating_set.list_members(), [resized_member]);
+    assert_eq!(session.floating_set.list_members(), expected_members);
 }

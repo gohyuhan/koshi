@@ -2993,3 +2993,100 @@ fn an_image_scrolled_into_history_shares_its_pixels_with_a_subsequent_transfer()
         &image_records[1].image
     ));
 }
+
+/// A copy of `copied_bytes` for `clipboard_targets`.
+fn build_clipboard_copy(clipboard_targets: &str, copied_bytes: &[u8]) -> ClipboardCopy {
+    ClipboardCopy {
+        clipboard_targets: clipboard_targets.to_string(),
+        copied_bytes: copied_bytes.to_vec(),
+    }
+}
+
+#[test]
+fn an_engine_that_does_not_read_clipboard_copies_hands_back_none() {
+    let mut engine = build_test_terminal_engine();
+
+    let _ = engine.process_pty_output(b"\x1b]52;c;aGk=\x07");
+
+    assert_eq!(engine.take_clipboard_copies(), Vec::new());
+}
+
+#[test]
+fn an_engine_reading_clipboard_copies_hands_back_each_copy_once() {
+    let mut engine = build_test_terminal_engine();
+    engine.start_reading_clipboard_copies(1024);
+
+    let _ = engine.process_pty_output(b"ab\x1b]52;c;aGk=\x07cd\x1b]52;p;aGVsbG8=\x1b\\");
+
+    assert_eq!(
+        engine.take_clipboard_copies(),
+        vec![
+            build_clipboard_copy("c", b"hi"),
+            build_clipboard_copy("p", b"hello"),
+        ]
+    );
+    assert_eq!(engine.take_clipboard_copies(), Vec::new());
+    assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'a');
+    assert_eq!(get_terminal_cell_character(&engine, 0, 2), 'c');
+}
+
+#[test]
+fn a_clipboard_copy_cut_before_the_reader_started_completes_in_the_next_chunk() {
+    let mut engine = build_test_terminal_engine();
+    let _ = engine.process_pty_output(b"\x1b]52;c;aG");
+
+    engine.start_reading_clipboard_copies(1024);
+    let _ = engine.process_pty_output(b"k=\x07");
+
+    assert_eq!(
+        engine.take_clipboard_copies(),
+        vec![build_clipboard_copy("c", b"hi")]
+    );
+}
+
+#[test]
+fn a_carried_engine_completes_a_clipboard_copy_the_swap_cut_in_half() {
+    let mut engine = TerminalEngine::from_terminal_state(
+        TerminalState::from_pty_size(PtySize {
+            column_count: 8,
+            row_count: 3,
+        }),
+        b"\x1b]52;c;aG",
+    );
+
+    engine.start_reading_clipboard_copies(1024);
+    let _ = engine.process_pty_output(b"k=\x07");
+
+    assert_eq!(
+        engine.take_clipboard_copies(),
+        vec![build_clipboard_copy("c", b"hi")]
+    );
+}
+
+#[test]
+fn a_clipboard_copy_inside_synchronized_output_arrives_when_the_update_ends() {
+    let mut engine = build_test_terminal_engine();
+    engine.start_reading_clipboard_copies(1024);
+
+    let _ = engine.process_pty_output(b"\x1b[?2026h\x1b]52;c;aGk=\x07");
+    assert_eq!(engine.take_clipboard_copies(), Vec::new());
+
+    let _ = engine.process_pty_output(b"\x1b[?2026l");
+    assert_eq!(
+        engine.take_clipboard_copies(),
+        vec![build_clipboard_copy("c", b"hi")]
+    );
+}
+
+#[test]
+fn an_eight_bit_clipboard_copy_reads_as_its_seven_bit_form() {
+    let mut engine = build_test_terminal_engine();
+    engine.start_reading_clipboard_copies(1024);
+
+    let _ = engine.process_pty_output(b"\x9d52;c;aGk=\x9c");
+
+    assert_eq!(
+        engine.take_clipboard_copies(),
+        vec![build_clipboard_copy("c", b"hi")]
+    );
+}

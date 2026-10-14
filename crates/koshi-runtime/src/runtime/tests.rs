@@ -35,13 +35,14 @@ pub(crate) fn build_mouse_frame(render_snapshot: RenderSnapshot) -> MouseFrame {
 /// The viewer half for `client_id` on an 80x24 viewport, on the stock
 /// settings, subscribed to `server`.
 pub(crate) fn build_viewer(server: &mut Server, client_id: ClientId) -> ViewerClient {
+    let (delivery_receiver, _) = server.subscribe(client_id);
     ViewerClient::from_client_id_and_viewport_size(
         client_id,
         Size {
             column_count: 80,
             row_count: 24,
         },
-        server.subscribe(client_id),
+        delivery_receiver,
         TerminalCleanupGuard::new(),
     )
 }

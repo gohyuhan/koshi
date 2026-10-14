@@ -59,8 +59,9 @@ impl Server {
     /// Register a freshly spawned pane's PTY: mark `pane_id` live, record
     /// `pty_size`, and add a new terminal engine of `pty_size` capped by the
     /// config's `scrollback.maximum_line_count` and
-    /// `scrollback.maximum_byte_count`. Every spawn path calls this. A record
-    /// already held for `pane_id` is replaced.
+    /// `scrollback.maximum_byte_count`, as
+    /// [`insert_terminal_engine`](Self::insert_terminal_engine) states. Every
+    /// spawn path calls this. A record already held for `pane_id` is replaced.
     pub(crate) fn park_pane_pty(&mut self, pane_id: PaneId, pty_size: PtySize) {
         self.live_pane_ids.insert(pane_id);
         self.pty_size_by_pane_id.insert(pane_id, pty_size);
@@ -69,10 +70,29 @@ impl Server {
             scrollback_config.maximum_line_count,
             scrollback_config.maximum_byte_count,
         );
-        self.terminal_engine_by_pane_id.insert(
+        self.insert_terminal_engine(
             pane_id,
             TerminalEngine::with_scrollback(pty_size, scrollback_limit),
         );
+    }
+
+    /// Hold `terminal_engine` as `pane_id`'s engine, replacing any engine held
+    /// for it. While `pane-clipboard-writes` allows writes, the engine first
+    /// starts reading the `OSC 52` copies of at most `max-copy-bytes` decoded
+    /// bytes in the pane's output
+    /// ([`TerminalEngine::start_reading_clipboard_copies`]).
+    pub(crate) fn insert_terminal_engine(
+        &mut self,
+        pane_id: PaneId,
+        mut terminal_engine: TerminalEngine,
+    ) {
+        let pane_clipboard_writes = self.config.pane_clipboard_writes;
+        if pane_clipboard_writes.should_allow_writes {
+            terminal_engine
+                .start_reading_clipboard_copies(pane_clipboard_writes.maximum_copy_byte_count);
+        }
+        self.terminal_engine_by_pane_id
+            .insert(pane_id, terminal_engine);
     }
 }
 

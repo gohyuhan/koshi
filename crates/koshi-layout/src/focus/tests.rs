@@ -8,22 +8,9 @@
 //! prior one, and that the deepest stack containing a pane can be located and then activated
 //! by ID.
 
-use koshi_core::geometry::{Point, Size};
+use koshi_test_support::fixtures::build_cell_rect;
 
 use super::*;
-
-fn build_cell_rect(origin_column: u16, origin_row: u16, column_count: u16, row_count: u16) -> Rect {
-    Rect::from_origin_and_size(
-        Point {
-            column: origin_column,
-            row: origin_row,
-        },
-        Size {
-            column_count,
-            row_count,
-        },
-    )
-}
 
 #[test]
 fn nearest_pane_by_center_is_the_spatial_neighbor() {

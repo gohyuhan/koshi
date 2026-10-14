@@ -62,6 +62,18 @@ pub struct Cli {
     #[arg(long = "remote", global = true, value_name = "SERVER")]
     pub remote_server_reference: Option<String>,
 
+    /// The fingerprint of the certificate the server `--remote` names must
+    /// present: 64 lowercase hex characters, as `koshi share grant` prints it
+    /// on that machine. Needed for a server this machine has not saved, and
+    /// refused for a server it has saved.
+    #[arg(
+        long = "certificate-fingerprint",
+        global = true,
+        requires = "remote_server_reference",
+        value_name = "FINGERPRINT"
+    )]
+    pub certificate_fingerprint: Option<String>,
+
     /// The verb to run; absent on the bare interactive launch.
     #[command(subcommand)]
     pub command: Option<CliCommand>,
@@ -360,8 +372,9 @@ pub enum CliCommand {
         )]
         output_format: OutputFormat,
     },
-    /// Open a new pane running a shell; its working directory and
-    /// environment come from the issuing terminal.
+    /// Open a new pane running a shell; it starts in the current working
+    /// directory of the pane it splits from, with the environment the session
+    /// process started with plus koshi's own variables.
     NewPane {
         #[command(flatten)]
         new_pane_flags: NewPaneFlags,
@@ -462,8 +475,10 @@ pub enum CliCommand {
         #[arg(long = "no-enter")]
         should_leave_input_at_prompt: bool,
     },
-    /// Open a new tab; its first pane inherits the issuing terminal's
-    /// working directory and environment.
+    /// Open a new tab; its first pane starts in the current working directory
+    /// of the focused pane of the terminal that switches onto the tab, with the
+    /// environment the session process started with plus koshi's own
+    /// variables.
     NewTab {
         /// Session the tab joins, by id or name; defaults to the current
         /// session, else the only running one.
@@ -668,8 +683,10 @@ pub enum CliCommand {
         )]
         output_format: OutputFormat,
     },
-    /// Open a new pane running the command given after `--`; its working
-    /// directory and environment come from the issuing terminal.
+    /// Open a new pane running the command given after `--`; it starts in the
+    /// current working directory of the pane it splits from, with the
+    /// environment the session process started with plus koshi's own
+    /// variables.
     Run {
         #[command(flatten)]
         new_pane_flags: NewPaneFlags,
@@ -816,17 +833,16 @@ pub enum ShareCommand {
     },
 }
 
-/// The `koshi remote` subcommands: the servers this machine has connected to,
-/// saved on this machine. Every verb reads or writes that store; none of them
-/// prints a saved secret.
+/// The `koshi remote` subcommands: the servers this machine has saved. Every
+/// verb reads or writes that store; none of them prints a saved secret.
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum RemoteCommand {
-    /// Save a server this machine can dial, asking for its name, its address
-    /// and its secret in turn.
+    /// Save a server this machine can dial, asking for its name, its address,
+    /// the fingerprint of its certificate and its secret in turn.
     New,
-    /// Change what one saved server holds, asking for its name, its address
-    /// and its secret in turn, with the current value kept on an empty
-    /// answer.
+    /// Change what one saved server holds, asking for its name, its address,
+    /// the fingerprint of its certificate and its secret in turn, with the
+    /// current value kept on an empty answer.
     Edit {
         /// Server to change, by the name it was saved under or its address.
         #[arg(value_name = "SERVER")]
@@ -1590,8 +1606,9 @@ impl NewPaneFlags {
 
 /// Build the [`SpawnSpec`] for a `run` invocation's trailing argv: the first
 /// token is the program, the rest its arguments. The working directory and
-/// environment stay empty — they are filled from the issuing terminal when
-/// the command is sent.
+/// environment stay empty: the session starts the program in the current
+/// working directory of the pane it splits from, with the environment the
+/// session process started with plus koshi's own variables.
 ///
 /// Panics when `command_arguments` is empty.
 fn build_spawn_spec_from_arguments(command_arguments: &[String]) -> SpawnSpec {

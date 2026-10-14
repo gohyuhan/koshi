@@ -61,22 +61,16 @@ pub fn render_remote_discarded() -> String {
 }
 
 /// The one line a settled record renders to: `status_verb`, the name when the record
-/// has one, and the address. A record with no pinned fingerprint says when it
-/// pins one.
+/// has one, and the address.
 ///
-/// Example — a named record that was checked renders
-/// `saved work at laptop.local:7654.`
+/// Example — a named record renders `saved work at laptop.local:7654.`
 fn render_settled_server_line(status_verb: &str, saved_server: &SavedServer) -> String {
     let server_name_prefix = match &saved_server.server_name {
         Some(server_name) => format!("{server_name} at "),
         None => String::new(),
     };
-    let certificate_pinning_notice = match saved_server.certificate_fingerprint {
-        Some(_) => "",
-        None => "; its certificate is pinned on the first connection",
-    };
     let server_address = &saved_server.server_address;
-    format!("{status_verb} {server_name_prefix}{server_address}{certificate_pinning_notice}.\n")
+    format!("{status_verb} {server_name_prefix}{server_address}.\n")
 }
 
 /// One saved server as a listing reports it. The secret is not a field here.
@@ -87,9 +81,8 @@ struct RemoteServerRow {
     server_name: Option<String>,
     /// Where the server listens, as `host:port`.
     server_address: String,
-    /// The sha256 of the certificate this server presented on the first
-    /// connection, as 64 lowercase hex characters, or `None` while no
-    /// connection to it has opened.
+    /// The sha256 of the certificate this server must present, as 64
+    /// lowercase hex characters, or `None` when the record holds none.
     certificate_fingerprint: Option<String>,
     /// When a connection to this server last opened, or `None` when none has
     /// since it was saved.

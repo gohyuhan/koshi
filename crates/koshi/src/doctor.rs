@@ -726,27 +726,11 @@ enum ShellAvailability {
     Missing,
 }
 
-/// Whether this user may run `shell_path`, asked of the kernel with `access(X_OK)`.
-///
-/// The answer covers the owner, group and other bits, any access control
-/// list, and a filesystem mounted without execute permission. It is made
-/// against this process's real user and group.
-#[cfg(unix)]
-fn can_user_execute(shell_path: &Path) -> bool {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let Ok(shell_path_c_string) = CString::new(shell_path.as_os_str().as_bytes()) else {
-        return false;
-    };
-    // SAFETY: `shell_path_c_string` holds a NUL-terminated C string that outlives the call,
-    // and `access` only reads it.
-    unsafe { libc::access(shell_path_c_string.as_ptr(), libc::X_OK) == 0 }
-}
-
 /// What `shell_path` is: [`ShellAvailability::Missing`] when it is absent or is not
 /// a regular file, [`ShellAvailability::NotExecutable`] when it is a regular
-/// file this user may not run, else [`ShellAvailability::Runnable`].
+/// file this user may not run, else [`ShellAvailability::Runnable`]. On Unix,
+/// `koshi_host::execute_permission::can_user_execute` says whether this user
+/// may run it.
 ///
 /// `/bin/zsh` at mode `755` is `Runnable`. The same file at mode `644` is
 /// `NotExecutable`, and so is a file at mode `011` this user owns, whose
@@ -759,7 +743,7 @@ fn inspect_shell_file(shell_path: &Path) -> ShellAvailability {
         return ShellAvailability::Missing;
     }
     #[cfg(unix)]
-    if !can_user_execute(shell_path) {
+    if !koshi_host::execute_permission::can_user_execute(shell_path) {
         return ShellAvailability::NotExecutable;
     }
     ShellAvailability::Runnable

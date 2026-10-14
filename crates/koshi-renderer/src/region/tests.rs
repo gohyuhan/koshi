@@ -44,6 +44,7 @@ fn build_region_test_render_snapshot() -> RenderSnapshot {
                 tab_index: 0,
                 is_active: true,
             }],
+            floating_pane_slots: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {
@@ -56,6 +57,7 @@ fn build_region_test_render_snapshot() -> RenderSnapshot {
             active_tab_id: tab_id,
             focused_pane_id: None,
             lock_mode: LockMode::Normal,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }
@@ -207,7 +209,7 @@ fn tabline_inputs_borrow_the_session_and_copy_the_client_and_viewer_state() {
     let viewer_chrome = ViewerChrome {
         reconnecting: Some(Reconnecting {
             attempt: 3,
-            retry_in_seconds: 8,
+            retry_in_seconds: Some(8),
         }),
         active_input_mode: None,
         tabline_offset: Some(2),
@@ -226,7 +228,7 @@ fn tabline_inputs_borrow_the_session_and_copy_the_client_and_viewer_state() {
             is_mouse_selection_enabled: true,
             reconnecting: Some(Reconnecting {
                 attempt: 3,
-                retry_in_seconds: 8,
+                retry_in_seconds: Some(8),
             }),
             tabline_offset: Some(2),
         }

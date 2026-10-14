@@ -152,6 +152,7 @@ fn build_mouse_frame(mouse_panes: &[MousePane], focused_pane_id: Option<PaneId>)
                 tab_index: 0,
                 is_active: true,
             }],
+            floating_pane_slots: Vec::new(),
         },
         mouse_panes: mouse_panes.to_vec(),
         client_snapshot: ClientSnapshot {
@@ -161,6 +162,7 @@ fn build_mouse_frame(mouse_panes: &[MousePane], focused_pane_id: Option<PaneId>)
             active_tab_id: tab_id,
             focused_pane_id,
             lock_mode: LockMode::Normal,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: false,
         },
         committed_regions: CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),

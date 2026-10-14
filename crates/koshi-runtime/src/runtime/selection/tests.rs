@@ -22,13 +22,12 @@ use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{CommandId, SessionId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord};
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
-use koshi_renderer::snapshot::ViewerChrome;
+use koshi_renderer::snapshot::{Delivery, ViewerChrome};
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::build_key_input_for_chord;
 
-/// A runtime with one bootstrapped 80x24 client, its viewer half, and its
-/// single pane.
-fn build_selection_runtime() -> (Server, ViewerClient, PaneId) {
+/// A runtime with one bootstrapped 80x24 client and its single pane.
+fn build_selection_server() -> (Server, ClientId, PaneId) {
     let (event_sender, event_receiver) = mpsc::channel();
     let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(event_sender),
@@ -45,8 +44,26 @@ fn build_selection_runtime() -> (Server, ViewerClient, PaneId) {
         )
         .expect("bootstrap");
     let pane_id = *server.live_pane_ids.iter().next().expect("one pane");
+    (server, client_id, pane_id)
+}
+
+/// A runtime with one bootstrapped 80x24 client, its viewer half, and its
+/// single pane.
+fn build_selection_runtime() -> (Server, ViewerClient, PaneId) {
+    let (mut server, client_id, pane_id) = build_selection_server();
     let viewer = build_viewer(&mut server, client_id);
     (server, viewer, pane_id)
+}
+
+/// [`build_selection_runtime`], plus a subscription for the client made
+/// before the viewer's: the host writes for the client's outer terminal go on
+/// it.
+fn build_selection_runtime_with_outer_terminal(
+) -> (Server, ViewerClient, PaneId, mpsc::Receiver<Delivery>) {
+    let (mut server, client_id, pane_id) = build_selection_server();
+    let (outer_terminal_receiver, _) = server.subscribe(client_id);
+    let viewer = build_viewer(&mut server, client_id);
+    (server, viewer, pane_id, outer_terminal_receiver)
 }
 
 /// The viewer from [`build_viewer`], with its `copy` settings overridden by
@@ -2340,7 +2357,8 @@ fn a_highlight_on_the_alternate_screen_survives_a_redraw_in_place() {
 fn a_plain_click_copies_nothing() {
     // A click's press highlights nothing, and its release copies nothing: no
     // clipboard write, and the clipboard the user already had is untouched.
-    let (mut server, mut viewer, pane_id) = build_selection_runtime();
+    let (mut server, mut viewer, pane_id, outer_terminal_receiver) =
+        build_selection_runtime_with_outer_terminal();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
     server.handle_pty_output(pane_id, b"hello world");
@@ -2358,7 +2376,10 @@ fn a_plain_click_copies_nothing() {
         build_mouse_release(screen_point),
         clock.advance_one_second(),
     );
-    assert_eq!(server.take_host_writes(client_id), None);
+    assert_eq!(
+        server.take_host_writes(client_id, &outer_terminal_receiver),
+        None
+    );
 }
 
 #[test]
@@ -2366,7 +2387,8 @@ fn releasing_the_gesture_is_the_copy() {
     // No copy key exists: releasing the selection is the copy. The highlighted
     // text goes to the client's outer terminal as OSC 52, which sets the OS
     // clipboard, and the highlight stays standing.
-    let (mut server, mut viewer, pane_id) = build_selection_runtime();
+    let (mut server, mut viewer, pane_id, outer_terminal_receiver) =
+        build_selection_runtime_with_outer_terminal();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
     server.handle_pty_output(pane_id, b"hello world");
@@ -2386,7 +2408,7 @@ fn releasing_the_gesture_is_the_copy() {
         clock.advance_one_second(),
     );
     assert_eq!(
-        server.take_host_writes(client_id),
+        server.take_host_writes(client_id, &outer_terminal_receiver),
         None,
         "nothing is copied while the drag is still moving"
     );
@@ -2400,7 +2422,7 @@ fn releasing_the_gesture_is_the_copy() {
     // base64("hello") = aGVsbG8=
     assert_eq!(
         server
-            .take_host_writes(client_id)
+            .take_host_writes(client_id, &outer_terminal_receiver)
             .expect("queued clipboard write"),
         b"\x1b]52;c;aGVsbG8=\x07".to_vec()
     );
@@ -2424,7 +2446,8 @@ fn releasing_the_gesture_is_the_copy() {
 
 #[test]
 fn copy_release_obeys_disabled_trailing_whitespace_trimming() {
-    let (mut server, viewer, pane_id) = build_selection_runtime();
+    let (mut server, viewer, pane_id, outer_terminal_receiver) =
+        build_selection_runtime_with_outer_terminal();
     let client_id = viewer.get_client_id();
     let mut viewer = build_copying_viewer(
         &mut server,
@@ -2459,7 +2482,7 @@ fn copy_release_obeys_disabled_trailing_whitespace_trimming() {
 
     assert_eq!(
         server
-            .take_host_writes(client_id)
+            .take_host_writes(client_id, &outer_terminal_receiver)
             .expect("queued clipboard write"),
         b"\x1b]52;c;YSAg\x07".to_vec()
     );
@@ -2802,7 +2825,8 @@ fn a_press_on_a_scrolled_view_highlights_the_history_line_the_user_saw() {
     // live view's top row is line 41, and a ten-line scroll back puts line 31
     // there. Output arriving between the paint and the press does not move it:
     // a scrolled view is held and the text it shows stays put.
-    let (mut server, mut viewer, pane_id) = build_selection_runtime();
+    let (mut server, mut viewer, pane_id, outer_terminal_receiver) =
+        build_selection_runtime_with_outer_terminal();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
     for line_number in 0..60 {
@@ -2841,7 +2865,7 @@ fn a_press_on_a_scrolled_view_highlights_the_history_line_the_user_saw() {
     }
 
     let copied_bytes = server
-        .take_host_writes(client_id)
+        .take_host_writes(client_id, &outer_terminal_receiver)
         .expect("the release copied");
     assert_eq!(
         copied_bytes,
@@ -2871,7 +2895,8 @@ fn copying_a_highlight_reaching_past_the_last_line_reads_the_lines_that_are_ther
     // A highlight's row numbers arrive on the command wire unbounded. A command
     // can name a row far past anything the pane has ever held. The copy reads
     // only the rows the pane has and answers at once.
-    let (mut server, viewer, pane_id) = build_selection_runtime();
+    let (mut server, viewer, pane_id, outer_terminal_receiver) =
+        build_selection_runtime_with_outer_terminal();
     let client_id = viewer.get_client_id();
     server.handle_pty_output(pane_id, b"hello world");
 
@@ -2935,16 +2960,18 @@ fn copying_a_highlight_reaching_past_the_last_line_reads_the_lines_that_are_ther
     let blank_row_count = usize::from(content_row_count) - 1;
     let expected_clipboard_text = format!("hello world{}", "\n".repeat(blank_row_count));
     assert_eq!(
-        server.take_host_writes(client_id),
+        server.take_host_writes(client_id, &outer_terminal_receiver),
         Some(crate::runtime::clipboard::encode_osc52_copy(
-            &expected_clipboard_text
+            "c",
+            expected_clipboard_text.as_bytes()
         ))
     );
 }
 
 #[test]
 fn a_copy_writes_the_highlighted_text_to_the_outer_terminal_as_osc52() {
-    let (mut server, viewer, pane_id) = build_selection_runtime();
+    let (mut server, viewer, pane_id, outer_terminal_receiver) =
+        build_selection_runtime_with_outer_terminal();
     let client_id = viewer.get_client_id();
     server.handle_pty_output(pane_id, b"hello");
 
@@ -2998,7 +3025,7 @@ fn a_copy_writes_the_highlighted_text_to_the_outer_terminal_as_osc52() {
     );
     // base64("hello") = aGVsbG8=
     assert_eq!(
-        server.take_host_writes(client_id),
+        server.take_host_writes(client_id, &outer_terminal_receiver),
         Some(b"\x1b]52;c;aGVsbG8=\x07".to_vec()),
         "the same highlight copied to OSC 52 reaches the outer terminal"
     );

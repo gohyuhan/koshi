@@ -1,11 +1,10 @@
-//! The servers a user has connected to, saved on the dialling user's own
-//! machine.
+//! The servers a user has saved, on the dialling user's own machine.
 //!
 //! One [`SavedServer`](crate::remote_servers::SavedServer) holds the address,
 //! the secret the operator handed out, the fingerprint of the certificate
-//! that server presented on the first connection — or none until a
-//! connection has opened — and an optional name the user chose. The user
-//! types the name or the address.
+//! that server must present — or none, and a server holding none is not
+//! dialled — and an optional name the user chose. The user types the name or
+//! the address.
 //!
 //! The whole set lives in one JSON file —
 //! [`resolve_server_store_path`](crate::remote_servers::resolve_server_store_path) — inside the
@@ -33,7 +32,7 @@ use crate::remote_state::{
 /// [`koshi_core::compat::SAVED_SERVER_FORMAT`].
 pub const SERVER_STORE_FORMAT: u32 = koshi_core::compat::SAVED_SERVER_FORMAT.maximum_version;
 
-/// One server this machine has connected to.
+/// One server this machine has saved.
 ///
 /// Decoding rejects any field it does not know; a misspelled field name is an
 /// error.
@@ -48,12 +47,11 @@ pub struct SavedServer {
     /// The secret the operator handed out with a grant. `ConnectionToken`'s
     /// `Debug` and `Display` write it redacted.
     pub connection_token: ConnectionToken,
-    /// The sha256 of the certificate this server presented on the first
-    /// connection, as 64 lowercase hex characters, or `None` while no
-    /// connection to it has opened. The next connection that presents a
-    /// different certificate is refused; the first connection of a record
-    /// holding `None` pins whatever certificate it meets. `None` leaves the
-    /// file without this field.
+    /// The sha256 of the certificate this server must present, as 64
+    /// lowercase hex characters. A connection to a server that presents
+    /// another certificate ends before the secret is sent. A record holding
+    /// `None` is not dialled until `koshi remote edit` gives it a
+    /// fingerprint. `None` leaves the file without this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub certificate_fingerprint: Option<String>,
     /// When this server was first saved.
@@ -63,7 +61,7 @@ pub struct SavedServer {
     pub last_used_at: Option<SystemTime>,
 }
 
-/// Every server this machine has connected to.
+/// Every server this machine has saved.
 ///
 /// Decoding rejects any field it does not know; a misspelled field name is an
 /// error.
@@ -95,8 +93,8 @@ impl ServerStore {
 
     /// Read the server store at `server_store_path`.
     ///
-    /// A path with no file is an empty store: this machine has connected to
-    /// nothing yet. A file that cannot be read, whose bytes are not a
+    /// A path with no file is an empty store: this machine has saved no
+    /// server. A file that cannot be read, whose bytes are not a
     /// readable store, or whose format number is not
     /// [`SERVER_STORE_FORMAT`] is [`IpcError::RemoteFileUnreadable`].
     pub fn load_server_store_from_path(server_store_path: &Path) -> Result<ServerStore, IpcError> {
@@ -157,8 +155,9 @@ impl ServerStore {
     /// Save `saved_server` at the end of `saved_servers`, dropping whatever record already
     /// holds that address.
     ///
-    /// Saving an address again replaces its record: the secret and the pinned
-    /// fingerprint are the new ones, and the record moves to the end.
+    /// Saving an address again replaces its record: the secret and the
+    /// certificate fingerprint are the new ones, and the record moves to the
+    /// end.
     ///
     /// Keeps three rules:
     ///
@@ -268,25 +267,6 @@ impl ServerStore {
         let saved_server = &mut self.saved_servers[saved_server_index];
         saved_server.connection_token = connection_token;
         Some(saved_server.server_address.clone())
-    }
-
-    /// Put `certificate_fingerprint` on the server `server_reference` names.
-    ///
-    /// Nothing changes when no record answers to `server_reference`, and
-    /// nothing changes when more than one does.
-    ///
-    /// The store is not written; the caller does that.
-    pub fn pin_certificate_fingerprint(
-        &mut self,
-        server_reference: &str,
-        certificate_fingerprint: String,
-    ) {
-        if let SavedServerMatch::One { saved_server_index } =
-            self.find_saved_server_match(server_reference)
-        {
-            self.saved_servers[saved_server_index].certificate_fingerprint =
-                Some(certificate_fingerprint);
-        }
     }
 
     /// Stamp the last-used time of the server `server_reference` names with `last_used_at`.

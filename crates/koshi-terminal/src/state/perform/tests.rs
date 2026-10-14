@@ -1,5 +1,6 @@
 //! Unit tests for the VTE performer: printing and display width (wide glyphs,
-//! grapheme clusters, ambiguous width), the deferred wrap, C0/C1 control bytes,
+//! grapheme clusters and their 2-column limit, halfwidth katakana sound marks,
+//! ambiguous width), the deferred wrap, C0/C1 control bytes,
 //! CSI cursor / erase / line / cell sequences, SGR, the alternate screen and
 //! DEC private modes, OSC title / reported_working_directory / shell markers, charset designation,
 //! DECSCUSR, the soft and hard resets, and malformed or hostile input.
@@ -3314,6 +3315,144 @@ fn combining_mark_at_line_start_is_dropped() {
         .list_combining_characters()
         .is_empty());
     assert_eq!(terminal_state.get_active_cursor().column, 0); // no advance, no panic
+}
+
+#[test]
+fn a_halfwidth_sound_mark_takes_a_cell_of_its_own_after_halfwidth_katakana() {
+    let mut terminal_state = build_terminal_state(8, 2);
+    print_text(&mut terminal_state, "\u{FF76}\u{FF9E}\u{FF8A}\u{FF9F}x"); // ｶﾞﾊﾟx
+    for (column_index, expected_character) in
+        (0..).zip(['\u{FF76}', '\u{FF9E}', '\u{FF8A}', '\u{FF9F}', 'x'])
+    {
+        let cell = terminal_state
+            .get_active_grid()
+            .get_cell(0, column_index)
+            .expect("in bounds");
+        assert_eq!(
+            cell.get_character(),
+            expected_character,
+            "column {column_index}"
+        );
+        assert!(
+            cell.list_combining_characters().is_empty(),
+            "column {column_index}"
+        );
+        assert_eq!(cell.get_display_width(), 1, "column {column_index}");
+    }
+    assert_eq!(terminal_state.get_active_cursor().column, 5);
+}
+
+#[test]
+fn a_halfwidth_sound_mark_at_line_start_takes_a_cell() {
+    let mut terminal_state = build_terminal_state(5, 2);
+    terminal_state.print('\u{FF9E}');
+    let cell = terminal_state
+        .get_active_grid()
+        .get_cell(0, 0)
+        .expect("in bounds");
+    assert_eq!(cell.get_character(), '\u{FF9E}');
+    assert_eq!(cell.get_display_width(), 1);
+    assert_eq!(terminal_state.get_active_cursor().column, 1);
+}
+
+#[test]
+fn a_combining_mark_after_a_halfwidth_sound_mark_attaches_to_the_sound_mark() {
+    let mut terminal_state = build_terminal_state(5, 2);
+    print_text(&mut terminal_state, "\u{FF76}\u{FF9E}\u{301}");
+    let cell = terminal_state
+        .get_active_grid()
+        .get_cell(0, 1)
+        .expect("in bounds");
+    assert_eq!(cell.get_character(), '\u{FF9E}');
+    assert_eq!(cell.list_combining_characters(), ['\u{301}']);
+    assert_eq!(cell.get_display_width(), 1);
+    assert_eq!(terminal_state.get_active_cursor().column, 2);
+}
+
+#[test]
+fn the_combining_voiced_sound_mark_attaches_to_halfwidth_katakana() {
+    let mut terminal_state = build_terminal_state(5, 2);
+    print_text(&mut terminal_state, "\u{FF76}\u{3099}x");
+    let cell = terminal_state
+        .get_active_grid()
+        .get_cell(0, 0)
+        .expect("in bounds");
+    assert_eq!(cell.get_character(), '\u{FF76}');
+    assert_eq!(cell.list_combining_characters(), ['\u{3099}']);
+    assert_eq!(cell.get_display_width(), 1);
+    assert_eq!(get_terminal_glyph(&terminal_state, 0, 1), Some('x'));
+    assert_eq!(terminal_state.get_active_cursor().column, 2);
+}
+
+#[test]
+fn a_spacing_mark_that_makes_a_cluster_two_columns_wide_attaches_and_widens_it() {
+    let mut terminal_state = build_terminal_state(6, 2);
+    print_text(&mut terminal_state, "\u{915}\u{93F}x"); // कि then x
+    let cluster_cell = terminal_state
+        .get_active_grid()
+        .get_cell(0, 0)
+        .expect("in bounds");
+    assert_eq!(cluster_cell.get_character(), '\u{915}');
+    assert_eq!(cluster_cell.list_combining_characters(), ['\u{93F}']);
+    assert_eq!(cluster_cell.get_display_width(), 2);
+    assert_eq!(
+        terminal_state
+            .get_active_grid()
+            .get_cell(0, 1)
+            .expect("in bounds")
+            .get_display_width(),
+        0
+    );
+    assert_eq!(get_terminal_glyph(&terminal_state, 0, 2), Some('x'));
+    assert_eq!(terminal_state.get_active_cursor().column, 3);
+}
+
+#[test]
+fn a_spacing_mark_that_makes_a_cluster_wider_than_two_columns_starts_a_cell() {
+    let mut terminal_state = build_terminal_state(6, 2);
+    print_text(&mut terminal_state, "\u{915}\u{94D}\u{937}\u{93F}x"); // क्षि then x
+    let cluster_cell = terminal_state
+        .get_active_grid()
+        .get_cell(0, 0)
+        .expect("in bounds");
+    assert_eq!(cluster_cell.get_character(), '\u{915}');
+    assert_eq!(
+        cluster_cell.list_combining_characters(),
+        ['\u{94D}', '\u{937}']
+    );
+    assert_eq!(cluster_cell.get_display_width(), 2);
+    assert_eq!(
+        terminal_state
+            .get_active_grid()
+            .get_cell(0, 1)
+            .expect("in bounds")
+            .get_display_width(),
+        0
+    );
+    let vowel_sign_cell = terminal_state
+        .get_active_grid()
+        .get_cell(0, 2)
+        .expect("in bounds");
+    assert_eq!(vowel_sign_cell.get_character(), '\u{93F}');
+    assert!(vowel_sign_cell.list_combining_characters().is_empty());
+    assert_eq!(vowel_sign_cell.get_display_width(), 1);
+    assert_eq!(get_terminal_glyph(&terminal_state, 0, 3), Some('x'));
+    assert_eq!(terminal_state.get_active_cursor().column, 4);
+}
+
+#[test]
+fn the_khmer_sign_beyyal_takes_one_column_and_a_combining_mark_after_it() {
+    let mut terminal_state = build_terminal_state(6, 2);
+    print_text(&mut terminal_state, "\u{17D8}\u{301}x");
+    let base_cell = terminal_state
+        .get_active_grid()
+        .get_cell(0, 0)
+        .expect("in bounds");
+    assert_eq!(base_cell.get_character(), '\u{17D8}');
+    assert_eq!(base_cell.list_combining_characters(), ['\u{301}']);
+    assert_eq!(base_cell.get_display_width(), 1);
+    assert_eq!(get_terminal_glyph(&terminal_state, 0, 1), Some('x'));
+    assert_eq!(terminal_state.get_active_cursor().column, 2);
 }
 
 #[test]

@@ -245,16 +245,16 @@ pub fn resolve_new_pane_direction(app_config_layer: Option<PartialKoshiConfig>) 
     .new_pane_direction
 }
 
-/// Whether this viewer sends native image output to its terminal:
-/// `app_config_layer`'s `image-support` folded onto the built-in default.
-/// `None` gives `true`.
+/// This viewer's settings: `app_config_layer` folded onto the built-in
+/// defaults. `None` gives [`ClientConfig::default`]. Example: a layer that sets
+/// `image-support #false` gives `supports_image_protocols` `false`, with every
+/// other field at its default.
 #[must_use]
-pub fn supports_image_output(app_config_layer: Option<PartialKoshiConfig>) -> bool {
+pub fn resolve_client_config(app_config_layer: Option<PartialKoshiConfig>) -> ClientConfig {
     merge_client(
         ClientConfig::default(),
         app_config_layer.into_iter().collect(),
     )
-    .supports_image_protocols
 }
 
 /// The file's text, or `None` when it is absent or unreadable. A read failure

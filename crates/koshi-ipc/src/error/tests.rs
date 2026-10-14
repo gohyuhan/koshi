@@ -235,18 +235,19 @@ fn a_remote_file_names_which_file_it_is_as_well_as_its_path() {
 }
 
 #[test]
-fn a_changed_certificate_names_both_fingerprints_and_the_way_out() {
-    let ipc_error = IpcError::CertificateChanged {
+fn a_certificate_mismatch_names_both_fingerprints_and_where_the_new_one_comes_from() {
+    let ipc_error = IpcError::CertificateMismatch {
         server_address: "laptop.local:7654".to_string(),
-        pinned_certificate: "aa".repeat(32),
-        presented_certificate: "bb".repeat(32),
+        expected_certificate_fingerprint: "aa".repeat(32),
+        presented_certificate_fingerprint: "bb".repeat(32),
     };
     assert_eq!(
         ipc_error.to_string(),
         format!(
-            "the certificate of laptop.local:7654 changed: pinned {}, presented {}. \
-             if the server was reinstalled on purpose, run \
-             `koshi remote forget laptop.local:7654` and connect again.",
+            "the certificate laptop.local:7654 presented is not the expected one: expected {}, \
+             presented {}. the secret was not sent. if that machine's certificate changed on \
+             purpose, `koshi share grant` there prints the new fingerprint: give it with \
+             --certificate-fingerprint, or with `koshi remote edit` for a saved server.",
             "aa".repeat(32),
             "bb".repeat(32)
         )

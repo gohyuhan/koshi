@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+unicode-width.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

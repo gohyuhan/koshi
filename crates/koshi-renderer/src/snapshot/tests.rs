@@ -73,6 +73,7 @@ fn build_render_snapshot_fixture(terminal_grid: Arc<Grid>) -> RenderSnapshot {
             tab_index: 0,
             is_active: true,
         }],
+        floating_pane_slots: Vec::new(),
     };
 
     let pane_snapshot = PaneSnapshot {
@@ -112,6 +113,7 @@ fn build_render_snapshot_fixture(terminal_grid: Arc<Grid>) -> RenderSnapshot {
         active_tab_id: tab_id,
         focused_pane_id: Some(pane_id),
         lock_mode: LockMode::Normal,
+        last_applied_lock_command_id: None,
         is_mouse_selection_enabled: false,
     };
 
@@ -455,7 +457,7 @@ fn render_snapshot_frame_layout_borrows_the_frame_without_committed_regions() {
         tabline_offset: Some(3),
         reconnecting: Some(Reconnecting {
             attempt: 4,
-            retry_in_seconds: 8,
+            retry_in_seconds: Some(8),
         }),
         ..ViewerChrome::default()
     };
@@ -538,7 +540,7 @@ fn tabline_inputs_borrow_session_client_and_viewer_fields() {
     render_snapshot.client_snapshot.is_mouse_selection_enabled = true;
     let reconnecting = Reconnecting {
         attempt: 4,
-        retry_in_seconds: 8,
+        retry_in_seconds: Some(8),
     };
     let viewer_chrome = ViewerChrome {
         hovered_pane_id: None,

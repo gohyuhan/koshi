@@ -9,8 +9,9 @@
 //!
 //! Presenting the token hands the view back once and drops the record, so a
 //! second presentation of the same token finds nothing. A record stands for
-//! 120 seconds from the moment it was filed, and the store keeps at most 32 of
-//! them.
+//! 24 hours from the moment it was filed, and the store keeps at most 32 of
+//! them. Presenting the token of a client that is still attached finds that
+//! client ([`SavedViewStore::find_client_id_by_resume_token`]).
 //!
 //! The whole store lives in memory. Nothing here is written to disk, sent over
 //! a socket, or carried across a server restart: a restart drops every saved
@@ -26,8 +27,8 @@ use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::remote_tokens::hash_connection_token;
 use koshi_session::client::{Client, FloatingPaneView};
 
-/// How long a filed view stands before it is dropped: 120 seconds.
-const SAVED_VIEW_LIFETIME_DURATION: Duration = Duration::from_secs(120);
+/// How long a filed view stands before it is dropped: 24 hours.
+const SAVED_VIEW_LIFETIME_DURATION: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How many filed views the store keeps: 32. Filing a view over that count
 /// drops the oldest.
@@ -93,8 +94,8 @@ impl SavedViewStore {
         resume_token
     }
 
-    /// File `client`'s view under the hash minted for it, standing until 120
-    /// seconds after `observed_time`.
+    /// File `client`'s view under the hash minted for it, standing until 24
+    /// hours after `observed_time`.
     ///
     /// Files nothing when no hash stands against `client`'s id — the client was
     /// never minted, its hash was already spent by an earlier
@@ -105,7 +106,7 @@ impl SavedViewStore {
     /// Drops every record that stopped standing at or before `observed_time`, then drops
     /// oldest-first until at most 32 remain.
     ///
-    /// Files nothing, and drops the hash, when `observed_time` plus 120 seconds is past
+    /// Files nothing, and drops the hash, when `observed_time` plus 24 hours is past
     /// the largest `SystemTime` this platform holds.
     pub fn save_client_view(&mut self, client: &Client, observed_time: SystemTime) {
         let Some(connection_token_hash) = self
@@ -146,6 +147,26 @@ impl SavedViewStore {
         self.connection_token_hash_by_client_id.remove(&client_id);
     }
 
+    /// The client whose attach minted `resume_token` and whose hash still
+    /// waits for its detach, or `None` when no such hash is that token's sha256.
+    ///
+    /// Compares every waiting hash through its last byte, never stopping at
+    /// the first match. Changes nothing in the store.
+    #[must_use]
+    pub fn find_client_id_by_resume_token(
+        &self,
+        resume_token: &ConnectionToken,
+    ) -> Option<ClientId> {
+        let presented_token_hash = hash_connection_token(resume_token);
+        let mut matched_client_id = None;
+        for (&client_id, connection_token_hash) in &self.connection_token_hash_by_client_id {
+            if is_same_token_hash(connection_token_hash, &presented_token_hash) {
+                matched_client_id = Some(client_id);
+            }
+        }
+        matched_client_id
+    }
+
     /// Take back the view filed under `resume_token`, or `None` when no standing
     /// record holds that token's sha256 at `observed_time`.
     ///
@@ -165,12 +186,10 @@ impl SavedViewStore {
             .retain(|saved_view_record| saved_view_record.expires_at > observed_time);
         let mut matched_record_index = None;
         for (record_index, saved_view_record) in self.saved_view_records.iter().enumerate() {
-            let is_matching_token_hash: bool = saved_view_record
-                .connection_token_hash
-                .as_bytes()
-                .ct_eq(presented_token_hash.as_bytes())
-                .into();
-            if is_matching_token_hash {
+            if is_same_token_hash(
+                &saved_view_record.connection_token_hash,
+                &presented_token_hash,
+            ) {
                 matched_record_index = Some(record_index);
             }
         }
@@ -180,6 +199,15 @@ impl SavedViewStore {
                 .saved_view,
         )
     }
+}
+
+/// Whether `stored_token_hash` and `presented_token_hash` are the same text,
+/// compared through the last byte of each whatever the first difference.
+fn is_same_token_hash(stored_token_hash: &str, presented_token_hash: &str) -> bool {
+    stored_token_hash
+        .as_bytes()
+        .ct_eq(presented_token_hash.as_bytes())
+        .into()
 }
 
 #[cfg(test)]

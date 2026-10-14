@@ -57,11 +57,17 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(unix)]
+use koshi_config::layer::merge_server;
 use koshi_config::layer::PartialKoshiConfig;
+#[cfg(unix)]
+use koshi_config::types::ServerConfig;
 use koshi_core::geometry::Size;
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize};
-use koshi_ipc::endpoint::resolve_resume_file_path;
+#[cfg(unix)]
+use koshi_host::clipboard_tool::refresh_clipboard_tool_directory;
+use koshi_ipc::endpoint::{resolve_clipboard_tool_directory_path, resolve_resume_file_path};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::router::{SessionServerReady, ROUTER_PROTOCOL_VERSION};
 use koshi_observability::logging::initialize_tracing;
@@ -279,6 +285,13 @@ enum ServeOutcome {
 /// previous image left, and deletes the resume file. A session that moved to a
 /// new image ends nothing.
 ///
+/// On Linux and macOS, while `pane-clipboard-writes` allows writes, the
+/// session fills its folder of stand-in clipboard tools before its first pane
+/// starts: one link to the koshi program for each clipboard tool installed on
+/// this process's `PATH`. A session that ends in this process removes that
+/// folder, in each case listed above and on a resume run whose program path
+/// cannot be resolved. A session that moved to a new image keeps it.
+///
 /// The ready line is printed only once the session is seeded and the socket is
 /// bound. Any failure before that returns `Err` having printed nothing: a
 /// caller reading standard output sees end of stream.
@@ -364,6 +377,7 @@ pub fn run_session_server(
                     Arc::clone(&pty_sink),
                 );
                 let _ = std::fs::remove_file(resume_file_path);
+                remove_session_clipboard_tools(runtime_directory, session_id);
             }
             return Err(program_path_error.into());
         }
@@ -381,6 +395,9 @@ pub fn run_session_server(
         supervisor_token: supervisor_token.map(str::to_string),
         supervisor_process_id,
     };
+    // The stand-in clipboard tools are in place before the first pane starts.
+    #[cfg(unix)]
+    refresh_session_clipboard_tools(&session_start, app_config.as_ref());
 
     let built_session = match resume_file_path {
         Some(resume_file_path) => resume_from_file(
@@ -413,7 +430,13 @@ pub fn run_session_server(
     if let Some(resume_file_path) = resume_file_path {
         let _ = std::fs::remove_file(resume_file_path);
     }
-    let (mut session_server, pty_owner, mut ipc_server) = started_session?;
+    let (mut session_server, pty_owner, mut ipc_server) = match started_session {
+        Ok(started_session) => started_session,
+        Err(start_error) => {
+            remove_session_clipboard_tools(runtime_directory, session_id);
+            return Err(start_error);
+        }
+    };
     install_restart_check(
         &mut session_server,
         &pty_owner,
@@ -454,6 +477,7 @@ pub fn run_session_server(
                         %swap_error,
                         "the session could neither swap nor be put back; every pane is ended"
                     );
+                    remove_session_clipboard_tools(runtime_directory, session_id);
                     return Err(swap_error);
                 }
             },
@@ -469,7 +493,54 @@ pub fn run_session_server(
     ipc_server.shutdown();
     session_server.shutdown();
     end_every_pane(&pty_owner);
+    remove_session_clipboard_tools(runtime_directory, session_id);
     Ok(())
+}
+
+/// Make the folder of stand-in clipboard tools of `session_start`'s session
+/// hold one link to the program that `session_start.executable_watch` watches
+/// for each clipboard tool installed on this process's `PATH`, as
+/// [`refresh_clipboard_tool_directory`] states, while `pane-clipboard-writes`
+/// in `app_config` allows writes.
+///
+/// While it does not allow writes, nothing changes: a folder already there
+/// stays as it is. A failure is logged at warn level, and the session runs
+/// with the links that were made before it.
+#[cfg(unix)]
+fn refresh_session_clipboard_tools(
+    session_start: &SessionStart,
+    app_config: Option<&PartialKoshiConfig>,
+) {
+    let server_config = merge_server(
+        ServerConfig::default(),
+        app_config.cloned().into_iter().collect(),
+    );
+    if !server_config.pane_clipboard_writes.should_allow_writes {
+        return;
+    }
+    if let Err(refresh_error) = refresh_clipboard_tool_directory(
+        &resolve_clipboard_tool_directory_path(
+            &session_start.runtime_directory,
+            session_start.session_id,
+        ),
+        session_start.executable_watch.get_executable_path(),
+        std::env::var_os("PATH").as_deref(),
+    ) {
+        tracing::warn!(
+            %refresh_error,
+            "the stand-in clipboard tools could not be set up"
+        );
+    }
+}
+
+/// Remove the folder of stand-in clipboard tools of the session `session_id`
+/// in `runtime_directory`, with every link in it. A folder that is not there,
+/// or that cannot be removed, stays as it is.
+fn remove_session_clipboard_tools(runtime_directory: &Path, session_id: SessionId) {
+    let _ = std::fs::remove_dir_all(resolve_clipboard_tool_directory_path(
+        runtime_directory,
+        session_id,
+    ));
 }
 
 /// Seed the one session this process serves.
@@ -1916,9 +1987,6 @@ enum DetachPolicy {
 /// told client's record across, and the client attaches again onto it. The
 /// grace window after the swap drops a record nobody claims. The last of those
 /// passes runs after [`IpcServer::close_intake`]: nothing arrives after it.
-///
-/// The push delivers the bytes a command queued for a client's own terminal —
-/// the escape a copy writes to the clipboard.
 fn apply_queued_runtime_events(session_server: &mut Server, detach_policy: DetachPolicy) {
     drain_runtime_event_inbox(session_server, detach_policy);
     session_server.push_frames();

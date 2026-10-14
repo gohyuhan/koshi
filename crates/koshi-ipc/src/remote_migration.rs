@@ -53,7 +53,8 @@ struct PreviousTokenStore {
     records: Vec<PreviousTokenRecord>,
 }
 
-/// One previous saved server, with its original secret and certificate pin.
+/// One previous saved server, with its original secret and certificate
+/// fingerprint.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreviousSavedServer {

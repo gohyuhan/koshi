@@ -43,7 +43,8 @@ use koshi_link::remote_client::{self, DIAL_TIMEOUT_DURATION};
 use koshi_test_support::child_exit::wait_until_child_has_exited;
 use koshi_test_support::fixtures::{
     build_test_runtime_directory, count_program_runs, spawn_session_listening_before_it_advertises,
-    write_koshi_0_1_0_window_endpoint_file, write_printing_program, NO_SUCH_PROCESS_ID,
+    write_clipboard_tool_directory, write_koshi_0_1_0_window_endpoint_file, write_printing_program,
+    NO_SUCH_PROCESS_ID,
 };
 
 #[test]
@@ -666,7 +667,7 @@ const PAST_RESTART_WINDOW_DURATION: Duration =
 const INSIDE_RESTART_WINDOW_DURATION: Duration = Duration::from_secs(1);
 
 #[test]
-fn removing_a_session_takes_its_resume_and_program_files_with_it() {
+fn removing_a_session_takes_its_resume_program_and_clipboard_tool_files_with_it() {
     // A resume file past the window goes with the session's other files.
     let gone_session_id = SessionId::new();
     let runtime_directory = build_test_runtime_directory();
@@ -695,6 +696,8 @@ fn removing_a_session_takes_its_resume_and_program_files_with_it() {
         gone_session_id,
         PAST_RESTART_WINDOW_DURATION,
     );
+    let clipboard_tool_directory =
+        write_clipboard_tool_directory(runtime_directory.path(), gone_session_id);
 
     let mut session_registry = build_session_registry(&[(gone_session_id, "S-quiet-lake")]);
     assert_eq!(
@@ -712,6 +715,10 @@ fn removing_a_session_takes_its_resume_and_program_files_with_it() {
     assert!(!endpoint_path.exists(), "the endpoint file is removed");
     assert!(!resume_file_path.exists(), "the resume file is removed");
     assert!(!program_file_path.exists(), "the program file is removed");
+    assert!(
+        !clipboard_tool_directory.exists(),
+        "the folder of stand-in clipboard tools is removed"
+    );
 }
 
 #[test]
@@ -735,6 +742,8 @@ fn removing_a_session_that_is_replacing_its_image_leaves_it_and_its_files_alone(
         replacing_session_id,
         INSIDE_RESTART_WINDOW_DURATION,
     );
+    let clipboard_tool_directory =
+        write_clipboard_tool_directory(runtime_directory.path(), replacing_session_id);
 
     let mut session_registry = build_session_registry(&[(replacing_session_id, "S-quiet-lake")]);
     assert_eq!(
@@ -757,6 +766,13 @@ fn removing_a_session_that_is_replacing_its_image_leaves_it_and_its_files_alone(
     assert!(
         resume_file_path.exists(),
         "the resume file is left in place"
+    );
+    assert_eq!(
+        std::fs::read_dir(&clipboard_tool_directory)
+            .expect("the folder of stand-in clipboard tools is left in place")
+            .map(|directory_entry| directory_entry.expect("the entry reads").file_name())
+            .collect::<Vec<std::ffi::OsString>>(),
+        vec![std::ffi::OsString::from("xclip")]
     );
 }
 
@@ -1726,7 +1742,7 @@ fn build_no_remote_state() -> RemoteState {
     RemoteState {
         remote_listen_address: None,
         data_directory: None,
-        is_listening: false,
+        served_certificate_fingerprint: None,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -7537,6 +7553,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
     let held_runtime_directory = runtime_directory.path().to_path_buf();
     let held_token_store_path = token_store_path.clone();
     let held_data_directory = data_directory.clone();
+    let held_certificate_fingerprint = certificate_fingerprint.clone();
     let loop_thread = std::thread::spawn(move || {
         // The session is listed at the address its stand-in serves.
         let mut session_registry = build_session_registry(&[(session_id, "S-quiet-lake")]);
@@ -7547,7 +7564,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
         let mut remote_state = RemoteState {
             remote_listen_address: Some(remote_listen_address),
             data_directory: Some(held_data_directory),
-            is_listening: true,
+            served_certificate_fingerprint: Some(held_certificate_fingerprint),
             admitted_remote_connections: Vec::new(),
             next_remote_connection_id: 0,
             full_capacity_warning: WarningRateLimiter::new(),
@@ -7571,7 +7588,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
     let attaching_connection = remote_client::connect_remote_server(
         &remote_listen_address.to_string(),
         &connection_token,
-        Some(&certificate_fingerprint),
+        &certificate_fingerprint,
         DIAL_TIMEOUT_DURATION,
         None,
     )
@@ -7579,6 +7596,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
     let (mut bridged_connection, _bridged_writer) = remote_client::attach_remote_session(
         attaching_connection,
         SessionSelector::SessionId(session_id),
+        Duration::from_secs(30),
     )
     .expect("the attach is sent");
     let hello_response: IncomingResponse = bridged_connection
@@ -7590,7 +7608,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
     let mut listing_connection = remote_client::connect_remote_server(
         &remote_listen_address.to_string(),
         &connection_token,
-        Some(&certificate_fingerprint),
+        &certificate_fingerprint,
         DIAL_TIMEOUT_DURATION,
         None,
     )
@@ -8177,10 +8195,10 @@ fn a_caller_speaking_no_remote_protocol_version_this_build_has_is_told_both_rang
         maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: ConnectionToken::generate(),
     };
-    let (_frame_reader, _frame_writer, _presented_certificate_fingerprint, remote_server_response) =
+    let (_frame_reader, _frame_writer, remote_server_response) =
         remote_wire::open_remote_connection(
             &remote_listen_address.to_string(),
-            Some(&certificate_fingerprint),
+            &certificate_fingerprint,
             &hello_frame,
             DIAL_TIMEOUT_DURATION,
             None,
@@ -8222,12 +8240,13 @@ fn a_caller_whose_remote_protocol_range_covers_this_build_settles_on_what_both_s
     let held_runtime_directory = runtime_directory.path().to_path_buf();
     let held_token_store_path = token_store_path.clone();
     let held_data_directory = data_directory.clone();
+    let held_certificate_fingerprint = certificate_fingerprint.clone();
     let loop_thread = std::thread::spawn(move || {
         let session_registry = build_session_registry(&[]);
         let mut remote_state = RemoteState {
             remote_listen_address: Some(remote_listen_address),
             data_directory: Some(held_data_directory),
-            is_listening: true,
+            served_certificate_fingerprint: Some(held_certificate_fingerprint),
             admitted_remote_connections: Vec::new(),
             next_remote_connection_id: 0,
             full_capacity_warning: WarningRateLimiter::new(),
@@ -8254,10 +8273,10 @@ fn a_caller_whose_remote_protocol_range_covers_this_build_settles_on_what_both_s
         maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: connection_token.clone(),
     };
-    let (_frame_reader, _frame_writer, _presented_certificate_fingerprint, remote_server_response) =
+    let (_frame_reader, _frame_writer, remote_server_response) =
         remote_wire::open_remote_connection(
             &remote_listen_address.to_string(),
-            Some(&certificate_fingerprint),
+            &certificate_fingerprint,
             &hello_frame,
             DIAL_TIMEOUT_DURATION,
             None,
@@ -8541,7 +8560,10 @@ fn switching_remote_access_on_with_no_listen_address_is_refused() {
             "no remote listen address is set; add `remote-listen \"<ip>:<port>\"` to koshi.kdl"
         )
     );
-    assert!(!remote_state.is_listening, "no port is open");
+    assert_eq!(
+        remote_state.served_certificate_fingerprint, None,
+        "no port is open"
+    );
 }
 
 #[test]
@@ -8564,17 +8586,20 @@ fn switching_remote_access_on_with_no_data_directory_is_refused() {
             "this machine has no data directory, so remote access cannot be switched on"
         )
     );
-    assert!(!remote_state.is_listening, "no port is open");
+    assert_eq!(
+        remote_state.served_certificate_fingerprint, None,
+        "no port is open"
+    );
 }
 
 #[test]
-fn switching_remote_access_on_while_this_router_already_holds_the_port_keeps_serving_on_it() {
-    // `is_listening` is already `true`: the router skips the bind, and an
-    // address another socket holds is not refused.
+fn switching_remote_access_on_while_this_router_serves_answers_with_the_served_certificate() {
+    // The listener already serves the certificate whose fingerprint is 64 `a`
+    // characters, and no certificate file exists: the router skips the
+    // certificate and the bind, so an address another socket holds is not
+    // refused and no certificate file is made.
     let runtime_directory = build_test_runtime_directory();
     let data_directory = runtime_directory.path().join("data");
-    let (_certificate_file, certificate_fingerprint) =
-        load_or_create_certificate(&data_directory).expect("this machine's certificate");
     let occupied_listener = TcpListener::bind("127.0.0.1:0").expect("hold a loopback address");
     let remote_listen_address = occupied_listener
         .local_addr()
@@ -8583,7 +8608,7 @@ fn switching_remote_access_on_while_this_router_already_holds_the_port_keeps_ser
     let mut remote_state = RemoteState {
         remote_listen_address: Some(remote_listen_address),
         data_directory: Some(data_directory.clone()),
-        is_listening: true,
+        served_certificate_fingerprint: Some("a".repeat(64)),
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -8599,12 +8624,17 @@ fn switching_remote_access_on_while_this_router_already_holds_the_port_keeps_ser
         enable_result,
         RouterResult::RemoteEnabled {
             remote_listen_address,
-            certificate_fingerprint,
+            certificate_fingerprint: "a".repeat(64),
         }
     );
+    assert_eq!(
+        remote_state.served_certificate_fingerprint,
+        Some("a".repeat(64)),
+        "the listener keeps serving the certificate it held"
+    );
     assert!(
-        remote_state.is_listening,
-        "the port it already held stays open"
+        !CertificateFile::resolve_certificate_file_path(&data_directory).exists(),
+        "the certificate file was neither read nor made"
     );
     assert!(
         is_remote_access_enabled(&data_directory),
@@ -8625,7 +8655,10 @@ fn the_start_up_open_with_no_listen_address_takes_no_port() {
         &router_events_sender,
     );
 
-    assert!(!remote_state.is_listening, "no address opens no port");
+    assert_eq!(
+        remote_state.served_certificate_fingerprint, None,
+        "no address opens no port"
+    );
 }
 
 #[test]
@@ -8638,7 +8671,7 @@ fn the_start_up_open_takes_no_port_until_the_operator_has_said_yes() {
     let mut remote_state = RemoteState {
         remote_listen_address: Some(find_free_loopback_address()),
         data_directory: Some(data_directory.clone()),
-        is_listening: false,
+        served_certificate_fingerprint: None,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -8650,8 +8683,8 @@ fn the_start_up_open_takes_no_port_until_the_operator_has_said_yes() {
         &router_events_sender,
     );
 
-    assert!(
-        !remote_state.is_listening,
+    assert_eq!(
+        remote_state.served_certificate_fingerprint, None,
         "no remote access record, so no port"
     );
     assert!(
@@ -8677,8 +8710,8 @@ fn the_start_up_open_takes_the_port_again_once_the_answer_is_written_down() {
     let (router_events_sender, _router_events_receiver) = mpsc::channel();
     let mut remote_state = RemoteState {
         remote_listen_address: None,
-        data_directory: Some(data_directory),
-        is_listening: false,
+        data_directory: Some(data_directory.clone()),
+        served_certificate_fingerprint: None,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -8691,14 +8724,21 @@ fn the_start_up_open_takes_the_port_again_once_the_answer_is_written_down() {
             &build_unread_executable_watch(),
             &router_events_sender,
         );
-        if remote_state.is_listening {
+        if remote_state.served_certificate_fingerprint.is_some() {
             break;
         }
     }
 
     assert!(
-        remote_state.is_listening,
+        remote_state.served_certificate_fingerprint.is_some(),
         "no loopback port could be opened in {MAX_ADDRESS_ATTEMPT_COUNT} tries"
+    );
+    let (_certificate_file, disk_certificate_fingerprint) =
+        load_or_create_certificate(&data_directory).expect("this machine's certificate");
+    assert_eq!(
+        remote_state.served_certificate_fingerprint,
+        Some(disk_certificate_fingerprint),
+        "the listener serves the certificate this machine holds"
     );
     let remote_listen_address = remote_state
         .remote_listen_address
@@ -8728,7 +8768,7 @@ fn an_address_that_cannot_be_taken_writes_no_record_of_the_answer() {
     let mut remote_state = RemoteState {
         remote_listen_address: Some(occupied_socket_address),
         data_directory: Some(data_directory.clone()),
-        is_listening: false,
+        served_certificate_fingerprint: None,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -8748,8 +8788,8 @@ fn an_address_that_cannot_be_taken_writes_no_record_of_the_answer() {
             "the remote listener could not open {occupied_socket_address}: {bind_error}"
         ))
     );
-    assert!(
-        !remote_state.is_listening,
+    assert_eq!(
+        remote_state.served_certificate_fingerprint, None,
         "nothing is being served on an address that was never taken"
     );
     assert!(
@@ -8761,6 +8801,51 @@ fn an_address_that_cannot_be_taken_writes_no_record_of_the_answer() {
 }
 
 #[test]
+fn a_certificate_that_cannot_be_read_refuses_the_switch_on_and_names_the_address() {
+    let runtime_directory = build_test_runtime_directory();
+    let data_directory = runtime_directory.path().join("data");
+    let certificate_path = CertificateFile::resolve_certificate_file_path(&data_directory);
+    std::fs::create_dir_all(certificate_path.parent().expect("certificate parent"))
+        .expect("create remote directory");
+    std::fs::write(&certificate_path, b"unreadable certificate")
+        .expect("write unreadable certificate");
+    let certificate_error =
+        load_or_create_certificate(&data_directory).expect_err("the certificate cannot be read");
+    let remote_listen_address = SocketAddr::from(([127, 0, 0, 1], 0));
+    let (router_events_sender, _router_events_receiver) = mpsc::channel();
+    let mut remote_state = RemoteState {
+        remote_listen_address: Some(remote_listen_address),
+        data_directory: Some(data_directory.clone()),
+        served_certificate_fingerprint: None,
+        admitted_remote_connections: Vec::new(),
+        next_remote_connection_id: 0,
+        full_capacity_warning: WarningRateLimiter::new(),
+    };
+
+    let enable_result = enable_remote_access(
+        &mut remote_state,
+        &build_unread_executable_watch(),
+        &router_events_sender,
+    );
+
+    assert_eq!(
+        enable_result,
+        build_expected_refusal(&format!(
+            "the remote listener could not open 127.0.0.1:0: {certificate_error}"
+        ))
+    );
+    assert_eq!(remote_state.served_certificate_fingerprint, None);
+    assert!(
+        !RemoteAccessRecord::resolve_remote_access_record_path(&data_directory).exists(),
+        "the remote access record was never written"
+    );
+    assert_eq!(
+        std::fs::read(&certificate_path).expect("read the certificate after the refusal"),
+        b"unreadable certificate"
+    );
+}
+
+#[test]
 fn taking_the_address_writes_the_record_and_serves_on_it() {
     let runtime_directory = build_test_runtime_directory();
     let data_directory = runtime_directory.path().join("data");
@@ -8769,7 +8854,7 @@ fn taking_the_address_writes_the_record_and_serves_on_it() {
     let mut remote_state = RemoteState {
         remote_listen_address: None,
         data_directory: Some(data_directory.clone()),
-        is_listening: false,
+        served_certificate_fingerprint: None,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -8796,7 +8881,11 @@ fn taking_the_address_writes_the_record_and_serves_on_it() {
         certificate_fingerprint, disk_certificate_fingerprint,
         "the answer names the certificate this machine now presents"
     );
-    assert!(remote_state.is_listening, "the port is being served");
+    assert_eq!(
+        remote_state.served_certificate_fingerprint,
+        Some(certificate_fingerprint),
+        "the port is being served with that certificate"
+    );
     assert!(
         is_remote_access_enabled(&data_directory),
         "the remote access record is written in the data directory"
@@ -8805,8 +8894,9 @@ fn taking_the_address_writes_the_record_and_serves_on_it() {
 
 #[test]
 fn the_status_separates_the_answer_given_from_the_port_being_open() {
-    // The remote access record exists and no port is open: the status reports
-    // `is_remote_access_enabled` as `true` and `is_listening` as `false`.
+    // The remote access record and the certificate file exist, and no port is
+    // open: the status reports `is_remote_access_enabled` as `true`,
+    // `is_listening` as `false`, and no certificate fingerprint.
     let runtime_directory = build_test_runtime_directory();
     let data_directory = runtime_directory.path().join("data");
     RemoteAccessRecord {
@@ -8818,10 +8908,13 @@ fn the_status_separates_the_answer_given_from_the_port_being_open() {
     ))
     .expect("the remote access record is written");
 
+    let (_certificate_file, _certificate_fingerprint) =
+        load_or_create_certificate(&data_directory).expect("this machine's certificate");
+
     let remote_state = RemoteState {
         remote_listen_address: Some(SocketAddr::from(([127, 0, 0, 1], 7654))),
         data_directory: Some(data_directory),
-        is_listening: false,
+        served_certificate_fingerprint: None,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -8830,6 +8923,7 @@ fn the_status_separates_the_answer_given_from_the_port_being_open() {
     let RouterResult::RemoteStatus {
         is_remote_access_enabled,
         is_listening,
+        certificate_fingerprint,
         ..
     } = build_remote_status_result(&remote_state)
     else {
@@ -8837,21 +8931,24 @@ fn the_status_separates_the_answer_given_from_the_port_being_open() {
     };
     assert!(is_remote_access_enabled, "the operator did say yes");
     assert!(!is_listening, "and this run is holding no port");
+    assert_eq!(
+        certificate_fingerprint, None,
+        "and no listener presents a certificate"
+    );
 }
 
 #[test]
-fn the_status_names_this_machines_certificate_and_how_many_connections_it_holds() {
-    // The status names the certificate fingerprint and the count of admitted
-    // connections. A certificate with no remote access record reports
-    // `is_remote_access_enabled` as `false`.
+fn the_status_names_the_served_certificate_and_how_many_connections_it_holds() {
+    // The listener serves the certificate whose fingerprint is 64 `a`
+    // characters, and no certificate file exists: the status names that
+    // fingerprint and the count of admitted connections. No remote access
+    // record reports `is_remote_access_enabled` as `false`.
     let runtime_directory = build_test_runtime_directory();
     let data_directory = runtime_directory.path().join("data");
-    let (_certificate_file, certificate_fingerprint) =
-        load_or_create_certificate(&data_directory).expect("this machine's certificate");
     let mut remote_state = RemoteState {
         remote_listen_address: Some(SocketAddr::from(([127, 0, 0, 1], 7654))),
-        data_directory: Some(data_directory),
-        is_listening: true,
+        data_directory: Some(data_directory.clone()),
+        served_certificate_fingerprint: Some("a".repeat(64)),
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -8876,9 +8973,13 @@ fn the_status_names_this_machines_certificate_and_how_many_connections_it_holds(
             remote_listen_address: Some(SocketAddr::from(([127, 0, 0, 1], 7654))),
             is_remote_access_enabled: false,
             is_listening: true,
-            certificate_fingerprint: Some(certificate_fingerprint),
+            certificate_fingerprint: Some("a".repeat(64)),
             remote_connection_count: 3,
         }
+    );
+    assert!(
+        !CertificateFile::resolve_certificate_file_path(&data_directory).exists(),
+        "the status made no certificate file"
     );
 }
 

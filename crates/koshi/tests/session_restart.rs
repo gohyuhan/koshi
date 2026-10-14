@@ -334,6 +334,7 @@ impl AttachedClientStream {
                 pane_area: None,
                 graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
+                link_timeout_ms: None,
             },
         };
         connection
@@ -1018,7 +1019,8 @@ fn input_sent_after_the_clients_are_told_still_reaches_its_pane() {
     // What a real client sends the moment it reads that frame. Requests arrive
     // in the order they were queued: the session reads the line above before
     // it reads this, and the swap waits for this.
-    attached_client_stream.send_request_while_connection_open(21, IpcRequestKind::Leaving);
+    attached_client_stream
+        .send_request_while_connection_open(21, IpcRequestKind::Leaving { is_returning: true });
     drop(control_connection);
 
     let restarted_endpoint = wait_for_restarted_session_endpoint(

@@ -15,7 +15,7 @@ use koshi_core::{
     command::Selection,
     constant::FLOATING_PANE_CHROME_SIZE,
     geometry::{PaneArea, PixelCellSize, Point, Rect, Size},
-    ids::{ClientId, PaneId, SessionId, TabId},
+    ids::{ClientId, CommandId, PaneId, SessionId, TabId},
     lock::LockMode,
 };
 use koshi_layout::{mode::LayoutMode, solver::MIN_PANE_SIZE};
@@ -153,6 +153,12 @@ pub struct Client {
     /// this client's input while no floating pane is focused.
     focused_pane_id_by_tab_id: HashMap<TabId, PaneId>,
     lock_mode: LockMode,
+    /// The last lock command that this client's own connection sent and the
+    /// session ran, also when the command left the lock mode as it was. `None`
+    /// before the session runs one, and again after the session restarts: the
+    /// resume file does not carry it.
+    #[serde(skip)]
+    last_applied_lock_command_id: Option<CommandId>,
     /// Whether this client grabs the mouse for text selection: while on, a drag
     /// highlights in koshi even over a program that asked for the mouse. Toggled
     /// by `core:mouse-select`; independent of [`lock_mode`](Self::lock_mode).
@@ -239,6 +245,7 @@ impl Client {
             color_index,
             focused_pane_id_by_tab_id: HashMap::new(),
             lock_mode: LockMode::Normal,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: false,
             scroll_offset_by_pane_id: HashMap::new(),
             selection_by_pane_id: HashMap::new(),
@@ -484,6 +491,19 @@ impl Client {
     /// Update this client's lock mode.
     pub fn update_lock_mode(&mut self, lock_mode: LockMode) {
         self.lock_mode = lock_mode
+    }
+
+    /// The last lock command that this client's own connection sent and the
+    /// session ran, or `None` before the session runs one.
+    #[must_use]
+    pub fn get_last_applied_lock_command_id(&self) -> Option<CommandId> {
+        self.last_applied_lock_command_id
+    }
+
+    /// Record `lock_command_id` as the last lock command that this client's
+    /// own connection sent and the session ran.
+    pub fn set_last_applied_lock_command_id(&mut self, lock_command_id: CommandId) {
+        self.last_applied_lock_command_id = Some(lock_command_id);
     }
 
     /// Whether this client grabs the mouse for text selection.

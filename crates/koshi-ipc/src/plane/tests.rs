@@ -750,6 +750,7 @@ fn an_attach_carries_its_payload_through_to_the_callers_dispatch() {
                     pane_area: None,
                     graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
                     cell_size: None,
+                    link_timeout_ms: None,
                 },
             })
             .expect("send attach");
@@ -768,6 +769,7 @@ fn an_attach_carries_its_payload_through_to_the_callers_dispatch() {
                         pane_area: None,
                         graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
                         cell_size: None,
+                        link_timeout_ms: None,
                     },
                 },
                 RequestDisposition::Stop,

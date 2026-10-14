@@ -14,7 +14,8 @@ use koshi_core::lock::LockMode;
 use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcResponse, IpcResult};
 use koshi_ipc::transport::{Connection, Listener};
 use koshi_test_support::fixtures::{
-    build_test_runtime_directory, close_connection_after_peer_hangs_up, NO_SUCH_PROCESS_ID,
+    build_test_runtime_directory, close_connection_after_peer_hangs_up,
+    write_clipboard_tool_directory, NO_SUCH_PROCESS_ID,
 };
 
 use super::*;
@@ -1133,6 +1134,56 @@ fn a_session_replacing_its_image_is_counted_and_keeps_its_endpoint_file() {
     assert!(
         unbound_endpoint_path.exists(),
         "the endpoint file of a session restarting is kept"
+    );
+}
+
+#[test]
+fn a_session_that_is_gone_loses_its_folder_of_stand_in_clipboard_tools() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let endpoint_path = write_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        koshi_ipc::endpoint::compute_socket_address(runtime_directory.path(), session_id),
+    );
+    let clipboard_tool_directory =
+        write_clipboard_tool_directory(runtime_directory.path(), session_id);
+
+    let discovery = fetch_all_session_overviews(runtime_directory.path(), None);
+
+    assert_eq!(discovery.sessions, Vec::new());
+    assert_eq!(discovery.unasked_session_count, 0);
+    assert!(
+        !clipboard_tool_directory.exists(),
+        "the folder of a session that is gone is removed"
+    );
+    assert!(
+        !endpoint_path.exists(),
+        "the endpoint file of a session that is gone is removed"
+    );
+}
+
+#[test]
+fn a_session_restarting_keeps_its_folder_of_stand_in_clipboard_tools() {
+    // The resume file was written just now, and the endpoint file names a
+    // socket nothing listens on.
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    write_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        koshi_ipc::endpoint::compute_socket_address(runtime_directory.path(), session_id),
+    );
+    write_aged_resume_file(runtime_directory.path(), session_id, Duration::ZERO);
+    let clipboard_tool_directory =
+        write_clipboard_tool_directory(runtime_directory.path(), session_id);
+
+    let discovery = fetch_all_session_overviews(runtime_directory.path(), None);
+
+    assert_eq!(discovery.unasked_session_count, 1);
+    assert!(
+        clipboard_tool_directory.join("xclip").exists(),
+        "the folder of a session restarting is kept"
     );
 }
 

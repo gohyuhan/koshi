@@ -31,7 +31,7 @@ use crate::resume::LAYOUT_NOT_RESTORED_NOTICE_BYTES;
 use crate::runtime::command::{
     compute_pane_spawn_sizes, compute_root_pane_pty_size, generate_tab_name,
 };
-use crate::runtime::spawn_env::build_koshi_environment;
+use crate::runtime::spawn_env::add_koshi_environment;
 use crate::server::Server;
 
 #[cfg(test)]
@@ -112,14 +112,14 @@ impl Server {
         // Launch the shell first: on failure nothing is registered. The spawn spec
         // carries the pane's in-session identity vars in its env overlay.
         let mut spawn_spec = self.build_default_shell_spec(None, BTreeMap::new());
-        spawn_spec
-            .environment_variables
-            .extend(build_koshi_environment(
-                session_id,
-                client_id,
-                pane_id,
-                koshi_paths::resolve_runtime_directory().as_deref(),
-            ));
+        add_koshi_environment(
+            &mut spawn_spec.environment_variables,
+            session_id,
+            client_id,
+            pane_id,
+            koshi_paths::resolve_runtime_directory().as_deref(),
+            self.config.pane_clipboard_writes.should_allow_writes,
+        );
         pty_backend.spawn_pane(pane_id, spawn_spec, root_pane_pty_size)?;
 
         // Assemble the session with its client, if any, viewing the tab we are
@@ -299,6 +299,7 @@ impl Server {
         // Spawn every pane before committing anything. On any failure, kill
         // what was already spawned so no orphan child outlives the launch.
         let runtime_directory_path = koshi_paths::resolve_runtime_directory();
+        let should_add_clipboard_tools = self.config.pane_clipboard_writes.should_allow_writes;
         let mut spawned_pane_pty_sizes: Vec<(PaneId, PtySize)> = Vec::new();
         let pane_sizing = self.get_pane_sizing();
         for tab_plan in &profile_tab_plans {
@@ -313,14 +314,14 @@ impl Server {
                     .map(|(_, pane_pty_size)| *pane_pty_size)
                     .expect("every planned pane id is a leaf of its own tab tree");
                 let mut pane_spawn_spec = spawn_spec.clone();
-                pane_spawn_spec
-                    .environment_variables
-                    .extend(build_koshi_environment(
-                        session_id,
-                        client_id,
-                        *pane_id,
-                        runtime_directory_path.as_deref(),
-                    ));
+                add_koshi_environment(
+                    &mut pane_spawn_spec.environment_variables,
+                    session_id,
+                    client_id,
+                    *pane_id,
+                    runtime_directory_path.as_deref(),
+                    should_add_clipboard_tools,
+                );
                 match pty_backend.spawn_pane(*pane_id, pane_spawn_spec, pane_pty_size) {
                     Ok(()) => spawned_pane_pty_sizes.push((*pane_id, pane_pty_size)),
                     Err(spawn_error) => {

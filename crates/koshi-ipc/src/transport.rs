@@ -27,6 +27,10 @@
 //! [`FrameReader::set_deadline`](crate::transport::FrameReader::set_deadline) and
 //! [`FrameWriter::set_deadline`](crate::transport::FrameWriter::set_deadline)
 //! end each read and write of a split connection by the moment they name.
+//! [`FrameReader::set_idle_timeout`](crate::transport::FrameReader::set_idle_timeout)
+//! and
+//! [`FrameWriter::set_idle_timeout`](crate::transport::FrameWriter::set_idle_timeout)
+//! end each socket call that gets or takes no byte for the time they name.
 //!
 //! The frame shape is not tied to the local socket.
 //! [`build_frame_halves`](crate::transport::build_frame_halves) puts it on any other pair
@@ -341,9 +345,10 @@ impl Connection {
     /// The connection is consumed: after this, [`send`](Self::send) and
     /// [`recv`](Self::recv) are the halves' own methods.
     ///
-    /// Neither half starts with a deadline.
+    /// Neither half starts with a deadline or an idle timeout.
     /// [`FrameReader::set_deadline`] and [`FrameWriter::set_deadline`] give
-    /// one.
+    /// a deadline, and [`FrameReader::set_idle_timeout`] and
+    /// [`FrameWriter::set_idle_timeout`] give an idle timeout.
     #[must_use]
     pub fn split(self) -> (FrameReader, FrameWriter) {
         let (reader_half, writer_half) = self.socket_stream.split();
@@ -354,6 +359,7 @@ impl Connection {
             },
             FrameWriter {
                 writer_half: Box::new(LocalSocketWriter::from_send_half(writer_half)),
+                last_frame_written_at: Instant::now(),
             },
         )
     }
@@ -375,6 +381,14 @@ pub trait Deadlined: Send {
     /// Every read and write after this finishes by `deadline`, or blocks for as long
     /// as it takes when `deadline` is `None`.
     fn set_deadline(&mut self, deadline: Option<Instant>);
+
+    /// Every socket call after this that gets or takes no byte for
+    /// `idle_timeout` ends with a timeout, or waits for as long as it takes
+    /// when `idle_timeout` is `None`. A half that makes several socket calls
+    /// for one read or write gives each socket call its own `idle_timeout`.
+    /// Each socket call ends by the instant [`compute_step_deadline`] gives
+    /// when it starts.
+    fn set_idle_timeout(&mut self, idle_timeout: Option<Duration>);
 }
 
 /// The least time left a step under a deadline starts with: 1 ms. Less time
@@ -398,9 +412,32 @@ pub fn compute_time_left_until(deadline: Instant) -> io::Result<Duration> {
     Ok(time_left)
 }
 
+/// The instant one socket call that starts now must end by: the earlier of
+/// `deadline` and the time now plus `idle_timeout`, or `None` when neither
+/// limits it. An `idle_timeout` too large to add to the time now limits
+/// nothing.
+///
+/// Example: a deadline 10 seconds away and a 30-second idle timeout give the
+/// deadline. A deadline 60 seconds away and the same idle timeout give the
+/// time now plus 30 seconds.
+#[must_use]
+pub fn compute_step_deadline(
+    deadline: Option<Instant>,
+    idle_timeout: Option<Duration>,
+) -> Option<Instant> {
+    let idle_deadline =
+        idle_timeout.and_then(|idle_timeout| Instant::now().checked_add(idle_timeout));
+    match (deadline, idle_deadline) {
+        (Some(deadline), Some(idle_deadline)) => Some(deadline.min(idle_deadline)),
+        (Some(deadline), None) => Some(deadline),
+        (None, idle_deadline) => idle_deadline,
+    }
+}
+
 /// The reading half of a split local socket [`Connection`]. A read under a
-/// deadline ends by that deadline; a read with no deadline blocks for as long
-/// as it takes.
+/// deadline or an idle timeout ends by the earlier of the deadline and the
+/// time the read starts plus the idle timeout; a read with neither blocks for
+/// as long as it takes.
 ///
 /// A read that runs out of time is [`io::ErrorKind::TimedOut`] with the text
 /// `this step ran out of time`.
@@ -412,10 +449,12 @@ struct LocalSocketReader {
     recv_half: socket::RecvHalf,
     /// When every read must be finished by, or `None` for no limit.
     deadline: Option<Instant>,
+    /// The longest one read waits for a byte, or `None` for no limit.
+    idle_timeout: Option<Duration>,
 }
 
 impl LocalSocketReader {
-    /// A reader over `recv_half` with no deadline.
+    /// A reader over `recv_half` with no deadline and no idle timeout.
     fn from_recv_half(recv_half: socket::RecvHalf) -> LocalSocketReader {
         #[cfg(windows)]
         let socket::RecvHalf::NamedPipe(pipe_half) = &recv_half;
@@ -426,6 +465,7 @@ impl LocalSocketReader {
             )),
             recv_half,
             deadline: None,
+            idle_timeout: None,
         }
     }
 }
@@ -440,28 +480,39 @@ impl Deadlined for LocalSocketReader {
             let _ = self.recv_half.set_timeout(None);
         }
     }
+
+    /// Store `idle_timeout`. On Unix `None` also clears the socket's receive
+    /// timeout; a failure to clear it is ignored.
+    fn set_idle_timeout(&mut self, idle_timeout: Option<Duration>) {
+        self.idle_timeout = idle_timeout;
+        #[cfg(unix)]
+        if idle_timeout.is_none() {
+            let _ = self.recv_half.set_timeout(None);
+        }
+    }
 }
 
 impl Read for LocalSocketReader {
-    /// Read from the socket. Under a deadline the read ends by it.
+    /// Read from the socket. Under a deadline or an idle timeout the read ends
+    /// by the instant [`compute_step_deadline`] gives when it starts.
     ///
     /// On Unix each attempt first sets the socket's receive timeout to the
     /// time left; a timed-out attempt is tried again with the new time left
     /// until less than 1 ms is left. On Windows the read runs while
-    /// `PipeStepCanceller` watches the deadline.
+    /// `PipeStepCanceller` watches that instant.
     ///
     /// # Errors
     /// [`io::ErrorKind::TimedOut`] with the text `this step ran out of time`
-    /// once the deadline is reached; otherwise the read's own failure.
+    /// once that instant is reached; otherwise the read's own failure.
     fn read(&mut self, read_buffer: &mut [u8]) -> io::Result<usize> {
-        let Some(deadline) = self.deadline else {
+        let Some(step_deadline) = compute_step_deadline(self.deadline, self.idle_timeout) else {
             return self.recv_half.read(read_buffer);
         };
         let recv_half = &self.recv_half;
         #[cfg(unix)]
         {
             run_socket_step_until(
-                deadline,
+                step_deadline,
                 |time_left| recv_half.set_timeout(Some(time_left)),
                 || {
                     let mut recv_half_reference = recv_half;
@@ -471,17 +522,19 @@ impl Read for LocalSocketReader {
         }
         #[cfg(windows)]
         {
-            self.pipe_step_canceller.run_pipe_step_until(deadline, || {
-                let mut recv_half_reference = recv_half;
-                recv_half_reference.read(read_buffer)
-            })
+            self.pipe_step_canceller
+                .run_pipe_step_until(step_deadline, || {
+                    let mut recv_half_reference = recv_half;
+                    recv_half_reference.read(read_buffer)
+                })
         }
     }
 }
 
 /// The writing half of a split local socket [`Connection`]. A write under a
-/// deadline ends by that deadline; a write with no deadline blocks for as long
-/// as it takes.
+/// deadline or an idle timeout ends by the earlier of the deadline and the
+/// time the write starts plus the idle timeout; a write with neither blocks
+/// for as long as it takes.
 ///
 /// A write that runs out of time is [`io::ErrorKind::TimedOut`] with the text
 /// `this step ran out of time`.
@@ -493,10 +546,13 @@ struct LocalSocketWriter {
     send_half: socket::SendHalf,
     /// When every write must be finished by, or `None` for no limit.
     deadline: Option<Instant>,
+    /// The longest one write waits for the socket to take a byte, or `None`
+    /// for no limit.
+    idle_timeout: Option<Duration>,
 }
 
 impl LocalSocketWriter {
-    /// A writer over `send_half` with no deadline.
+    /// A writer over `send_half` with no deadline and no idle timeout.
     fn from_send_half(send_half: socket::SendHalf) -> LocalSocketWriter {
         #[cfg(windows)]
         let socket::SendHalf::NamedPipe(pipe_half) = &send_half;
@@ -507,6 +563,7 @@ impl LocalSocketWriter {
             )),
             send_half,
             deadline: None,
+            idle_timeout: None,
         }
     }
 }
@@ -521,24 +578,35 @@ impl Deadlined for LocalSocketWriter {
             let _ = self.send_half.set_timeout(None);
         }
     }
+
+    /// Store `idle_timeout`. On Unix `None` also clears the socket's send
+    /// timeout; a failure to clear it is ignored.
+    fn set_idle_timeout(&mut self, idle_timeout: Option<Duration>) {
+        self.idle_timeout = idle_timeout;
+        #[cfg(unix)]
+        if idle_timeout.is_none() {
+            let _ = self.send_half.set_timeout(None);
+        }
+    }
 }
 
 impl Write for LocalSocketWriter {
-    /// Write to the socket. Under a deadline the write ends by it, the same
+    /// Write to the socket. Under a deadline or an idle timeout the write ends
+    /// by the instant [`compute_step_deadline`] gives when it starts, the same
     /// way [`LocalSocketReader`]'s read does.
     ///
     /// # Errors
     /// [`io::ErrorKind::TimedOut`] with the text `this step ran out of time`
-    /// once the deadline is reached; otherwise the write's own failure.
+    /// once that instant is reached; otherwise the write's own failure.
     fn write(&mut self, write_bytes: &[u8]) -> io::Result<usize> {
-        let Some(deadline) = self.deadline else {
+        let Some(step_deadline) = compute_step_deadline(self.deadline, self.idle_timeout) else {
             return self.send_half.write(write_bytes);
         };
         let send_half = &self.send_half;
         #[cfg(unix)]
         {
             run_socket_step_until(
-                deadline,
+                step_deadline,
                 |time_left| send_half.set_timeout(Some(time_left)),
                 || {
                     let mut send_half_reference = send_half;
@@ -548,10 +616,11 @@ impl Write for LocalSocketWriter {
         }
         #[cfg(windows)]
         {
-            self.pipe_step_canceller.run_pipe_step_until(deadline, || {
-                let mut send_half_reference = send_half;
-                send_half_reference.write(write_bytes)
-            })
+            self.pipe_step_canceller
+                .run_pipe_step_until(step_deadline, || {
+                    let mut send_half_reference = send_half;
+                    send_half_reference.write(write_bytes)
+                })
         }
     }
 
@@ -750,11 +819,13 @@ fn run_pipe_step_canceller(
     }
 }
 
-/// The reading half of a stream, with a deadline it may be given later.
+/// The reading half of a stream, with a deadline and an idle timeout it may be
+/// given later.
 pub trait DeadlinedRead: Read + Deadlined {}
 impl<T: Read + Deadlined> DeadlinedRead for T {}
 
-/// The writing half of a stream, with a deadline it may be given later.
+/// The writing half of a stream, with a deadline and an idle timeout it may be
+/// given later.
 pub trait DeadlinedWrite: Write + Deadlined {}
 impl<T: Write + Deadlined> DeadlinedWrite for T {}
 
@@ -764,9 +835,10 @@ impl<T: Write + Deadlined> DeadlinedWrite for T {}
 ///
 /// The reader starts open: no [`ReadCloser`] reaches these halves.
 ///
-/// Each half keeps whatever deadline it already carries, and
-/// [`FrameReader::set_deadline`] and [`FrameWriter::set_deadline`] reach it
-/// through the box.
+/// Each half keeps whatever deadline and idle timeout it already carries.
+/// [`FrameReader::set_deadline`], [`FrameWriter::set_deadline`],
+/// [`FrameReader::set_idle_timeout`] and [`FrameWriter::set_idle_timeout`]
+/// reach it through the box.
 #[must_use]
 pub fn build_frame_halves(
     reader_half: Box<dyn DeadlinedRead>,
@@ -777,7 +849,10 @@ pub fn build_frame_halves(
             reader_half,
             is_closed: Arc::new(AtomicBool::new(false)),
         },
-        FrameWriter { writer_half },
+        FrameWriter {
+            writer_half,
+            last_frame_written_at: Instant::now(),
+        },
     )
 }
 
@@ -796,6 +871,21 @@ impl FrameReader {
     /// join it to a session, and none afterwards.
     pub fn set_deadline(&mut self, deadline: Option<Instant>) {
         self.reader_half.set_deadline(deadline);
+    }
+
+    /// Give each socket read of this half at most `idle_timeout` to get a
+    /// byte, or `None` to take the idle timeout away. A peer that sends
+    /// nothing for `idle_timeout` ends the read with a timeout error, however
+    /// long the whole frame takes to arrive. The deadline still applies: each
+    /// socket read ends by the earlier of the deadline and the time it starts
+    /// plus `idle_timeout`. An `idle_timeout` too large to add to the current
+    /// time limits nothing.
+    ///
+    /// Example: with a 30-second idle timeout, a frame whose bytes arrive 10
+    /// seconds apart is read whole, and a peer that sends nothing for 30
+    /// seconds ends the read.
+    pub fn set_idle_timeout(&mut self, idle_timeout: Option<Duration>) {
+        self.reader_half.set_idle_timeout(idle_timeout);
     }
 }
 
@@ -878,6 +968,9 @@ fn duplicate_unix_socket(socket_stream: &socket::Stream) -> Result<UnixStream, I
 /// The writing half of a split [`Connection`]. Reads nothing.
 pub struct FrameWriter {
     writer_half: Box<dyn DeadlinedWrite>,
+    /// When the last frame [`FrameWriter::send`] wrote went out whole, or
+    /// when this half was built while none has.
+    last_frame_written_at: Instant,
 }
 
 impl FrameWriter {
@@ -885,6 +978,21 @@ impl FrameWriter {
     /// same rule [`FrameReader::set_deadline`] states.
     pub fn set_deadline(&mut self, deadline: Option<Instant>) {
         self.writer_half.set_deadline(deadline);
+    }
+
+    /// Give each socket write of this half at most `idle_timeout` for the
+    /// socket to take a byte, or `None` to take the idle timeout away. A peer
+    /// that takes no byte for `idle_timeout` ends the send with a timeout
+    /// error, however long the whole frame takes to go out. The deadline still
+    /// applies: each socket write ends by the earlier of the deadline and the
+    /// time it starts plus `idle_timeout`. An `idle_timeout` too large to add
+    /// to the current time limits nothing.
+    ///
+    /// Example: with a 30-second idle timeout, a frame whose parts the peer
+    /// takes 10 seconds apart goes out whole, and a peer that takes no byte for
+    /// 30 seconds ends the send.
+    pub fn set_idle_timeout(&mut self, idle_timeout: Option<Duration>) {
+        self.writer_half.set_idle_timeout(idle_timeout);
     }
 }
 
@@ -896,9 +1004,21 @@ impl std::fmt::Debug for FrameWriter {
 
 impl FrameWriter {
     /// Send one message as one frame. Blocks until the bytes are handed to
-    /// the OS.
+    /// the OS, under this half's deadline and its idle timeout
+    /// ([`set_idle_timeout`](Self::set_idle_timeout)). A frame that goes out
+    /// whole sets [`get_last_frame_written_at`](Self::get_last_frame_written_at)
+    /// to the time it finished; a failed send leaves it as it was.
     pub fn send<Message: Serialize>(&mut self, message: &Message) -> Result<(), IpcError> {
-        write_message(&mut self.writer_half, message)
+        write_message(&mut self.writer_half, message)?;
+        self.last_frame_written_at = Instant::now();
+        Ok(())
+    }
+
+    /// When the last frame [`send`](Self::send) wrote went out whole, or when
+    /// this half was built while none has.
+    #[must_use]
+    pub fn get_last_frame_written_at(&self) -> Instant {
+        self.last_frame_written_at
     }
 }
 

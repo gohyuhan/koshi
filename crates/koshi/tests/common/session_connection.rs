@@ -61,6 +61,7 @@ pub fn build_attach_request() -> IpcRequest {
             pane_area: None,
             graphics_capabilities: GraphicsCapabilities::default(),
             cell_size: None,
+            link_timeout_ms: None,
         },
     }
 }

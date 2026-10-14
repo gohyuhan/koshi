@@ -6,11 +6,14 @@ use std::process::{Child, Command};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::SessionId;
 use koshi_core::key::{
     BindingModifierFlags, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
 };
-use koshi_ipc::endpoint::{compute_socket_address, EndpointFile};
+use koshi_ipc::endpoint::{
+    compute_socket_address, resolve_clipboard_tool_directory_path, EndpointFile,
+};
 use koshi_ipc::handshake::{Handshake, Peer};
 use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
 use koshi_ipc::router::{compute_router_socket_address, resolve_router_endpoint_path};
@@ -35,6 +38,38 @@ const REPORTED_MODIFIER_BY_BINDING_MODIFIER: [(BindingModifierFlags, KeyModifier
     (BindingModifierFlags::SHIFT, KeyModifierFlags::SHIFT),
     (BindingModifierFlags::SUPER, KeyModifierFlags::SUPER),
 ];
+
+/// The cell rect at `(origin_column, origin_row)`, `column_count` columns wide
+/// and `row_count` rows tall: `build_cell_rect(2, 1, 10, 5)` covers columns `2`
+/// to `11` of rows `1` to `5`.
+#[must_use]
+pub fn build_cell_rect(
+    origin_column: u16,
+    origin_row: u16,
+    column_count: u16,
+    row_count: u16,
+) -> Rect {
+    Rect::from_origin_and_size(
+        Point {
+            column: origin_column,
+            row: origin_row,
+        },
+        Size {
+            column_count,
+            row_count,
+        },
+    )
+}
+
+/// `byte_count` bytes that count from `0` to `250` and then start again at
+/// `0`: the byte at index `n` is `n % 251`. `build_counting_bytes(253)` ends
+/// with `249, 250, 0, 1`.
+#[must_use]
+pub fn build_counting_bytes(byte_count: usize) -> Vec<u8> {
+    (0..byte_count)
+        .map(|byte_index| u8::try_from(byte_index % 251).expect("a value below 251 fits in u8"))
+        .collect()
+}
 
 /// The complete key event a terminal reports for one chord: a press, with no
 /// alternative keys and no associated text.
@@ -78,6 +113,21 @@ pub fn build_test_runtime_directory() -> TempDir {
     #[cfg(windows)]
     let base_directory = std::env::temp_dir();
     TempDir::new_in(base_directory).expect("a temporary runtime directory")
+}
+
+/// Make the folder of stand-in clipboard tools of `session_id` in
+/// `runtime_directory`, holding one empty file named `xclip`, and hand back
+/// the folder's path.
+///
+/// # Panics
+///
+/// Panics when the folder or the file cannot be written.
+pub fn write_clipboard_tool_directory(runtime_directory: &Path, session_id: SessionId) -> PathBuf {
+    let clipboard_tool_directory =
+        resolve_clipboard_tool_directory_path(runtime_directory, session_id);
+    std::fs::create_dir(&clipboard_tool_directory).expect("the folder is made");
+    std::fs::write(clipboard_tool_directory.join("xclip"), b"").expect("the stand-in is written");
+    clipboard_tool_directory
 }
 
 /// Write a program named `program_stem` into `program_directory` that adds

@@ -82,10 +82,29 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "End the session when its last client leaves.",
     ),
     build_config_field_help(
+        "koshi.pane-clipboard-writes.allow",
+        "koshi.kdl",
+        "#false",
+        "Let a program in a pane write the clipboard of the clients that focus that pane.",
+    ),
+    build_config_field_help(
+        "koshi.pane-clipboard-writes.max-copy-bytes",
+        "koshi.kdl",
+        "8388608",
+        "Largest copy a pane may write, in bytes. A bigger OSC 52 copy makes no copy.",
+    ),
+    build_config_field_help(
         "koshi.remote-reconnect",
         "koshi.kdl",
         "#true",
         "Dial a session on another machine again when the link drops.",
+    ),
+    build_config_field_help(
+        "koshi.remote-link-timeout-ms",
+        "koshi.kdl",
+        "30000",
+        "Milliseconds a link to a session on another machine may carry no byte before it \
+         drops, from 1000.",
     ),
     build_config_field_help(
         "koshi.image-support",

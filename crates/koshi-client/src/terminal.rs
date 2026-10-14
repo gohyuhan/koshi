@@ -168,7 +168,8 @@ impl Widget for SnapshotWidget<'_> {
 }
 
 /// Build the frame shown for a placement tab. A drag previewing tab `work`
-/// returns `work` with its proposed pane slots.
+/// returns `work` with its proposed pane slots. The floating pane slots and
+/// their pane content stay as `render_snapshot` holds them.
 pub(crate) fn build_placement_render_snapshot(
     render_snapshot: &RenderSnapshot,
     placement_display_snapshot: &PlacementSnapshot,
@@ -197,6 +198,13 @@ pub(crate) fn build_placement_render_snapshot(
         .pane_slots
         .iter()
         .map(|pane_slot| pane_slot.pane_id)
+        .chain(
+            render_snapshot
+                .session_snapshot
+                .floating_pane_slots
+                .iter()
+                .map(|floating_pane_slot| floating_pane_slot.pane_id),
+        )
         .collect::<HashSet<_>>();
     let placement_pane_snapshot_by_id = displayed_tab_snapshot
         .pane_snapshots
@@ -936,7 +944,7 @@ fn build_target_outline_rect(
 /// The graphics capability proved by a reply from the outer terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GraphicsSupport {
-    /// Paint image coverage with the fixed unsupported-image text.
+    /// Paint image coverage with the fixed unavailable-image text.
     Unsupported,
     /// Emit Kitty raw-RGBA image commands after the text buffer is painted.
     Kitty,
@@ -1985,13 +1993,21 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
                     placement_presentation.is_pane_affected(focused_pane_id)
                 })
         });
-    let mut hardware_cursor_position =
-        get_cursor_position(displayed_snapshot, committed_regions, render_area)
-            .filter(|_| !is_focused_pane_softened);
+    let mut hardware_cursor_position = get_cursor_position(
+        displayed_snapshot,
+        committed_regions,
+        frame_paint.chrome,
+        render_area,
+    )
+    .filter(|_| !is_focused_pane_softened);
     let is_native_image_output = image_output_state.get_output_kind().is_some();
     image_output_state.set_host_terminal_size(terminal_size.width, terminal_size.height);
-    let mut image_paint_commands =
-        build_image_paints(displayed_snapshot, committed_regions, render_area);
+    let mut image_paint_commands = build_image_paints(
+        displayed_snapshot,
+        committed_regions,
+        frame_paint.chrome,
+        render_area,
+    );
     if let Some(placement_presentation) = &frame_paint.placement_presentation {
         image_paint_commands
             .retain(|image_paint| !placement_presentation.is_pane_affected(image_paint.pane_id));
@@ -2005,6 +2021,7 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
             Some(Arc::new(build_image_cell_snapshot(
                 displayed_snapshot,
                 committed_regions,
+                frame_paint.chrome,
                 render_area,
             )?))
         });
@@ -2073,9 +2090,13 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
             .draw(|render_frame| {
                 let frame_area = render_frame.area();
                 render_area = frame_area;
-                hardware_cursor_position =
-                    get_cursor_position(displayed_snapshot, committed_regions, frame_area)
-                        .filter(|_| !is_focused_pane_softened);
+                hardware_cursor_position = get_cursor_position(
+                    displayed_snapshot,
+                    committed_regions,
+                    frame_paint.chrome,
+                    frame_area,
+                )
+                .filter(|_| !is_focused_pane_softened);
                 render_frame.render_widget(
                     SnapshotWidget {
                         render_snapshot: displayed_snapshot,
@@ -2208,12 +2229,7 @@ pub(crate) fn build_window_title(render_snapshot: &RenderSnapshot) -> String {
     let focused_pane_title = render_snapshot
         .client_snapshot
         .focused_pane_id
-        .and_then(|focused_pane_id| {
-            render_snapshot
-                .pane_snapshots
-                .iter()
-                .find(|pane_snapshot| pane_snapshot.pane_id == focused_pane_id)
-        })
+        .and_then(|focused_pane_id| render_snapshot.find_pane_snapshot(focused_pane_id))
         .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref());
     match focused_pane_title {
         Some(pane_title) if !pane_title.is_empty() => {

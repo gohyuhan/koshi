@@ -90,8 +90,8 @@ const CRITICAL_COMMAND_COUNT: usize = 6000;
 
 /// One loopback stream half, as a framed connection reads or writes it.
 ///
-/// [`Deadlined::set_deadline`] does nothing. A read on it is bounded by the
-/// stream's own read timeout, when one is set.
+/// [`Deadlined::set_deadline`] and [`Deadlined::set_idle_timeout`] do nothing.
+/// A read on it is bounded by the stream's own read timeout, when one is set.
 struct LoopbackHalf(TcpStream);
 
 impl Read for LoopbackHalf {
@@ -112,6 +112,8 @@ impl Write for LoopbackHalf {
 
 impl Deadlined for LoopbackHalf {
     fn set_deadline(&mut self, _deadline: Option<Instant>) {}
+
+    fn set_idle_timeout(&mut self, _idle_timeout: Option<Duration>) {}
 }
 
 /// Start a relay listening on loopback, and return the address it listens on.

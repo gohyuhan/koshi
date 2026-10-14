@@ -19,11 +19,11 @@
 
 use koshi_ipc::frame::{
     FrameAttributes, FrameCell, FrameClient, FrameColor, FrameCursor, FrameCursorShape,
-    FrameGraphicsProtocol, FrameImageAction, FrameImageDimension, FrameImageDisplay,
-    FrameImagePlacement, FrameImageRecordHeader, FrameImageTransfer, FramePane, FrameRow,
-    FrameRowEnd, FrameRun, FrameScrollback, FrameSelection, FrameSession, FrameSixelBackground,
-    FrameSlot, FrameStyle, FrameTab, FrameTabMetadata, FrameUnderline, FrameWindow, PaintedFrame,
-    MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT,
+    FrameFloatingPaneSlot, FrameGraphicsProtocol, FrameImageAction, FrameImageDimension,
+    FrameImageDisplay, FrameImagePlacement, FrameImageRecordHeader, FrameImageTransfer, FramePane,
+    FrameRow, FrameRowEnd, FrameRun, FrameScrollback, FrameSelection, FrameSession,
+    FrameSixelBackground, FrameSlot, FrameStyle, FrameTab, FrameTabMetadata, FrameUnderline,
+    FrameWindow, PaintedFrame, MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT,
 };
 use koshi_ipc::placement::{
     PanePlacementClientSnapshot as WirePlacementClientSnapshot,
@@ -45,7 +45,8 @@ use koshi_terminal::style::{Color, Style, UnderlineStyle};
 /// Turn one painted frame into the form it travels in.
 ///
 /// Carries the session's identity, its solved active tab, the tab-bar entries,
-/// every pane's content, and the viewing client's own state.
+/// the floating panes the viewing client shows, every pane's content, and the
+/// viewing client's own state.
 #[must_use]
 pub fn build_wire_frame(render_snapshot: &RenderSnapshot) -> PaintedFrame {
     let mut next_image_content_id = 1u64;
@@ -90,6 +91,16 @@ pub(crate) fn build_wire_frame_with_content_ids(
                 .iter()
                 .map(build_wire_tab_metadata)
                 .collect(),
+            floating_pane_slots: session_snapshot
+                .floating_pane_slots
+                .iter()
+                .map(|floating_pane_slot| FrameFloatingPaneSlot {
+                    pane_id: floating_pane_slot.pane_id,
+                    outer_rect: floating_pane_slot.outer_rect,
+                    content_rect: floating_pane_slot.content_rect,
+                    is_pinned: floating_pane_slot.is_pinned,
+                })
+                .collect(),
         },
         pane_snapshots: render_snapshot
             .pane_snapshots
@@ -103,6 +114,7 @@ pub(crate) fn build_wire_frame_with_content_ids(
             active_tab_id: client_snapshot.active_tab_id,
             focused_pane_id: client_snapshot.focused_pane_id,
             lock_mode: client_snapshot.lock_mode,
+            last_applied_lock_command_id: client_snapshot.last_applied_lock_command_id,
             is_mouse_selection_enabled: client_snapshot.is_mouse_selection_enabled,
         },
     }

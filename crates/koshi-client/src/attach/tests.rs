@@ -13,15 +13,20 @@
 //! that fails reporting the death a broken connection already reports, and a
 //! first dial that a session refuses for the token it advertised before, which
 //! joins once the session advertises its own. It also
-//! covers a remote viewer whose link broke: the pause each redial waits, that
-//! dialing again moves what the viewer paints, what the drain of the stretch
-//! with no link keeps and what it drops, and what a viewer that stopped dialing
-//! prints and exits with. It also covers how a typed value reads as a session id or as a
-//! display name.
+//! covers the stretch with no link: the redial countdown and its window, what
+//! a restart holds and sends after the join, what a redial drops, that the quit
+//! keybinding leaves at once with a link and without one, that a lock key
+//! switches the mode the next key resolves in before the session answers, with
+//! a link and during a restart, a restarted session that never answers the
+//! join, and what a viewer that stopped dialing or left
+//! while reconnecting prints and exits with. It also covers how a typed value
+//! reads as a session id or as a display name, and that `SIGHUP` puts a quit
+//! on the loop's channel unless this process ignores `SIGHUP`.
 //! These tests also check that an accepted Enter swap updates the shown pane
 //! rectangles without a resize and that placement messages describe both panes
 //! inside the preview.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,10 +36,15 @@ use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Size as RatatuiSize};
 
+use koshi_config::layer::PartialKeybindingsConfig;
+use koshi_config::types::{KeybindingsConfig, ModeBindings, ModeName};
+use koshi_core::action::ActionReference;
 use koshi_core::command::{
-    ClearSelectionArgs, CliExitCode, GridPosition, PanePlacementTarget, PlacePaneArgs,
-    PlacementRevision, Selection, SelectionKind, SetSelectionArgs, VisualCommand,
+    ClearSelectionArgs, CliExitCode, FocusTabArgs, GridPosition, NewTabArgs, PanePlacementTarget,
+    PlacePaneArgs, PlacementRevision, Selection, SelectionKind, SetSelectionArgs, TabTarget,
+    VisualCommand,
 };
+use koshi_core::constant::MIN_LINK_TIMEOUT_MS;
 use koshi_core::geometry::{Direction, PaneArea, Point, Rect, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_core::key::{
@@ -52,11 +62,14 @@ use koshi_ipc::protocol::{
     PROTOCOL_VERSION,
 };
 use koshi_ipc::remote_servers::SavedServer;
+use koshi_ipc::remote_wire::RemoteClientFrame;
 use koshi_ipc::router::{
     compute_router_socket_address, resolve_router_endpoint_path, RouterRequest, RouterResponse,
     ROUTER_PROTOCOL_VERSION,
 };
-use koshi_ipc::transport::{Listener, MAX_FRAME_BYTE_COUNT};
+use koshi_ipc::transport::{
+    build_frame_halves, Connection, Deadlined, Listener, MAX_FRAME_BYTE_COUNT,
+};
 use koshi_ipc::wire::MaybeKnown;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::{LayoutNode, SplitNode};
@@ -115,10 +128,14 @@ fn report_terminal_size(client: &mut Client, uplink: &mut Uplink) {
     report_terminal_size_with_cell_size(client, uplink, &mut cell_size_query, None);
 }
 
-/// [`process_runtime_input_with_cell_size`] with a fresh terminal query state.
+/// [`process_runtime_input_with_cell_size`] with a fresh terminal query state,
+/// for an event that does not fire the quit binding.
 fn process_runtime_input(client: &mut Client, uplink: &mut Uplink, runtime_event: RuntimeEvent) {
     let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
-    process_runtime_input_with_cell_size(client, uplink, &mut cell_size_query, runtime_event);
+    assert_eq!(
+        process_runtime_input_with_cell_size(client, uplink, &mut cell_size_query, runtime_event),
+        ControlFlow::Continue(())
+    );
 }
 
 /// The smallest frame a session can paint: one empty tab, no panes, the client
@@ -160,6 +177,7 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
                 gap_cell_count: 0,
             },
             tab_snapshots: Vec::new(),
+            floating_pane_slots: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: FrameClient {
@@ -172,6 +190,7 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
             active_tab_id,
             focused_pane_id: None,
             lock_mode,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }
@@ -614,6 +633,7 @@ fn a_server_with_no_name_is_named_by_its_address_in_the_way_back() {
     let remote_home = Home::Remote {
         server: ServerReference::New {
             server_address: "laptop.local:7654".to_string(),
+            certificate_fingerprint: "ab".repeat(32),
         },
     };
     let ending_error = report_attachment_ending(
@@ -739,30 +759,47 @@ fn a_link_that_breaks_is_an_unreachable_dial() {
 }
 
 #[test]
-fn a_refused_dial_ends_the_redial_at_once_and_is_the_cause_it_stops_on() {
-    let mut client = build_test_client();
-    let mut screen = build_test_screen();
-    let mut dial_count = 0_u32;
-    let Err(cause) = redial_remote_session_with(
-        || {
-            dial_count += 1;
-            Err(DialError::Refused(CliError::Runtime {
-                detail: "the server desk.local:7654 did not admit the connection".to_string(),
-            }))
-        },
-        SessionId::new(),
-        &mut client,
-        &mut screen,
-        None,
-    ) else {
-        panic!("a refused dial never joins");
+fn a_refused_redial_ends_the_stretch_with_no_link_with_that_refusal() {
+    let redial_answer = build_redial_answer(Err(DialError::Refused(CliError::Runtime {
+        detail: "the server host:7654 did not admit the connection".to_string(),
+    })));
+
+    let RejoinAnswer::Ended(attachment_ending) = redial_answer else {
+        panic!("a refused dial ends the redial");
     };
-    assert_eq!(dial_count, 1);
     assert_eq!(
-        cause.to_string(),
-        "the server desk.local:7654 did not admit the connection"
+        attachment_ending,
+        AttachmentEnding::LinkLost(Box::new(CliError::Runtime {
+            detail: "the server host:7654 did not admit the connection".to_string(),
+        }))
     );
-    assert_eq!(client.reconnecting, None);
+}
+
+#[test]
+fn an_unreachable_or_restarting_server_answers_a_redial_as_unreachable() {
+    let unreachable_answer =
+        build_redial_answer(Err(DialError::Unreachable(CliError::IpcUnavailable {
+            detail: "connection refused".to_string(),
+        })));
+    let restarting_answer =
+        build_redial_answer(Err(DialError::Restarting(CliError::IpcUnavailable {
+            detail: "the router is restarting".to_string(),
+        })));
+
+    let RejoinAnswer::Unreachable(CliError::IpcUnavailable {
+        detail: unreachable_detail,
+    }) = unreachable_answer
+    else {
+        panic!("an unreachable server is dialed again");
+    };
+    assert_eq!(unreachable_detail, "connection refused");
+    let RejoinAnswer::Unreachable(CliError::IpcUnavailable {
+        detail: restarting_detail,
+    }) = restarting_answer
+    else {
+        panic!("a restarting server is dialed again");
+    };
+    assert_eq!(restarting_detail, "the router is restarting");
 }
 
 #[test]
@@ -1069,6 +1106,288 @@ fn an_attach_answer_is_taken_whether_or_not_it_echoes_a_pane_area() {
     assert_eq!(silent_attached_session, (client_id, session_id, None));
 }
 
+/// A stream half over bytes held in memory: reads come from `read_bytes`,
+/// writes land in `written_bytes`, and each read and each write records the
+/// deadline and the idle timeout the half held when it started.
+struct RecordedLinkHalf {
+    /// The bytes the reads return, in order.
+    read_bytes: io::Cursor<Vec<u8>>,
+    /// Every byte written, in order.
+    written_bytes: Arc<Mutex<Vec<u8>>>,
+    /// The deadline the last [`Deadlined::set_deadline`] gave and the idle
+    /// timeout the last [`Deadlined::set_idle_timeout`] gave.
+    link_limits: LinkLimits,
+    /// The limits the half held when each read or write started, in order.
+    link_limits_at_steps: Arc<Mutex<Vec<LinkLimits>>>,
+}
+
+/// The deadline and the idle timeout a [`RecordedLinkHalf`] holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LinkLimits {
+    /// When every read or write must be finished by, or `None` for no limit.
+    deadline: Option<Instant>,
+    /// The longest one read or write waits for a byte, or `None` for no limit.
+    idle_timeout: Option<Duration>,
+}
+
+/// A [`RecordedLinkHalf`] whose reads return `read_bytes`, with no deadline,
+/// no idle timeout, nothing written and no step recorded.
+fn build_recorded_link_half(read_bytes: Vec<u8>) -> RecordedLinkHalf {
+    RecordedLinkHalf {
+        read_bytes: io::Cursor::new(read_bytes),
+        written_bytes: Arc::new(Mutex::new(Vec::new())),
+        link_limits: LinkLimits {
+            deadline: None,
+            idle_timeout: None,
+        },
+        link_limits_at_steps: Arc::new(Mutex::new(Vec::new())),
+    }
+}
+
+impl io::Read for RecordedLinkHalf {
+    fn read(&mut self, read_buffer: &mut [u8]) -> io::Result<usize> {
+        self.link_limits_at_steps
+            .lock()
+            .expect("the record outlives every panic")
+            .push(self.link_limits);
+        io::Read::read(&mut self.read_bytes, read_buffer)
+    }
+}
+
+impl io::Write for RecordedLinkHalf {
+    fn write(&mut self, frame_bytes: &[u8]) -> io::Result<usize> {
+        self.link_limits_at_steps
+            .lock()
+            .expect("the record outlives every panic")
+            .push(self.link_limits);
+        self.written_bytes
+            .lock()
+            .expect("the record outlives every panic")
+            .extend_from_slice(frame_bytes);
+        Ok(frame_bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Deadlined for RecordedLinkHalf {
+    fn set_deadline(&mut self, deadline: Option<Instant>) {
+        self.link_limits.deadline = deadline;
+    }
+
+    fn set_idle_timeout(&mut self, idle_timeout: Option<Duration>) {
+        self.link_limits.idle_timeout = idle_timeout;
+    }
+}
+
+/// The frames a serving machine sends to join a client to `session_id` as
+/// `client_id`, as bytes: the session's answer to the Hello, its answer to the
+/// Attach, then the string `after the join`.
+fn encode_remote_join_answers(client_id: ClientId, session_id: SessionId) -> Vec<u8> {
+    let encoding_half = build_recorded_link_half(Vec::new());
+    let encoded_bytes = Arc::clone(&encoding_half.written_bytes);
+    let (_, mut frame_writer) = build_frame_halves(
+        Box::new(build_recorded_link_half(Vec::new())),
+        Box::new(encoding_half),
+    );
+    frame_writer
+        .send(&IpcResponse {
+            request_id: Some(1),
+            answer_result: IpcResult::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                build_version: String::from("0.0.0"),
+            },
+        })
+        .expect("the Hello answer is encoded");
+    frame_writer
+        .send(&IpcResponse {
+            request_id: Some(2),
+            answer_result: build_attached_result(client_id, session_id, None),
+        })
+        .expect("the Attach answer is encoded");
+    frame_writer
+        .send(&"after the join")
+        .expect("the frame after the join is encoded");
+    let remote_join_answer_bytes = encoded_bytes
+        .lock()
+        .expect("the record outlives every panic")
+        .clone();
+    remote_join_answer_bytes
+}
+
+/// Asserts that `link_limits_at_steps` holds at least one step, that every
+/// step held `expected_link_limits`, and then clears the record.
+#[track_caller]
+fn assert_every_step_held_and_clear(
+    link_limits_at_steps: &Mutex<Vec<LinkLimits>>,
+    expected_link_limits: LinkLimits,
+) {
+    let mut link_limits_at_steps = link_limits_at_steps
+        .lock()
+        .expect("the record outlives every panic");
+    assert!(!link_limits_at_steps.is_empty());
+    assert_eq!(
+        *link_limits_at_steps,
+        vec![expected_link_limits; link_limits_at_steps.len()]
+    );
+    link_limits_at_steps.clear();
+}
+
+#[test]
+fn a_remote_join_runs_under_the_join_deadline_then_gives_each_half_only_the_link_idle_timeout() {
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let link_reader_half =
+        build_recorded_link_half(encode_remote_join_answers(client_id, session_id));
+    let read_link_limits = Arc::clone(&link_reader_half.link_limits_at_steps);
+    let link_writer_half = build_recorded_link_half(Vec::new());
+    let write_link_limits = Arc::clone(&link_writer_half.link_limits_at_steps);
+    let (mut frame_reader, mut frame_writer) =
+        build_frame_halves(Box::new(link_reader_half), Box::new(link_writer_half));
+    let join_deadline = Instant::now() + remote_client::JOIN_TIMEOUT_DURATION;
+    frame_reader.set_deadline(Some(join_deadline));
+    frame_writer.set_deadline(Some(join_deadline));
+    let connection_token = ConnectionToken::generate();
+
+    let joined_session = join_remote_session(
+        remote_client::RemoteLink {
+            frame_reader,
+            frame_writer,
+        },
+        connection_token.clone(),
+        &SessionSelector::SessionId(session_id),
+        None,
+        None,
+        terminal::GraphicsSupport::Unsupported,
+        None,
+        MIN_LINK_TIMEOUT_MS,
+    )
+    .expect("the session joins");
+
+    assert_eq!(joined_session.client_id, client_id);
+    assert_eq!(joined_session.session_id, session_id);
+    assert_eq!(joined_session.connection_token, connection_token);
+    assert_eq!(joined_session.resume_token, None);
+    let join_link_limits = LinkLimits {
+        deadline: Some(join_deadline),
+        idle_timeout: None,
+    };
+    assert_every_step_held_and_clear(&read_link_limits, join_link_limits);
+    assert_every_step_held_and_clear(&write_link_limits, join_link_limits);
+    let JoinedSession {
+        mut reader,
+        mut writer,
+        ..
+    } = joined_session;
+
+    writer
+        .send(&"from the client")
+        .expect("the frame is written");
+    let received_text: String = reader.recv().expect("the frame after the join is read");
+
+    assert_eq!(received_text, "after the join");
+    let joined_link_limits = LinkLimits {
+        deadline: None,
+        idle_timeout: Some(Duration::from_millis(u64::from(MIN_LINK_TIMEOUT_MS))),
+    };
+    assert_every_step_held_and_clear(&read_link_limits, joined_link_limits);
+    assert_every_step_held_and_clear(&write_link_limits, joined_link_limits);
+}
+
+#[test]
+fn a_remote_join_pings_every_third_of_the_link_timeout_until_the_attach_answer_arrives() {
+    let (client_connection, serving_connection) = connect_test_socket_pair();
+    let (client_frame_reader, client_frame_writer) = client_connection.split();
+    let (mut serving_frame_reader, mut serving_frame_writer) = serving_connection.split();
+    serving_frame_reader.set_deadline(Some(Instant::now() + Duration::from_secs(10)));
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let (join_result_sender, join_result_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let join_result = join_remote_session(
+            remote_client::RemoteLink {
+                frame_reader: client_frame_reader,
+                frame_writer: client_frame_writer,
+            },
+            ConnectionToken::generate(),
+            &SessionSelector::SessionId(session_id),
+            None,
+            None,
+            terminal::GraphicsSupport::Unsupported,
+            None,
+            MIN_LINK_TIMEOUT_MS,
+        );
+        let _ = join_result_sender.send(
+            join_result.map(|joined_session| (joined_session.client_id, joined_session.session_id)),
+        );
+    });
+
+    let remote_attach: RemoteClientFrame = serving_frame_reader
+        .recv()
+        .expect("the serving machine's Attach arrives");
+    // The session's Attach goes up after the Hello answer arrives.
+    let hello_answer_sent_at = Instant::now();
+    serving_frame_writer
+        .send(&IpcResponse {
+            request_id: Some(1),
+            answer_result: IpcResult::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                build_version: String::from("0.0.0"),
+            },
+        })
+        .expect("the Hello answer is written");
+    let session_attach: IpcRequest = serving_frame_reader
+        .recv()
+        .expect("the session's Attach arrives");
+    // The Attach answer is held back until two pings have arrived.
+    let pings_before_the_answer: Vec<IpcRequest> = (0..2)
+        .map(|_| {
+            serving_frame_reader
+                .recv()
+                .expect("a ping arrives while the Attach waits")
+        })
+        .collect();
+    let second_ping_delay = hello_answer_sent_at.elapsed();
+    serving_frame_writer
+        .send(&IpcResponse {
+            request_id: Some(2),
+            answer_result: build_attached_result(client_id, session_id, None),
+        })
+        .expect("the Attach answer is written");
+    let joined_ids = join_result_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the join ends")
+        .expect("the session joins");
+
+    assert_eq!(
+        remote_attach,
+        RemoteClientFrame::Attach {
+            session_selector: SessionSelector::SessionId(session_id),
+            link_timeout_ms: Some(MIN_LINK_TIMEOUT_MS),
+        }
+    );
+    assert_eq!(session_attach.request_id, 2);
+    let IpcRequestKind::Attach {
+        link_timeout_ms, ..
+    } = session_attach.request_kind
+    else {
+        panic!("the second frame is the session's Attach");
+    };
+    assert_eq!(link_timeout_ms, Some(MIN_LINK_TIMEOUT_MS));
+    let join_ping = IpcRequest {
+        request_id: 2,
+        request_kind: IpcRequestKind::Ping,
+    };
+    assert_eq!(pings_before_the_answer, vec![join_ping.clone(), join_ping]);
+    assert!(
+        second_ping_delay >= compute_heartbeat_interval(MIN_LINK_TIMEOUT_MS) * 2,
+        "the second ping came {second_ping_delay:?} after the Hello answer"
+    );
+    assert_eq!(joined_ids, (client_id, session_id));
+}
+
 #[test]
 fn coming_back_after_a_restart_keeps_the_client_record_and_graphics_capability() {
     let runtime_directory = build_test_runtime_directory();
@@ -1081,19 +1400,22 @@ fn coming_back_after_a_restart_keeps_the_client_record_and_graphics_capability()
     )
     .expect("the stand-in session advertised its socket");
 
-    let (rejoined_client_id, rejoined_endpoint, client_connection) = rejoin_session(
+    let joined_session = rejoin_session(
         runtime_directory.path(),
         session_id,
         client_id,
         &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        Instant::now() + RESTART_WINDOW_DURATION,
         terminal::GraphicsSupport::Kitty,
         None,
     )
     .expect("the stand-in session handed the client record back");
-    drop(client_connection);
-
-    assert_eq!(rejoined_client_id, client_id);
-    assert_eq!(rejoined_endpoint, advertised_endpoint);
+    assert_eq!(joined_session.client_id, client_id);
+    assert_eq!(
+        joined_session.connection_token,
+        advertised_endpoint.connection_token
+    );
+    drop(joined_session);
     assert_eq!(
         recorded_attach_request
             .lock()
@@ -1110,6 +1432,7 @@ fn coming_back_after_a_restart_keeps_the_client_record_and_graphics_capability()
                 supports_sixel: false,
             },
             cell_size: None,
+            link_timeout_ms: None,
         }),
         "the restart path claims the client record and reports this terminal's capability"
     );
@@ -1118,7 +1441,7 @@ fn coming_back_after_a_restart_keeps_the_client_record_and_graphics_capability()
 #[test]
 fn attach_advertises_the_selected_native_protocol() {
     let iterm_attach_request =
-        build_attach_request(None, None, terminal::GraphicsSupport::Iterm, None);
+        build_attach_request(None, None, terminal::GraphicsSupport::Iterm, None, None);
     let sixel_attach_request = build_attach_request(
         None,
         None,
@@ -1127,6 +1450,7 @@ fn attach_advertises_the_selected_native_protocol() {
             maximum_pixel_width: None,
             maximum_pixel_height: None,
         },
+        None,
         None,
     );
 
@@ -1179,11 +1503,12 @@ fn a_restarted_session_that_refuses_the_join_ends_with_that_refusal() {
         session_id,
         client_id,
         &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        Instant::now() + RESTART_WINDOW_DURATION,
         terminal::GraphicsSupport::Unsupported,
         None,
     );
     assert_eq!(
-        rejoin_result.map(|(_, rejoined_endpoint, _)| rejoined_endpoint),
+        rejoin_result.map(|joined_session| joined_session.client_id),
         Err(AttachmentEnding::RefusedAfterRestart(Box::new(
             CliError::IpcUnavailable {
                 detail: "this session holds no such client".to_string(),
@@ -1217,6 +1542,7 @@ fn a_restarted_session_that_closes_before_answering_the_join_ends_as_restarting(
         session_id,
         ClientId::new(),
         &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        Instant::now() + RESTART_WINDOW_DURATION,
         terminal::GraphicsSupport::Unsupported,
         None,
     );
@@ -1225,7 +1551,7 @@ fn a_restarted_session_that_closes_before_answering_the_join_ends_as_restarting(
         .expect("the stand-in session read the Hello and closed");
 
     assert_eq!(
-        rejoin_result.map(|(_, rejoined_endpoint, _)| rejoined_endpoint),
+        rejoin_result.map(|joined_session| joined_session.client_id),
         Err(AttachmentEnding::Restarting)
     );
 }
@@ -1246,13 +1572,64 @@ fn a_restarted_session_whose_new_socket_takes_no_connection_ends_as_restarting()
         session_id,
         ClientId::new(),
         &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        Instant::now() + RESTART_WINDOW_DURATION,
         terminal::GraphicsSupport::Unsupported,
         None,
     );
 
     assert_eq!(
-        rejoin_result.map(|(_, rejoined_endpoint, _)| rejoined_endpoint),
+        rejoin_result.map(|joined_session| joined_session.client_id),
         Err(AttachmentEnding::Restarting)
+    );
+}
+
+#[test]
+fn a_restarted_session_that_never_answers_the_join_ends_as_restarting_at_the_deadline() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let listener = Listener::bind(&compute_socket_address(
+        runtime_directory.path(),
+        session_id,
+    ))
+    .expect("bind the stand-in session");
+    write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        NEW_CONNECTION_TOKEN,
+        std::process::id(),
+    );
+    let stand_in_session_thread = thread::spawn(move || {
+        let mut connection = listener.accept().expect("the client connects");
+        let mut unanswered_request_count = 0_usize;
+        while connection.recv::<IpcRequest>().is_ok() {
+            unanswered_request_count += 1;
+        }
+        unanswered_request_count
+    });
+    let restart_deadline = Instant::now() + Duration::from_millis(300);
+
+    let rejoin_result = rejoin_session(
+        runtime_directory.path(),
+        session_id,
+        ClientId::new(),
+        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        restart_deadline,
+        terminal::GraphicsSupport::Unsupported,
+        None,
+    );
+    let rejoin_returned_at = Instant::now();
+
+    assert_eq!(
+        rejoin_result.map(|joined_session| joined_session.client_id),
+        Err(AttachmentEnding::Restarting)
+    );
+    assert!(rejoin_returned_at < restart_deadline + Duration::from_secs(2));
+    assert_eq!(
+        stand_in_session_thread
+            .join()
+            .expect("the stand-in session read until the client closed"),
+        2,
+        "the client wrote its Hello and its Attach, then closed at the deadline"
     );
 }
 
@@ -1294,19 +1671,22 @@ fn a_restarted_session_that_mints_a_new_client_is_joined_as_that_client() {
     )
     .expect("the stand-in session advertised its socket");
 
-    let (rejoined_client_id, rejoined_endpoint, client_connection) = rejoin_session(
+    let joined_session = rejoin_session(
         runtime_directory.path(),
         session_id,
         ClientId::new(),
         &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        Instant::now() + RESTART_WINDOW_DURATION,
         terminal::GraphicsSupport::Unsupported,
         None,
     )
     .expect("the restarted session is joined as the client it minted");
-    drop(client_connection);
-
-    assert_eq!(rejoined_client_id, minted_client_id);
-    assert_eq!(rejoined_endpoint, advertised_endpoint);
+    assert_eq!(joined_session.client_id, minted_client_id);
+    assert_eq!(
+        joined_session.connection_token,
+        advertised_endpoint.connection_token
+    );
+    drop(joined_session);
 }
 
 #[test]
@@ -1354,12 +1734,13 @@ fn another_local_users_restarting_session_is_not_waited_for() {
         SessionId::new(),
         ClientId::new(),
         &ConnectionToken::from_secret(""),
+        Instant::now() + RESTART_WINDOW_DURATION,
         terminal::GraphicsSupport::Unsupported,
         None,
     );
 
     assert_eq!(
-        rejoin_result.map(|(_, rejoined_endpoint, _)| rejoined_endpoint),
+        rejoin_result.map(|joined_session| joined_session.client_id),
         Err(AttachmentEnding::Restarting)
     );
     assert!(
@@ -1441,6 +1822,7 @@ fn a_dial_refused_for_the_old_token_joins_once_the_session_advertises_its_own() 
         terminal::GraphicsSupport::Unsupported,
         None,
         None,
+        30_000,
     )
     .expect("the second dial presents the session's own token");
 
@@ -1471,11 +1853,12 @@ fn a_restarted_session_that_refuses_this_protocol_version_is_a_restart_into_an_i
         session_id,
         ClientId::new(),
         &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        Instant::now() + RESTART_WINDOW_DURATION,
         terminal::GraphicsSupport::Unsupported,
         None,
     );
     assert_eq!(
-        rejoin_result.map(|(_, rejoined_endpoint, _)| rejoined_endpoint),
+        rejoin_result.map(|joined_session| joined_session.client_id),
         Err(AttachmentEnding::RestartedIntoIncompatibleBuild)
     );
 }
@@ -1516,11 +1899,7 @@ fn run_local_attachment_through_restart(
     client.set_client_id(client_id);
     let mut screen = build_test_screen();
     let (request_sender, _request_receiver) = mpsc::channel();
-    let mut uplink = Uplink {
-        request_sender,
-        registry: ActionRegistry::new(),
-        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
-    };
+    let mut uplink = build_test_uplink(request_sender);
     let (incoming_sender, incoming_receiver) = build_incoming_channel();
     incoming_sender
         .send(Incoming::Frame {
@@ -1576,15 +1955,15 @@ fn a_restart_into_an_incompatible_build_returns_only_after_the_router_restarts()
         },
         session_id,
         client_id,
-        &mut ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
-        &mut None,
+        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
         terminal::GraphicsSupport::Unsupported,
         None,
+        30_000,
     );
     let reconnect_returned_at = Instant::now();
 
     assert_eq!(
-        reconnect_result.map(|(rejoined_client_id, _, _)| rejoined_client_id),
+        reconnect_result.map(|joined_session| joined_session.client_id),
         Err(AttachmentEnding::RestartedIntoIncompatibleBuild)
     );
     let router_restarted_at = router_restart.join().expect("the router restart ran");
@@ -1613,14 +1992,14 @@ fn a_restart_into_an_incompatible_build_with_no_router_running_returns_at_once()
         },
         session_id,
         client_id,
-        &mut ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
-        &mut None,
+        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
         terminal::GraphicsSupport::Unsupported,
         None,
+        30_000,
     );
 
     assert_eq!(
-        reconnect_result.map(|(rejoined_client_id, _, _)| rejoined_client_id),
+        reconnect_result.map(|joined_session| joined_session.client_id),
         Err(AttachmentEnding::RestartedIntoIncompatibleBuild)
     );
     assert!(
@@ -1790,6 +2169,7 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
                 tab_index: 0,
                 is_active: true,
             }],
+            floating_pane_slots: Vec::new(),
         },
         mouse_panes: mouse_panes.to_vec(),
         client_snapshot: ClientSnapshot {
@@ -1799,6 +2179,7 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
             active_tab_id: tab_id,
             focused_pane_id: mouse_panes.first().map(|mouse_pane| mouse_pane.pane_id),
             lock_mode: LockMode::Normal,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: false,
         },
         committed_regions: CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
@@ -1918,7 +2299,22 @@ struct TestControlSocket {
     uplink: Uplink,
 }
 
-fn build_test_control_socket() -> TestControlSocket {
+/// An uplink numbered from [`FIRST_POST_ATTACH_REQUEST_ID`] that queues every
+/// request on `request_sender`, and whose writer thread reads as ended at once.
+fn build_test_uplink(request_sender: mpsc::Sender<IpcRequest>) -> Uplink {
+    Uplink {
+        uplink_writer: Some(UplinkWriter {
+            request_sender,
+            writer_end_receiver: mpsc::channel().1,
+        }),
+        registry: ActionRegistry::new(),
+        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
+    }
+}
+
+/// Open one local socket connection at a fresh address and return its two
+/// ends: the one that connected, then the one that accepted.
+fn connect_test_socket_pair() -> (Connection, Connection) {
     // On Unix the address is a socket-file path under `/tmp`. On Windows it is
     // a pipe name, and the directory is unused. A new session id makes each
     // address unique.
@@ -1932,12 +2328,17 @@ fn build_test_control_socket() -> TestControlSocket {
     let client_connection =
         Connection::connect(&socket_address).expect("connect to the control socket");
     let session_connection = accept_thread.join().expect("the accepting thread finished");
+    (client_connection, session_connection)
+}
+
+fn build_test_control_socket() -> TestControlSocket {
+    let (client_connection, session_connection) = connect_test_socket_pair();
     let (frame_reader, frame_writer) = client_connection.split();
     TestControlSocket {
         _frame_reader: frame_reader,
         session_connection,
         uplink: Uplink {
-            request_sender: spawn_uplink_writer(frame_writer),
+            uplink_writer: Some(spawn_uplink_writer(frame_writer)),
             registry: ActionRegistry::new(),
             next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
         },
@@ -4097,19 +4498,22 @@ fn a_terminal_resize_reports_its_measured_cell_size() {
     let measured_cell_size = koshi_core::geometry::PixelCellSize::from_pixel_dimensions(10, 20)
         .expect("positive cell dimensions");
 
-    process_runtime_input_with_cell_size(
-        &mut client,
-        &mut control_socket.uplink,
-        &mut cell_size_query,
-        RuntimeEvent::Resize {
-            client_id,
-            viewport_size: Size {
-                column_count: 100,
-                row_count: 40,
+    assert_eq!(
+        process_runtime_input_with_cell_size(
+            &mut client,
+            &mut control_socket.uplink,
+            &mut cell_size_query,
+            RuntimeEvent::Resize {
+                client_id,
+                viewport_size: Size {
+                    column_count: 100,
+                    row_count: 40,
+                },
+                pane_area: None,
+                cell_size: Some(measured_cell_size),
             },
-            pane_area: None,
-            cell_size: Some(measured_cell_size),
-        },
+        ),
+        ControlFlow::Continue(())
     );
 
     control_socket
@@ -4520,6 +4924,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
                 tab_index: 0,
                 is_active: true,
             }],
+            floating_pane_slots: Vec::new(),
         },
         pane_snapshots: vec![PaneSnapshot {
             pane_id,
@@ -4558,6 +4963,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
             active_tab_id: tab_id,
             focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }
@@ -5497,11 +5903,7 @@ fn mouse_pickup_reads_placement_and_focuses_dragged_pane() {
         Instant::now(),
     );
     let (request_sender, request_receiver) = mpsc::channel();
-    let mut uplink = Uplink {
-        request_sender,
-        registry: ActionRegistry::new(),
-        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
-    };
+    let mut uplink = build_test_uplink(request_sender);
 
     assert!(handle_placement_mouse_event(
         &mut client,
@@ -5745,11 +6147,7 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
         TEST_VIEWPORT_SIZE,
     );
     let (request_sender, request_receiver) = mpsc::channel();
-    let mut uplink = Uplink {
-        request_sender,
-        registry: ActionRegistry::new(),
-        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
-    };
+    let mut uplink = build_test_uplink(request_sender);
     let (incoming_sender, incoming_receiver) = build_incoming_channel();
     let producer_sender = incoming_sender.clone();
     let producer_draw_count = Arc::clone(&draw_count);
@@ -6203,9 +6601,9 @@ fn a_viewer_only_refresh_waits_for_a_frame_after_resize() {
         column_count: 100,
         row_count: 30,
     });
-    client.set_reconnecting(Some(Reconnecting {
+    client.set_link_status(LinkStatus::Redialing(Reconnecting {
         attempt: 1,
-        retry_in_seconds: 1,
+        retry_in_seconds: Some(1),
     }));
     screen.refresh(&mut client, Some(active_tab_id));
 
@@ -6417,11 +6815,7 @@ fn attachment_skips_a_redraw_after_paste_when_viewer_paint_is_unchanged() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
     let (request_sender, request_receiver) = mpsc::channel();
-    let mut uplink = Uplink {
-        request_sender,
-        registry: ActionRegistry::new(),
-        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
-    };
+    let mut uplink = build_test_uplink(request_sender);
     let (incoming_sender, incoming_receiver) = build_incoming_channel();
     let producer_sender = incoming_sender.clone();
     let producer_draw_count = Arc::clone(&draw_count);
@@ -6497,11 +6891,7 @@ fn a_failed_shift_mouse_request_ends_the_attachment() {
 
     let mut screen = build_test_screen();
     let (request_sender, _request_receiver) = mpsc::channel();
-    let mut uplink = Uplink {
-        request_sender,
-        registry: ActionRegistry::new(),
-        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
-    };
+    let mut uplink = build_test_uplink(request_sender);
     let (incoming_sender, incoming_receiver) = build_incoming_channel();
     incoming_sender
         .send(Incoming::Input(Box::new(RuntimeEvent::HostPaste {
@@ -6600,9 +6990,9 @@ fn dialing_again_moves_what_the_viewer_paints() {
 
     let reconnecting = Reconnecting {
         attempt: 1,
-        retry_in_seconds: 5,
+        retry_in_seconds: Some(5),
     };
-    client.set_reconnecting(Some(reconnecting));
+    client.set_link_status(LinkStatus::Redialing(reconnecting));
 
     let paint_after_reconnect = ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
     assert_eq!(paint_before_reconnect.chrome.reconnecting, None);
@@ -6613,88 +7003,1613 @@ fn dialing_again_moves_what_the_viewer_paints() {
     assert_ne!(paint_after_reconnect, paint_before_reconnect);
 }
 
-#[test]
-fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
-    let client = build_test_client();
-    let sequence_opener_chord = get_sequence_opener(&client);
-    let resized_viewport_size = Size {
-        column_count: 100,
-        row_count: 40,
-    };
-    let (incoming_sender, incoming_receiver) = build_incoming_channel();
-    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
-    incoming_sender
-        .send(Incoming::Input(Box::new(RuntimeEvent::KeyInput {
-            client_id: client.get_client_id(),
-            key_input: crate::tests::build_key_input_for_chord(sequence_opener_chord),
-        })))
-        .expect("the loop's channel takes it");
-    incoming_sender
-        .send(Incoming::Input(Box::new(RuntimeEvent::Quit)))
-        .expect("the loop's channel takes it");
-    incoming_sender
-        .send(Incoming::Input(Box::new(RuntimeEvent::Resize {
-            client_id: client.get_client_id(),
-            viewport_size: resized_viewport_size,
-            pane_area: None,
-            cell_size: None,
-        })))
-        .expect("the loop's channel takes it");
-    incoming_sender
-        .send(Incoming::Frame {
-            connection_index: 0,
-            session_event_result: Ok(SessionEvent::Painted {
-                frame: Box::new(build_test_painted_frame()),
-            }),
+/// A test viewer that drew one frame and lost its link, with the loop's channel
+/// it reads and the cell-size query it answers.
+struct TestViewerWithoutLink {
+    client: Client,
+    screen: Screen<TestBackend>,
+    /// The active tab of the one frame `screen` drew.
+    active_tab_id: TabId,
+    cell_size_query: terminal::CellSizeQuery,
+    incoming_sender: mpsc::SyncSender<Incoming>,
+    incoming_receiver: mpsc::Receiver<Incoming>,
+}
+
+impl TestViewerWithoutLink {
+    /// A [`build_test_client`] viewer that drew one [`build_test_painted_frame`],
+    /// with no cell-size reply pending.
+    fn new() -> Self {
+        let mut client = build_test_client();
+        let mut screen = build_test_screen();
+        let painted_frame = build_test_painted_frame();
+        let active_tab_id = painted_frame.client_snapshot.active_tab_id;
+        screen
+            .draw_painted_frame(&mut client, Box::new(painted_frame))
+            .expect("paint");
+        let (incoming_sender, incoming_receiver) = build_incoming_channel();
+        TestViewerWithoutLink {
+            client,
+            screen,
+            active_tab_id,
+            cell_size_query: terminal::CellSizeQuery::from_current_measurement(None, false, false),
+            incoming_sender,
+            incoming_receiver,
+        }
+    }
+
+    /// Put `incoming_event` on the loop's channel.
+    fn queue_incoming_event(&self, incoming_event: Incoming) {
+        self.incoming_sender
+            .send(incoming_event)
+            .expect("the loop's channel takes it");
+    }
+
+    /// `key_chord` pressed on this viewer's terminal.
+    fn build_key_press_event(&self, key_chord: KeyChord) -> Incoming {
+        Incoming::Input(Box::new(RuntimeEvent::KeyInput {
+            client_id: self.client.get_client_id(),
+            key_input: crate::tests::build_key_input_for_chord(key_chord),
+        }))
+    }
+
+    /// Run [`run_without_link`] for `link_recovery`, reading `leftover_events`
+    /// first, with `attempt_rejoin` as every attempt and an uplink whose queue
+    /// nobody reads.
+    fn run_without_link(
+        &mut self,
+        link_recovery: LinkRecovery,
+        leftover_events: Vec<Incoming>,
+        attempt_rejoin: Arc<dyn Fn() -> RejoinAnswer + Send + Sync>,
+    ) -> Result<(JoinedSession, Vec<HeldInput>), AttachmentEnding> {
+        let (request_sender, _request_receiver) = mpsc::channel();
+        let uplink = build_test_uplink(request_sender);
+        run_without_link(
+            link_recovery,
+            leftover_events,
+            &attempt_rejoin,
+            &mut self.client,
+            &mut self.screen,
+            Some(self.active_tab_id),
+            &uplink,
+            &mut self.cell_size_query,
+            &self.incoming_sender,
+            &self.incoming_receiver,
+        )
+    }
+}
+
+/// `<C-q>`, the chord the built-in keymap binds to `core:quit` in normal and
+/// locked mode.
+fn build_quit_chord() -> KeyChord {
+    KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('q'))
+}
+
+/// `character` typed with no modifier.
+fn build_plain_chord(character: char) -> KeyChord {
+    KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char(character))
+}
+
+/// `<C-l>`, the chord the built-in keymap binds to `core:lock` in normal mode
+/// and to `core:unlock` in locked mode.
+fn build_lock_chord() -> KeyChord {
+    KeybindingsConfig::RESERVED_UNLOCK
+}
+
+/// `<Tab>`, the key the built-in keymap binds to `core:next-tab` in normal
+/// mode and passes to the pane in locked mode.
+fn build_tab_chord() -> KeyChord {
+    KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Tab))
+}
+
+/// The `SetLockMode` command a lock binding sends: `is_locked` for
+/// `is_locked`, naming no client.
+fn build_expected_lock_command(is_locked: bool) -> Command {
+    Command::SetLockMode(LockModeArgs {
+        is_locked,
+        client_id: None,
+    })
+}
+
+/// An attempt that adds one to the returned count each time it runs and
+/// answers unreachable.
+fn build_counted_attempt() -> (
+    Arc<dyn Fn() -> RejoinAnswer + Send + Sync>,
+    Arc<AtomicUsize>,
+) {
+    let attempt_count = Arc::new(AtomicUsize::new(0));
+    let counted_attempt_count = Arc::clone(&attempt_count);
+    let attempt_rejoin: Arc<dyn Fn() -> RejoinAnswer + Send + Sync> = Arc::new(move || {
+        counted_attempt_count.fetch_add(1, Ordering::SeqCst);
+        RejoinAnswer::Unreachable(CliError::IpcUnavailable {
+            detail: String::from("connection refused"),
         })
-        .expect("the loop's channel takes it");
+    });
+    (attempt_rejoin, attempt_count)
+}
 
-    let viewport_size_before_blackout = client.get_viewport_size();
+/// How long an attempt from [`build_blocked_attempt`] waits for its release: 10
+/// seconds.
+const BLOCKED_ATTEMPT_WAIT_DURATION: Duration = Duration::from_secs(10);
 
+/// An attempt that reports its start on the returned receiver, then waits
+/// until the returned sender is dropped or [`BLOCKED_ATTEMPT_WAIT_DURATION`]
+/// passes, and answers unreachable.
+fn build_blocked_attempt() -> (
+    Arc<dyn Fn() -> RejoinAnswer + Send + Sync>,
+    mpsc::Receiver<()>,
+    mpsc::Sender<()>,
+) {
+    let (attempt_start_sender, attempt_start_receiver) = mpsc::channel::<()>();
+    let (attempt_release_sender, attempt_release_receiver) = mpsc::channel::<()>();
+    let attempt_release_receiver = Mutex::new(attempt_release_receiver);
+    let attempt_rejoin: Arc<dyn Fn() -> RejoinAnswer + Send + Sync> = Arc::new(move || {
+        let _ = attempt_start_sender.send(());
+        let _ = attempt_release_receiver
+            .lock()
+            .expect("the release outlives every panic")
+            .recv_timeout(BLOCKED_ATTEMPT_WAIT_DURATION);
+        RejoinAnswer::Unreachable(CliError::IpcUnavailable {
+            detail: String::from("the test released the attempt"),
+        })
+    });
+    (
+        attempt_rejoin,
+        attempt_start_receiver,
+        attempt_release_sender,
+    )
+}
+
+/// A session that `client_id` joined on a fresh local connection, and the
+/// session end of that connection.
+fn build_joined_session(client_id: ClientId) -> (JoinedSession, Connection) {
+    let (session_connection, reader, writer) = build_test_event_stream();
+    let joined_session = JoinedSession {
+        reader,
+        writer,
+        client_id,
+        session_id: SessionId::new(),
+        connection_token: ConnectionToken::from_secret(NEW_CONNECTION_TOKEN),
+        resume_token: None,
+    };
+    (joined_session, session_connection)
+}
+
+/// An attempt answer that joined `client_id` to a session on a fresh local
+/// connection, and the session end of that connection.
+fn build_joined_answer(client_id: ClientId) -> (Incoming, Connection) {
+    let (joined_session, session_connection) = build_joined_session(client_id);
+    let joined_answer = Incoming::RejoinAnswer(Box::new(RejoinAnswer::Joined(
+        JoinedSessionGuard::from_joined_session(joined_session),
+    )));
+    (joined_answer, session_connection)
+}
+
+/// Read the `Leaving { is_returning: true }` request that a join the loop did
+/// not take sends, then the close of its connection, from `session_connection`.
+fn assert_joined_connection_leaves_then_closes(session_connection: &mut Connection) {
+    assert_eq!(
+        session_connection
+            .recv::<IpcRequest>()
+            .expect("the joined connection says it leaves"),
+        IpcRequest {
+            request_id: FIRST_POST_ATTACH_REQUEST_ID,
+            request_kind: IpcRequestKind::Leaving { is_returning: true },
+        }
+    );
+    let Err(IpcError::Disconnected) = session_connection.recv::<IpcRequest>() else {
+        panic!("the joined connection closes after it says it leaves");
+    };
+}
+
+/// The `RECONNECTING` tag in the tabline the screen last drew, from
+/// `RECONNECTING` through its closing parenthesis, or `None` when the tabline
+/// carries no tag.
+fn find_drawn_reconnecting_tag(screen: &Screen<TestBackend>) -> Option<String> {
+    let screen_buffer = screen.terminal.backend().buffer();
+    let column_count = screen_buffer.area.width as usize;
+    let tabline_text = screen_buffer
+        .content()
+        .chunks(column_count)
+        .next()
+        .expect("a drawn frame has at least one row")
+        .iter()
+        .map(|buffer_cell| buffer_cell.symbol())
+        .collect::<String>();
+    let tag_start_index = tabline_text.find("RECONNECTING")?;
+    let tag_byte_count = tabline_text[tag_start_index..].find(')')? + 1;
+    Some(tabline_text[tag_start_index..tag_start_index + tag_byte_count].to_string())
+}
+
+/// Bind `key_sequence` to `core:quit` in `client`'s normal mode, on top of the
+/// built-in keymap.
+fn bind_quit_in_normal_mode(client: &mut Client, key_sequence: KeySequence) {
+    let mut bound_action_by_key_sequence = BTreeMap::new();
+    bound_action_by_key_sequence.insert(
+        key_sequence,
+        BoundAction {
+            action_reference: ActionReference::from_core_action_name("quit")
+                .expect("valid core action name"),
+        },
+    );
+    let mut mode_bindings_by_name = BTreeMap::new();
+    mode_bindings_by_name.insert(
+        ModeName::from_text("normal"),
+        ModeBindings {
+            bound_action_by_key_sequence,
+            removed_key_sequences: BTreeSet::new(),
+        },
+    );
+    client.load_startup_config(
+        None,
+        None,
+        Some(PartialKeybindingsConfig {
+            mode_bindings_by_name: Some(mode_bindings_by_name),
+            ..PartialKeybindingsConfig::default()
+        }),
+    );
+}
+
+/// The schedule of a link that dropped one redial wait ago: its first dial is
+/// due now.
+fn build_due_redial_schedule() -> RedialSchedule {
+    RedialSchedule::from_link_drop_at(
+        Instant::now()
+            .checked_sub(FIRST_REDIAL_WAIT_DURATION)
+            .expect("the clock reads past one second"),
+    )
+}
+
+#[test]
+fn the_redial_countdown_reads_whole_seconds_rounded_up_from_the_next_dial() {
+    let link_dropped_at = Instant::now();
+    let mut redial_schedule = RedialSchedule::from_link_drop_at(link_dropped_at);
+
+    assert_eq!(
+        redial_schedule.build_reconnecting(link_dropped_at),
+        Reconnecting {
+            attempt: 1,
+            retry_in_seconds: Some(1),
+        }
+    );
+    assert_eq!(
+        redial_schedule.compute_next_wakeup(link_dropped_at),
+        Some(Duration::from_secs(1))
+    );
+    let before_first_dial = link_dropped_at + Duration::from_millis(300);
+    assert_eq!(
+        redial_schedule.build_reconnecting(before_first_dial),
+        Reconnecting {
+            attempt: 1,
+            retry_in_seconds: Some(1),
+        }
+    );
+    assert_eq!(
+        redial_schedule.compute_next_wakeup(before_first_dial),
+        Some(Duration::from_millis(700))
+    );
+    assert!(!redial_schedule.start_due_dial(before_first_dial));
+
+    let first_dial_at = link_dropped_at + FIRST_REDIAL_WAIT_DURATION;
+    assert!(redial_schedule.start_due_dial(first_dial_at));
+    assert_eq!(
+        redial_schedule.build_reconnecting(first_dial_at),
+        Reconnecting {
+            attempt: 1,
+            retry_in_seconds: None,
+        }
+    );
+    assert_eq!(redial_schedule.compute_next_wakeup(first_dial_at), None);
     assert!(
-        drop_input_from_the_blackout(&incoming_receiver, &mut cell_size_query),
-        "the terminal hung up while the link was down"
+        !redial_schedule.start_due_dial(first_dial_at + Duration::from_secs(5)),
+        "a running dial is never started again"
     );
 
+    let first_dial_failed_at = link_dropped_at + Duration::from_millis(1500);
+    assert!(redial_schedule.schedule_next_dial(first_dial_failed_at));
     assert_eq!(
-        client.get_viewport_size(),
-        viewport_size_before_blackout,
-        "the resize was dropped with the rest; the new link reads the size itself"
-    );
-    assert_ne!(
-        viewport_size_before_blackout, resized_viewport_size,
-        "the dropped resize named another size"
+        redial_schedule.build_reconnecting(first_dial_failed_at),
+        Reconnecting {
+            attempt: 2,
+            retry_in_seconds: Some(2),
+        }
     );
     assert_eq!(
-        incoming_receiver.try_recv().err(),
-        Some(mpsc::TryRecvError::Empty),
-        "the key, the resize and the stale frame were all taken off the channel"
+        redial_schedule.compute_next_wakeup(first_dial_failed_at),
+        Some(Duration::from_secs(1))
+    );
+    let during_second_pause = first_dial_failed_at + Duration::from_millis(1300);
+    assert_eq!(
+        redial_schedule.build_reconnecting(during_second_pause),
+        Reconnecting {
+            attempt: 2,
+            retry_in_seconds: Some(1),
+        }
+    );
+    assert_eq!(
+        redial_schedule.compute_next_wakeup(during_second_pause),
+        Some(Duration::from_millis(700))
     );
 }
 
 #[test]
-fn a_cell_size_reply_in_the_blackout_is_consumed_by_the_outer_query() {
+fn redials_go_out_on_the_widening_schedule_and_stop_inside_the_window() {
+    let link_dropped_at = Instant::now();
+    let mut redial_schedule = RedialSchedule::from_link_drop_at(link_dropped_at);
+    let mut dial_offset_seconds = Vec::new();
+
+    loop {
+        let next_dial_at = redial_schedule
+            .next_dial_at
+            .expect("a waiting schedule names its next dial");
+        assert!(redial_schedule.start_due_dial(next_dial_at));
+        dial_offset_seconds.push((next_dial_at - link_dropped_at).as_secs());
+        if !redial_schedule.schedule_next_dial(next_dial_at) {
+            break;
+        }
+    }
+
+    assert_eq!(
+        dial_offset_seconds,
+        vec![1, 3, 7, 15, 23, 31, 39, 47, 55, 63, 71, 79, 87, 95, 103, 111, 119]
+    );
+    assert_eq!(redial_schedule.attempt, 17);
+    assert_eq!(
+        redial_schedule.next_dial_at, None,
+        "a pause past the window is not taken"
+    );
+}
+
+#[test]
+fn a_restart_hold_takes_inputs_up_to_its_count_and_paste_caps() {
+    let mut input_hold = InputHold::default();
+    for _ in 0..MAX_HELD_INPUT_COUNT {
+        assert!(input_hold.hold_input(HeldInput::Keyboard(
+            crate::tests::build_key_input_for_chord(build_plain_chord('a'))
+        )));
+    }
+    assert!(!input_hold.hold_input(HeldInput::Keyboard(
+        crate::tests::build_key_input_for_chord(build_plain_chord('b'))
+    )));
+    assert_eq!(input_hold.held_inputs.len(), MAX_HELD_INPUT_COUNT);
+
+    let mut paste_hold = InputHold::default();
+    let frame_of_text = "x".repeat(MAX_FRAME_BYTE_COUNT as usize);
+    assert!(paste_hold.hold_input(HeldInput::Paste(frame_of_text.clone())));
+    assert!(!paste_hold.hold_input(HeldInput::Paste(String::from("y"))));
+    assert_eq!(
+        paste_hold.held_inputs,
+        vec![HeldInput::Paste(frame_of_text)]
+    );
+    assert_eq!(
+        paste_hold.held_paste_byte_count,
+        MAX_FRAME_BYTE_COUNT as usize
+    );
+}
+
+#[test]
+fn an_overflowing_restart_hold_drops_everything_typed_during_that_restart() {
+    let mut client = build_test_client();
+    let mut link_recovery = LinkRecovery::RestartRejoin {
+        input_hold: Some(InputHold::default()),
+    };
+    for _ in 0..=MAX_HELD_INPUT_COUNT {
+        link_recovery.hold_input(
+            &mut client,
+            HeldInput::Keyboard(crate::tests::build_key_input_for_chord(build_plain_chord(
+                'a',
+            ))),
+        );
+    }
+    link_recovery.hold_input(&mut client, HeldInput::Paste(String::from("after")));
+
+    let LinkRecovery::RestartRejoin { input_hold } = link_recovery else {
+        panic!("holding never changes the recovery");
+    };
+    assert_eq!(input_hold.map(|input_hold| input_hold.held_inputs), None);
+}
+
+#[test]
+fn a_restart_during_pane_placement_holds_nothing() {
+    let mut client = build_test_client();
+    client.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id: TabId::new(),
+        placement_direction: Direction::Right,
+        placement_target: None,
+        pending_placement_command: None,
+    });
+    let mut restart_recovery = LinkRecovery::RestartRejoin {
+        input_hold: Some(InputHold::default()),
+    };
+    restart_recovery.hold_input(&mut client, HeldInput::Paste(String::from("typed")));
+    let LinkRecovery::RestartRejoin { input_hold } = restart_recovery else {
+        panic!("holding never changes the recovery");
+    };
+    assert_eq!(
+        input_hold.map(|input_hold| input_hold.held_inputs),
+        Some(Vec::new())
+    );
+}
+
+#[test]
+fn quitting_while_a_redial_waits_leaves_before_any_dial() {
+    let mut viewer = TestViewerWithoutLink::new();
+    viewer.queue_incoming_event(viewer.build_key_press_event(build_quit_chord()));
+    let (attempt_rejoin, attempt_count) = build_counted_attempt();
+    let link_dropped_at = Instant::now();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::Redial(RedialSchedule::from_link_drop_at(link_dropped_at)),
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    assert_eq!(
+        stretch_result.err(),
+        Some(AttachmentEnding::LeftWhileReconnecting)
+    );
+    assert!(link_dropped_at.elapsed() < FIRST_REDIAL_WAIT_DURATION);
+    assert_eq!(attempt_count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        find_drawn_reconnecting_tag(&viewer.screen).as_deref(),
+        Some("RECONNECTING (attempt 1, retry in 1s)")
+    );
+    assert_eq!(viewer.client.link_status, LinkStatus::Linked);
+}
+
+#[test]
+fn quitting_while_a_dial_runs_leaves_at_once_and_the_tag_reads_dialing() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let (attempt_rejoin, attempt_start_receiver, attempt_release_sender) = build_blocked_attempt();
+    let quit_event = viewer.build_key_press_event(build_quit_chord());
+    let quit_sender = viewer.incoming_sender.clone();
+    let quit_thread = thread::spawn(move || {
+        attempt_start_receiver.recv().expect("the due dial starts");
+        quit_sender
+            .send(quit_event)
+            .expect("the loop's channel takes it");
+    });
+
+    let stretch_started_at = Instant::now();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::Redial(build_due_redial_schedule()),
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    assert_eq!(
+        stretch_result.err(),
+        Some(AttachmentEnding::LeftWhileReconnecting)
+    );
+    assert!(
+        stretch_started_at.elapsed() < BLOCKED_ATTEMPT_WAIT_DURATION / 2,
+        "the stretch left while the dial still ran"
+    );
+    assert_eq!(
+        find_drawn_reconnecting_tag(&viewer.screen).as_deref(),
+        Some("RECONNECTING (attempt 1, dialing)")
+    );
+    quit_thread.join().expect("the quit was sent");
+    drop(attempt_release_sender);
+}
+
+#[test]
+fn a_locked_viewer_leaves_with_the_quit_keybinding_while_reconnecting() {
+    let mut viewer = TestViewerWithoutLink::new();
+    viewer.client.set_lock_mode(LockMode::Locked);
+    viewer.queue_incoming_event(viewer.build_key_press_event(build_quit_chord()));
+    let (attempt_rejoin, _attempt_count) = build_counted_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::Redial(RedialSchedule::from_link_drop_at(Instant::now())),
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    assert_eq!(
+        stretch_result.err(),
+        Some(AttachmentEnding::LeftWhileReconnecting)
+    );
+}
+
+#[test]
+fn a_quit_left_in_the_batch_that_ended_the_link_leaves_before_any_dial() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let leftover_quit_event = viewer.build_key_press_event(build_quit_chord());
+    let (attempt_rejoin, attempt_count) = build_counted_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::Redial(RedialSchedule::from_link_drop_at(Instant::now())),
+        vec![leftover_quit_event],
+        attempt_rejoin,
+    );
+
+    assert_eq!(
+        stretch_result.err(),
+        Some(AttachmentEnding::LeftWhileReconnecting)
+    );
+    assert_eq!(attempt_count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn quitting_while_a_placement_waits_for_its_answer_leaves_with_the_base_keymap() {
+    let mut viewer = TestViewerWithoutLink::new();
+    viewer.client.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id: TabId::new(),
+        placement_direction: Direction::Right,
+        placement_target: None,
+        pending_placement_command: Some(crate::tests::build_pending_placement_command(
+            CommandId::new(),
+        )),
+    });
+    assert!(viewer.client.is_placement_confirmation_pending());
+    viewer.queue_incoming_event(viewer.build_key_press_event(build_quit_chord()));
+    let (attempt_rejoin, _attempt_count) = build_counted_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::Redial(RedialSchedule::from_link_drop_at(Instant::now())),
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    assert_eq!(
+        stretch_result.err(),
+        Some(AttachmentEnding::LeftWhileReconnecting)
+    );
+}
+
+#[test]
+fn a_quit_bound_as_a_key_sequence_leaves_while_reconnecting() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let pane_group_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p'));
+    bind_quit_in_normal_mode(
+        &mut viewer.client,
+        KeySequence::from_first_and_rest(pane_group_chord, vec![build_plain_chord('z')]),
+    );
+    viewer.queue_incoming_event(viewer.build_key_press_event(pane_group_chord));
+    viewer.queue_incoming_event(viewer.build_key_press_event(build_plain_chord('z')));
+    let (attempt_rejoin, _attempt_count) = build_counted_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::Redial(RedialSchedule::from_link_drop_at(Instant::now())),
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    assert_eq!(
+        stretch_result.err(),
+        Some(AttachmentEnding::LeftWhileReconnecting)
+    );
+}
+
+#[test]
+fn a_quit_on_an_ambiguous_prefix_leaves_when_its_deadline_passes_while_reconnecting() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let pane_group_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p'));
+    bind_quit_in_normal_mode(&mut viewer.client, KeySequence::from(pane_group_chord));
+    let chord_pressed_at = Instant::now()
+        .checked_sub(viewer.client.keymap_catalog.get_chord_timeout())
+        .expect("the clock reads past one chord timeout");
+    assert_eq!(
+        viewer
+            .client
+            .resolve_key(pane_group_chord, chord_pressed_at),
+        KeyOutcome::Pending,
+        "the quit chord opens longer pane bindings too"
+    );
+    let (attempt_rejoin, _attempt_count) = build_counted_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::Redial(RedialSchedule::from_link_drop_at(Instant::now())),
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    assert_eq!(
+        stretch_result.err(),
+        Some(AttachmentEnding::LeftWhileReconnecting)
+    );
+}
+
+#[test]
+fn keys_resizes_and_stale_frames_while_redialing_send_nothing_and_a_hangup_ends_the_stretch() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let sequence_opener_chord = get_sequence_opener(&viewer.client);
+    viewer.queue_incoming_event(viewer.build_key_press_event(build_plain_chord('a')));
+    viewer.queue_incoming_event(viewer.build_key_press_event(sequence_opener_chord));
+    viewer.queue_incoming_event(Incoming::Input(Box::new(RuntimeEvent::Resize {
+        client_id: viewer.client.get_client_id(),
+        viewport_size: Size {
+            column_count: 100,
+            row_count: 40,
+        },
+        pane_area: None,
+        cell_size: None,
+    })));
+    viewer.queue_incoming_event(Incoming::Frame {
+        connection_index: INITIAL_CONNECTION_INDEX,
+        session_event_result: Ok(SessionEvent::Painted {
+            frame: Box::new(build_test_painted_frame()),
+        }),
+    });
+    viewer.queue_incoming_event(Incoming::Input(Box::new(RuntimeEvent::Quit)));
+    let (attempt_rejoin, attempt_count) = build_counted_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::Redial(RedialSchedule::from_link_drop_at(Instant::now())),
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    assert_eq!(stretch_result.err(), Some(AttachmentEnding::TerminalGone));
+    assert_eq!(viewer.client.get_viewport_size(), TEST_VIEWPORT_SIZE);
+    assert_eq!(
+        viewer.client.get_pending_key_sequence(),
+        Some(&KeySequence::from(sequence_opener_chord)),
+        "the sequence opener keeps its breadcrumb"
+    );
+    assert_eq!(
+        find_drawn_reconnecting_tag(&viewer.screen).as_deref(),
+        Some("RECONNECTING (attempt 1, retry in 1s)")
+    );
+    assert_eq!(attempt_count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        viewer.incoming_receiver.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty),
+        "every queued event was taken off the channel"
+    );
+}
+
+#[test]
+fn a_redial_that_joins_hands_back_the_session_and_holds_nothing_typed() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let client_id = viewer.client.get_client_id();
+    viewer.queue_incoming_event(viewer.build_key_press_event(build_plain_chord('a')));
+    viewer.queue_incoming_event(Incoming::Input(Box::new(RuntimeEvent::HostPaste {
+        client_id,
+        pasted_text: String::from("pasted"),
+    })));
+    let (joined_answer, mut session_connection) = build_joined_answer(client_id);
+    viewer.queue_incoming_event(joined_answer);
+    let (attempt_rejoin, _attempt_count) = build_counted_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::Redial(RedialSchedule::from_link_drop_at(Instant::now())),
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    let Ok((joined_session, held_inputs)) = stretch_result else {
+        panic!("the queued join ends the stretch");
+    };
+    assert_eq!(joined_session.client_id, client_id);
+    assert_eq!(held_inputs, Vec::new());
+    assert_eq!(viewer.client.link_status, LinkStatus::Linked);
+    assert_eq!(
+        find_drawn_reconnecting_tag(&viewer.screen),
+        None,
+        "the join draws the screen once more without the tag"
+    );
+    // The loop took the join: closing it sends no `Leaving`.
+    drop(joined_session);
+    let Err(IpcError::Disconnected) = session_connection.recv::<IpcRequest>() else {
+        panic!("a join the loop took closes with no request on it");
+    };
+}
+
+#[test]
+fn an_unreachable_redial_schedules_the_next_dial_with_a_wider_pause() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let running_dial_schedule = RedialSchedule {
+        started_at: Instant::now(),
+        attempt: 1,
+        retry_wait: FIRST_REDIAL_WAIT_DURATION,
+        next_dial_at: None,
+    };
+    let leftover_events = vec![
+        Incoming::RejoinAnswer(Box::new(RejoinAnswer::Unreachable(
+            CliError::IpcUnavailable {
+                detail: String::from("connection refused"),
+            },
+        ))),
+        viewer.build_key_press_event(build_quit_chord()),
+    ];
+    let (attempt_rejoin, attempt_count) = build_counted_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::Redial(running_dial_schedule),
+        leftover_events,
+        attempt_rejoin,
+    );
+
+    assert_eq!(
+        stretch_result.err(),
+        Some(AttachmentEnding::LeftWhileReconnecting)
+    );
+    assert_eq!(
+        find_drawn_reconnecting_tag(&viewer.screen).as_deref(),
+        Some("RECONNECTING (attempt 2, retry in 2s)")
+    );
+    assert_eq!(attempt_count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn an_unreachable_redial_whose_next_pause_passes_the_window_ends_with_its_cause() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let last_dial_schedule = RedialSchedule {
+        started_at: Instant::now()
+            .checked_sub(Duration::from_secs(119))
+            .expect("the clock reads past 119 seconds"),
+        attempt: 17,
+        retry_wait: MAX_REDIAL_WAIT_DURATION,
+        next_dial_at: None,
+    };
+    let leftover_events = vec![Incoming::RejoinAnswer(Box::new(RejoinAnswer::Unreachable(
+        CliError::IpcUnavailable {
+            detail: String::from("connection refused"),
+        },
+    )))];
+    let (attempt_rejoin, _attempt_count) = build_counted_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::Redial(last_dial_schedule),
+        leftover_events,
+        attempt_rejoin,
+    );
+
+    assert_eq!(
+        stretch_result.err(),
+        Some(AttachmentEnding::LinkLost(Box::new(
+            CliError::IpcUnavailable {
+                detail: String::from("connection refused"),
+            }
+        )))
+    );
+}
+
+#[test]
+fn a_refused_redial_ends_the_stretch_at_once_with_that_refusal() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let attempt_rejoin: Arc<dyn Fn() -> RejoinAnswer + Send + Sync> = Arc::new(|| {
+        build_redial_answer(Err(DialError::Refused(CliError::Runtime {
+            detail: String::from("the server host:7654 did not admit the connection"),
+        })))
+    });
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::Redial(build_due_redial_schedule()),
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    assert_eq!(
+        stretch_result.err(),
+        Some(AttachmentEnding::LinkLost(Box::new(CliError::Runtime {
+            detail: String::from("the server host:7654 did not admit the connection"),
+        })))
+    );
+}
+
+#[test]
+fn keys_and_pastes_during_a_restart_are_held_in_order_for_the_restarted_session() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let client_id = viewer.client.get_client_id();
+    viewer.queue_incoming_event(viewer.build_key_press_event(build_plain_chord('a')));
+    viewer.queue_incoming_event(Incoming::Input(Box::new(RuntimeEvent::HostPaste {
+        client_id,
+        pasted_text: String::from("pasted"),
+    })));
+    viewer.queue_incoming_event(viewer.build_key_press_event(build_plain_chord('b')));
+    let (joined_answer, _session_connection) = build_joined_answer(client_id);
+    viewer.queue_incoming_event(joined_answer);
+    let (attempt_rejoin, _attempt_start_receiver, _attempt_release_sender) =
+        build_blocked_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::RestartRejoin {
+            input_hold: Some(InputHold::default()),
+        },
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    let Ok((_joined_session, held_inputs)) = stretch_result else {
+        panic!("the queued join ends the stretch");
+    };
+    assert_eq!(
+        held_inputs,
+        vec![
+            HeldInput::Keyboard(crate::tests::build_key_input_for_chord(build_plain_chord(
+                'a'
+            ))),
+            HeldInput::Paste(String::from("pasted")),
+            HeldInput::Keyboard(crate::tests::build_key_input_for_chord(build_plain_chord(
+                'b'
+            ))),
+        ]
+    );
+}
+
+#[test]
+fn held_inputs_go_up_in_the_order_they_were_typed() {
+    let mut client = build_test_client();
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+
+    send_held_inputs(
+        &mut client,
+        &mut uplink,
+        vec![
+            HeldInput::Keyboard(crate::tests::build_key_input_for_chord(build_plain_chord(
+                'a',
+            ))),
+            HeldInput::DispatchPlan(DispatchPlan::Command(Box::new(Command::NewTab(
+                NewTabArgs::default(),
+            )))),
+            HeldInput::Paste(String::from("pasted")),
+        ],
+    );
+
+    let sent_requests: Vec<IpcRequest> = request_receiver.try_iter().collect();
+    assert_eq!(sent_requests.len(), 3);
+    assert_eq!(
+        sent_requests[0].request_kind,
+        IpcRequestKind::Keyboard {
+            key_input: crate::tests::build_key_input_for_chord(build_plain_chord('a')),
+        }
+    );
+    let IpcRequestKind::SubmitCommand(command_envelope) = &sent_requests[1].request_kind else {
+        panic!("the held binding goes up as its command");
+    };
+    assert_eq!(
+        command_envelope.command,
+        Command::NewTab(NewTabArgs::default())
+    );
+    assert_eq!(
+        sent_requests[2].request_kind,
+        IpcRequestKind::Paste {
+            pasted_text: String::from("pasted"),
+        }
+    );
+}
+
+#[test]
+fn an_overflowing_restart_hold_still_leaves_on_the_quit_keybinding() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let mut leftover_events: Vec<Incoming> = (0..=MAX_HELD_INPUT_COUNT)
+        .map(|_| viewer.build_key_press_event(build_plain_chord('a')))
+        .collect();
+    leftover_events.push(viewer.build_key_press_event(build_quit_chord()));
+    let (attempt_rejoin, _attempt_start_receiver, _attempt_release_sender) =
+        build_blocked_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::RestartRejoin {
+            input_hold: Some(InputHold::default()),
+        },
+        leftover_events,
+        attempt_rejoin,
+    );
+
+    assert_eq!(
+        stretch_result.err(),
+        Some(AttachmentEnding::LeftWhileReconnecting)
+    );
+}
+
+#[test]
+fn a_restart_whose_hold_overflowed_joins_with_nothing_held() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let client_id = viewer.client.get_client_id();
+    let leftover_events: Vec<Incoming> = (0..=MAX_HELD_INPUT_COUNT)
+        .map(|_| viewer.build_key_press_event(build_plain_chord('a')))
+        .collect();
+    let (joined_answer, _session_connection) = build_joined_answer(client_id);
+    viewer.queue_incoming_event(joined_answer);
+    let (attempt_rejoin, _attempt_start_receiver, _attempt_release_sender) =
+        build_blocked_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::RestartRejoin {
+            input_hold: Some(InputHold::default()),
+        },
+        leftover_events,
+        attempt_rejoin,
+    );
+
+    let Ok((_joined_session, held_inputs)) = stretch_result else {
+        panic!("the queued join ends the stretch");
+    };
+    assert_eq!(held_inputs, Vec::new());
+}
+
+#[test]
+fn keys_typed_after_the_lock_key_resolve_in_locked_mode_before_the_session_answers() {
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+
+    for key_chord in [build_lock_chord(), build_tab_chord()] {
+        process_runtime_input(
+            &mut client,
+            &mut uplink,
+            RuntimeEvent::KeyInput {
+                client_id,
+                key_input: crate::tests::build_key_input_for_chord(key_chord),
+            },
+        );
+    }
+
+    let sent_request_kinds: Vec<IpcRequestKind> = request_receiver
+        .try_iter()
+        .map(|sent_request| sent_request.request_kind)
+        .collect();
+    let [IpcRequestKind::SubmitCommand(lock_command_envelope), tab_request_kind] =
+        sent_request_kinds.as_slice()
+    else {
+        panic!("the lock key and Tab send two requests, not {sent_request_kinds:?}");
+    };
+    assert_eq!(
+        lock_command_envelope.command,
+        build_expected_lock_command(true)
+    );
+    assert_eq!(
+        lock_command_envelope.command_source,
+        CommandSource::from_key_binding(client_id)
+    );
+    assert_eq!(
+        *tab_request_kind,
+        IpcRequestKind::Keyboard {
+            key_input: crate::tests::build_key_input_for_chord(build_tab_chord()),
+        }
+    );
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(
+        client.get_pending_lock_command_id(),
+        Some(lock_command_envelope.command_id)
+    );
+}
+
+#[test]
+fn a_quit_key_bound_in_normal_mode_alone_reaches_the_pane_right_after_the_lock_key() {
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let quit_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('x'));
+    bind_quit_in_normal_mode(&mut client, KeySequence::from(quit_chord));
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+
+    for key_chord in [build_lock_chord(), quit_chord] {
+        process_runtime_input(
+            &mut client,
+            &mut uplink,
+            RuntimeEvent::KeyInput {
+                client_id,
+                key_input: crate::tests::build_key_input_for_chord(key_chord),
+            },
+        );
+    }
+
+    let sent_request_kinds: Vec<IpcRequestKind> = request_receiver
+        .try_iter()
+        .map(|sent_request| sent_request.request_kind)
+        .collect();
+    let [IpcRequestKind::SubmitCommand(lock_command_envelope), quit_key_request_kind] =
+        sent_request_kinds.as_slice()
+    else {
+        panic!("the lock key and <C-x> send two requests, not {sent_request_kinds:?}");
+    };
+    assert_eq!(
+        lock_command_envelope.command,
+        build_expected_lock_command(true)
+    );
+    assert_eq!(
+        *quit_key_request_kind,
+        IpcRequestKind::Keyboard {
+            key_input: crate::tests::build_key_input_for_chord(quit_chord),
+        }
+    );
+}
+
+#[test]
+fn a_toggle_lock_binding_goes_up_as_the_lock_mode_it_sets() {
+    let mut client = build_test_client();
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    let toggle_lock_binding = BoundAction {
+        action_reference: ActionReference::from_core_action_name("toggle-lock")
+            .expect("valid core action name"),
+    };
+
+    assert_eq!(
+        uplink.submit_bound_action(&mut client, toggle_lock_binding.clone()),
+        ControlFlow::Continue(())
+    );
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(
+        uplink.submit_bound_action(&mut client, toggle_lock_binding),
+        ControlFlow::Continue(())
+    );
+
+    let sent_commands: Vec<(CommandId, Command)> = request_receiver
+        .try_iter()
+        .map(|sent_request| match sent_request.request_kind {
+            IpcRequestKind::SubmitCommand(command_envelope) => {
+                (command_envelope.command_id, command_envelope.command)
+            }
+            other_request_kind => panic!("a toggle sends a command, not {other_request_kind:?}"),
+        })
+        .collect();
+    assert_eq!(
+        sent_commands
+            .iter()
+            .map(|(_, command)| command.clone())
+            .collect::<Vec<Command>>(),
+        vec![
+            build_expected_lock_command(true),
+            build_expected_lock_command(false)
+        ]
+    );
+    assert_ne!(sent_commands[0].0, sent_commands[1].0);
+    assert_eq!(client.get_lock_mode(), LockMode::Normal);
+    assert_eq!(
+        client.get_pending_lock_command_id(),
+        Some(sent_commands[1].0)
+    );
+}
+
+#[test]
+fn lock_keys_during_a_restart_switch_the_mode_the_next_key_resolves_in() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let client_id = viewer.client.get_client_id();
+    for key_chord in [
+        build_lock_chord(),
+        build_tab_chord(),
+        build_lock_chord(),
+        build_tab_chord(),
+    ] {
+        viewer.queue_incoming_event(viewer.build_key_press_event(key_chord));
+    }
+    let (joined_answer, _session_connection) = build_joined_answer(client_id);
+    viewer.queue_incoming_event(joined_answer);
+    let (attempt_rejoin, _attempt_start_receiver, _attempt_release_sender) =
+        build_blocked_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::RestartRejoin {
+            input_hold: Some(InputHold::default()),
+        },
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    let Ok((_joined_session, held_inputs)) = stretch_result else {
+        panic!("the queued join ends the stretch");
+    };
+    let [HeldInput::LockCommand {
+        lock_command_id: first_lock_command_id,
+        lock_mode: LockMode::Locked,
+    }, HeldInput::Keyboard(locked_tab_key_input), HeldInput::LockCommand {
+        lock_command_id: second_lock_command_id,
+        lock_mode: LockMode::Normal,
+    }, HeldInput::DispatchPlan(next_tab_plan)] = held_inputs.as_slice()
+    else {
+        panic!("lock, Tab, unlock and Tab are held as they resolved, not {held_inputs:?}");
+    };
+    assert_ne!(first_lock_command_id, second_lock_command_id);
+    assert_eq!(
+        *locked_tab_key_input,
+        crate::tests::build_key_input_for_chord(build_tab_chord())
+    );
+    assert_eq!(
+        *next_tab_plan,
+        DispatchPlan::Command(Box::new(Command::FocusTab(FocusTabArgs {
+            focus_target: TabTarget::Next,
+            client_id: None,
+        })))
+    );
+    assert_eq!(viewer.client.get_lock_mode(), LockMode::Normal);
+    assert_eq!(
+        viewer.client.get_pending_lock_command_id(),
+        Some(*second_lock_command_id)
+    );
+}
+
+#[test]
+fn a_lock_key_during_a_redial_is_dropped_and_switches_nothing() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let client_id = viewer.client.get_client_id();
+    viewer.queue_incoming_event(viewer.build_key_press_event(build_lock_chord()));
+    let (joined_answer, _session_connection) = build_joined_answer(client_id);
+    viewer.queue_incoming_event(joined_answer);
+    let (attempt_rejoin, _attempt_count) = build_counted_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::Redial(RedialSchedule::from_link_drop_at(Instant::now())),
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    let Ok((_joined_session, held_inputs)) = stretch_result else {
+        panic!("the queued join ends the stretch");
+    };
+    assert_eq!(held_inputs, Vec::new());
+    assert_eq!(viewer.client.get_lock_mode(), LockMode::Normal);
+    assert_eq!(viewer.client.get_pending_lock_command_id(), None);
+}
+
+#[test]
+fn a_binding_the_action_table_refuses_is_held_as_nothing() {
+    let mut client = build_test_client();
+    let (request_sender, _request_receiver) = mpsc::channel();
+    let uplink = build_test_uplink(request_sender);
+    let mut link_recovery = LinkRecovery::RestartRejoin {
+        input_hold: Some(InputHold::default()),
+    };
+    let unregistered_binding = BoundAction {
+        action_reference: ActionReference::from_core_action_name("no-such-action")
+            .expect("valid core action name"),
+    };
+
+    assert_eq!(
+        hold_fired_binding(
+            &mut link_recovery,
+            &mut client,
+            &uplink,
+            unregistered_binding
+        ),
+        ControlFlow::Continue(())
+    );
+
+    let LinkRecovery::RestartRejoin { input_hold } = link_recovery else {
+        panic!("holding never changes the recovery");
+    };
+    assert_eq!(
+        input_hold.map(|input_hold| input_hold.held_inputs),
+        Some(Vec::new())
+    );
+}
+
+#[test]
+fn an_overflowing_hold_puts_back_the_lock_mode_from_before_its_first_lock_command() {
+    let mut client = build_test_client();
+    let lock_command_id_sent_before_the_restart = CommandId::new();
+    client.apply_lock_command(lock_command_id_sent_before_the_restart, LockMode::Locked);
+    let mut link_recovery = LinkRecovery::RestartRejoin {
+        input_hold: Some(InputHold::default()),
+    };
+    let held_unlock_command_id = CommandId::new();
+    link_recovery.hold_input(
+        &mut client,
+        HeldInput::LockCommand {
+            lock_command_id: held_unlock_command_id,
+            lock_mode: LockMode::Normal,
+        },
+    );
+    assert_eq!(client.get_lock_mode(), LockMode::Normal);
+    assert_eq!(
+        client.get_pending_lock_command_id(),
+        Some(held_unlock_command_id)
+    );
+    let held_lock_command_id = CommandId::new();
+    link_recovery.hold_input(
+        &mut client,
+        HeldInput::LockCommand {
+            lock_command_id: held_lock_command_id,
+            lock_mode: LockMode::Locked,
+        },
+    );
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(
+        client.get_pending_lock_command_id(),
+        Some(held_lock_command_id)
+    );
+
+    for _ in 0..MAX_HELD_INPUT_COUNT - 1 {
+        link_recovery.hold_input(
+            &mut client,
+            HeldInput::Keyboard(crate::tests::build_key_input_for_chord(build_plain_chord(
+                'a',
+            ))),
+        );
+    }
+
+    let LinkRecovery::RestartRejoin { input_hold } = link_recovery else {
+        panic!("holding never changes the recovery");
+    };
+    assert_eq!(input_hold.map(|input_hold| input_hold.held_inputs), None);
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(
+        client.get_pending_lock_command_id(),
+        Some(lock_command_id_sent_before_the_restart)
+    );
+}
+
+#[test]
+fn held_lock_commands_go_up_under_their_own_ids_and_leave_the_mode_and_open_sequence_alone() {
+    let mut client = build_test_client();
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    client.apply_lock_command(CommandId::new(), LockMode::Normal);
+    let open_sequence_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p'));
+    assert_eq!(
+        client.resolve_key(open_sequence_chord, Instant::now()),
+        KeyOutcome::Pending
+    );
+    let first_lock_command_id = CommandId::new();
+    let second_lock_command_id = CommandId::new();
+
+    send_held_inputs(
+        &mut client,
+        &mut uplink,
+        vec![
+            HeldInput::LockCommand {
+                lock_command_id: first_lock_command_id,
+                lock_mode: LockMode::Locked,
+            },
+            HeldInput::Keyboard(crate::tests::build_key_input_for_chord(build_tab_chord())),
+            HeldInput::LockCommand {
+                lock_command_id: second_lock_command_id,
+                lock_mode: LockMode::Normal,
+            },
+        ],
+    );
+
+    let sent_requests: Vec<IpcRequest> = request_receiver.try_iter().collect();
+    let [first_lock_request, tab_request, second_lock_request] = sent_requests.as_slice() else {
+        panic!("three held inputs send three requests, not {sent_requests:?}");
+    };
+    let IpcRequestKind::SubmitCommand(first_lock_envelope) = &first_lock_request.request_kind
+    else {
+        panic!("a held lock command goes up as a command");
+    };
+    assert_eq!(first_lock_envelope.command_id, first_lock_command_id);
+    assert_eq!(
+        first_lock_envelope.command,
+        build_expected_lock_command(true)
+    );
+    assert_eq!(
+        tab_request.request_kind,
+        IpcRequestKind::Keyboard {
+            key_input: crate::tests::build_key_input_for_chord(build_tab_chord()),
+        }
+    );
+    let IpcRequestKind::SubmitCommand(second_lock_envelope) = &second_lock_request.request_kind
+    else {
+        panic!("a held lock command goes up as a command");
+    };
+    assert_eq!(second_lock_envelope.command_id, second_lock_command_id);
+    assert_eq!(
+        second_lock_envelope.command,
+        build_expected_lock_command(false)
+    );
+    assert_eq!(client.get_lock_mode(), LockMode::Normal);
+    assert_eq!(
+        client.get_pending_lock_command_id(),
+        Some(second_lock_command_id)
+    );
+    assert_eq!(
+        client.get_pending_key_sequence(),
+        Some(&KeySequence::from(open_sequence_chord))
+    );
+}
+
+#[test]
+fn a_new_connection_with_no_held_lock_command_waits_for_no_lock_command() {
+    let mut client = build_test_client();
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    client.apply_lock_command(CommandId::new(), LockMode::Locked);
+
+    send_held_inputs(&mut client, &mut uplink, Vec::new());
+
+    assert_eq!(request_receiver.try_iter().count(), 0);
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(client.get_pending_lock_command_id(), None);
+}
+
+#[test]
+fn a_join_read_before_a_quit_hands_the_quit_to_the_new_link() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let client_id = viewer.client.get_client_id();
+    let (joined_answer, _session_connection) = build_joined_answer(client_id);
+    viewer.queue_incoming_event(joined_answer);
+    viewer.queue_incoming_event(viewer.build_key_press_event(build_quit_chord()));
+    let (attempt_rejoin, _attempt_start_receiver, _attempt_release_sender) =
+        build_blocked_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::RestartRejoin {
+            input_hold: Some(InputHold::default()),
+        },
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    let Ok((joined_session, held_inputs)) = stretch_result else {
+        panic!("the join was read first");
+    };
+    assert_eq!(joined_session.client_id, client_id);
+    assert_eq!(held_inputs, Vec::new());
+    let Ok(Incoming::Input(runtime_event)) = viewer.incoming_receiver.try_recv() else {
+        panic!("the quit stays on the channel for the linked loop");
+    };
+    let RuntimeEvent::KeyInput { key_input, .. } = *runtime_event else {
+        panic!("the quit stays a key");
+    };
+    assert_eq!(
+        key_input,
+        crate::tests::build_key_input_for_chord(build_quit_chord())
+    );
+}
+
+#[test]
+fn a_quit_read_before_a_join_leaves_and_closes_the_joined_connection() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let client_id = viewer.client.get_client_id();
+    viewer.queue_incoming_event(viewer.build_key_press_event(build_quit_chord()));
+    let (joined_answer, mut session_connection) = build_joined_answer(client_id);
+    viewer.queue_incoming_event(joined_answer);
+    let (attempt_rejoin, _attempt_start_receiver, _attempt_release_sender) =
+        build_blocked_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::RestartRejoin {
+            input_hold: Some(InputHold::default()),
+        },
+        Vec::new(),
+        attempt_rejoin,
+    );
+    assert_eq!(
+        stretch_result.err(),
+        Some(AttachmentEnding::LeftWhileReconnecting)
+    );
+    drop(viewer);
+
+    assert_joined_connection_leaves_then_closes(&mut session_connection);
+}
+
+#[test]
+fn a_join_whose_attempt_finds_the_channel_gone_leaves_and_closes_the_joined_connection() {
+    let (joined_session, mut session_connection) = build_joined_session(ClientId::new());
+    let unanswered_joined_session = Mutex::new(Some(joined_session));
+    let attempt_rejoin: Arc<dyn Fn() -> RejoinAnswer + Send + Sync> = Arc::new(move || {
+        let joined_session = unanswered_joined_session
+            .lock()
+            .expect("the join outlives every panic")
+            .take()
+            .expect("the attempt runs once");
+        RejoinAnswer::Joined(JoinedSessionGuard::from_joined_session(joined_session))
+    });
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
+    drop(incoming_receiver);
+
+    spawn_rejoin_attempt(attempt_rejoin, incoming_sender);
+
+    assert_joined_connection_leaves_then_closes(&mut session_connection);
+}
+
+#[test]
+fn a_rejoin_attempt_that_panics_ends_the_stretch_as_a_lost_link() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let attempt_rejoin: Arc<dyn Fn() -> RejoinAnswer + Send + Sync> =
+        Arc::new(|| panic!("the attempt broke"));
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::RestartRejoin {
+            input_hold: Some(InputHold::default()),
+        },
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    assert_eq!(
+        stretch_result.err(),
+        Some(AttachmentEnding::LinkLost(Box::new(CliError::Runtime {
+            detail: String::from(
+                "the attempt to reach the session again stopped on an internal error"
+            ),
+        })))
+    );
+}
+
+#[test]
+fn a_cell_size_reply_while_reconnecting_is_taken_by_the_query() {
+    let mut viewer = TestViewerWithoutLink::new();
+    viewer.cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, true, true);
     let measured_cell_size = koshi_core::geometry::PixelCellSize::from_pixel_dimensions(10, 20)
         .expect("positive cell dimensions");
-    let client_id = ClientId::new();
-    let (incoming_sender, incoming_receiver) = build_incoming_channel();
-    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, true, true);
-    incoming_sender
-        .send(Incoming::Input(Box::new(RuntimeEvent::CellSize {
-            client_id,
+    let leftover_events = vec![
+        Incoming::Input(Box::new(RuntimeEvent::CellSize {
+            client_id: viewer.client.get_client_id(),
             cell_size: measured_cell_size,
-        })))
-        .expect("the cell-size reply is queued");
+        })),
+        viewer.build_key_press_event(build_quit_chord()),
+    ];
+    let (attempt_rejoin, _attempt_count) = build_counted_attempt();
 
-    assert!(!drop_input_from_the_blackout(
-        &incoming_receiver,
-        &mut cell_size_query,
-    ));
-    assert_eq!(
-        cell_size_query.accept_cell_size_reply(measured_cell_size),
-        (None, false),
-        "the blackout consumed the reply instead of leaving it pending"
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::Redial(RedialSchedule::from_link_drop_at(Instant::now())),
+        leftover_events,
+        attempt_rejoin,
     );
+
+    assert_eq!(
+        stretch_result.err(),
+        Some(AttachmentEnding::LeftWhileReconnecting)
+    );
+    assert_eq!(
+        viewer
+            .cell_size_query
+            .accept_cell_size_reply(measured_cell_size),
+        (None, false),
+        "the stretch took the reply instead of leaving it pending"
+    );
+}
+
+#[test]
+fn quitting_waits_for_a_stalled_writer_no_longer_than_the_quit_write_wait() {
+    let (request_sender, _request_receiver) = mpsc::channel();
+    let (_writer_end_sender, writer_end_receiver) = mpsc::channel::<()>();
+    let mut uplink = Uplink {
+        uplink_writer: Some(UplinkWriter {
+            request_sender,
+            writer_end_receiver,
+        }),
+        registry: ActionRegistry::new(),
+        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
+    };
+    let quit_started_at = Instant::now();
+
+    assert_eq!(leave_after_quit(&mut uplink), AttachmentEnding::Detached);
+
+    let quit_duration = quit_started_at.elapsed();
+    assert!(quit_duration >= MAX_QUIT_WRITE_WAIT_DURATION);
+    assert!(quit_duration < MAX_QUIT_WRITE_WAIT_DURATION + Duration::from_secs(1));
+}
+
+#[test]
+fn quitting_with_a_link_writes_the_quit_and_leaves_without_the_sessions_answer() {
+    let mut test_control_socket = build_test_control_socket();
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+
+    assert_eq!(
+        process_runtime_input_with_cell_size(
+            &mut client,
+            &mut test_control_socket.uplink,
+            &mut terminal::CellSizeQuery::from_current_measurement(None, false, false),
+            RuntimeEvent::KeyInput {
+                client_id,
+                key_input: crate::tests::build_key_input_for_chord(build_quit_chord()),
+            },
+        ),
+        ControlFlow::Break(())
+    );
+    assert_eq!(
+        leave_after_quit(&mut test_control_socket.uplink),
+        AttachmentEnding::Detached
+    );
+
+    let quit_request: IpcRequest = test_control_socket
+        .session_connection
+        .recv()
+        .expect("the quit reached the socket before the client left");
+    let IpcRequestKind::SubmitCommand(command_envelope) = quit_request.request_kind else {
+        panic!("the quit goes up as a command");
+    };
+    assert_eq!(command_envelope.command, Command::Quit);
+}
+
+#[test]
+fn the_quit_keybinding_ends_a_linked_attachment_at_once_as_detached() {
+    // The attachment runs on its own thread, so a loop that waits for the
+    // session's answer fails the wait below instead of holding the test.
+    let (attachment_result_sender, attachment_result_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut client = build_test_client();
+        let client_id = client.get_client_id();
+        let mut screen = build_test_screen();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let mut uplink = build_test_uplink(request_sender);
+        let (incoming_sender, incoming_receiver) = build_incoming_channel();
+        incoming_sender
+            .send(Incoming::Input(Box::new(RuntimeEvent::KeyInput {
+                client_id,
+                key_input: crate::tests::build_key_input_for_chord(build_quit_chord()),
+            })))
+            .expect("the loop's channel takes it");
+        let mut cell_size_query =
+            terminal::CellSizeQuery::from_current_measurement(None, false, false);
+        let attachment_ending = run_attachment(
+            &build_local_home(),
+            SessionId::new(),
+            client_id,
+            ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+            None,
+            &mut client,
+            &mut screen,
+            &mut uplink,
+            terminal::GraphicsSupport::Unsupported,
+            &mut cell_size_query,
+            &mut Vec::new(),
+            incoming_sender,
+            incoming_receiver,
+        );
+        let sent_request_kinds: Vec<IpcRequestKind> = request_receiver
+            .try_iter()
+            .map(|sent_request| sent_request.request_kind)
+            .collect();
+        let _ = attachment_result_sender.send((attachment_ending, sent_request_kinds));
+    });
+
+    let (attachment_ending, sent_request_kinds) = attachment_result_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the attachment ended without an answer from the session");
+
+    assert_eq!(attachment_ending, AttachmentEnding::Detached);
+    assert_eq!(sent_request_kinds.len(), 1);
+    let IpcRequestKind::SubmitCommand(command_envelope) = &sent_request_kinds[0] else {
+        panic!("the quit goes up as a command");
+    };
+    assert_eq!(command_envelope.command, Command::Quit);
+}
+
+#[test]
+fn a_remote_viewer_with_reconnect_off_ends_at_once_when_its_link_breaks() {
+    let mut client = build_test_client();
+    client.client_config.should_reconnect_remote_session = false;
+    let client_id = client.get_client_id();
+    let mut screen = build_test_screen();
+    let (request_sender, _request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
+    incoming_sender
+        .send(Incoming::Frame {
+            connection_index: INITIAL_CONNECTION_INDEX,
+            session_event_result: Err(IpcError::Disconnected),
+        })
+        .expect("the loop's channel takes it");
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+
+    let attachment_ending = run_attachment(
+        &build_remote_home(),
+        SessionId::new(),
+        client_id,
+        ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        None,
+        &mut client,
+        &mut screen,
+        &mut uplink,
+        terminal::GraphicsSupport::Unsupported,
+        &mut cell_size_query,
+        &mut Vec::new(),
+        incoming_sender,
+        incoming_receiver,
+    );
+
+    assert_eq!(attachment_ending, AttachmentEnding::ConnectionDied);
+    assert_eq!(client.link_status, LinkStatus::Linked);
+}
+
+#[test]
+fn leaving_while_reconnecting_exits_zero_and_names_no_next_session() {
+    let report_result = report_attachment_ending(
+        &build_remote_home(),
+        AttachmentEnding::LeftWhileReconnecting,
+        SessionId::new(),
+        None,
+    );
+
+    let Ok(next_session_id) = report_result else {
+        panic!("leaving while reconnecting is no error");
+    };
+    assert_eq!(next_session_id, None);
 }
 
 #[test]
@@ -6943,11 +8858,7 @@ fn incoming_batch_defers_an_image_chunk_past_the_byte_limit() {
 fn a_new_connection_is_told_the_size_the_terminal_is_now() {
     let mut client = build_test_client();
     let (request_sender, request_receiver) = mpsc::channel();
-    let mut uplink = Uplink {
-        request_sender,
-        registry: ActionRegistry::new(),
-        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
-    };
+    let mut uplink = build_test_uplink(request_sender);
 
     report_terminal_size(&mut client, &mut uplink);
 
@@ -6983,11 +8894,7 @@ fn a_new_connection_is_told_the_size_the_terminal_is_now() {
 fn a_new_connection_reports_a_measured_cell_size() {
     let mut client = build_test_client();
     let (request_sender, request_receiver) = mpsc::channel();
-    let mut uplink = Uplink {
-        request_sender,
-        registry: ActionRegistry::new(),
-        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
-    };
+    let mut uplink = build_test_uplink(request_sender);
     let measured_cell_size = koshi_core::geometry::PixelCellSize::from_pixel_dimensions(10, 20)
         .expect("positive cell dimensions");
     let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, true, false);
@@ -7564,11 +9471,7 @@ fn run_attachment_with_committed_swap_notice(
         TEST_VIEWPORT_SIZE,
     );
     let (request_sender, _request_receiver) = mpsc::channel();
-    let mut uplink = Uplink {
-        request_sender,
-        registry: ActionRegistry::new(),
-        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
-    };
+    let mut uplink = build_test_uplink(request_sender);
     let (incoming_sender, incoming_receiver) = build_incoming_channel();
     let producer_sender = incoming_sender.clone();
     let producer_draw_count = Arc::clone(&draw_count);
@@ -8079,4 +9982,284 @@ fn a_committed_placement_records_only_the_tab_ids_it_names() {
     screen.note_committed_placement([None, None]);
 
     assert_eq!(screen.committed_placement_tab_ids, vec![destination_tab_id]);
+}
+
+#[test]
+fn an_attach_request_carries_the_link_timeout_it_is_given() {
+    for link_timeout_ms in [None, Some(30_000)] {
+        let attach_request = build_attach_request(
+            None,
+            None,
+            terminal::GraphicsSupport::Unsupported,
+            None,
+            link_timeout_ms,
+        );
+        let IpcRequestKind::Attach {
+            link_timeout_ms: sent_link_timeout_ms,
+            ..
+        } = attach_request.request_kind
+        else {
+            panic!("expected an attach request");
+        };
+        assert_eq!(sent_link_timeout_ms, link_timeout_ms);
+    }
+}
+
+/// Run one attachment in `home` with `remote_link_timeout_ms`, with
+/// `first_incoming_events` queued before it starts, then after
+/// `terminal_gone_delay` tell it this terminal went away. Returns how it ended
+/// and every request it queued.
+fn run_attachment_until_the_terminal_goes(
+    home: Home,
+    remote_link_timeout_ms: u32,
+    first_incoming_events: Vec<Incoming>,
+    terminal_gone_delay: Duration,
+) -> (AttachmentEnding, Vec<IpcRequestKind>) {
+    let (incoming_sender, request_receiver, attachment_ending_receiver) =
+        start_test_attachment(home, remote_link_timeout_ms, first_incoming_events);
+    thread::sleep(terminal_gone_delay);
+    let _ = incoming_sender.send(Incoming::Input(Box::new(RuntimeEvent::Quit)));
+    let attachment_ending = attachment_ending_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the attachment ended");
+    let sent_request_kinds: Vec<IpcRequestKind> = request_receiver
+        .try_iter()
+        .map(|sent_request| sent_request.request_kind)
+        .collect();
+    (attachment_ending, sent_request_kinds)
+}
+
+/// Start one attachment in `home` with `remote_link_timeout_ms` on its own
+/// thread, with `first_incoming_events` queued in the loop's channel before
+/// it starts. Returns the sender into the loop's channel, the receiver of
+/// every request the loop queues, and the receiver of how the attachment
+/// ended.
+fn start_test_attachment(
+    home: Home,
+    remote_link_timeout_ms: u32,
+    first_incoming_events: Vec<Incoming>,
+) -> (
+    mpsc::SyncSender<Incoming>,
+    mpsc::Receiver<IpcRequest>,
+    mpsc::Receiver<AttachmentEnding>,
+) {
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
+    for incoming_event in first_incoming_events {
+        incoming_sender
+            .send(incoming_event)
+            .expect("the loop's channel takes it");
+    }
+    let loop_incoming_sender = incoming_sender.clone();
+    let (request_sender, request_receiver) = mpsc::channel();
+    let (attachment_ending_sender, attachment_ending_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut client = build_test_client();
+        client.client_config.remote_link_timeout_ms = remote_link_timeout_ms;
+        let client_id = client.get_client_id();
+        let mut screen = build_test_screen();
+        let mut uplink = build_test_uplink(request_sender);
+        let mut cell_size_query =
+            terminal::CellSizeQuery::from_current_measurement(None, false, false);
+        let attachment_ending = run_attachment(
+            &home,
+            SessionId::new(),
+            client_id,
+            ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+            None,
+            &mut client,
+            &mut screen,
+            &mut uplink,
+            terminal::GraphicsSupport::Unsupported,
+            &mut cell_size_query,
+            &mut Vec::new(),
+            loop_incoming_sender,
+            incoming_receiver,
+        );
+        let _ = attachment_ending_sender.send(attachment_ending);
+    });
+    (
+        incoming_sender,
+        request_receiver,
+        attachment_ending_receiver,
+    )
+}
+
+#[test]
+fn a_remote_link_sends_its_first_ping_as_soon_as_the_attachment_starts() {
+    // A 60-second link timeout pings every 20 seconds after the first ping.
+    let (incoming_sender, request_receiver, attachment_ending_receiver) =
+        start_test_attachment(build_remote_home(), 60_000, Vec::new());
+
+    let first_request = request_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the loop queues a request inside 10 seconds");
+    let _ = incoming_sender.send(Incoming::Input(Box::new(RuntimeEvent::Quit)));
+    let attachment_ending = attachment_ending_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the attachment ended");
+
+    assert_eq!(
+        first_request,
+        IpcRequest {
+            request_id: FIRST_POST_ATTACH_REQUEST_ID,
+            request_kind: IpcRequestKind::Ping,
+        }
+    );
+    assert_eq!(attachment_ending, AttachmentEnding::TerminalGone);
+    let later_request_kinds: Vec<IpcRequestKind> = request_receiver
+        .try_iter()
+        .map(|sent_request| sent_request.request_kind)
+        .collect();
+    assert_eq!(
+        later_request_kinds,
+        vec![IpcRequestKind::Leaving {
+            is_returning: false
+        }]
+    );
+}
+
+#[test]
+fn a_remote_link_pings_on_its_cadence_and_its_last_request_says_the_viewer_does_not_return() {
+    let (attachment_ending, sent_request_kinds) = run_attachment_until_the_terminal_goes(
+        build_remote_home(),
+        30,
+        Vec::new(),
+        Duration::from_millis(300),
+    );
+
+    assert_eq!(attachment_ending, AttachmentEnding::TerminalGone);
+    let (last_request_kind, earlier_request_kinds) = sent_request_kinds
+        .split_last()
+        .expect("the loop queued requests");
+    assert_eq!(
+        *last_request_kind,
+        IpcRequestKind::Leaving {
+            is_returning: false
+        }
+    );
+    assert!(
+        !earlier_request_kinds.is_empty(),
+        "a 10 ms cadence pings at least once in 300 ms"
+    );
+    assert!(
+        earlier_request_kinds
+            .iter()
+            .all(|request_kind| *request_kind == IpcRequestKind::Ping),
+        "every request before the last is a ping, got {earlier_request_kinds:?}"
+    );
+}
+
+#[test]
+fn a_local_link_sends_no_ping() {
+    let (attachment_ending, sent_request_kinds) = run_attachment_until_the_terminal_goes(
+        build_local_home(),
+        30,
+        Vec::new(),
+        Duration::from_millis(300),
+    );
+
+    assert_eq!(attachment_ending, AttachmentEnding::TerminalGone);
+    assert_eq!(
+        sent_request_kinds,
+        vec![IpcRequestKind::Leaving {
+            is_returning: false
+        }]
+    );
+}
+
+#[test]
+fn a_viewer_the_session_moves_away_says_it_does_not_return() {
+    let next_session_id = SessionId::new();
+    let (attachment_ending, sent_request_kinds) = run_attachment_until_the_terminal_goes(
+        build_local_home(),
+        30_000,
+        vec![Incoming::Frame {
+            connection_index: INITIAL_CONNECTION_INDEX,
+            session_event_result: Ok(SessionEvent::SwitchTo {
+                session_id: next_session_id,
+            }),
+        }],
+        Duration::ZERO,
+    );
+
+    assert_eq!(
+        attachment_ending,
+        AttachmentEnding::SwitchSession(next_session_id)
+    );
+    assert_eq!(
+        sent_request_kinds,
+        vec![IpcRequestKind::Leaving {
+            is_returning: false
+        }]
+    );
+}
+
+#[test]
+fn a_remote_viewer_leaving_a_dropped_link_to_dial_again_says_it_returns() {
+    // Both events wait in the queue before the loop starts, so the loop reads
+    // the dropped link before its first ping. The terminal goes away before
+    // the first dial is due, so no dial runs.
+    let (attachment_ending, sent_request_kinds) = run_attachment_until_the_terminal_goes(
+        build_remote_home(),
+        30_000,
+        vec![
+            Incoming::Frame {
+                connection_index: INITIAL_CONNECTION_INDEX,
+                session_event_result: Err(IpcError::Disconnected),
+            },
+            Incoming::Input(Box::new(RuntimeEvent::Quit)),
+        ],
+        Duration::ZERO,
+    );
+
+    assert_eq!(attachment_ending, AttachmentEnding::TerminalGone);
+    assert_eq!(
+        sent_request_kinds,
+        vec![IpcRequestKind::Leaving { is_returning: true }],
+        "the dropped link's queue is closed: no second Leaving follows"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hangup_ends_the_attachment_only_while_this_process_does_not_ignore_hangups() {
+    let (incoming_sender, incoming_receiver) = mpsc::sync_channel(INCOMING_QUEUE_CAPACITY);
+
+    // SAFETY: `SIG_IGN` is a valid action for `SIGHUP`, and the call installs
+    // no handler function.
+    unsafe { libc::signal(libc::SIGHUP, libc::SIG_IGN) };
+    let ignored_hangup_watch =
+        TerminalCloseWatch::start_terminal_close_watch(incoming_sender.clone())
+            .expect("the SIGHUP action is read");
+    assert!(
+        ignored_hangup_watch.is_none(),
+        "a process that ignores SIGHUP starts no watch"
+    );
+
+    // SAFETY: `SIG_DFL` is a valid action for `SIGHUP`, and the call installs
+    // no handler function.
+    unsafe { libc::signal(libc::SIGHUP, libc::SIG_DFL) };
+    let hangup_watch = TerminalCloseWatch::start_terminal_close_watch(incoming_sender)
+        .expect("SIGHUP is registered")
+        .expect("a process that does not ignore SIGHUP starts a watch");
+    signal_hook::low_level::raise(libc::SIGHUP).expect("SIGHUP is raised");
+
+    let Incoming::Input(runtime_event) = incoming_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the hangup reaches the attachment channel")
+    else {
+        panic!("the channel contained a session event");
+    };
+    let RuntimeEvent::Quit = *runtime_event else {
+        panic!("the channel contained another input event");
+    };
+
+    drop(hangup_watch);
+    assert_eq!(
+        incoming_receiver
+            .recv_timeout(Duration::from_secs(10))
+            .err(),
+        Some(mpsc::RecvTimeoutError::Disconnected),
+        "the stopped watch ends its thread and sends nothing more"
+    );
 }

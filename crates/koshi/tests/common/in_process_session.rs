@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
+use koshi_config::layer::PartialKoshiConfig;
 use koshi_core::command::CommandResult;
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::Event;
@@ -58,11 +59,23 @@ pub struct RunningSession {
 
 impl RunningSession {
     /// Start a session server on its own thread and return once its endpoint
-    /// file is readable.
+    /// file is readable. The session server keeps every built-in setting.
     ///
     /// # Panics
     /// When the endpoint file is still unreadable after [`WAIT_DURATION`].
     pub fn start_session() -> RunningSession {
+        Self::start_session_with_app_config(None)
+    }
+
+    /// [`start_session`](Self::start_session) with `startup_app_config` as the
+    /// `koshi.kdl` settings the session server reads at its start. `None`
+    /// keeps every built-in setting.
+    ///
+    /// # Panics
+    /// When the endpoint file is still unreadable after [`WAIT_DURATION`].
+    pub fn start_session_with_app_config(
+        startup_app_config: Option<PartialKoshiConfig>,
+    ) -> RunningSession {
         let runtime_directory = build_test_runtime_directory();
         let session_id = SessionId::new();
         let (inbox_sender, inbox_receiver) = mpsc::channel();
@@ -77,6 +90,7 @@ impl RunningSession {
             serve_session(
                 &serving_runtime_directory,
                 session_id,
+                startup_app_config,
                 serving_pty_backend,
                 inbox_receiver,
                 serving_inbox_sender,
@@ -148,21 +162,23 @@ impl Drop for RunningSession {
     }
 }
 
-/// Build one session's server on `fake_pty_backend`, seed the session named
-/// `quiet-lake`, bind its control socket in `runtime_directory`, and serve the
-/// runtime inbox until the session ends.
+/// Build one session's server on `fake_pty_backend` with `startup_app_config`
+/// as its `koshi.kdl` settings, seed the session named `quiet-lake`, bind its
+/// control socket in `runtime_directory`, and serve the runtime inbox until the
+/// session ends.
 ///
 /// The session is seeded before the socket binds.
 fn serve_session(
     runtime_directory: &Path,
     session_id: SessionId,
+    startup_app_config: Option<PartialKoshiConfig>,
     fake_pty_backend: Arc<FakePtyBackend>,
     inbox_receiver: mpsc::Receiver<RuntimeEvent>,
     inbox_sender: mpsc::Sender<RuntimeEvent>,
 ) {
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend;
     let mut session_server = Server::from_runtime_parts(pty_backend, inbox_receiver);
-    session_server.load_startup_config(None);
+    session_server.load_startup_config(startup_app_config);
     session_server
         .bootstrap_session(
             session_id,

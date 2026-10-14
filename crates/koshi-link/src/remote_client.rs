@@ -2,21 +2,24 @@
 //! machine.
 //!
 //! A user names a server either by the address it listens on, `host:port`, or
-//! by the name they gave it when they first connected.
-//! [`resolve_server`] turns what they
-//! typed into one of the two, reading the saved-server store on this machine.
+//! by the name they saved it under. [`resolve_server`] turns what they typed
+//! into one of the two, reading the saved-server store on this machine.
+//! A server this machine has not saved also needs the fingerprint of the
+//! certificate it must present, from `--certificate-fingerprint`. A saved one
+//! carries its own, and a saved one holding none is not dialled.
 //!
 //! The secret from a grant never arrives as a command-line argument.
 //! [`resolve_server_connection_token`] reads it from
 //! `KOSHI_REMOTE_SECRET`, or asks for it at the terminal without printing
 //! what is typed.
 //!
-//! [`connect_remote_server`] opens the TLS stream, presents
-//! the secret, and hands back a
+//! [`connect_remote_server`] opens the TLS stream, checks the certificate
+//! against the fingerprint it was given, presents the secret, and hands back a
 //! [`RemoteLink`] once the server answers
 //! `Welcome`. [`connect_saved_server`] wraps
 //! that with the store: a server reached for the first time is saved with the
-//! fingerprint it presented, and a saved one has its last-used time stamped.
+//! fingerprint it was dialled with, and a saved one has its last-used time
+//! stamped.
 //!
 //! From an open link a caller lists the sessions the secret reaches, attaches
 //! to one, submits one command to one, or asks one to describe itself.
@@ -24,7 +27,8 @@
 //! returns, inside one deadline, the sessions of each server that answered.
 //!
 //! Every TLS and remote-frame detail stays inside this module. Callers name
-//! sessions, secrets and addresses, and never a certificate or a frame.
+//! sessions, secrets, addresses and certificate fingerprints, and never a
+//! frame.
 
 use std::fs::File;
 use std::io::{self, Read};
@@ -82,8 +86,8 @@ pub const JOIN_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
 /// counted from the moment the connection opens.
 ///
 /// The dial before it has [`DIAL_TIMEOUT_DURATION`] of its own, so one request takes at most
-/// `DIAL_TIMEOUT_DURATION + REPLY_TIMEOUT_DURATION`. An attached client passes `None` instead and
-/// waits as long as it takes.
+/// `DIAL_TIMEOUT_DURATION + REPLY_TIMEOUT_DURATION`. A client that joins a session as a viewer
+/// passes [`JOIN_TIMEOUT_DURATION`] instead.
 pub const REPLY_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
 
 /// How many saved servers [`reach_all_saved_servers`] asks at once, one thread each. Records
@@ -106,14 +110,17 @@ const STORE_LOCK_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(20);
 /// Which server an invocation talks to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerReference {
-    /// A server this machine has saved, with its secret and — once a
-    /// connection to it has opened — its pinned fingerprint.
+    /// A server this machine has saved, with its secret and the fingerprint
+    /// its certificate must have.
     Saved(SavedServer),
-    /// A server this machine has not connected to, named by the address it
-    /// listens on.
+    /// A server this machine has not saved, named by the address it listens
+    /// on.
     New {
         /// Where the server listens, as `host:port`.
         server_address: String,
+        /// The fingerprint the server's certificate must have, as 64
+        /// lowercase hex characters.
+        certificate_fingerprint: String,
     },
 }
 
@@ -124,9 +131,23 @@ impl ServerReference {
     pub fn format_server_label(&self) -> String {
         match self {
             Self::Saved(saved_server) => format_saved_server_label(saved_server),
-            Self::New { server_address } => server_address.clone(),
+            Self::New { server_address, .. } => server_address.clone(),
         }
     }
+}
+
+/// The sentence that refuses to dial the saved server `saved_server_label`
+/// names, which holds no certificate fingerprint.
+///
+/// Example — `desk` gives ``desk holds no certificate fingerprint, so it is
+/// not dialled; run `koshi remote edit desk` and give the fingerprint `koshi
+/// share grant` printed on that machine``.
+fn format_missing_fingerprint_refusal(saved_server_label: &str) -> String {
+    format!(
+        "{saved_server_label} holds no certificate fingerprint, so it is not dialled; run \
+         `koshi remote edit {saved_server_label}` and give the fingerprint `koshi share grant` \
+         printed on that machine"
+    )
 }
 
 /// How one saved server is named in a message: the name the user chose when
@@ -146,9 +167,6 @@ pub struct RemoteLink {
     pub frame_reader: FrameReader,
     /// The frames this client sends.
     pub frame_writer: FrameWriter,
-    /// The sha256 of the certificate the server presented, as 64 lowercase
-    /// hex characters.
-    pub certificate_fingerprint: String,
 }
 
 /// Why one dial did not hand back a connection.
@@ -159,7 +177,7 @@ pub enum DialError {
     /// The server's router answered that it is restarting into a new build,
     /// and a dial after the restart can succeed.
     Restarting(CliError),
-    /// The server — or the pinned-certificate check — answered, and every
+    /// The server — or the certificate check — answered, and every
     /// identical dial after it gets the same answer.
     Refused(CliError),
 }
@@ -194,12 +212,12 @@ enum Reach {
         /// The sentence a dial to that server reports for the same refusal.
         refusal_detail: String,
     },
-    /// The server answered and presented a certificate other than the one
-    /// pinned for it.
-    CertificateChanged {
+    /// The server presented a certificate other than the one its record
+    /// holds the fingerprint of.
+    CertificateMismatch {
         /// The server's name when it has one, else its address.
         server_label: String,
-        /// The sentence naming the pinned and the presented certificate.
+        /// The sentence naming the expected and the presented certificate.
         certificate_error_detail: String,
     },
     /// The server could not be reached, was still unanswered at the deadline,
@@ -208,7 +226,8 @@ enum Reach {
         /// The server's name when it has one, else its address.
         server_label: String,
     },
-    /// The record pins no certificate, and the sweep did not dial it.
+    /// The record holds no certificate fingerprint, and the sweep did not
+    /// dial it.
     Unchecked {
         /// The server's name when it has one, else its address.
         server_label: String,
@@ -374,40 +393,68 @@ fn build_saved_server_store_error(ipc_error: IpcError) -> CliError {
 }
 
 /// The server selector names: a saved record whose name or address matches the
-/// selector, or a server this machine has not connected to when the selector is
-/// an address.
+/// selector, or a server this machine has not saved when the selector is an
+/// address.
+///
+/// `certificate_fingerprint` is the value given with
+/// `--certificate-fingerprint`, or `None` when none was given. A server this
+/// machine has not saved needs it, and a saved one refuses it.
 ///
 /// Example — `work` matches the record the user named `work`, and
-/// `laptop.local:7654` with no matching record is [`ServerReference::New`].
+/// `laptop.local:7654` with no matching record and a fingerprint given is
+/// [`ServerReference::New`].
 ///
 /// A selector that matches more than one record is refused, and no dial is
 /// made.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the selector matches no record and is not an
-/// address, and when it matches more than one.
-pub fn resolve_server(server_selector_text: &str) -> Result<ServerReference, CliError> {
+/// address, when it matches more than one, when it matches a saved server and
+/// a fingerprint is given, and when it is an address no record holds and the
+/// fingerprint is missing or is not 64 lowercase hex characters.
+pub fn resolve_server(
+    server_selector_text: &str,
+    certificate_fingerprint: Option<&str>,
+) -> Result<ServerReference, CliError> {
     let (_, saved_server_store) = load_saved_server_store()?;
     resolve_server_reference(
         saved_server_store.find_saved_server(server_selector_text),
         server_selector_text,
+        certificate_fingerprint,
     )
 }
 
-/// Which server the selector names, given what the store said about it.
+/// Which server the selector names, given what the store said about it and
+/// the fingerprint given with `--certificate-fingerprint`.
 ///
-/// [`SavedServerLookup::Saved`] dials with that record's pinned fingerprint;
-/// [`SavedServerLookup::NotSaved`] with an address shape dials with none.
+/// [`SavedServerLookup::Saved`] dials with the fingerprint that record holds
+/// and refuses `certificate_fingerprint`. [`SavedServerLookup::NotSaved`] with
+/// an address shape dials with `certificate_fingerprint`, and refuses to go on
+/// without one.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the selector names nothing and is not an
-/// address, and when it names more than one saved server.
+/// address, when it names more than one saved server, when it names a saved
+/// server and `certificate_fingerprint` is `Some`, and when it is an address
+/// nothing is saved under and `certificate_fingerprint` is `None` or fails
+/// [`validate_certificate_fingerprint`].
 fn resolve_server_reference(
     server_lookup: SavedServerLookup<'_>,
     server_selector_text: &str,
+    certificate_fingerprint: Option<&str>,
 ) -> Result<ServerReference, CliError> {
     match server_lookup {
         SavedServerLookup::Saved(saved_server) => {
+            if certificate_fingerprint.is_some() {
+                let saved_server_label = format_saved_server_label(saved_server);
+                return Err(CliError::InvalidArgs {
+                    detail: format!(
+                        "{saved_server_label} is already saved, so --certificate-fingerprint \
+                         would change nothing; run `koshi remote edit {saved_server_label}` to \
+                         change the fingerprint it expects"
+                    ),
+                });
+            }
             Ok(ServerReference::Saved(saved_server.clone()))
         }
         SavedServerLookup::Ambiguous => Err(CliError::InvalidArgs {
@@ -417,8 +464,19 @@ fn resolve_server_reference(
             ),
         }),
         SavedServerLookup::NotSaved if is_server_address(server_selector_text) => {
+            let Some(certificate_fingerprint) = certificate_fingerprint else {
+                return Err(CliError::InvalidArgs {
+                    detail: format!(
+                        "{server_selector_text} is not saved, so the fingerprint of its \
+                         certificate is needed: add `--certificate-fingerprint <FINGERPRINT>` \
+                         with the fingerprint `koshi share grant` printed on that machine"
+                    ),
+                });
+            };
+            validate_certificate_fingerprint(certificate_fingerprint)?;
             Ok(ServerReference::New {
                 server_address: server_selector_text.to_string(),
+                certificate_fingerprint: certificate_fingerprint.to_string(),
             })
         }
         SavedServerLookup::NotSaved => Err(CliError::InvalidArgs {
@@ -474,6 +532,29 @@ pub fn validate_saved_server_name(saved_server_name: &str) -> Result<(), CliErro
         });
     }
     Ok(())
+}
+
+/// Refuse a certificate fingerprint that is not 64 lowercase hex characters,
+/// the shape `koshi share grant` prints.
+///
+/// Example — 64 `a` characters are taken. 64 `A` characters, 63 `a`
+/// characters, and 64 `g` characters are refused.
+///
+/// # Errors
+/// [`CliError::InvalidArgs`] naming the shape.
+pub fn validate_certificate_fingerprint(certificate_fingerprint: &str) -> Result<(), CliError> {
+    let is_fingerprint_shape = certificate_fingerprint.len() == 64
+        && certificate_fingerprint
+            .bytes()
+            .all(|fingerprint_byte| matches!(fingerprint_byte, b'0'..=b'9' | b'a'..=b'f'));
+    if is_fingerprint_shape {
+        return Ok(());
+    }
+    Err(CliError::InvalidArgs {
+        detail: "a certificate fingerprint is 64 lowercase hex characters, as `koshi share \
+                 grant` prints it on the machine that serves"
+            .to_string(),
+    })
 }
 
 /// Refuse a saved name that cannot be given to the server at `server_address`.
@@ -642,9 +723,9 @@ fn build_input_ended_error() -> CliError {
 
 /// Open a connection to `server_address` and present `connection_token`.
 ///
-/// `pinned_certificate_fingerprint` is the fingerprint saved from an earlier
-/// connection, or `None` on the first connection to this server. A server
-/// presenting a different certificate is refused.
+/// `expected_certificate_fingerprint` is the fingerprint the server's
+/// certificate must have. A server presenting another certificate is refused
+/// before `connection_token` is sent.
 ///
 /// `dial_timeout` bounds the connect, the TLS handshake and the secret exchange
 /// together. The name lookup before them is the operating system's own and
@@ -653,13 +734,14 @@ fn build_input_ended_error() -> CliError {
 ///
 /// # Errors
 /// [`DialError::Unreachable`] when the connection could not be opened or the
-/// exchange ran out of time. [`DialError::Refused`] when the certificate
-/// changed, the server did not admit the secret, the remote protocol version it
-/// settled on is one this build does not speak, or it answered something else.
+/// exchange ran out of time. [`DialError::Refused`] when the certificate is not
+/// the expected one, the server did not admit the secret, the remote protocol
+/// version it settled on is one this build does not speak, or it answered
+/// something else.
 pub fn connect_remote_server(
     server_address: &str,
     connection_token: &ConnectionToken,
-    pinned_certificate_fingerprint: Option<&str>,
+    expected_certificate_fingerprint: &str,
     dial_timeout: Duration,
     reply_timeout: Option<Duration>,
 ) -> Result<RemoteLink, DialError> {
@@ -670,30 +752,28 @@ pub fn connect_remote_server(
         maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: connection_token.clone(),
     };
-    let (frame_reader, frame_writer, certificate_fingerprint, remote_server_answer) =
-        remote_wire::open_remote_connection(
-            server_address,
-            pinned_certificate_fingerprint,
-            &remote_hello,
-            dial_timeout,
-            reply_timeout,
-        )
-        .map_err(classify_dial_failure)?;
+    let (frame_reader, frame_writer, remote_server_answer) = remote_wire::open_remote_connection(
+        server_address,
+        expected_certificate_fingerprint,
+        &remote_hello,
+        dial_timeout,
+        reply_timeout,
+    )
+    .map_err(classify_dial_failure)?;
     validate_remote_server_answer(server_address, &remote_server_answer)?;
     Ok(RemoteLink {
         frame_reader,
         frame_writer,
-        certificate_fingerprint,
     })
 }
 
-/// How one dial's transport failure classifies: a certificate that does not
-/// match the pinned one is [`DialError::Refused`], every other transport
-/// failure is [`DialError::Unreachable`]. The message is
+/// How one dial's transport failure classifies: a certificate that is not the
+/// expected one is [`DialError::Refused`], every other transport failure is
+/// [`DialError::Unreachable`]. The message is
 /// [`build_ipc_unavailable_error`]'s either way.
 fn classify_dial_failure(ipc_error: IpcError) -> DialError {
     match ipc_error {
-        IpcError::CertificateChanged { .. } => {
+        IpcError::CertificateMismatch { .. } => {
             DialError::Refused(build_ipc_unavailable_error(ipc_error))
         }
         _ => DialError::Unreachable(build_ipc_unavailable_error(ipc_error)),
@@ -718,7 +798,7 @@ fn classify_dial_failure(ipc_error: IpcError) -> DialError {
 ///
 /// Every refusal built here carries [`CliError::Runtime`].
 /// [`probe_saved_server`] reads a [`DialError::Refused`] carrying
-/// [`CliError::IpcUnavailable`] as the pinned-certificate check, and one
+/// [`CliError::IpcUnavailable`] as the certificate check, and one
 /// carrying [`CliError::Runtime`] as a server refusal.
 ///
 /// Example — a `Refused` frame carrying `"the session is gone"` from
@@ -775,20 +855,19 @@ fn validate_remote_server_answer(
 /// Open a connection to the server argument, saving what the next
 /// connection needs.
 ///
-/// A saved server presents the secret and the fingerprint its record holds, and
-/// its last-used time is stamped once the connection opens. A record holding
-/// no fingerprint takes the one the store pins for that address now, and pins
-/// the certificate this connection presented when the store pins none either.
-/// A store that will not take those changes leaves a log line and the
+/// A saved server presents the secret its record holds and expects the
+/// fingerprint its record holds, and its last-used time is stamped once the
+/// connection opens. A record holding no fingerprint is refused, and nothing
+/// is dialled. A store that will not take the stamp leaves a log line and the
 /// connection stands.
 ///
 /// A server reached for the first time asks for its secret ([`resolve_server_connection_token`]),
-/// pins whatever certificate it presents, and is saved under `save_as` once it
-/// admits the connection. A store that will not take that record fails the
-/// call.
+/// expects the fingerprint its [`ServerReference::New`] carries, and is saved
+/// with that fingerprint under `save_as` once it admits the connection. A store
+/// that will not take that record fails the call.
 ///
-/// `save_as` names a server this machine has not connected to. Given for a
-/// server that is already saved, it is refused.
+/// `save_as` names a server this machine has not saved. Given for a server
+/// that is already saved, it is refused.
 ///
 /// `reply_timeout` is passed straight to [`connect_remote_server`].
 ///
@@ -797,9 +876,10 @@ fn validate_remote_server_answer(
 /// # Errors
 /// Whatever [`connect_remote_server`] reports. [`DialError::Refused`] carrying
 /// [`CliError::InvalidArgs`] when `save_as` names a server that is already
-/// saved, when the name cannot be given to that address, and when no secret was
-/// given; carrying [`CliError::IpcUnavailable`] when a server reached for the
-/// first time could not be saved.
+/// saved, when a saved server holds no fingerprint, when the name cannot be
+/// given to that address, and when no secret was given; carrying
+/// [`CliError::IpcUnavailable`] when a server reached for the first time could
+/// not be saved.
 pub fn connect_saved_server(
     server_reference: &ServerReference,
     save_as: Option<&str>,
@@ -817,23 +897,19 @@ pub fn connect_saved_server(
                     ),
                 }));
             }
-            let pinned_certificate_fingerprint = saved_server_record
-                .certificate_fingerprint
-                .clone()
-                .or_else(|| {
-                    load_saved_server_store()
-                        .ok()
-                        .and_then(|(_, saved_server_store)| {
-                            find_pinned_certificate_fingerprint(
-                                &saved_server_store,
-                                &saved_server_record.server_address,
-                            )
-                        })
-                });
+            let Some(saved_certificate_fingerprint) =
+                saved_server_record.certificate_fingerprint.as_deref()
+            else {
+                return Err(DialError::Refused(CliError::InvalidArgs {
+                    detail: format_missing_fingerprint_refusal(&format_saved_server_label(
+                        saved_server_record,
+                    )),
+                }));
+            };
             let remote_link = connect_remote_server(
                 &saved_server_record.server_address,
                 &saved_server_record.connection_token,
-                pinned_certificate_fingerprint.as_deref(),
+                saved_certificate_fingerprint,
                 DIAL_TIMEOUT_DURATION,
                 reply_timeout,
             )?;
@@ -841,24 +917,19 @@ pub fn connect_saved_server(
             let store_update_result = update_saved_server_store(|saved_server_store| {
                 saved_server_store
                     .mark_server_used(&saved_server_record.server_address, connection_opened_at);
-                if saved_server_record.certificate_fingerprint.is_none() {
-                    saved_server_store.pin_certificate_fingerprint(
-                        &saved_server_record.server_address,
-                        remote_link.certificate_fingerprint.clone(),
-                    );
-                }
                 Ok(())
             });
             if let Err(store_update_error) = store_update_result {
                 tracing::warn!(%store_update_error, "the record was not updated");
             }
             let mut updated_saved_server = saved_server_record.clone();
-            updated_saved_server.certificate_fingerprint =
-                Some(remote_link.certificate_fingerprint.clone());
             updated_saved_server.last_used_at = Some(connection_opened_at);
             Ok((remote_link, updated_saved_server))
         }
-        ServerReference::New { server_address } => {
+        ServerReference::New {
+            server_address,
+            certificate_fingerprint,
+        } => {
             if let Some(save_as_name) = save_as {
                 validate_save_as(save_as_name, server_address).map_err(DialError::Refused)?;
             }
@@ -867,7 +938,7 @@ pub fn connect_saved_server(
             let remote_link = connect_remote_server(
                 server_address,
                 &connection_token,
-                None,
+                certificate_fingerprint,
                 DIAL_TIMEOUT_DURATION,
                 reply_timeout,
             )?;
@@ -876,7 +947,7 @@ pub fn connect_saved_server(
                 server_name: save_as.map(str::to_string),
                 server_address: server_address.clone(),
                 connection_token,
-                certificate_fingerprint: Some(remote_link.certificate_fingerprint.clone()),
+                certificate_fingerprint: Some(certificate_fingerprint.clone()),
                 added_at: connection_opened_at,
                 last_used_at: Some(connection_opened_at),
             };
@@ -890,20 +961,6 @@ pub fn connect_saved_server(
             .map_err(DialError::Refused)?;
             Ok((remote_link, new_saved_server))
         }
-    }
-}
-
-/// The fingerprint the saved-server store pins for `server_address`, or `None` when no record
-/// answers to it, more than one does, or the one that does pins nothing.
-fn find_pinned_certificate_fingerprint(
-    saved_server_store: &ServerStore,
-    server_address: &str,
-) -> Option<String> {
-    match saved_server_store.find_saved_server(server_address) {
-        SavedServerLookup::Saved(saved_server_record) => {
-            saved_server_record.certificate_fingerprint.clone()
-        }
-        SavedServerLookup::NotSaved | SavedServerLookup::Ambiguous => None,
     }
 }
 
@@ -945,19 +1002,30 @@ pub fn list_remote_sessions(
 /// token and the versions this build named. The next frame the caller reads
 /// is that session server's Hello answer.
 ///
+/// `link_timeout` goes up in the Attach as `link_timeout_ms`, in whole
+/// milliseconds: the serving machine ends the connection once a socket write
+/// to this caller takes no byte, or a socket read from this caller gets no
+/// byte, for that long. A socket read before this caller's first byte after
+/// the Attach waits for the larger of that and 20 seconds. A timeout past
+/// `u32::MAX` milliseconds goes up as `u32::MAX`.
+///
 /// # Errors
 /// [`CliError::IpcUnavailable`] when the request could not be sent.
 pub fn attach_remote_session(
     remote_link: RemoteLink,
     session_selector: SessionSelector,
+    link_timeout: Duration,
 ) -> Result<(FrameReader, FrameWriter), CliError> {
     let RemoteLink {
         frame_reader,
         mut frame_writer,
-        ..
     } = remote_link;
+    let link_timeout_ms = u32::try_from(link_timeout.as_millis()).unwrap_or(u32::MAX);
     frame_writer
-        .send(&RemoteClientFrame::Attach { session_selector })
+        .send(&RemoteClientFrame::Attach {
+            session_selector,
+            link_timeout_ms: Some(link_timeout_ms),
+        })
         .map_err(build_ipc_unavailable_error)?;
     Ok((frame_reader, frame_writer))
 }
@@ -1150,6 +1218,8 @@ pub fn fetch_remote_overview(
 /// from the Hello answer the server sent on this caller's behalf, then send
 /// the IPC request and read its answer.
 ///
+/// The Attach names [`REPLY_TIMEOUT_DURATION`] as its link timeout.
+///
 /// The dial, the Attach and the Hello answer run through
 /// [`dial_through_router_restart`] with
 /// [`RESTART_WINDOW_DURATION`](koshi_ipc::endpoint::RESTART_WINDOW_DURATION):
@@ -1165,9 +1235,12 @@ fn send_remote_ipc_request(
         dial_through_router_restart(koshi_ipc::endpoint::RESTART_WINDOW_DURATION, || {
             let (remote_link, _) =
                 connect_saved_server(server_reference, None, Some(REPLY_TIMEOUT_DURATION))?;
-            let (mut frame_reader, frame_writer) =
-                attach_remote_session(remote_link, session_selector.clone())
-                    .map_err(DialError::Unreachable)?;
+            let (mut frame_reader, frame_writer) = attach_remote_session(
+                remote_link,
+                session_selector.clone(),
+                REPLY_TIMEOUT_DURATION,
+            )
+            .map_err(DialError::Unreachable)?;
             let hello_response = read_forwarded_hello_answer(&mut frame_reader, &session_selector)?;
             Ok((frame_reader, frame_writer, hello_response))
         })?;
@@ -1194,19 +1267,14 @@ fn send_remote_ipc_request(
 /// Every other asked server prints one line on standard error and adds no row:
 ///
 /// - a refusal: `koshi: <server>: <the sentence a dial to it reports>`;
-/// - a changed certificate: `koshi: <server>: <the certificate failure> its
-///   sessions are not listed`;
+/// - a certificate that is not the expected one: `koshi: <server>: <the
+///   certificate failure> its sessions are not listed`;
 /// - no answer: `koshi: <server> did not answer; its sessions are not listed`;
-/// - no pinned certificate: ``koshi: <server> has no pinned certificate yet;
-///   run `koshi <pinning_command_name> --remote <server>` to connect and pin
-///   it``.
-///
-/// `pinning_command_name` is the koshi command the last line names, such as
-/// `attach`.
+/// - no fingerprint: ``koshi: <server> holds no certificate fingerprint, so it
+///   is not dialled; run `koshi remote edit <server>` and give the fingerprint
+///   `koshi share grant` printed on that machine``.
 #[must_use]
-pub fn list_saved_server_session_rows(
-    pinning_command_name: &str,
-) -> Vec<(String, RemoteSessionRow)> {
+pub fn list_saved_server_session_rows() -> Vec<(String, RemoteSessionRow)> {
     let mut saved_server_session_rows = Vec::new();
     for reach in reach_all_saved_servers(REACH_TIMEOUT_DURATION) {
         match reach {
@@ -1224,7 +1292,7 @@ pub fn list_saved_server_session_rows(
                 server_label,
                 refusal_detail,
             } => eprintln!("koshi: {server_label}: {refusal_detail}"),
-            Reach::CertificateChanged {
+            Reach::CertificateMismatch {
                 server_label,
                 certificate_error_detail,
             } => {
@@ -1236,8 +1304,8 @@ pub fn list_saved_server_session_rows(
                 eprintln!("koshi: {server_label} did not answer; its sessions are not listed");
             }
             Reach::Unchecked { server_label } => eprintln!(
-                "koshi: {server_label} has no pinned certificate yet; \
-                 run `koshi {pinning_command_name} --remote {server_label}` to connect and pin it"
+                "koshi: {}",
+                format_missing_fingerprint_refusal(&server_label)
             ),
         }
     }
@@ -1253,12 +1321,12 @@ pub fn list_saved_server_session_rows(
 ///
 /// At most 16 records are asked. The rest are named on stderr and left out.
 ///
-/// A record pinning no certificate is [`Reach::Unchecked`], and no secret is
-/// presented to it.
+/// A record holding no certificate fingerprint is [`Reach::Unchecked`], and no
+/// secret is presented to it.
 ///
 /// A server that answered with a refusal is [`Reach::Refused`]. A server that
-/// presented a certificate other than the pinned one is
-/// [`Reach::CertificateChanged`]. A server that could not be reached or was
+/// presented a certificate other than the one its record holds the fingerprint
+/// of is [`Reach::CertificateMismatch`]. A server that could not be reached or was
 /// still unanswered at the deadline is [`Reach::Unreachable`]. Every
 /// record comes back as exactly one entry, sorted by server label. A store that
 /// cannot be read reads as no saved servers.
@@ -1322,7 +1390,7 @@ fn get_reach_server_label(reach: &Reach) -> &str {
     match reach {
         Reach::Reached { server_label, .. }
         | Reach::Refused { server_label, .. }
-        | Reach::CertificateChanged { server_label, .. }
+        | Reach::CertificateMismatch { server_label, .. }
         | Reach::Unreachable { server_label }
         | Reach::Unchecked { server_label } => server_label,
     }
@@ -1360,11 +1428,12 @@ fn complete_reach_results(
 
 /// Ask one saved server for its sessions.
 ///
-/// A record pinning no certificate is [`Reach::Unchecked`] and is not dialled.
+/// A record holding no certificate fingerprint is [`Reach::Unchecked`] and is
+/// not dialled.
 ///
 /// A failure carrying [`CliError::Runtime`] — every refusal the server sent —
 /// is [`Reach::Refused`]. A dial refused with [`CliError::IpcUnavailable`] is
-/// the pinned-certificate check and is [`Reach::CertificateChanged`]:
+/// the certificate check and is [`Reach::CertificateMismatch`]:
 /// [`classify_dial_failure`] is the only place that builds one, and every
 /// refusal [`validate_remote_server_answer`] builds carries
 /// [`CliError::Runtime`]. Every other failure is [`Reach::Unreachable`].
@@ -1374,7 +1443,7 @@ fn complete_reach_results(
 /// file.
 fn probe_saved_server(saved_server_record: &SavedServer, reach_deadline: Instant) -> Reach {
     let server_label = format_saved_server_label(saved_server_record);
-    let Some(pinned_certificate_fingerprint) =
+    let Some(saved_certificate_fingerprint) =
         saved_server_record.certificate_fingerprint.as_deref()
     else {
         return Reach::Unchecked { server_label };
@@ -1383,7 +1452,7 @@ fn probe_saved_server(saved_server_record: &SavedServer, reach_deadline: Instant
     let mut remote_link = match connect_remote_server(
         &saved_server_record.server_address,
         &saved_server_record.connection_token,
-        Some(pinned_certificate_fingerprint),
+        saved_certificate_fingerprint,
         remaining_wait_duration,
         Some(remaining_wait_duration),
     ) {
@@ -1391,7 +1460,7 @@ fn probe_saved_server(saved_server_record: &SavedServer, reach_deadline: Instant
         Err(DialError::Refused(CliError::IpcUnavailable {
             detail: certificate_error_detail,
         })) => {
-            return Reach::CertificateChanged {
+            return Reach::CertificateMismatch {
                 server_label,
                 certificate_error_detail,
             }

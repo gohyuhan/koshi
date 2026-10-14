@@ -269,7 +269,7 @@ fn a_record_carries_the_four_fields_a_listing_reports_and_the_secret_it_leaves_b
 }
 
 #[test]
-fn a_record_with_no_pinned_fingerprint_travels_without_the_field_and_reads_back() {
+fn a_record_with_no_fingerprint_travels_without_the_field_and_reads_back() {
     let mut saved_server = build_saved_server(Some("work"), "laptop.local:7654");
     saved_server.certificate_fingerprint = None;
 
@@ -279,7 +279,7 @@ fn a_record_with_no_pinned_fingerprint_travels_without_the_field_and_reads_back(
         .expect("a record encodes as an object");
     assert!(
         !saved_server_fields.contains_key("certificate_fingerprint"),
-        "no pinned fingerprint leaves the file without the field: {saved_server_fields:?}"
+        "no fingerprint leaves the file without the field: {saved_server_fields:?}"
     );
 
     let decoded_saved_server: SavedServer =
@@ -303,25 +303,6 @@ fn a_file_written_when_every_record_carried_a_fingerprint_still_reads() {
     assert_eq!(
         decoded_saved_server.certificate_fingerprint,
         Some("ab".repeat(32))
-    );
-}
-
-#[test]
-fn pinning_puts_the_fingerprint_on_the_named_record_and_an_ambiguous_name_pins_nothing() {
-    let mut store = build_single_server_store();
-    store.saved_servers[0].certificate_fingerprint = None;
-
-    store.pin_certificate_fingerprint("work", "ab".repeat(32));
-    assert_eq!(
-        store.saved_servers[0].certificate_fingerprint,
-        Some("ab".repeat(32))
-    );
-
-    store.pin_certificate_fingerprint("nobody", "ff".repeat(32));
-    assert_eq!(
-        store.saved_servers[0].certificate_fingerprint,
-        Some("ab".repeat(32)),
-        "a selector naming no record pins nothing"
     );
 }
 
@@ -637,34 +618,7 @@ fn an_ambiguous_selector_says_so_and_never_reads_as_nothing_saved() {
 }
 
 #[test]
-fn a_selector_two_records_answer_to_pins_nothing() {
-    // A hand-written file can hold what `save_server` refuses under rule 3.
-    let mut store = ServerStore::new();
-    store.saved_servers.push(SavedServer {
-        server_name: Some("target.example:7654".to_string()),
-        server_address: "other.example:7654".to_string(),
-        connection_token: ConnectionToken::generate(),
-        certificate_fingerprint: None,
-        added_at: SystemTime::UNIX_EPOCH,
-        last_used_at: None,
-    });
-    store.saved_servers.push(SavedServer {
-        server_name: None,
-        server_address: "target.example:7654".to_string(),
-        connection_token: ConnectionToken::generate(),
-        certificate_fingerprint: None,
-        added_at: SystemTime::UNIX_EPOCH,
-        last_used_at: None,
-    });
-
-    store.pin_certificate_fingerprint("target.example:7654", "ab".repeat(32));
-
-    assert_eq!(store.saved_servers[0].certificate_fingerprint, None);
-    assert_eq!(store.saved_servers[1].certificate_fingerprint, None);
-}
-
-#[test]
-fn a_record_with_no_pinned_fingerprint_survives_the_file_it_is_written_to() {
+fn a_record_with_no_fingerprint_survives_the_file_it_is_written_to() {
     let test_directory = TempDir::new().expect("make a test directory");
     let server_store_path = resolve_server_store_path(test_directory.path());
     let mut store = build_single_server_store();

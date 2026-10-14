@@ -161,8 +161,10 @@ router did restart into the installed build, and their panes keep running.
 
 The router converts the remote listener's certificate, remote access record, and grants.
 Koshi converts saved servers on their first read. For example, a saved server
-keeps its secret and certificate pin, and an existing grant keeps its scope and
-expiry.
+keeps its secret and certificate fingerprint, and an existing grant keeps its
+scope and expiry. A saved server that holds no fingerprint, such as one an
+older koshi saved before it ever connected, is not dialled until `koshi remote
+edit` gives it one.
 
 A session whose saved state is partly damaged still comes back. A pane whose
 screen could not be read comes back blank with a notice, and its program keeps
@@ -632,10 +634,10 @@ Example: terminals `client-1a2b…` and `client-3c4d…` both watch session
 | `koshi share grant <IDENTITY> [--session <SESSION>] [--expires <DURATION>]` | Grant an identity a remote access token |
 | `koshi share revoke <IDENTITY> [--session <SESSION>]` | Revoke the tokens an identity holds |
 | `koshi share list [--session <SESSION>] [--format table\|json]` | List the tokens granted on this machine |
-| `koshi attach --remote <SERVER> [--save-as <NAME>] [SESSION]` | Attach to a session on the machine `SERVER` names |
-| `koshi list-sessions --remote <SERVER>` | List the sessions on the machine `SERVER` names |
-| `koshi remote new` | Save a server, asking for its name, address and secret |
-| `koshi remote edit <SERVER>` | Change one saved server's name, address or secret |
+| `koshi attach --remote <SERVER> [--certificate-fingerprint <FINGERPRINT>] [--save-as <NAME>] [SESSION]` | Attach to a session on the machine `SERVER` names |
+| `koshi list-sessions --remote <SERVER> [--certificate-fingerprint <FINGERPRINT>]` | List the sessions on the machine `SERVER` names |
+| `koshi remote new` | Save a server, asking for its name, address, certificate fingerprint and secret |
+| `koshi remote edit <SERVER>` | Change one saved server's name, address, certificate fingerprint or secret |
 | `koshi remote list [--format table\|json]` | List the servers this machine has saved |
 | `koshi remote forget <SERVER>` | Drop one saved server |
 | `koshi remote set-secret <SERVER>` | Replace the secret of one saved server |
@@ -729,7 +731,10 @@ other answer leaves it shut and still prints the token. With no address in
 used to connect yet.
 
 With the port open, the grant prints the command that connects from another
-machine. The address in that command depends on `remote-listen`:
+machine. Each command carries `--certificate-fingerprint` with the fingerprint
+of the certificate this machine's listener presents: the sha256 of it, as 64
+lowercase hex characters. The address in that command depends on
+`remote-listen`:
 
 - `0.0.0.0:7654` gives one command for each IPv4 address of this machine, and
   `[::]:7654` gives one for each IPv6 address. Koshi lists the addresses of each
@@ -745,8 +750,8 @@ machine. The address in that command depends on `remote-listen`:
 
 ```text
 connect from another machine, at the address of this one it can reach:
-  koshi attach --remote 192.0.2.20:7654 --save-as alice [SESSION]   # en0
-  koshi attach --remote 198.51.100.2:7654 --save-as alice [SESSION]   # utun3
+  koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 --save-as alice [SESSION]   # en0
+  koshi attach --remote 198.51.100.2:7654 --certificate-fingerprint 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 --save-as alice [SESSION]   # utun3
 set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.
 ```
 
@@ -782,14 +787,15 @@ listens on or the name it was saved under. Everything after that — how a
 session is named, how a missing name is resolved, what is refused — runs
 against that machine unchanged.
 
-The first connection to a server names its address, and `--save-as` gives it a
-short name:
+The first connection to a server names its address and the fingerprint of its
+certificate, and `--save-as` gives it a short name:
 
 ```text
-koshi attach --remote laptop.local:7654 --save-as work web
+koshi attach --remote laptop.local:7654 --certificate-fingerprint 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 --save-as work web
 ```
 
-After that the name stands in for the address, and nothing is retyped:
+After that the name stands in for the address and the fingerprint, and
+nothing is retyped:
 
 ```text
 koshi attach --remote work web
@@ -799,23 +805,51 @@ The secret never appears on a command line. koshi reads it from the
 environment variable `KOSHI_REMOTE_SECRET`, and with that unset asks for it at
 the terminal without printing what is typed. No flag takes a secret.
 
-On the first connection koshi records the fingerprint of the certificate the
-server presented — the sha256 of it, as 64 lowercase hex characters — and
-pins it. A later connection presenting a different certificate is always
-refused, and the refusal names the address and both fingerprints. When the
-server really was reinstalled, run `koshi remote forget <SERVER>` and connect
-again to pin the new one.
+The fingerprint is the sha256 of the server's certificate, as 64 lowercase hex
+characters. `koshi share grant` on the serving machine prints it in each
+connect command. Both machines speak TLS 1.3 only, and a peer that offers
+TLS 1.2 alone is refused during the handshake.
 
-A first connection saves the address, the secret, the pinned fingerprint, and
-the name given by `--save-as`. The store lives on the connecting machine and is
+koshi 0.5.0 and older print no fingerprint, so a first connection from this
+koshi to a machine that runs one of them has no fingerprint to give. Update
+koshi on that machine first; its `koshi share grant` then prints the
+fingerprint. koshi 0.5.0 and older also refuse `--certificate-fingerprint` as
+an unknown argument. On a machine that runs one of them, leave the flag out
+of the connect command: that koshi saves the certificate the server presents
+on its first connection.
+
+koshi compares the fingerprint during the TLS handshake, before the secret is
+sent. If the server presents another certificate, the connection is refused,
+the secret is not sent, and the refusal names the address and both
+fingerprints:
+
+```text
+koshi: IPC unavailable: the certificate laptop.local:7654 presented is not the expected one: expected 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, presented 0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c. the secret was not sent. if that machine's certificate changed on purpose, `koshi share grant` there prints the new fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` for a saved server.
+```
+
+An address that is not saved needs `--certificate-fingerprint`. Without it,
+the connection is refused and nothing is dialled:
+
+```text
+koshi: invalid arguments: laptop.local:7654 is not saved, so the fingerprint of its certificate is needed: add `--certificate-fingerprint <FINGERPRINT>` with the fingerprint `koshi share grant` printed on that machine
+```
+
+A saved server refuses `--certificate-fingerprint`, and
+`koshi remote edit <SERVER>` changes the fingerprint it expects. If the
+serving machine's certificate changes on purpose, `koshi share grant` there
+prints the new fingerprint, and `koshi remote edit` stores it.
+
+A first connection saves the address, the secret, the fingerprint, and the
+name given by `--save-as`. The store lives on the connecting machine and is
 readable only by its owner. `koshi remote list` prints the name, address,
 fingerprint and last-used time of each saved server, and never a secret. Once
 the serving machine grants a fresh secret, `koshi remote set-secret <SERVER>`
 replaces the saved one; it reads the new secret the same way a connection does.
 
 `koshi remote new` saves a server without attaching to one of its sessions. It
-asks three questions in turn — the name, the address, and the secret — and
-every answer is needed. It then dials the server once to check that it admits
+asks four questions in turn — the name, the address, the fingerprint of the
+server's certificate, and the secret — and every answer is needed. It then
+dials the server once to check that it presents that certificate and admits
 the secret:
 
 ```text
@@ -823,25 +857,35 @@ $ koshi remote new
 every answer is needed. Ctrl-C stops without saving.
 name: work
 address: laptop.local:7654
+fingerprint: 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0
 secret:
 checking laptop.local:7654 …
 saved work at laptop.local:7654.
 ```
 
-A server that does not admit the secret is named, and the last question is
-whether to save what was typed anyway. A server saved that way holds no
-fingerprint, and its first connection pins the certificate it meets:
+A fingerprint that is not 64 lowercase hex characters is refused, and the
+question is asked again:
+
+```text
+fingerprint: 3F6A
+koshi: invalid arguments: a certificate fingerprint is 64 lowercase hex characters, as `koshi share grant` prints it on the machine that serves
+fingerprint:
+```
+
+A server that does not pass the check is named, and the last question is
+whether to save what was typed anyway. A server saved that way holds the
+fingerprint that was typed:
 
 ```text
 checking laptop.local:7654 …
 koshi: IPC unavailable: laptop.local:7654 refused the connection: nothing is listening on that port. if remote access is not enabled on that machine, run `koshi share grant` there and answer yes to the offer to open the port
 save it anyway? [y/N]: y
-saved work at laptop.local:7654; its certificate is pinned on the first connection.
+saved work at laptop.local:7654.
 ```
 
 Answering anything else prints `nothing was saved.` and writes nothing.
 
-`koshi remote edit <SERVER>` asks the same three questions with the saved
+`koshi remote edit <SERVER>` asks the same four questions with the saved
 values in brackets. An empty answer keeps the value in brackets, and an empty
 secret keeps the saved secret, so only what changes is typed:
 
@@ -850,23 +894,19 @@ $ koshi remote edit work
 press Enter to keep the value in brackets. An empty secret keeps the saved one. Ctrl-C stops without saving.
 name [work]:
 address [laptop.local:7654]: laptop.local:7655
+fingerprint [3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0]:
 secret:
 checking laptop.local:7655 …
 updated work at laptop.local:7655.
 ```
 
-An edit that keeps the address requires the pinned fingerprint on the check, so
-a certificate that changed under that address does not pass. An edit that
-changes the address requires none: a pinned fingerprint stands for the address
-the record held when that certificate was met.
+A saved server that holds no fingerprint offers none in brackets, and the
+question is asked until a fingerprint is typed.
 
-A check that passes pins the certificate the server presented, either way. A
-check that does not pass keeps the pinned fingerprint while the address is
-unchanged, and keeps none once the address changed; the next connection to the
-new address pins the certificate it meets. When the check does not pass, that
-question names it:
-`save the change anyway? The certificate at that address is pinned on the
-first connection to it. [y/N]`.
+The check requires the fingerprint the answers settled on. The saved server
+holds that fingerprint when the check passes, and also when the change is
+saved anyway. If the check does not pass, the last question is
+`save the change anyway? [y/N]`.
 
 Nothing is written until every answer has settled. Ctrl-C at any question, and
 input that ends before an answer arrives, leave the saved server unchanged.
@@ -898,11 +938,17 @@ The added time and the last-used time are not compared. Another `koshi` that
 only dialled this server does not stop the edit, and the edit carries the
 values the record on disk holds for both.
 
-A saved server that pins no certificate is left out of the sweep that a bare
-`koshi list-sessions` and a bare `koshi attach` make over every saved server,
-and one stderr line names it. Naming it — `koshi list-sessions --remote work` —
-connects, pins the certificate that server presents, and the sweep includes it
-from then on.
+A saved server that holds no certificate fingerprint is never dialled. The
+sweep that a bare `koshi list-sessions` and a bare `koshi attach` make over
+every saved server leaves it out, and names it on one stderr line together
+with the command that gives it a fingerprint:
+
+```text
+koshi: desk holds no certificate fingerprint, so it is not dialled; run `koshi remote edit desk` and give the fingerprint `koshi share grant` printed on that machine
+```
+
+`--remote desk` is refused with the same sentence. Once
+`koshi remote edit desk` stores the fingerprint, the sweep includes it.
 
 A token is full access to every session it reaches. `koshi share grant alice`
 reaches every session on the serving machine, including the sessions started
@@ -945,6 +991,10 @@ work` included, is refused:
 --remote works with `attach`, `list-sessions`, and the action verbs, such as `koshi attach --remote <server>`
 ```
 
+`--certificate-fingerprint` goes with `--remote` on each of those verbs, for a
+server this machine has not saved. Without `--remote`, koshi stops with a usage
+error that names `--remote <SERVER>`.
+
 `koshi share grant` prints the new token's secret, and `koshi share list`
 prints every identity holding one. Inside a koshi pane, the session paints that
 pane to every client viewing its tab, a client on another machine included.
@@ -985,6 +1035,23 @@ session from another machine, run it from a terminal outside koshi, or detach
 them first.
 
 Tokens are granted only from the machine holding the sessions.
+
+### Copies made in a pane
+
+With `pane-clipboard-writes { allow #true }` in the `koshi.kdl` of the machine
+holding the session, a copy that a program in a pane makes reaches the
+clipboard of a terminal attached from another machine:
+
+- an `OSC 52` copy goes to the terminal of every client whose focused pane is
+  that pane;
+- on Linux and macOS, a copy made with `pbcopy`, `xclip`, `xsel` or `wl-copy`
+  goes to the terminal of each client on another machine whose focused pane is
+  that pane.
+
+Example: `printf hi | xclip -selection clipboard` in a pane that you focus
+from your laptop with `koshi attach --remote` puts `hi` on your laptop's
+clipboard. The setting is off by default. [`koshi.kdl`](koshi.md#pane-clipboard-writes)
+lists every copy it covers and every copy it does not.
 
 ## Versions
 
@@ -1106,6 +1173,10 @@ koshi keeps its router socket and its session sockets in one directory per
 user. On Linux and macOS that directory is `/tmp/koshi-<your user id>`, built
 from your user id and nothing else. On Windows it is `run` under your
 application data directory.
+
+On Linux and macOS, a session whose `pane-clipboard-writes` allows writes also
+keeps its folder of stand-in clipboard tools there:
+`session-<uuid>.clipboard-tools`. The folder goes when the session ends.
 
 `KOSHI_RUNTIME_DIR` names the directory instead, and koshi reads it only when
 it holds an absolute path. A relative value is ignored. Two koshi processes

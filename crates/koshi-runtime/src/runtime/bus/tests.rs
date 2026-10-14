@@ -8,12 +8,15 @@
 //! subscriber's queue, is refused by a desynced one, and on a full queue is
 //! refused while the subscriber stays live. Then a round's mouse answers, which
 //! ride the same queue and desync the subscriber when they do not fit. Then
-//! bytes for the terminal a subscriber's client runs in and the session a
-//! subscriber's client moves to, which ride it the same way, and which are each
-//! refused for an unknown subscriber and for a desynced one.
+//! bytes for the terminal a subscriber's client runs in: they wait in the
+//! subscriber's waiting host writes, with their limit, behind one wake on the
+//! queue, live or desynced. A full queue drops only the wake, and a resync
+//! leaves the waiting bytes where they are. Then the session a subscriber's
+//! client moves to, which rides the queue the same way, and is refused for an
+//! unknown subscriber and for a desynced one.
 //!
 //! Then the wire conversion: one queue item becomes the frame the client is
-//! sent.
+//! sent, and one host write becomes the frames that carry its bytes.
 
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
 use koshi_core::event::{
@@ -29,6 +32,7 @@ use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
 use koshi_layout::mode::LayoutMode;
 use koshi_renderer::snapshot::{ClientSnapshot, SessionSnapshot, TabSnapshot};
+use koshi_test_support::fixtures::build_counting_bytes;
 
 use super::*;
 
@@ -38,6 +42,19 @@ impl EventBus {
     #[must_use]
     pub(crate) fn count_subscribers(&self) -> usize {
         self.subscribers.len()
+    }
+
+    /// The waiting host writes of subscriber `subscriber_id`, or `None` when
+    /// it is not registered.
+    #[must_use]
+    pub(crate) fn find_waiting_host_writes(
+        &self,
+        subscriber_id: SubscriberId,
+    ) -> Option<Arc<WaitingHostWrites>> {
+        self.find_subscriber_index(subscriber_id)
+            .map(|subscriber_index| {
+                Arc::clone(&self.subscribers[subscriber_index].waiting_host_writes)
+            })
     }
 }
 
@@ -64,6 +81,7 @@ fn build_test_render_snapshot() -> Box<RenderSnapshot> {
                 gap_cell_count: 0,
             },
             tabs_metadata: Vec::new(),
+            floating_pane_slots: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {
@@ -76,6 +94,7 @@ fn build_test_render_snapshot() -> Box<RenderSnapshot> {
             active_tab_id: tab_id,
             focused_pane_id: None,
             lock_mode: LockMode::Normal,
+            last_applied_lock_command_id: None,
             is_mouse_selection_enabled: false,
         },
     })
@@ -115,8 +134,8 @@ fn publishing_to_a_bus_with_no_subscribers_removes_nobody() {
 #[test]
 fn subscribers_receive_distinct_ids() {
     let mut bus = EventBus::new();
-    let (first_subscriber_id, _first_receiver) = bus.subscribe();
-    let (second_subscriber_id, _second_receiver) = bus.subscribe();
+    let (first_subscriber_id, _first_receiver, _) = bus.subscribe();
+    let (second_subscriber_id, _second_receiver, _) = bus.subscribe();
 
     assert_ne!(first_subscriber_id, second_subscriber_id);
     assert_eq!(bus.subscribers[0].subscriber_id, first_subscriber_id);
@@ -127,7 +146,7 @@ fn subscribers_receive_distinct_ids() {
 fn a_subscriber_receives_published_events_in_order() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (_subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (_subscriber_id, subscriber_receiver, _) = bus.subscribe();
 
     bus.publish(&Event::TabCreated(TabCreated { tab_id }));
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
@@ -145,8 +164,8 @@ fn a_subscriber_receives_published_events_in_order() {
 fn every_subscriber_receives_its_own_copy() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (_first_subscriber_id, first_receiver) = bus.subscribe();
-    let (_second_subscriber_id, second_receiver) = bus.subscribe();
+    let (_first_subscriber_id, first_receiver, _) = bus.subscribe();
+    let (_second_subscriber_id, second_receiver, _) = bus.subscribe();
 
     bus.publish(&Event::TabCreated(TabCreated { tab_id }));
 
@@ -164,8 +183,8 @@ fn every_subscriber_receives_its_own_copy() {
 fn a_dropped_receiver_is_removed_on_the_next_publish() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (_keep_subscriber_id, keep_receiver) = bus.subscribe();
-    let (dropped_subscriber_id, dropped_receiver) = bus.subscribe();
+    let (_keep_subscriber_id, keep_receiver, _) = bus.subscribe();
+    let (dropped_subscriber_id, dropped_receiver, _) = bus.subscribe();
     drop(dropped_receiver);
     assert_eq!(bus.count_subscribers(), 2);
 
@@ -187,9 +206,9 @@ fn a_dropped_receiver_is_removed_on_the_next_publish() {
 fn every_dropped_receiver_is_returned_in_subscription_order() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (first_subscriber_id, first_receiver) = bus.subscribe();
-    let (keep_subscriber_id, keep_receiver) = bus.subscribe();
-    let (third_subscriber_id, third_receiver) = bus.subscribe();
+    let (first_subscriber_id, first_receiver, _) = bus.subscribe();
+    let (keep_subscriber_id, keep_receiver, _) = bus.subscribe();
+    let (third_subscriber_id, third_receiver, _) = bus.subscribe();
     drop(first_receiver);
     drop(third_receiver);
 
@@ -211,9 +230,9 @@ fn every_dropped_receiver_is_returned_in_subscription_order() {
 fn an_event_that_does_not_fit_desyncs_that_subscriber_only() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (full_subscriber_id, full_subscriber_receiver) = bus.subscribe();
+    let (full_subscriber_id, full_subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    let (fresh_subscriber_id, fresh_subscriber_receiver) = bus.subscribe();
+    let (fresh_subscriber_id, fresh_subscriber_receiver, _) = bus.subscribe();
 
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
 
@@ -249,7 +268,7 @@ fn an_event_that_does_not_fit_desyncs_that_subscriber_only() {
 fn a_resync_onto_a_still_full_queue_fails_and_leaves_the_subscriber_desynced() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
@@ -268,7 +287,7 @@ fn a_resync_onto_a_still_full_queue_fails_and_leaves_the_subscriber_desynced() {
 fn a_resync_queues_the_snapshot_behind_the_backlog_and_ahead_of_live_events() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
 
@@ -307,7 +326,7 @@ fn a_resync_queues_the_snapshot_behind_the_backlog_and_ahead_of_live_events() {
 fn the_dropped_count_holds_the_trigger_plus_every_withheld_event() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
 
     // The trigger, then three withheld events: 1 + 3 = 4.
@@ -342,7 +361,7 @@ fn a_live_subscriber_whose_queue_is_full_misses_the_restart() {
     // client's writing thread reads rather than waiting on the queue.
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
 
     bus.publish(&Event::Restarting);
@@ -365,7 +384,7 @@ fn a_live_subscriber_whose_queue_is_full_misses_the_restart() {
 #[test]
 fn publishing_the_quit_raises_the_ending_notice_and_delivers_it() {
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
 
     let removed_subscriber_ids = bus.publish(&Event::Quit(QuitCause::Requested));
 
@@ -385,7 +404,7 @@ fn publishing_the_quit_raises_the_ending_notice_and_delivers_it() {
 #[test]
 fn the_ending_notice_keeps_the_first_ending_it_was_raised_with() {
     let mut bus = EventBus::new();
-    let (_subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (_subscriber_id, subscriber_receiver, _) = bus.subscribe();
 
     bus.publish(&Event::Restarting);
     bus.publish(&Event::Quit(QuitCause::Requested));
@@ -408,7 +427,7 @@ fn the_ending_notice_keeps_the_first_ending_it_was_raised_with() {
 fn a_desynced_subscriber_is_told_the_session_is_restarting() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
@@ -431,7 +450,7 @@ fn a_desynced_subscriber_is_told_the_session_is_restarting() {
 fn a_desynced_subscriber_is_told_the_session_quit() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
@@ -452,7 +471,7 @@ fn a_desynced_subscriber_is_told_the_session_quit() {
 fn a_last_frame_that_does_not_fit_a_desynced_queue_is_counted() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
 
@@ -483,7 +502,7 @@ fn a_last_frame_that_does_not_fit_a_desynced_queue_is_counted() {
 fn a_desynced_subscriber_whose_receiver_is_gone_is_removed_by_the_resync() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
     assert_eq!(
@@ -503,7 +522,7 @@ fn a_desynced_subscriber_whose_receiver_is_gone_is_removed_by_the_resync() {
 fn a_resync_of_a_live_or_unknown_subscriber_does_nothing() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     bus.publish(&Event::TabCreated(TabCreated { tab_id }));
 
     assert!(!bus.try_resync(subscriber_id, build_test_render_snapshot()));
@@ -520,7 +539,7 @@ fn a_resync_of_a_live_or_unknown_subscriber_does_nothing() {
 fn a_second_desync_counts_from_one_again() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
 
     // First gap: the trigger plus two more withheld events.
@@ -561,7 +580,7 @@ fn a_second_desync_counts_from_one_again() {
 fn a_resync_of_a_just_resynced_subscriber_does_nothing() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
     assert_eq!(
@@ -590,10 +609,10 @@ fn a_resync_of_a_just_resynced_subscriber_does_nothing() {
 fn every_desynced_subscriber_is_listed_in_subscription_order() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (first_subscriber_id, first_receiver) = bus.subscribe();
-    let (second_subscriber_id, second_receiver) = bus.subscribe();
+    let (first_subscriber_id, first_receiver, _) = bus.subscribe();
+    let (second_subscriber_id, second_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    let (live_subscriber_id, _live_receiver) = bus.subscribe();
+    let (live_subscriber_id, _live_receiver, _) = bus.subscribe();
 
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
 
@@ -621,7 +640,7 @@ fn every_desynced_subscriber_is_listed_in_subscription_order() {
 fn a_desynced_subscriber_whose_receiver_is_gone_survives_every_publish() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
     drop(subscriber_receiver);
@@ -644,7 +663,7 @@ fn a_desynced_subscriber_whose_receiver_is_gone_survives_every_publish() {
 fn unsubscribing_an_unknown_id_changes_nothing() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
 
     bus.unsubscribe(SubscriberId::new());
 
@@ -661,7 +680,7 @@ fn unsubscribing_an_unknown_id_changes_nothing() {
 fn unsubscribing_a_desynced_subscriber_clears_it_from_the_desynced_list() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, _subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, _subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
@@ -678,8 +697,8 @@ fn unsubscribing_a_desynced_subscriber_clears_it_from_the_desynced_list() {
 fn unsubscribe_removes_that_subscriber_only() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (gone_subscriber_id, gone_receiver) = bus.subscribe();
-    let (keep_subscriber_id, keep_receiver) = bus.subscribe();
+    let (gone_subscriber_id, gone_receiver, _) = bus.subscribe();
+    let (keep_subscriber_id, keep_receiver, _) = bus.subscribe();
 
     bus.unsubscribe(gone_subscriber_id);
 
@@ -701,7 +720,7 @@ fn unsubscribe_removes_that_subscriber_only() {
 #[test]
 fn a_frame_lands_on_a_live_subscribers_queue() {
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     let render_snapshot = build_test_render_snapshot();
 
     assert!(bus.try_send_frame(subscriber_id, render_snapshot.clone()));
@@ -716,7 +735,7 @@ fn a_frame_lands_on_a_live_subscribers_queue() {
 #[test]
 fn a_frame_for_an_unknown_subscriber_is_refused() {
     let mut bus = EventBus::new();
-    let (_subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (_subscriber_id, subscriber_receiver, _) = bus.subscribe();
 
     assert!(!bus.try_send_frame(SubscriberId::new(), build_test_render_snapshot()));
 
@@ -731,7 +750,7 @@ fn a_frame_for_an_unknown_subscriber_is_refused() {
 fn a_frame_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
@@ -755,7 +774,7 @@ fn a_frame_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
 fn a_frame_that_does_not_fit_is_refused_and_leaves_the_subscriber_live() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
 
     assert!(!bus.try_send_frame(subscriber_id, build_test_render_snapshot()));
@@ -781,7 +800,7 @@ fn a_frame_that_does_not_fit_is_refused_and_leaves_the_subscriber_live() {
 #[test]
 fn a_subscriber_whose_receiver_is_gone_is_removed_by_the_frame() {
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     drop(subscriber_receiver);
 
     assert!(!bus.try_send_frame(subscriber_id, build_test_render_snapshot()));
@@ -794,7 +813,7 @@ fn a_subscriber_whose_receiver_is_gone_is_removed_by_the_frame() {
 fn an_answer_lands_on_a_live_subscribers_queue() {
     let pane_id = PaneId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
 
     assert!(bus.try_send_mouse_answer(
         subscriber_id,
@@ -837,7 +856,7 @@ fn an_answer_lands_on_a_live_subscribers_queue() {
 #[test]
 fn a_round_with_nothing_to_report_lands_as_an_empty_list() {
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
 
     assert!(bus.try_send_mouse_answer(subscriber_id, 1, Vec::new()));
 
@@ -854,7 +873,7 @@ fn a_round_with_nothing_to_report_lands_as_an_empty_list() {
 #[test]
 fn a_mouse_answer_for_an_unknown_subscriber_is_refused() {
     let mut bus = EventBus::new();
-    let (_subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (_subscriber_id, subscriber_receiver, _) = bus.subscribe();
 
     assert!(!bus.try_send_mouse_answer(SubscriberId::new(), 4, Vec::new()));
 
@@ -869,7 +888,7 @@ fn a_mouse_answer_for_an_unknown_subscriber_is_refused() {
 fn a_mouse_answer_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
@@ -897,7 +916,7 @@ fn a_mouse_answer_that_does_not_fit_desyncs_the_subscriber_and_a_resync_follows(
     let tab_id = TabId::new();
     let pane_id = PaneId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
 
     assert!(!bus.try_send_mouse_answer(
@@ -945,7 +964,7 @@ fn a_mouse_answer_that_does_not_fit_desyncs_the_subscriber_and_a_resync_follows(
 #[test]
 fn a_subscriber_whose_receiver_is_gone_is_removed_by_its_mouse_answer() {
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     drop(subscriber_receiver);
 
     assert!(!bus.try_send_mouse_answer(subscriber_id, 2, Vec::new()));
@@ -954,112 +973,361 @@ fn a_subscriber_whose_receiver_is_gone_is_removed_by_its_mouse_answer() {
     assert_eq!(bus.count_subscribers(), 0);
 }
 
+/// The OSC 52 copy of `hello`: the sequence a clipboard write queues.
+const CLIPBOARD_WRITE_BYTES: &[u8] = b"\x1b]52;c;aGVsbG8=\x07";
+
+/// The host write a copy of `hello` to the target `c` makes, whose bytes are
+/// [`CLIPBOARD_WRITE_BYTES`].
+fn build_clipboard_host_write() -> HostWrite {
+    HostWrite::from_clipboard_copy("c", b"hello")
+}
+
+/// How many bytes of `a` a copy to the target `c` holds when its sequence is
+/// 12582868 bytes: 8 bytes of `ESC ] 52 ; c ;` and `BEL` around 12582860
+/// base64 characters. With a 12-byte sequence beside it, the two are 1 byte
+/// past [`MAX_HOST_WRITE_BYTE_COUNT`].
+const NEAR_LIMIT_COPIED_BYTE_COUNT: usize = 9_437_145;
+
 #[test]
-fn a_host_write_reaches_the_subscriber_as_the_bytes_it_queued() {
-    // An OSC 52 copy of "hello", the sequence a clipboard write queues.
-    let clipboard_write_bytes = b"\x1b]52;c;aGVsbG8=\x07".to_vec();
-    let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+fn a_host_write_is_its_osc52_sequence_and_the_targets_it_sets_in_byte_order() {
+    let host_write = HostWrite::from_clipboard_copy("pc", b"hello");
 
-    assert!(bus.try_send_host_write(subscriber_id, clipboard_write_bytes.clone()));
-
-    let queued_deliveries: Vec<Delivery> = subscriber_receiver.try_iter().collect();
-    assert_eq!(
-        queued_deliveries,
-        vec![Delivery::HostWrite(clipboard_write_bytes.clone())]
-    );
-    assert_eq!(
-        build_wire_event(&queued_deliveries[0]),
-        Some(SessionEvent::HostWrite {
-            host_output_bytes: clipboard_write_bytes,
-        })
-    );
-    assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
-    assert_eq!(bus.count_subscribers(), 1);
+    assert_eq!(host_write.host_write_bytes, b"\x1b]52;pc;aGVsbG8=\x07");
+    assert_eq!(host_write.sorted_clipboard_targets, b"cp");
 }
 
 #[test]
-fn a_full_queue_desyncs_the_subscriber_and_drops_the_host_write() {
-    let tab_id = TabId::new();
+fn a_host_write_waits_for_the_subscriber_and_queues_one_wake() {
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
-    fill_to_capacity(&mut bus, tab_id);
+    let (subscriber_id, subscriber_receiver, waiting_host_writes) = bus.subscribe();
 
-    assert!(!bus.try_send_host_write(subscriber_id, b"\x1b]52;c;aGVsbG8=\x07".to_vec()));
+    assert!(bus.queue_host_write(subscriber_id, &build_clipboard_host_write()));
 
-    assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
-    assert_eq!(bus.count_subscribers(), 1);
-    // The backlog that filled the queue, and nothing else: the bytes are gone,
-    // and the desync is what puts a fresh frame on the queue.
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id })); SUBSCRIBER_QUEUE_CAPACITY]
+        vec![Delivery::HostWrite]
+    );
+    assert_eq!(
+        waiting_host_writes.take_host_write_bytes(),
+        CLIPBOARD_WRITE_BYTES
+    );
+    assert_eq!(
+        waiting_host_writes.take_host_write_bytes(),
+        Vec::<u8>::new()
+    );
+    assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
+}
+
+#[test]
+fn host_writes_behind_a_queued_wake_wait_in_order_with_no_second_wake() {
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver, waiting_host_writes) = bus.subscribe();
+
+    assert!(bus.queue_host_write(
+        subscriber_id,
+        &HostWrite::from_clipboard_copy("c", b"first")
+    ));
+    assert!(bus.queue_host_write(
+        subscriber_id,
+        &HostWrite::from_clipboard_copy("p", b"second")
+    ));
+    assert!(bus.queue_host_write(
+        subscriber_id,
+        &HostWrite::from_clipboard_copy("q", b"third")
+    ));
+
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
+        vec![Delivery::HostWrite]
+    );
+    assert_eq!(
+        waiting_host_writes.take_host_write_bytes(),
+        [
+            encode_osc52_copy("c", b"first"),
+            encode_osc52_copy("p", b"second"),
+            encode_osc52_copy("q", b"third"),
+        ]
+        .concat()
     );
 }
 
 #[test]
-fn an_empty_host_write_reaches_the_subscriber_as_empty_bytes() {
+fn a_host_write_after_the_wake_is_read_queues_a_new_wake() {
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
-
-    assert!(bus.try_send_host_write(subscriber_id, Vec::new()));
-
-    let queued_deliveries: Vec<Delivery> = subscriber_receiver.try_iter().collect();
-    assert_eq!(queued_deliveries, vec![Delivery::HostWrite(Vec::new())]);
+    let (subscriber_id, subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    assert!(bus.queue_host_write(
+        subscriber_id,
+        &HostWrite::from_clipboard_copy("c", b"first")
+    ));
+    assert_eq!(subscriber_receiver.try_recv(), Ok(Delivery::HostWrite));
+    waiting_host_writes.clear_queued_wake();
     assert_eq!(
-        build_wire_event(&queued_deliveries[0]),
-        Some(SessionEvent::HostWrite {
-            host_output_bytes: Vec::new(),
-        })
+        waiting_host_writes.take_host_write_bytes(),
+        encode_osc52_copy("c", b"first")
+    );
+
+    assert!(bus.queue_host_write(
+        subscriber_id,
+        &HostWrite::from_clipboard_copy("c", b"second")
+    ));
+
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
+        vec![Delivery::HostWrite]
+    );
+    assert_eq!(
+        waiting_host_writes.take_host_write_bytes(),
+        encode_osc52_copy("c", b"second")
+    );
+}
+
+#[test]
+fn a_host_write_past_the_limit_beside_other_targets_is_refused_and_queues_no_wake() {
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let waiting_host_write =
+        HostWrite::from_clipboard_copy("c", &vec![b'a'; NEAR_LIMIT_COPIED_BYTE_COUNT]);
+    let refused_host_write = HostWrite::from_clipboard_copy("p", b"bcd");
+    assert_eq!(
+        waiting_host_write.host_write_bytes.len() + refused_host_write.host_write_bytes.len(),
+        MAX_HOST_WRITE_BYTE_COUNT + 1
+    );
+    assert!(bus.queue_host_write(subscriber_id, &waiting_host_write));
+    assert_eq!(subscriber_receiver.try_recv(), Ok(Delivery::HostWrite));
+    waiting_host_writes.clear_queued_wake();
+
+    assert!(!bus.queue_host_write(subscriber_id, &refused_host_write));
+
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
+        Vec::new()
+    );
+    assert_eq!(
+        waiting_host_writes.take_host_write_bytes(),
+        waiting_host_write.host_write_bytes
+    );
+}
+
+#[test]
+fn waiting_host_writes_up_to_the_limit_keep_every_byte() {
+    let mut bus = EventBus::new();
+    let (subscriber_id, _subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let waiting_host_write =
+        HostWrite::from_clipboard_copy("c", &vec![b'a'; NEAR_LIMIT_COPIED_BYTE_COUNT]);
+    let kept_host_write = HostWrite::from_clipboard_copy("", b"bcd");
+    assert_eq!(
+        waiting_host_write.host_write_bytes.len() + kept_host_write.host_write_bytes.len(),
+        MAX_HOST_WRITE_BYTE_COUNT
+    );
+    assert!(bus.queue_host_write(subscriber_id, &waiting_host_write));
+
+    assert!(bus.queue_host_write(subscriber_id, &kept_host_write));
+
+    assert_eq!(
+        waiting_host_writes.take_host_write_bytes(),
+        [
+            waiting_host_write.host_write_bytes,
+            kept_host_write.host_write_bytes
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn a_host_write_for_the_same_targets_replaces_the_waiting_one_past_the_limit() {
+    let mut bus = EventBus::new();
+    let (subscriber_id, _subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let waiting_host_write =
+        HostWrite::from_clipboard_copy("c", &vec![b'a'; NEAR_LIMIT_COPIED_BYTE_COUNT]);
+    let replacing_host_write = HostWrite::from_clipboard_copy("c", b"bcd");
+    assert_eq!(
+        waiting_host_write.host_write_bytes.len() + replacing_host_write.host_write_bytes.len(),
+        MAX_HOST_WRITE_BYTE_COUNT + 1
+    );
+    assert!(bus.queue_host_write(subscriber_id, &waiting_host_write));
+
+    assert!(bus.queue_host_write(subscriber_id, &replacing_host_write));
+
+    assert_eq!(
+        waiting_host_writes.take_host_write_bytes(),
+        encode_osc52_copy("c", b"bcd")
+    );
+}
+
+#[test]
+fn a_host_write_replaces_only_the_waiting_ones_for_the_same_targets_in_any_order() {
+    let mut bus = EventBus::new();
+    let (subscriber_id, _subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    assert!(bus.queue_host_write(
+        subscriber_id,
+        &HostWrite::from_clipboard_copy("pc", b"first")
+    ));
+    assert!(bus.queue_host_write(
+        subscriber_id,
+        &HostWrite::from_clipboard_copy("c", b"second")
+    ));
+
+    assert!(bus.queue_host_write(
+        subscriber_id,
+        &HostWrite::from_clipboard_copy("cp", b"third")
+    ));
+
+    assert_eq!(
+        waiting_host_writes.take_host_write_bytes(),
+        [
+            encode_osc52_copy("c", b"second"),
+            encode_osc52_copy("cp", b"third")
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn a_host_write_longer_than_the_limit_with_nothing_waiting_waits_whole() {
+    let mut bus = EventBus::new();
+    let (subscriber_id, _subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let copied_bytes = build_counting_bytes(MAX_HOST_WRITE_BYTE_COUNT);
+    let host_write = HostWrite::from_clipboard_copy("c", &copied_bytes);
+    assert!(host_write.host_write_bytes.len() > MAX_HOST_WRITE_BYTE_COUNT);
+
+    assert!(bus.queue_host_write(subscriber_id, &host_write));
+
+    assert_eq!(
+        waiting_host_writes.take_host_write_bytes(),
+        encode_osc52_copy("c", &copied_bytes)
+    );
+}
+
+#[test]
+fn a_host_write_longer_than_the_limit_replaces_the_waiting_one_for_the_same_targets() {
+    let mut bus = EventBus::new();
+    let (subscriber_id, _subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let copied_bytes = build_counting_bytes(MAX_HOST_WRITE_BYTE_COUNT);
+    let host_write = HostWrite::from_clipboard_copy("c", &copied_bytes);
+    assert!(host_write.host_write_bytes.len() > MAX_HOST_WRITE_BYTE_COUNT);
+    assert!(bus.queue_host_write(
+        subscriber_id,
+        &HostWrite::from_clipboard_copy("c", b"older")
+    ));
+
+    assert!(bus.queue_host_write(subscriber_id, &host_write));
+
+    assert_eq!(
+        waiting_host_writes.take_host_write_bytes(),
+        encode_osc52_copy("c", &copied_bytes)
     );
 }
 
 #[test]
 fn a_host_write_for_an_unknown_subscriber_is_refused() {
     let mut bus = EventBus::new();
-    let (_subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (_subscriber_id, subscriber_receiver, waiting_host_writes) = bus.subscribe();
 
-    assert!(!bus.try_send_host_write(SubscriberId::new(), b"\x07".to_vec()));
+    assert!(!bus.queue_host_write(SubscriberId::new(), &build_clipboard_host_write()));
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
         Vec::<Delivery>::new()
+    );
+    assert_eq!(
+        waiting_host_writes.take_host_write_bytes(),
+        Vec::<u8>::new()
     );
     assert_eq!(bus.count_subscribers(), 1);
     assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
 }
 
 #[test]
-fn a_host_write_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
+fn a_full_queue_drops_only_the_wake_and_the_next_host_write_queues_one() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    fill_to_capacity(&mut bus, tab_id);
+
+    assert!(bus.queue_host_write(subscriber_id, &build_clipboard_host_write()));
+
+    assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
+        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id })); SUBSCRIBER_QUEUE_CAPACITY]
+    );
+    assert!(bus.queue_host_write(subscriber_id, &HostWrite::from_clipboard_copy("p", b"next")));
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
+        vec![Delivery::HostWrite]
+    );
+    assert_eq!(
+        waiting_host_writes.take_host_write_bytes(),
+        [CLIPBOARD_WRITE_BYTES, &encode_osc52_copy("p", b"next")].concat()
+    );
+}
+
+#[test]
+fn a_desynced_subscriber_with_room_on_its_queue_takes_the_wake() {
+    let tab_id = TabId::new();
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver, waiting_host_writes) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
-    assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
-    // Drained, so a refusal here cannot be a full queue.
     assert_eq!(
         subscriber_receiver.try_iter().count(),
         SUBSCRIBER_QUEUE_CAPACITY
     );
 
-    assert!(!bus.try_send_host_write(subscriber_id, b"\x1b]52;c;aGVsbG8=\x07".to_vec()));
+    assert!(bus.queue_host_write(subscriber_id, &build_clipboard_host_write()));
 
     assert_eq!(
-        subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        Vec::<Delivery>::new()
+        subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
+        vec![Delivery::HostWrite]
+    );
+    assert_eq!(
+        waiting_host_writes.take_host_write_bytes(),
+        CLIPBOARD_WRITE_BYTES
     );
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
-    assert_eq!(bus.count_subscribers(), 1);
+}
+
+#[test]
+fn waiting_host_writes_outlast_a_resync_that_fills_the_last_free_slot() {
+    let tab_id = TabId::new();
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    fill_to_capacity(&mut bus, tab_id);
+    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    assert!(bus.queue_host_write(subscriber_id, &build_clipboard_host_write()));
+    assert_eq!(
+        subscriber_receiver.try_recv(),
+        Ok(Delivery::Event(Event::TabCreated(TabCreated { tab_id })))
+    );
+
+    let render_snapshot = build_test_render_snapshot();
+    assert!(bus.try_resync(subscriber_id, render_snapshot.clone()));
+
+    let queued_deliveries: Vec<Delivery> = subscriber_receiver.try_iter().collect();
+    assert_eq!(queued_deliveries.len(), SUBSCRIBER_QUEUE_CAPACITY);
+    assert_eq!(
+        queued_deliveries.last(),
+        Some(&Delivery::Snapshot {
+            render_snapshot,
+            lag_report: SubscriberLagged {
+                subscriber_id,
+                dropped_event_count: 1,
+            },
+        })
+    );
+    assert_eq!(
+        waiting_host_writes.take_host_write_bytes(),
+        CLIPBOARD_WRITE_BYTES
+    );
 }
 
 #[test]
 fn a_subscriber_whose_receiver_is_gone_is_removed_by_the_host_write() {
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _waiting_host_writes) = bus.subscribe();
     drop(subscriber_receiver);
 
-    assert!(!bus.try_send_host_write(subscriber_id, b"\x1b]52;c;aGVsbG8=\x07".to_vec()));
+    assert!(!bus.queue_host_write(subscriber_id, &build_clipboard_host_write()));
 
     assert!(!bus.has_subscriber(subscriber_id));
     assert_eq!(bus.count_subscribers(), 0);
@@ -1067,10 +1335,69 @@ fn a_subscriber_whose_receiver_is_gone_is_removed_by_the_host_write() {
 }
 
 #[test]
+fn a_host_write_wake_has_no_wire_frame() {
+    assert_eq!(build_wire_event(&Delivery::HostWrite), None);
+}
+
+#[test]
+fn a_host_write_within_one_frame_becomes_one_host_write_frame() {
+    assert_eq!(
+        build_wire_host_write_events(CLIPBOARD_WRITE_BYTES).collect::<Vec<SessionEvent>>(),
+        vec![SessionEvent::HostWrite {
+            host_write_bytes: CLIPBOARD_WRITE_BYTES.to_vec(),
+        }]
+    );
+}
+
+#[test]
+fn an_empty_host_write_becomes_one_empty_host_write_frame() {
+    assert_eq!(
+        build_wire_host_write_events(b"").collect::<Vec<SessionEvent>>(),
+        vec![SessionEvent::HostWrite {
+            host_write_bytes: Vec::new(),
+        }]
+    );
+}
+
+#[test]
+fn a_host_write_of_exactly_one_frame_becomes_one_host_write_frame() {
+    let host_write_bytes = build_counting_bytes(MAX_HOST_WRITE_BYTE_COUNT);
+
+    assert_eq!(
+        build_wire_host_write_events(&host_write_bytes).collect::<Vec<SessionEvent>>(),
+        vec![SessionEvent::HostWrite {
+            host_write_bytes: host_write_bytes.clone(),
+        }]
+    );
+}
+
+#[test]
+fn a_host_write_past_one_frame_becomes_full_parts_then_the_rest() {
+    let host_write_bytes = build_counting_bytes(2 * MAX_HOST_WRITE_BYTE_COUNT + 5);
+
+    assert_eq!(
+        build_wire_host_write_events(&host_write_bytes).collect::<Vec<SessionEvent>>(),
+        vec![
+            SessionEvent::HostWritePart {
+                host_write_bytes: host_write_bytes[..MAX_HOST_WRITE_BYTE_COUNT].to_vec(),
+            },
+            SessionEvent::HostWritePart {
+                host_write_bytes: host_write_bytes
+                    [MAX_HOST_WRITE_BYTE_COUNT..2 * MAX_HOST_WRITE_BYTE_COUNT]
+                    .to_vec(),
+            },
+            SessionEvent::HostWrite {
+                host_write_bytes: host_write_bytes[2 * MAX_HOST_WRITE_BYTE_COUNT..].to_vec(),
+            },
+        ]
+    );
+}
+
+#[test]
 fn a_switch_reaches_the_subscriber_as_the_session_it_names() {
     let session_id = SessionId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
 
     assert!(bus.try_send_switch(subscriber_id, session_id));
 
@@ -1088,7 +1415,7 @@ fn a_switch_reaches_the_subscriber_as_the_session_it_names() {
 fn a_rejected_placement_command_reaches_the_subscriber_with_its_command_id() {
     let command_id = CommandId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
 
     assert!(bus.try_send_placement_command_rejection(subscriber_id, command_id));
 
@@ -1109,7 +1436,7 @@ fn a_rejected_placement_command_reaches_the_subscriber_with_its_command_id() {
 fn a_full_queue_desyncs_the_subscriber_and_drops_the_switch() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
 
     assert!(!bus.try_send_switch(subscriber_id, SessionId::new()));
@@ -1127,7 +1454,7 @@ fn a_full_queue_desyncs_the_subscriber_and_drops_the_switch() {
 #[test]
 fn a_switch_for_an_unknown_subscriber_is_refused() {
     let mut bus = EventBus::new();
-    let (_subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (_subscriber_id, subscriber_receiver, _) = bus.subscribe();
 
     assert!(!bus.try_send_switch(SubscriberId::new(), SessionId::new()));
 
@@ -1143,7 +1470,7 @@ fn a_switch_for_an_unknown_subscriber_is_refused() {
 fn a_switch_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
@@ -1166,7 +1493,7 @@ fn a_switch_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
 #[test]
 fn a_subscriber_whose_receiver_is_gone_is_removed_by_the_switch() {
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     drop(subscriber_receiver);
 
     assert!(!bus.try_send_switch(subscriber_id, SessionId::new()));

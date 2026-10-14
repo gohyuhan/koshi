@@ -89,10 +89,18 @@ impl Server {
     /// restores the rest of the view onto the freshly minted client
     /// ([`Self::restore_saved_view`]). The token
     /// is consumed by this one attach: presenting it again restores nothing. A
-    /// token the session holds no view under, and a token older than 120
-    /// seconds, attach with a fresh view instead of failing. An attach that
+    /// token the session holds no view under, and a token older than 24
+    /// hours, attach with a fresh view instead of failing. An attach that
     /// returns `None` reads no token and spends none: that view stands until
-    /// its 120 seconds run out.
+    /// its 24 hours run out.
+    ///
+    /// A token minted for a client that is still attached takes that client
+    /// over: its view is filed under the token ([`Self::save_client_view`])
+    /// and restored onto the fresh client, and its record is removed with no
+    /// quit, before the fresh client registers. Its subscription goes with
+    /// the record. Example: a viewer on another machine dials again before
+    /// the session read that its first link dropped; the dial gets the view
+    /// back, and the session holds one client for that viewer, not two.
     ///
     /// Every accepted attach mints a new token, carried back on
     /// [`AttachAccepted::resume_token`].
@@ -135,12 +143,23 @@ impl Server {
             let client = session.clients.get_client_by_id(claimed_client_id)?;
             let client_active_tab_id = client.get_active_tab_id();
             let is_streaming = self
-                .subscriptions
-                .iter()
-                .any(|&(_, viewed_client_id)| viewed_client_id == claimed_client_id);
+                .find_subscriber_id_by_client_id(claimed_client_id)
+                .is_some();
             (session.tabs.contains_key(&client_active_tab_id) && !is_streaming)
                 .then_some((claimed_client_id, client_active_tab_id))
         });
+        let mut emitted_events = Vec::new();
+        // A token minted for a client that is still attached: that client's
+        // view is filed under the token and taken below, and its record goes.
+        if let (None, Some(resume_token)) = (claimed_client_view, resume_token.as_ref()) {
+            if let Some(previous_client_id) = self
+                .saved_view_store
+                .find_client_id_by_resume_token(resume_token)
+            {
+                self.save_client_view(previous_client_id, attached_at);
+                self.remove_client_record(previous_client_id, &mut emitted_events);
+            }
+        }
         let saved_view = resume_token
             .and_then(|resume_token| {
                 self.saved_view_store
@@ -164,7 +183,7 @@ impl Server {
         };
         self.client_ids_awaiting_reconnect.remove(&client_id);
 
-        let mut emitted_events = self.handle_client_attach(
+        emitted_events.extend(self.handle_client_attach(
             session_id,
             client_id,
             viewport_size,
@@ -173,7 +192,7 @@ impl Server {
             cell_size,
             attached_at,
             is_remote,
-        );
+        ));
         if let Some(saved_view) = saved_view {
             emitted_events.extend(self.restore_saved_view(
                 session_id,
@@ -184,7 +203,7 @@ impl Server {
         }
         self.publish_events(&emitted_events);
 
-        let deliveries = self.subscribe(client_id);
+        let (deliveries, waiting_host_writes) = self.subscribe(client_id);
         let resume_token = self.saved_view_store.mint_resume_token(client_id);
         let session = self
             .session_by_id
@@ -195,6 +214,7 @@ impl Server {
             session_id,
             session_structure: build_session_structure_snapshot(session),
             deliveries,
+            waiting_host_writes,
             ending_notice: Arc::clone(self.event_bus.get_ending_notice()),
             resume_token,
             pane_area,
@@ -596,8 +616,8 @@ impl Server {
     }
 
     /// File the view `client_id` is leaving behind ([`SavedView`]), under the
-    /// token that client's attach minted. The record stands for 120 seconds
-    /// from `detached_at`, and presenting the minted token within that window
+    /// token that client's attach minted. The record stands for 24 hours
+    /// from `detached_at`, and presenting the minted token within that time
     /// hands the view back once.
     ///
     /// `detached_at` is when the producer saw the connection end, supplied by
@@ -610,8 +630,10 @@ impl Server {
     /// files nothing and its minted hash is dropped, so the token it was handed
     /// takes back nothing. A client whose attach minted no token files nothing.
     ///
-    /// Call this before [`handle_client_detach`](Self::handle_client_detach),
-    /// which removes the record read here.
+    /// Reads the client's record: call it before that record is removed by
+    /// [`handle_client_detach`](Self::handle_client_detach),
+    /// [`handle_returning_client_detach`](Self::handle_returning_client_detach),
+    /// or an attach that takes the client over.
     pub(crate) fn save_client_view(&mut self, client_id: ClientId, detached_at: SystemTime) {
         if self.client_ids_awaiting_reconnect.contains(&client_id) {
             return;
@@ -652,12 +674,14 @@ impl Server {
     /// Every subscription registered as viewing this client is dropped with the
     /// record, closing the sending end of each one's queue.
     ///
-    /// Runs for every detach trigger: a connection drop (either half of an
-    /// attached client's connection ending), the [`Command::Detach`] /
-    /// [`Command::DetachAll`] execution arms, and a [`Command::Quit`] whose
-    /// command source names a client. Target resolution happens at command resolution
-    /// before this is reached. With `auto-close-session` on, a detach that
-    /// leaves the session with no client requests a graceful quit.
+    /// Runs for every detach trigger but a returning client's: an attached
+    /// client's connection that ends with a client that does not attach again,
+    /// the [`Command::Detach`] / [`Command::DetachAll`] execution arms, and a
+    /// [`Command::Quit`] whose command source names a client. Target
+    /// resolution happens at command resolution before this is reached. With
+    /// `auto-close-session` on, a detach that leaves the session with no
+    /// client requests a graceful quit. A client that may attach again goes
+    /// through `handle_returning_client_detach`.
     ///
     /// A detach for a client that is still awaiting reconnect is dropped.
     /// `handle_drop_unclaimed_clients` removes that client from the set and
@@ -682,6 +706,28 @@ impl Server {
             self.request_graceful_quit();
         }
 
+        emitted_events
+    }
+
+    /// Detach the client `client_id`, which may attach again with the resume
+    /// token its attach minted: remove its record, reflow the tab it was
+    /// viewing and the session's floating panes, and schedule a redraw, as
+    /// [`handle_client_detach`](Self::handle_client_detach) does. Requests no
+    /// quit: with `auto-close-session` on, a session this leaves with no
+    /// client keeps running.
+    ///
+    /// Returns one [`Event::PtyResized`] per reflowed pane. A detach for a
+    /// client that is still awaiting reconnect, or that no session holds, is
+    /// dropped and returns no event.
+    ///
+    /// Example: a client on another machine whose link dropped is removed,
+    /// and the session keeps running for that client to attach again.
+    pub(crate) fn handle_returning_client_detach(&mut self, client_id: ClientId) -> Vec<Event> {
+        if self.client_ids_awaiting_reconnect.contains(&client_id) {
+            return Vec::new();
+        }
+        let mut emitted_events = Vec::new();
+        self.remove_client_record(client_id, &mut emitted_events);
         emitted_events
     }
 
@@ -793,8 +839,8 @@ impl Server {
     /// Handle [`Command::SetLockMode`]: set the target client to
     /// [`LockMode::Locked`] when `command_args.locked`, else [`LockMode::Normal`].
     ///
-    /// Setting the mode the client already holds is a no-op: applied, zero
-    /// events.
+    /// Setting the mode the client already holds leaves the mode as it is:
+    /// applied, zero events.
     pub(super) fn handle_set_lock_mode(
         &mut self,
         command_id: CommandId,
@@ -821,7 +867,13 @@ impl Server {
     /// Lock mode targets a client alone — the explicit `client` argument when
     /// set, else the acting client — no pane is resolved, so a client with no
     /// focused pane still locks. Nothing in the layout, focus, or any PTY
-    /// changes; a no-op change mutates nothing.
+    /// changes.
+    ///
+    /// A command whose source is [`CommandSource::KeyBinding`] naming the
+    /// target client came from that client's own connection: the client
+    /// records `command_id` as its last applied lock command, also when the
+    /// mode stays as it was. A command from any other source changes only the
+    /// mode.
     fn set_lock_mode(
         &mut self,
         command_id: CommandId,
@@ -832,6 +884,9 @@ impl Server {
         let (client_id, client) =
             self.resolve_acting_client_mut(command_source, explicit_client_id)?;
 
+        if *command_source == CommandSource::from_key_binding(client_id) {
+            client.set_last_applied_lock_command_id(command_id);
+        }
         let current_lock_mode = client.get_lock_mode();
         let next_lock_mode = resolve_lock_mode(current_lock_mode);
         let mut transaction_scope = TransactionScope::new();

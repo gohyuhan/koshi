@@ -45,9 +45,10 @@ use koshi_ipc::frame::{
 };
 use koshi_ipc::placement::PanePlacementSnapshot;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, PaneSlot, PaneSnapshot,
-    PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot, PlacementTabSnapshot,
-    RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, FloatingPaneSlot, GridView, ImagePlacementSnapshot, PaneSlot,
+    PaneSnapshot, PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot,
+    PlacementTabSnapshot, RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot,
+    TabMetadata, TabSnapshot,
 };
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
@@ -103,6 +104,17 @@ fn build_render_snapshot_with_images(
                 .iter()
                 .map(build_tab_metadata)
                 .collect(),
+            floating_pane_slots: painted_frame
+                .session_snapshot
+                .floating_pane_slots
+                .iter()
+                .map(|frame_floating_pane_slot| FloatingPaneSlot {
+                    pane_id: frame_floating_pane_slot.pane_id,
+                    outer_rect: frame_floating_pane_slot.outer_rect,
+                    content_rect: frame_floating_pane_slot.content_rect,
+                    is_pinned: frame_floating_pane_slot.is_pinned,
+                })
+                .collect(),
         },
         pane_snapshots: painted_frame
             .pane_snapshots
@@ -116,6 +128,9 @@ fn build_render_snapshot_with_images(
             active_tab_id: painted_frame.client_snapshot.active_tab_id,
             focused_pane_id: painted_frame.client_snapshot.focused_pane_id,
             lock_mode: painted_frame.client_snapshot.lock_mode,
+            last_applied_lock_command_id: painted_frame
+                .client_snapshot
+                .last_applied_lock_command_id,
             is_mouse_selection_enabled: painted_frame.client_snapshot.is_mouse_selection_enabled,
         },
     }
@@ -186,6 +201,7 @@ fn build_placement_render_snapshot(
                 active_tab_id: placement_snapshot.client_snapshot.active_tab_id,
                 focused_pane_id: placement_snapshot.client_snapshot.focused_pane_id,
                 lock_mode: LockMode::Normal,
+                last_applied_lock_command_id: None,
                 is_mouse_selection_enabled: false,
             },
             reported_pane_area: placement_snapshot.client_snapshot.pane_area,

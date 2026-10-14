@@ -8,9 +8,10 @@
 //! (answers to DA/DSR/DECRQM: escape sequences the child sends to ask "what
 //! terminal are you" / "what's your status" / "is this mode on") back into
 //! the pane's PTY, and marks the screen stale for the event loop to schedule a
-//! repaint. Shell-integration events are published in marker order. Bytes for
-//! a pane with no engine (one closed while the event sat in the inbox) are
-//! dropped without touching any state.
+//! repaint. Shell-integration events are published in marker order, and the
+//! `OSC 52` clipboard copies the engine read go to the clients that focus the
+//! pane. Bytes for a pane with no engine (one closed while the event sat in the
+//! inbox) are dropped without touching any state.
 
 use std::time::Instant;
 
@@ -75,6 +76,11 @@ impl Server {
     /// alternate) than it started on drops every client's highlight in it.
     ///
     /// Shell-integration facts become command lifecycle events in marker order.
+    ///
+    /// Each `OSC 52` copy the engine read
+    /// ([`TerminalEngine::take_clipboard_copies`]) goes, in order, to every
+    /// client whose focused pane is `pane_id`, on this machine and on other
+    /// machines alike, as an `OSC 52` host write.
     pub fn handle_pty_output(&mut self, pane_id: PaneId, output_bytes: &[u8]) {
         let terminal_cell_size = self.session_by_id.values().find_map(|session| {
             if let Some(tab) = session.find_tab_by_pane_id(pane_id) {
@@ -136,9 +142,10 @@ impl Server {
         reply_bytes: Vec<u8>,
         shell_integration_facts: Vec<ShellIntegrationFact>,
     ) {
-        let Some(terminal_engine) = self.terminal_engine_by_pane_id.get(&pane_id) else {
+        let Some(terminal_engine) = self.terminal_engine_by_pane_id.get_mut(&pane_id) else {
             return;
         };
+        let clipboard_copies = terminal_engine.take_clipboard_copies();
         for graphics_error in terminal_engine
             .list_graphics_events()
             .skip(terminal_advance_state_before.graphics_event_count)
@@ -201,6 +208,9 @@ impl Server {
                 })
                 .collect();
             self.publish_events(&shell_integration_events);
+        }
+        if !clipboard_copies.is_empty() {
+            self.copy_pane_clipboard_to_clients(pane_id, &clipboard_copies);
         }
         self.render_scheduler.invalidate();
     }

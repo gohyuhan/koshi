@@ -1,19 +1,8 @@
 //! Tests for ordered edge-region geometry.
 
-use super::*;
+use koshi_test_support::fixtures::build_cell_rect;
 
-fn build_cell_rect(origin_column: u16, origin_row: u16, column_count: u16, row_count: u16) -> Rect {
-    Rect::from_origin_and_size(
-        Point {
-            column: origin_column,
-            row: origin_row,
-        },
-        Size {
-            column_count,
-            row_count,
-        },
-    )
-}
+use super::*;
 
 fn build_region_geometry(edge: Edge, extent_cell_count: u16) -> RegionGeometry {
     RegionGeometry {

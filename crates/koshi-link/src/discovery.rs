@@ -25,7 +25,10 @@ use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::redact::redact_command_argv;
 use koshi_core::text::{format_counted_noun, sanitize_reported_text};
-use koshi_ipc::endpoint::{is_refusal_from_live_session, is_replacing_its_image, EndpointFile};
+use koshi_ipc::endpoint::{
+    is_refusal_from_live_session, is_replacing_its_image, resolve_clipboard_tool_directory_path,
+    EndpointFile,
+};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::validate::reclaim_stale_socket;
 use serde::Serialize;
@@ -622,9 +625,10 @@ pub fn fetch_session_overview(
 }
 
 /// Remove what the session `session_id` of this user's left behind once
-/// nothing listened at what `asked_endpoint_file` names: its endpoint file in
-/// `runtime_directory`, and the socket file that endpoint file names. Checked
-/// in this order, and the first that holds keeps every file:
+/// nothing listened at what `asked_endpoint_file` names: the socket file that
+/// its endpoint file names, its folder of stand-in clipboard tools, and the
+/// endpoint file in `runtime_directory`, removed in that order. Checked in
+/// this order, and the first that holds keeps every file:
 ///
 /// 1. [`is_replacing_its_image`] accepts the session: it is restarting.
 /// 2. The endpoint file is gone: nothing is left to remove. A session that
@@ -682,6 +686,10 @@ fn delete_stale_session_files(
         });
     }
     let _ = reclaim_stale_socket(&current_endpoint_file.socket_address);
+    let _ = std::fs::remove_dir_all(resolve_clipboard_tool_directory_path(
+        runtime_directory,
+        session_id,
+    ));
     let _ = std::fs::remove_file(&endpoint_path);
     Ok(())
 }
