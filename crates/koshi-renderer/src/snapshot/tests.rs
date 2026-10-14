@@ -114,6 +114,7 @@ fn build_render_snapshot_fixture(terminal_grid: Arc<Grid>) -> RenderSnapshot {
         focused_pane_id: Some(pane_id),
         lock_mode: LockMode::Normal,
         last_applied_lock_command_id: None,
+        last_applied_floating_pane_move_command_id: None,
         is_mouse_selection_enabled: false,
     };
 
@@ -443,6 +444,7 @@ fn viewer_chrome_defaults_to_no_pointer_no_tab_offset_and_no_reconnect() {
             reconnecting: None,
             is_pane_placement_visible: false,
             placement_source_pane_id: None,
+            floating_pane_move_draft: None,
         }
     );
 }
@@ -492,28 +494,6 @@ fn an_active_viewer_mode_replaces_the_frames_base_mode_in_tabline_inputs() {
             .lock_mode,
         LockMode::PanePlacement
     );
-}
-
-#[test]
-fn an_owned_frame_layout_borrows_its_session_and_client() {
-    let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
-    let owned_frame_layout = OwnedFrameLayout {
-        session_snapshot: render_snapshot.session_snapshot.clone(),
-        client_snapshot: render_snapshot.client_snapshot.clone(),
-    };
-
-    let frame_layout = owned_frame_layout.build_frame_layout(ViewerChrome::default());
-
-    assert_eq!(
-        *frame_layout.session_snapshot,
-        render_snapshot.session_snapshot
-    );
-    assert_eq!(
-        *frame_layout.client_snapshot,
-        render_snapshot.client_snapshot
-    );
-    assert_eq!(frame_layout.viewer_chrome, ViewerChrome::default());
-    assert_eq!(frame_layout.committed_regions, None);
 }
 
 #[test]

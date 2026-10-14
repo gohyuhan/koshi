@@ -2542,6 +2542,7 @@ fn run_attachment<B: Backend, W: Write>(
                         Ok(SessionEvent::Resync { .. }) => {
                             sent_border_moves.clear();
                             client.prepare_placement_reconciliation();
+                            client.forget_submitted_floating_pane_move();
                         }
                         // The first bytes of a long host write wait for the
                         // `HostWrite` that ends it.
@@ -2596,6 +2597,7 @@ fn run_attachment<B: Backend, W: Write>(
                     }
                     RuntimeEvent::OuterTerminalFocusLost { .. } => {
                         client.cancel_placement_mode();
+                        client.cancel_floating_pane_move_drag();
                     }
                     other_runtime_event => {
                         if process_runtime_input_with_cell_size(
@@ -4686,12 +4688,11 @@ fn handle_mouse_event(
     for mouse_action in &mouse_actions {
         if let MouseAction::Forward {
             pane_id,
-            mouse_input,
+            mouse_kind: MouseKind::Press(button),
+            ..
         } = mouse_action
         {
-            if let MouseKind::Press(button) = mouse_input.mouse_kind {
-                client.note_press_forwarded(*pane_id, button);
-            }
+            client.note_press_forwarded(*pane_id, *button);
         }
     }
     queue_mouse_actions(pending_mouse_actions, mouse_actions);
@@ -4708,9 +4709,10 @@ fn handle_mouse_event(
 ///
 /// Nothing else is ever dropped. A [`MouseAction::Forward`] is one report the
 /// pane's program must see, and [`MouseAction::AlternateScrollArrows`] is arrow keys
-/// that program reads; a [`MouseAction::Command`] runs once, and a
+/// that program reads; a [`MouseAction::Command`] runs once, a
 /// [`MouseAction::Resize`] states a border's whole distance from its drag
-/// anchor. A pile holding no scrolls therefore stays over the cap rather than
+/// anchor, and a [`MouseAction::MoveFloatingPane`] is the move a drawn draft
+/// waits for. A pile holding no scrolls therefore stays over the cap rather than
 /// break any of those.
 fn queue_mouse_actions(
     pending_mouse_actions: &mut Vec<MouseAction>,
@@ -4977,10 +4979,14 @@ fn convert_mouse_action_to_wire(mouse_action: MouseAction) -> WireMouseAction {
         },
         MouseAction::Forward {
             pane_id,
-            mouse_input,
+            mouse_kind,
+            modifier_flags,
+            pane_local_cell,
         } => WireMouseAction::Forward {
             pane_id,
-            mouse_input,
+            mouse_kind,
+            modifier_flags,
+            pane_local_cell,
         },
         MouseAction::AlternateScrollArrows {
             pane_id,
@@ -5003,6 +5009,13 @@ fn convert_mouse_action_to_wire(mouse_action: MouseAction) -> WireMouseAction {
             requested_cell_count,
         },
         MouseAction::Command(command) => WireMouseAction::Command(command),
+        MouseAction::MoveFloatingPane {
+            command_id,
+            command_args,
+        } => WireMouseAction::MoveFloatingPane {
+            command_id,
+            command_args,
+        },
     }
 }
 

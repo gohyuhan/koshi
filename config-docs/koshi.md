@@ -76,6 +76,26 @@ Each terminal reads these for itself.
 | `scroll-lines` | integer — lines per wheel notch | `3` | ≥ 0.1.0 |
 | `wheel` | `"scroll-scrollback"` (scroll koshi's history) \| `"ignore"` | `"scroll-scrollback"` | ≥ 0.1.0 |
 
+A floating pane takes the mouse on every cell it covers, the margin around
+the tiled panes too. On its titlebar row:
+
+- Drag the grab handle `⣿⣿` to move the pane in your own view. The pane follows
+  the pointer and stays inside the pane area. The move is sent when you
+  release. A release where you pressed, `Esc` during the drag, or a terminal
+  that loses focus sends no move. A pane you pinned does not move. Until the
+  session has moved the pane you released, a press on a grab handle starts no
+  new move.
+- `[ ]` pins the pane at its cell, and `[⚪]` unpins it. `–` minimizes the
+  pane, and `✕` closes it.
+
+Drag a floating pane's border to resize it, up to the edge of your pane area
+on that side. A pane you pinned resizes from its right and bottom borders
+only. A press on the titlebar, the grab handle or the border also focuses the
+pane and shows it above your other floating panes; the three buttons do not.
+
+Example: a `40x12` floating pane at column `30` of an `80`-column pane area,
+its right border dragged 15 columns right, becomes `50` columns wide.
+
 ## `copy`
 
 Each terminal reads this for itself: the copy is made where the selection was

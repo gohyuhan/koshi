@@ -112,6 +112,7 @@ fn build_test_painted_frame() -> PaintedFrame {
             focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: None,
+            last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }

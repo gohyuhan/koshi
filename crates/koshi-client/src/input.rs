@@ -452,7 +452,12 @@ impl Client {
     /// `<C-l>` while locked yields `Fire(core:unlock)` whatever the keymap
     /// says; `<C-p>` in the default keymap opens the pane group and yields
     /// `Pending`; a plain `a` with nothing bound yields `PassThrough('a')`.
+    /// Escape while a floating pane's grab handle is held drops that move and
+    /// yields `Discard`.
     pub fn resolve_key(&mut self, chord: KeyChord, current_time: Instant) -> KeyOutcome {
+        if chord == ESCAPE_KEY_CHORD && self.cancel_floating_pane_move_drag() {
+            return KeyOutcome::Discard;
+        }
         let active_input_mode = self.get_active_input_mode();
         let open_key_sequence = self.pending_key_sequence.take();
 

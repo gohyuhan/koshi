@@ -16,11 +16,6 @@
 //! client shows, at its own positions, while
 //! `session_snapshot.session_name`/`tabs_metadata` are the session-wide data.
 //!
-//! `Server::build_frame_layout` is the same work stopping short of the panes:
-//! it yields the [`OwnedFrameLayout`] that says where every surface sits, with no
-//! grid, title, or highlight. Writing a mouse report to a pane reads only that
-//! much.
-//!
 //! A snapshot carries no hint-bar data: the viewer draws that bar from its own
 //! keymap.
 
@@ -35,10 +30,10 @@ use koshi_layout::content::list_content_rects;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::{solve_layout_with_mode, LayoutSolve, PaneSizing};
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, FloatingPaneSlot, GridView, ImagePlacementSnapshot,
-    OwnedFrameLayout, PaneSlot, PaneSnapshot, PlacementClientSnapshot, PlacementPaneSnapshot,
-    PlacementSnapshot, PlacementSnapshotError, PlacementSnapshotErrorCode, PlacementTabSnapshot,
-    RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, FloatingPaneSlot, GridView, ImagePlacementSnapshot, PaneSlot,
+    PaneSnapshot, PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot,
+    PlacementSnapshotError, PlacementSnapshotErrorCode, PlacementTabSnapshot, RenderSnapshot,
+    ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
 };
 use koshi_session::client::{place_floating_pane, Client, FloatingPanePosition};
 use koshi_session::session::state::{Session, Tab};
@@ -147,13 +142,62 @@ impl Server {
     /// client shows, placed for it, and `pane_snapshots` holds one entry per
     /// tiled slot, then one per floating pane slot.
     pub fn build_snapshot(&self, client_id: ClientId) -> Option<RenderSnapshot> {
-        let owned_frame_layout = self.build_frame_layout(client_id)?;
         let session = self.get_session_for_client(client_id)?;
         let client = session.clients.get_client_by_id(client_id)?;
+        let active_tab_id = client.get_active_tab_id();
+        let tab = session.tabs.get(&active_tab_id)?;
+
+        // Solve the active tab's layout over a rect at origin (0, 0) sized to the
+        // shared tab size; the renderer offsets it into the client viewport.
+        // A tab whose every viewer is starving solves at 0x0, which suppresses
+        // every pane.
+        //
+        // The solve uses THIS client's layout mode: zoom is per-client, so a pane
+        // filling the tab for this client can be one tile among several for
+        // another client viewing the same tab at the same moment.
+        let tab_size = session.get_tab_size(active_tab_id).unwrap_or(Size {
+            column_count: 0,
+            row_count: 0,
+        });
+        let layout_mode = client.get_layout_mode(active_tab_id);
+        let pane_sizing = self.get_pane_sizing();
+        let layout_solve = solve_tab_layout(tab, layout_mode, tab_size, pane_sizing);
+
+        let active_tab_snapshot = TabSnapshot {
+            tab_id: tab.get_tab_id(),
+            tab_name: tab.get_tab_name().to_owned(),
+            pane_slots: list_pane_slots(&layout_solve),
+            tab_size,
+            stack_headers: layout_solve.stack_headers,
+            layout_mode,
+            is_every_pane_suppressed: layout_solve.is_every_pane_suppressed,
+            gap_cell_count: pane_sizing.gap_cell_count,
+        };
+
+        // Metadata for every tab in the session, in display (index) order.
+        let mut tabs_metadata: Vec<TabMetadata> = session
+            .tabs
+            .values()
+            .map(|tab| TabMetadata {
+                tab_id: tab.get_tab_id(),
+                tab_name: tab.get_tab_name().to_owned(),
+                tab_index: tab.get_tab_index(),
+                is_active: tab.get_tab_id() == active_tab_id,
+            })
+            .collect();
+        tabs_metadata.sort_by_key(|tab_metadata| tab_metadata.tab_index);
+
+        let session_snapshot = SessionSnapshot {
+            session_id: session.session_id,
+            session_revision: session.get_placement_revision(),
+            session_name: session.session_name.clone(),
+            active_tab_snapshot,
+            tabs_metadata,
+            floating_pane_slots: list_floating_pane_slots(session, client),
+        };
 
         // One content snapshot per solved slot, in slot order, then one per
         // floating pane slot, back to front.
-        let session_snapshot = &owned_frame_layout.session_snapshot;
         let pane_snapshots: Vec<PaneSnapshot> = session_snapshot
             .active_tab_snapshot
             .pane_slots
@@ -176,9 +220,20 @@ impl Server {
 
         Some(RenderSnapshot {
             is_recovery_notice_visible: session.is_recovery_notice_visible,
-            session_snapshot: owned_frame_layout.session_snapshot,
+            session_snapshot,
             pane_snapshots,
-            client_snapshot: owned_frame_layout.client_snapshot,
+            client_snapshot: ClientSnapshot {
+                client_id: client.get_client_id(),
+                client_revision: client.get_placement_revision(),
+                viewport_size: client.get_viewport_size(),
+                active_tab_id,
+                focused_pane_id: client.get_active_focused_pane_id(),
+                lock_mode: client.get_lock_mode(),
+                last_applied_lock_command_id: client.get_last_applied_lock_command_id(),
+                last_applied_floating_pane_move_command_id: client
+                    .get_last_applied_floating_pane_move_command_id(),
+                is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
+            },
         })
     }
 
@@ -282,6 +337,8 @@ impl Server {
                     focused_pane_id: client.get_active_focused_pane_id(),
                     lock_mode: client.get_lock_mode(),
                     last_applied_lock_command_id: client.get_last_applied_lock_command_id(),
+                    last_applied_floating_pane_move_command_id: client
+                        .get_last_applied_floating_pane_move_command_id(),
                     is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
                 },
                 reported_pane_area: client.get_reported_pane_area(),
@@ -349,85 +406,6 @@ impl Server {
             },
             pane_snapshots,
         }
-    }
-
-    /// Freeze only where `client_id`'s surfaces sit: the solved layout, the tab
-    /// bar's metadata, the floating panes the client shows, and the client's
-    /// own view state.
-    ///
-    /// Returns `None` on the same terms as
-    /// [`build_snapshot`](Self::build_snapshot) — no attached client with that
-    /// id, or its viewed tab has gone.
-    ///
-    /// This is [`build_snapshot`](Self::build_snapshot) without the per-pane
-    /// content: no grid, no title, no highlight resolution. Placing a forwarded
-    /// mouse report in its pane reads only these fields.
-    pub(crate) fn build_frame_layout(&self, client_id: ClientId) -> Option<OwnedFrameLayout> {
-        let session = self.get_session_for_client(client_id)?;
-        let client = session.clients.get_client_by_id(client_id)?;
-        let active_tab_id = client.get_active_tab_id();
-        let tab = session.tabs.get(&active_tab_id)?;
-
-        // Solve the active tab's layout over a rect at origin (0, 0) sized to the
-        // shared tab size; the renderer offsets it into the client viewport.
-        // A tab whose every viewer is starving solves at 0x0, which suppresses
-        // every pane.
-        //
-        // The solve uses THIS client's layout mode: zoom is per-client, so a pane
-        // filling the tab for this client can be one tile among several for
-        // another client viewing the same tab at the same moment.
-        let tab_size = session.get_tab_size(active_tab_id).unwrap_or(Size {
-            column_count: 0,
-            row_count: 0,
-        });
-        let layout_mode = client.get_layout_mode(active_tab_id);
-        let pane_sizing = self.get_pane_sizing();
-        let layout_solve = solve_tab_layout(tab, layout_mode, tab_size, pane_sizing);
-
-        let active_tab_snapshot = TabSnapshot {
-            tab_id: tab.get_tab_id(),
-            tab_name: tab.get_tab_name().to_owned(),
-            pane_slots: list_pane_slots(&layout_solve),
-            tab_size,
-            stack_headers: layout_solve.stack_headers,
-            layout_mode,
-            is_every_pane_suppressed: layout_solve.is_every_pane_suppressed,
-            gap_cell_count: pane_sizing.gap_cell_count,
-        };
-
-        // Metadata for every tab in the session, in display (index) order.
-        let mut tabs_metadata: Vec<TabMetadata> = session
-            .tabs
-            .values()
-            .map(|tab| TabMetadata {
-                tab_id: tab.get_tab_id(),
-                tab_name: tab.get_tab_name().to_owned(),
-                tab_index: tab.get_tab_index(),
-                is_active: tab.get_tab_id() == active_tab_id,
-            })
-            .collect();
-        tabs_metadata.sort_by_key(|tab_metadata| tab_metadata.tab_index);
-
-        Some(OwnedFrameLayout {
-            session_snapshot: SessionSnapshot {
-                session_id: session.session_id,
-                session_revision: session.get_placement_revision(),
-                session_name: session.session_name.clone(),
-                active_tab_snapshot,
-                tabs_metadata,
-                floating_pane_slots: list_floating_pane_slots(session, client),
-            },
-            client_snapshot: ClientSnapshot {
-                client_id: client.get_client_id(),
-                client_revision: client.get_placement_revision(),
-                viewport_size: client.get_viewport_size(),
-                active_tab_id,
-                focused_pane_id: client.get_active_focused_pane_id(),
-                lock_mode: client.get_lock_mode(),
-                last_applied_lock_command_id: client.get_last_applied_lock_command_id(),
-                is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
-            },
-        })
     }
 
     /// Content snapshot for one pane at scrollback view `scrollback_offset` — lines the

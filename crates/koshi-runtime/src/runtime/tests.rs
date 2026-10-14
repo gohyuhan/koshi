@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_client::mouse::MouseAction;
 use koshi_client::Client as ViewerClient;
-use koshi_core::command::{CommandEnvelope, CommandSource};
+use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource};
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, CommandId, PaneId};
@@ -94,13 +94,18 @@ pub(crate) fn apply_mouse_actions(
             }
             MouseAction::Forward {
                 pane_id,
-                mouse_input,
+                mouse_kind,
+                modifier_flags,
+                pane_local_cell,
             } => {
-                let is_report_written =
-                    server.forward_mouse_to_pane(client_id, pane_id, mouse_input);
-                if let (true, MouseKind::Press(mouse_button)) =
-                    (is_report_written, mouse_input.mouse_kind)
-                {
+                let is_report_written = server.forward_mouse_to_pane(
+                    client_id,
+                    pane_id,
+                    mouse_kind,
+                    modifier_flags,
+                    pane_local_cell,
+                );
+                if let (true, MouseKind::Press(mouse_button)) = (is_report_written, mouse_kind) {
                     viewer.note_press_forwarded(pane_id, mouse_button);
                 }
             }
@@ -133,6 +138,19 @@ pub(crate) fn apply_mouse_actions(
                     *command,
                 );
                 let _ = server.submit_command(command_envelope);
+            }
+            MouseAction::MoveFloatingPane {
+                command_id,
+                command_args,
+            } => {
+                let command_envelope = CommandEnvelope::from_parts(
+                    command_id,
+                    CommandSource::from_mouse(client_id),
+                    Command::MoveFloatingPane(command_args),
+                );
+                if let CommandResult::Rejected { .. } = server.submit_command(command_envelope) {
+                    let _ = server.send_placement_command_rejection(client_id, command_id);
+                }
             }
         }
     }

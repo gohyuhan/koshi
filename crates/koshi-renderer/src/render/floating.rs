@@ -38,9 +38,9 @@ const CLOSE_BUTTON_TEXT: &str = "✕";
 /// One floating pane this viewer draws, placed in the frame: its slot, and
 /// its rects moved from pane-area cells to frame cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PlacedFloatingPane<'a> {
+pub(crate) struct PlacedFloatingPane {
     /// The slot this placement comes from.
-    pub(crate) floating_pane_slot: &'a FloatingPaneSlot,
+    pub(crate) floating_pane_slot: FloatingPaneSlot,
     /// The pane's box with its chrome.
     pub(crate) outer_area: RatatuiRect,
     /// The cells inside the chrome, where the pane's grid starts.
@@ -59,18 +59,17 @@ pub(crate) struct PlacedFloatingPane<'a> {
 /// A slot with outer rect `(150, 4)` `40x12` on a viewport whose pane area
 /// starts at `(0, 1)` has its outer area at `(150, 5)` and its content area
 /// at `(151, 8)` `38x8`.
-pub(crate) fn list_placed_floating_panes<'a>(
-    render_snapshot: &'a RenderSnapshot,
+pub(crate) fn list_placed_floating_panes(
+    render_snapshot: &RenderSnapshot,
     committed_regions: &CommittedRegions,
     viewer_chrome: ViewerChrome,
     viewport_area: RatatuiRect,
-) -> Vec<PlacedFloatingPane<'a>> {
+) -> Vec<PlacedFloatingPane> {
     let pane_area = compute_pane_area(committed_regions, viewport_area);
     let pane_area_origin = get_area_origin(pane_area);
     render_snapshot
         .build_frame_layout(viewer_chrome)
         .list_drawn_floating_pane_slots()
-        .iter()
         .map(|floating_pane_slot| {
             let content_area = place_cell_rect(floating_pane_slot.content_rect, pane_area_origin);
             PlacedFloatingPane {
@@ -110,7 +109,7 @@ pub(crate) fn list_placed_floating_panes<'a>(
 /// its chrome with no title, no cells and no scroll position.
 pub(super) fn draw_floating_pane(
     render_snapshot: &RenderSnapshot,
-    placed_floating_pane: &PlacedFloatingPane<'_>,
+    placed_floating_pane: &PlacedFloatingPane,
     viewer_chrome: ViewerChrome,
     theme: &Theme,
     screen_buffer: &mut Buffer,

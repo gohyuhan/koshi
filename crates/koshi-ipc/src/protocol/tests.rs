@@ -16,8 +16,8 @@ use crate::plane::Plane;
 use crate::router::RouterRequestKind;
 use crate::wire::{MaybeKnown, WireName, WireVariants};
 use koshi_core::command::{
-    Command, CommandSource, MovePaneArgs, NewPaneArgs, NewPanePlacement, PanePlacementAnchor,
-    PanePlacementTarget, PlacePaneArgs, ScrollPaneArgs, ToggleLockModeArgs,
+    Command, CommandSource, MoveFloatingPaneArgs, MovePaneArgs, NewPaneArgs, NewPanePlacement,
+    PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, ScrollPaneArgs, ToggleLockModeArgs,
 };
 use koshi_core::discovery::{
     ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, TabDiscovery,
@@ -31,7 +31,7 @@ use koshi_core::key::{
     BindingModifierFlags, Key, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
 };
 use koshi_core::lock::LockMode;
-use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
+use koshi_core::mouse::{MouseButton, MouseKind};
 use koshi_core::process::{ShellKind, SpawnSpec};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::LayoutNode;
@@ -263,11 +263,9 @@ fn list_every_mouse_action() -> Vec<WireMouseAction> {
         },
         WireMouseAction::Forward {
             pane_id,
-            mouse_input: MouseInput {
-                mouse_kind: MouseKind::Press(MouseButton::Left),
-                position: Point { column: 10, row: 3 },
-                modifier_flags: BindingModifierFlags::CTRL,
-            },
+            mouse_kind: MouseKind::Press(MouseButton::Left),
+            modifier_flags: BindingModifierFlags::CTRL,
+            pane_local_cell: Point { column: 10, row: 3 },
         },
         WireMouseAction::AlternateScrollArrows {
             pane_id,
@@ -283,6 +281,13 @@ fn list_every_mouse_action() -> Vec<WireMouseAction> {
         WireMouseAction::Command(Box::new(Command::ToggleLockMode(
             ToggleLockModeArgs::default(),
         ))),
+        WireMouseAction::MoveFloatingPane {
+            command_id: CommandId::from_uuid(build_fixed_test_uuid()),
+            command_args: MoveFloatingPaneArgs {
+                pane_id,
+                top_left_cell: Point { column: 29, row: 8 },
+            },
+        },
     ]
 }
 

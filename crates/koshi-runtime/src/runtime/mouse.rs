@@ -15,6 +15,10 @@
 //! - [`drag_resize`](Server::drag_resize) moves one pane border a number of
 //!   cells and reports how many it took.
 //!
+//! A floating pane move the viewer drew ahead of the session arrives as a
+//! command under the id the viewer chose
+//! ([`run_client_mouse`](Server::run_client_mouse)).
+//!
 //! Focus and every selection change arrive as ordinary commands through
 //! [`Server::submit_command`], validated like any command typed at the CLI.
 //!
@@ -28,30 +32,29 @@
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, ResizePaneArgs, VisualCommand,
 };
-use koshi_core::geometry::Direction;
+use koshi_core::geometry::{Direction, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, NamedKey};
-use koshi_core::mouse::{is_mouse_kind_reported, MouseAnswer, MouseInput, MouseKind};
+use koshi_core::mouse::{is_mouse_kind_reported, MouseAnswer, MouseKind};
 use koshi_input::keyboard::encode_key_chord;
 use koshi_ipc::protocol::WireMouseAction;
-use koshi_renderer::compute_clamped_pane_cell;
-use koshi_renderer::snapshot::ViewerChrome;
 use koshi_terminal::mouse_report::encode_mouse;
 use koshi_terminal::state::Screen;
 
 use crate::server::Server;
 
 impl Server {
-    /// Envelope and dispatch a command attributed to `client_id`'s mouse,
-    /// returning the runtime's result and the cells a resize refused at a pane
-    /// minimum can still take.
+    /// Envelope `mouse_command` under `command_id`, attributed to `client_id`'s
+    /// mouse, and dispatch it, returning the runtime's result and the cells a
+    /// resize refused at a pane minimum can still take.
     fn dispatch_mouse_command(
         &mut self,
         client_id: ClientId,
+        command_id: CommandId,
         mouse_command: Command,
     ) -> (CommandResult, Option<u16>) {
         let mouse_command_envelope = CommandEnvelope::from_parts(
-            CommandId::new(),
+            command_id,
             CommandSource::from_mouse(client_id),
             mouse_command,
         );
@@ -61,7 +64,11 @@ impl Server {
     /// Dispatch a selection command attributed to `client_id`'s mouse, through
     /// the same dispatch every other mutation takes. The result is dropped.
     pub(crate) fn dispatch_visual(&mut self, client_id: ClientId, visual_command: VisualCommand) {
-        let _ = self.dispatch_mouse_command(client_id, Command::Visual(visual_command));
+        let _ = self.dispatch_mouse_command(
+            client_id,
+            CommandId::new(),
+            Command::Visual(visual_command),
+        );
     }
 
     /// Ask for `pane_id`'s `border_side` border to move `requested_cell_count` cells in `resize_step`'s
@@ -85,7 +92,7 @@ impl Server {
             direction: border_side,
             resize_amount_cells: resize_cell_count,
         });
-        match self.dispatch_mouse_command(client_id, resize_command) {
+        match self.dispatch_mouse_command(client_id, CommandId::new(), resize_command) {
             (CommandResult::Ok { .. }, _) => Ok(()),
             (_, available_donor_cell_count) => Err(available_donor_cell_count.unwrap_or(0)),
         }
@@ -107,6 +114,10 @@ impl Server {
     /// The returned count never passes `requested_cell_count`.
     ///
     /// A drag of 5 cells into a neighbor with room for 2 returns `2`.
+    ///
+    /// A floating pane takes one [`Command::ResizePane`], and the returned
+    /// count is how far its solved size moved on the dragged axis: a `40`-column
+    /// float with `10` columns of room, dragged `15` cells wider, returns `10`.
     pub fn drag_resize(
         &mut self,
         client_id: ClientId,
@@ -115,6 +126,27 @@ impl Server {
         resize_step: i16,
         requested_cell_count: u16,
     ) -> u16 {
+        if let Some(previous_solved_size) = self.find_floating_pane_solved_size(client_id, pane_id)
+        {
+            let _ = self.ask_border_move(
+                client_id,
+                pane_id,
+                border_side,
+                resize_step,
+                requested_cell_count,
+            );
+            let solved_size = self
+                .find_floating_pane_solved_size(client_id, pane_id)
+                .unwrap_or(previous_solved_size);
+            return match border_side {
+                Direction::Left | Direction::Right => solved_size
+                    .column_count
+                    .abs_diff(previous_solved_size.column_count),
+                Direction::Up | Direction::Down => solved_size
+                    .row_count
+                    .abs_diff(previous_solved_size.row_count),
+            };
+        }
         let mut applied_cell_count: u16 = 0;
         // What this round asks for: the whole remaining distance, or the cells
         // the last round was told the donating pane can still give.
@@ -144,6 +176,16 @@ impl Server {
             }
         }
         applied_cell_count
+    }
+
+    /// The solved outer size of the floating pane `pane_id` in `client_id`'s
+    /// session, or `None` when `pane_id` is no floating pane there.
+    fn find_floating_pane_solved_size(&self, client_id: ClientId, pane_id: PaneId) -> Option<Size> {
+        let (_, floating_member) = self
+            .get_session_for_client(client_id)?
+            .floating_set
+            .find_member(pane_id)?;
+        Some(floating_member.solved_size)
     }
 
     /// Move `client_id`'s koshi scrollback view of `pane_id` by `scroll_line_count`, up into
@@ -208,16 +250,15 @@ impl Server {
             })
     }
 
-    /// Hand `mouse_input` to the program in `pane_id`, encoded as the mouse report
-    /// that pane's mode asks for.
+    /// Hand a `mouse_kind` event with `modifier_flags` held to the program in
+    /// `pane_id`, as the mouse report that pane's mode asks for, at the cell
+    /// `pane_local_cell` (`(0, 0)` is the top-left content cell).
     ///
-    /// The tracking level and encoding are read here, at the moment of the
-    /// write: a program that turned mouse reporting off since the frame the
-    /// viewer decided from receives nothing.
-    ///
-    /// The pointer's cell is clamped into the pane: an event that landed on
-    /// chrome (a border, the status line) or left the pane mid-drag reaches it
-    /// at the nearest edge.
+    /// The tracking level, the encoding and the grid size are read here, at the
+    /// moment of the write: a program that turned mouse reporting off since the
+    /// frame the viewer decided from receives nothing, and a cell past the
+    /// pane's last column or row is pulled to it. On an `80x24` pane, cell
+    /// `(200, 200)` reports column `80`, row `24`.
     ///
     /// An event that reaches the pane's writer also drops this client's
     /// highlight in that pane, whether the write succeeds or fails. A wheel
@@ -225,15 +266,16 @@ impl Server {
     ///
     /// Returns whether a report was handed to the pane's writer. It is `false`
     /// when the pane is gone, when its live tracking no longer asks for this
-    /// event, when the layout no longer places the pane, and when the pane
-    /// refuses the bytes.
+    /// event, and when the pane refuses the bytes.
     pub fn forward_mouse_to_pane(
         &mut self,
         client_id: ClientId,
         pane_id: PaneId,
-        mouse_input: MouseInput,
+        mouse_kind: MouseKind,
+        modifier_flags: BindingModifierFlags,
+        pane_local_cell: Point,
     ) -> bool {
-        let Some((mouse_tracking, mouse_encoding)) = self
+        let Some((mouse_tracking, mouse_encoding, (row_count, column_count))) = self
             .terminal_engine_by_pane_id
             .get(&pane_id)
             .map(|terminal_engine| {
@@ -241,30 +283,28 @@ impl Server {
                 (
                     terminal_state.get_mouse_tracking(),
                     terminal_state.get_mouse_encoding(),
+                    terminal_state.get_active_grid().get_grid_dimensions(),
                 )
             })
         else {
             return false;
         };
-        if !is_mouse_kind_reported(mouse_tracking, mouse_input.mouse_kind) {
+        if !is_mouse_kind_reported(mouse_tracking, mouse_kind) {
             return false;
         }
-        let Some(owned_frame_layout) = self.build_frame_layout(client_id) else {
-            return false;
-        };
         // A mouse report addresses the program's own grid, whose top-left
         // content cell is `(1, 1)`.
-        let Some((column_number, row_number)) = compute_clamped_pane_cell(
-            owned_frame_layout.build_frame_layout(ViewerChrome::default()),
-            pane_id,
-            mouse_input.position,
-        )
-        .map(|(column_index, row_index)| (column_index + 1, row_index + 1)) else {
-            return false;
-        };
+        let column_number = pane_local_cell
+            .column
+            .min(column_count.saturating_sub(1))
+            .saturating_add(1);
+        let row_number = pane_local_cell
+            .row
+            .min(row_count.saturating_sub(1))
+            .saturating_add(1);
         let Some(mouse_report_bytes) = encode_mouse(
-            mouse_input.mouse_kind,
-            mouse_input.modifier_flags,
+            mouse_kind,
+            modifier_flags,
             column_number,
             row_number,
             mouse_tracking,
@@ -281,7 +321,7 @@ impl Server {
         }
         // A wheel tick leaves the highlight standing; every other forwarded
         // report — click, drag, motion, release — drops it.
-        if is_report_written && !matches!(mouse_input.mouse_kind, MouseKind::Scroll(_)) {
+        if is_report_written && !matches!(mouse_kind, MouseKind::Scroll(_)) {
             self.clear_selection_on_pane_input(client_id, pane_id);
         }
         is_report_written
@@ -348,11 +388,17 @@ impl Server {
     /// and each one runs against the target it names.
     ///
     /// One answer per round goes to the subscriber that views `client_id`,
-    /// carrying `request_id`. It holds one entry per action that had
-    /// something to report — a scroll and a border move — in the order those
-    /// actions ran, and is empty when none did. Each entry names the pane it is
-    /// about, and a border move's entry also names the side and direction it
-    /// was asked in.
+    /// carrying `request_id`. It holds one entry per scroll and per border
+    /// move, in the order those actions ran, and is empty when the round held
+    /// neither. Each entry names the pane it is about, and a border move's
+    /// entry also names the side and direction it was asked in.
+    ///
+    /// A floating pane move runs under the `command_id` it carries and adds no
+    /// entry to the answer. A move the session runs makes `client_id`'s next
+    /// frames name `command_id` as the last applied floating pane move. A move
+    /// the session rejects puts one `PlacementCommandRejected` naming
+    /// `command_id` on the same subscriber's queue, ahead of the round's
+    /// answer.
     pub fn run_client_mouse(
         &mut self,
         client_id: ClientId,
@@ -380,9 +426,17 @@ impl Server {
                 }
                 WireMouseAction::Forward {
                     pane_id,
-                    mouse_input,
+                    mouse_kind,
+                    modifier_flags,
+                    pane_local_cell,
                 } => {
-                    let _ = self.forward_mouse_to_pane(client_id, pane_id, mouse_input);
+                    let _ = self.forward_mouse_to_pane(
+                        client_id,
+                        pane_id,
+                        mouse_kind,
+                        modifier_flags,
+                        pane_local_cell,
+                    );
                 }
                 WireMouseAction::AlternateScrollArrows {
                     pane_id,
@@ -412,7 +466,24 @@ impl Server {
                     });
                 }
                 WireMouseAction::Command(mouse_command) => {
-                    let _ = self.dispatch_mouse_command(client_id, *mouse_command);
+                    let _ =
+                        self.dispatch_mouse_command(client_id, CommandId::new(), *mouse_command);
+                }
+                WireMouseAction::MoveFloatingPane {
+                    command_id,
+                    command_args,
+                } => {
+                    let (command_result, _) = self.dispatch_mouse_command(
+                        client_id,
+                        command_id,
+                        Command::MoveFloatingPane(command_args),
+                    );
+                    match command_result {
+                        CommandResult::Ok { .. } => {}
+                        CommandResult::Rejected { .. } => {
+                            let _ = self.send_placement_command_rejection(client_id, command_id);
+                        }
+                    }
                 }
             }
         }

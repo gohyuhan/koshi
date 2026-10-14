@@ -17,13 +17,13 @@
 
 use std::fmt;
 
-use koshi_core::command::{Command, CommandEnvelope, CommandResult};
+use koshi_core::command::{Command, CommandEnvelope, CommandResult, MoveFloatingPaneArgs};
 use koshi_core::compat::SESSION_PROTOCOL;
 use koshi_core::discovery::SessionOverview;
-use koshi_core::geometry::{Direction, PaneArea, Size};
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_core::key::KeyInput;
-use koshi_core::mouse::MouseInput;
+use koshi_core::geometry::{Direction, PaneArea, Point, Size};
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+use koshi_core::key::{BindingModifierFlags, KeyInput};
+use koshi_core::mouse::MouseKind;
 use koshi_core::recent_event::RecentEvent;
 use koshi_core::redact::REDACTED;
 use serde::de::{self, IgnoredAny, MapAccess, Visitor};
@@ -639,13 +639,19 @@ pub enum WireMouseAction {
         /// Lines to move.
         scroll_line_count: usize,
     },
-    /// Hand the event to the program in `pane_id` as a mouse report. The session
-    /// encodes it from that pane's live tracking level and encoding.
+    /// Hand the event to the program in `pane_id` as a mouse report at the
+    /// cell `pane_local_cell`. The session encodes it from that pane's live
+    /// tracking level and encoding.
     Forward {
         /// The pane whose program receives the report.
         pane_id: PaneId,
-        /// The event, with the cell it landed on and the modifiers held.
-        mouse_input: MouseInput,
+        /// What the mouse did.
+        mouse_kind: MouseKind,
+        /// The modifier keys held during the event.
+        modifier_flags: BindingModifierFlags,
+        /// The cell in the pane's content the event names, `(0, 0)` at its
+        /// top-left content cell.
+        pane_local_cell: Point,
     },
     /// Send `arrow_count` cursor arrow keys to `pane_id` — the alternate-scroll
     /// (`?1007`) translation of a wheel tick on the alternate screen.
@@ -672,6 +678,15 @@ pub enum WireMouseAction {
     /// Run the command through the session's command door, attributed to this
     /// client's mouse.
     Command(Box<Command>),
+    /// Move this client's view of a floating pane under `command_id`, the id
+    /// the client chose. A move the session refuses is answered with
+    /// `PlacementCommandRejected` naming `command_id`.
+    MoveFloatingPane {
+        /// The id the move command carries.
+        command_id: CommandId,
+        /// The floating pane and its new top-left cell.
+        command_args: MoveFloatingPaneArgs,
+    },
 }
 
 /// One message answering an [`IpcRequest`].

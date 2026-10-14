@@ -31,7 +31,8 @@
 //! [`SwitchTo`](crate::event::SessionEvent::SwitchTo) is the fifth: it names
 //! the session the client leaves this one for.
 //! [`PlacementCommandRejected`](crate::event::SessionEvent::PlacementCommandRejected)
-//! is the sixth: it names a placement command that the session rejected.
+//! is the sixth: it names a pane placement command, or a floating pane move
+//! from a mouse round, that the session rejected.
 //! [`Pong`](crate::event::SessionEvent::Pong) is the seventh: the session
 //! writes one to a client whose `Attach` named a `link_timeout_ms` whenever it
 //! has written that client nothing for a third of it.
@@ -260,7 +261,8 @@ pub enum SessionEvent {
         /// and connection token from the endpoint file keyed by this id.
         session_id: SessionId,
     },
-    /// A pane placement command from this client was rejected.
+    /// A pane placement command from this client's key binding, or a
+    /// floating pane move from its mouse round, was rejected.
     PlacementCommandRejected {
         /// The rejected command.
         command_id: CommandId,

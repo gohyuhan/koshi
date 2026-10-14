@@ -1055,6 +1055,7 @@ fn build_test_painted_frame() -> crate::frame::PaintedFrame {
             focused_pane_id: None,
             lock_mode: koshi_core::lock::LockMode::default(),
             last_applied_lock_command_id: None,
+            last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }

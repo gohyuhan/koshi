@@ -95,6 +95,7 @@ fn build_test_render_snapshot() -> Box<RenderSnapshot> {
             focused_pane_id: None,
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: None,
+            last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
         },
     })

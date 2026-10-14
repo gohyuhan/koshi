@@ -137,6 +137,7 @@ fn build_render_snapshot(
             focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: None,
+            last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }
@@ -1492,7 +1493,7 @@ fn a_floating_panes_unavailable_image_shows_text_unless_a_later_floating_pane_co
         build_screen_area(),
     );
     let list_lower_placeholder_rects =
-        |covering_floating_panes: &[PlacedFloatingPane<'_>], image_mode: ImageRenderMode| {
+        |covering_floating_panes: &[PlacedFloatingPane], image_mode: ImageRenderMode| {
             compute_floating_pane_image_placeholder_rects(
                 &render_snapshot,
                 &placed_floating_panes[0],

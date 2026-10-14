@@ -656,8 +656,6 @@ impl Server {
     /// ([`Self::resolve_floating_pane_view_target`]). Shared by validation and
     /// [`Self::handle_move_floating_pane`].
     ///
-    /// `None` when the acting client already stores `Moved(top_left_cell)` for
-    /// the pane.
     /// A pane the acting client minimized, and a pane that client does not
     /// show, both resolve. A pane the acting client pinned is
     /// [`RejectReason::InvalidState`] `<pane> is pinned`.
@@ -666,7 +664,7 @@ impl Server {
         command_args: &MoveFloatingPaneArgs,
         command_source: &CommandSource,
         session: Option<&Session>,
-    ) -> Result<Option<FloatingPaneViewTarget>, Rejection> {
+    ) -> Result<FloatingPaneViewTarget, Rejection> {
         let floating_pane_view_target = self.resolve_floating_pane_view_target(
             Some(command_args.pane_id),
             command_source,
@@ -687,10 +685,7 @@ impl Server {
                 &format!("{} is pinned", floating_pane_view_target.pane_id),
             ));
         }
-        if client_position == FloatingPanePosition::Moved(command_args.top_left_cell) {
-            return Ok(None);
-        }
-        Ok(Some(floating_pane_view_target))
+        Ok(floating_pane_view_target)
     }
 
     /// Resolve a [`Command::SetPanePinned`]: the pane and the acting client

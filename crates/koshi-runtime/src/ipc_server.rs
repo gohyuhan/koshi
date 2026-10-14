@@ -1114,8 +1114,10 @@ fn serve_connection(
 /// or, for a rejected pane placement command, one
 /// [`SessionEvent::PlacementCommandRejected`] carrying its `command_id`; and
 /// a `Mouse` round is answered on the writing half by exactly one
-/// [`SessionEvent::MouseAnswer`] carrying that round's `request_id`. A `Ping`
-/// is read and dropped: nothing crosses for it, and nothing answers it. A
+/// [`SessionEvent::MouseAnswer`] carrying that round's `request_id`, after one
+/// [`SessionEvent::PlacementCommandRejected`] for each floating pane move in
+/// the round that the session rejected. A `Ping` is read and dropped: nothing
+/// crosses for it, and nothing answers it. A
 /// request of any other kind, end of stream, a transport fault, an oversize
 /// frame, or a dispatcher that is gone all end the reading loop. Each read of
 /// the client's next bytes waits with no limit.

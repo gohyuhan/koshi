@@ -115,6 +115,8 @@ pub(crate) fn build_wire_frame_with_content_ids(
             focused_pane_id: client_snapshot.focused_pane_id,
             lock_mode: client_snapshot.lock_mode,
             last_applied_lock_command_id: client_snapshot.last_applied_lock_command_id,
+            last_applied_floating_pane_move_command_id: client_snapshot
+                .last_applied_floating_pane_move_command_id,
             is_mouse_selection_enabled: client_snapshot.is_mouse_selection_enabled,
         },
     }

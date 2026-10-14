@@ -955,6 +955,11 @@ impl Server {
     /// `Moved(top_left_cell)` changes nothing and emits nothing. The session's
     /// placement revision, the pane's size, and every other client's view
     /// stay as they are.
+    ///
+    /// A command whose source is [`CommandSource::Mouse`] naming the acting
+    /// client came from that client's own connection: the client records
+    /// `command_id` as its last applied floating pane move, also when the
+    /// position stays as it was.
     pub(super) fn handle_move_floating_pane(
         &mut self,
         command_id: CommandId,
@@ -962,21 +967,29 @@ impl Server {
         command_args: &MoveFloatingPaneArgs,
     ) -> Result<CommandResult, Rejection> {
         let acting_session = self.resolve_acting_session(command_source)?;
-        let Some(FloatingPaneViewTarget {
+        let FloatingPaneViewTarget {
             session_id,
             client_id,
             pane_id,
-        }) =
-            self.resolve_move_floating_pane_target(command_args, command_source, acting_session)?
-        else {
-            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
-        };
+        } = self.resolve_move_floating_pane_target(command_args, command_source, acting_session)?;
         let session = self
             .session_by_id
             .get_mut(&session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
-        ensure_client_placement_revision_capacity(session, &[client_id])?;
+        let is_position_changed = Self::require_client(session, client_id)?
+            .get_floating_pane_view(pane_id)
+            .position
+            != FloatingPanePosition::Moved(command_args.top_left_cell);
+        if is_position_changed {
+            ensure_client_placement_revision_capacity(session, &[client_id])?;
+        }
         let client = Self::require_client_mut(session, client_id)?;
+        if *command_source == CommandSource::from_mouse(client_id) {
+            client.set_last_applied_floating_pane_move_command_id(command_id);
+        }
+        if !is_position_changed {
+            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
+        }
         let _ = client.set_floating_pane_position(pane_id, command_args.top_left_cell);
         let _ = client.advance_placement_revision();
         Ok(Self::commit_events(

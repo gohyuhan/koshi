@@ -61,7 +61,9 @@ use koshi_renderer::region::solve_core_regions;
 use koshi_renderer::snapshot::{Delivery, Reconnecting, RenderSnapshot};
 use koshi_renderer::theme::Theme;
 
-use crate::mouse::{LastPress, MouseCapture, ResizeDrag, SelectionDrag, TablineDrag, TablinePeek};
+use crate::mouse::{
+    FloatingPaneMove, LastPress, MouseCapture, ResizeDrag, SelectionDrag, TablineDrag, TablinePeek,
+};
 
 #[cfg(test)]
 mod tests;
@@ -221,6 +223,8 @@ pub(crate) struct ViewerRestorePoint {
     visible_tab_ids: Vec<TabId>,
     /// Pane placement mode, its preview reads, and the placement revisions.
     placement_state: PlacementState,
+    /// The floating pane move this viewer draws ahead of the session.
+    floating_pane_move: Option<FloatingPaneMove>,
 }
 
 /// Whether a viewer holds a link to its session, and how it is getting one back
@@ -340,6 +344,10 @@ pub struct Client {
     /// The tab-strip peek-drag under way, held only between the press on the
     /// bare strip that begins it and the release that ends it.
     tabline_drag: Option<TablineDrag>,
+    /// The floating pane this viewer draws at its own top-left cell: while
+    /// its grab handle is held, and after the release until the session
+    /// rejects the move, or until an applied frame names the move.
+    floating_pane_move: Option<FloatingPaneMove>,
     /// Where this viewer's tab strip is scrolled, and the tab it was scrolled
     /// on. `None` follows the active tab. A [`TablinePeek`] records the active
     /// tab and the first visible tab index. The peek belongs to the tab it was
@@ -416,6 +424,7 @@ impl Client {
             mouse_capture: None,
             resize_drag: None,
             tabline_drag: None,
+            floating_pane_move: None,
             tabline_peek: None,
             selection_drag: None,
             selection_scroll_origin_row_index: None,
@@ -553,7 +562,9 @@ impl Client {
 
     /// Apply the viewer state `render_snapshot` carries, in this order: the
     /// placement revisions, the active tab with its focused pane and tab list,
-    /// the lock mode, the tab-strip peek, and whether mouse-select is on. A
+    /// the lock mode, the tab-strip peek, whether mouse-select is on, and
+    /// whether the snapshot settles a sent floating pane move by naming it
+    /// ([`settle_floating_pane_move`](Self::settle_floating_pane_move)). A
     /// tab-strip peek made on another tab is dropped. Each other step can end
     /// pane placement mode or clear its target, as
     /// [`set_placement_revisions`](Self::set_placement_revisions),
@@ -594,6 +605,11 @@ impl Client {
         self.set_mouse_selection_enabled(
             render_snapshot.client_snapshot.is_mouse_selection_enabled,
         );
+        self.settle_floating_pane_move(
+            render_snapshot
+                .client_snapshot
+                .last_applied_floating_pane_move_command_id,
+        );
     }
 
     /// Copy every field [`apply_render_snapshot`](Self::apply_render_snapshot)
@@ -609,6 +625,7 @@ impl Client {
             focused_pane_id: self.focused_pane_id,
             visible_tab_ids: self.visible_tab_ids.clone(),
             placement_state: self.placement_state.clone(),
+            floating_pane_move: self.floating_pane_move,
         }
     }
 
@@ -624,6 +641,7 @@ impl Client {
             focused_pane_id,
             visible_tab_ids,
             placement_state,
+            floating_pane_move,
         } = viewer_restore_point;
         self.lock_mode = lock_mode;
         self.pending_lock_command_id = pending_lock_command_id;
@@ -634,6 +652,7 @@ impl Client {
         self.focused_pane_id = focused_pane_id;
         self.visible_tab_ids = visible_tab_ids;
         self.placement_state = placement_state;
+        self.floating_pane_move = floating_pane_move;
     }
 
     /// Record the view carried by the newest painted frame.
@@ -1275,12 +1294,17 @@ impl Client {
         true
     }
 
-    /// Clear the pending placement confirmation that the session rejected, and
-    /// return `true`. Pane placement mode that lasts until Esc stays on and
-    /// reads a fresh preview; a mode that lasts until its drag ends closes.
-    /// Returns `false`, changing nothing, when `command_id` is not the pending
-    /// placement command.
+    /// Drop the command `command_id` names, which the session rejected, and
+    /// return `true`: a sent floating pane move
+    /// ([`reject_floating_pane_move`](Self::reject_floating_pane_move)), or
+    /// the pending placement confirmation. After a rejected confirmation, pane
+    /// placement mode that lasts until Esc stays on and reads a fresh preview,
+    /// and a mode that lasts until its drag ends closes. Returns `false`,
+    /// changing nothing, when `command_id` names neither.
     pub(crate) fn reject_placement_command(&mut self, command_id: CommandId) -> bool {
+        if self.reject_floating_pane_move(command_id) {
+            return true;
+        }
         if !self.is_pending_placement_command(command_id) {
             return false;
         }
@@ -1429,7 +1453,9 @@ impl Client {
     /// [`Delivery::HostWrite`], which wakes the thread that writes that
     /// client's connection, and a [`Delivery::SwitchTo`], which moves that
     /// client to another session. A [`Delivery::PlacementCommandRejected`]
-    /// clears the matching pending placement command.
+    /// clears the matching sent floating pane move, or else the matching
+    /// pending placement command. A [`Delivery::Snapshot`] also drops a sent
+    /// floating pane move.
     pub fn apply_events(&mut self) -> usize {
         let mut delivery_count = 0;
         while let Ok(delivery) = self.delivery_receiver.try_recv() {
@@ -1472,6 +1498,7 @@ impl Client {
                         dropped_event_count = lag_report.dropped_event_count,
                         "events were dropped; resuming from a fresh frame"
                     );
+                    self.forget_submitted_floating_pane_move();
                     self.apply_render_snapshot(&render_snapshot);
                     self.clear_placement_read();
                 }
