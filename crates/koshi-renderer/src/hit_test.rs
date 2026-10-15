@@ -95,17 +95,11 @@ pub enum HitRegion {
         tab_id: TabId,
     },
     /// The left scroll arrow, shown when tabs are hidden off the left of a
-    /// scrolled tab strip; clicking it peeks toward the start.
-    TablineScrollLeft {
-        /// The first-visible tab index the click scrolls the strip to.
-        target_tab_index: usize,
-    },
+    /// scrolled tab strip; clicking it steps the strip one tab toward the start.
+    TablineScrollLeft,
     /// The right scroll arrow, shown when tabs are hidden off the right of a
-    /// scrolled tab strip; clicking it peeks toward the end.
-    TablineScrollRight {
-        /// The first-visible tab index the click scrolls the strip to.
-        target_tab_index: usize,
-    },
+    /// scrolled tab strip; clicking it steps the strip one tab toward the end.
+    TablineScrollRight,
     /// The tabline row, off any tab ribbon or arrow (session name, gap, or mode
     /// tag).
     Tabline,
@@ -316,19 +310,11 @@ fn classify_tabline_region(
     screen_column: u16,
 ) -> HitRegion {
     let tabline_geometry = solve_tabline_layout(frame_layout.get_tabline_inputs(), tabline_rect);
-    if let Some(left_scroll_arrow) = tabline_geometry.left_scroll_arrow {
-        if screen_column == left_scroll_arrow.start_column {
-            return HitRegion::TablineScrollLeft {
-                target_tab_index: left_scroll_arrow.target_first_visible_tab_index,
-            };
-        }
+    if tabline_geometry.left_scroll_arrow_column == Some(screen_column) {
+        return HitRegion::TablineScrollLeft;
     }
-    if let Some(right_scroll_arrow) = tabline_geometry.right_scroll_arrow {
-        if screen_column == right_scroll_arrow.start_column {
-            return HitRegion::TablineScrollRight {
-                target_tab_index: right_scroll_arrow.target_first_visible_tab_index,
-            };
-        }
+    if tabline_geometry.right_scroll_arrow_column == Some(screen_column) {
+        return HitRegion::TablineScrollRight;
     }
     for visible_tab_span in tabline_geometry.visible_tab_spans {
         if screen_column >= visible_tab_span.start_column
@@ -363,10 +349,7 @@ pub fn find_pane_content_rect(frame_layout: FrameLayout<'_>, pane_id: PaneId) ->
         return None;
     }
     let frame_pane_area = compute_frame_pane_area(frame_layout, viewport_area);
-    if let Some(floating_pane_slot) = frame_layout
-        .list_drawn_floating_pane_slots()
-        .find(|floating_pane_slot| floating_pane_slot.pane_id == pane_id)
-    {
+    if let Some(floating_pane_slot) = frame_layout.find_drawn_floating_pane_slot(pane_id) {
         let content_rect = floating_pane_slot.content_rect;
         return Some(Rect::from_origin_and_size(
             Point {
@@ -392,8 +375,9 @@ pub fn find_pane_content_rect(frame_layout: FrameLayout<'_>, pane_id: PaneId) ->
 }
 
 /// The 0-based cell inside `pane_id`'s content that client-local screen cell
-/// `screen_point` falls on, with a cell outside that content pulled to the
-/// nearest edge. [`None`] when the pane is not drawn this frame.
+/// `screen_point` falls on, `(0, 0)` at the content's top-left cell, with a
+/// cell outside that content pulled to the nearest edge. [`None`] when the
+/// pane is not drawn this frame.
 ///
 /// On a pane whose content spans columns 10–49, `screen_point.column = 70`
 /// gives column `39`, the pane's last, and `screen_point.column = 3` gives
@@ -403,18 +387,18 @@ pub fn compute_clamped_pane_cell(
     frame_layout: FrameLayout<'_>,
     pane_id: PaneId,
     screen_point: Point,
-) -> Option<(u16, u16)> {
+) -> Option<Point> {
     let content_rect = find_pane_content_rect(frame_layout, pane_id)?;
     let right_column =
         content_rect.origin.column + content_rect.size.column_count.saturating_sub(1);
     let bottom_row = content_rect.origin.row + content_rect.size.row_count.saturating_sub(1);
-    Some((
-        screen_point
+    Some(Point {
+        column: screen_point
             .column
             .clamp(content_rect.origin.column, right_column)
             - content_rect.origin.column,
-        screen_point.row.clamp(content_rect.origin.row, bottom_row) - content_rect.origin.row,
-    ))
+        row: screen_point.row.clamp(content_rect.origin.row, bottom_row) - content_rect.origin.row,
+    })
 }
 
 /// The metadata index of the first tab currently visible in `frame_layout`'s committed
@@ -447,7 +431,7 @@ pub fn find_first_visible_tab_index(frame_layout: FrameLayout<'_>) -> Option<usi
 
 /// Return the pane rectangle from the committed solve, or the whole area for
 /// the server-side layout view that has no client commit.
-fn compute_frame_pane_area(
+pub(crate) fn compute_frame_pane_area(
     frame_layout: FrameLayout<'_>,
     viewport_area: RatatuiRect,
 ) -> RatatuiRect {
@@ -461,7 +445,7 @@ fn compute_frame_pane_area(
 /// The viewing client's whole viewport as a screen rect, origin `(0, 0)`. A
 /// client 80 cells across and 24 rows tall gives `x: 0, y: 0, width: 80,
 /// height: 24`.
-fn compute_viewport_area(frame_layout: FrameLayout<'_>) -> RatatuiRect {
+pub(crate) fn compute_viewport_area(frame_layout: FrameLayout<'_>) -> RatatuiRect {
     let viewport_size = frame_layout.committed_regions.map_or(
         frame_layout.client_snapshot.viewport_size,
         |committed_regions| committed_regions.viewport_size,

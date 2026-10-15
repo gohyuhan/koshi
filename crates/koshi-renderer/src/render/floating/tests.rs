@@ -8,7 +8,7 @@
 //! left border beside it. `U+17D8` there takes 1 column and stays, and in a
 //! title it takes 1 column. No floating pane is placed or drawn while pane
 //! placement shows or every pane is suppressed. The pane a move draft names is
-//! placed at the draft's top-left cell.
+//! placed at the draft's top-left cell, moved inside the pane area.
 
 use super::*;
 
@@ -307,6 +307,38 @@ fn a_move_draft_places_its_floating_pane_at_the_draft_cell() {
                 visible_content_area: RatatuiRect::new(5, 7, 18, 2),
             },
         ]
+    );
+}
+
+#[test]
+fn a_move_draft_past_the_pane_area_places_its_floating_pane_moved_inside_the_pane_area() {
+    let mut render_snapshot = build_forty_by_twelve_render_snapshot();
+    let moved_pane_id =
+        push_floating_pane(&mut render_snapshot, build_cell_rect(2, 1, 20, 6), "htop");
+    let viewer_chrome = ViewerChrome {
+        floating_pane_move_draft: Some(FloatingPaneMoveDraft {
+            pane_id: moved_pane_id,
+            top_left_cell: Point { column: 35, row: 9 },
+        }),
+        ..ViewerChrome::default()
+    };
+
+    let placed_floating_panes = list_core_placed_floating_panes(&render_snapshot, viewer_chrome);
+
+    // The 20x6 pane in the 40x10 pane area, which starts at row 1, keeps its
+    // top-left cell at (20, 4) at most.
+    assert_eq!(
+        placed_floating_panes,
+        [PlacedFloatingPane {
+            floating_pane_slot: FloatingPaneSlot::from_outer_rect(
+                moved_pane_id,
+                build_cell_rect(20, 4, 20, 6),
+                false,
+            ),
+            outer_area: RatatuiRect::new(20, 5, 20, 6),
+            content_area: RatatuiRect::new(21, 8, 18, 2),
+            visible_content_area: RatatuiRect::new(21, 8, 18, 2),
+        }]
     );
 }
 

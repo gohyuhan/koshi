@@ -1311,10 +1311,7 @@ fn run_server_until_quit(
         {
             let _ = server.handle_runtime_event(runtime_event);
         }
-        server.resync_lagged();
-        if server.poll_render(Instant::now()) {
-            server.push_frames();
-        }
+        server.push_due_frames(Instant::now());
     }
 
     let (server, _, ()) = served_test_session.finish();

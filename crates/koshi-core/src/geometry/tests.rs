@@ -1,6 +1,7 @@
 //! Unit tests for rectangular geometry operations and layout enums.
 //!
-//! Tests `Rect` containment, intersection, insetting, and serde round-trips;
+//! Tests `Rect` containment, intersection, insetting, moving inside a
+//! container, and serde round-trips;
 //! the `Size` fit check; the `RequiredSize` sum and fit check; `Direction` and
 //! `SplitDirection` enum serialization; the range `AxisPercent` and
 //! `FloatingPaneDimension` accept and their encoding; and the cell count of a
@@ -167,6 +168,34 @@ fn a_rect_is_inside_another_only_when_every_edge_stays_within_it() {
             inner_rect.is_inside_rect(outer_rect),
             is_expected_inside,
             "{inner_rect:?}"
+        );
+    }
+}
+
+#[test]
+fn a_rect_moved_inside_a_container_moves_left_and_up_only_as_far_as_it_must() {
+    let container_size = Size {
+        column_count: 80,
+        row_count: 22,
+    };
+    let moved_rect_checks = [
+        (build_rect(70, 2, 20, 10), build_rect(60, 2, 20, 10)),
+        (build_rect(5, 20, 20, 10), build_rect(5, 12, 20, 10)),
+        (build_rect(60, 12, 20, 10), build_rect(60, 12, 20, 10)),
+        (build_rect(3, 4, 20, 10), build_rect(3, 4, 20, 10)),
+        (build_rect(5, 2, 90, 10), build_rect(0, 2, 90, 10)),
+        (build_rect(5, 2, 20, 30), build_rect(5, 0, 20, 30)),
+        (
+            build_rect(u16::MAX, u16::MAX, 20, 10),
+            build_rect(60, 12, 20, 10),
+        ),
+    ];
+
+    for (starting_rect, expected_rect) in moved_rect_checks {
+        assert_eq!(
+            starting_rect.compute_moved_inside(container_size),
+            expected_rect,
+            "{starting_rect:?}"
         );
     }
 }

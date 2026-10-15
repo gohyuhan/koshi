@@ -9,7 +9,8 @@ use koshi_core::{
         FLOATING_PANE_CHROME_SIZE, MAX_FLOATING_PANES_PER_SESSION, MAX_TAB_FOCUS_MRU_ENTRY_COUNT,
     },
     geometry::{
-        compute_percent_cell_count, FloatingPaneDimension, FloatingPaneSize, PixelCellSize, Size,
+        compute_percent_cell_count, FloatingPaneDimension, FloatingPaneSize, PixelCellSize, Rect,
+        Size,
     },
     ids::{ClientId, PaneId, SessionId, TabId},
 };
@@ -18,7 +19,7 @@ use koshi_pane::{pane::lifecycle::PaneLifecycle, registry::PaneRegistry};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    client::{Client, ClientRegistry},
+    client::{place_floating_pane, Client, ClientRegistry},
     error::{FloatingSetError, InvalidTransition, SessionConsistencyError},
     session::lifecycle::{SessionLifecycle, SessionLifecycleEvent},
 };
@@ -158,7 +159,7 @@ impl FloatingSet {
     }
 
     /// The member holding `pane_id`, with its index in creation order: its
-    /// cascade index ([`place_floating_pane`](crate::client::place_floating_pane)).
+    /// cascade index ([`place_floating_pane`]).
     /// `None` when no member holds `pane_id`. With members `[a, b]`, `b` →
     /// `Some((1, b))`.
     #[must_use]
@@ -511,6 +512,28 @@ impl Session {
             .list_attached_clients()
             .filter_map(Client::get_floating_viewport)
             .reduce(Size::compute_minimum_axes)
+    }
+
+    /// The rectangle the session places the floating pane `pane_id` in for
+    /// `client`, counted in its pane-area cells: [`place_floating_pane`] of
+    /// the client's position for the pane, the pane's solved size and cascade
+    /// index, on the client's floating viewport
+    /// ([`Client::get_floating_viewport`]). The client's minimized state is
+    /// not read. `None` when `pane_id` is no floating member of this session,
+    /// or the client has no floating viewport.
+    ///
+    /// A `40x12` pane pinned at `(20, 5)`, on a client whose floating viewport
+    /// is `50x22` → `(10, 5)` `40x12`.
+    #[must_use]
+    pub fn find_client_floating_pane_rect(&self, client: &Client, pane_id: PaneId) -> Option<Rect> {
+        let floating_viewport = client.get_floating_viewport()?;
+        let (cascade_index, floating_member) = self.floating_set.find_member(pane_id)?;
+        Some(place_floating_pane(
+            client.get_floating_pane_view(pane_id).position,
+            floating_member.solved_size,
+            cascade_index,
+            floating_viewport,
+        ))
     }
 
     /// The cell size the session's floating panes take: that of the

@@ -291,24 +291,28 @@ fn mouse_hit_testing_stays_on_the_painted_region_revision() {
         5,
     );
 
-    let painted_mouse_frame = MouseFrame::from_snapshot(&render_snapshot, default_regions.clone());
+    let painted_mouse_frame = MouseFrame::from_snapshot(
+        &render_snapshot,
+        default_regions.clone(),
+        ViewerChrome::default(),
+    );
     assert_eq!(
         resolve_hit_region(
-            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
+            painted_mouse_frame.build_frame_layout(),
             build_screen_point(12, 2)
         ),
         HitRegion::PaneContent { pane_id }
     );
     assert_eq!(
         resolve_hit_region(
-            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
+            painted_mouse_frame.build_frame_layout(),
             build_screen_point(1, 0)
         ),
         HitRegion::Tabline
     );
     assert_eq!(
         resolve_hit_region(
-            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
+            painted_mouse_frame.build_frame_layout(),
             build_screen_point(1, 39)
         ),
         HitRegion::Statusline
@@ -318,10 +322,11 @@ fn mouse_hit_testing_stays_on_the_painted_region_revision() {
         4
     );
 
-    let replacement_mouse_frame = MouseFrame::from_snapshot(&render_snapshot, side_regions);
+    let replacement_mouse_frame =
+        MouseFrame::from_snapshot(&render_snapshot, side_regions, ViewerChrome::default());
     assert_eq!(
         resolve_hit_region(
-            replacement_mouse_frame.build_frame_layout(ViewerChrome::default()),
+            replacement_mouse_frame.build_frame_layout(),
             build_screen_point(12, 2)
         ),
         HitRegion::None
@@ -380,10 +385,11 @@ fn a_left_region_shifts_the_pane_area_right() {
             ),
             9,
         ),
+        ViewerChrome::default(),
     );
     let resolve_screen_hit_region = |screen_column, screen_row| {
         resolve_hit_region(
-            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
+            painted_mouse_frame.build_frame_layout(),
             build_screen_point(screen_column, screen_row),
         )
     };
@@ -407,27 +413,24 @@ fn a_left_region_shifts_the_pane_area_right() {
     assert_eq!(resolve_screen_hit_region(0, 39), HitRegion::Statusline);
 
     assert_eq!(
-        find_pane_content_rect(
-            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
-            pane_id
-        ),
+        find_pane_content_rect(painted_mouse_frame.build_frame_layout(), pane_id),
         Some(build_cell_rect(21, 2, 98, 36))
     );
     assert_eq!(
         compute_clamped_pane_cell(
-            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
+            painted_mouse_frame.build_frame_layout(),
             pane_id,
             build_screen_point(21, 2)
         ),
-        Some((0, 0))
+        Some(Point { column: 0, row: 0 })
     );
     assert_eq!(
         compute_clamped_pane_cell(
-            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
+            painted_mouse_frame.build_frame_layout(),
             pane_id,
             build_screen_point(0, 0)
         ),
-        Some((0, 0))
+        Some(Point { column: 0, row: 0 })
     );
 }
 
@@ -498,10 +501,11 @@ fn a_committed_solve_with_no_regions_leaves_every_row_to_the_panes() {
             solve_region_rects(viewport_size, &[]),
             3,
         ),
+        ViewerChrome::default(),
     );
     let resolve_screen_hit_region = |screen_column, screen_row| {
         resolve_hit_region(
-            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
+            painted_mouse_frame.build_frame_layout(),
             build_screen_point(screen_column, screen_row),
         )
     };
@@ -527,9 +531,7 @@ fn a_committed_solve_with_no_regions_leaves_every_row_to_the_panes() {
         HitRegion::PaneContent { pane_id }
     );
     assert_eq!(
-        find_first_visible_tab_index(
-            painted_mouse_frame.build_frame_layout(ViewerChrome::default()),
-        ),
+        find_first_visible_tab_index(painted_mouse_frame.build_frame_layout()),
         None
     );
 }
@@ -563,11 +565,11 @@ fn a_pane_with_a_zero_cell_content_area_clamps_every_cell_to_its_origin() {
     );
     assert_eq!(
         compute_clamped_pane_cell(build_frame_layout(), pane_id, build_screen_point(1, 6)),
-        Some((0, 0))
+        Some(Point { column: 0, row: 0 })
     );
     assert_eq!(
         compute_clamped_pane_cell(build_frame_layout(), pane_id, build_screen_point(39, 9)),
-        Some((0, 0))
+        Some(Point { column: 0, row: 0 })
     );
     assert_eq!(
         resolve_hit_region(build_frame_layout(), build_screen_point(0, 5)),
@@ -805,10 +807,9 @@ fn tabs_hit_by_column() {
     );
 }
 
-/// Scroll arrows hit-test to their scroll targets, and those targets step one
-/// tab off the current first-visible index.
+/// The cell of each scroll arrow hit-tests to that arrow.
 #[test]
-fn scroll_arrows_hit_test_to_their_targets() {
+fn scroll_arrows_hit_test_to_their_arrows() {
     use crate::render::solve_tabline_layout;
     use ratatui::layout::Rect as RatatuiRect;
 
@@ -849,38 +850,26 @@ fn scroll_arrows_hit_test_to_their_targets() {
             .get_tabline_inputs(),
         tabline_area,
     );
-    let left_scroll_arrow = tabline_layout
-        .left_scroll_arrow
+    let left_scroll_arrow_column = tabline_layout
+        .left_scroll_arrow_column
         .expect("tabs hidden off the left");
-    let right_scroll_arrow = tabline_layout
-        .right_scroll_arrow
+    let right_scroll_arrow_column = tabline_layout
+        .right_scroll_arrow_column
         .expect("tabs hidden off the right");
 
     assert_eq!(
-        left_scroll_arrow.target_first_visible_tab_index, 1,
-        "left arrow steps one tab toward the start"
-    );
-    assert_eq!(
-        right_scroll_arrow.target_first_visible_tab_index, 3,
-        "right arrow steps one tab toward the end"
+        resolve_hit_region(
+            render_snapshot.build_frame_layout(viewer_chrome),
+            build_screen_point(left_scroll_arrow_column, 0),
+        ),
+        HitRegion::TablineScrollLeft
     );
     assert_eq!(
         resolve_hit_region(
             render_snapshot.build_frame_layout(viewer_chrome),
-            build_screen_point(left_scroll_arrow.start_column, 0),
+            build_screen_point(right_scroll_arrow_column, 0),
         ),
-        HitRegion::TablineScrollLeft {
-            target_tab_index: 1
-        }
-    );
-    assert_eq!(
-        resolve_hit_region(
-            render_snapshot.build_frame_layout(viewer_chrome),
-            build_screen_point(right_scroll_arrow.start_column, 0),
-        ),
-        HitRegion::TablineScrollRight {
-            target_tab_index: 3
-        }
+        HitRegion::TablineScrollRight
     );
 }
 
@@ -1093,22 +1082,31 @@ fn a_pane_cell_clamped_pulls_an_outside_cell_to_the_nearest_edge() {
 
     // The content rect spans columns 3–40 and rows 3–10, so its own cells run
     // (0, 0) to (37, 7).
-    assert_eq!(compute_clamped_screen_point_pane_cell(3, 3), Some((0, 0)));
+    assert_eq!(
+        compute_clamped_screen_point_pane_cell(3, 3),
+        Some(Point { column: 0, row: 0 })
+    );
     assert_eq!(
         compute_clamped_screen_point_pane_cell(40, 10),
-        Some((37, 7))
+        Some(Point { column: 37, row: 7 })
     );
     // Past the far corner, and before the near corner: both pull inside.
     assert_eq!(
         compute_clamped_screen_point_pane_cell(200, 200),
-        Some((37, 7))
+        Some(Point { column: 37, row: 7 })
     );
-    assert_eq!(compute_clamped_screen_point_pane_cell(0, 0), Some((0, 0)));
+    assert_eq!(
+        compute_clamped_screen_point_pane_cell(0, 0),
+        Some(Point { column: 0, row: 0 })
+    );
     // Off one axis only: that axis clamps, the other keeps its cell.
-    assert_eq!(compute_clamped_screen_point_pane_cell(1, 7), Some((0, 4)));
+    assert_eq!(
+        compute_clamped_screen_point_pane_cell(1, 7),
+        Some(Point { column: 0, row: 4 })
+    );
     assert_eq!(
         compute_clamped_screen_point_pane_cell(20, 13),
-        Some((17, 7))
+        Some(Point { column: 17, row: 7 })
     );
     // A pane that is not drawn this frame names no cell at all.
     assert_eq!(
@@ -1293,11 +1291,15 @@ fn build_floating_frame(tiled_pane_id: PaneId, tab_size: Size) -> RenderSnapshot
 }
 
 /// The frame `render_snapshot` paints with the tabline on its first row and
-/// the statusline on its last.
-fn build_core_mouse_frame(render_snapshot: &RenderSnapshot) -> MouseFrame {
+/// the statusline on its last, painted with `viewer_chrome`.
+fn build_core_mouse_frame(
+    render_snapshot: &RenderSnapshot,
+    viewer_chrome: ViewerChrome,
+) -> MouseFrame {
     MouseFrame::from_snapshot(
         render_snapshot,
         CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0),
+        viewer_chrome,
     )
 }
 
@@ -1343,7 +1345,7 @@ fn a_cell_goes_to_the_topmost_floating_pane_drawn_over_it() {
     );
     let resolve_screen_hit_region = |screen_column, screen_row| {
         resolve_hit_region(
-            build_core_mouse_frame(&render_snapshot).build_frame_layout(ViewerChrome::default()),
+            build_core_mouse_frame(&render_snapshot, ViewerChrome::default()).build_frame_layout(),
             build_screen_point(screen_column, screen_row),
         )
     };
@@ -1395,7 +1397,7 @@ fn a_floating_pane_in_the_letterbox_margin_is_hit() {
     );
     assert_eq!(
         resolve_hit_region(
-            build_core_mouse_frame(&render_snapshot).build_frame_layout(ViewerChrome::default()),
+            build_core_mouse_frame(&render_snapshot, ViewerChrome::default()).build_frame_layout(),
             build_screen_point(5, 6)
         ),
         HitRegion::None
@@ -1409,7 +1411,7 @@ fn a_floating_pane_in_the_letterbox_margin_is_hit() {
 
     assert_eq!(
         resolve_hit_region(
-            build_core_mouse_frame(&render_snapshot).build_frame_layout(ViewerChrome::default()),
+            build_core_mouse_frame(&render_snapshot, ViewerChrome::default()).build_frame_layout(),
             build_screen_point(5, 6)
         ),
         HitRegion::PaneContent {
@@ -1418,7 +1420,7 @@ fn a_floating_pane_in_the_letterbox_margin_is_hit() {
     );
     assert_eq!(
         resolve_hit_region(
-            build_core_mouse_frame(&render_snapshot).build_frame_layout(ViewerChrome::default()),
+            build_core_mouse_frame(&render_snapshot, ViewerChrome::default()).build_frame_layout(),
             build_screen_point(5, 1)
         ),
         HitRegion::PaneBorder {
@@ -1447,7 +1449,7 @@ fn no_floating_pane_is_hit_while_placement_shows_or_every_pane_is_suppressed() {
 
     assert_eq!(
         resolve_hit_region(
-            build_core_mouse_frame(&render_snapshot).build_frame_layout(placement_viewer_chrome),
+            build_core_mouse_frame(&render_snapshot, placement_viewer_chrome).build_frame_layout(),
             build_screen_point(15, 16)
         ),
         HitRegion::PaneContent {
@@ -1456,7 +1458,7 @@ fn no_floating_pane_is_hit_while_placement_shows_or_every_pane_is_suppressed() {
     );
     assert_eq!(
         find_pane_content_rect(
-            build_core_mouse_frame(&render_snapshot).build_frame_layout(placement_viewer_chrome),
+            build_core_mouse_frame(&render_snapshot, placement_viewer_chrome).build_frame_layout(),
             floating_pane_id
         ),
         None
@@ -1468,14 +1470,14 @@ fn no_floating_pane_is_hit_while_placement_shows_or_every_pane_is_suppressed() {
         .is_every_pane_suppressed = true;
     assert_eq!(
         resolve_hit_region(
-            build_core_mouse_frame(&render_snapshot).build_frame_layout(ViewerChrome::default()),
+            build_core_mouse_frame(&render_snapshot, ViewerChrome::default()).build_frame_layout(),
             build_screen_point(15, 16)
         ),
         HitRegion::None
     );
     assert_eq!(
         find_pane_content_rect(
-            build_core_mouse_frame(&render_snapshot).build_frame_layout(ViewerChrome::default()),
+            build_core_mouse_frame(&render_snapshot, ViewerChrome::default()).build_frame_layout(),
             floating_pane_id
         ),
         None
@@ -1496,7 +1498,7 @@ fn a_floating_panes_titlebar_parts_hit_where_they_are_drawn() {
     // Each pane-area cell is one screen row lower.
     let resolve_pane_area_hit_region = |pane_area_column: u16, pane_area_row: u16| {
         resolve_hit_region(
-            build_core_mouse_frame(&render_snapshot).build_frame_layout(ViewerChrome::default()),
+            build_core_mouse_frame(&render_snapshot, ViewerChrome::default()).build_frame_layout(),
             build_screen_point(pane_area_column, pane_area_row + 1),
         )
     };
@@ -1587,18 +1589,18 @@ fn a_floating_panes_content_rect_takes_no_letterbox_offset() {
 
     assert_eq!(
         find_pane_content_rect(
-            build_core_mouse_frame(&render_snapshot).build_frame_layout(ViewerChrome::default()),
+            build_core_mouse_frame(&render_snapshot, ViewerChrome::default()).build_frame_layout(),
             floating_pane_id
         ),
         Some(build_cell_rect(25, 12, 70, 18))
     );
     assert_eq!(
         compute_clamped_pane_cell(
-            build_core_mouse_frame(&render_snapshot).build_frame_layout(ViewerChrome::default()),
+            build_core_mouse_frame(&render_snapshot, ViewerChrome::default()).build_frame_layout(),
             floating_pane_id,
             build_screen_point(30, 14)
         ),
-        Some((5, 2))
+        Some(Point { column: 5, row: 2 })
     );
 }
 
@@ -1627,7 +1629,7 @@ fn a_move_draft_moves_the_floating_pane_it_names() {
 
     assert_eq!(
         resolve_hit_region(
-            build_core_mouse_frame(&render_snapshot).build_frame_layout(draft_viewer_chrome),
+            build_core_mouse_frame(&render_snapshot, draft_viewer_chrome).build_frame_layout(),
             build_screen_point(15, 16)
         ),
         HitRegion::PaneContent {
@@ -1636,7 +1638,7 @@ fn a_move_draft_moves_the_floating_pane_it_names() {
     );
     assert_eq!(
         resolve_hit_region(
-            build_core_mouse_frame(&render_snapshot).build_frame_layout(draft_viewer_chrome),
+            build_core_mouse_frame(&render_snapshot, draft_viewer_chrome).build_frame_layout(),
             build_screen_point(65, 31)
         ),
         HitRegion::PaneContent {
@@ -1645,7 +1647,7 @@ fn a_move_draft_moves_the_floating_pane_it_names() {
     );
     assert_eq!(
         find_pane_content_rect(
-            build_core_mouse_frame(&render_snapshot).build_frame_layout(draft_viewer_chrome),
+            build_core_mouse_frame(&render_snapshot, draft_viewer_chrome).build_frame_layout(),
             floating_pane_id
         ),
         Some(build_cell_rect(61, 24, 38, 11))

@@ -619,13 +619,15 @@ impl Server {
         }
     }
 
-    /// Remove a pane's live ID, cached size, and terminal engine. Clear each
-    /// attached client's scroll offset and selection for it. Every pane
-    /// removal calls this for runtime bookkeeping.
+    /// Remove a pane's live ID, cached size, terminal engine, and every mouse
+    /// button held in it, with no release written. Clear each attached
+    /// client's scroll offset and selection for it. Every pane removal calls
+    /// this for runtime bookkeeping.
     pub(super) fn release_pane_bookkeeping(&mut self, session_id: SessionId, pane_id: PaneId) {
         self.live_pane_ids.remove(&pane_id);
         self.pty_size_by_pane_id.remove(&pane_id);
         self.terminal_engine_by_pane_id.remove(&pane_id);
+        self.remove_held_mouse_buttons_in_pane(pane_id);
         let Some(session) = self.session_by_id.get_mut(&session_id) else {
             return;
         };

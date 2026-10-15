@@ -82,9 +82,9 @@ pub enum FloatingPanePosition {
 /// The step is `cascade_index % (max_steps + 1)`, where `max_steps` is
 /// `min(right_margin / 2, bottom_margin)` and the margins count the cells
 /// right of and below the centered rectangle. The rectangle then moves left
-/// and up until it lies inside `client_viewport`; on an axis where `size` is
-/// larger than `client_viewport`, it starts at `0`. `position` itself is not
-/// changed.
+/// and up until it lies inside `client_viewport`
+/// ([`Rect::compute_moved_inside`]); on an axis where `size` is larger than
+/// `client_viewport`, it starts at `0`. `position` itself is not changed.
 ///
 /// A `48x13` pane on an `80x22` viewport centers at `(16, 4)`, and `max_steps`
 /// is `min(16 / 2, 5) = 5`: `cascade_index` `1` → `(18, 5)`, `6` → `(16, 4)`.
@@ -116,13 +116,7 @@ pub fn place_floating_pane(
             }
         }
     };
-    Rect {
-        origin: Point {
-            column: unclamped_top_left_cell.column.min(free_column_count),
-            row: unclamped_top_left_cell.row.min(free_row_count),
-        },
-        size,
-    }
+    Rect::from_origin_and_size(unclamped_top_left_cell, size).compute_moved_inside(client_viewport)
 }
 
 /// One attached client: a single terminal connected to a session, holding the

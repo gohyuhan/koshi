@@ -98,9 +98,11 @@ impl Server {
     /// over: its view is filed under the token ([`Self::save_client_view`])
     /// and restored onto the fresh client, and its record is removed with no
     /// quit, before the fresh client registers. Its subscription goes with
-    /// the record. Example: a viewer on another machine dials again before
-    /// the session read that its first link dropped; the dial gets the view
-    /// back, and the session holds one client for that viewer, not two.
+    /// the record, and every mouse button it holds is released
+    /// ([`Self::release_client_mouse_buttons`]). Example: a viewer on another
+    /// machine dials again before the session read that its first link
+    /// dropped; the dial gets the view back, and the session holds one client
+    /// for that viewer, not two.
     ///
     /// Every accepted attach mints a new token, carried back on
     /// [`AttachAccepted::resume_token`].
@@ -203,7 +205,7 @@ impl Server {
         }
         self.publish_events(&emitted_events);
 
-        let (deliveries, waiting_host_writes) = self.subscribe(client_id);
+        let (deliveries, writer_handoff) = self.subscribe(client_id);
         let resume_token = self.saved_view_store.mint_resume_token(client_id);
         let session = self
             .session_by_id
@@ -214,7 +216,7 @@ impl Server {
             session_id,
             session_structure: build_session_structure_snapshot(session),
             deliveries,
-            waiting_host_writes,
+            writer_handoff,
             ending_notice: Arc::clone(self.event_bus.get_ending_notice()),
             resume_token,
             pane_area,
@@ -668,8 +670,11 @@ impl Server {
     /// to the new [`Session::get_shared_floating_viewport`]: they grow when the
     /// departing client was the smallest, and keep their sizes when no client
     /// is left. The detach always marks the screen stale: the remaining
-    /// clients repaint. A detach for a client this runtime does not hold is
-    /// dropped.
+    /// clients repaint.
+    ///
+    /// Every mouse button the client holds is released first
+    /// (`release_client_mouse_buttons`). A detach for a client this runtime
+    /// does not hold releases those buttons and changes nothing else.
     ///
     /// Every subscription registered as viewing this client is dropped with the
     /// record, closing the sending end of each one's queue.
@@ -710,8 +715,9 @@ impl Server {
     }
 
     /// Detach the client `client_id`, which may attach again with the resume
-    /// token its attach minted: remove its record, reflow the tab it was
-    /// viewing and the session's floating panes, and schedule a redraw, as
+    /// token its attach minted: release every mouse button it holds, remove
+    /// its record, reflow the tab it was viewing and the session's floating
+    /// panes, and schedule a redraw, as
     /// [`handle_client_detach`](Self::handle_client_detach) does. Requests no
     /// quit: with `auto-close-session` on, a session this leaves with no
     /// client keeps running.
@@ -731,19 +737,23 @@ impl Server {
         emitted_events
     }
 
-    /// Remove the record of the client `client_id`, reflow the tab it was
-    /// viewing and the session's floating panes, and schedule a redraw, as
+    /// Release every mouse button the client `client_id` holds
+    /// ([`release_client_mouse_buttons`](Self::release_client_mouse_buttons)),
+    /// then remove its record, reflow the tab it was viewing and the session's
+    /// floating panes, and schedule a redraw, as
     /// [`handle_client_detach`](Self::handle_client_detach) states. Pushes one
     /// [`Event::PtyResized`] per reflowed pane onto `emitted_events`. Requests
     /// no quit.
     ///
     /// The id of the session that held the client, once its record is removed.
-    /// `None` for a client no session holds, which changes nothing.
+    /// `None` for a client no session holds, which changes nothing but the
+    /// release.
     fn remove_client_record(
         &mut self,
         client_id: ClientId,
         emitted_events: &mut Vec<Event>,
     ) -> Option<SessionId> {
+        self.release_client_mouse_buttons(client_id);
         // A detach for a client no session holds is dropped.
         let session = self.get_session_for_client_mut(client_id)?;
         let session_id = session.session_id;

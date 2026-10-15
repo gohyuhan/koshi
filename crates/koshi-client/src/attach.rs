@@ -172,7 +172,7 @@ use koshi_core::geometry::{Direction, PixelCellSize, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{KeyInput, KeySequence};
 use koshi_core::lock::LockMode;
-use koshi_core::mouse::{MouseAnswer, MouseInput, MouseKind};
+use koshi_core::mouse::{MouseAnswer, MouseInput};
 use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::{resolve_action_with_scroll_line_count, DispatchPlan};
 use koshi_ipc::endpoint::EndpointFile;
@@ -654,8 +654,9 @@ impl<B: Backend> Screen<B> {
     /// frame: a rejected locked frame leaves the viewer unlocked.
     ///
     /// The returned [`MouseFrame`] holds the committed region solve, where the
-    /// surfaces sit, and the per-pane scroll and mouse fields. That is what the
-    /// next mouse event is answered from.
+    /// surfaces sit, the viewer chrome painted with them, and the per-pane
+    /// scroll and mouse fields. That is what the next mouse event is answered
+    /// from.
     fn draw_snapshot(
         &mut self,
         client: &mut Client,
@@ -778,6 +779,7 @@ impl<B: Backend> Screen<B> {
             .expect("the committed snapshot is pending");
         let displayed_snapshot = displayed_render_snapshot.as_ref().unwrap_or(&snapshot);
         self.committed_regions = committed_regions.clone();
+        let painted_viewer_chrome = frame_paint.chrome;
         self.shown_viewer_paint = Some(frame_paint);
         self.shown_placement_snapshot = self.placement_snapshot.clone();
         self.shown_placement_render_snapshot = placement_render_snapshot.cloned();
@@ -792,7 +794,11 @@ impl<B: Backend> Screen<B> {
         } else {
             &snapshot
         };
-        let mouse_frame = MouseFrame::from_snapshot(mouse_frame_snapshot, committed_regions);
+        let mouse_frame = MouseFrame::from_snapshot(
+            mouse_frame_snapshot,
+            committed_regions,
+            painted_viewer_chrome,
+        );
         self.last_snapshot = Some(snapshot);
         Some(mouse_frame)
     }
@@ -887,6 +893,7 @@ impl<B: Backend> Screen<B> {
         )) {
             return None;
         }
+        let painted_viewer_chrome = viewer_paint.chrome;
         self.shown_viewer_paint = Some(viewer_paint);
         self.shown_placement_snapshot = self.placement_snapshot.clone();
         self.shown_placement_render_snapshot = placement_render_snapshot.cloned();
@@ -904,6 +911,7 @@ impl<B: Backend> Screen<B> {
         Some(MouseFrame::from_snapshot(
             mouse_frame_snapshot,
             self.committed_regions.clone(),
+            painted_viewer_chrome,
         ))
     }
 
@@ -2378,7 +2386,11 @@ fn run_attachment<B: Backend, W: Write>(
                                 if let Some(mouse_frame) =
                                     screen.draw_snapshot(client, render_snapshot)
                                 {
-                                    last_mouse_frame = Some(mouse_frame);
+                                    adopt_painted_mouse_frame(
+                                        client,
+                                        &mut last_mouse_frame,
+                                        mouse_frame,
+                                    );
                                 }
                                 if client.get_placement_snapshot().is_none() {
                                     if let Err(snapshot_error) =
@@ -2429,7 +2441,11 @@ fn run_attachment<B: Backend, W: Write>(
                                     if let Some(mouse_frame) =
                                         screen.draw_snapshot(client, render_snapshot)
                                     {
-                                        last_mouse_frame = Some(mouse_frame);
+                                        adopt_painted_mouse_frame(
+                                            client,
+                                            &mut last_mouse_frame,
+                                            mouse_frame,
+                                        );
                                     }
                                     if client.get_placement_snapshot().is_none() {
                                         if let Err(snapshot_error) =
@@ -2542,7 +2558,7 @@ fn run_attachment<B: Backend, W: Write>(
                         Ok(SessionEvent::Resync { .. }) => {
                             sent_border_moves.clear();
                             client.prepare_placement_reconciliation();
-                            client.forget_submitted_floating_pane_move();
+                            client.forget_sent_floating_pane_move();
                         }
                         // The first bytes of a long host write wait for the
                         // `HostWrite` that ends it.
@@ -2790,12 +2806,18 @@ fn run_attachment<B: Backend, W: Write>(
                 .map(|mouse_frame| mouse_frame.client_snapshot.active_tab_id),
             Instant::now(),
         ) {
-            last_mouse_frame = Some(mouse_frame);
+            adopt_painted_mouse_frame(client, &mut last_mouse_frame, mouse_frame);
         }
         if let Err(io_error) = screen.update_shift_mouse_capture(client, terminal_writer) {
             tracing::warn!(%io_error, "could not update Shift mouse reporting");
             break AttachmentEnding::TerminalGone;
         }
+        // A capture that a key or a painted frame ended outside a mouse event
+        // owes its program a release, which joins this pass's round.
+        queue_mouse_actions(
+            &mut pending_mouse_actions,
+            client.take_mouse_capture_release().into_iter().collect(),
+        );
         flush_mouse_round(uplink, &mut sent_border_moves, &mut pending_mouse_actions);
     };
     // A viewer whose terminal went away, or that the session moved to another
@@ -4586,7 +4608,9 @@ fn process_runtime_input_with_cell_size(
                 }
                 // Held or dropped: nothing reaches the session. A chord that
                 // opens or closes a sequence moves the breadcrumb the hint
-                // bar draws. A discard moves nothing and draws nothing.
+                // bar draws. An `Esc` that ends a grab-handle drag clears the
+                // breadcrumb, and the floating pane is drawn where the frame
+                // places it. Any other discard draws nothing.
                 KeyOutcome::Pending | KeyOutcome::Discard => {}
             }
         }
@@ -4669,33 +4693,35 @@ fn handle_placement_mouse_event(
     true
 }
 
+/// Make `mouse_frame`, the frame this terminal just painted, the frame the
+/// next mouse events are placed against, after `client` drops every gesture
+/// that frame ended ([`Client::drop_gestures_the_frame_ended`]).
+fn adopt_painted_mouse_frame(
+    client: &mut Client,
+    last_mouse_frame: &mut Option<MouseFrame>,
+    mouse_frame: MouseFrame,
+) {
+    client.drop_gestures_the_frame_ended(&mouse_frame);
+    *last_mouse_frame = Some(mouse_frame);
+}
+
 /// Answer one mouse event read from this terminal against `mouse_frame`, the
 /// frame this terminal last painted, and add everything the viewer decided to
 /// `pending_mouse_actions` through [`queue_mouse_actions`].
 ///
 /// Viewer state moves at once — the hovered pane, the gesture under way, the
 /// capture a press takes — so a drag keeps tracking the pointer while earlier
-/// rounds are still unanswered. Every [`MouseAction::Forward`] carrying a press
-/// records the capture here, through [`Client::note_press_forwarded`], before
-/// the round is written.
+/// rounds are still unanswered.
 fn handle_mouse_event(
     client: &mut Client,
     mouse_frame: &MouseFrame,
     mouse_input: MouseInput,
     pending_mouse_actions: &mut Vec<MouseAction>,
 ) {
-    let mouse_actions = client.handle_mouse(mouse_input, mouse_frame, Instant::now());
-    for mouse_action in &mouse_actions {
-        if let MouseAction::Forward {
-            pane_id,
-            mouse_kind: MouseKind::Press(button),
-            ..
-        } = mouse_action
-        {
-            client.note_press_forwarded(*pane_id, *button);
-        }
-    }
-    queue_mouse_actions(pending_mouse_actions, mouse_actions);
+    queue_mouse_actions(
+        pending_mouse_actions,
+        client.handle_mouse(mouse_input, mouse_frame, Instant::now()),
+    );
 }
 
 /// Add `mouse_actions` to the pile waiting for the next write and keep the pile at
@@ -4805,13 +4831,13 @@ fn apply_mouse_answers(
     }
 }
 
-/// Take the cells the session just moved off every buffered border move for
+/// Take the cells the session just applied off every buffered border move for
 /// `pane_id`'s `border_side`.
 ///
 /// A buffered move names the whole distance from the drag anchor to the pointer
-/// it was decided position, and the answered move travelled `applied_cell_count`
+/// position it was decided at, and the answered move applied `applied_cell_count`
 /// cells of that same distance in the direction `resize_step` names. What is
-/// left to ask for is therefore each buffered move's own signed distance minus
+/// left to ask for is each buffered move's own signed distance minus
 /// `resize_step * applied_cell_count`,
 /// which is zero when the session already went the whole way and flips sign when
 /// the pointer crossed back past the border.

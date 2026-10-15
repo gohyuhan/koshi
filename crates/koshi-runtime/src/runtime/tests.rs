@@ -13,7 +13,7 @@ use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, CommandId, PaneId};
-use koshi_core::mouse::{MouseInput, MouseKind};
+use koshi_core::mouse::MouseInput;
 use koshi_core::process::{KillPolicy, PtySize, SpawnSpec};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::PtyBackend;
@@ -24,12 +24,17 @@ use koshi_renderer::snapshot::{CommittedRegions, MouseFrame, RenderSnapshot};
 use crate::runtime::event::RuntimeEvent;
 use crate::server::Server;
 
-/// The mouse frame for `render_snapshot` under the compiled-in region solve for
-/// its client's viewport, at input revision `0`.
-pub(crate) fn build_mouse_frame(render_snapshot: RenderSnapshot) -> MouseFrame {
+/// The mouse frame `viewer` paints for `render_snapshot`: the compiled-in
+/// region solve for its client's viewport, at input revision `0`, and the
+/// chrome `viewer` builds for the frame's active tab.
+pub(crate) fn build_mouse_frame(
+    render_snapshot: RenderSnapshot,
+    viewer: &ViewerClient,
+) -> MouseFrame {
     let committed_regions =
         CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0);
-    MouseFrame::from_snapshot(&render_snapshot, committed_regions)
+    let viewer_chrome = viewer.build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id);
+    MouseFrame::from_snapshot(&render_snapshot, committed_regions, viewer_chrome)
 }
 
 /// The viewer half for `client_id` on an 80x24 viewport, on the stock
@@ -48,8 +53,9 @@ pub(crate) fn build_viewer(server: &mut Server, client_id: ClientId) -> ViewerCl
 }
 
 /// One mouse event at `event_time`, the way the running binary delivers it:
-/// the viewer takes its queued events, decides what the event means against
-/// the frame it is looking at, and only what it decided reaches the session.
+/// the viewer takes its queued events, paints a frame and drops the gestures
+/// that frame ended, decides what the event means against that frame, and
+/// only what it decided reaches the session.
 pub(crate) fn dispatch_mouse_input_at_time(
     server: &mut Server,
     viewer: &mut ViewerClient,
@@ -61,7 +67,9 @@ pub(crate) fn dispatch_mouse_input_at_time(
         server
             .build_snapshot(viewer.get_client_id())
             .expect("render snapshot"),
+        viewer,
     );
+    viewer.drop_gestures_the_frame_ended(&mouse_frame);
     let mouse_actions = viewer.handle_mouse(mouse_input, &mouse_frame, event_time);
     apply_mouse_actions(server, viewer, &mouse_frame, mouse_actions);
 }
@@ -98,16 +106,13 @@ pub(crate) fn apply_mouse_actions(
                 modifier_flags,
                 pane_local_cell,
             } => {
-                let is_report_written = server.forward_mouse_to_pane(
+                server.forward_mouse_to_pane(
                     client_id,
                     pane_id,
                     mouse_kind,
                     modifier_flags,
                     pane_local_cell,
                 );
-                if let (true, MouseKind::Press(mouse_button)) = (is_report_written, mouse_kind) {
-                    viewer.note_press_forwarded(pane_id, mouse_button);
-                }
             }
             MouseAction::AlternateScrollArrows {
                 pane_id,

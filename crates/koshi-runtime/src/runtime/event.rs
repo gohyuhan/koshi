@@ -33,7 +33,7 @@ use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{ConnectionToken, WireMouseAction};
 use koshi_renderer::snapshot::Delivery;
 
-use crate::runtime::bus::WaitingHostWrites;
+use crate::runtime::bus::WriterHandoff;
 
 /// A trigger the dispatcher thread reacts to, drained from the runtime inbox.
 ///
@@ -287,12 +287,23 @@ pub enum RuntimeEvent {
         /// this value, not the clock.
         unclaimed_client_deadline: Instant,
     },
+    /// The thread that writes `client_id`'s connection read a delivery off a
+    /// queue where a frame or resync snapshot had found no room
+    /// ([`WriterHandoff::take_owed_frame_mark`]). The dispatcher puts that
+    /// client's current frame on that queue when its subscriber is live and
+    /// not owed a frame, and offers no other client a frame. A paused
+    /// subscriber takes its resync snapshot on the same pass of the serve loop
+    /// instead.
+    QueueRoomFreed {
+        /// The client whose writing thread read the delivery.
+        client_id: ClientId,
+    },
 }
 
 /// What the dispatcher minted for one [`RuntimeEvent::IpcAttach`]: the client
 /// record, the session it joined, the structure built for the attach reply, the
-/// receiving end of the client's own event queue, the host-write bytes that
-/// wait for the client's own terminal, and the session's shared ending notice.
+/// receiving end of the client's own event queue, what waits beside that queue
+/// for the client's writing thread, and the session's shared ending notice.
 ///
 /// The whole of it comes out of one dispatcher turn: the structure names the
 /// same state the queue's first event follows.
@@ -307,8 +318,9 @@ pub struct AttachAccepted {
     /// The client's event queue. Dropping it ends the subscription.
     pub deliveries: Receiver<Delivery>,
     /// Shared with the session. This client's writing thread takes the bytes
-    /// that wait for the client's own terminal from it before each delivery.
-    pub waiting_host_writes: Arc<WaitingHostWrites>,
+    /// that wait for the client's own terminal from it before each delivery,
+    /// and the owed-frame mark after each delivery.
+    pub writer_handoff: Arc<WriterHandoff>,
     /// Shared with the session. This client's writing thread reads the session
     /// ending from it even when the queue above is full, and the session reads
     /// from it when that thread has written the last frame.

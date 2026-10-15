@@ -93,7 +93,7 @@ use koshi_renderer::snapshot::{
 use koshi_terminal::graphics::ImageRecord;
 
 use crate::executable_watch::ExecutableWatch;
-use crate::runtime::bus::{build_wire_event, build_wire_host_write_events, WaitingHostWrites};
+use crate::runtime::bus::{build_wire_event, build_wire_host_write_events, WriterHandoff};
 use crate::runtime::event::{EndingNotice, RuntimeEvent, SessionEnding};
 use crate::runtime::frame::{
     build_wire_frame, build_wire_frame_with_content_ids, build_wire_image_chunk_sources,
@@ -183,8 +183,7 @@ impl Intake {
     }
 
     /// Hand `event` to the dispatcher over the runtime inbox. `false` means it
-    /// was not handed over — intake is closed, or the dispatcher is gone — and
-    /// the caller's connection ends.
+    /// was not handed over: intake is closed, or the dispatcher is gone.
     fn hand_over_event(
         &self,
         inbox_sender: &Sender<RuntimeEvent>,
@@ -295,8 +294,9 @@ struct AttachedStream {
     /// Deliveries waiting to be written to the client.
     deliveries: Receiver<Delivery>,
     /// The host-write bytes that wait for the client's own terminal, which the
-    /// writer takes before each delivery and before its last frame.
-    waiting_host_writes: Arc<WaitingHostWrites>,
+    /// writer takes before each delivery and before its last frame, and the
+    /// owed-frame mark, which the writer takes after each delivery.
+    writer_handoff: Arc<WriterHandoff>,
     /// Shared session-ending notice read by the writer.
     ending_notice: Arc<EndingNotice>,
     /// Graphics capabilities reported by this connection.
@@ -933,7 +933,7 @@ fn serve_connection(
                     AttachedStream {
                         client_id: accepted_client.client_id,
                         deliveries: accepted_client.deliveries,
-                        waiting_host_writes: accepted_client.waiting_host_writes,
+                        writer_handoff: accepted_client.writer_handoff,
                         ending_notice: accepted_client.ending_notice,
                         graphics_capabilities,
                         heartbeat_interval: link_timeout_ms.map(compute_heartbeat_interval),
@@ -1138,11 +1138,18 @@ fn serve_connection(
 /// [`build_wire_host_write_events`] gives. A [`Delivery::HostWrite`] only
 /// wakes it for that. When the writing thread ends, it drops its queue's
 /// receiver, then clears the wake it did not read
-/// ([`WaitingHostWrites::clear_queued_wake`]). The next host write that the
+/// ([`WriterHandoff::clear_queued_wake`]). The next host write that the
 /// bus adds for this client then finds the receiver gone, and the bus takes
 /// none. Example: a write that fails on a large frame, with a wake queued
 /// behind that frame, ends the thread. A clipboard tool copy for this client
 /// after that is not routed.
+///
+/// After each delivery it reads, the writing thread takes the stream's
+/// owed-frame mark ([`WriterHandoff::take_owed_frame_mark`]). A mark that was
+/// set hands one [`RuntimeEvent::QueueRoomFreed`] naming `client_id` to the
+/// dispatcher while intake is open ([`Intake::hand_over_event`]). Example: a
+/// frame that found the queue full on an idle session is followed by a newer
+/// frame once the writing thread reads the next delivery.
 ///
 /// A frame that arrives whole and does not decode costs the client that one
 /// request. The reading half drops it and reads the next frame, and the client
@@ -1223,7 +1230,7 @@ fn stream_events(
     let AttachedStream {
         client_id,
         deliveries,
-        waiting_host_writes,
+        writer_handoff,
         ending_notice,
         graphics_capabilities,
         heartbeat_interval,
@@ -1237,6 +1244,7 @@ fn stream_events(
     let writer_is_link_lost = Arc::clone(&is_link_lost);
     let writer_intake = Arc::clone(&served_connection.intake);
     let connection_number = served_connection.connection_number;
+    let writer_inbox_sender = inbox_sender.clone();
     ending_notice.record_writer_started();
     std::thread::spawn(move || {
         let mut image_cache = ConnectionImageCache::new();
@@ -1262,13 +1270,13 @@ fn stream_events(
                     }
                 };
                 if let Some(terminal_event) = terminal_event {
-                    if send_waiting_host_writes(&mut frame_writer, &waiting_host_writes).is_ok() {
+                    if send_waiting_host_writes(&mut frame_writer, &writer_handoff).is_ok() {
                         let _ = frame_writer.send(&terminal_event);
                     }
                 }
                 break false;
             }
-            if send_waiting_host_writes(&mut frame_writer, &waiting_host_writes).is_err() {
+            if send_waiting_host_writes(&mut frame_writer, &writer_handoff).is_err() {
                 break true;
             }
             let delivery_wait_result = match heartbeat_interval {
@@ -1303,14 +1311,19 @@ fn stream_events(
                 // close: the goodbye follows the events that preceded it.
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     if let Some(detach_goodbye) = build_detach_goodbye(&writer_is_link_lost) {
-                        if send_waiting_host_writes(&mut frame_writer, &waiting_host_writes).is_ok()
-                        {
+                        if send_waiting_host_writes(&mut frame_writer, &writer_handoff).is_ok() {
                             let _ = frame_writer.send(&detach_goodbye);
                         }
                     }
                     break false;
                 }
             };
+            if writer_handoff.take_owed_frame_mark() {
+                writer_intake.hand_over_event(
+                    &writer_inbox_sender,
+                    RuntimeEvent::QueueRoomFreed { client_id },
+                );
+            }
             let send_result = match &delivery {
                 Delivery::Frame(render_snapshot) => send_painted_frame(
                     &mut frame_writer,
@@ -1333,7 +1346,7 @@ fn stream_events(
                 // The wake is read. The top of the next turn writes the
                 // waiting bytes.
                 Delivery::HostWrite => {
-                    waiting_host_writes.clear_queued_wake();
+                    writer_handoff.clear_queued_wake();
                     continue;
                 }
                 _ => Ok(()),
@@ -1374,12 +1387,29 @@ fn stream_events(
                     break false;
                 }
             }
+            // A resync goes out as `Resync`, then the frame it carries.
+            if let Delivery::Snapshot {
+                render_snapshot, ..
+            } = &delivery
+            {
+                if send_painted_frame(
+                    &mut frame_writer,
+                    &mut image_cache,
+                    render_snapshot,
+                    graphics_capabilities,
+                    client_id,
+                )
+                .is_err()
+                {
+                    break true;
+                }
+            }
         };
         // The queue's receiver goes before the wake clears. A host write that
         // the bus adds after this queues a new wake, finds the receiver gone,
         // and removes this client's subscriber.
         drop(deliveries);
-        waiting_host_writes.clear_queued_wake();
+        writer_handoff.clear_queued_wake();
         // A failed write closes the read direction: the reading loop then ends
         // on a failed read and hands over the detach.
         if has_write_failed {
@@ -1784,16 +1814,17 @@ fn build_detach_goodbye(is_link_lost: &AtomicBool) -> Option<SessionEvent> {
     Some(SessionEvent::Detached)
 }
 
-/// Take every byte in `waiting_host_writes` and send them as one host write,
-/// as [`send_host_write`] does. Sends nothing when no byte waits.
+/// Take every host-write byte waiting in `writer_handoff` and send them as
+/// one host write, as [`send_host_write`] does. Sends nothing when no byte
+/// waits.
 ///
 /// # Errors
 /// The [`IpcError`] of the first frame that could not be written.
 fn send_waiting_host_writes(
     frame_writer: &mut FrameWriter,
-    waiting_host_writes: &WaitingHostWrites,
+    writer_handoff: &WriterHandoff,
 ) -> Result<(), IpcError> {
-    let host_write_bytes = waiting_host_writes.take_host_write_bytes();
+    let host_write_bytes = writer_handoff.take_host_write_bytes();
     if host_write_bytes.is_empty() {
         return Ok(());
     }

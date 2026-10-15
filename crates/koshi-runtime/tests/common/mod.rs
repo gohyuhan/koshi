@@ -216,10 +216,7 @@ pub fn serve_test_session<ExchangeResult: Send + 'static>(
                 break;
             }
         }
-        server.resync_lagged();
-        if server.poll_render(Instant::now()) {
-            server.push_frames();
-        }
+        server.push_due_frames(Instant::now());
     }
 
     served_test_session.finish()

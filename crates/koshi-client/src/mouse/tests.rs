@@ -30,8 +30,8 @@ use koshi_layout::regions::{solve_region_rects, Edge, RegionGeometry};
 use koshi_layout::solver::{solve_layout_with_mode, PaneSizing, StackHeader};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, Delivery, MousePane, PaneSlot, RenderSnapshot,
-    SessionSnapshot, TabMetadata, TabSnapshot,
+    ClientSnapshot, CommittedRegions, Delivery, FloatingPaneSlot, MousePane, PaneSlot,
+    RenderSnapshot, SessionSnapshot, TabMetadata, TabSnapshot,
 };
 
 use crate::input::KeyOutcome;
@@ -168,6 +168,16 @@ fn build_mouse_frame(mouse_panes: &[MousePane], focused_pane_id: Option<PaneId>)
             is_mouse_selection_enabled: false,
         },
         committed_regions: CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+        viewer_chrome: ViewerChrome::default(),
+    }
+}
+
+/// `mouse_frame` painted again with the chrome `client` builds for it now, as
+/// the attach loop paints at the end of each pass.
+fn repaint_mouse_frame(client: &Client, mouse_frame: &MouseFrame) -> MouseFrame {
+    MouseFrame {
+        viewer_chrome: client.build_viewer_chrome(mouse_frame.client_snapshot.active_tab_id),
+        ..mouse_frame.clone()
     }
 }
 
@@ -678,6 +688,189 @@ fn a_tick_over_the_tabline_steps_the_viewers_own_strip() {
         client.build_viewer_chrome(active_tab_id).tabline_offset,
         Some(0),
         "the first visible index saturates at zero"
+    );
+}
+
+/// A one-pane frame whose tab strip holds the frame's own tab and seven more
+/// named `long tab name number 1` to `long tab name number 7`. The 22-cell
+/// names overflow the 80-column strip, so it scrolls.
+fn build_overflowing_tab_strip_mouse_frame() -> MouseFrame {
+    let mut mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(PaneId::new()));
+    for tab_index in 1..8 {
+        mouse_frame
+            .session_snapshot
+            .tabs_metadata
+            .push(TabMetadata {
+                tab_id: TabId::new(),
+                tab_name: format!("long tab name number {tab_index}"),
+                tab_index,
+                is_active: false,
+            });
+    }
+    mouse_frame
+}
+
+/// Send `client` two wheel-down ticks over the tab strip of `mouse_frame`, with
+/// no repaint between them.
+fn scroll_tab_strip_down_twice(client: &mut Client, mouse_frame: &MouseFrame) {
+    for _ in 0..2 {
+        client
+            .handle_mouse_wheel(
+                build_mouse_wheel(ScrollDirection::Down, Point { column: 40, row: 0 }),
+                mouse_frame,
+            )
+            .expect("a wheel tick decides");
+    }
+}
+
+#[test]
+fn two_ticks_over_the_tabline_before_a_repaint_step_the_strip_twice() {
+    let mouse_frame = build_overflowing_tab_strip_mouse_frame();
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let mut client = build_test_client();
+
+    scroll_tab_strip_down_twice(&mut client, &mouse_frame);
+
+    assert_eq!(
+        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        Some(2)
+    );
+}
+
+#[test]
+fn a_tab_strip_drag_before_a_repaint_steps_from_the_strip_the_ticks_scrolled_to() {
+    let mouse_frame = build_overflowing_tab_strip_mouse_frame();
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    scroll_tab_strip_down_twice(&mut client, &mouse_frame);
+
+    // Screen (0, 0) is the session block, which hit-tests as the bare tab strip.
+    client.handle_mouse(
+        build_left_mouse_press(Point { column: 0, row: 0 }),
+        &mouse_frame,
+        current_time,
+    );
+    // Six cells right of the anchor is one step toward the first tab.
+    client.handle_mouse(
+        build_left_mouse_drag(Point { column: 6, row: 0 }),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+
+    assert_eq!(
+        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        Some(1)
+    );
+}
+
+/// The column of the cell on row `0` of `mouse_frame` that hit-tests as
+/// `scroll_arrow_region`.
+fn find_painted_scroll_arrow_column(
+    mouse_frame: &MouseFrame,
+    scroll_arrow_region: HitRegion,
+) -> u16 {
+    (0..mouse_frame.client_snapshot.viewport_size.column_count)
+        .find(|&column| {
+            resolve_hit_region(mouse_frame.build_frame_layout(), Point { column, row: 0 })
+                == scroll_arrow_region
+        })
+        .expect("the painted tab strip draws the arrow")
+}
+
+#[test]
+fn a_right_arrow_click_before_a_repaint_steps_from_the_strip_the_ticks_scrolled_to() {
+    let mouse_frame = build_overflowing_tab_strip_mouse_frame();
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let right_scroll_arrow_column =
+        find_painted_scroll_arrow_column(&mouse_frame, HitRegion::TablineScrollRight);
+    let mut client = build_test_client();
+    scroll_tab_strip_down_twice(&mut client, &mouse_frame);
+
+    let press_actions = client.handle_mouse(
+        build_left_mouse_press(Point {
+            column: right_scroll_arrow_column,
+            row: 0,
+        }),
+        &mouse_frame,
+        Instant::now(),
+    );
+
+    assert_eq!(press_actions, Vec::new());
+    assert_eq!(
+        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        Some(3)
+    );
+}
+
+#[test]
+fn a_left_arrow_click_before_a_repaint_steps_from_the_strip_the_ticks_scrolled_to() {
+    let mut mouse_frame = build_overflowing_tab_strip_mouse_frame();
+    mouse_frame.viewer_chrome.tabline_offset = Some(2);
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let left_scroll_arrow_column =
+        find_painted_scroll_arrow_column(&mouse_frame, HitRegion::TablineScrollLeft);
+    let mut client = build_test_client();
+    scroll_tab_strip_down_twice(&mut client, &mouse_frame);
+    scroll_tab_strip_down_twice(&mut client, &mouse_frame);
+
+    let press_actions = client.handle_mouse(
+        build_left_mouse_press(Point {
+            column: left_scroll_arrow_column,
+            row: 0,
+        }),
+        &mouse_frame,
+        Instant::now(),
+    );
+
+    assert_eq!(press_actions, Vec::new());
+    assert_eq!(
+        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        Some(3)
+    );
+}
+
+#[test]
+fn a_placement_drag_onto_the_right_arrow_before_a_repaint_steps_from_the_strip_the_ticks_scrolled_to(
+) {
+    let mouse_frame = build_overflowing_tab_strip_mouse_frame();
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let source_pane_id = mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[0].pane_id;
+    let right_scroll_arrow_column =
+        find_painted_scroll_arrow_column(&mouse_frame, HitRegion::TablineScrollRight);
+    let mut client = build_test_client();
+    client.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id: active_tab_id,
+        destination_tab_id: active_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: None,
+        pending_placement_command: None,
+    });
+    for _ in 0..2 {
+        assert_eq!(
+            client.handle_placement_mouse(
+                build_mouse_wheel(ScrollDirection::Down, Point { column: 40, row: 0 }),
+                &mouse_frame,
+                Instant::now(),
+            ),
+            Some(PlacementInputAction::Consumed)
+        );
+    }
+
+    let drag_action = client.handle_placement_mouse(
+        build_left_mouse_drag(Point {
+            column: right_scroll_arrow_column,
+            row: 0,
+        }),
+        &mouse_frame,
+        Instant::now(),
+    );
+
+    assert_eq!(drag_action, Some(PlacementInputAction::Consumed));
+    assert_eq!(
+        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        Some(3)
     );
 }
 
@@ -1480,9 +1673,6 @@ fn a_captured_drag_that_leaves_the_pane_still_reaches_it_and_the_release_ends_it
             Point { column: 1, row: 1 }
         )]
     );
-    // The session wrote that press to the pane, which is what captures the
-    // gesture; the loop reports it back.
-    client.note_press_forwarded(pane_id, MouseButton::Left);
 
     // Row 0 is the tabline — off the pane entirely. The capture still routes it.
     let outside_point = Point { column: 0, row: 0 };
@@ -1514,6 +1704,11 @@ fn a_captured_drag_that_leaves_the_pane_still_reaches_it_and_the_release_ends_it
             Point { column: 0, row: 0 }
         )]
     );
+    assert_eq!(
+        client.take_mouse_capture_release(),
+        None,
+        "the release reached the program, so none is owed"
+    );
 
     // The capture is over: a further drag reaches no program.
     assert_eq!(
@@ -1525,6 +1720,214 @@ fn a_captured_drag_that_leaves_the_pane_still_reaches_it_and_the_release_ends_it
         Vec::new(),
         "a drag with no press behind it forwards nothing"
     );
+}
+
+#[test]
+fn a_press_of_the_captured_button_after_a_lost_release_releases_it_at_its_last_cell_first() {
+    let pane_id = PaneId::new();
+    let mut mouse_pane = build_plain_mouse_pane(pane_id);
+    mouse_pane.mouse_tracking = MouseTracking::ButtonMotion;
+    let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
+    let screen_point = get_content_cell(&mouse_frame, 0);
+    let drag_point = Point {
+        column: screen_point.column + 3,
+        ..screen_point
+    };
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_left_mouse_press(screen_point),
+        &mouse_frame,
+        current_time,
+    );
+    client.handle_mouse(
+        build_left_mouse_drag(drag_point),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+
+    // The release never arrived.
+    let press_actions = client.handle_mouse(
+        build_left_mouse_press(screen_point),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 2),
+    );
+
+    assert_eq!(
+        press_actions,
+        vec![
+            MouseAction::Forward {
+                pane_id,
+                mouse_kind: MouseKind::Release(MouseButton::Left),
+                modifier_flags: BindingModifierFlags::NONE,
+                pane_local_cell: Point { column: 4, row: 1 },
+            },
+            build_forwarded_mouse_action(
+                pane_id,
+                build_left_mouse_press(screen_point),
+                Point { column: 1, row: 1 }
+            ),
+        ],
+        "the program hears the old gesture end where its last drag was, then the new press"
+    );
+    assert_eq!(
+        client.mouse_capture,
+        Some(MouseCapture {
+            pane_id,
+            button: MouseButton::Left,
+            last_pane_local_cell: Point { column: 1, row: 1 },
+        })
+    );
+}
+
+#[test]
+fn a_press_of_the_captured_button_on_koshis_chrome_releases_the_capture() {
+    let pane_id = PaneId::new();
+    let mut mouse_pane = build_plain_mouse_pane(pane_id);
+    mouse_pane.mouse_tracking = MouseTracking::ButtonMotion;
+    let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
+    // The bare tab strip, past the one tab's ribbon.
+    let tabline_point = Point { column: 40, row: 0 };
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_left_mouse_press(get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
+        current_time,
+    );
+
+    // The release never arrived, and the next left press lands on the strip.
+    let press_actions = client.handle_mouse(
+        build_left_mouse_press(tabline_point),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+
+    assert_eq!(
+        press_actions,
+        vec![MouseAction::Forward {
+            pane_id,
+            mouse_kind: MouseKind::Release(MouseButton::Left),
+            modifier_flags: BindingModifierFlags::NONE,
+            pane_local_cell: Point { column: 1, row: 1 },
+        }]
+    );
+    assert_eq!(client.mouse_capture, None);
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_release(tabline_point),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 2)
+        ),
+        Vec::new(),
+        "the release ends the strip's peek-drag and reaches no program"
+    );
+}
+
+#[test]
+fn a_forwarded_press_of_another_button_releases_the_held_capture_first() {
+    let pane_id = PaneId::new();
+    let mut mouse_pane = build_plain_mouse_pane(pane_id);
+    mouse_pane.mouse_tracking = MouseTracking::ButtonMotion;
+    let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
+    let screen_point = get_content_cell(&mouse_frame, 0);
+    let right_point = Point {
+        column: screen_point.column + 2,
+        ..screen_point
+    };
+    let right_press = build_mouse_event(
+        MouseKind::Press(MouseButton::Right),
+        right_point,
+        BindingModifierFlags::NONE,
+    );
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_left_mouse_press(screen_point),
+        &mouse_frame,
+        current_time,
+    );
+
+    assert_eq!(
+        client.handle_mouse(
+            right_press,
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 1)
+        ),
+        vec![
+            MouseAction::Forward {
+                pane_id,
+                mouse_kind: MouseKind::Release(MouseButton::Left),
+                modifier_flags: BindingModifierFlags::NONE,
+                pane_local_cell: Point { column: 1, row: 1 },
+            },
+            build_forwarded_mouse_action(pane_id, right_press, Point { column: 3, row: 1 }),
+        ],
+        "one capture is held at a time, so the left one ends before the right press"
+    );
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_release(right_point),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 2)
+        ),
+        vec![MouseAction::Forward {
+            pane_id,
+            mouse_kind: MouseKind::Release(MouseButton::Right),
+            modifier_flags: BindingModifierFlags::NONE,
+            pane_local_cell: Point { column: 3, row: 1 },
+        }],
+        "the next release ends the right capture and carries its button"
+    );
+    assert_eq!(
+        client.handle_mouse(
+            build_mouse_event(
+                MouseKind::Release(MouseButton::Right),
+                right_point,
+                BindingModifierFlags::NONE,
+            ),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 3)
+        ),
+        Vec::new(),
+        "every press the program saw already has its release"
+    );
+}
+
+#[test]
+fn a_capture_whose_pane_leaves_the_frame_releases_on_the_next_event() {
+    let pane_id = PaneId::new();
+    let mut mouse_pane = build_plain_mouse_pane(pane_id);
+    mouse_pane.mouse_tracking = MouseTracking::ButtonMotion;
+    let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_left_mouse_press(get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
+        current_time,
+    );
+
+    // The pane is hidden: the next painted frame does not draw it.
+    let replacement_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(PaneId::new()));
+    client.drop_gestures_the_frame_ended(&replacement_frame);
+    assert_eq!(client.mouse_capture, None);
+    let mouse_actions = client.handle_mouse(
+        build_mouse_motion(get_content_cell(&replacement_frame, 0)),
+        &replacement_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+
+    assert_eq!(
+        mouse_actions,
+        vec![MouseAction::Forward {
+            pane_id,
+            mouse_kind: MouseKind::Release(MouseButton::Left),
+            modifier_flags: BindingModifierFlags::NONE,
+            pane_local_cell: Point { column: 1, row: 1 },
+        }]
+    );
+    assert_eq!(client.mouse_capture, None);
 }
 
 #[test]
@@ -1644,6 +2047,44 @@ fn mouse_routing_uses_the_region_solve_committed_with_the_frame() {
 }
 
 #[test]
+fn a_painted_frame_leaves_the_hover_until_a_mouse_event_meets_a_frame_without_its_pane() {
+    let pane_id = PaneId::new();
+    let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let other_tab_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(PaneId::new()));
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_mouse_motion(get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
+        current_time,
+    );
+
+    // A key switches to a tab without the pane and back, with the pointer still.
+    client.drop_gestures_the_frame_ended(&other_tab_frame);
+    client.drop_gestures_the_frame_ended(&mouse_frame);
+    assert_eq!(
+        client.build_viewer_chrome(active_tab_id).hovered_pane_id,
+        Some(pane_id),
+        "the pane under the still pointer stays hovered"
+    );
+
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_release(get_content_cell(&other_tab_frame, 0)),
+            &other_tab_frame,
+            advance_time_by_seconds(current_time, 1),
+        ),
+        Vec::new()
+    );
+    assert_eq!(
+        client.build_viewer_chrome(active_tab_id).hovered_pane_id,
+        None,
+        "a mouse event placed against a frame without the pane clears the hover"
+    );
+}
+
+#[test]
 fn a_gesture_is_dropped_when_its_pane_leaves_the_frame() {
     let pane_id = PaneId::new();
     let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
@@ -1657,9 +2098,10 @@ fn a_gesture_is_dropped_when_its_pane_leaves_the_frame() {
         current_time,
     );
 
-    // The pane closes: the next frame does not draw it.
+    // The pane closes: the next painted frame does not draw it.
     let replacement_pane_id = PaneId::new();
     let replacement_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(replacement_pane_id));
+    client.drop_gestures_the_frame_ended(&replacement_frame);
     let mouse_actions = client.handle_mouse(
         build_left_mouse_drag(get_content_cell(&replacement_frame, 0)),
         &replacement_frame,
@@ -1720,6 +2162,7 @@ fn a_pane_swapping_to_the_alternate_screen_ends_the_selection_drag() {
     let mut alternate_screen_mouse_pane = build_plain_mouse_pane(pane_id);
     alternate_screen_mouse_pane.is_on_alternate_screen = true;
     let alternate_screen_mouse_frame = build_one_pane_mouse_frame(alternate_screen_mouse_pane);
+    client.drop_gestures_the_frame_ended(&alternate_screen_mouse_frame);
 
     assert_eq!(
         client.handle_mouse(
@@ -1730,7 +2173,7 @@ fn a_pane_swapping_to_the_alternate_screen_ends_the_selection_drag() {
         Vec::new(),
         "the drag ended with the screen it was made on"
     );
-    assert_eq!(client.selection_drag, None);
+    assert_eq!(client.left_button_gesture, None);
 }
 
 #[test]
@@ -2071,7 +2514,130 @@ fn releasing_a_highlight_copies_it_with_the_viewers_own_trim_setting() {
             },
             "trim {should_trim_trailing_whitespace}"
         );
+        assert_eq!(
+            client.left_button_gesture, None,
+            "the release ends the drag"
+        );
     }
+}
+
+#[test]
+fn a_left_release_ends_a_border_drag_and_a_strip_peek_drag_and_sends_nothing() {
+    let resized_pane_id = PaneId::new();
+    let mouse_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(PaneId::new()),
+            build_plain_mouse_pane(resized_pane_id),
+        ],
+        None,
+    );
+    let divider_point = Point {
+        column: 10,
+        row: mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+            .outer_rect
+            .origin
+            .row
+            + 1,
+    };
+    // The bare tab strip, past the one tab's ribbon.
+    let tabline_point = Point { column: 40, row: 0 };
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+
+    client.handle_mouse(
+        build_left_mouse_press(divider_point),
+        &mouse_frame,
+        current_time,
+    );
+    assert_eq!(
+        client.left_button_gesture,
+        Some(LeftButtonGesture::BorderResize(ResizeDrag {
+            pane_id: resized_pane_id,
+            border_side: Direction::Up,
+            last_accepted_position: divider_point,
+        }))
+    );
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_release(divider_point),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 1)
+        ),
+        Vec::new()
+    );
+    assert_eq!(client.left_button_gesture, None);
+
+    client.handle_mouse(
+        build_left_mouse_press(tabline_point),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 2),
+    );
+    assert_eq!(
+        client.left_button_gesture,
+        Some(LeftButtonGesture::TablinePeek(TablineDrag {
+            anchor_column: 40,
+            anchor_first_visible_tab_index: 0,
+        }))
+    );
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_release(tabline_point),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 3)
+        ),
+        Vec::new()
+    );
+    assert_eq!(client.left_button_gesture, None);
+}
+
+#[test]
+fn another_buttons_release_during_a_highlight_drag_copies_nothing_and_leaves_the_drag() {
+    let pane_id = PaneId::new();
+    let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let screen_point = get_content_cell(&mouse_frame, 0);
+    let drag_point = Point {
+        column: screen_point.column + 4,
+        ..screen_point
+    };
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_left_mouse_press(screen_point),
+        &mouse_frame,
+        current_time,
+    );
+    client.handle_mouse(
+        build_left_mouse_drag(drag_point),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+
+    let right_release_actions = client.handle_mouse(
+        build_mouse_event(
+            MouseKind::Release(MouseButton::Right),
+            drag_point,
+            BindingModifierFlags::NONE,
+        ),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 2),
+    );
+    let left_release_actions = client.handle_mouse(
+        build_left_mouse_release(drag_point),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 3),
+    );
+
+    assert_eq!(right_release_actions, Vec::new());
+    assert_eq!(
+        find_copy_action(&left_release_actions),
+        Some(CopyArgs {
+            pane_id,
+            should_trim_trailing_whitespace: client
+                .client_config
+                .copy
+                .should_trim_trailing_whitespace,
+        })
+    );
 }
 
 #[test]
@@ -2277,9 +2843,10 @@ fn shifted_handle_press_in_normal_mode_does_not_start_pane_placement() {
     let mut client = build_test_client();
     client.set_frame_view(active_tab_id, Some(pane_id), vec![active_tab_id]);
     client.placement_handle_pane_id = Some(pane_id);
+    let mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
     let handle_position = Point { column: 1, row: 1 };
     assert_eq!(
-        resolve_hit_region(client.build_frame_layout(&mouse_frame), handle_position),
+        resolve_hit_region(mouse_frame.build_frame_layout(), handle_position),
         HitRegion::PlacementHandle { pane_id }
     );
 
@@ -2318,9 +2885,10 @@ fn plain_handle_press_in_normal_mode_starts_pane_placement() {
     let mut client = build_test_client();
     client.set_frame_view(active_tab_id, Some(pane_id), vec![active_tab_id]);
     client.placement_handle_pane_id = Some(pane_id);
+    let mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
     let handle_position = Point { column: 1, row: 1 };
     assert_eq!(
-        resolve_hit_region(client.build_frame_layout(&mouse_frame), handle_position),
+        resolve_hit_region(mouse_frame.build_frame_layout(), handle_position),
         HitRegion::PlacementHandle { pane_id }
     );
 
@@ -2474,14 +3042,15 @@ fn shift_drag_selects_text_from_a_mouse_aware_program() {
 }
 
 #[test]
-fn ending_the_gestures_drops_all_four_and_leaves_the_pointer_and_the_strip_alone() {
+fn ending_the_gestures_drops_the_left_gesture_and_the_capture_and_leaves_the_pointer_and_the_strip_alone(
+) {
     let hovered_pane_id = PaneId::new();
     let resized_pane_id = PaneId::new();
+    let mut hovered_mouse_pane = build_plain_mouse_pane(hovered_pane_id);
+    // Button-event tracking reports the right press the capture holds.
+    hovered_mouse_pane.mouse_tracking = MouseTracking::ButtonMotion;
     let mouse_frame = build_mouse_frame(
-        &[
-            build_plain_mouse_pane(hovered_pane_id),
-            build_plain_mouse_pane(resized_pane_id),
-        ],
+        &[hovered_mouse_pane, build_plain_mouse_pane(resized_pane_id)],
         Some(hovered_pane_id),
     );
     let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
@@ -2517,54 +3086,56 @@ fn ending_the_gestures_drops_all_four_and_leaves_the_pointer_and_the_strip_alone
         Some(hovered_pane_id)
     );
 
-    // All four gestures under way at once: the presses that began them are
-    // spaced so no two read as one double click.
-    client.handle_mouse(
-        build_left_mouse_press(screen_point),
-        &mouse_frame,
-        current_time,
-    );
+    // A border drag held by the left button, and the right button captured to
+    // the hovered pane's program.
     client.handle_mouse(
         build_left_mouse_press(divider_point),
         &mouse_frame,
-        advance_time_by_seconds(current_time, 1),
+        current_time,
     );
-    client.handle_mouse(
-        build_left_mouse_press(tabline_point),
-        &mouse_frame,
-        advance_time_by_seconds(current_time, 2),
-    );
-    client.note_press_forwarded(resized_pane_id, MouseButton::Left);
-    assert_eq!(
-        client
-            .selection_drag
-            .map(|selection_drag| selection_drag.pane_id),
-        Some(hovered_pane_id)
+    let right_press = build_mouse_event(
+        MouseKind::Press(MouseButton::Right),
+        screen_point,
+        BindingModifierFlags::NONE,
     );
     assert_eq!(
-        client.resize_drag.map(|resize_drag| resize_drag.pane_id),
-        Some(resized_pane_id)
+        client.handle_mouse(
+            right_press,
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 1)
+        ),
+        vec![build_forwarded_mouse_action(
+            hovered_pane_id,
+            right_press,
+            Point { column: 1, row: 1 }
+        )]
     );
     assert_eq!(
-        client
-            .tabline_drag
-            .map(|tabline_drag| tabline_drag.anchor_column),
-        Some(tabline_point.column)
+        client.left_button_gesture,
+        Some(LeftButtonGesture::BorderResize(ResizeDrag {
+            pane_id: resized_pane_id,
+            border_side: Direction::Up,
+            last_accepted_position: divider_point,
+        }))
     );
     assert_eq!(
         client.mouse_capture,
         Some(MouseCapture {
-            pane_id: resized_pane_id,
-            button: MouseButton::Left,
+            pane_id: hovered_pane_id,
+            button: MouseButton::Right,
+            last_pane_local_cell: Point { column: 1, row: 1 },
         })
     );
 
     client.end_mouse_gestures();
 
-    assert_eq!(client.selection_drag, None);
-    assert_eq!(client.resize_drag, None);
-    assert_eq!(client.tabline_drag, None);
+    assert_eq!(client.left_button_gesture, None);
     assert_eq!(client.mouse_capture, None);
+    assert_eq!(
+        client.take_mouse_capture_release(),
+        None,
+        "the new link owes no release for the right press"
+    );
     assert_eq!(
         client.build_viewer_chrome(active_tab_id).tabline_offset,
         Some(1),
@@ -2586,6 +3157,119 @@ fn ending_the_gestures_drops_all_four_and_leaves_the_pointer_and_the_strip_alone
         ),
         Vec::new(),
         "no gesture is under way, so the drag decides nothing"
+    );
+}
+
+#[test]
+fn ending_the_gestures_drops_a_release_already_owed() {
+    let pane_id = PaneId::new();
+    let mut mouse_pane = build_plain_mouse_pane(pane_id);
+    mouse_pane.mouse_tracking = MouseTracking::ButtonMotion;
+    let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
+    let mut client = build_test_client();
+    client.handle_mouse(
+        build_left_mouse_press(get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
+        Instant::now(),
+    );
+    // A painted frame that no longer draws the pane owes its program a release.
+    client.drop_gestures_the_frame_ended(&build_one_pane_mouse_frame(build_plain_mouse_pane(
+        PaneId::new(),
+    )));
+    assert_eq!(client.mouse_capture, None);
+    assert_eq!(
+        client.unreleased_mouse_capture,
+        Some(MouseCapture {
+            pane_id,
+            button: MouseButton::Left,
+            last_pane_local_cell: Point { column: 1, row: 1 },
+        })
+    );
+
+    client.end_mouse_gestures();
+
+    assert_eq!(
+        client.take_mouse_capture_release(),
+        None,
+        "a new link sends no release the old link owed"
+    );
+}
+
+#[test]
+fn keyboard_placement_ends_the_held_gestures_and_the_edge_scroll_and_owes_the_capture_a_release() {
+    let selection_pane_id = PaneId::new();
+    let mut selection_mouse_pane = build_plain_mouse_pane(selection_pane_id);
+    // Button-event tracking reports the right press the capture holds; the
+    // left press holds Shift, so it selects.
+    selection_mouse_pane.mouse_tracking = MouseTracking::ButtonMotion;
+    let mouse_frame = build_mouse_frame(
+        &[selection_mouse_pane, build_plain_mouse_pane(PaneId::new())],
+        Some(selection_pane_id),
+    );
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let selection_point = get_content_cell(&mouse_frame, 0);
+    let current_time = Instant::now();
+    let mut client = build_test_client();
+    client.set_frame_view(active_tab_id, Some(selection_pane_id), vec![active_tab_id]);
+
+    // A selection drag held below its pane, and the right button captured to
+    // the program in it.
+    client.handle_mouse(
+        build_mouse_event(
+            MouseKind::Press(MouseButton::Left),
+            selection_point,
+            BindingModifierFlags::SHIFT,
+        ),
+        &mouse_frame,
+        current_time,
+    );
+    client.handle_mouse(
+        build_left_mouse_drag(get_content_cell(&mouse_frame, 1)),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+    let right_press = build_mouse_event(
+        MouseKind::Press(MouseButton::Right),
+        selection_point,
+        BindingModifierFlags::NONE,
+    );
+    assert_eq!(
+        client.handle_mouse(
+            right_press,
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 1)
+        ),
+        vec![build_forwarded_mouse_action(
+            selection_pane_id,
+            right_press,
+            Point { column: 1, row: 1 }
+        )]
+    );
+    assert_eq!(
+        client.compute_next_mouse_wakeup(advance_time_by_seconds(current_time, 1)),
+        Some(Duration::from_millis(15))
+    );
+
+    assert_eq!(
+        client.begin_placement_mode(),
+        Some((selection_pane_id, active_tab_id))
+    );
+
+    assert_eq!(client.left_button_gesture, None);
+    assert_eq!(client.mouse_capture, None);
+    assert_eq!(
+        client.take_mouse_capture_release(),
+        Some(MouseAction::Forward {
+            pane_id: selection_pane_id,
+            mouse_kind: MouseKind::Release(MouseButton::Right),
+            modifier_flags: BindingModifierFlags::NONE,
+            pane_local_cell: Point { column: 1, row: 1 },
+        })
+    );
+    assert_eq!(
+        client.expire_mouse_scroll(advance_time_by_seconds(current_time, 4), &mouse_frame),
+        Vec::new(),
+        "the pane under the ended selection drag no longer scrolls"
     );
 }
 
@@ -2734,16 +3418,16 @@ fn a_neighbor_below_the_gap_counts_as_adjacent() {
 }
 
 #[test]
-fn ending_the_selection_leaves_the_other_three_gestures_alone() {
+fn ending_the_selection_leaves_a_border_drag_and_the_capture_alone() {
     // A key that reaches the pane's program ends the highlight gesture only.
-    // The border drag, the strip peek-drag and the captured pane are all still
-    // under way.
     let selection_pane_id = PaneId::new();
-    let captured_pane_id = PaneId::new();
+    let resized_pane_id = PaneId::new();
+    let mut selection_mouse_pane = build_plain_mouse_pane(selection_pane_id);
+    selection_mouse_pane.mouse_tracking = MouseTracking::ButtonMotion;
     let mouse_frame = build_mouse_frame(
         &[
-            build_plain_mouse_pane(selection_pane_id),
-            build_plain_mouse_pane(captured_pane_id),
+            selection_mouse_pane,
+            build_plain_mouse_pane(resized_pane_id),
         ],
         Some(selection_pane_id),
     );
@@ -2756,46 +3440,165 @@ fn ending_the_selection_leaves_the_other_three_gestures_alone() {
             .row
             + 1,
     };
-    let tabline_point = Point { column: 40, row: 0 };
     let current_time = Instant::now();
     let mut client = build_test_client();
+    let right_capture = Some(MouseCapture {
+        pane_id: selection_pane_id,
+        button: MouseButton::Right,
+        last_pane_local_cell: Point { column: 1, row: 1 },
+    });
 
+    // A Shift selection drag, and the right button captured to the program.
+    client.handle_mouse(
+        build_mouse_event(
+            MouseKind::Press(MouseButton::Left),
+            screen_point,
+            BindingModifierFlags::SHIFT,
+        ),
+        &mouse_frame,
+        current_time,
+    );
+    client.handle_mouse(
+        build_mouse_event(
+            MouseKind::Press(MouseButton::Right),
+            screen_point,
+            BindingModifierFlags::NONE,
+        ),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+
+    client.end_mouse_selection();
+
+    assert_eq!(client.left_button_gesture, None);
+    assert_eq!(client.mouse_capture, right_capture);
+    assert_eq!(
+        client.take_mouse_capture_release(),
+        None,
+        "the capture is still held, so no release is owed"
+    );
+
+    // A left press on the divider leaves the right capture held.
+    client.handle_mouse(
+        build_left_mouse_press(divider_point),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 2),
+    );
+    client.end_mouse_selection();
+
+    assert_eq!(
+        client.left_button_gesture,
+        Some(LeftButtonGesture::BorderResize(ResizeDrag {
+            pane_id: resized_pane_id,
+            border_side: Direction::Up,
+            last_accepted_position: divider_point,
+        })),
+        "a border drag is not a selection"
+    );
+    assert_eq!(client.mouse_capture, right_capture);
+}
+
+#[test]
+fn a_left_press_after_a_lost_release_ends_the_stale_selection_without_copying_it() {
+    let selection_pane_id = PaneId::new();
+    let other_pane_id = PaneId::new();
+    let mouse_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(selection_pane_id),
+            build_plain_mouse_pane(other_pane_id),
+        ],
+        Some(selection_pane_id),
+    );
+    let screen_point = get_content_cell(&mouse_frame, 0);
+    let other_pane_point = get_content_cell(&mouse_frame, 1);
+    let mut client = build_test_client();
+    let current_time = Instant::now();
     client.handle_mouse(
         build_left_mouse_press(screen_point),
         &mouse_frame,
         current_time,
     );
     client.handle_mouse(
-        build_left_mouse_press(divider_point),
+        build_left_mouse_drag(Point {
+            column: screen_point.column + 4,
+            ..screen_point
+        }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 1),
     );
-    client.handle_mouse(
-        build_left_mouse_press(tabline_point),
+
+    // The release never arrived. A click on the other pane only focuses it.
+    let press_actions = client.handle_mouse(
+        build_left_mouse_press(other_pane_point),
         &mouse_frame,
         advance_time_by_seconds(current_time, 2),
     );
-    client.note_press_forwarded(captured_pane_id, MouseButton::Left);
 
-    client.end_mouse_selection();
-
-    assert_eq!(client.selection_drag, None);
     assert_eq!(
-        client.resize_drag.map(|resize_drag| resize_drag.pane_id),
-        Some(captured_pane_id)
+        press_actions,
+        vec![build_focus_pane_command(&client, other_pane_id)]
+    );
+    assert_eq!(client.left_button_gesture, None);
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_release(other_pane_point),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 3)
+        ),
+        Vec::new(),
+        "the stale highlight is not copied"
+    );
+}
+
+#[test]
+fn a_left_press_after_a_lost_release_ends_the_stale_border_drag() {
+    let resized_pane_id = PaneId::new();
+    let mouse_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(PaneId::new()),
+            build_plain_mouse_pane(resized_pane_id),
+        ],
+        None,
+    );
+    let resized_pane_point = get_content_cell(&mouse_frame, 1);
+    let divider_point = Point {
+        column: 10,
+        row: mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+            .outer_rect
+            .origin
+            .row
+            + 1,
+    };
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_left_mouse_press(divider_point),
+        &mouse_frame,
+        current_time,
+    );
+
+    // The release never arrived. A click on an unfocused pane only focuses it.
+    let press_actions = client.handle_mouse(
+        build_left_mouse_press(resized_pane_point),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+
+    assert_eq!(
+        press_actions,
+        vec![build_focus_pane_command(&client, resized_pane_id)]
     );
     assert_eq!(
-        client
-            .tabline_drag
-            .map(|tabline_drag| tabline_drag.anchor_column),
-        Some(tabline_point.column)
-    );
-    assert_eq!(
-        client.mouse_capture,
-        Some(MouseCapture {
-            pane_id: captured_pane_id,
-            button: MouseButton::Left,
-        })
+        client.handle_mouse(
+            build_left_mouse_drag(Point {
+                column: resized_pane_point.column,
+                row: resized_pane_point.row + 3,
+            }),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 2)
+        ),
+        Vec::new(),
+        "no border moves"
     );
 }
 
@@ -3785,6 +4588,21 @@ fn find_floating_pane_move_draft(
         .floating_pane_move_draft
 }
 
+/// The top-left cell `client` draws the floating pane `pane_id` at when it
+/// paints `mouse_frame` again, in pane-area cells, or `None` when it draws no
+/// such pane.
+fn find_drawn_floating_pane_top_left_cell(
+    client: &Client,
+    mouse_frame: &MouseFrame,
+    pane_id: PaneId,
+) -> Option<Point> {
+    let painted_mouse_frame = repaint_mouse_frame(client, mouse_frame);
+    painted_mouse_frame
+        .build_frame_layout()
+        .find_drawn_floating_pane_slot(pane_id)
+        .map(|floating_pane_slot| floating_pane_slot.outer_rect.origin)
+}
+
 /// The `FocusPane` a press sends for `pane_id`.
 fn build_focus_pane_command(client: &Client, pane_id: PaneId) -> MouseAction {
     MouseAction::Command(Box::new(Command::FocusPane(FocusPaneArgs {
@@ -4045,6 +4863,83 @@ fn a_wheel_over_chrome_scrolls_the_focused_floating_pane() {
 }
 
 #[test]
+fn a_wheel_over_a_floating_panes_titlebar_border_handle_or_buttons_scrolls_that_pane() {
+    let tiled_pane_id = PaneId::new();
+    let floating_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(tiled_pane_id),
+        build_plain_mouse_pane(floating_pane_id),
+        false,
+        tiled_pane_id,
+    );
+    let floating_pane_chrome_points = [
+        Point { column: 12, row: 6 },
+        Point { column: 20, row: 6 },
+        Point { column: 20, row: 7 },
+        Point { column: 39, row: 6 },
+        Point { column: 43, row: 6 },
+        Point { column: 46, row: 6 },
+        Point { column: 10, row: 9 },
+        Point { column: 49, row: 9 },
+        Point { column: 20, row: 5 },
+        Point {
+            column: 20,
+            row: 16,
+        },
+    ];
+
+    for screen_point in floating_pane_chrome_points {
+        assert_eq!(
+            build_test_client()
+                .handle_mouse_wheel(
+                    build_mouse_wheel(ScrollDirection::Up, screen_point),
+                    &mouse_frame
+                )
+                .expect("a wheel tick decides"),
+            WheelDecision {
+                hovered_pane_id: None,
+                mouse_action: Some(MouseAction::Scroll {
+                    pane_id: floating_pane_id,
+                    is_scrolling_up: true,
+                    scroll_line_count: 3,
+                }),
+            },
+            "{screen_point:?}"
+        );
+    }
+}
+
+#[test]
+fn a_wheel_over_a_tiled_panes_border_scrolls_the_focused_pane() {
+    let floating_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(PaneId::new()),
+        build_plain_mouse_pane(floating_pane_id),
+        false,
+        floating_pane_id,
+    );
+
+    let wheel_decision = build_test_client()
+        .handle_mouse_wheel(
+            build_mouse_wheel(ScrollDirection::Up, Point { column: 0, row: 9 }),
+            &mouse_frame,
+        )
+        .expect("a wheel tick decides");
+
+    assert_eq!(
+        wheel_decision,
+        WheelDecision {
+            hovered_pane_id: None,
+            mouse_action: Some(MouseAction::Scroll {
+                pane_id: floating_pane_id,
+                is_scrolling_up: true,
+                scroll_line_count: 3,
+            }),
+        }
+    );
+}
+
+#[test]
 fn dragging_a_floating_panes_handle_draws_it_locally_and_sends_one_move_on_release() {
     let tiled_pane_id = PaneId::new();
     let floating_pane_id = PaneId::new();
@@ -4101,7 +4996,7 @@ fn dragging_a_floating_panes_handle_draws_it_locally_and_sends_one_move_on_relea
 }
 
 #[test]
-fn a_floating_pane_handle_drag_keeps_the_pane_inside_the_pane_area() {
+fn a_floating_pane_handle_drag_draws_and_sends_the_pane_inside_the_pane_area() {
     let floating_pane_id = PaneId::new();
     let mouse_frame = build_floating_mouse_frame(
         build_plain_mouse_pane(PaneId::new()),
@@ -4117,8 +5012,8 @@ fn a_floating_pane_handle_drag_keeps_the_pane_inside_the_pane_area() {
         current_time,
     );
 
-    // A 40x12 pane in the 80x22 pane area keeps its top-left cell between
-    // (0, 0) and (40, 10).
+    // A 40x12 pane in the 80x22 pane area is drawn with its top-left cell
+    // between (0, 0) and (40, 10).
     client.handle_mouse(
         build_left_mouse_drag(Point {
             column: 79,
@@ -4126,6 +5021,39 @@ fn a_floating_pane_handle_drag_keeps_the_pane_inside_the_pane_area() {
         }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 1),
+    );
+    assert_eq!(
+        find_drawn_floating_pane_top_left_cell(&client, &mouse_frame, floating_pane_id),
+        Some(Point {
+            column: 40,
+            row: 10
+        })
+    );
+    client.handle_mouse(
+        build_left_mouse_drag(Point { column: 0, row: 0 }),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 2),
+    );
+    assert_eq!(
+        find_drawn_floating_pane_top_left_cell(&client, &mouse_frame, floating_pane_id),
+        Some(Point { column: 0, row: 0 })
+    );
+    let release_actions = client.handle_mouse(
+        build_left_mouse_release(Point {
+            column: 79,
+            row: 23,
+        }),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 3),
+    );
+
+    get_floating_pane_move_command_id(
+        &release_actions,
+        floating_pane_id,
+        Point {
+            column: 40,
+            row: 10,
+        },
     );
     assert_eq!(
         find_floating_pane_move_draft(&client, &mouse_frame),
@@ -4137,17 +5065,65 @@ fn a_floating_pane_handle_drag_keeps_the_pane_inside_the_pane_area() {
             },
         })
     );
+}
+
+#[test]
+fn a_held_handle_draws_and_sends_the_pane_inside_a_pane_area_that_shrank() {
+    let floating_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(PaneId::new()),
+        build_plain_mouse_pane(floating_pane_id),
+        false,
+        floating_pane_id,
+    );
+    let small_viewport_size = Size {
+        column_count: 60,
+        row_count: 20,
+    };
+    let mut small_mouse_frame = mouse_frame.clone();
+    small_mouse_frame.client_snapshot.viewport_size = small_viewport_size;
+    small_mouse_frame.committed_regions = CommittedRegions::build_core(small_viewport_size, 0);
+    let mut client = build_test_client();
+    let current_time = Instant::now();
     client.handle_mouse(
-        build_left_mouse_drag(Point { column: 0, row: 0 }),
+        build_left_mouse_press(Point { column: 12, row: 6 }),
         &mouse_frame,
-        advance_time_by_seconds(current_time, 2),
+        current_time,
+    );
+    client.handle_mouse(
+        build_left_mouse_drag(Point {
+            column: 42,
+            row: 12,
+        }),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 1),
     );
     assert_eq!(
-        find_floating_pane_move_draft(&client, &mouse_frame),
-        Some(FloatingPaneMoveDraft {
-            pane_id: floating_pane_id,
-            top_left_cell: Point { column: 0, row: 0 },
+        find_drawn_floating_pane_top_left_cell(&client, &mouse_frame, floating_pane_id),
+        Some(Point {
+            column: 40,
+            row: 10
         })
+    );
+
+    // The 40x12 pane in the 60x18 pane area is drawn at (20, 6) at most.
+    assert_eq!(
+        find_drawn_floating_pane_top_left_cell(&client, &small_mouse_frame, floating_pane_id),
+        Some(Point { column: 20, row: 6 })
+    );
+    let release_actions = client.handle_mouse(
+        build_left_mouse_release(Point {
+            column: 42,
+            row: 12,
+        }),
+        &small_mouse_frame,
+        advance_time_by_seconds(current_time, 2),
+    );
+
+    get_floating_pane_move_command_id(
+        &release_actions,
+        floating_pane_id,
+        Point { column: 20, row: 6 },
     );
 }
 
@@ -4173,19 +5149,250 @@ fn a_handle_released_where_it_was_pressed_sends_no_move() {
         &mouse_frame,
         advance_time_by_seconds(current_time, 1),
     );
-    client.handle_mouse(
-        build_left_mouse_drag(Point { column: 12, row: 6 }),
-        &mouse_frame,
-        advance_time_by_seconds(current_time, 2),
-    );
+    // No drag reports the pointer's way back: the release names the cell.
     let release_actions = client.handle_mouse(
         build_left_mouse_release(Point { column: 12, row: 6 }),
         &mouse_frame,
-        advance_time_by_seconds(current_time, 3),
+        advance_time_by_seconds(current_time, 2),
     );
 
     assert_eq!(release_actions, Vec::new());
     assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
+}
+
+#[test]
+fn a_handle_released_where_it_was_pressed_sends_no_move_after_the_pane_area_shrinks() {
+    let floating_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(PaneId::new()),
+        build_plain_mouse_pane(floating_pane_id),
+        false,
+        floating_pane_id,
+    );
+    let small_viewport_size = Size {
+        column_count: 45,
+        row_count: 20,
+    };
+    let mut small_mouse_frame = mouse_frame.clone();
+    small_mouse_frame.client_snapshot.viewport_size = small_viewport_size;
+    small_mouse_frame.committed_regions = CommittedRegions::build_core(small_viewport_size, 0);
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_left_mouse_press(Point { column: 12, row: 6 }),
+        &mouse_frame,
+        current_time,
+    );
+    // The 40x12 pane in the 45x18 pane area is drawn at (5, 4).
+    assert_eq!(
+        find_drawn_floating_pane_top_left_cell(&client, &small_mouse_frame, floating_pane_id),
+        Some(Point { column: 5, row: 4 })
+    );
+
+    let release_actions = client.handle_mouse(
+        build_left_mouse_release(Point { column: 12, row: 6 }),
+        &small_mouse_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+
+    assert_eq!(release_actions, Vec::new());
+    assert_eq!(
+        find_floating_pane_move_draft(&client, &small_mouse_frame),
+        None
+    );
+}
+
+#[test]
+fn a_handle_release_that_leaves_the_pane_drawn_where_it_was_sends_no_move() {
+    let floating_pane_id = PaneId::new();
+    let mut mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(PaneId::new()),
+        build_plain_mouse_pane(floating_pane_id),
+        false,
+        floating_pane_id,
+    );
+    // The 40x12 pane at (40, 4) touches the right edge of the 80x22 pane area.
+    mouse_frame.session_snapshot.floating_pane_slots = vec![FloatingPaneSlot::from_outer_rect(
+        floating_pane_id,
+        Rect {
+            origin: Point { column: 40, row: 4 },
+            ..FLOATING_PANE_OUTER_RECT
+        },
+        false,
+    )];
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_left_mouse_press(Point { column: 42, row: 6 }),
+        &mouse_frame,
+        current_time,
+    );
+
+    // Three cells right is past the right edge: the pane stays drawn at (40, 4).
+    let release_actions = client.handle_mouse(
+        build_left_mouse_release(Point { column: 45, row: 6 }),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+
+    assert_eq!(release_actions, Vec::new());
+    assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
+}
+
+#[test]
+fn a_press_hits_a_moved_floating_pane_where_the_painted_frame_still_draws_it() {
+    let tiled_pane_id = PaneId::new();
+    let floating_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(tiled_pane_id),
+        build_plain_mouse_pane(floating_pane_id),
+        false,
+        tiled_pane_id,
+    );
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_left_mouse_press(Point { column: 12, row: 6 }),
+        &mouse_frame,
+        current_time,
+    );
+    let release_actions = client.handle_mouse(
+        build_left_mouse_release(Point { column: 42, row: 6 }),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+    get_floating_pane_move_command_id(
+        &release_actions,
+        floating_pane_id,
+        Point { column: 40, row: 4 },
+    );
+
+    // No paint has drawn the move: screen (16, 10) still shows the floating
+    // pane's content.
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_press(Point {
+                column: 16,
+                row: 10
+            }),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 3),
+        ),
+        vec![build_focus_pane_command(&client, floating_pane_id)]
+    );
+
+    // A paint draws the pane at (40, 4): screen (16, 10) shows the tiled pane.
+    let painted_mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_press(Point {
+                column: 16,
+                row: 10
+            }),
+            &painted_mouse_frame,
+            advance_time_by_seconds(current_time, 5),
+        ),
+        vec![MouseAction::Command(Box::new(Command::Visual(
+            VisualCommand::ClearSelection(ClearSelectionArgs {
+                pane_id: tiled_pane_id
+            })
+        )))]
+    );
+}
+
+#[test]
+fn a_handle_release_moves_the_pane_by_the_release_cell_not_the_last_drag() {
+    let floating_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(PaneId::new()),
+        build_plain_mouse_pane(floating_pane_id),
+        false,
+        floating_pane_id,
+    );
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_left_mouse_press(Point { column: 12, row: 6 }),
+        &mouse_frame,
+        current_time,
+    );
+    client.handle_mouse(
+        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+
+    let release_actions = client.handle_mouse(
+        build_left_mouse_release(Point { column: 20, row: 9 }),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 2),
+    );
+
+    get_floating_pane_move_command_id(
+        &release_actions,
+        floating_pane_id,
+        Point { column: 18, row: 7 },
+    );
+}
+
+#[test]
+fn another_buttons_release_during_a_handle_drag_leaves_the_drag_held() {
+    let floating_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(PaneId::new()),
+        build_plain_mouse_pane(floating_pane_id),
+        false,
+        floating_pane_id,
+    );
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_left_mouse_press(Point { column: 12, row: 6 }),
+        &mouse_frame,
+        current_time,
+    );
+    client.handle_mouse(
+        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+
+    let right_press_actions = client.handle_mouse(
+        build_mouse_event(
+            MouseKind::Press(MouseButton::Right),
+            Point { column: 17, row: 7 },
+            BindingModifierFlags::NONE,
+        ),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 2),
+    );
+    let right_release_actions = client.handle_mouse(
+        build_mouse_event(
+            MouseKind::Release(MouseButton::Right),
+            Point { column: 17, row: 7 },
+            BindingModifierFlags::NONE,
+        ),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 3),
+    );
+    client.handle_mouse(
+        build_left_mouse_drag(Point { column: 20, row: 8 }),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 4),
+    );
+    let left_release_actions = client.handle_mouse(
+        build_left_mouse_release(Point { column: 20, row: 8 }),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 5),
+    );
+
+    assert_eq!(right_press_actions, Vec::new());
+    assert_eq!(right_release_actions, Vec::new());
+    get_floating_pane_move_command_id(
+        &left_release_actions,
+        floating_pane_id,
+        Point { column: 18, row: 6 },
+    );
 }
 
 #[test]
@@ -4225,6 +5432,94 @@ fn escape_during_a_handle_drag_drops_the_move() {
             advance_time_by_seconds(current_time, 3),
         ),
         Vec::new()
+    );
+}
+
+#[test]
+fn escape_during_a_handle_drag_also_drops_an_open_key_sequence() {
+    let floating_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(PaneId::new()),
+        build_plain_mouse_pane(floating_pane_id),
+        false,
+        floating_pane_id,
+    );
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_left_mouse_press(Point { column: 12, row: 6 }),
+        &mouse_frame,
+        current_time,
+    );
+    client.handle_mouse(
+        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+    assert_eq!(
+        client.resolve_key(
+            KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
+            advance_time_by_seconds(current_time, 2),
+        ),
+        KeyOutcome::Pending
+    );
+
+    assert_eq!(
+        client.resolve_key(
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Esc)),
+            advance_time_by_seconds(current_time, 3),
+        ),
+        KeyOutcome::Discard
+    );
+    assert_eq!(client.get_pending_key_sequence(), None);
+    assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
+}
+
+#[test]
+fn keyboard_placement_drops_a_held_handle_drag() {
+    let floating_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(PaneId::new()),
+        build_plain_mouse_pane(floating_pane_id),
+        false,
+        floating_pane_id,
+    );
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let mut client = build_test_client();
+    client.set_frame_view(active_tab_id, Some(floating_pane_id), vec![active_tab_id]);
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_left_mouse_press(Point { column: 12, row: 6 }),
+        &mouse_frame,
+        current_time,
+    );
+    client.handle_mouse(
+        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+    assert_eq!(
+        find_floating_pane_move_draft(&client, &mouse_frame),
+        Some(FloatingPaneMoveDraft {
+            pane_id: floating_pane_id,
+            top_left_cell: Point { column: 15, row: 5 },
+        })
+    );
+
+    assert_eq!(
+        client.begin_placement_mode(),
+        Some((floating_pane_id, active_tab_id))
+    );
+    assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
+    client.cancel_placement_mode();
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_release(Point { column: 17, row: 7 }),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 2),
+        ),
+        Vec::new(),
+        "the release after placement mode ends sends no move"
     );
 }
 
@@ -4303,21 +5598,109 @@ fn a_handle_drag_ends_with_no_move_when_its_pane_leaves_the_frame() {
         current_time,
     );
 
+    client.drop_gestures_the_frame_ended(&frame_without_floating_pane);
     client.handle_mouse(
         build_left_mouse_drag(Point { column: 17, row: 7 }),
         &frame_without_floating_pane,
         advance_time_by_seconds(current_time, 1),
     );
+    // The pane is drawn again by the release.
+    client.drop_gestures_the_frame_ended(&mouse_frame);
     let release_actions = client.handle_mouse(
         build_left_mouse_release(Point { column: 17, row: 7 }),
-        &frame_without_floating_pane,
+        &mouse_frame,
         advance_time_by_seconds(current_time, 2),
     );
 
     assert_eq!(release_actions, Vec::new());
+    assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
+}
+
+#[test]
+fn ending_a_handle_drag_leaves_a_border_drag_held() {
+    // Losing the outer terminal's focus ends a grab-handle drag only.
+    let resized_pane_id = PaneId::new();
+    let mouse_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(PaneId::new()),
+            build_plain_mouse_pane(resized_pane_id),
+        ],
+        None,
+    );
+    let divider_point = Point {
+        column: 10,
+        row: mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+            .outer_rect
+            .origin
+            .row
+            + 1,
+    };
+    let mut client = build_test_client();
+    client.handle_mouse(
+        build_left_mouse_press(divider_point),
+        &mouse_frame,
+        Instant::now(),
+    );
+
+    assert!(!client.cancel_floating_pane_move_drag());
     assert_eq!(
-        find_floating_pane_move_draft(&client, &frame_without_floating_pane),
-        None
+        client.left_button_gesture,
+        Some(LeftButtonGesture::BorderResize(ResizeDrag {
+            pane_id: resized_pane_id,
+            border_side: Direction::Up,
+            last_accepted_position: divider_point,
+        }))
+    );
+}
+
+#[test]
+fn a_left_press_after_a_lost_release_drops_the_stale_handle_drag_and_sends_no_move() {
+    let tiled_pane_id = PaneId::new();
+    let floating_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(tiled_pane_id),
+        build_plain_mouse_pane(floating_pane_id),
+        false,
+        floating_pane_id,
+    );
+    // Tiled pane content the floating pane does not cover.
+    let tiled_point = Point {
+        column: 60,
+        row: 10,
+    };
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_left_mouse_press(Point { column: 12, row: 6 }),
+        &mouse_frame,
+        current_time,
+    );
+    client.handle_mouse(
+        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+
+    // The release never arrived.
+    let press_actions = client.handle_mouse(
+        build_left_mouse_press(tiled_point),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 2),
+    );
+
+    assert_eq!(
+        press_actions,
+        vec![build_focus_pane_command(&client, tiled_pane_id)]
+    );
+    assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_release(tiled_point),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 3)
+        ),
+        Vec::new(),
+        "the release sends no move"
     );
 }
 
@@ -4435,21 +5818,32 @@ fn a_handle_press_while_a_sent_move_waits_only_focuses_and_keeps_the_sent_move_d
         top_left_cell: Point { column: 15, row: 5 },
     });
 
-    // The handle is drawn at screen (17, 7) once the pane is drawn at (15, 5).
+    // The repaint draws the pane at its draft, five columns right and one row
+    // down, so its grab handle starts at screen (17, 7).
+    let painted_mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
+    assert_eq!(
+        resolve_hit_region(
+            painted_mouse_frame.build_frame_layout(),
+            Point { column: 17, row: 7 }
+        ),
+        HitRegion::PlacementHandle {
+            pane_id: floating_pane_id
+        }
+    );
     let press_actions = client.handle_mouse(
         build_left_mouse_press(Point { column: 17, row: 7 }),
-        &mouse_frame,
+        &painted_mouse_frame,
         advance_time_by_seconds(current_time, 3),
     );
     let drag_actions = client.handle_mouse(
         build_left_mouse_drag(Point { column: 22, row: 9 }),
-        &mouse_frame,
+        &painted_mouse_frame,
         advance_time_by_seconds(current_time, 4),
     );
     let draft_after_drag = find_floating_pane_move_draft(&client, &mouse_frame);
     let second_release_actions = client.handle_mouse(
         build_left_mouse_release(Point { column: 22, row: 9 }),
-        &mouse_frame,
+        &painted_mouse_frame,
         advance_time_by_seconds(current_time, 5),
     );
 
@@ -4506,7 +5900,7 @@ fn dropped_events_forget_a_sent_move_and_leave_a_handle_drag() {
     let current_time = Instant::now();
     drag_floating_pane_handle_by_five_and_one(&mut client, &mouse_frame, current_time);
 
-    client.forget_submitted_floating_pane_move();
+    client.forget_sent_floating_pane_move();
     assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
 
     client.handle_mouse(
@@ -4514,7 +5908,7 @@ fn dropped_events_forget_a_sent_move_and_leave_a_handle_drag() {
         &mouse_frame,
         advance_time_by_seconds(current_time, 3),
     );
-    client.forget_submitted_floating_pane_move();
+    client.forget_sent_floating_pane_move();
     assert_eq!(
         find_floating_pane_move_draft(&client, &mouse_frame),
         Some(FloatingPaneMoveDraft {
@@ -4811,11 +6205,12 @@ fn a_locked_viewer_moves_and_pins_a_floating_pane_the_same_way() {
 
     let release_actions =
         drag_floating_pane_handle_by_five_and_one(&mut client, &mouse_frame, current_time);
-    // The pane draws at its draft, five columns right and one row down, so its
-    // pin toggle starts at screen (43, 7).
+    // The repaint draws the pane at its draft, five columns right and one row
+    // down, so its pin toggle starts at screen (43, 7).
+    let painted_mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
     let pin_actions = client.handle_mouse(
         build_left_mouse_press(Point { column: 43, row: 7 }),
-        &mouse_frame,
+        &painted_mouse_frame,
         advance_time_by_seconds(current_time, 3),
     );
 
@@ -4862,4 +6257,83 @@ fn ending_the_gestures_drops_a_held_or_sent_floating_pane_move() {
     );
     client.end_mouse_gestures();
     assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
+}
+
+#[test]
+fn a_captured_release_is_forwarded_when_the_frame_reports_no_releases() {
+    let pane_id = PaneId::new();
+    let mut mouse_pane = build_plain_mouse_pane(pane_id);
+    // X10 compatibility reports presses only.
+    mouse_pane.mouse_tracking = MouseTracking::X10;
+    let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
+    let screen_point = get_content_cell(&mouse_frame, 0);
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_left_mouse_press(screen_point),
+        &mouse_frame,
+        current_time,
+    );
+
+    let release_actions = client.handle_mouse(
+        build_left_mouse_release(screen_point),
+        &mouse_frame,
+        advance_time_by_seconds(current_time, 1),
+    );
+
+    assert_eq!(
+        release_actions,
+        vec![build_forwarded_mouse_action(
+            pane_id,
+            build_left_mouse_release(screen_point),
+            Point { column: 1, row: 1 }
+        )],
+        "the session hears the release and ends the press it holds"
+    );
+    assert_eq!(client.mouse_capture, None);
+}
+
+#[test]
+fn a_captured_release_whose_pane_has_no_content_cell_goes_out_at_the_capture_cell() {
+    let pane_id = PaneId::new();
+    let mut mouse_pane = build_plain_mouse_pane(pane_id);
+    mouse_pane.mouse_tracking = MouseTracking::ButtonMotion;
+    let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
+    let screen_point = get_content_cell(&mouse_frame, 0);
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.handle_mouse(
+        build_left_mouse_press(screen_point),
+        &mouse_frame,
+        current_time,
+    );
+    // The pane is still drawn, but its frame gives it no content cell.
+    let mut frame_without_content = mouse_frame.clone();
+    frame_without_content
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[0]
+        .content_rect = None;
+    client.drop_gestures_the_frame_ended(&frame_without_content);
+    let release_point = Point {
+        column: screen_point.column + 5,
+        ..screen_point
+    };
+
+    let release_actions = client.handle_mouse(
+        build_left_mouse_release(release_point),
+        &frame_without_content,
+        advance_time_by_seconds(current_time, 1),
+    );
+
+    assert_eq!(
+        release_actions,
+        vec![build_forwarded_mouse_action(
+            pane_id,
+            build_left_mouse_release(release_point),
+            Point { column: 1, row: 1 }
+        )],
+        "the release goes out at the cell of the press, not under the pointer"
+    );
+    assert_eq!(client.mouse_capture, None);
 }

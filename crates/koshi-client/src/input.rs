@@ -68,8 +68,10 @@ pub enum KeyOutcome {
     /// session encodes it for the focused pane with that pane's cursor-key mode
     /// at the instant it writes.
     PassThrough(KeyChord),
-    /// Consumed with nothing to do: no sequence is open, the chord binds
-    /// nothing, and the mode discards what it does not bind.
+    /// Consumed, and nothing reaches the session: no sequence is open, the
+    /// chord binds nothing, and the mode discards what it does not bind; or
+    /// an `Esc` ended a floating pane's grab-handle drag and dropped any open
+    /// sequence, so the pane and the hint bar are drawn again.
     Discard,
 }
 
@@ -453,9 +455,10 @@ impl Client {
     /// says; `<C-p>` in the default keymap opens the pane group and yields
     /// `Pending`; a plain `a` with nothing bound yields `PassThrough('a')`.
     /// Escape while a floating pane's grab handle is held drops that move and
-    /// yields `Discard`.
+    /// any open key sequence, and yields `Discard`.
     pub fn resolve_key(&mut self, chord: KeyChord, current_time: Instant) -> KeyOutcome {
         if chord == ESCAPE_KEY_CHORD && self.cancel_floating_pane_move_drag() {
+            self.pending_key_sequence = None;
             return KeyOutcome::Discard;
         }
         let active_input_mode = self.get_active_input_mode();

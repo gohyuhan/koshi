@@ -76,25 +76,57 @@ Each terminal reads these for itself.
 | `scroll-lines` | integer — lines per wheel notch | `3` | ≥ 0.1.0 |
 | `wheel` | `"scroll-scrollback"` (scroll koshi's history) \| `"ignore"` | `"scroll-scrollback"` | ≥ 0.1.0 |
 
+A program in a pane that asked for the mouse gets one release for each press
+that koshi sent it, and no drag or release without a press. If one of these
+comes before your release, koshi sends the release itself, at the cell your
+pointer was over at the last press or drag koshi sent. A cell past the edge of
+the program's screen goes to the nearest edge cell:
+
+- pane placement mode opens;
+- the pane leaves your view;
+- your terminal's connection to the session ends: you detach, your terminal
+  closes, the link drops, or the session restarts;
+- you press the same button again;
+- a press of another button reaches the program.
+
+A left press ends a koshi drag that is still held. The highlight is not
+copied, the border stays where it is, and a grab-handle drag sends no move.
+
+Example: you drag in `vim`, and a key opens pane placement mode before you let
+go. `vim` gets a left release at the cell of your last drag.
+
 A floating pane takes the mouse on every cell it covers, the margin around
-the tiled panes too. On its titlebar row:
+the tiled panes too. A wheel notch on any of those cells, the titlebar and the
+border included, goes to that floating pane.
+
+On a floating pane's titlebar row:
 
 - Drag the grab handle `⣿⣿` to move the pane in your own view. The pane follows
   the pointer and stays inside the pane area. The move is sent when you
-  release. A release where you pressed, `Esc` during the drag, or a terminal
-  that loses focus sends no move. A pane you pinned does not move. Until the
-  session has moved the pane you released, a press on a grab handle starts no
-  new move.
+  release. A release where you pressed, a release that leaves the pane where
+  it started, `Esc` during the drag, pane placement mode opening during the
+  drag, or a terminal that loses focus sends no move. `Esc` during the drag
+  also drops a key sequence you started. A pane you pinned does not move.
+  Until the session has moved the pane you released, a press on a grab handle
+  starts no new move.
 - `[ ]` pins the pane at its cell, and `[⚪]` unpins it. `–` minimizes the
   pane, and `✕` closes it.
 
 Drag a floating pane's border to resize it, up to the edge of your pane area
 on that side. A pane you pinned resizes from its right and bottom borders
-only. A press on the titlebar, the grab handle or the border also focuses the
-pane and shows it above your other floating panes; the three buttons do not.
+only. A pinned pane that does not fit at its pinned cell is drawn left of or
+above that cell, against the pane area edge. A drag on its right or bottom
+border changes its size by the cells you drag. Until the pane fits at its
+pinned cell, that border stays at the edge and the opposite edge moves. A
+press on the titlebar, the grab handle or the border also focuses the pane and
+shows it above your other floating panes; the three buttons do not.
 
 Example: a `40x12` floating pane at column `30` of an `80`-column pane area,
 its right border dragged 15 columns right, becomes `50` columns wide.
+
+Example: a `40`-column pane pinned at column `20` of a `50`-column pane area is
+drawn at column `10`. Its right border dragged 3 columns left makes it `37`
+columns wide, drawn at column `13`.
 
 ## `copy`
 

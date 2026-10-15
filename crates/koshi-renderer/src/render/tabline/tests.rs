@@ -105,16 +105,6 @@ fn build_visible_tab_span(
     }
 }
 
-fn build_tabline_scroll_arrow(
-    start_column: u16,
-    target_first_visible_tab_index: usize,
-) -> TablineScrollArrow {
-    TablineScrollArrow {
-        start_column,
-        target_first_visible_tab_index,
-    }
-}
-
 /// A one-row render area `column_count` cells wide, anchored at the origin.
 fn build_tabline_area(column_count: u16) -> RatatuiRect {
     RatatuiRect {
@@ -207,8 +197,8 @@ fn one_tab_that_fits_shows_whole_with_no_arrows() {
             7
         )]
     );
-    assert_eq!(layout.left_scroll_arrow, None);
-    assert_eq!(layout.right_scroll_arrow, None);
+    assert_eq!(layout.left_scroll_arrow_column, None);
+    assert_eq!(layout.right_scroll_arrow_column, None);
 }
 
 #[test]
@@ -231,8 +221,8 @@ fn several_tabs_that_all_fit_pack_left_to_right_with_a_gap() {
             build_visible_tab_span(2, 20 + compute_version_badge_column_count(), 7),
         ]
     );
-    assert_eq!(layout.left_scroll_arrow, None);
-    assert_eq!(layout.right_scroll_arrow, None);
+    assert_eq!(layout.left_scroll_arrow_column, None);
+    assert_eq!(layout.right_scroll_arrow_column, None);
 }
 
 #[test]
@@ -251,8 +241,8 @@ fn a_tab_that_exactly_fills_the_gap_is_kept() {
             7
         )]
     );
-    assert_eq!(layout.left_scroll_arrow, None);
-    assert_eq!(layout.right_scroll_arrow, None);
+    assert_eq!(layout.left_scroll_arrow_column, None);
+    assert_eq!(layout.right_scroll_arrow_column, None);
 }
 
 #[test]
@@ -266,13 +256,10 @@ fn one_column_too_narrow_drops_the_tab_and_shows_a_right_arrow() {
     );
     assert_eq!(layout.first_visible_tab_index, 0);
     assert!(layout.visible_tab_spans.is_empty());
-    assert_eq!(layout.left_scroll_arrow, None);
+    assert_eq!(layout.left_scroll_arrow_column, None);
     assert_eq!(
-        layout.right_scroll_arrow,
-        Some(build_tabline_scroll_arrow(
-            9 + compute_version_badge_column_count(),
-            1
-        ))
+        layout.right_scroll_arrow_column,
+        Some(9 + compute_version_badge_column_count())
     );
 }
 
@@ -301,8 +288,8 @@ fn two_tabs_fit_when_the_row_holds_both_plus_the_gap_between_them() {
             build_visible_tab_span(1, 12 + compute_version_badge_column_count(), 7),
         ]
     );
-    assert_eq!(fitting_layout.left_scroll_arrow, None);
-    assert_eq!(fitting_layout.right_scroll_arrow, None);
+    assert_eq!(fitting_layout.left_scroll_arrow_column, None);
+    assert_eq!(fitting_layout.right_scroll_arrow_column, None);
 
     let one_cell_short_layout = solve_tabline_layout(
         &tabline_test_frame,
@@ -317,13 +304,10 @@ fn two_tabs_fit_when_the_row_holds_both_plus_the_gap_between_them() {
             7
         )]
     );
-    assert_eq!(one_cell_short_layout.left_scroll_arrow, None);
+    assert_eq!(one_cell_short_layout.left_scroll_arrow_column, None);
     assert_eq!(
-        one_cell_short_layout.right_scroll_arrow,
-        Some(build_tabline_scroll_arrow(
-            17 + compute_version_badge_column_count(),
-            1
-        ))
+        one_cell_short_layout.right_scroll_arrow_column,
+        Some(17 + compute_version_badge_column_count())
     );
 }
 
@@ -352,13 +336,10 @@ fn following_the_active_tab_scrolls_it_into_view() {
         )]
     );
     assert_eq!(
-        layout.left_scroll_arrow,
-        Some(build_tabline_scroll_arrow(
-            4 + compute_version_badge_column_count(),
-            1
-        ))
+        layout.left_scroll_arrow_column,
+        Some(4 + compute_version_badge_column_count())
     );
-    assert_eq!(layout.right_scroll_arrow, None);
+    assert_eq!(layout.right_scroll_arrow_column, None);
 }
 
 #[test]
@@ -386,13 +367,10 @@ fn the_window_starts_at_the_smallest_index_that_still_shows_the_active_tab() {
         ]
     );
     assert_eq!(
-        layout.left_scroll_arrow,
-        Some(build_tabline_scroll_arrow(
-            4 + compute_version_badge_column_count(),
-            1
-        ))
+        layout.left_scroll_arrow_column,
+        Some(4 + compute_version_badge_column_count())
     );
-    assert_eq!(layout.right_scroll_arrow, None);
+    assert_eq!(layout.right_scroll_arrow_column, None);
 }
 
 #[test]
@@ -417,18 +395,12 @@ fn a_peek_offset_windows_from_that_index_with_both_arrows() {
         )]
     );
     assert_eq!(
-        layout.left_scroll_arrow,
-        Some(build_tabline_scroll_arrow(
-            4 + compute_version_badge_column_count(),
-            0
-        ))
+        layout.left_scroll_arrow_column,
+        Some(4 + compute_version_badge_column_count())
     );
     assert_eq!(
-        layout.right_scroll_arrow,
-        Some(build_tabline_scroll_arrow(
-            17 + compute_version_badge_column_count(),
-            2
-        ))
+        layout.right_scroll_arrow_column,
+        Some(17 + compute_version_badge_column_count())
     );
 }
 
@@ -454,13 +426,10 @@ fn a_peek_offset_past_the_last_tab_clamps_to_it() {
         )]
     );
     assert_eq!(
-        layout.left_scroll_arrow,
-        Some(build_tabline_scroll_arrow(
-            4 + compute_version_badge_column_count(),
-            1
-        ))
+        layout.left_scroll_arrow_column,
+        Some(4 + compute_version_badge_column_count())
     );
-    assert_eq!(layout.right_scroll_arrow, None);
+    assert_eq!(layout.right_scroll_arrow_column, None);
 }
 
 #[test]
@@ -486,13 +455,10 @@ fn a_peek_offset_of_zero_holds_the_window_at_the_first_tab() {
             7
         )]
     );
-    assert_eq!(layout.left_scroll_arrow, None);
+    assert_eq!(layout.left_scroll_arrow_column, None);
     assert_eq!(
-        layout.right_scroll_arrow,
-        Some(build_tabline_scroll_arrow(
-            17 + compute_version_badge_column_count(),
-            1
-        ))
+        layout.right_scroll_arrow_column,
+        Some(17 + compute_version_badge_column_count())
     );
 }
 
@@ -519,8 +485,8 @@ fn a_peek_offset_is_ignored_while_every_tab_fits() {
             build_visible_tab_span(2, 20 + compute_version_badge_column_count(), 7),
         ]
     );
-    assert_eq!(layout.left_scroll_arrow, None);
-    assert_eq!(layout.right_scroll_arrow, None);
+    assert_eq!(layout.left_scroll_arrow_column, None);
+    assert_eq!(layout.right_scroll_arrow_column, None);
 }
 
 #[test]
@@ -544,13 +510,10 @@ fn no_active_tab_windows_from_the_first() {
             7
         )]
     );
-    assert_eq!(layout.left_scroll_arrow, None);
+    assert_eq!(layout.left_scroll_arrow_column, None);
     assert_eq!(
-        layout.right_scroll_arrow,
-        Some(build_tabline_scroll_arrow(
-            17 + compute_version_badge_column_count(),
-            1
-        ))
+        layout.right_scroll_arrow_column,
+        Some(17 + compute_version_badge_column_count())
     );
 }
 
@@ -576,13 +539,10 @@ fn the_first_active_tab_wins_when_several_are_marked() {
             7
         )]
     );
-    assert_eq!(layout.left_scroll_arrow, None);
+    assert_eq!(layout.left_scroll_arrow_column, None);
     assert_eq!(
-        layout.right_scroll_arrow,
-        Some(build_tabline_scroll_arrow(
-            17 + compute_version_badge_column_count(),
-            1
-        ))
+        layout.right_scroll_arrow_column,
+        Some(17 + compute_version_badge_column_count())
     );
 }
 
@@ -604,18 +564,12 @@ fn an_active_tab_wider_than_the_window_shows_no_tabs_between_both_arrows() {
     assert_eq!(layout.first_visible_tab_index, 1);
     assert!(layout.visible_tab_spans.is_empty());
     assert_eq!(
-        layout.left_scroll_arrow,
-        Some(build_tabline_scroll_arrow(
-            4 + compute_version_badge_column_count(),
-            0
-        ))
+        layout.left_scroll_arrow_column,
+        Some(4 + compute_version_badge_column_count())
     );
     assert_eq!(
-        layout.right_scroll_arrow,
-        Some(build_tabline_scroll_arrow(
-            17 + compute_version_badge_column_count(),
-            2
-        ))
+        layout.right_scroll_arrow_column,
+        Some(17 + compute_version_badge_column_count())
     );
 }
 
@@ -635,8 +589,8 @@ fn an_empty_tab_list_leaves_only_the_two_blocks() {
     );
     assert_eq!(layout.first_visible_tab_index, 0);
     assert!(layout.visible_tab_spans.is_empty());
-    assert_eq!(layout.left_scroll_arrow, None);
-    assert_eq!(layout.right_scroll_arrow, None);
+    assert_eq!(layout.left_scroll_arrow_column, None);
+    assert_eq!(layout.right_scroll_arrow_column, None);
 }
 
 #[test]
@@ -649,8 +603,8 @@ fn a_zero_width_row_yields_no_blocks_and_no_tabs() {
     assert_eq!(layout.right_block_start_column, 0);
     assert_eq!(layout.first_visible_tab_index, 0);
     assert!(layout.visible_tab_spans.is_empty());
-    assert_eq!(layout.left_scroll_arrow, None);
-    assert_eq!(layout.right_scroll_arrow, None);
+    assert_eq!(layout.left_scroll_arrow_column, None);
+    assert_eq!(layout.right_scroll_arrow_column, None);
 }
 
 #[test]
@@ -684,8 +638,8 @@ fn a_row_offset_from_the_origin_places_every_block_from_its_x() {
             7
         )]
     );
-    assert_eq!(layout.left_scroll_arrow, None);
-    assert_eq!(layout.right_scroll_arrow, None);
+    assert_eq!(layout.left_scroll_arrow_column, None);
+    assert_eq!(layout.right_scroll_arrow_column, None);
 }
 
 #[test]
@@ -704,8 +658,8 @@ fn an_offset_row_narrower_than_the_mode_tag_anchors_the_right_block_at_its_x() {
     assert_eq!(layout.right_block_start_column, 10);
     assert_eq!(layout.session_block_width, 0);
     assert!(layout.visible_tab_spans.is_empty());
-    assert_eq!(layout.left_scroll_arrow, None);
-    assert_eq!(layout.right_scroll_arrow, None);
+    assert_eq!(layout.left_scroll_arrow_column, None);
+    assert_eq!(layout.right_scroll_arrow_column, None);
 }
 
 #[test]
@@ -718,8 +672,8 @@ fn no_room_between_the_blocks_yields_no_tabs() {
     assert_eq!(layout.session_block_width, 0);
     assert_eq!(layout.right_block_start_column, 0);
     assert!(layout.visible_tab_spans.is_empty());
-    assert_eq!(layout.left_scroll_arrow, None);
-    assert_eq!(layout.right_scroll_arrow, None);
+    assert_eq!(layout.left_scroll_arrow_column, None);
+    assert_eq!(layout.right_scroll_arrow_column, None);
 }
 
 // --- the mode tag drives the right block's width -----------------------------
@@ -1384,8 +1338,8 @@ fn an_absurdly_long_name_saturates_instead_of_wrapping() {
     assert_eq!(layout.right_block_start_column, 34);
     assert_eq!(layout.first_visible_tab_index, 0);
     assert!(layout.visible_tab_spans.is_empty());
-    assert_eq!(layout.left_scroll_arrow, None);
-    assert_eq!(layout.right_scroll_arrow, None);
+    assert_eq!(layout.left_scroll_arrow_column, None);
+    assert_eq!(layout.right_scroll_arrow_column, None);
 }
 
 #[test]

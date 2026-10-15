@@ -115,7 +115,8 @@ pub enum MouseAnswer {
         /// The direction the move was asked in: `1` grows the pane, `-1`
         /// shrinks it.
         resize_step: i16,
-        /// The number of cells the border actually moved.
+        /// The number of cells the pane's size changed on the axis the border
+        /// moves along.
         applied_cell_count: u16,
     },
 }

@@ -1287,8 +1287,11 @@ fn adopting_a_frame_takes_the_viewer_state_the_session_decided() {
         render_snapshot.client_snapshot.viewport_size,
         0,
     );
-    let mouse_frame =
-        koshi_renderer::snapshot::MouseFrame::from_snapshot(&render_snapshot, committed_regions);
+    let mouse_frame = koshi_renderer::snapshot::MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions,
+        koshi_renderer::snapshot::ViewerChrome::default(),
+    );
     assert_eq!(mouse_frame.client_snapshot.active_tab_id, active_tab_id);
     assert_eq!(mouse_frame.client_snapshot.focused_pane_id, focused_pane_id);
 }

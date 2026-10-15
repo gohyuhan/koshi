@@ -9,11 +9,18 @@
 //! - [`scroll_pane_view`](Server::scroll_pane_view) moves a client's scrollback
 //!   view of one pane;
 //! - [`forward_mouse_to_pane`](Server::forward_mouse_to_pane) hands an event to
-//!   the program in one pane as a mouse report;
+//!   the program in one pane as a mouse report, and records which buttons that
+//!   program holds pressed;
 //! - [`write_alternate_scroll_arrows`](Server::write_alternate_scroll_arrows) sends cursor
 //!   arrows for the alternate-scroll translation of a wheel tick;
 //! - [`drag_resize`](Server::drag_resize) moves one pane border a number of
-//!   cells and reports how many it took.
+//!   cells and reports how many cells the pane's size changed.
+//!
+//! A client that leaves the session gets a release written for every button
+//! it still holds (`Server::release_client_mouse_buttons`). Carrying the
+//! session out for an image swap writes one for every button any client holds
+//! ([`carry_out`](Server::carry_out)). A pane that leaves the session ends the
+//! buttons held in it, with no release written.
 //!
 //! A floating pane move the viewer drew ahead of the session arrives as a
 //! command under the id the viewer chose
@@ -32,16 +39,30 @@
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, ResizePaneArgs, VisualCommand,
 };
-use koshi_core::geometry::{Direction, Point, Size};
+use koshi_core::geometry::{Direction, Point};
 use koshi_core::ids::{ClientId, CommandId, PaneId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, NamedKey};
-use koshi_core::mouse::{is_mouse_kind_reported, MouseAnswer, MouseKind};
+use koshi_core::mouse::{is_mouse_kind_reported, MouseAnswer, MouseButton, MouseKind};
 use koshi_input::keyboard::encode_key_chord;
 use koshi_ipc::protocol::WireMouseAction;
 use koshi_terminal::mouse_report::encode_mouse;
 use koshi_terminal::state::Screen;
 
 use crate::server::Server;
+
+/// A mouse button whose press the session wrote to a pane's program, and
+/// whose release it has not written.
+pub(crate) struct HeldMouseButton {
+    /// The client whose viewer sent the press.
+    client_id: ClientId,
+    /// The pane whose program took the press.
+    pane_id: PaneId,
+    /// The button the press named.
+    button: MouseButton,
+    /// The pane-local cell that the last press or drag written for this button
+    /// named, as the viewer sent it, before it was pulled into the pane's grid.
+    last_pane_local_cell: Point,
+}
 
 impl Server {
     /// Envelope `mouse_command` under `command_id`, attributed to `client_id`'s
@@ -116,8 +137,14 @@ impl Server {
     /// A drag of 5 cells into a neighbor with room for 2 returns `2`.
     ///
     /// A floating pane takes one [`Command::ResizePane`], and the returned
-    /// count is how far its solved size moved on the dragged axis: a `40`-column
-    /// float with `10` columns of room, dragged `15` cells wider, returns `10`.
+    /// count is how many cells its outer size changed on the axis
+    /// `border_side` moves along: its width for `Left` and `Right`, its height
+    /// for `Up` and `Down`. The count is `0` when the session refuses the
+    /// resize. A `40`-column float with `10` columns of room, dragged `15`
+    /// cells wider, returns `10`. A `40`-column float pinned at column `20` and
+    /// drawn at column `10` of a `50`-column pane area, dragged `3` cells
+    /// narrower from its right border, is drawn `37` columns wide at column
+    /// `13` and returns `3`, though its right border stays.
     pub fn drag_resize(
         &mut self,
         client_id: ClientId,
@@ -126,7 +153,8 @@ impl Server {
         resize_step: i16,
         requested_cell_count: u16,
     ) -> u16 {
-        if let Some(previous_solved_size) = self.find_floating_pane_solved_size(client_id, pane_id)
+        if let Some(previous_cell_count) =
+            self.find_floating_pane_axis_cell_count(client_id, pane_id, border_side)
         {
             let _ = self.ask_border_move(
                 client_id,
@@ -135,17 +163,9 @@ impl Server {
                 resize_step,
                 requested_cell_count,
             );
-            let solved_size = self
-                .find_floating_pane_solved_size(client_id, pane_id)
-                .unwrap_or(previous_solved_size);
-            return match border_side {
-                Direction::Left | Direction::Right => solved_size
-                    .column_count
-                    .abs_diff(previous_solved_size.column_count),
-                Direction::Up | Direction::Down => solved_size
-                    .row_count
-                    .abs_diff(previous_solved_size.row_count),
-            };
+            return self
+                .find_floating_pane_axis_cell_count(client_id, pane_id, border_side)
+                .map_or(0, |cell_count| previous_cell_count.abs_diff(cell_count));
         }
         let mut applied_cell_count: u16 = 0;
         // What this round asks for: the whole remaining distance, or the cells
@@ -178,14 +198,27 @@ impl Server {
         applied_cell_count
     }
 
-    /// The solved outer size of the floating pane `pane_id` in `client_id`'s
-    /// session, or `None` when `pane_id` is no floating pane there.
-    fn find_floating_pane_solved_size(&self, client_id: ClientId, pane_id: PaneId) -> Option<Size> {
+    /// The outer cell count of the floating pane `pane_id` from its last size
+    /// solve, on the axis its `border_side` border moves along: its width for
+    /// `Left` and `Right`, its height for `Up` and `Down`. `None` when no
+    /// session holds `client_id` or `pane_id` is no floating member of that
+    /// session.
+    ///
+    /// A `40x12` float → `Right` `40`, `Down` `12`.
+    fn find_floating_pane_axis_cell_count(
+        &self,
+        client_id: ClientId,
+        pane_id: PaneId,
+        border_side: Direction,
+    ) -> Option<u16> {
         let (_, floating_member) = self
             .get_session_for_client(client_id)?
             .floating_set
             .find_member(pane_id)?;
-        Some(floating_member.solved_size)
+        Some(match border_side {
+            Direction::Left | Direction::Right => floating_member.solved_size.column_count,
+            Direction::Up | Direction::Down => floating_member.solved_size.row_count,
+        })
     }
 
     /// Move `client_id`'s koshi scrollback view of `pane_id` by `scroll_line_count`, up into
@@ -255,21 +288,148 @@ impl Server {
     /// `pane_local_cell` (`(0, 0)` is the top-left content cell).
     ///
     /// The tracking level, the encoding and the grid size are read here, at the
-    /// moment of the write: a program that turned mouse reporting off since the
-    /// frame the viewer decided from receives nothing, and a cell past the
-    /// pane's last column or row is pulled to it. On an `80x24` pane, cell
-    /// `(200, 200)` reports column `80`, row `24`.
+    /// moment of the write: a pane that is gone, and a program that turned
+    /// mouse reporting off since the frame the viewer decided from, receive
+    /// nothing, and a cell past the pane's last column or row is pulled to it.
+    /// On an `80x24` pane, cell `(200, 200)` reports column `80`, row `24`.
     ///
-    /// An event that reaches the pane's writer also drops this client's
-    /// highlight in that pane, whether the write succeeds or fails. A wheel
-    /// tick leaves the highlight standing.
+    /// A drag or a release reaches the program only for a button that
+    /// `client_id` holds in `pane_id`, and a drag or a release of any other
+    /// button writes nothing. The release ends the held button whether or not
+    /// the pane takes the report. A press the pane takes holds its button for
+    /// `client_id` in `pane_id`. A press or a drag the pane takes for a held
+    /// button moves that button's last cell to `pane_local_cell`.
     ///
-    /// Returns whether a report was handed to the pane's writer. It is `false`
-    /// when the pane is gone, when its live tracking no longer asks for this
-    /// event, and when the pane refuses the bytes.
+    /// Example: `client-1` presses left in `pane-7` and the program takes it.
+    /// A left drag or release from `client-2` in `pane-7` writes nothing. A
+    /// left release from `client-1` at cell `(0, 0)` writes
+    /// `ESC [ < 0 ; 1 ; 1 m` under SGR encoding.
+    ///
+    /// A report the pane takes also clears the session's recovery notice and
+    /// drops this client's highlight in that pane. A wheel tick leaves the
+    /// highlight standing. A report the pane refuses changes neither.
     pub fn forward_mouse_to_pane(
         &mut self,
         client_id: ClientId,
+        pane_id: PaneId,
+        mouse_kind: MouseKind,
+        modifier_flags: BindingModifierFlags,
+        pane_local_cell: Point,
+    ) {
+        let held_mouse_button_index = match mouse_kind {
+            MouseKind::Press(mouse_button)
+            | MouseKind::Drag(mouse_button)
+            | MouseKind::Release(mouse_button) => {
+                self.find_held_mouse_button_index(client_id, pane_id, mouse_button)
+            }
+            MouseKind::Motion | MouseKind::Scroll(_) => None,
+        };
+        match (mouse_kind, held_mouse_button_index) {
+            (MouseKind::Drag(_) | MouseKind::Release(_), None) => return,
+            (MouseKind::Release(_), Some(held_mouse_button_index)) => {
+                self.held_mouse_buttons.remove(held_mouse_button_index);
+            }
+            _ => {}
+        }
+        if !self.write_mouse_report(pane_id, mouse_kind, modifier_flags, pane_local_cell) {
+            return;
+        }
+        match (mouse_kind, held_mouse_button_index) {
+            (MouseKind::Press(pressed_button), None) => {
+                self.held_mouse_buttons.push(HeldMouseButton {
+                    client_id,
+                    pane_id,
+                    button: pressed_button,
+                    last_pane_local_cell: pane_local_cell,
+                });
+            }
+            (MouseKind::Press(_) | MouseKind::Drag(_), Some(held_mouse_button_index)) => {
+                self.held_mouse_buttons[held_mouse_button_index].last_pane_local_cell =
+                    pane_local_cell;
+            }
+            _ => {}
+        }
+        self.clear_session_recovery_notice_after_pane_input(pane_id);
+        // A wheel tick leaves the highlight standing; every other forwarded
+        // report — click, drag, motion, release — drops it.
+        if !matches!(mouse_kind, MouseKind::Scroll(_)) {
+            self.clear_selection_on_pane_input(client_id, pane_id);
+        }
+    }
+
+    /// Write a release for every mouse button `client_id` holds, in the order
+    /// the presses were written, and end those held buttons. Each release goes
+    /// out at its button's last cell, pulled into the pane's grid as the grid
+    /// stands at this call, with no modifier held, in the mode the pane has at
+    /// this call. A mode that reports no release receives nothing. The
+    /// client's highlight and the session's recovery notice stay as they are.
+    ///
+    /// Example: `client-1` pressed left in `pane-7` and dragged to cell
+    /// `(3, 1)`. Under SGR encoding, `pane-7` receives `ESC [ < 0 ; 4 ; 2 m`.
+    /// A press at cell `(70, 20)` on a `40x12` grid is written at `(39, 11)`;
+    /// when the grid has grown to `80x24` by this call, the release is written
+    /// at `(70, 20)`.
+    pub(crate) fn release_client_mouse_buttons(&mut self, client_id: ClientId) {
+        let (released_mouse_buttons, kept_mouse_buttons): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.held_mouse_buttons)
+                .into_iter()
+                .partition(|held_mouse_button| held_mouse_button.client_id == client_id);
+        self.held_mouse_buttons = kept_mouse_buttons;
+        self.write_mouse_releases(released_mouse_buttons);
+    }
+
+    /// Write a release for every mouse button any client holds, as
+    /// [`release_client_mouse_buttons`](Self::release_client_mouse_buttons)
+    /// writes one client's, and end every held button.
+    pub(crate) fn release_every_mouse_button(&mut self) {
+        let released_mouse_buttons = std::mem::take(&mut self.held_mouse_buttons);
+        self.write_mouse_releases(released_mouse_buttons);
+    }
+
+    /// End every mouse button any client holds in `pane_id`, with no release
+    /// written.
+    pub(crate) fn remove_held_mouse_buttons_in_pane(&mut self, pane_id: PaneId) {
+        self.held_mouse_buttons
+            .retain(|held_mouse_button| held_mouse_button.pane_id != pane_id);
+    }
+
+    /// Write one release of each entry's button to its pane, at its last cell
+    /// with no modifier held, in the order of `released_mouse_buttons`.
+    fn write_mouse_releases(&self, released_mouse_buttons: Vec<HeldMouseButton>) {
+        for released_mouse_button in released_mouse_buttons {
+            self.write_mouse_report(
+                released_mouse_button.pane_id,
+                MouseKind::Release(released_mouse_button.button),
+                BindingModifierFlags::NONE,
+                released_mouse_button.last_pane_local_cell,
+            );
+        }
+    }
+
+    /// The index in `held_mouse_buttons` of `button` held by `client_id` in
+    /// `pane_id`, or `None` when that button is not held there.
+    fn find_held_mouse_button_index(
+        &self,
+        client_id: ClientId,
+        pane_id: PaneId,
+        button: MouseButton,
+    ) -> Option<usize> {
+        self.held_mouse_buttons
+            .iter()
+            .position(|held_mouse_button| {
+                held_mouse_button.client_id == client_id
+                    && held_mouse_button.pane_id == pane_id
+                    && held_mouse_button.button == button
+            })
+    }
+
+    /// Write the mouse report for a `mouse_kind` event with `modifier_flags`
+    /// held at `pane_local_cell` to the program in `pane_id`, reading the
+    /// pane's mode as [`forward_mouse_to_pane`](Self::forward_mouse_to_pane)
+    /// states. Returns whether the pane took the bytes: `false` for a pane that
+    /// is gone, a mode that does not report `mouse_kind`, or a refused write.
+    fn write_mouse_report(
+        &self,
         pane_id: PaneId,
         mouse_kind: MouseKind,
         modifier_flags: BindingModifierFlags,
@@ -312,19 +472,9 @@ impl Server {
         ) else {
             return false;
         };
-        let is_report_written = self
-            .get_pty_backend()
+        self.get_pty_backend()
             .write_pane_input(pane_id, &mouse_report_bytes)
-            .is_ok();
-        if is_report_written {
-            self.clear_session_recovery_notice_after_pane_input(pane_id);
-        }
-        // A wheel tick leaves the highlight standing; every other forwarded
-        // report — click, drag, motion, release — drops it.
-        if is_report_written && !matches!(mouse_kind, MouseKind::Scroll(_)) {
-            self.clear_selection_on_pane_input(client_id, pane_id);
-        }
-        is_report_written
+            .is_ok()
     }
 
     /// Send `arrow_count` cursor arrow keys to `pane_id` for a wheel tick — the
@@ -430,7 +580,7 @@ impl Server {
                     modifier_flags,
                     pane_local_cell,
                 } => {
-                    let _ = self.forward_mouse_to_pane(
+                    self.forward_mouse_to_pane(
                         client_id,
                         pane_id,
                         mouse_kind,

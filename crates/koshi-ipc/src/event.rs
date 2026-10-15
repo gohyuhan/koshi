@@ -214,7 +214,8 @@ pub enum SessionEvent {
     /// again.
     Detached,
     /// The client's queue overflowed, and the client missed every delivery
-    /// until this frame.
+    /// until this frame. A [`Painted`](Self::Painted) frame of the session as
+    /// it stands follows it.
     Resync {
         /// How many deliveries the client missed.
         dropped_event_count: u64,

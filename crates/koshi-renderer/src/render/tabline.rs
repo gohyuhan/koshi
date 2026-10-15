@@ -84,21 +84,21 @@ pub(super) fn draw_tabline(
         );
     }
     // A `◀`/`▶` on each side that still hides tabs.
-    if let Some(left_scroll_arrow) = tabline_layout.left_scroll_arrow {
+    if let Some(left_scroll_arrow_column) = tabline_layout.left_scroll_arrow_column {
         let left_arrow_line = Line::from(Span::styled("◀", compute_scroll_arrow_style(theme)));
         set_line_clipped(
             screen_buffer,
-            left_scroll_arrow.start_column,
+            left_scroll_arrow_column,
             tabline_area.y,
             &left_arrow_line,
             TABLINE_ARROW_WIDTH,
         );
     }
-    if let Some(right_scroll_arrow) = tabline_layout.right_scroll_arrow {
+    if let Some(right_scroll_arrow_column) = tabline_layout.right_scroll_arrow_column {
         let right_arrow_line = Line::from(Span::styled("▶", compute_scroll_arrow_style(theme)));
         set_line_clipped(
             screen_buffer,
-            right_scroll_arrow.start_column,
+            right_scroll_arrow_column,
             tabline_area.y,
             &right_arrow_line,
             TABLINE_ARROW_WIDTH,
@@ -124,10 +124,12 @@ pub(crate) struct TablineLayout {
     pub first_visible_tab_index: usize,
     /// The visible tab spans in left-to-right order.
     pub visible_tab_spans: Vec<VisibleTabSpan>,
-    /// The left scroll arrow when tabs are hidden off the left.
-    pub left_scroll_arrow: Option<TablineScrollArrow>,
-    /// The right scroll arrow when tabs are hidden off the right.
-    pub right_scroll_arrow: Option<TablineScrollArrow>,
+    /// The column of the left scroll arrow, or `None` when no tab is hidden off
+    /// the left.
+    pub left_scroll_arrow_column: Option<u16>,
+    /// The column of the right scroll arrow, or `None` when no tab is hidden
+    /// off the right.
+    pub right_scroll_arrow_column: Option<u16>,
 }
 
 /// The columns occupied by one visible tab ribbon.
@@ -136,13 +138,6 @@ pub(crate) struct VisibleTabSpan {
     pub tab_metadata_index: usize,
     pub start_column: u16,
     pub column_count: u16,
-}
-
-/// The position and target of one tabline scroll arrow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TablineScrollArrow {
-    pub start_column: u16,
-    pub target_first_visible_tab_index: usize,
 }
 
 /// Solve the tabline's block widths, its windowed run of tabs, and its scroll
@@ -186,8 +181,8 @@ pub(crate) fn solve_tabline_layout(
         right_block_start_column,
         first_visible_tab_index: 0,
         visible_tab_spans: Vec::new(),
-        left_scroll_arrow: None,
-        right_scroll_arrow: None,
+        left_scroll_arrow_column: None,
+        right_scroll_arrow_column: None,
     };
     if tab_count == 0 || tab_strip_start_column >= right_block_start_column {
         return create_empty_layout();
@@ -214,8 +209,8 @@ pub(crate) fn solve_tabline_layout(
             right_block_start_column,
             first_visible_tab_index: 0,
             visible_tab_spans: unscrolled_visible_tab_spans,
-            left_scroll_arrow: None,
-            right_scroll_arrow: None,
+            left_scroll_arrow_column: None,
+            right_scroll_arrow_column: None,
         };
     }
 
@@ -249,22 +244,17 @@ pub(crate) fn solve_tabline_layout(
         visible_tabs_end_column,
     );
     let after_window_tab_index = first_visible_tab_index + visible_tab_spans.len();
-    let left_scroll_arrow = (first_visible_tab_index > 0).then(|| TablineScrollArrow {
-        start_column: tab_strip_start_column,
-        target_first_visible_tab_index: first_visible_tab_index - 1,
-    });
-    let right_scroll_arrow = (after_window_tab_index < tab_count).then(|| TablineScrollArrow {
-        start_column: right_block_start_column - TABLINE_ARROW_WIDTH,
-        target_first_visible_tab_index: first_visible_tab_index + 1,
-    });
+    let left_scroll_arrow_column = (first_visible_tab_index > 0).then_some(tab_strip_start_column);
+    let right_scroll_arrow_column = (after_window_tab_index < tab_count)
+        .then_some(right_block_start_column - TABLINE_ARROW_WIDTH);
 
     TablineLayout {
         session_block_width,
         right_block_start_column,
         first_visible_tab_index,
         visible_tab_spans,
-        left_scroll_arrow,
-        right_scroll_arrow,
+        left_scroll_arrow_column,
+        right_scroll_arrow_column,
     }
 }
 

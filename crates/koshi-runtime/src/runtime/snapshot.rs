@@ -35,7 +35,7 @@ use koshi_renderer::snapshot::{
     PlacementSnapshotError, PlacementSnapshotErrorCode, PlacementTabSnapshot, RenderSnapshot,
     ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
 };
-use koshi_session::client::{place_floating_pane, Client, FloatingPanePosition};
+use koshi_session::client::{Client, FloatingPanePosition};
 use koshi_session::session::state::{Session, Tab};
 use koshi_terminal::graphics::DecodedImage;
 use koshi_terminal::grid::state::Grid;
@@ -222,18 +222,7 @@ impl Server {
             is_recovery_notice_visible: session.is_recovery_notice_visible,
             session_snapshot,
             pane_snapshots,
-            client_snapshot: ClientSnapshot {
-                client_id: client.get_client_id(),
-                client_revision: client.get_placement_revision(),
-                viewport_size: client.get_viewport_size(),
-                active_tab_id,
-                focused_pane_id: client.get_active_focused_pane_id(),
-                lock_mode: client.get_lock_mode(),
-                last_applied_lock_command_id: client.get_last_applied_lock_command_id(),
-                last_applied_floating_pane_move_command_id: client
-                    .get_last_applied_floating_pane_move_command_id(),
-                is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
-            },
+            client_snapshot: build_client_snapshot(client),
         })
     }
 
@@ -329,18 +318,7 @@ impl Server {
             source_tab_snapshot,
             destination_tab_snapshot,
             client_snapshot: PlacementClientSnapshot {
-                client_snapshot: ClientSnapshot {
-                    client_id: client.get_client_id(),
-                    client_revision: client.get_placement_revision(),
-                    viewport_size: client.get_viewport_size(),
-                    active_tab_id: client.get_active_tab_id(),
-                    focused_pane_id: client.get_active_focused_pane_id(),
-                    lock_mode: client.get_lock_mode(),
-                    last_applied_lock_command_id: client.get_last_applied_lock_command_id(),
-                    last_applied_floating_pane_move_command_id: client
-                        .get_last_applied_floating_pane_move_command_id(),
-                    is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
-                },
+                client_snapshot: build_client_snapshot(client),
                 reported_pane_area: client.get_reported_pane_area(),
             },
             pane_sizing: self.get_pane_sizing(),
@@ -523,20 +501,16 @@ impl Server {
 
 /// The floating panes `client` shows, back to front: its floating focus order
 /// with its minimized panes left out, each placed for it. A slot's outer rect
-/// is [`place_floating_pane`] of the client's position for the pane, the
-/// pane's solved size and its cascade index, on the client's floating viewport
-/// ([`Client::get_floating_viewport`]); its content rect comes from that outer
-/// rect ([`FloatingPaneSlot::from_outer_rect`]). A focus-order entry that is no
-/// floating member of `session` is left out. Empty when the client has no
-/// floating viewport.
+/// is the rectangle the session places the pane in for the client
+/// ([`Session::find_client_floating_pane_rect`]); its content rect comes from
+/// that outer rect ([`FloatingPaneSlot::from_outer_rect`]). A focus-order entry
+/// that is no floating member of `session` is left out. Empty when the client
+/// has no floating viewport ([`Client::get_floating_viewport`]).
 ///
 /// A `72x22` pane at the default position, alone in the session, on a client
 /// whose floating viewport is `120x38` → outer rect `(24, 8)` `72x22`, content
 /// rect `(25, 11)` `70x18`.
 fn list_floating_pane_slots(session: &Session, client: &Client) -> Vec<FloatingPaneSlot> {
-    let Some(floating_viewport) = client.get_floating_viewport() else {
-        return Vec::new();
-    };
     client
         .list_floating_pane_focus_order()
         .iter()
@@ -545,13 +519,7 @@ fn list_floating_pane_slots(session: &Session, client: &Client) -> Vec<FloatingP
             if floating_pane_view.is_minimized {
                 return None;
             }
-            let (cascade_index, floating_member) = session.floating_set.find_member(pane_id)?;
-            let outer_rect = place_floating_pane(
-                floating_pane_view.position,
-                floating_member.solved_size,
-                cascade_index,
-                floating_viewport,
-            );
+            let outer_rect = session.find_client_floating_pane_rect(client, pane_id)?;
             Some(FloatingPaneSlot::from_outer_rect(
                 pane_id,
                 outer_rect,
@@ -559,6 +527,25 @@ fn list_floating_pane_slots(session: &Session, client: &Client) -> Vec<FloatingP
             ))
         })
         .collect()
+}
+
+/// The viewer state of `client` that a frame and a placement preview carry:
+/// its id, placement revision, viewport size, active tab, focused pane, lock
+/// mode, last applied lock command and floating pane move, and whether
+/// mouse-select is on.
+fn build_client_snapshot(client: &Client) -> ClientSnapshot {
+    ClientSnapshot {
+        client_id: client.get_client_id(),
+        client_revision: client.get_placement_revision(),
+        viewport_size: client.get_viewport_size(),
+        active_tab_id: client.get_active_tab_id(),
+        focused_pane_id: client.get_active_focused_pane_id(),
+        lock_mode: client.get_lock_mode(),
+        last_applied_lock_command_id: client.get_last_applied_lock_command_id(),
+        last_applied_floating_pane_move_command_id: client
+            .get_last_applied_floating_pane_move_command_id(),
+        is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
+    }
 }
 
 /// One path as pane-title text: the user's home directory prefix shortened to

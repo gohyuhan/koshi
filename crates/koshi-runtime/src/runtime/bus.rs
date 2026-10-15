@@ -2,7 +2,7 @@
 //!
 //! `EventBus::subscribe` registers a subscriber and hands back its id, the
 //! receiving end of that subscriber's own bounded queue, and its
-//! [`WaitingHostWrites`].
+//! [`WriterHandoff`].
 //! `EventBus::publish` clones each event into every subscriber's queue,
 //! `EventBus::try_send_frame` puts the frame the session composed for one
 //! subscriber's client on that subscriber's own queue,
@@ -23,8 +23,16 @@
 //! command rejection that does not fit marks the subscriber desynced the same
 //! way; a frame that does not fit is dropped and the subscriber stays live.
 //!
+//! A frame or a resync snapshot that does not fit also marks the subscriber's
+//! [`WriterHandoff`] owed a frame. The thread that writes the subscriber's
+//! connection takes that mark after the next delivery it reads, and sends
+//! [`RuntimeEvent::QueueRoomFreed`](crate::runtime::event::RuntimeEvent::QueueRoomFreed)
+//! to the session, which offers that subscriber alone a newer frame, or its
+//! resync snapshot when it is paused. Until the mark is taken, the session
+//! builds that subscriber no frame and no resync snapshot.
+//!
 //! Host-write bytes never wait for room on the queue. They wait in the
-//! subscriber's [`WaitingHostWrites`], which the thread that writes the
+//! subscriber's [`WriterHandoff`], which the thread that writes the
 //! subscriber's connection empties before each delivery it reads. A
 //! [`Delivery::HostWrite`] on the queue only wakes that thread, and a full
 //! queue drops the wake and pauses no one.
@@ -90,7 +98,7 @@ enum QueueDeliveryStatus {
 }
 
 /// One registered subscriber: its id, its delivery state, the sending end of
-/// its queue, and the host-write bytes that wait for its client's terminal.
+/// its queue, and its [`WriterHandoff`].
 #[derive(Debug)]
 struct Subscriber {
     /// Stable subscriber ID assigned at subscription, named in log lines about this
@@ -102,17 +110,23 @@ struct Subscriber {
     /// Sending end of the subscriber's bounded queue; the receiver lives with
     /// the subscriber.
     delivery_sender: SyncSender<Delivery>,
-    /// The host writes that wait for the terminal the subscriber's client runs
-    /// in, shared with the thread that writes the client's connection.
-    waiting_host_writes: Arc<WaitingHostWrites>,
+    /// What waits beside the queue for the thread that writes the client's
+    /// connection, shared with that thread.
+    writer_handoff: Arc<WriterHandoff>,
 }
 
-/// The host writes that wait for the terminal one subscriber's client runs
-/// in: whole `OSC 52` sequences, oldest first. The bus adds to them, and the
-/// thread that writes the client's connection takes all of them before each
-/// delivery it reads.
+/// What the bus leaves beside one subscriber's queue for the thread that
+/// writes that subscriber's client connection: the host writes that wait for
+/// the terminal the client runs in, and whether a frame or resync snapshot
+/// found the queue full.
+///
+/// The host writes are whole `OSC 52` sequences, oldest first. The bus adds to
+/// them, and the writing thread takes all of them before each delivery it
+/// reads. The bus marks a frame owed when a frame or resync snapshot finds the
+/// queue full, and the writing thread takes the mark after each delivery it
+/// reads ([`take_owed_frame_mark`](Self::take_owed_frame_mark)).
 #[derive(Debug, Default)]
-pub struct WaitingHostWrites {
+pub struct WriterHandoff {
     /// The host writes that wait, oldest first.
     host_writes: Mutex<Vec<HostWrite>>,
     /// Whether a [`Delivery::HostWrite`] that wakes the writing thread is on
@@ -120,6 +134,10 @@ pub struct WaitingHostWrites {
     /// clears it when a full queue drops the wake. The writing thread clears it
     /// when it reads the wake, and when it ends, after its receiver is gone.
     is_wake_queued: AtomicBool,
+    /// Whether a frame or resync snapshot found the queue full since the
+    /// writing thread last took the mark. The bus sets it while it holds the
+    /// lock across the send that found the queue full.
+    is_frame_owed: Mutex<bool>,
 }
 
 /// One write for the terminal a client runs in: a whole `OSC 52` sequence,
@@ -150,7 +168,7 @@ impl HostWrite {
     }
 }
 
-impl WaitingHostWrites {
+impl WriterHandoff {
     /// Take the bytes of every host write that waits, oldest first, and leave
     /// none. Empty when none waits.
     ///
@@ -176,6 +194,52 @@ impl WaitingHostWrites {
     /// gone. The bus calls it when a full queue drops the wake.
     pub fn clear_queued_wake(&self) {
         self.is_wake_queued.store(false, Ordering::SeqCst);
+    }
+
+    /// Take the owed-frame mark: `true` when a frame or resync snapshot found
+    /// the queue full since the last take, and the mark is cleared.
+    ///
+    /// The writing thread takes it after each delivery it reads. The bus sets
+    /// the mark only on a full queue, which still holds a delivery the writing
+    /// thread has not read.
+    ///
+    /// # Panics
+    /// When a thread panicked while it held the mark.
+    #[must_use]
+    pub fn take_owed_frame_mark(&self) -> bool {
+        std::mem::take(&mut *self.is_frame_owed.lock().expect("owed frame mark"))
+    }
+
+    /// Whether a frame or resync snapshot found the queue full since the
+    /// writing thread last took the owed-frame mark. The mark stays.
+    ///
+    /// # Panics
+    /// When a thread panicked while it held the mark.
+    fn is_frame_owed(&self) -> bool {
+        *self.is_frame_owed.lock().expect("owed frame mark")
+    }
+
+    /// Put `delivery`, a frame or a resync snapshot, on `delivery_sender`
+    /// while holding the owed-frame mark, and set the mark when the queue is
+    /// full. Returns what the send returned, with the delivery that did not
+    /// fit dropped.
+    ///
+    /// # Panics
+    /// When a thread panicked while it held the mark.
+    fn send_or_mark_frame_owed(
+        &self,
+        delivery_sender: &SyncSender<Delivery>,
+        delivery: Delivery,
+    ) -> Result<(), TrySendError<()>> {
+        let mut is_frame_owed = self.is_frame_owed.lock().expect("owed frame mark");
+        match delivery_sender.try_send(delivery) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                *is_frame_owed = true;
+                Err(TrySendError::Full(()))
+            }
+            Err(TrySendError::Disconnected(_)) => Err(TrySendError::Disconnected(())),
+        }
     }
 }
 
@@ -207,23 +271,21 @@ impl EventBus {
     }
 
     /// Register a subscriber for every published event and hand back its id,
-    /// the receiving end of its queue, and its [`WaitingHostWrites`], with no
-    /// host write waiting. The subscriber starts live. Dropping the receiver
-    /// ends the subscription; the bus removes it on the next publish or
-    /// delivery to it.
-    pub(crate) fn subscribe(
-        &mut self,
-    ) -> (SubscriberId, Receiver<Delivery>, Arc<WaitingHostWrites>) {
+    /// the receiving end of its queue, and its [`WriterHandoff`], with no
+    /// host write waiting and no frame owed. The subscriber starts live.
+    /// Dropping the receiver ends the subscription; the bus removes it on the
+    /// next publish or delivery to it.
+    pub(crate) fn subscribe(&mut self) -> (SubscriberId, Receiver<Delivery>, Arc<WriterHandoff>) {
         let (delivery_sender, delivery_receiver) = sync_channel(SUBSCRIBER_QUEUE_CAPACITY);
         let subscriber_id = SubscriberId::new();
-        let waiting_host_writes = Arc::new(WaitingHostWrites::default());
+        let writer_handoff = Arc::new(WriterHandoff::default());
         self.subscribers.push(Subscriber {
             subscriber_id,
             delivery_state: DeliveryState::Live,
             delivery_sender,
-            waiting_host_writes: Arc::clone(&waiting_host_writes),
+            writer_handoff: Arc::clone(&writer_handoff),
         });
-        (subscriber_id, delivery_receiver, waiting_host_writes)
+        (subscriber_id, delivery_receiver, writer_handoff)
     }
 
     /// Deliver `event` to every live subscriber, and to every desynced one
@@ -324,6 +386,31 @@ impl EventBus {
         self.find_subscriber_index(subscriber_id).is_some()
     }
 
+    /// Whether a frame or resync snapshot found `subscriber_id`'s queue full
+    /// since its writing thread last took the owed-frame mark
+    /// ([`WriterHandoff::take_owed_frame_mark`]). `false` when `subscriber_id`
+    /// is not registered.
+    pub(crate) fn is_frame_owed(&self, subscriber_id: SubscriberId) -> bool {
+        self.find_subscriber_index(subscriber_id)
+            .is_some_and(|subscriber_index| {
+                self.subscribers[subscriber_index]
+                    .writer_handoff
+                    .is_frame_owed()
+            })
+    }
+
+    /// Whether `subscriber_id` is live and not owed a frame
+    /// ([`is_frame_owed`](Self::is_frame_owed)). `false` when `subscriber_id`
+    /// is not registered.
+    pub(crate) fn can_take_frame(&self, subscriber_id: SubscriberId) -> bool {
+        self.find_subscriber_index(subscriber_id)
+            .is_some_and(|subscriber_index| {
+                let subscriber = &self.subscribers[subscriber_index];
+                subscriber.delivery_state == DeliveryState::Live
+                    && !subscriber.writer_handoff.is_frame_owed()
+            })
+    }
+
     /// Where `subscriber_id` sits in the subscription-ordered list, or `None` when `subscriber_id`
     /// is not registered.
     fn find_subscriber_index(&self, subscriber_id: SubscriberId) -> Option<usize> {
@@ -342,9 +429,9 @@ impl EventBus {
     /// delivery, reporting how many deliveries it missed.
     ///
     /// Returns `true` once the snapshot is queued. Returns `false` when `subscriber_id` is
-    /// unknown, when it is already live, or when its queue is still full — the
-    /// caller retries a full queue on a subsequent pass. A subscriber whose receiver
-    /// is gone is removed.
+    /// unknown, when it is already live, or when its queue is full. A full
+    /// queue marks the subscriber's [`WriterHandoff`] owed a frame. A
+    /// subscriber whose receiver is gone is removed.
     pub(crate) fn try_resync(
         &mut self,
         subscriber_id: SubscriberId,
@@ -364,10 +451,13 @@ impl EventBus {
             subscriber_id,
             dropped_event_count,
         };
-        match subscriber.delivery_sender.try_send(Delivery::Snapshot {
-            render_snapshot,
-            lag_report,
-        }) {
+        match subscriber.writer_handoff.send_or_mark_frame_owed(
+            &subscriber.delivery_sender,
+            Delivery::Snapshot {
+                render_snapshot,
+                lag_report,
+            },
+        ) {
             Ok(()) => {
                 subscriber.delivery_state = DeliveryState::Live;
                 tracing::info!(
@@ -390,7 +480,8 @@ impl EventBus {
     ///
     /// Returns `true` once the frame is queued. Returns `false` when `subscriber_id` is
     /// unknown, when it is desynced — a paused subscriber takes its resync
-    /// snapshot first — or when its queue is full. A subscriber whose receiver
+    /// snapshot first — or when its queue is full. A full queue marks the
+    /// subscriber's [`WriterHandoff`] owed a frame. A subscriber whose receiver
     /// is gone is removed.
     pub(crate) fn try_send_frame(
         &mut self,
@@ -404,10 +495,10 @@ impl EventBus {
         if subscriber.delivery_state != DeliveryState::Live {
             return false;
         }
-        match subscriber
-            .delivery_sender
-            .try_send(Delivery::Frame(render_snapshot))
-        {
+        match subscriber.writer_handoff.send_or_mark_frame_owed(
+            &subscriber.delivery_sender,
+            Delivery::Frame(render_snapshot),
+        ) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => false,
             Err(TrySendError::Disconnected(_)) => {
@@ -508,6 +599,11 @@ impl EventBus {
         }
     }
 
+    /// Put `mouse_answers`, the answer to mouse round `request_id`, on a live
+    /// subscriber's queue.
+    ///
+    /// Returns `true` when queued. A full queue marks the subscriber desynced,
+    /// and a missing, paused or disconnected subscriber returns `false`.
     pub(crate) fn try_send_mouse_answer(
         &mut self,
         subscriber_id: SubscriberId,
@@ -575,7 +671,7 @@ impl EventBus {
         let subscriber = &self.subscribers[subscriber_index];
         {
             let mut waiting_host_writes = subscriber
-                .waiting_host_writes
+                .writer_handoff
                 .host_writes
                 .lock()
                 .expect("waiting host writes");
@@ -604,7 +700,7 @@ impl EventBus {
             waiting_host_writes.push(host_write.clone());
         }
         if subscriber
-            .waiting_host_writes
+            .writer_handoff
             .is_wake_queued
             .swap(true, Ordering::SeqCst)
         {
@@ -613,7 +709,7 @@ impl EventBus {
         match subscriber.delivery_sender.try_send(Delivery::HostWrite) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
-                subscriber.waiting_host_writes.clear_queued_wake();
+                subscriber.writer_handoff.clear_queued_wake();
                 true
             }
             Err(TrySendError::Disconnected(_)) => {
@@ -650,7 +746,8 @@ impl EventBus {
         }
     }
 
-    /// Put a rejected pane placement command on the live subscriber's queue.
+    /// Put a rejected pane placement command or floating pane move on the live
+    /// subscriber's queue.
     ///
     /// Returns `true` when the rejection is queued and `false` when the
     /// subscriber is missing, disconnected, or desynchronized.
@@ -686,8 +783,8 @@ impl EventBus {
 /// this conversion.
 ///
 /// A [`Delivery::Snapshot`] becomes [`SessionEvent::Resync`] carrying the count
-/// of missed events. Its frame does not go on the wire: the client attaches
-/// again, and the attach reply carries a fresh structure.
+/// of missed events. The connection writer sends the snapshot's frame right
+/// after it, as a [`SessionEvent::Painted`].
 ///
 /// A [`Delivery::MouseAnswer`] becomes [`SessionEvent::MouseAnswer`] carrying
 /// the id of the round it answers and that round's answers.
