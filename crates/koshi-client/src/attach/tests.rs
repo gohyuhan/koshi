@@ -52,7 +52,7 @@ use koshi_core::key::{
     NamedKey, TEXT_ONLY_KEY_CODEPOINT,
 };
 use koshi_core::lock::LockMode;
-use koshi_core::mouse::{MouseAnswer, MouseButton, MouseTracking, ScrollDirection};
+use koshi_core::mouse::{MouseAnswer, MouseButton, MouseKind, MouseTracking, ScrollDirection};
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::{compute_socket_address, EndpointFile};
 use koshi_ipc::frame::{FrameClient, FrameSession, FrameSlot, FrameTab, PaintedFrame};
@@ -74,9 +74,9 @@ use koshi_ipc::wire::MaybeKnown;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, CursorSnapshot, GridView, ImagePlacementSnapshot, MousePane,
-    PaneSlot, PaneSnapshot, RenderSnapshot, ScrollbackMetadata, SessionSnapshot, TabMetadata,
-    TabSnapshot,
+    ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPaneMoveDraft, FloatingPaneSlot,
+    GridView, ImagePlacementSnapshot, MousePane, PaneSlot, PaneSnapshot, RenderSnapshot,
+    ScrollbackMetadata, SessionSnapshot, TabMetadata, TabSnapshot,
 };
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
@@ -191,6 +191,7 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
             focused_pane_id: None,
             lock_mode,
             last_applied_lock_command_id: None,
+            last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }
@@ -2180,9 +2181,11 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
             focused_pane_id: mouse_panes.first().map(|mouse_pane| mouse_pane.pane_id),
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: None,
+            last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
         },
         committed_regions: CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+        viewer_chrome: koshi_renderer::snapshot::ViewerChrome::default(),
     }
 }
 
@@ -2276,10 +2279,12 @@ fn build_selection_action(pane_id: PaneId, row_index: u64) -> MouseAction {
 fn build_forward_mouse_action(pane_id: PaneId, column_index: u16) -> MouseAction {
     MouseAction::Forward {
         pane_id,
-        mouse_input: build_mouse_press(Point {
+        mouse_kind: MouseKind::Press(MouseButton::Left),
+        modifier_flags: BindingModifierFlags::NONE,
+        pane_local_cell: Point {
             column: column_index,
             row: 5,
-        }),
+        },
     }
 }
 
@@ -2667,7 +2672,9 @@ fn a_round_goes_out_as_one_request_holding_its_actions_in_order() {
                 },
                 WireMouseAction::Forward {
                     pane_id,
-                    mouse_input: build_mouse_press(Point { column: 4, row: 5 }),
+                    mouse_kind: MouseKind::Press(MouseButton::Left),
+                    modifier_flags: BindingModifierFlags::NONE,
+                    pane_local_cell: Point { column: 4, row: 5 },
                 },
                 WireMouseAction::Resize {
                     pane_id,
@@ -2700,7 +2707,7 @@ fn a_round_goes_out_as_one_request_holding_its_actions_in_order() {
 /// reads nothing.
 ///
 /// Every round holds [`MAX_PENDING_MOUSE_ACTION_COUNT`] forwarded reports, about
-/// 31 kB of frame. 128 rounds come to about 3.9 MB.
+/// 39 kB of frame. 128 rounds come to about 5.0 MB.
 const WRITER_STALLED_ROUND_COUNT: u64 = 128;
 
 /// How long the test waits for the queueing to finish before it fails.
@@ -2724,10 +2731,12 @@ fn build_full_forwarded_wire_round(pane_id: PaneId) -> Vec<WireMouseAction> {
     (0..MAX_PENDING_MOUSE_ACTION_COUNT)
         .map(|column_index| WireMouseAction::Forward {
             pane_id,
-            mouse_input: build_mouse_press(Point {
+            mouse_kind: MouseKind::Press(MouseButton::Left),
+            modifier_flags: BindingModifierFlags::NONE,
+            pane_local_cell: Point {
                 column: u16::try_from(column_index).expect("the cap fits a u16"),
                 row: 5,
-            }),
+            },
         })
         .collect()
 }
@@ -3296,11 +3305,23 @@ fn every_report_in_one_pass_leaves_as_its_own_forward_in_order() {
         );
     }
 
+    // The watched pane's content starts at screen (1, 13), so the watched
+    // point (2, 14) is the pane's cell (1, 1).
+    let forwarded_pane_local_cells = [
+        Point { column: 1, row: 1 },
+        Point { column: 1, row: 1 },
+        Point { column: 1, row: 1 },
+        Point { column: 2, row: 1 },
+        Point { column: 1, row: 2 },
+    ];
     let forwarded_actions: Vec<MouseAction> = forwarded_mouse_inputs
         .iter()
-        .map(|&mouse_input| MouseAction::Forward {
+        .zip(forwarded_pane_local_cells)
+        .map(|(mouse_input, pane_local_cell)| MouseAction::Forward {
             pane_id: watched_pane_id,
-            mouse_input,
+            mouse_kind: mouse_input.mouse_kind,
+            modifier_flags: mouse_input.modifier_flags,
+            pane_local_cell,
         })
         .collect();
     assert_eq!(
@@ -3326,9 +3347,12 @@ fn every_report_in_one_pass_leaves_as_its_own_forward_in_order() {
             request_kind: IpcRequestKind::Mouse(
                 forwarded_mouse_inputs
                     .iter()
-                    .map(|&mouse_input| WireMouseAction::Forward {
+                    .zip(forwarded_pane_local_cells)
+                    .map(|(mouse_input, pane_local_cell)| WireMouseAction::Forward {
                         pane_id: watched_pane_id,
-                        mouse_input,
+                        mouse_kind: mouse_input.mouse_kind,
+                        modifier_flags: mouse_input.modifier_flags,
+                        pane_local_cell,
                     })
                     .collect(),
             ),
@@ -3395,7 +3419,12 @@ fn the_pile_stops_at_the_cap_and_keeps_every_forwarded_report() {
             );
             forwarded_actions.push(MouseAction::Forward {
                 pane_id: watched_pane_id,
-                mouse_input: wheel_mouse_input,
+                mouse_kind: wheel_mouse_input.mouse_kind,
+                modifier_flags: BindingModifierFlags::NONE,
+                pane_local_cell: Point {
+                    column: 1 + u16::try_from(tick_index / 100).expect("a handful of reports"),
+                    row: 1,
+                },
             });
         } else {
             handle_mouse_event(
@@ -4964,6 +4993,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
             focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: None,
+            last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }
@@ -5881,11 +5911,9 @@ fn mouse_pickup_reads_placement_and_focuses_dragged_pane() {
         build_plain_mouse_pane(dragged_pane_id),
     ]);
     let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
-    let screen_pane_content_rect = koshi_renderer::find_pane_content_rect(
-        mouse_frame.build_frame_layout(koshi_renderer::snapshot::ViewerChrome::default()),
-        dragged_pane_id,
-    )
-    .expect("the dragged pane has visible content");
+    let screen_pane_content_rect =
+        koshi_renderer::find_pane_content_rect(mouse_frame.build_frame_layout(), dragged_pane_id)
+            .expect("the dragged pane has visible content");
     let placement_handle_position = Point {
         column: screen_pane_content_rect.origin.column,
         row: screen_pane_content_rect.origin.row - 1,
@@ -5902,6 +5930,10 @@ fn mouse_pickup_reads_placement_and_focuses_dragged_pane() {
         &mouse_frame,
         Instant::now(),
     );
+    let mouse_frame = MouseFrame {
+        viewer_chrome: client.build_viewer_chrome(active_tab_id),
+        ..mouse_frame
+    };
     let (request_sender, request_receiver) = mpsc::channel();
     let mut uplink = build_test_uplink(request_sender);
 
@@ -6775,6 +6807,57 @@ fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
 }
 
 #[test]
+fn each_painted_mouse_frame_carries_the_viewer_chrome_it_was_painted_with() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let painted_frame = build_test_painted_frame_with_lock_mode(LockMode::Normal);
+    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
+    let second_pane_id = PaneId::new();
+    let mouse_frame = build_mouse_frame(&[
+        build_plain_mouse_pane(PaneId::new()),
+        build_plain_mouse_pane(second_pane_id),
+    ]);
+    let mut pending_mouse_actions = Vec::new();
+
+    let drawn_mouse_frame = screen
+        .draw_painted_frame(&mut client, Box::new(painted_frame))
+        .expect("paint");
+    assert_eq!(
+        Some(drawn_mouse_frame.viewer_chrome),
+        screen
+            .shown_viewer_paint
+            .as_ref()
+            .map(|viewer_paint| viewer_paint.chrome)
+    );
+    assert_eq!(
+        drawn_mouse_frame.viewer_chrome.active_input_mode,
+        Some(LockMode::Normal)
+    );
+
+    handle_mouse_event(
+        &mut client,
+        &mouse_frame,
+        build_mouse_motion(get_content_cell(&mouse_frame, 1)),
+        &mut pending_mouse_actions,
+    );
+    let refreshed_mouse_frame = screen
+        .refresh(&mut client, Some(active_tab_id))
+        .expect("the hover repaints");
+
+    assert_eq!(
+        Some(refreshed_mouse_frame.viewer_chrome),
+        screen
+            .shown_viewer_paint
+            .as_ref()
+            .map(|viewer_paint| viewer_paint.chrome)
+    );
+    assert_eq!(
+        refreshed_mouse_frame.viewer_chrome.hovered_pane_id,
+        Some(second_pane_id)
+    );
+}
+
+#[test]
 fn a_pass_without_viewer_changes_skips_terminal_draw() {
     let mut client = build_test_client();
     let draw_count = Arc::new(AtomicUsize::new(0));
@@ -6870,6 +6953,149 @@ fn attachment_skips_a_redraw_after_paste_when_viewer_paint_is_unchanged() {
 
     assert_eq!(attachment_ending, AttachmentEnding::TerminalGone);
     assert_eq!(draw_count.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn a_release_owed_outside_a_mouse_event_leaves_in_the_next_round() {
+    let pane_id = PaneId::new();
+    let mut client = build_client_capturing_left_press(pane_id);
+    // Placement mode opening from a key ends the capture this way.
+    client.end_held_mouse_gestures();
+
+    // No frame is painted in the pass.
+    let (attachment_ending, first_request_kind) = run_attachment_until_first_request(
+        &mut client,
+        &mut build_test_screen(),
+        SessionEvent::Pong,
+    );
+
+    assert_eq!(attachment_ending, AttachmentEnding::TerminalGone);
+    assert_eq!(
+        first_request_kind,
+        Ok(IpcRequestKind::Mouse(vec![WireMouseAction::Forward {
+            pane_id,
+            mouse_kind: MouseKind::Release(MouseButton::Left),
+            modifier_flags: BindingModifierFlags::NONE,
+            pane_local_cell: Point { column: 1, row: 1 },
+        }])),
+        "the program that saw the press gets its release in the first pass's round"
+    );
+}
+
+/// Run an attachment for `client` with `screen`, while a producer sends
+/// `first_session_event`, reads the first request the loop writes, and then
+/// ends the terminal. Returns how the attachment ended and the kind of that
+/// first request, or the wait that ran out after 5 seconds.
+fn run_attachment_until_first_request(
+    client: &mut Client,
+    screen: &mut Screen<TestBackend>,
+    first_session_event: SessionEvent,
+) -> (
+    AttachmentEnding,
+    Result<IpcRequestKind, mpsc::RecvTimeoutError>,
+) {
+    let client_id = client.get_client_id();
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
+    let producer_sender = incoming_sender.clone();
+    let producer_thread = thread::spawn(move || {
+        producer_sender
+            .send(Incoming::Frame {
+                connection_index: INITIAL_CONNECTION_INDEX,
+                session_event_result: Ok(first_session_event),
+            })
+            .expect("the attachment loop accepts the frame");
+        let first_request = request_receiver.recv_timeout(Duration::from_secs(5));
+        producer_sender
+            .send(Incoming::Input(Box::new(RuntimeEvent::Quit)))
+            .expect("the attachment loop accepts the terminal end");
+        first_request.map(|first_request| first_request.request_kind)
+    });
+    let attachment_ending = run_attachment(
+        &build_local_home(),
+        SessionId::new(),
+        client_id,
+        ConnectionToken::generate(),
+        None,
+        client,
+        screen,
+        &mut uplink,
+        terminal::GraphicsSupport::Unsupported,
+        &mut terminal::CellSizeQuery::from_current_measurement(None, false, false),
+        &mut Vec::new(),
+        incoming_sender,
+        incoming_receiver,
+    );
+    let first_request_kind = producer_thread.join().expect("the producer finished");
+    (attachment_ending, first_request_kind)
+}
+
+/// A client whose left press in `pane_id`, a pane that reports drags, is
+/// still captured at pane cell `(1, 1)`.
+fn build_client_capturing_left_press(pane_id: PaneId) -> Client {
+    let mouse_frame = build_mouse_frame(&[MousePane {
+        mouse_tracking: MouseTracking::ButtonMotion,
+        ..build_plain_mouse_pane(pane_id)
+    }]);
+    let mut client = build_test_client();
+    client.handle_mouse(
+        build_mouse_press(get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
+        Instant::now(),
+    );
+    client
+}
+
+#[test]
+fn a_painted_frame_that_no_longer_draws_a_captured_pane_sends_its_release() {
+    let pane_id = PaneId::new();
+    let mut client = build_client_capturing_left_press(pane_id);
+
+    // The painted frame draws only panes of its own, not `pane_id`.
+    let (attachment_ending, first_request_kind) = run_attachment_until_first_request(
+        &mut client,
+        &mut build_test_screen(),
+        SessionEvent::Painted {
+            frame: Box::new(build_test_painted_frame()),
+        },
+    );
+
+    assert_eq!(attachment_ending, AttachmentEnding::TerminalGone);
+    assert_eq!(
+        first_request_kind,
+        Ok(IpcRequestKind::Mouse(vec![WireMouseAction::Forward {
+            pane_id,
+            mouse_kind: MouseKind::Release(MouseButton::Left),
+            modifier_flags: BindingModifierFlags::NONE,
+            pane_local_cell: Point { column: 1, row: 1 },
+        }])),
+        "the pass that paints the frame sends the release, with no mouse event"
+    );
+}
+
+#[test]
+fn a_frame_committed_at_the_end_of_a_pass_sends_the_release_it_ended_in_that_pass() {
+    let pane_id = PaneId::new();
+    let mut client = build_client_capturing_left_press(pane_id);
+    // A frame that waits to be committed. The end of the first pass commits it.
+    let mut screen = build_test_screen();
+    screen.pending_snapshot = Some(build_render_snapshot(&build_test_painted_frame()));
+
+    let (attachment_ending, first_request_kind) =
+        run_attachment_until_first_request(&mut client, &mut screen, SessionEvent::Pong);
+
+    assert_eq!(attachment_ending, AttachmentEnding::TerminalGone);
+    assert_eq!(
+        first_request_kind,
+        Ok(IpcRequestKind::Mouse(vec![WireMouseAction::Forward {
+            pane_id,
+            mouse_kind: MouseKind::Release(MouseButton::Left),
+            modifier_flags: BindingModifierFlags::NONE,
+            pane_local_cell: Point { column: 1, row: 1 },
+        }])),
+        "the release joins the round of the pass whose end committed the frame"
+    );
 }
 
 #[test]
@@ -10261,5 +10487,93 @@ fn a_hangup_ends_the_attachment_only_while_this_process_does_not_ignore_hangups(
             .err(),
         Some(mpsc::RecvTimeoutError::Disconnected),
         "the stopped watch ends its thread and sends nothing more"
+    );
+}
+
+#[test]
+fn a_late_painted_frame_that_names_no_floating_pane_move_keeps_the_move_drawn() {
+    let tiled_pane_id = PaneId::new();
+    let floating_pane_id = PaneId::new();
+    let mut mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(tiled_pane_id)]);
+    mouse_frame
+        .session_snapshot
+        .floating_pane_slots
+        .push(FloatingPaneSlot::from_outer_rect(
+            floating_pane_id,
+            Rect::from_origin_and_size(
+                Point { column: 10, row: 4 },
+                Size {
+                    column_count: 40,
+                    row_count: 12,
+                },
+            ),
+            false,
+        ));
+    mouse_frame
+        .mouse_panes
+        .push(build_plain_mouse_pane(floating_pane_id));
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    // The grab handle sits on screen row 6, columns 12 and 13.
+    client.handle_mouse(
+        build_mouse_press(Point { column: 12, row: 6 }),
+        &mouse_frame,
+        current_time,
+    );
+    client.handle_mouse(
+        build_mouse_drag(Point { column: 17, row: 7 }),
+        &mouse_frame,
+        current_time + Duration::from_secs(1),
+    );
+    let release_actions = client.handle_mouse(
+        MouseInput {
+            mouse_kind: MouseKind::Release(MouseButton::Left),
+            position: Point { column: 17, row: 7 },
+            modifier_flags: BindingModifierFlags::NONE,
+        },
+        &mouse_frame,
+        current_time + Duration::from_secs(2),
+    );
+    let [MouseAction::MoveFloatingPane { command_id, .. }] = release_actions.as_slice() else {
+        panic!("expected one floating pane move, got {release_actions:?}");
+    };
+    let moved_draft = Some(FloatingPaneMoveDraft {
+        pane_id: floating_pane_id,
+        top_left_cell: Point { column: 15, row: 5 },
+    });
+    let mut screen = build_failing_screen();
+    let frame_before_the_move = build_test_painted_frame();
+    let active_tab_id = frame_before_the_move.client_snapshot.active_tab_id;
+    let mut frame_after_the_move = build_test_painted_frame();
+    frame_after_the_move
+        .client_snapshot
+        .last_applied_floating_pane_move_command_id = Some(*command_id);
+    screen.terminal.backend_mut().should_fail_draw = true;
+
+    assert_eq!(
+        screen.draw_painted_frame(&mut client, Box::new(frame_before_the_move)),
+        None,
+        "the backend rejects the frame, and the frame stays pending"
+    );
+    screen.terminal.backend_mut().should_fail_draw = false;
+    screen
+        .refresh(&mut client, Some(active_tab_id))
+        .expect("the pending frame paints on the next attempt");
+    assert_eq!(
+        client
+            .build_viewer_chrome(active_tab_id)
+            .floating_pane_move_draft,
+        moved_draft,
+        "a frame that names no move leaves the move drawn"
+    );
+
+    screen
+        .draw_painted_frame(&mut client, Box::new(frame_after_the_move))
+        .expect("the frame paints");
+    assert_eq!(
+        client
+            .build_viewer_chrome(active_tab_id)
+            .floating_pane_move_draft,
+        None
     );
 }

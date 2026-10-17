@@ -7,7 +7,8 @@
 //! left of a floating pane turns blank, and the frame diff writes the pane's
 //! left border beside it. `U+17D8` there takes 1 column and stays, and in a
 //! title it takes 1 column. No floating pane is placed or drawn while pane
-//! placement shows or every pane is suppressed.
+//! placement shows or every pane is suppressed. The pane a move draft names is
+//! placed at the draft's top-left cell, moved inside the pane area.
 
 use super::*;
 
@@ -16,6 +17,7 @@ use std::sync::Arc;
 use ratatui::buffer::CellWidth;
 use ratatui::style::{Color, Modifier};
 
+use koshi_core::geometry::Point;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
@@ -28,8 +30,9 @@ use crate::images::ImageRenderMode;
 use crate::render::render_frame;
 use crate::render::tests::{format_rendered_cells, get_pane_snapshot_mut};
 use crate::snapshot::{
-    ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, KeymapHints, PaneSlot,
-    PaneSnapshot, ScrollbackMetadata, SessionSnapshot, TabMetadata, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, FloatingPaneMoveDraft, GridView, ImagePlacementSnapshot,
+    KeymapHints, PaneSlot, PaneSnapshot, ScrollbackMetadata, SessionSnapshot, TabMetadata,
+    TabSnapshot,
 };
 
 /// The content of `pane_id`: no title, no grid, a visible cursor at `(0, 0)`.
@@ -105,6 +108,7 @@ fn build_tiled_render_snapshot(viewport_size: Size, tab_size: Size) -> RenderSna
             focused_pane_id: Some(tiled_pane_id),
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: None,
+            last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }
@@ -206,7 +210,7 @@ fn render_default_core_frame(render_snapshot: &RenderSnapshot) -> Buffer {
 fn list_core_placed_floating_panes(
     render_snapshot: &RenderSnapshot,
     viewer_chrome: ViewerChrome,
-) -> Vec<PlacedFloatingPane<'_>> {
+) -> Vec<PlacedFloatingPane> {
     let viewport_size = render_snapshot.client_snapshot.viewport_size;
     list_placed_floating_panes(
         render_snapshot,
@@ -240,7 +244,7 @@ fn a_placed_floating_pane_moves_by_the_pane_area_origin_and_takes_no_letterbox_o
     assert_eq!(
         placed_floating_panes,
         [PlacedFloatingPane {
-            floating_pane_slot: &render_snapshot.session_snapshot.floating_pane_slots[0],
+            floating_pane_slot: render_snapshot.session_snapshot.floating_pane_slots[0],
             outer_area: RatatuiRect::new(150, 5, 40, 12),
             content_area: RatatuiRect::new(151, 8, 38, 8),
             visible_content_area: RatatuiRect::new(151, 8, 38, 8),
@@ -259,10 +263,81 @@ fn a_floating_pane_past_the_pane_area_keeps_its_content_area_and_cuts_its_visibl
     assert_eq!(
         placed_floating_panes,
         [PlacedFloatingPane {
-            floating_pane_slot: &render_snapshot.session_snapshot.floating_pane_slots[0],
+            floating_pane_slot: render_snapshot.session_snapshot.floating_pane_slots[0],
             outer_area: RatatuiRect::new(30, 5, 20, 10),
             content_area: RatatuiRect::new(31, 8, 18, 6),
             visible_content_area: RatatuiRect::new(31, 8, 9, 3),
+        }]
+    );
+}
+
+#[test]
+fn a_move_draft_places_its_floating_pane_at_the_draft_cell() {
+    let mut render_snapshot = build_forty_by_twelve_render_snapshot();
+    let moved_pane_id =
+        push_floating_pane(&mut render_snapshot, build_cell_rect(2, 1, 20, 6), "htop");
+    push_floating_pane(&mut render_snapshot, build_cell_rect(4, 3, 20, 6), "top");
+    let viewer_chrome = ViewerChrome {
+        floating_pane_move_draft: Some(FloatingPaneMoveDraft {
+            pane_id: moved_pane_id,
+            top_left_cell: Point { column: 15, row: 4 },
+        }),
+        ..ViewerChrome::default()
+    };
+
+    let placed_floating_panes = list_core_placed_floating_panes(&render_snapshot, viewer_chrome);
+
+    assert_eq!(
+        placed_floating_panes,
+        [
+            PlacedFloatingPane {
+                floating_pane_slot: FloatingPaneSlot::from_outer_rect(
+                    moved_pane_id,
+                    build_cell_rect(15, 4, 20, 6),
+                    false,
+                ),
+                outer_area: RatatuiRect::new(15, 5, 20, 6),
+                content_area: RatatuiRect::new(16, 8, 18, 2),
+                visible_content_area: RatatuiRect::new(16, 8, 18, 2),
+            },
+            PlacedFloatingPane {
+                floating_pane_slot: render_snapshot.session_snapshot.floating_pane_slots[1],
+                outer_area: RatatuiRect::new(4, 4, 20, 6),
+                content_area: RatatuiRect::new(5, 7, 18, 2),
+                visible_content_area: RatatuiRect::new(5, 7, 18, 2),
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_move_draft_past_the_pane_area_places_its_floating_pane_moved_inside_the_pane_area() {
+    let mut render_snapshot = build_forty_by_twelve_render_snapshot();
+    let moved_pane_id =
+        push_floating_pane(&mut render_snapshot, build_cell_rect(2, 1, 20, 6), "htop");
+    let viewer_chrome = ViewerChrome {
+        floating_pane_move_draft: Some(FloatingPaneMoveDraft {
+            pane_id: moved_pane_id,
+            top_left_cell: Point { column: 35, row: 9 },
+        }),
+        ..ViewerChrome::default()
+    };
+
+    let placed_floating_panes = list_core_placed_floating_panes(&render_snapshot, viewer_chrome);
+
+    // The 20x6 pane in the 40x10 pane area, which starts at row 1, keeps its
+    // top-left cell at (20, 4) at most.
+    assert_eq!(
+        placed_floating_panes,
+        [PlacedFloatingPane {
+            floating_pane_slot: FloatingPaneSlot::from_outer_rect(
+                moved_pane_id,
+                build_cell_rect(20, 4, 20, 6),
+                false,
+            ),
+            outer_area: RatatuiRect::new(20, 5, 20, 6),
+            content_area: RatatuiRect::new(21, 8, 18, 2),
+            visible_content_area: RatatuiRect::new(21, 8, 18, 2),
         }]
     );
 }

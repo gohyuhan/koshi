@@ -1,8 +1,8 @@
 //! The loop-facing surface: the thin methods the binary's event loop calls to
 //! route one inbox event to its handler, time renders, decide when to
-//! repaint, tell whether any pane is still live, and group-kill every child
-//! when the loop panics (the normal quit path takes the staged
-//! [`Server::shutdown`]). They wrap the render scheduler, PTY maps, and
+//! repaint, push the frames that are due, tell whether any pane is still
+//! live, and group-kill every child when the loop panics (the normal quit path
+//! takes the staged [`Server::shutdown`]). They wrap the render scheduler, PTY maps, and
 //! handlers, which are crate-private; the loop lives outside this crate.
 
 use std::ops::ControlFlow;
@@ -208,6 +208,7 @@ impl Server {
                     self.handle_drop_unclaimed_clients(unclaimed_client_deadline);
                 self.publish_events(&unclaimed_client_drop_events);
             }
+            RuntimeEvent::QueueRoomFreed { client_id } => self.push_client_frame(client_id),
         }
         ControlFlow::Continue(())
     }
@@ -275,6 +276,19 @@ impl Server {
             self.render_scheduler.invalidate();
         }
         self.render_scheduler.claim_due_render(current_time)
+    }
+
+    /// Hand a fresh snapshot to each paused subscriber that can take one
+    /// ([`resync_lagged`](Self::resync_lagged)), then put each client's
+    /// current frame on its queue ([`push_frames`](Self::push_frames)) when
+    /// [`poll_render`](Self::poll_render) says a render is due at
+    /// `current_time`. The snapshots and the frames are built from the same
+    /// state. A serve loop calls it once per pass, after the events it read.
+    pub fn push_due_frames(&mut self, current_time: Instant) {
+        self.resync_lagged();
+        if self.poll_render(current_time) {
+            self.push_frames();
+        }
     }
 
     /// Whether any pane's PTY is still live — the loop exits once none remain.

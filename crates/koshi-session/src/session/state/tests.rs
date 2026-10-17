@@ -1,9 +1,9 @@
 //! Tests for the session model in `state.rs`: [`Session`] and [`Tab`]
 //! construction, a tab's focus history, the start lock, the lifecycle moves
 //! that attaching, detaching and stopping make, the tab size, the shared
-//! floating viewport, the tab and floating cell sizes, the floating set and its
-//! size solve, the serialized shape, and every invariant
-//! [`Session::validate_session_consistency`] checks.
+//! floating viewport, where a client draws a floating pane, the tab and
+//! floating cell sizes, the floating set and its size solve, the serialized
+//! shape, and every invariant [`Session::validate_session_consistency`] checks.
 
 use super::*;
 use std::collections::HashMap;
@@ -284,6 +284,53 @@ fn shared_floating_viewport_leaves_a_starving_client_out() {
     assert_eq!(
         session.get_shared_floating_viewport(),
         Some(roomy_pane_area)
+    );
+}
+
+#[test]
+fn a_client_draws_a_floating_pane_at_its_stored_cell_moved_inside_its_floating_viewport() {
+    let mut session = build_empty_session();
+    let floating_pane_id = register_floating_pane(&mut session);
+    let drawing_client_id = attach_viewer_with_pane_area(
+        &mut session,
+        TabId::new(),
+        50,
+        24,
+        Some(PaneArea::Reported(Size {
+            column_count: 50,
+            row_count: 22,
+        })),
+    );
+    let starving_client_id =
+        attach_viewer_with_pane_area(&mut session, TabId::new(), 10, 3, Some(PaneArea::Starving));
+    get_attached_client_mut(&mut session, drawing_client_id)
+        .pin_floating_pane(floating_pane_id, Point { column: 20, row: 5 });
+    let drawing_client = session
+        .clients
+        .get_client_by_id(drawing_client_id)
+        .expect("the drawing client is attached");
+    let starving_client = session
+        .clients
+        .get_client_by_id(starving_client_id)
+        .expect("the starving client is attached");
+
+    assert_eq!(
+        session.find_client_floating_pane_rect(drawing_client, floating_pane_id),
+        Some(Rect::from_origin_and_size(
+            Point { column: 10, row: 5 },
+            Size {
+                column_count: 40,
+                row_count: 10,
+            },
+        ))
+    );
+    assert_eq!(
+        session.find_client_floating_pane_rect(drawing_client, PaneId::new()),
+        None
+    );
+    assert_eq!(
+        session.find_client_floating_pane_rect(starving_client, floating_pane_id),
+        None
     );
 }
 

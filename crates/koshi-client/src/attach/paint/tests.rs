@@ -5,7 +5,7 @@
 //! slots in their order.
 
 use koshi_core::geometry::{Point, Rect, Size};
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_ipc::frame::{
@@ -399,6 +399,7 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
             focused_pane_id: Some(content_pane_id),
             lock_mode: LockMode::Locked,
             last_applied_lock_command_id: None,
+            last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: true,
         },
     }
@@ -411,6 +412,12 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
         build_empty_pane_snapshot(PaneId::new()),
     ]);
     expected_render_snapshot.is_recovery_notice_visible = true;
+    expected_render_snapshot
+        .client_snapshot
+        .last_applied_lock_command_id = Some(CommandId::new());
+    expected_render_snapshot
+        .client_snapshot
+        .last_applied_floating_pane_move_command_id = Some(CommandId::new());
     expected_render_snapshot
         .session_snapshot
         .floating_pane_slots = vec![
@@ -1280,8 +1287,11 @@ fn adopting_a_frame_takes_the_viewer_state_the_session_decided() {
         render_snapshot.client_snapshot.viewport_size,
         0,
     );
-    let mouse_frame =
-        koshi_renderer::snapshot::MouseFrame::from_snapshot(&render_snapshot, committed_regions);
+    let mouse_frame = koshi_renderer::snapshot::MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions,
+        koshi_renderer::snapshot::ViewerChrome::default(),
+    );
     assert_eq!(mouse_frame.client_snapshot.active_tab_id, active_tab_id);
     assert_eq!(mouse_frame.client_snapshot.focused_pane_id, focused_pane_id);
 }

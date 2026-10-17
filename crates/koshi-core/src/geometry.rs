@@ -350,6 +350,30 @@ impl Rect {
             && self.get_bottom_edge() <= outer_rect.get_bottom_edge()
     }
 
+    /// This rect moved left and up until it lies inside the area of
+    /// `container_size` that starts at `(0, 0)`. On an axis where the rect is
+    /// larger than the container, its origin is `0`. The size stays the same.
+    ///
+    /// Example: in an `80x22` container, a `20x10` rect at `(70, 2)` moves to
+    /// `(60, 2)`, and a `90x10` rect at `(5, 2)` moves to `(0, 2)`.
+    #[must_use]
+    pub fn compute_moved_inside(self, container_size: Size) -> Rect {
+        Rect {
+            origin: Point {
+                column: self.origin.column.min(
+                    container_size
+                        .column_count
+                        .saturating_sub(self.size.column_count),
+                ),
+                row: self
+                    .origin
+                    .row
+                    .min(container_size.row_count.saturating_sub(self.size.row_count)),
+            },
+            size: self.size,
+        }
+    }
+
     /// `true` when `point` lies within the half-open rect. An empty rect
     /// contains nothing.
     #[must_use]

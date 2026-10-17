@@ -7,9 +7,11 @@
 //! its panes alive. Frame delivery: a subscriber paused by a dropped critical
 //! event is handed a fresh frame or dropped, and a due render hands every
 //! client its own frame behind any bytes queued for that client's own
-//! terminal. The restart checks, an accepted or refused restart request, and
-//! the announcements that wait for every client to hold the session's last
-//! frame. The state that crosses an image swap: what `carry_out` writes and
+//! terminal. A freed slot on a queue that missed a frame hands that client
+//! alone a frame, and a subscriber owed a frame is offered none until its
+//! writing thread takes the owed-frame mark. The restart checks, an accepted
+//! or refused restart request, and the announcements that wait for every
+//! client to hold the session's last frame. The state that crosses an image swap: what `carry_out` writes and
 //! what `resume` puts back. The view a client leaves behind, taken back by the
 //! token the next attach presents.
 
@@ -22,7 +24,7 @@ use koshi_core::command::{
 };
 use koshi_core::event::{
     InputModeChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved, PtyResized,
-    SubscriberLagged,
+    SubscriberLagged, TabCreated,
 };
 use koshi_core::geometry::{Direction, PaneArea, Point};
 use koshi_core::ids::{CommandId, TabId};
@@ -40,8 +42,10 @@ use koshi_terminal::graphics::{
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use super::*;
+use crate::runtime::bus::SUBSCRIBER_QUEUE_CAPACITY;
 use crate::runtime::command::tests::{build_floating_new_pane_args, create_floating_pane};
 use crate::runtime::event::{AttachAccepted, SessionEnding};
+use crate::runtime::render_schedule::FRAME_INTERVAL_DURATION;
 use crate::runtime::saved_view::SavedView;
 
 impl Server {
@@ -56,15 +60,15 @@ impl Server {
         client_id: ClientId,
         delivery_receiver: &mpsc::Receiver<Delivery>,
     ) -> Option<Vec<u8>> {
-        let waiting_host_writes = self
+        let writer_handoff = self
             .find_subscriber_id_by_client_id(client_id)
-            .and_then(|subscriber_id| self.event_bus.find_waiting_host_writes(subscriber_id))?;
+            .and_then(|subscriber_id| self.event_bus.find_writer_handoff(subscriber_id))?;
         let mut taken_host_write_bytes: Option<Vec<u8>> = None;
         for delivery in delivery_receiver.try_iter() {
             if delivery == Delivery::HostWrite {
-                waiting_host_writes.clear_queued_wake();
+                writer_handoff.clear_queued_wake();
             }
-            let host_write_bytes = waiting_host_writes.take_host_write_bytes();
+            let host_write_bytes = writer_handoff.take_host_write_bytes();
             if !host_write_bytes.is_empty() {
                 taken_host_write_bytes
                     .get_or_insert_with(Vec::new)
@@ -668,7 +672,7 @@ fn resyncing_with_nobody_paused_delivers_nothing() {
 #[test]
 fn a_resync_blocked_by_a_full_queue_retries_with_a_newer_frame() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, _) = server.subscribe(client_id);
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id);
     let (subscriber_id, _) = server.subscriptions[0];
     pause_subscribers(&mut server);
 
@@ -680,13 +684,15 @@ fn a_resync_blocked_by_a_full_queue_retries_with_a_newer_frame() {
         vec![subscriber_id]
     );
 
-    // Change the state the frame reports, then make room.
+    // Change the state the frame reports, then make room the way the writing
+    // thread does: it reads the backlog and takes the owed-frame mark.
     let _ = server.submit_command(CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::KeyBinding { client_id },
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     ));
     let _backlog: Vec<Delivery> = delivery_receiver.try_iter().collect();
+    assert!(writer_handoff.take_owed_frame_mark());
     let expected_render_snapshot = server.build_snapshot(client_id).expect("frame");
     assert_eq!(
         expected_render_snapshot.client_snapshot.lock_mode,
@@ -844,7 +850,7 @@ fn pushing_frames_serves_every_client() {
 #[test]
 fn a_host_write_queues_its_wake_ahead_of_the_next_frame() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, waiting_host_writes) = server.subscribe(client_id);
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id);
     // An OSC 52 copy of "hello", as `copy_to_clipboard` queues it.
     assert!(server.queue_host_write(client_id, &HostWrite::from_clipboard_copy("c", b"hello")));
     let expected_render_snapshot = server.build_snapshot(client_id).expect("frame");
@@ -859,7 +865,7 @@ fn a_host_write_queues_its_wake_ahead_of_the_next_frame() {
         ]
     );
     assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
+        writer_handoff.take_host_write_bytes(),
         b"\x1b]52;c;aGVsbG8=\x07"
     );
 }
@@ -879,7 +885,7 @@ fn a_detach_leaves_the_waiting_bytes_to_the_connection_writer_and_adds_none() {
     let (mut server, local_client_id) = boot_server();
     let remote_client_id =
         attach_additional_client(&mut server, local_client_id, TEST_VIEWPORT_SIZE);
-    let (delivery_receiver, waiting_host_writes) = server.subscribe(remote_client_id);
+    let (delivery_receiver, writer_handoff) = server.subscribe(remote_client_id);
     let (subscriber_id, _) = server.subscriptions[0];
     assert!(server.queue_host_write(
         remote_client_id,
@@ -905,7 +911,7 @@ fn a_detach_leaves_the_waiting_bytes_to_the_connection_writer_and_adds_none() {
         1
     );
     assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
+        writer_handoff.take_host_write_bytes(),
         b"\x1b]52;c;b25l\x07\x1b]52;p;dHdv\x07"
     );
 }
@@ -974,6 +980,194 @@ fn a_frame_blocked_by_a_full_queue_leaves_the_subscription_in_place() {
             .iter()
             .any(|delivery| matches!(delivery, Delivery::Frame(_))),
         "the frame did not fit, so none was queued"
+    );
+}
+
+/// Publish one `TabCreated` event [`SUBSCRIBER_QUEUE_CAPACITY`] times, which
+/// fills the queue of every subscriber whose queue was empty and leaves it
+/// live. Returns the event.
+fn fill_subscriber_queues(server: &mut Server) -> Event {
+    let tab_created_event = Event::TabCreated(TabCreated {
+        tab_id: TabId::new(),
+    });
+    for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
+        server.event_bus.publish(&tab_created_event);
+    }
+    tab_created_event
+}
+
+#[test]
+fn freed_slots_on_two_full_queues_give_each_client_one_frame_and_owe_nothing_more() {
+    let (mut server, local_client_id) = boot_server();
+    let remote_client_id =
+        attach_additional_client(&mut server, local_client_id, REMOTE_VIEWPORT_SIZE);
+    let (local_receiver, local_writer_handoff) = server.subscribe(local_client_id);
+    let (remote_receiver, remote_writer_handoff) = server.subscribe(remote_client_id);
+    let tab_created_delivery = Delivery::Event(fill_subscriber_queues(&mut server));
+    // A due render finds both queues full: both frames are dropped, and both
+    // subscribers are owed a frame.
+    let render_time = Instant::now();
+    assert!(server.poll_render(render_time));
+    server.push_frames();
+    let local_frame = server.build_snapshot(local_client_id).expect("frame");
+    let remote_frame = server.build_snapshot(remote_client_id).expect("frame");
+
+    // Each writing thread reads one delivery, takes its mark, and wakes the
+    // session, remote first. Each wake runs one pass of the serve loop, one
+    // frame interval after the last.
+    let wakes = [
+        (remote_client_id, &remote_receiver, &remote_writer_handoff),
+        (local_client_id, &local_receiver, &local_writer_handoff),
+    ];
+    for (pass_number, (client_id, delivery_receiver, writer_handoff)) in (1..).zip(wakes) {
+        assert_eq!(delivery_receiver.recv(), Ok(tab_created_delivery.clone()));
+        assert!(writer_handoff.take_owed_frame_mark());
+        let control_flow = server.handle_runtime_event(RuntimeEvent::QueueRoomFreed { client_id });
+        assert_eq!(control_flow, std::ops::ControlFlow::Continue(()));
+        server.push_due_frames(render_time + FRAME_INTERVAL_DURATION * pass_number);
+    }
+
+    assert!(
+        !remote_writer_handoff.take_owed_frame_mark(),
+        "the local wake offers the full remote queue no frame"
+    );
+    assert!(!local_writer_handoff.take_owed_frame_mark());
+    let mut expected_local_deliveries =
+        vec![tab_created_delivery.clone(); SUBSCRIBER_QUEUE_CAPACITY - 1];
+    expected_local_deliveries.push(Delivery::Frame(Box::new(local_frame)));
+    assert_eq!(
+        local_receiver.try_iter().collect::<Vec<_>>(),
+        expected_local_deliveries
+    );
+    let mut expected_remote_deliveries = vec![tab_created_delivery; SUBSCRIBER_QUEUE_CAPACITY - 1];
+    expected_remote_deliveries.push(Delivery::Frame(Box::new(remote_frame)));
+    assert_eq!(
+        remote_receiver.try_iter().collect::<Vec<_>>(),
+        expected_remote_deliveries
+    );
+}
+
+#[test]
+fn a_freed_slot_taken_before_the_frame_owes_the_subscriber_a_frame_again() {
+    let (mut server, client_id) = boot_server();
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id);
+    let tab_created_event = fill_subscriber_queues(&mut server);
+    let tab_created_delivery = Delivery::Event(tab_created_event.clone());
+    server.push_frames();
+    assert_eq!(delivery_receiver.recv(), Ok(tab_created_delivery.clone()));
+    assert!(writer_handoff.take_owed_frame_mark());
+    // An event takes the freed slot before the session reads the wake.
+    server.event_bus.publish(&tab_created_event);
+
+    server.push_client_frame(client_id);
+
+    assert!(writer_handoff.take_owed_frame_mark());
+    assert_eq!(
+        delivery_receiver.try_iter().collect::<Vec<_>>(),
+        vec![tab_created_delivery; SUBSCRIBER_QUEUE_CAPACITY]
+    );
+}
+
+#[test]
+fn a_freed_slot_for_a_paused_subscriber_takes_the_resync_snapshot_and_no_frame() {
+    let (mut server, client_id) = boot_server();
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id);
+    let (subscriber_id, _) = server.subscriptions[0];
+    pause_subscribers(&mut server);
+    server.resync_lagged();
+    let _oldest_delivery: Delivery = delivery_receiver.recv().expect("queued event");
+    assert!(writer_handoff.take_owed_frame_mark());
+    let expected_render_snapshot = server.build_snapshot(client_id).expect("frame");
+
+    server.push_client_frame(client_id);
+    server.resync_lagged();
+
+    let mut expected_deliveries =
+        vec![Delivery::Event(Event::Quit(QuitCause::Requested)); SUBSCRIBER_QUEUE_CAPACITY - 1];
+    expected_deliveries.push(Delivery::Snapshot {
+        render_snapshot: Box::new(expected_render_snapshot),
+        lag_report: SubscriberLagged {
+            subscriber_id,
+            dropped_event_count: 1,
+        },
+    });
+    assert_eq!(
+        delivery_receiver.try_iter().collect::<Vec<_>>(),
+        expected_deliveries
+    );
+    assert!(!writer_handoff.take_owed_frame_mark());
+}
+
+#[test]
+fn a_render_offers_a_subscriber_owed_a_frame_nothing_until_its_writer_takes_the_mark() {
+    let (mut server, client_id) = boot_server();
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id);
+    let tab_created_delivery = Delivery::Event(fill_subscriber_queues(&mut server));
+    server.push_frames();
+    // The writing thread reads one delivery and has not taken its mark yet.
+    assert_eq!(delivery_receiver.recv(), Ok(tab_created_delivery.clone()));
+
+    server.push_frames();
+    let owed_deliveries: Vec<Delivery> = delivery_receiver.try_iter().collect();
+    assert!(writer_handoff.take_owed_frame_mark());
+    let expected_render_snapshot = server.build_snapshot(client_id).expect("frame");
+    server.push_frames();
+
+    assert_eq!(
+        owed_deliveries,
+        vec![tab_created_delivery; SUBSCRIBER_QUEUE_CAPACITY - 1]
+    );
+    assert_eq!(
+        delivery_receiver.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Frame(Box::new(expected_render_snapshot))]
+    );
+}
+
+#[test]
+fn a_paused_subscriber_owed_a_frame_is_not_resynced_until_its_writer_takes_the_mark() {
+    let (mut server, client_id) = boot_server();
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id);
+    let (subscriber_id, _) = server.subscriptions[0];
+    pause_subscribers(&mut server);
+    server.resync_lagged();
+    // The writing thread reads one delivery and has not taken its mark yet.
+    let _oldest_delivery: Delivery = delivery_receiver.recv().expect("queued event");
+
+    server.resync_lagged();
+
+    assert_eq!(
+        server.event_bus.list_desynced_subscriber_ids(),
+        vec![subscriber_id]
+    );
+    assert_eq!(
+        delivery_receiver.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Event(Event::Quit(QuitCause::Requested)); SUBSCRIBER_QUEUE_CAPACITY - 1]
+    );
+    assert!(writer_handoff.take_owed_frame_mark());
+}
+
+#[test]
+fn a_freed_slot_queues_nothing_for_a_gone_client_and_drops_a_gone_receivers_subscription() {
+    let (mut server, client_id) = boot_server();
+    // No session holds this id, so no frame can ever be built for it.
+    let unknown_client_id = ClientId::new();
+    let (unknown_client_receiver, _) = server.subscribe(unknown_client_id);
+    let (gone_receiver, _) = server.subscribe(client_id);
+    let (unknown_client_subscriber_id, _) = server.subscriptions[0];
+    let (gone_subscriber_id, _) = server.subscriptions[1];
+    drop(gone_receiver);
+
+    server.push_client_frame(unknown_client_id);
+    server.push_client_frame(client_id);
+
+    assert_eq!(
+        unknown_client_receiver.try_iter().collect::<Vec<_>>(),
+        Vec::<Delivery>::new()
+    );
+    assert!(!server.event_bus.has_subscriber(gone_subscriber_id));
+    assert_eq!(
+        server.subscriptions,
+        vec![(unknown_client_subscriber_id, unknown_client_id)]
     );
 }
 

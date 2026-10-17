@@ -136,6 +136,7 @@ fn build_render_snapshot(
             focused_pane_id,
             lock_mode,
             last_applied_lock_command_id: None,
+            last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }

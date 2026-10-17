@@ -15,9 +15,9 @@ mod statusline_hints;
 pub mod theme;
 
 pub use hit_test::{
-    compute_clamped_pane_cell, compute_pane_local_cell, compute_placement_handle_rect,
-    find_first_visible_tab_index, find_pane_content_rect, is_placement_handle_cell,
-    resolve_hit_region, HitRegion, PLACEMENT_HANDLE_COLUMN_COUNT,
+    compute_clamped_pane_cell, compute_placement_handle_rect, find_first_visible_tab_index,
+    find_pane_content_rect, is_placement_handle_cell, resolve_hit_region, HitRegion,
+    PLACEMENT_HANDLE_COLUMN_COUNT,
 };
 pub use images::{
     build_image_cell_snapshot, build_image_paints, draw_image_placeholders, ImageCellSnapshot,

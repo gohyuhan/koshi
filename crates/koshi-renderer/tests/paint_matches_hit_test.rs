@@ -22,9 +22,9 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::SolvedRegions;
 use koshi_layout::solver::StackHeader;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, CursorSnapshot, GridView, KeymapHints, MouseFrame, PaneSlot,
-    PaneSnapshot, RenderSnapshot, ScrollbackMetadata, SessionSnapshot, TabMetadata, TabSnapshot,
-    ViewerChrome,
+    ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPaneMoveDraft, FloatingPaneSlot,
+    GridView, KeymapHints, MouseFrame, PaneSlot, PaneSnapshot, RenderSnapshot, ScrollbackMetadata,
+    SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{
@@ -68,7 +68,7 @@ fn build_pane_slot(pane_id: PaneId, outer_rect: Rect) -> PaneSlot {
 
 /// A pane whose every cell holds `fill_character`, sized `column_count x row_count`.
 fn build_filled_grid(column_count: u16, row_count: u16, fill_character: char) -> GridView {
-    let cells = vec![
+    let cell_rows = vec![
         vec![
             Cell::from_character(fill_character, 1, CellStyle::default());
             column_count as usize
@@ -76,7 +76,11 @@ fn build_filled_grid(column_count: u16, row_count: u16, fill_character: char) ->
         row_count as usize
     ];
     GridView {
-        grid: Arc::new(Grid::from_rows(cells, column_count, CellStyle::default())),
+        grid: Arc::new(Grid::from_rows(
+            cell_rows,
+            column_count,
+            CellStyle::default(),
+        )),
         view_row_offset: 0,
     }
 }
@@ -114,13 +118,13 @@ fn build_pane_snapshot(
     }
 }
 
-/// A frame with `pane_slots` laid out for `effective_size`, `headers` on top of them, and
-/// three tabs.
+/// A frame with `pane_slots` laid out for `effective_layout_size`, `stack_headers` on top
+/// of them, and three tabs.
 fn build_render_snapshot(
-    effective_size: Size,
+    effective_layout_size: Size,
     pane_slots: Vec<PaneSlot>,
     pane_snapshots: Vec<PaneSnapshot>,
-    headers: Vec<StackHeader>,
+    stack_headers: Vec<StackHeader>,
     focused_pane_id: Option<PaneId>,
 ) -> RenderSnapshot {
     let tab_id = TabId::new();
@@ -144,8 +148,8 @@ fn build_render_snapshot(
                 tab_id,
                 tab_name: "one".to_string(),
                 pane_slots,
-                tab_size: effective_size,
-                stack_headers: headers,
+                tab_size: effective_layout_size,
+                stack_headers,
                 layout_mode: LayoutMode::Tiled,
                 is_every_pane_suppressed: false,
                 gap_cell_count: 0,
@@ -162,6 +166,7 @@ fn build_render_snapshot(
             focused_pane_id,
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: None,
+            last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }
@@ -172,31 +177,36 @@ fn build_render_snapshot(
 ///
 /// Returns the frame, the left pane, the right pane, and the header's pane.
 fn build_tiled_frame() -> (RenderSnapshot, PaneId, PaneId, PaneId) {
-    let left = PaneId::new();
-    let right = PaneId::new();
-    let collapsed = PaneId::new();
-    let left_outer = build_cell_rect(0, 0, 25, 10);
-    let right_outer = build_cell_rect(25, 0, 25, 10);
-    let header = StackHeader {
-        pane_id: collapsed,
+    let left_pane_id = PaneId::new();
+    let right_pane_id = PaneId::new();
+    let collapsed_pane_id = PaneId::new();
+    let left_outer_rect = build_cell_rect(0, 0, 25, 10);
+    let right_outer_rect = build_cell_rect(25, 0, 25, 10);
+    let stack_header = StackHeader {
+        pane_id: collapsed_pane_id,
         header_rect: build_cell_rect(26, 1, 23, 1),
         member_index: 0,
         member_count: 2,
     };
-    let frame = build_render_snapshot(
+    let render_snapshot = build_render_snapshot(
         EFFECTIVE_LAYOUT_SIZE,
         vec![
-            build_pane_slot(left, left_outer),
-            build_pane_slot(right, right_outer),
+            build_pane_slot(left_pane_id, left_outer_rect),
+            build_pane_slot(right_pane_id, right_outer_rect),
         ],
         vec![
-            build_pane_snapshot(left, Some(build_filled_grid(23, 8, 'a')), 3, 7),
-            build_pane_snapshot(right, None, 0, 0),
+            build_pane_snapshot(left_pane_id, Some(build_filled_grid(23, 8, 'a')), 3, 7),
+            build_pane_snapshot(right_pane_id, None, 0, 0),
         ],
-        vec![header],
-        Some(left),
+        vec![stack_header],
+        Some(left_pane_id),
     );
-    (frame, left, right, collapsed)
+    (
+        render_snapshot,
+        left_pane_id,
+        right_pane_id,
+        collapsed_pane_id,
+    )
 }
 
 /// The whole viewport as a ratatui area at the origin.
@@ -209,10 +219,12 @@ fn build_viewport_area() -> RatatuiRect {
     )
 }
 
-/// Paint `frame` with `regions` into a fresh viewport-sized buffer.
+/// Paint `render_snapshot` with `committed_regions` and `viewer_chrome` into a
+/// fresh viewport-sized buffer.
 fn paint_render_snapshot(
     render_snapshot: &RenderSnapshot,
     committed_regions: &CommittedRegions,
+    viewer_chrome: ViewerChrome,
 ) -> Buffer {
     let viewport_area = build_viewport_area();
     let mut screen_buffer = Buffer::empty(viewport_area);
@@ -222,7 +234,7 @@ fn paint_render_snapshot(
         &Theme::default(),
         &KeymapHints::default(),
         None,
-        ViewerChrome::default(),
+        viewer_chrome,
         ImageRenderMode::Placeholder,
         None,
         None,
@@ -233,7 +245,8 @@ fn paint_render_snapshot(
     screen_buffer
 }
 
-/// The text painted across the half-open column span `[from, to)` of `row`.
+/// The text painted on row `row_index` across the half-open column span
+/// `[starting_column, ending_column)`.
 fn get_row_text(
     screen_buffer: &Buffer,
     row_index: u16,
@@ -241,127 +254,140 @@ fn get_row_text(
     ending_column: u16,
 ) -> String {
     (starting_column..ending_column)
-        .map(|column| screen_buffer[(column, row_index)].symbol())
+        .map(|column_index| screen_buffer[(column_index, row_index)].symbol())
         .collect()
 }
 
 #[test]
 fn every_cell_classifies_as_what_was_painted() {
-    let (frame, left, right, collapsed) = build_tiled_frame();
-    let regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
-    let screen_buffer = paint_render_snapshot(&frame, &regions);
+    let (render_snapshot, left_pane_id, right_pane_id, collapsed_pane_id) = build_tiled_frame();
+    let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
+    let screen_buffer = paint_render_snapshot(
+        &render_snapshot,
+        &committed_regions,
+        ViewerChrome::default(),
+    );
     let theme = Theme::default();
-    let mouse = MouseFrame::from_snapshot(&frame, regions);
-    let layout = mouse.build_frame_layout(ViewerChrome::default());
+    let mouse_frame =
+        MouseFrame::from_snapshot(&render_snapshot, committed_regions, ViewerChrome::default());
+    let frame_layout = mouse_frame.build_frame_layout();
 
-    let statusline_row = TEST_VIEWPORT_SIZE.row_count - 1;
-    let mut seen_content = 0_u32;
-    let mut seen_border = 0_u32;
-    let mut seen_header = 0_u32;
-    let mut seen_letterbox = 0_u32;
+    let statusline_row_index = TEST_VIEWPORT_SIZE.row_count - 1;
+    let mut content_cell_count = 0_u32;
+    let mut border_cell_count = 0_u32;
+    let mut header_cell_count = 0_u32;
+    let mut letterbox_cell_count = 0_u32;
 
     for row_index in 0..TEST_VIEWPORT_SIZE.row_count {
-        for column in 0..TEST_VIEWPORT_SIZE.column_count {
-            let point = Point {
-                column,
+        for column_index in 0..TEST_VIEWPORT_SIZE.column_count {
+            let screen_point = Point {
+                column: column_index,
                 row: row_index,
             };
-            let painted_cell = &screen_buffer[(column, row_index)];
-            match resolve_hit_region(layout, point) {
+            let painted_cell = &screen_buffer[(column_index, row_index)];
+            match resolve_hit_region(frame_layout, screen_point) {
                 HitRegion::Tabline
                 | HitRegion::Tab { .. }
-                | HitRegion::TablineScrollLeft { .. }
-                | HitRegion::TablineScrollRight { .. } => {
+                | HitRegion::TablineScrollLeft
+                | HitRegion::TablineScrollRight => {
                     assert_eq!(
                         row_index, 0,
-                        "tabline classified off the tabline row at ({column}, {row_index})"
+                        "tabline classified off the tabline row at ({column_index}, {row_index})"
                     );
                 }
                 HitRegion::Statusline => {
                     assert_eq!(
-                        row_index, statusline_row,
-                        "statusline classified off its row at ({column}, {row_index})"
+                        row_index, statusline_row_index,
+                        "statusline classified off its row at ({column_index}, {row_index})"
                     );
                     assert_eq!(
                         painted_cell.bg, theme.bar_background_color,
-                        "statusline cell ({column}, {row_index}) is not the bar background"
+                        "statusline cell ({column_index}, {row_index}) is not the bar background"
                     );
                 }
                 HitRegion::PaneContent { pane_id } => {
-                    let content_rect = find_pane_content_rect(layout, pane_id)
+                    let content_rect = find_pane_content_rect(frame_layout, pane_id)
                         .unwrap_or_else(|| panic!("pane {pane_id:?} has no content rect"));
                     assert!(
-                        content_rect.is_point_inside(point),
-                        "content hit at ({column}, {row_index}) is outside {content_rect:?}"
+                        content_rect.is_point_inside(screen_point),
+                        "content hit at ({column_index}, {row_index}) is outside {content_rect:?}"
                     );
-                    if pane_id == left {
+                    if pane_id == left_pane_id {
                         assert_eq!(
                             painted_cell.symbol(),
                             "a",
-                            "left pane content cell ({column}, {row_index}) was not painted"
+                            "left pane content cell ({column_index}, {row_index}) was not painted"
                         );
                     } else {
                         assert_eq!(
-                            pane_id, right,
-                            "unexpected pane hit at ({column}, {row_index})"
+                            pane_id, right_pane_id,
+                            "unexpected pane hit at ({column_index}, {row_index})"
                         );
                     }
-                    seen_content += 1;
+                    content_cell_count += 1;
                 }
                 HitRegion::PaneBorder { pane_id, .. } => {
-                    let content_rect = find_pane_content_rect(layout, pane_id)
+                    let content_rect = find_pane_content_rect(frame_layout, pane_id)
                         .unwrap_or_else(|| panic!("pane {pane_id:?} has no content rect"));
                     assert!(
-                        !content_rect.is_point_inside(point),
-                        "border hit at ({column}, {row_index}) is inside {content_rect:?}"
+                        !content_rect.is_point_inside(screen_point),
+                        "border hit at ({column_index}, {row_index}) is inside {content_rect:?}"
                     );
                     assert!(
                         BORDER_GLYPHS.contains(&painted_cell.symbol()),
-                        "border hit at ({column}, {row_index}) painted {:?}",
+                        "border hit at ({column_index}, {row_index}) painted {:?}",
                         painted_cell.symbol()
                     );
-                    seen_border += 1;
+                    border_cell_count += 1;
                 }
                 HitRegion::PlacementHandle { pane_id } => {
-                    let content_rect = find_pane_content_rect(layout, pane_id)
+                    let content_rect = find_pane_content_rect(frame_layout, pane_id)
                         .unwrap_or_else(|| panic!("pane {pane_id:?} has no content rect"));
                     assert!(
-                        !content_rect.is_point_inside(point),
-                        "placement handle hit at ({column}, {row_index}) is inside {content_rect:?}"
+                        !content_rect.is_point_inside(screen_point),
+                        "placement handle hit at ({column_index}, {row_index}) is inside {content_rect:?}"
                     );
                     assert_eq!(
                         painted_cell.symbol(),
                         "⠿",
-                        "placement handle cell ({column}, {row_index}) was not painted"
+                        "placement handle cell ({column_index}, {row_index}) was not painted"
                     );
-                    seen_border += 1;
+                    border_cell_count += 1;
+                }
+                HitRegion::PaneTitlebar { .. }
+                | HitRegion::PanePinToggle { .. }
+                | HitRegion::PaneMinimizeButton { .. }
+                | HitRegion::PaneCloseButton { .. } => {
+                    panic!(
+                        "floating pane region at ({column_index}, {row_index}) in a frame with no floating pane"
+                    );
                 }
                 HitRegion::StackHeader { pane_id } => {
-                    assert_eq!(pane_id, collapsed);
+                    assert_eq!(pane_id, collapsed_pane_id);
                     assert_eq!(
                         painted_cell.bg, theme.stack_header_background_color,
-                        "stack header cell ({column}, {row_index}) is not the header background"
+                        "stack header cell ({column_index}, {row_index}) is not the header background"
                     );
-                    seen_header += 1;
+                    header_cell_count += 1;
                 }
                 HitRegion::None => {
                     assert_eq!(
                         painted_cell.bg, theme.letterbox_color,
-                        "unclassified cell ({column}, {row_index}) is not letterbox margin"
+                        "unclassified cell ({column_index}, {row_index}) is not letterbox margin"
                     );
-                    seen_letterbox += 1;
+                    letterbox_cell_count += 1;
                 }
             }
         }
     }
 
     // Both panes' content minus the row the stack header takes.
-    assert_eq!(seen_content, 2 * 23 * 8 - 23);
-    assert_eq!(seen_border, 2 * (25 * 10 - 23 * 8));
-    assert_eq!(seen_header, 23);
+    assert_eq!(content_cell_count, 2 * 23 * 8 - 23);
+    assert_eq!(border_cell_count, 2 * (25 * 10 - 23 * 8));
+    assert_eq!(header_cell_count, 23);
     // The 60x14 viewport less the two chrome rows and the centered 50x10 layout.
     assert_eq!(
-        seen_letterbox,
+        letterbox_cell_count,
         u32::from(
             TEST_VIEWPORT_SIZE.column_count * 12
                 - EFFECTIVE_LAYOUT_SIZE.column_count * EFFECTIVE_LAYOUT_SIZE.row_count
@@ -370,33 +396,189 @@ fn every_cell_classifies_as_what_was_painted() {
 }
 
 #[test]
+fn every_floating_pane_cell_classifies_as_what_was_painted() {
+    let (mut render_snapshot, left_pane_id, ..) = build_tiled_frame();
+    let floating_pane_id = PaneId::new();
+    // Pane-area (1, 0) is screen (1, 1): the float covers letterbox margin
+    // cells and the left tiled pane.
+    let floating_outer_rect = build_cell_rect(1, 0, 24, 8);
+    render_snapshot
+        .session_snapshot
+        .floating_pane_slots
+        .push(FloatingPaneSlot::from_outer_rect(
+            floating_pane_id,
+            floating_outer_rect,
+            false,
+        ));
+    let mut floating_pane_snapshot =
+        build_pane_snapshot(floating_pane_id, Some(build_filled_grid(22, 4, 'f')), 0, 0);
+    floating_pane_snapshot.pane_title = Some("htop".to_string());
+    render_snapshot.pane_snapshots.push(floating_pane_snapshot);
+    let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
+    let screen_buffer = paint_render_snapshot(
+        &render_snapshot,
+        &committed_regions,
+        ViewerChrome::default(),
+    );
+    let mouse_frame =
+        MouseFrame::from_snapshot(&render_snapshot, committed_regions, ViewerChrome::default());
+    let frame_layout = mouse_frame.build_frame_layout();
+    let floating_content_rect = find_pane_content_rect(frame_layout, floating_pane_id)
+        .unwrap_or_else(|| panic!("the floating pane has no content rect"));
+    assert_eq!(floating_content_rect, build_cell_rect(2, 4, 22, 4));
+
+    let mut region_cell_counts = [0_u32; 7];
+    for row_index in 1..9 {
+        for column_index in 1..25 {
+            let screen_point = Point {
+                column: column_index,
+                row: row_index,
+            };
+            let painted_symbol = screen_buffer[(column_index, row_index)].symbol();
+            let (region_index, pane_id, painted_symbols): (usize, PaneId, &[&str]) =
+                match resolve_hit_region(frame_layout, screen_point) {
+                    HitRegion::PaneContent { pane_id } => {
+                        assert!(
+                            floating_content_rect.is_point_inside(screen_point),
+                            "content hit at ({column_index}, {row_index}) is outside {floating_content_rect:?}"
+                        );
+                        (0, pane_id, &["f"])
+                    }
+                    HitRegion::PaneBorder { pane_id, .. } => {
+                        (1, pane_id, &["┌", "┐", "└", "┘", "─", "│", "├", "┤"])
+                    }
+                    HitRegion::PlacementHandle { pane_id } => (2, pane_id, &["⣿"]),
+                    HitRegion::PaneTitlebar { pane_id } => {
+                        (3, pane_id, &[" ", "h", "t", "o", "p", "─"])
+                    }
+                    HitRegion::PanePinToggle { pane_id } => (4, pane_id, &["[", " ", "]"]),
+                    HitRegion::PaneMinimizeButton { pane_id } => (5, pane_id, &["–"]),
+                    HitRegion::PaneCloseButton { pane_id } => (6, pane_id, &["✕"]),
+                    unexpected_region => {
+                        panic!(
+                            "({column_index}, {row_index}) inside the float hit {unexpected_region:?}"
+                        )
+                    }
+                };
+            assert_eq!(
+                pane_id, floating_pane_id,
+                "({column_index}, {row_index}) inside the float hit another pane"
+            );
+            assert!(
+                painted_symbols.contains(&painted_symbol),
+                "({column_index}, {row_index}) painted {painted_symbol:?} for region {region_index}"
+            );
+            region_cell_counts[region_index] += 1;
+        }
+    }
+
+    // Content 22x4; ring 2x24 + 2x6; handle 2; titlebar 14 + separator 22;
+    // pin 4; minimize 1; close 1. 24x8 = 192 cells.
+    assert_eq!(region_cell_counts, [88, 60, 2, 36, 4, 1, 1]);
+    // The cell right of the float is the left tiled pane again.
+    assert_eq!(
+        resolve_hit_region(frame_layout, Point { column: 25, row: 5 }),
+        HitRegion::PaneContent {
+            pane_id: left_pane_id
+        }
+    );
+}
+
+#[test]
+fn a_move_draft_past_the_pane_area_paints_and_hits_inside_the_pane_area() {
+    let (mut render_snapshot, ..) = build_tiled_frame();
+    let floating_pane_id = PaneId::new();
+    render_snapshot
+        .session_snapshot
+        .floating_pane_slots
+        .push(FloatingPaneSlot::from_outer_rect(
+            floating_pane_id,
+            build_cell_rect(1, 0, 24, 8),
+            false,
+        ));
+    render_snapshot.pane_snapshots.push(build_pane_snapshot(
+        floating_pane_id,
+        Some(build_filled_grid(22, 4, 'f')),
+        0,
+        0,
+    ));
+    let viewer_chrome = ViewerChrome {
+        floating_pane_move_draft: Some(FloatingPaneMoveDraft {
+            pane_id: floating_pane_id,
+            top_left_cell: Point { column: 50, row: 9 },
+        }),
+        ..ViewerChrome::default()
+    };
+    let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
+    let screen_buffer = paint_render_snapshot(&render_snapshot, &committed_regions, viewer_chrome);
+    let mouse_frame = MouseFrame::from_snapshot(&render_snapshot, committed_regions, viewer_chrome);
+    let frame_layout = mouse_frame.build_frame_layout();
+
+    // The 24x8 pane in the 60x12 pane area, which starts at screen row 1,
+    // draws with its top-left cell at pane-area (36, 4).
+    let floating_content_rect = find_pane_content_rect(frame_layout, floating_pane_id)
+        .unwrap_or_else(|| panic!("the floating pane has no content rect"));
+    assert_eq!(floating_content_rect, build_cell_rect(37, 8, 22, 4));
+    for row_index in 8..12 {
+        for column_index in 37..59 {
+            let screen_point = Point {
+                column: column_index,
+                row: row_index,
+            };
+            assert_eq!(
+                resolve_hit_region(frame_layout, screen_point),
+                HitRegion::PaneContent {
+                    pane_id: floating_pane_id
+                },
+                "({column_index}, {row_index}) does not hit the moved pane"
+            );
+            assert_eq!(
+                screen_buffer[(column_index, row_index)].symbol(),
+                "f",
+                "({column_index}, {row_index}) was not painted with the moved pane"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_tab_ribbon_spells_the_tab_it_hits() {
-    let (frame, ..) = build_tiled_frame();
-    let regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
-    let screen_buffer = paint_render_snapshot(&frame, &regions);
-    let tabs_metadata = frame.session_snapshot.tabs_metadata.clone();
-    let mouse = MouseFrame::from_snapshot(&frame, regions);
-    let layout = mouse.build_frame_layout(ViewerChrome::default());
+    let (render_snapshot, ..) = build_tiled_frame();
+    let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
+    let screen_buffer = paint_render_snapshot(
+        &render_snapshot,
+        &committed_regions,
+        ViewerChrome::default(),
+    );
+    let tabs_metadata = render_snapshot.session_snapshot.tabs_metadata.clone();
+    let mouse_frame =
+        MouseFrame::from_snapshot(&render_snapshot, committed_regions, ViewerChrome::default());
+    let frame_layout = mouse_frame.build_frame_layout();
 
     for tab_metadata in &tabs_metadata {
-        let tab_columns: Vec<u16> = (0..TEST_VIEWPORT_SIZE.column_count)
-            .filter(|&column| {
-                resolve_hit_region(layout, Point { column, row: 0 })
-                    == HitRegion::Tab {
-                        tab_id: tab_metadata.tab_id,
-                    }
+        let tab_column_indexes: Vec<u16> = (0..TEST_VIEWPORT_SIZE.column_count)
+            .filter(|&column_index| {
+                resolve_hit_region(
+                    frame_layout,
+                    Point {
+                        column: column_index,
+                        row: 0,
+                    },
+                ) == HitRegion::Tab {
+                    tab_id: tab_metadata.tab_id,
+                }
             })
             .collect();
-        let first_column = *tab_columns.first().expect("every tab fits this row");
-        let last_column = *tab_columns.last().expect("every tab fits this row");
+        let first_column_index = *tab_column_indexes.first().expect("every tab fits this row");
+        let last_column_index = *tab_column_indexes.last().expect("every tab fits this row");
         assert_eq!(
-            tab_columns.len() as u16,
-            last_column - first_column + 1,
+            tab_column_indexes.len() as u16,
+            last_column_index - first_column_index + 1,
             "tab {} hits a broken column run",
             tab_metadata.tab_name
         );
         assert_eq!(
-            get_row_text(&screen_buffer, 0, first_column, last_column + 1),
+            get_row_text(&screen_buffer, 0, first_column_index, last_column_index + 1),
             format!(
                 " #{}  {} ",
                 tab_metadata.tab_index + 1,
@@ -410,43 +592,47 @@ fn a_tab_ribbon_spells_the_tab_it_hits() {
 
 #[test]
 fn the_cursor_lands_in_the_focused_pane_content() {
-    let (frame, left, ..) = build_tiled_frame();
-    let regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
-    let position = get_cursor_position(
-        &frame,
-        &regions,
+    let (render_snapshot, left_pane_id, ..) = build_tiled_frame();
+    let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
+    let cursor_position = get_cursor_position(
+        &render_snapshot,
+        &committed_regions,
         ViewerChrome::default(),
         build_viewport_area(),
     )
     .expect("the focused pane has a cursor");
-    let mouse = MouseFrame::from_snapshot(&frame, regions);
-    let layout = mouse.build_frame_layout(ViewerChrome::default());
+    let mouse_frame =
+        MouseFrame::from_snapshot(&render_snapshot, committed_regions, ViewerChrome::default());
+    let frame_layout = mouse_frame.build_frame_layout();
 
-    let content_rect = find_pane_content_rect(layout, left).expect("the focused pane is drawn");
-    let point = Point {
-        column: position.x,
-        row: position.y,
+    let content_rect =
+        find_pane_content_rect(frame_layout, left_pane_id).expect("the focused pane is drawn");
+    let cursor_point = Point {
+        column: cursor_position.x,
+        row: cursor_position.y,
     };
     assert!(
-        content_rect.is_point_inside(point),
-        "cursor {point:?} is outside {content_rect:?}"
+        content_rect.is_point_inside(cursor_point),
+        "cursor {cursor_point:?} is outside {content_rect:?}"
     );
-    assert_eq!(point.column, content_rect.origin.column + 7);
-    assert_eq!(point.row, content_rect.origin.row + 3);
+    assert_eq!(cursor_point.column, content_rect.origin.column + 7);
+    assert_eq!(cursor_point.row, content_rect.origin.row + 3);
     assert_eq!(
-        resolve_hit_region(layout, point),
-        HitRegion::PaneContent { pane_id: left },
+        resolve_hit_region(frame_layout, cursor_point),
+        HitRegion::PaneContent {
+            pane_id: left_pane_id
+        },
         "the cursor cell does not hit the pane it belongs to"
     );
 }
 
 #[test]
 fn a_zero_height_chrome_region_paints_nothing() {
-    let only = PaneId::new();
-    let frame = build_render_snapshot(
+    let only_pane_id = PaneId::new();
+    let render_snapshot = build_render_snapshot(
         TEST_VIEWPORT_SIZE,
         vec![build_pane_slot(
-            only,
+            only_pane_id,
             build_cell_rect(
                 0,
                 0,
@@ -454,7 +640,7 @@ fn a_zero_height_chrome_region_paints_nothing() {
                 TEST_VIEWPORT_SIZE.row_count,
             ),
         )],
-        vec![build_pane_snapshot(only, None, 0, 0)],
+        vec![build_pane_snapshot(only_pane_id, None, 0, 0)],
         Vec::new(),
         None,
     );
@@ -465,7 +651,7 @@ fn a_zero_height_chrome_region_paints_nothing() {
             row_count: 0,
         },
     );
-    let regions = CommittedRegions::from_solved_regions(
+    let committed_regions = CommittedRegions::from_solved_regions(
         TEST_VIEWPORT_SIZE,
         SolvedRegions {
             region_rects: vec![empty_height_rect, empty_height_rect],
@@ -473,26 +659,31 @@ fn a_zero_height_chrome_region_paints_nothing() {
         },
         0,
     );
-    let screen_buffer = paint_render_snapshot(&frame, &regions);
-    let mouse = MouseFrame::from_snapshot(&frame, regions);
-    let layout = mouse.build_frame_layout(ViewerChrome::default());
+    let screen_buffer = paint_render_snapshot(
+        &render_snapshot,
+        &committed_regions,
+        ViewerChrome::default(),
+    );
+    let mouse_frame =
+        MouseFrame::from_snapshot(&render_snapshot, committed_regions, ViewerChrome::default());
+    let frame_layout = mouse_frame.build_frame_layout();
 
-    let top = get_row_text(&screen_buffer, 0, 0, TEST_VIEWPORT_SIZE.column_count);
+    let top_row_text = get_row_text(&screen_buffer, 0, 0, TEST_VIEWPORT_SIZE.column_count);
     assert!(
-        !top.contains("work") && !top.contains("BASE"),
-        "a zero-height tabline region painted the tab bar: {top:?}"
+        !top_row_text.contains("work") && !top_row_text.contains("BASE"),
+        "a zero-height tabline region painted the tab bar: {top_row_text:?}"
     );
     assert_eq!(
-        top,
+        top_row_text,
         format!(
             "┌{}┐",
             "─".repeat(usize::from(TEST_VIEWPORT_SIZE.column_count) - 2)
         )
     );
     assert_eq!(
-        resolve_hit_region(layout, Point { column: 0, row: 0 }),
+        resolve_hit_region(frame_layout, Point { column: 0, row: 0 }),
         HitRegion::PaneBorder {
-            pane_id: only,
+            pane_id: only_pane_id,
             side: koshi_core::geometry::Direction::Left,
         }
     );

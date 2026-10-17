@@ -19,17 +19,19 @@
 //! A frame also carries a few fields nothing draws: the terminal modes on
 //! [`PaneSnapshot`] that say where a mouse event over a pane goes, and the line
 //! number its top visible row is. A viewer copies them into a [`MouseFrame`] as
-//! it paints and answers the next mouse event from that.
+//! it paints, with the [`ViewerChrome`] it paints, and answers the next mouse
+//! event from that.
 //!
-//! Three things about a frame come from the viewer instead, as a
-//! [`ViewerChrome`]: the pane its pointer is over, where its tab strip is
-//! scrolled to, and whether it is dialing the session again. The session
-//! stores none of them.
+//! Other things about a frame come from the viewer instead, as a
+//! [`ViewerChrome`]: the pane its pointer is over, the placement handle it
+//! marks, its input mode, its pane placement preview, where its tab strip is
+//! scrolled to, whether it is dialing the session again, and where it draws a
+//! floating pane it moves. The session stores none of them.
 
 use std::sync::Arc;
 
 use koshi_core::event::{Event, SubscriberLagged};
-use koshi_core::geometry::{PaneArea, Rect, Size};
+use koshi_core::geometry::{PaneArea, Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
@@ -45,6 +47,7 @@ use koshi_terminal::grid::state::Grid;
 use koshi_terminal::state::{CursorShape, ImagePlacement, ImagePlacementId};
 
 use crate::floating_pane_chrome::compute_floating_pane_content_rect;
+use crate::hit_test::{compute_frame_pane_area, compute_viewport_area};
 use crate::region::{solve_core_regions, TablineInputs};
 
 /// The statusline data the renderer draws, re-exported from the keymap crate
@@ -256,7 +259,7 @@ impl CommittedRegions {
 /// overflowed, a pane placement preview or its refusal, the answers to one
 /// round of mouse actions, a wake-up for the bytes that wait for the
 /// subscriber's own terminal, the session its client moves to, or a pane
-/// placement command the session rejected.
+/// placement command or floating pane move the session rejected.
 ///
 /// All of them ride the same queue in order: a subscriber that missed events
 /// reads the backlog it already had, then the frame, then live events again.
@@ -306,17 +309,18 @@ pub enum Delivery {
     HostWrite,
     /// The session the subscriber's client leaves this one for.
     SwitchTo(SessionId),
-    /// A pane placement command from the subscriber was rejected.
+    /// A pane placement command from the subscriber's key binding, or a
+    /// floating pane move from its mouse round, was rejected.
     PlacementCommandRejected(CommandId),
 }
 
 /// The viewer-owned frame state: which pane the pointer is over, which top
 /// border exposes a placement handle, which input mode owns the keymap, where
-/// the tab strip is scrolled, and whether the viewer is dialing the session
-/// again. While pane placement is shown, including while a confirmation waits,
-/// the viewer clears the pointer and handle fields before hit-testing and
-/// painting, and the renderer ignores them: hovering `pane-123` leaves its
-/// border color unchanged.
+/// the tab strip is scrolled, whether the viewer is dialing the session again,
+/// and where it draws a floating pane it is moving. While pane placement is
+/// shown, including while a confirmation waits, the viewer clears the pointer
+/// and handle fields before hit-testing and painting, and the renderer ignores
+/// them: hovering `pane-123` leaves its border color unchanged.
 ///
 /// These values belong to one viewer. None is stored on the session or carried
 /// in a snapshot; the viewer hands them in when it hit-tests a frame and again
@@ -348,6 +352,27 @@ pub struct ViewerChrome {
     /// `RECONNECTING (attempt 4, dialing)` from a
     /// `Reconnecting { attempt: 4, retry_in_seconds: None }`.
     pub reconnecting: Option<Reconnecting>,
+    /// The floating pane this viewer is moving, drawn and hit-tested at the
+    /// draft's top-left cell, moved inside the pane area, instead of the cell
+    /// the frame places it at. `None` while no move is under way.
+    pub floating_pane_move_draft: Option<FloatingPaneMoveDraft>,
+}
+
+/// A floating pane this viewer draws at a cell of its own choosing, before the
+/// session places it there.
+///
+/// The frame's slot for `pane_id` keeps its size and pin state; only its
+/// top-left cell becomes `top_left_cell`, moved left and up until the slot lies
+/// inside the pane area ([`FrameLayout::list_drawn_floating_pane_slots`]). In
+/// a `120x38` pane area, a slot at `(24, 8)` `72x22` with a draft at `(29, 8)`
+/// draws at `(29, 8)` `72x22`, its content at `(30, 11)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloatingPaneMoveDraft {
+    /// The floating pane being moved.
+    pub pane_id: PaneId,
+    /// The pane's top-left cell that the viewer asks for, counted from the
+    /// viewer's pane-area origin. It may lie past the pane area.
+    pub top_left_cell: Point,
 }
 
 /// How far a viewer that dials its server again has got: which dial runs or
@@ -380,18 +405,19 @@ pub struct Reconnecting {
 /// cells.
 ///
 /// A caller that already holds a [`RenderSnapshot`] borrows one out of it with
-/// [`RenderSnapshot::build_frame_layout`], and an [`OwnedFrameLayout`] with
-/// [`OwnedFrameLayout::build_frame_layout`]; both leave the committed region solve unset,
-/// and hit-testing then works from the built-in geometry. A [`MouseFrame`]
+/// [`RenderSnapshot::build_frame_layout`], which leaves the committed region
+/// solve unset, and hit-testing then works from the built-in geometry. A [`MouseFrame`]
 /// fills the solve in with the one that placed the pane area when the frame was
-/// painted.
+/// painted, and the viewer chrome with the one painted with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameLayout<'a> {
     /// The session being viewed, including its solved active tab.
     pub session_snapshot: &'a SessionSnapshot,
     /// The viewing client's own state (viewport, focus, lock mode).
     pub client_snapshot: &'a ClientSnapshot,
-    /// The viewer's pointer, tab-strip, and link state.
+    /// The viewer's own chrome: the hovered pane, the marked placement handle,
+    /// the input mode, the pane placement preview, the tab strip's scroll, the
+    /// reconnect state, and the floating pane move draft.
     pub viewer_chrome: ViewerChrome,
     /// The region solve committed with the painted frame. `None` leaves
     /// hit-testing on the built-in geometry: the pane area is the whole area,
@@ -423,54 +449,72 @@ impl<'a> FrameLayout<'a> {
 
     /// The floating panes this viewer draws in this frame, back to front:
     /// every slot in the session's
-    /// [`floating_pane_slots`](SessionSnapshot::floating_pane_slots). None
-    /// while `viewer_chrome.is_pane_placement_visible` is `true`, and none
-    /// while the active tab's `is_every_pane_suppressed` is `true` (the frame
-    /// shows the "terminal too small" overlay).
-    #[must_use]
-    pub(crate) fn list_drawn_floating_pane_slots(&self) -> &'a [FloatingPaneSlot] {
-        if self.viewer_chrome.is_pane_placement_visible
-            || self
-                .session_snapshot
-                .active_tab_snapshot
-                .is_every_pane_suppressed
-        {
-            return &[];
-        }
-        &self.session_snapshot.floating_pane_slots
+    /// [`floating_pane_slots`](SessionSnapshot::floating_pane_slots). The slot
+    /// that `viewer_chrome.floating_pane_move_draft` names starts at the
+    /// draft's top-left cell, then moves left and up until it lies inside this
+    /// frame's pane area ([`Rect::compute_moved_inside`]). None while
+    /// `viewer_chrome.is_pane_placement_visible` is `true`, and none while the
+    /// active tab's `is_every_pane_suppressed` is `true` (the frame shows the
+    /// "terminal too small" overlay).
+    ///
+    /// The pane area comes from `committed_regions`, or is the whole viewport
+    /// when they are `None`. Example: a `72x22` slot with a draft at `(60, 20)`
+    /// in a `120x38` pane area draws at `(48, 16)`.
+    pub fn list_drawn_floating_pane_slots(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = FloatingPaneSlot> + 'a {
+        let floating_pane_slots: &'a [FloatingPaneSlot] =
+            if self.viewer_chrome.is_pane_placement_visible
+                || self
+                    .session_snapshot
+                    .active_tab_snapshot
+                    .is_every_pane_suppressed
+            {
+                &[]
+            } else {
+                &self.session_snapshot.floating_pane_slots
+            };
+        let frame_layout = *self;
+        floating_pane_slots.iter().map(move |floating_pane_slot| {
+            match frame_layout.viewer_chrome.floating_pane_move_draft {
+                Some(floating_pane_move_draft)
+                    if floating_pane_move_draft.pane_id == floating_pane_slot.pane_id =>
+                {
+                    let frame_pane_area =
+                        compute_frame_pane_area(frame_layout, compute_viewport_area(frame_layout));
+                    FloatingPaneSlot::from_outer_rect(
+                        floating_pane_slot.pane_id,
+                        Rect::from_origin_and_size(
+                            floating_pane_move_draft.top_left_cell,
+                            floating_pane_slot.outer_rect.size,
+                        )
+                        .compute_moved_inside(Size {
+                            column_count: frame_pane_area.width,
+                            row_count: frame_pane_area.height,
+                        }),
+                        floating_pane_slot.is_pinned,
+                    )
+                }
+                _ => *floating_pane_slot,
+            }
+        })
     }
-}
 
-/// The owned form of [`FrameLayout`], for a caller that builds these two
-/// itself instead of borrowing them out of a [`RenderSnapshot`].
-///
-/// Answering a mouse event needs to know where the surfaces are and nothing
-/// about what is inside them, so the mouse path builds one of these and calls
-/// [`build_frame_layout`](Self::build_frame_layout) to hand it to the hit-testing functions.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OwnedFrameLayout {
-    /// The session being viewed, including its solved active tab.
-    pub session_snapshot: SessionSnapshot,
-    /// The viewing client's own state (viewport, focus, lock mode).
-    pub client_snapshot: ClientSnapshot,
-}
-
-impl OwnedFrameLayout {
-    /// Borrow these two as a [`FrameLayout`], with `viewer_chrome` supplying the rest.
+    /// The slot of the floating pane `pane_id` as this frame draws it
+    /// ([`list_drawn_floating_pane_slots`](Self::list_drawn_floating_pane_slots)),
+    /// at its move draft's cell while one names it, or `None` when the frame
+    /// draws no such floating pane.
     #[must_use]
-    pub fn build_frame_layout(&self, viewer_chrome: ViewerChrome) -> FrameLayout<'_> {
-        FrameLayout {
-            session_snapshot: &self.session_snapshot,
-            client_snapshot: &self.client_snapshot,
-            viewer_chrome,
-            committed_regions: None,
-        }
+    pub fn find_drawn_floating_pane_slot(&self, pane_id: PaneId) -> Option<FloatingPaneSlot> {
+        self.list_drawn_floating_pane_slots()
+            .find(|floating_pane_slot| floating_pane_slot.pane_id == pane_id)
     }
 }
 
 /// A painted frame cut down to what answering a mouse event reads: where the
-/// surfaces sit, the committed region solve, and the few per-pane fields that
-/// say which line each pane's top row shows and where an event over it goes.
+/// surfaces sit, the committed region solve, the viewer chrome it was painted
+/// with, and the few per-pane fields that say which line each pane's top row
+/// shows and where an event over it goes.
 ///
 /// It carries no cells, no cursor and no titles, so a viewer holding one
 /// between paints holds no pane's [`Grid`].
@@ -485,22 +529,28 @@ pub struct MouseFrame {
     pub mouse_panes: Vec<MousePane>,
     /// The region solve and input revision that were painted with this frame.
     pub committed_regions: CommittedRegions,
+    /// The viewer chrome that was painted with this frame: the hovered pane,
+    /// the marked placement handle, the tab strip's scroll, the input mode and
+    /// reconnect tags, the pane placement preview, and the floating pane move
+    /// draft.
+    pub viewer_chrome: ViewerChrome,
 }
 
 impl MouseFrame {
     /// Borrow the parts of this painted frame that say where things sit, with
-    /// `viewer_chrome` supplying the pointer and tab-strip state.
+    /// the viewer chrome it was painted with.
     #[must_use]
-    pub fn build_frame_layout(&self, viewer_chrome: ViewerChrome) -> FrameLayout<'_> {
+    pub fn build_frame_layout(&self) -> FrameLayout<'_> {
         FrameLayout {
             session_snapshot: &self.session_snapshot,
             client_snapshot: &self.client_snapshot,
-            viewer_chrome,
+            viewer_chrome: self.viewer_chrome,
             committed_regions: Some(&self.committed_regions),
         }
     }
 
-    /// Build a mouse frame from a borrowed render snapshot and its painted regions.
+    /// Build a mouse frame from a borrowed render snapshot, the regions it was
+    /// painted with, and the viewer chrome it was painted with.
     ///
     /// The mouse frame copies session, client, and per-pane input data. It does
     /// not copy pane grids.
@@ -508,6 +558,7 @@ impl MouseFrame {
     pub fn from_snapshot(
         render_snapshot: &RenderSnapshot,
         committed_regions: CommittedRegions,
+        viewer_chrome: ViewerChrome,
     ) -> Self {
         Self {
             mouse_panes: render_snapshot
@@ -518,6 +569,7 @@ impl MouseFrame {
             session_snapshot: render_snapshot.session_snapshot.clone(),
             client_snapshot: render_snapshot.client_snapshot.clone(),
             committed_regions,
+            viewer_chrome,
         }
     }
 }
@@ -1132,6 +1184,12 @@ pub struct ClientSnapshot {
     /// lock command keeps its own lock mode until a frame names that command
     /// here.
     pub last_applied_lock_command_id: Option<CommandId>,
+    /// The last floating pane move that the client's mouse sent and the
+    /// session ran before it built this snapshot. `None` before the session
+    /// runs one, and again after the session restarts. A viewer that sent a
+    /// move keeps drawing the pane at the move's cell until a frame names that
+    /// move here.
+    pub last_applied_floating_pane_move_command_id: Option<CommandId>,
     /// Whether this client grabs the mouse for text selection. Adds the `SELECT`
     /// tag to the mode indicator. It is independent of
     /// [`lock_mode`](Self::lock_mode): both can be on at once. The viewer also reads it off a painted frame

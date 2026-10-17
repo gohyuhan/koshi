@@ -61,7 +61,7 @@ use koshi_renderer::region::solve_core_regions;
 use koshi_renderer::snapshot::{Delivery, Reconnecting, RenderSnapshot};
 use koshi_renderer::theme::Theme;
 
-use crate::mouse::{LastPress, MouseCapture, ResizeDrag, SelectionDrag, TablineDrag, TablinePeek};
+use crate::mouse::{LastPress, LeftButtonGesture, MouseCapture, SentFloatingPaneMove, TablinePeek};
 
 #[cfg(test)]
 mod tests;
@@ -221,6 +221,9 @@ pub(crate) struct ViewerRestorePoint {
     visible_tab_ids: Vec<TabId>,
     /// Pane placement mode, its preview reads, and the placement revisions.
     placement_state: PlacementState,
+    /// The floating pane move a grab-handle release sent, which this viewer
+    /// draws ahead of the session.
+    sent_floating_pane_move: Option<SentFloatingPaneMove>,
 }
 
 /// Whether a viewer holds a link to its session, and how it is getting one back
@@ -324,32 +327,42 @@ pub struct Client {
     /// double click from two separate clicks. `None` before this viewer has
     /// pressed anything.
     last_mouse_press: Option<LastPress>,
-    /// The pane a forwarded press captured, and the button that pressed it.
-    /// While a button is held, its drags and its release go to this pane even as
-    /// the pointer leaves it, and a drag or release with no capture is not
-    /// forwarded. Set when this viewer forwards the press; cleared on the next
-    /// release.
+    /// The pane a forwarded press captured, the button that pressed it, and
+    /// the cell its last forwarded report named. While a button is held, its
+    /// drags and its release go to this pane even as the pointer leaves it,
+    /// and a drag or release with no capture is not forwarded. Set when this
+    /// viewer forwards a press, and cleared by the next release, which is
+    /// forwarded whatever the frame says the pane's program reports. The events
+    /// that `unreleased_mouse_capture` lists end it before that. A new link to
+    /// the session drops it with no release owed
+    /// ([`end_mouse_gestures`](Client::end_mouse_gestures)).
     ///
     /// A press always names its button; some terminals report every drag and
     /// release as the left button. Drags and the release read the stored
     /// button.
     mouse_capture: Option<MouseCapture>,
-    /// The pane-border drag under way, held only between the press on a border
-    /// that begins it and the release that ends it.
-    resize_drag: Option<ResizeDrag>,
-    /// The tab-strip peek-drag under way, held only between the press on the
-    /// bare strip that begins it and the release that ends it.
-    tabline_drag: Option<TablineDrag>,
+    /// A capture this viewer ended before its button's release reached the
+    /// pane's program: a press of the same button, a forwarded press of
+    /// another button, placement mode opening, or a painted frame that no
+    /// longer draws the pane ended it. The program is owed one release of
+    /// that button at the capture's last cell
+    /// ([`take_mouse_capture_release`](Client::take_mouse_capture_release)).
+    /// A new link to the session drops it.
+    unreleased_mouse_capture: Option<MouseCapture>,
+    /// The one koshi gesture the held left button drives. The left press that
+    /// begins it sets it. Its release, the next left press, and every event
+    /// that ends held gestures clear it.
+    left_button_gesture: Option<LeftButtonGesture>,
+    /// The floating pane move a grab-handle release sent, drawn ahead of the
+    /// session until an applied frame names it, the session rejects it, or
+    /// the session drops events.
+    sent_floating_pane_move: Option<SentFloatingPaneMove>,
     /// Where this viewer's tab strip is scrolled, and the tab it was scrolled
     /// on. `None` follows the active tab. A [`TablinePeek`] records the active
     /// tab and the first visible tab index. The peek belongs to the tab it was
     /// made on, and [`Client::note_active_tab`] throws it away as soon as the
     /// viewer sees a frame on another tab.
     tabline_peek: Option<TablinePeek>,
-    /// The text-selection drag under way, held only between the press on a
-    /// pane's content that begins it and the release that ends it. The highlight
-    /// it produces lives on the session and outlives it.
-    selection_drag: Option<SelectionDrag>,
     /// The line the pane's view showed on its top row when the last edge-scroll
     /// step was asked for, awaiting the session's report of where the view
     /// landed. Set only for a scroll the selection drag's timer asked for.
@@ -414,10 +427,10 @@ impl Client {
             pending_key_sequence: None,
             last_mouse_press: None,
             mouse_capture: None,
-            resize_drag: None,
-            tabline_drag: None,
+            unreleased_mouse_capture: None,
+            left_button_gesture: None,
+            sent_floating_pane_move: None,
             tabline_peek: None,
-            selection_drag: None,
             selection_scroll_origin_row_index: None,
             hovered_pane_id: None,
             placement_handle_pane_id: None,
@@ -553,7 +566,9 @@ impl Client {
 
     /// Apply the viewer state `render_snapshot` carries, in this order: the
     /// placement revisions, the active tab with its focused pane and tab list,
-    /// the lock mode, the tab-strip peek, and whether mouse-select is on. A
+    /// the lock mode, the tab-strip peek, whether mouse-select is on, and
+    /// whether the snapshot settles a sent floating pane move by naming it
+    /// ([`settle_floating_pane_move`](Self::settle_floating_pane_move)). A
     /// tab-strip peek made on another tab is dropped. Each other step can end
     /// pane placement mode or clear its target, as
     /// [`set_placement_revisions`](Self::set_placement_revisions),
@@ -594,6 +609,11 @@ impl Client {
         self.set_mouse_selection_enabled(
             render_snapshot.client_snapshot.is_mouse_selection_enabled,
         );
+        self.settle_floating_pane_move(
+            render_snapshot
+                .client_snapshot
+                .last_applied_floating_pane_move_command_id,
+        );
     }
 
     /// Copy every field [`apply_render_snapshot`](Self::apply_render_snapshot)
@@ -609,6 +629,7 @@ impl Client {
             focused_pane_id: self.focused_pane_id,
             visible_tab_ids: self.visible_tab_ids.clone(),
             placement_state: self.placement_state.clone(),
+            sent_floating_pane_move: self.sent_floating_pane_move,
         }
     }
 
@@ -624,6 +645,7 @@ impl Client {
             focused_pane_id,
             visible_tab_ids,
             placement_state,
+            sent_floating_pane_move,
         } = viewer_restore_point;
         self.lock_mode = lock_mode;
         self.pending_lock_command_id = pending_lock_command_id;
@@ -634,6 +656,7 @@ impl Client {
         self.focused_pane_id = focused_pane_id;
         self.visible_tab_ids = visible_tab_ids;
         self.placement_state = placement_state;
+        self.sent_floating_pane_move = sent_floating_pane_move;
     }
 
     /// Record the view carried by the newest painted frame.
@@ -770,10 +793,12 @@ impl Client {
     }
 
     /// Start a placement of `source_pane_id` that previews `source_tab_id`
-    /// with no target, drops any open key sequence, tab hover, and preview
-    /// read, and returns `(source_pane_id, source_tab_id)`. Returns `None`,
-    /// changing nothing, when placement mode is already on or a placement
-    /// waits for the session.
+    /// with no target, drops any open key sequence, tab hover, preview read,
+    /// and every gesture a held button drives
+    /// ([`end_held_mouse_gestures`](Self::end_held_mouse_gestures)), and
+    /// returns `(source_pane_id, source_tab_id)`. Returns `None`, changing
+    /// nothing, when placement mode is already on or a placement waits for the
+    /// session.
     fn open_placement_mode(
         &mut self,
         source_pane_id: PaneId,
@@ -792,7 +817,7 @@ impl Client {
             pending_placement_command: None,
         });
         self.placement_state.placement_mode_lifetime = placement_mode_lifetime;
-        self.placement_state.placement_drag = None;
+        self.end_held_mouse_gestures();
         self.placement_state.placement_tab_hover = None;
         self.pending_key_sequence = None;
         self.clear_placement_read();
@@ -1275,12 +1300,17 @@ impl Client {
         true
     }
 
-    /// Clear the pending placement confirmation that the session rejected, and
-    /// return `true`. Pane placement mode that lasts until Esc stays on and
-    /// reads a fresh preview; a mode that lasts until its drag ends closes.
-    /// Returns `false`, changing nothing, when `command_id` is not the pending
-    /// placement command.
+    /// Drop the command `command_id` names, which the session rejected, and
+    /// return `true`: a sent floating pane move
+    /// ([`reject_floating_pane_move`](Self::reject_floating_pane_move)), or
+    /// the pending placement confirmation. After a rejected confirmation, pane
+    /// placement mode that lasts until Esc stays on and reads a fresh preview,
+    /// and a mode that lasts until its drag ends closes. Returns `false`,
+    /// changing nothing, when `command_id` names neither.
     pub(crate) fn reject_placement_command(&mut self, command_id: CommandId) -> bool {
+        if self.reject_floating_pane_move(command_id) {
+            return true;
+        }
         if !self.is_pending_placement_command(command_id) {
             return false;
         }
@@ -1429,7 +1459,9 @@ impl Client {
     /// [`Delivery::HostWrite`], which wakes the thread that writes that
     /// client's connection, and a [`Delivery::SwitchTo`], which moves that
     /// client to another session. A [`Delivery::PlacementCommandRejected`]
-    /// clears the matching pending placement command.
+    /// clears the matching sent floating pane move, or else the matching
+    /// pending placement command. A [`Delivery::Snapshot`] also drops a sent
+    /// floating pane move.
     pub fn apply_events(&mut self) -> usize {
         let mut delivery_count = 0;
         while let Ok(delivery) = self.delivery_receiver.try_recv() {
@@ -1472,6 +1504,7 @@ impl Client {
                         dropped_event_count = lag_report.dropped_event_count,
                         "events were dropped; resuming from a fresh frame"
                     );
+                    self.forget_sent_floating_pane_move();
                     self.apply_render_snapshot(&render_snapshot);
                     self.clear_placement_read();
                 }

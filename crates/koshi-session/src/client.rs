@@ -82,9 +82,9 @@ pub enum FloatingPanePosition {
 /// The step is `cascade_index % (max_steps + 1)`, where `max_steps` is
 /// `min(right_margin / 2, bottom_margin)` and the margins count the cells
 /// right of and below the centered rectangle. The rectangle then moves left
-/// and up until it lies inside `client_viewport`; on an axis where `size` is
-/// larger than `client_viewport`, it starts at `0`. `position` itself is not
-/// changed.
+/// and up until it lies inside `client_viewport`
+/// ([`Rect::compute_moved_inside`]); on an axis where `size` is larger than
+/// `client_viewport`, it starts at `0`. `position` itself is not changed.
 ///
 /// A `48x13` pane on an `80x22` viewport centers at `(16, 4)`, and `max_steps`
 /// is `min(16 / 2, 5) = 5`: `cascade_index` `1` → `(18, 5)`, `6` → `(16, 4)`.
@@ -116,13 +116,7 @@ pub fn place_floating_pane(
             }
         }
     };
-    Rect {
-        origin: Point {
-            column: unclamped_top_left_cell.column.min(free_column_count),
-            row: unclamped_top_left_cell.row.min(free_row_count),
-        },
-        size,
-    }
+    Rect::from_origin_and_size(unclamped_top_left_cell, size).compute_moved_inside(client_viewport)
 }
 
 /// One attached client: a single terminal connected to a session, holding the
@@ -159,6 +153,12 @@ pub struct Client {
     /// resume file does not carry it.
     #[serde(skip)]
     last_applied_lock_command_id: Option<CommandId>,
+    /// The last floating pane move that this client's mouse sent and the
+    /// session ran, also when the move left the pane where it was. `None`
+    /// before the session runs one, and again after the session restarts: the
+    /// resume file does not carry it.
+    #[serde(skip)]
+    last_applied_floating_pane_move_command_id: Option<CommandId>,
     /// Whether this client grabs the mouse for text selection: while on, a drag
     /// highlights in koshi even over a program that asked for the mouse. Toggled
     /// by `core:mouse-select`; independent of [`lock_mode`](Self::lock_mode).
@@ -246,6 +246,7 @@ impl Client {
             focused_pane_id_by_tab_id: HashMap::new(),
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: None,
+            last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
             scroll_offset_by_pane_id: HashMap::new(),
             selection_by_pane_id: HashMap::new(),
@@ -504,6 +505,19 @@ impl Client {
     /// own connection sent and the session ran.
     pub fn set_last_applied_lock_command_id(&mut self, lock_command_id: CommandId) {
         self.last_applied_lock_command_id = Some(lock_command_id);
+    }
+
+    /// The last floating pane move that this client's mouse sent and the
+    /// session ran, or `None` before the session runs one.
+    #[must_use]
+    pub fn get_last_applied_floating_pane_move_command_id(&self) -> Option<CommandId> {
+        self.last_applied_floating_pane_move_command_id
+    }
+
+    /// Record `move_command_id` as the last floating pane move that this
+    /// client's mouse sent and the session ran.
+    pub fn set_last_applied_floating_pane_move_command_id(&mut self, move_command_id: CommandId) {
+        self.last_applied_floating_pane_move_command_id = Some(move_command_id);
     }
 
     /// Whether this client grabs the mouse for text selection.

@@ -436,7 +436,7 @@ fn push_pane_image_paints(
     pane_snapshot: &PaneSnapshot,
     content_area: RatatuiRect,
     clip_area: RatatuiRect,
-    covering_floating_panes: &[PlacedFloatingPane<'_>],
+    covering_floating_panes: &[PlacedFloatingPane],
     screen_area: RatatuiRect,
     image_paints: &mut Vec<ImagePaint>,
 ) {
@@ -502,7 +502,7 @@ fn push_pane_image_paints(
 pub(crate) fn compute_image_placeholder_rects(
     render_snapshot: &RenderSnapshot,
     committed_regions: &CommittedRegions,
-    placed_floating_panes: &[PlacedFloatingPane<'_>],
+    placed_floating_panes: &[PlacedFloatingPane],
     screen_area: RatatuiRect,
     image_mode: ImageRenderMode,
     available_image_keys: Option<&[ImagePlacementKey]>,
@@ -567,8 +567,8 @@ pub(crate) fn compute_image_placeholder_rects(
 /// `covering_floating_panes` are the floating panes drawn above it.
 pub(crate) fn compute_floating_pane_image_placeholder_rects(
     render_snapshot: &RenderSnapshot,
-    placed_floating_pane: &PlacedFloatingPane<'_>,
-    covering_floating_panes: &[PlacedFloatingPane<'_>],
+    placed_floating_pane: &PlacedFloatingPane,
+    covering_floating_panes: &[PlacedFloatingPane],
     screen_area: RatatuiRect,
     image_mode: ImageRenderMode,
     available_image_keys: Option<&[ImagePlacementKey]>,
@@ -632,7 +632,7 @@ fn should_show_image_placeholder(
     pane_id: PaneId,
     image_placement_snapshot: &ImagePlacementSnapshot,
     target_area: RatatuiRect,
-    covering_floating_panes: &[PlacedFloatingPane<'_>],
+    covering_floating_panes: &[PlacedFloatingPane],
     image_mode: ImageRenderMode,
     available_image_keys: Option<&[ImagePlacementKey]>,
 ) -> bool {
@@ -658,7 +658,7 @@ fn should_show_image_placeholder(
 /// in `covering_floating_panes`.
 fn is_covered_by_floating_pane(
     target_area: RatatuiRect,
-    covering_floating_panes: &[PlacedFloatingPane<'_>],
+    covering_floating_panes: &[PlacedFloatingPane],
 ) -> bool {
     covering_floating_panes.iter().any(|placed_floating_pane| {
         !placed_floating_pane

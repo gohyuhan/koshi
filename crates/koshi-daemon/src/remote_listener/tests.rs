@@ -1813,10 +1813,7 @@ mod bridge_round_trip {
                     .handle_runtime_event(runtime_event)
                     .is_break();
             }
-            session_server.resync_lagged();
-            if session_server.poll_render(Instant::now()) {
-                session_server.push_frames();
-            }
+            session_server.push_due_frames(Instant::now());
             if should_quit
                 || session_server.is_quit_requested()
                 || !session_server.has_active_panes()

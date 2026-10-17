@@ -122,14 +122,14 @@ fn build_attached_structure(session_id: SessionId) -> AttachedSessionStructureSn
 
 /// The attach answer a stand-in dispatcher sends: `client_id` in `session_id`,
 /// with the structure [`build_attached_structure`] gives, `deliveries` as the
-/// client's queue, `waiting_host_writes` as the bytes that wait for the
-/// client's terminal, `ending_notice`, the [`MINTED_CONNECTION_TOKEN`] resume
+/// client's queue, `writer_handoff` as the host writes and owed-frame mark
+/// beside that queue, `ending_notice`, the [`MINTED_CONNECTION_TOKEN`] resume
 /// token, and no pane area.
 fn build_attach_accepted(
     client_id: ClientId,
     session_id: SessionId,
     deliveries: Receiver<Delivery>,
-    waiting_host_writes: Arc<WaitingHostWrites>,
+    writer_handoff: Arc<WriterHandoff>,
     ending_notice: Arc<EndingNotice>,
 ) -> AttachAccepted {
     AttachAccepted {
@@ -137,7 +137,7 @@ fn build_attach_accepted(
         session_id,
         session_structure: build_attached_structure(session_id),
         deliveries,
-        waiting_host_writes,
+        writer_handoff,
         ending_notice,
         resume_token: ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN),
         pane_area: None,
@@ -207,6 +207,7 @@ fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> 
             focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: None,
+            last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
         },
     }
@@ -283,7 +284,7 @@ fn spawn_frame_dispatcher(
             client_id,
             session_id,
             delivery_receiver,
-            Arc::new(WaitingHostWrites::default()),
+            Arc::new(WriterHandoff::default()),
             Arc::new(EndingNotice::default()),
         );
     });
@@ -315,7 +316,7 @@ fn spawn_attaching_dispatcher(
                         client_id,
                         session_id,
                         delivery_receiver,
-                        Arc::new(WaitingHostWrites::default()),
+                        Arc::new(WriterHandoff::default()),
                         Arc::clone(&ending_notice),
                     )));
                 }
@@ -337,14 +338,14 @@ fn spawn_attaching_dispatcher(
 }
 
 /// A stand-in dispatcher that answers the first attach with
-/// `delivery_receiver`, `waiting_host_writes` and `ending_notice`, and drops
+/// `delivery_receiver`, `writer_handoff` and `ending_notice`, and drops
 /// everything else it drains. Exits when every inbox sender is gone.
 fn spawn_ending_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
     client_id: ClientId,
     session_id: SessionId,
     delivery_receiver: Receiver<Delivery>,
-    waiting_host_writes: Arc<WaitingHostWrites>,
+    writer_handoff: Arc<WriterHandoff>,
     ending_notice: Arc<EndingNotice>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
@@ -353,7 +354,7 @@ fn spawn_ending_dispatcher(
             client_id,
             session_id,
             delivery_receiver,
-            waiting_host_writes,
+            writer_handoff,
             ending_notice,
         );
     })
@@ -361,14 +362,14 @@ fn spawn_ending_dispatcher(
 
 /// Drain `inbox_receiver` until every inbox sender is gone. The first attach
 /// is answered as `client_id` in `session_id`, streaming `delivery_receiver`
-/// and `waiting_host_writes` under `ending_notice`. Every attach after it and
+/// and `writer_handoff` under `ending_notice`. Every attach after it and
 /// every other event is dropped.
 fn answer_first_attach(
     inbox_receiver: &Receiver<RuntimeEvent>,
     client_id: ClientId,
     session_id: SessionId,
     delivery_receiver: Receiver<Delivery>,
-    waiting_host_writes: Arc<WaitingHostWrites>,
+    writer_handoff: Arc<WriterHandoff>,
     ending_notice: Arc<EndingNotice>,
 ) {
     let mut unanswered_delivery_receiver = Some(delivery_receiver);
@@ -386,7 +387,7 @@ fn answer_first_attach(
             client_id,
             session_id,
             delivery_receiver,
-            Arc::clone(&waiting_host_writes),
+            Arc::clone(&writer_handoff),
             Arc::clone(&ending_notice),
         )));
     }
@@ -415,13 +416,13 @@ fn wait_until(timeout_duration: Duration, mut is_done: impl FnMut() -> bool) -> 
 }
 
 /// Serve a socket whose stand-in dispatcher answers the first attach with
-/// `delivery_receiver` and `waiting_host_writes` under `ending_notice`, attach
+/// `delivery_receiver` and `writer_handoff` under `ending_notice`, attach
 /// one client, and return the first `frame_count` frames that client reads, in
 /// order. Asserts that the client's writing thread ends after those frames.
 fn read_frames_of_ending_session(
     directory_tag: &str,
     delivery_receiver: Receiver<Delivery>,
-    waiting_host_writes: Arc<WaitingHostWrites>,
+    writer_handoff: Arc<WriterHandoff>,
     ending_notice: &Arc<EndingNotice>,
     frame_count: usize,
 ) -> Vec<SessionEvent> {
@@ -434,7 +435,7 @@ fn read_frames_of_ending_session(
         client_id,
         session_id,
         delivery_receiver,
-        waiting_host_writes,
+        writer_handoff,
         Arc::clone(ending_notice),
     );
     let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
@@ -484,7 +485,7 @@ fn a_client_whose_queue_is_full_is_still_told_the_session_is_ending() {
         ),
     ] {
         let mut event_bus = EventBus::new();
-        let (_, delivery_receiver, waiting_host_writes) = event_bus.subscribe();
+        let (_, delivery_receiver, writer_handoff) = event_bus.subscribe();
         let tab_id = TabId::new();
         for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
             event_bus.publish(&Event::TabCreated(TabCreated { tab_id }));
@@ -497,7 +498,7 @@ fn a_client_whose_queue_is_full_is_still_told_the_session_is_ending() {
             read_frames_of_ending_session(
                 directory_tag,
                 delivery_receiver,
-                waiting_host_writes,
+                writer_handoff,
                 &ending_notice,
                 1
             ),
@@ -517,7 +518,7 @@ fn a_client_the_server_detached_reads_its_own_goodbye_when_the_session_ends() {
     use crate::runtime::bus::EventBus;
 
     let mut event_bus = EventBus::new();
-    let (subscriber_id, delivery_receiver, waiting_host_writes) = event_bus.subscribe();
+    let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
     event_bus.publish(&Event::TabCreated(TabCreated {
         tab_id: TabId::new(),
     }));
@@ -533,7 +534,7 @@ fn a_client_the_server_detached_reads_its_own_goodbye_when_the_session_ends() {
         read_frames_of_ending_session(
             "detach-then-quit",
             delivery_receiver,
-            waiting_host_writes,
+            writer_handoff,
             &ending_notice,
             1
         ),
@@ -550,7 +551,7 @@ fn a_client_reads_the_quit_frame_alone_when_the_events_that_ended_the_session_ar
     use crate::runtime::bus::EventBus;
 
     let mut event_bus = EventBus::new();
-    let (_, delivery_receiver, waiting_host_writes) = event_bus.subscribe();
+    let (_, delivery_receiver, writer_handoff) = event_bus.subscribe();
     event_bus.publish(&Event::PaneProcessExited(PaneProcessExited {
         pane_id: PaneId::new(),
         exit_code: Some(0),
@@ -567,7 +568,7 @@ fn a_client_reads_the_quit_frame_alone_when_the_events_that_ended_the_session_ar
         read_frames_of_ending_session(
             "quit-behind-queue",
             delivery_receiver,
-            waiting_host_writes,
+            writer_handoff,
             &ending_notice,
             1
         ),
@@ -597,7 +598,7 @@ fn host_writes_queued_before_the_session_ends_reach_the_client_ahead_of_its_last
         ),
     ] {
         let mut event_bus = EventBus::new();
-        let (subscriber_id, delivery_receiver, waiting_host_writes) = event_bus.subscribe();
+        let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
         event_bus.publish(&Event::PaneProcessExited(PaneProcessExited {
             pane_id: PaneId::new(),
             exit_code: Some(0),
@@ -616,7 +617,7 @@ fn host_writes_queued_before_the_session_ends_reach_the_client_ahead_of_its_last
             read_frames_of_ending_session(
                 directory_tag,
                 delivery_receiver,
-                waiting_host_writes,
+                writer_handoff,
                 &ending_notice,
                 2
             ),
@@ -638,7 +639,7 @@ fn host_writes_that_wait_reach_the_client_ahead_of_the_deliveries_queued_after_t
 
     let next_session_id = SessionId::new();
     let mut event_bus = EventBus::new();
-    let (subscriber_id, delivery_receiver, waiting_host_writes) = event_bus.subscribe();
+    let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
     assert!(event_bus.queue_host_write(subscriber_id, &HostWrite::from_clipboard_copy("c", b"one")));
     assert!(event_bus.queue_host_write(subscriber_id, &HostWrite::from_clipboard_copy("p", b"two")));
     assert!(event_bus.try_send_switch(subscriber_id, next_session_id));
@@ -649,7 +650,7 @@ fn host_writes_that_wait_reach_the_client_ahead_of_the_deliveries_queued_after_t
         read_frames_of_ending_session(
             "host-writes-before-switch",
             delivery_receiver,
-            waiting_host_writes,
+            writer_handoff,
             &ending_notice,
             3
         ),
@@ -676,7 +677,7 @@ fn a_host_write_whose_wake_found_the_queue_full_still_reaches_the_client() {
 
     let tab_id = TabId::new();
     let mut event_bus = EventBus::new();
-    let (subscriber_id, delivery_receiver, waiting_host_writes) = event_bus.subscribe();
+    let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
     for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
         event_bus.publish(&Event::TabCreated(TabCreated { tab_id }));
     }
@@ -687,7 +688,7 @@ fn a_host_write_whose_wake_found_the_queue_full_still_reaches_the_client() {
     let read_frames = read_frames_of_ending_session(
         "host-write-full-queue",
         delivery_receiver,
-        waiting_host_writes,
+        writer_handoff,
         &ending_notice,
         SUBSCRIBER_QUEUE_CAPACITY + 2,
     );
@@ -704,6 +705,97 @@ fn a_host_write_whose_wake_found_the_queue_full_still_reaches_the_client() {
 }
 
 #[test]
+fn a_dropped_frame_wakes_the_dispatcher_for_its_client_after_the_next_read() {
+    // The queue holds its full 1024 deliveries, so the frame is dropped and the
+    // writer handoff owes a frame. The writing thread takes that mark after
+    // the first delivery it reads, before it writes that delivery.
+    use koshi_core::event::{Event, TabCreated};
+
+    use crate::runtime::bus::{EventBus, SUBSCRIBER_QUEUE_CAPACITY};
+
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let tab_id = TabId::new();
+    let mut event_bus = EventBus::new();
+    let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
+    for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
+        event_bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+    }
+    assert!(!event_bus.try_send_frame(
+        subscriber_id,
+        Box::new(build_alternating_grid_snapshot(client_id, 2, 2))
+    ));
+    let ending_notice = Arc::clone(event_bus.get_ending_notice());
+    let runtime_directory = build_test_runtime_directory("owed-frame-wake");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (forwarded_event_sender, forwarded_event_receiver) = mpsc::channel();
+    let dispatcher_thread = std::thread::spawn(move || {
+        let mut unanswered_stream = Some((delivery_receiver, writer_handoff));
+        while let Ok(runtime_event) = inbox_receiver.recv() {
+            match runtime_event {
+                RuntimeEvent::IpcAttach {
+                    response_sender, ..
+                } => {
+                    if let Some((delivery_receiver, writer_handoff)) = unanswered_stream.take() {
+                        let _ = response_sender.send(Some(build_attach_accepted(
+                            client_id,
+                            session_id,
+                            delivery_receiver,
+                            writer_handoff,
+                            Arc::clone(&ending_notice),
+                        )));
+                    }
+                }
+                forwarded_runtime_event => {
+                    let _ = forwarded_event_sender.send(forwarded_runtime_event);
+                }
+            }
+        }
+    });
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+        .expect("start serving");
+    let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
+
+    assert_eq!(
+        connection.recv::<SessionEvent>().expect("the first event"),
+        SessionEvent::TabCreated { tab_id }
+    );
+    let RuntimeEvent::QueueRoomFreed {
+        client_id: woken_client_id,
+    } = forwarded_event_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the writing thread wakes the dispatcher")
+    else {
+        panic!("the first forwarded event is the wake");
+    };
+    assert_eq!(woken_client_id, client_id);
+    for _ in 1..SUBSCRIBER_QUEUE_CAPACITY {
+        assert_eq!(
+            connection.recv::<SessionEvent>().expect("the next event"),
+            SessionEvent::TabCreated { tab_id }
+        );
+    }
+    event_bus.unsubscribe(subscriber_id);
+    assert_eq!(
+        connection.recv::<SessionEvent>().expect("the goodbye"),
+        SessionEvent::Detached
+    );
+
+    drop(connection);
+    ipc_server.shutdown();
+    dispatcher_thread.join().expect("dispatcher exits");
+    delete_test_directory(&runtime_directory);
+    assert_eq!(
+        forwarded_event_receiver
+            .try_iter()
+            .filter(|runtime_event| matches!(runtime_event, RuntimeEvent::QueueRoomFreed { .. }))
+            .count(),
+        0,
+        "the writing thread took the mark once"
+    );
+}
+
+#[test]
 fn a_host_write_longer_than_one_frame_reaches_the_client_as_parts_then_its_last_run() {
     use koshi_ipc::event::MAX_HOST_WRITE_BYTE_COUNT;
 
@@ -711,7 +803,7 @@ fn a_host_write_longer_than_one_frame_reaches_the_client_as_parts_then_its_last_
     use crate::runtime::clipboard::encode_osc52_copy;
 
     let mut event_bus = EventBus::new();
-    let (subscriber_id, delivery_receiver, waiting_host_writes) = event_bus.subscribe();
+    let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
     let copied_bytes = vec![b'a'; MAX_HOST_WRITE_BYTE_COUNT];
     let host_write_bytes = encode_osc52_copy("c", &copied_bytes);
     assert_eq!(host_write_bytes.len(), 16_777_180);
@@ -726,7 +818,7 @@ fn a_host_write_longer_than_one_frame_reaches_the_client_as_parts_then_its_last_
         read_frames_of_ending_session(
             "host-write-parts",
             delivery_receiver,
-            waiting_host_writes,
+            writer_handoff,
             &ending_notice,
             3
         ),
@@ -749,7 +841,7 @@ fn a_host_write_after_the_writing_thread_ended_with_its_wake_unread_is_not_taken
     let client_id = ClientId::new();
     let session_id = SessionId::new();
     let mut event_bus = EventBus::new();
-    let (subscriber_id, delivery_receiver, waiting_host_writes) = event_bus.subscribe();
+    let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
     // One pane of 100 rows by 200 columns of alternating `a` and `b`: the
     // painted frame is inside the frame cap, and larger than a connection
     // holds while its client reads nothing.
@@ -774,7 +866,7 @@ fn a_host_write_after_the_writing_thread_ended_with_its_wake_unread_is_not_taken
         client_id,
         session_id,
         delivery_receiver,
-        waiting_host_writes,
+        writer_handoff,
         Arc::clone(&ending_notice),
     );
     let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
@@ -965,7 +1057,7 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
             client_id,
             session_id,
             delivery_receiver,
-            Arc::new(WaitingHostWrites::default()),
+            Arc::new(WriterHandoff::default()),
             Arc::new(EndingNotice::default()),
         )))
         .expect("the dispatcher receives the accepted attach");
@@ -4474,7 +4566,7 @@ fn spawn_origin_reporting_dispatcher(
                         client_id,
                         session_id,
                         delivery_receiver,
-                        Arc::new(WaitingHostWrites::default()),
+                        Arc::new(WriterHandoff::default()),
                         Arc::clone(&ending_notice),
                     )));
                 }
@@ -5009,7 +5101,7 @@ fn spawn_forwarding_frame_dispatcher(
                         client_id,
                         session_id,
                         delivery_receiver,
-                        Arc::new(WaitingHostWrites::default()),
+                        Arc::new(WriterHandoff::default()),
                         Arc::new(EndingNotice::default()),
                     )));
                 }
@@ -5947,7 +6039,7 @@ fn an_attach_whose_answer_cannot_be_written_reports_its_client_returning_only_wh
                 client_id,
                 session_id,
                 delivery_receiver,
-                Arc::new(WaitingHostWrites::default()),
+                Arc::new(WriterHandoff::default()),
                 Arc::new(EndingNotice::default()),
             )))
             .expect("the session waits for the answer");
@@ -6060,4 +6152,46 @@ fn a_failed_write_detaches_a_client_whose_connection_stays_open() {
     ipc_server.shutdown();
     dispatcher_thread.join().expect("dispatcher exits");
     delete_test_directory(&runtime_directory);
+}
+
+#[test]
+fn a_resynced_client_reads_the_resync_then_the_frame_it_resumes_from() {
+    // The queue holds its full 1024 deliveries, so one more event pauses the
+    // subscriber. The backlog is read, and the resync queues its snapshot.
+    use koshi_core::event::{Event, TabCreated};
+
+    use crate::runtime::bus::{EventBus, SUBSCRIBER_QUEUE_CAPACITY};
+
+    let tab_id = TabId::new();
+    let mut event_bus = EventBus::new();
+    let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
+    for _ in 0..=SUBSCRIBER_QUEUE_CAPACITY {
+        event_bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+    }
+    assert_eq!(
+        delivery_receiver.try_iter().count(),
+        SUBSCRIBER_QUEUE_CAPACITY
+    );
+    let render_snapshot = build_alternating_grid_snapshot(ClientId::new(), 2, 2);
+    assert!(event_bus.try_resync(subscriber_id, Box::new(render_snapshot.clone())));
+    event_bus.unsubscribe(subscriber_id);
+    let ending_notice = Arc::clone(event_bus.get_ending_notice());
+
+    assert_eq!(
+        read_frames_of_ending_session(
+            "resync-then-frame",
+            delivery_receiver,
+            writer_handoff,
+            &ending_notice,
+            2
+        ),
+        vec![
+            SessionEvent::Resync {
+                dropped_event_count: 1
+            },
+            SessionEvent::Painted {
+                frame: Box::new(build_wire_frame(&render_snapshot)),
+            },
+        ]
+    );
 }

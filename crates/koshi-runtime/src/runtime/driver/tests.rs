@@ -1,6 +1,6 @@
-//! Tests for the loop-facing driver surface: render-wakeup timing,
-//! poll delegation to the scheduler, the image animations each poll
-//! advances, the live-pane check, the routing of an
+//! Tests for the loop-facing driver surface: render-wakeup timing, poll
+//! delegation to the scheduler, a freed queue slot that makes no render due, the
+//! image animations each poll advances, the live-pane check, the routing of an
 //! attached client's key press and pasted text, the inbox events that are
 //! dropped or answered on their reply channel, and the abrupt group-kill the
 //! panic path takes.
@@ -427,6 +427,20 @@ fn a_pending_invalidation_is_due_at_once_then_clears_after_one_render() {
     assert!(server.poll_render(current_time));
     assert!(!server.poll_render(current_time));
     assert_eq!(server.compute_next_render_wakeup(current_time), None);
+}
+
+#[test]
+fn a_freed_queue_slot_for_a_client_no_subscriber_views_makes_no_render_due() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let current_time = Instant::now();
+
+    let control_flow = server.handle_runtime_event(RuntimeEvent::QueueRoomFreed {
+        client_id: ClientId::new(),
+    });
+
+    assert_eq!(control_flow, ControlFlow::Continue(()));
+    assert_eq!(server.compute_next_render_wakeup(current_time), None);
+    assert!(!server.poll_render(current_time));
 }
 
 #[test]

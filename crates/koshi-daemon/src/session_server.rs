@@ -1719,11 +1719,12 @@ fn restore_session_serving(mut session_server: Server, pty_owner: &Arc<PtyOwner>
 ///    the kills of panes that left the session
 ///    ([`Server::wait_for_pane_kills`]): every way out of the swap after this
 ///    point holds no kill.
-/// 4. Carry the state out and wait for every pane's writer again: no byte the
-///    session took for a child — a typed key, a paste, a reply to a device
-///    query — is still queued in a writer thread. Then write the carried state,
-///    withdraw the control socket, and replace the image. The new image binds
-///    the socket again.
+/// 4. Carry the state out, which first writes a release for every mouse
+///    button a client still holds ([`Server::carry_out`]), and wait for every
+///    pane's writer again: no byte the session took for a child — a typed key,
+///    a paste, a reply to a device query, a mouse release — is still queued in
+///    a writer thread. Then write the carried state, withdraw the control
+///    socket, and replace the image. The new image binds the socket again.
 ///
 /// A session that keeps serving on either check in step 4 — a pane's writer
 /// that will not settle, or carried state that cannot be written — keeps the
@@ -2297,13 +2298,7 @@ fn run_session_serve_loop(session_server: &mut Server) -> ServeOutcome {
                 .handle_runtime_event(runtime_event)
                 .is_break();
         }
-        // A subscriber that lost a critical event is paused until it is handed
-        // a fresh snapshot. The snapshot is queued now, applied in this pass,
-        // and the frame pushed below is built from it.
-        session_server.resync_lagged();
-        if session_server.poll_render(Instant::now()) {
-            session_server.push_frames();
-        }
+        session_server.push_due_frames(Instant::now());
         if (should_quit || session_server.is_quit_requested())
             && !session_server.is_awaiting_client()
         {

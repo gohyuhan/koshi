@@ -14,10 +14,15 @@
 //! - The **tabline** (top row) and the **statusline** (bottom row) are koshi-owned
 //!   chrome painted last, over whatever lies beneath, so a click on those rows
 //!   is chrome, not the pane under it.
-//! - The rest is the **pane area**: the solved layout centered in the pane
-//!   rectangle left by the committed region solve, with a dim letterbox margin
-//!   around it when the client is larger than the size the layout was solved for.
-//!   A click in that margin hits nothing.
+//! - **Floating panes** come next, the top of this viewer's draw order first.
+//!   They live in cells of the pane rectangle left by the committed region
+//!   solve, with no letterbox offset, so a float drawn in the letterbox margin
+//!   is hit there. Inside a float, its content, its border ring, its titlebar
+//!   row and the controls on it are separate regions.
+//! - The rest is the **pane area**: the solved layout centered in that pane
+//!   rectangle, with a dim letterbox margin around it when the client is larger
+//!   than the size the layout was solved for. A click in that margin hits
+//!   nothing.
 //! - Inside the pane area, a pane's one-cell **border** ring is distinct from its
 //!   **content**, and a collapsed stack member's title strip is its own region.
 //!   A cell inside the pane area that no pane box covers hits nothing.
@@ -26,10 +31,11 @@ use koshi_core::geometry::{Direction, Point, Rect};
 use koshi_core::ids::{PaneId, TabId};
 use ratatui::layout::Rect as RatatuiRect;
 
+use crate::floating_pane_chrome::compute_floating_pane_titlebar;
 use crate::render::{
     compute_content_rect, compute_pane_area, find_region_area, solve_tabline_layout,
 };
-use crate::snapshot::FrameLayout;
+use crate::snapshot::{FloatingPaneSlot, FrameLayout};
 
 /// The UI region under a client-local screen cell, as classified by
 /// [`resolve_hit_region`].
@@ -51,9 +57,31 @@ pub enum HitRegion {
         /// side ([`Left`](Direction::Left)/[`Right`](Direction::Right)).
         side: Direction,
     },
-    /// The painted placement handle in a pane's top border.
+    /// The painted placement handle in a tiled pane's top border, or the grab
+    /// handle `⣿⣿` in a floating pane's titlebar.
     PlacementHandle {
         /// The pane whose handle was hit.
+        pane_id: PaneId,
+    },
+    /// A floating pane's titlebar or separator row, on a cell that holds no
+    /// control.
+    PaneTitlebar {
+        /// The floating pane whose titlebar was hit.
+        pane_id: PaneId,
+    },
+    /// A floating pane's pin toggle `[ ]` or `[⚪]`.
+    PanePinToggle {
+        /// The floating pane whose pin toggle was hit.
+        pane_id: PaneId,
+    },
+    /// A floating pane's minimize button `–`.
+    PaneMinimizeButton {
+        /// The floating pane whose minimize button was hit.
+        pane_id: PaneId,
+    },
+    /// A floating pane's close button `✕`.
+    PaneCloseButton {
+        /// The floating pane whose close button was hit.
         pane_id: PaneId,
     },
     /// A collapsed stack member's title strip; clicking it activates that pane.
@@ -67,17 +95,11 @@ pub enum HitRegion {
         tab_id: TabId,
     },
     /// The left scroll arrow, shown when tabs are hidden off the left of a
-    /// scrolled tab strip; clicking it peeks toward the start.
-    TablineScrollLeft {
-        /// The first-visible tab index the click scrolls the strip to.
-        target_tab_index: usize,
-    },
+    /// scrolled tab strip; clicking it steps the strip one tab toward the start.
+    TablineScrollLeft,
     /// The right scroll arrow, shown when tabs are hidden off the right of a
-    /// scrolled tab strip; clicking it peeks toward the end.
-    TablineScrollRight {
-        /// The first-visible tab index the click scrolls the strip to.
-        target_tab_index: usize,
-    },
+    /// scrolled tab strip; clicking it steps the strip one tab toward the end.
+    TablineScrollRight,
     /// The tabline row, off any tab ribbon or arrow (session name, gap, or mode
     /// tag).
     Tabline,
@@ -92,8 +114,9 @@ pub enum HitRegion {
 ///
 /// Reads the frame in the renderer's own paint order so chrome wins over the
 /// pane content beneath it: the committed tabline and statusline regions are
-/// tested before the pane area, and the pane area is centered inside the
-/// committed pane rectangle with a letterbox margin that hits nothing.
+/// tested first, then this viewer's drawn floating panes from the top of the
+/// draw order down, then the tiled layer. The tiled layout is centered inside
+/// the committed pane rectangle with a letterbox margin that hits nothing.
 #[must_use]
 pub fn resolve_hit_region(frame_layout: FrameLayout<'_>, screen_point: Point) -> HitRegion {
     let viewport_area = compute_viewport_area(frame_layout);
@@ -120,12 +143,22 @@ pub fn resolve_hit_region(frame_layout: FrameLayout<'_>, screen_point: Point) ->
         }
     }
 
-    // The pane area is the effective-sized layout centered in the rectangle
+    // Floating panes draw over the tiled layer and its letterbox margin.
+    let frame_pane_area = compute_frame_pane_area(frame_layout, viewport_area);
+    if let Some(pane_area_point) = compute_pane_area_point(frame_pane_area, screen_point) {
+        for floating_pane_slot in frame_layout.list_drawn_floating_pane_slots().rev() {
+            if floating_pane_slot
+                .outer_rect
+                .is_point_inside(pane_area_point)
+            {
+                return classify_floating_pane_region(floating_pane_slot, pane_area_point);
+            }
+        }
+    }
+
+    // The tiled layout is the effective-sized layout centered in the rectangle
     // left by the committed regions. A cell outside it is letterbox margin.
-    let effective_layout_rect = compute_content_rect(
-        compute_frame_pane_area(frame_layout, viewport_area),
-        active_tab_snapshot.tab_size,
-    );
+    let effective_layout_rect = compute_content_rect(frame_pane_area, active_tab_snapshot.tab_size);
     if !is_screen_point_inside(effective_layout_rect, screen_point) {
         return HitRegion::None;
     }
@@ -177,6 +210,68 @@ pub fn resolve_hit_region(frame_layout: FrameLayout<'_>, screen_point: Point) ->
     HitRegion::None
 }
 
+/// Classify `pane_area_point`, a cell inside `floating_pane_slot`'s outer rect
+/// counted from the pane-area origin. The content wins, then the titlebar parts
+/// that [`compute_floating_pane_titlebar`] places, then the border ring. Every
+/// other cell is [`PaneTitlebar`](HitRegion::PaneTitlebar): the titlebar cells
+/// with no control and the separator row.
+///
+/// A `48x12` float at `(0, 0)`: `(2, 1)` is its grab handle, `(36, 1)` its pin
+/// toggle, `(41, 1)` minimize, `(44, 1)` close, `(5, 1)` and `(5, 2)` its
+/// titlebar, `(0, 1)` its left border, and `(5, 3)` its content.
+fn classify_floating_pane_region(
+    floating_pane_slot: FloatingPaneSlot,
+    pane_area_point: Point,
+) -> HitRegion {
+    let pane_id = floating_pane_slot.pane_id;
+    if floating_pane_slot
+        .content_rect
+        .is_point_inside(pane_area_point)
+    {
+        return HitRegion::PaneContent { pane_id };
+    }
+    let outer_rect = floating_pane_slot.outer_rect;
+    let titlebar = compute_floating_pane_titlebar(outer_rect);
+    let is_on_titlebar_part = |part_rect: Option<Rect>| {
+        part_rect.is_some_and(|part_rect| part_rect.is_point_inside(pane_area_point))
+    };
+    if is_on_titlebar_part(titlebar.grab_handle_rect) {
+        return HitRegion::PlacementHandle { pane_id };
+    }
+    if is_on_titlebar_part(titlebar.pin_toggle_rect) {
+        return HitRegion::PanePinToggle { pane_id };
+    }
+    if is_on_titlebar_part(titlebar.minimize_button_rect) {
+        return HitRegion::PaneMinimizeButton { pane_id };
+    }
+    if is_on_titlebar_part(titlebar.close_button_rect) {
+        return HitRegion::PaneCloseButton { pane_id };
+    }
+    let right_column = outer_rect.origin.column + outer_rect.size.column_count - 1;
+    let bottom_row = outer_rect.origin.row + outer_rect.size.row_count - 1;
+    let is_on_border_ring = pane_area_point.column == outer_rect.origin.column
+        || pane_area_point.column == right_column
+        || pane_area_point.row == outer_rect.origin.row
+        || pane_area_point.row == bottom_row;
+    if is_on_border_ring {
+        return HitRegion::PaneBorder {
+            pane_id,
+            side: resolve_border_side(outer_rect, pane_area_point),
+        };
+    }
+    HitRegion::PaneTitlebar { pane_id }
+}
+
+/// `screen_point` counted from the top-left cell of `frame_pane_area`, or
+/// `None` when it lies left of or above that cell. A pane area at `(0, 1)`
+/// turns screen `(30, 14)` into `(30, 13)`, and screen `(30, 0)` into `None`.
+fn compute_pane_area_point(frame_pane_area: RatatuiRect, screen_point: Point) -> Option<Point> {
+    Some(Point {
+        column: screen_point.column.checked_sub(frame_pane_area.x)?,
+        row: screen_point.row.checked_sub(frame_pane_area.y)?,
+    })
+}
+
 /// The number of cells painted for one placement handle.
 pub const PLACEMENT_HANDLE_COLUMN_COUNT: u16 = 3;
 
@@ -215,19 +310,11 @@ fn classify_tabline_region(
     screen_column: u16,
 ) -> HitRegion {
     let tabline_geometry = solve_tabline_layout(frame_layout.get_tabline_inputs(), tabline_rect);
-    if let Some(left_scroll_arrow) = tabline_geometry.left_scroll_arrow {
-        if screen_column == left_scroll_arrow.start_column {
-            return HitRegion::TablineScrollLeft {
-                target_tab_index: left_scroll_arrow.target_first_visible_tab_index,
-            };
-        }
+    if tabline_geometry.left_scroll_arrow_column == Some(screen_column) {
+        return HitRegion::TablineScrollLeft;
     }
-    if let Some(right_scroll_arrow) = tabline_geometry.right_scroll_arrow {
-        if screen_column == right_scroll_arrow.start_column {
-            return HitRegion::TablineScrollRight {
-                target_tab_index: right_scroll_arrow.target_first_visible_tab_index,
-            };
-        }
+    if tabline_geometry.right_scroll_arrow_column == Some(screen_column) {
+        return HitRegion::TablineScrollRight;
     }
     for visible_tab_span in tabline_geometry.visible_tab_spans {
         if screen_column >= visible_tab_span.start_column
@@ -247,8 +334,10 @@ fn classify_tabline_region(
 /// when the pane is not drawn this frame.
 ///
 /// This is the region a program's own grid maps onto — its cells inside the
-/// border. It reads the frame the same way [`resolve_hit_region`] does: the layout
-/// centered in the committed pane rectangle, with a letterbox margin around it.
+/// border. It reads the frame the same way [`resolve_hit_region`] does: a
+/// floating pane this viewer draws sits at its slot's content rect moved by the
+/// pane-area origin, and a tiled pane in the layout centered in the committed
+/// pane rectangle, with a letterbox margin around it.
 #[must_use]
 pub fn find_pane_content_rect(frame_layout: FrameLayout<'_>, pane_id: PaneId) -> Option<Rect> {
     let viewport_area = compute_viewport_area(frame_layout);
@@ -259,10 +348,18 @@ pub fn find_pane_content_rect(frame_layout: FrameLayout<'_>, pane_id: PaneId) ->
     if active_tab_snapshot.is_every_pane_suppressed {
         return None;
     }
-    let effective_layout_rect = compute_content_rect(
-        compute_frame_pane_area(frame_layout, viewport_area),
-        active_tab_snapshot.tab_size,
-    );
+    let frame_pane_area = compute_frame_pane_area(frame_layout, viewport_area);
+    if let Some(floating_pane_slot) = frame_layout.find_drawn_floating_pane_slot(pane_id) {
+        let content_rect = floating_pane_slot.content_rect;
+        return Some(Rect::from_origin_and_size(
+            Point {
+                column: frame_pane_area.x.saturating_add(content_rect.origin.column),
+                row: frame_pane_area.y.saturating_add(content_rect.origin.row),
+            },
+            content_rect.size,
+        ));
+    }
+    let effective_layout_rect = compute_content_rect(frame_pane_area, active_tab_snapshot.tab_size);
     let pane_slot = active_tab_snapshot
         .pane_slots
         .iter()
@@ -277,31 +374,10 @@ pub fn find_pane_content_rect(frame_layout: FrameLayout<'_>, pane_id: PaneId) ->
     ))
 }
 
-/// The 1-based cell inside `pane_id`'s content that client-local screen cell
-/// `screen_point` falls on, or [`None`] when `screen_point` is outside that
-/// pane's content or the pane is not drawn this frame.
-///
-/// A mouse report addresses the program's own grid, whose top-left content cell
-/// is `(1, 1)`, so the caller forwards these coordinates straight into the pane.
-#[must_use]
-pub fn compute_pane_local_cell(
-    frame_layout: FrameLayout<'_>,
-    pane_id: PaneId,
-    screen_point: Point,
-) -> Option<(u16, u16)> {
-    let content_rect = find_pane_content_rect(frame_layout, pane_id)?;
-    if !content_rect.is_point_inside(screen_point) {
-        return None;
-    }
-    Some((
-        screen_point.column - content_rect.origin.column + 1,
-        screen_point.row - content_rect.origin.row + 1,
-    ))
-}
-
 /// The 0-based cell inside `pane_id`'s content that client-local screen cell
-/// `screen_point` falls on, with a cell outside that content pulled to the
-/// nearest edge. [`None`] when the pane is not drawn this frame.
+/// `screen_point` falls on, `(0, 0)` at the content's top-left cell, with a
+/// cell outside that content pulled to the nearest edge. [`None`] when the
+/// pane is not drawn this frame.
 ///
 /// On a pane whose content spans columns 10–49, `screen_point.column = 70`
 /// gives column `39`, the pane's last, and `screen_point.column = 3` gives
@@ -311,18 +387,18 @@ pub fn compute_clamped_pane_cell(
     frame_layout: FrameLayout<'_>,
     pane_id: PaneId,
     screen_point: Point,
-) -> Option<(u16, u16)> {
+) -> Option<Point> {
     let content_rect = find_pane_content_rect(frame_layout, pane_id)?;
     let right_column =
         content_rect.origin.column + content_rect.size.column_count.saturating_sub(1);
     let bottom_row = content_rect.origin.row + content_rect.size.row_count.saturating_sub(1);
-    Some((
-        screen_point
+    Some(Point {
+        column: screen_point
             .column
             .clamp(content_rect.origin.column, right_column)
             - content_rect.origin.column,
-        screen_point.row.clamp(content_rect.origin.row, bottom_row) - content_rect.origin.row,
-    ))
+        row: screen_point.row.clamp(content_rect.origin.row, bottom_row) - content_rect.origin.row,
+    })
 }
 
 /// The metadata index of the first tab currently visible in `frame_layout`'s committed
@@ -355,7 +431,7 @@ pub fn find_first_visible_tab_index(frame_layout: FrameLayout<'_>) -> Option<usi
 
 /// Return the pane rectangle from the committed solve, or the whole area for
 /// the server-side layout view that has no client commit.
-fn compute_frame_pane_area(
+pub(crate) fn compute_frame_pane_area(
     frame_layout: FrameLayout<'_>,
     viewport_area: RatatuiRect,
 ) -> RatatuiRect {
@@ -369,7 +445,7 @@ fn compute_frame_pane_area(
 /// The viewing client's whole viewport as a screen rect, origin `(0, 0)`. A
 /// client 80 cells across and 24 rows tall gives `x: 0, y: 0, width: 80,
 /// height: 24`.
-fn compute_viewport_area(frame_layout: FrameLayout<'_>) -> RatatuiRect {
+pub(crate) fn compute_viewport_area(frame_layout: FrameLayout<'_>) -> RatatuiRect {
     let viewport_size = frame_layout.committed_regions.map_or(
         frame_layout.client_snapshot.viewport_size,
         |committed_regions| committed_regions.viewport_size,

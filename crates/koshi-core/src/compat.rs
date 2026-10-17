@@ -72,7 +72,9 @@ pub struct Surface {
 ///   state. The field is required, and 4 has no such field.
 /// - A frame's client carries `last_applied_lock_command_id`: the last lock
 ///   command that the client's own connection sent and the session ran, or
-///   `null`. 4 has no such field.
+///   `null`. It also carries `last_applied_floating_pane_move_command_id`: the
+///   last floating pane move that the client's mouse sent and the session
+///   ran, or `null`. 4 has neither field.
 /// - The `MoveFloatingPane`, `SetPanePinned`, `SetPaneMinimized` and
 ///   `SetAllFloatingPanesMinimized` commands, the `NextFloatingPane` and
 ///   `PreviousFloatingPane` focus targets, and the `FloatingPaneMoved`,
@@ -89,6 +91,10 @@ pub struct Surface {
 ///   `link_timeout_ms` below `1000` with the `RequestFailed` code. `Leaving`
 ///   carries `is_returning`; 4 sent a bare `Leaving`. The `Ping` request and
 ///   the `Pong` event exist in 5 only.
+/// - A mouse round's `Forward` carries the event's `mouse_kind`, its
+///   `modifier_flags` and `pane_local_cell`, the cell in the pane's content
+///   that the client resolved; 4 carried the client's screen cell in
+///   `mouse_input`. The `MoveFloatingPane` mouse action exists in 5 only.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A

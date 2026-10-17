@@ -484,7 +484,7 @@ fn a_copy_applied_while_the_swap_runs_reaches_the_clients_own_terminal() {
         .count();
     assert_eq!(host_write_wake_count, 1);
     assert_eq!(
-        attached_client.waiting_host_writes.take_host_write_bytes(),
+        attached_client.writer_handoff.take_host_write_bytes(),
         b"\x1b]52;c;aGVsbG8=\x07".to_vec()
     );
 }

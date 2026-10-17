@@ -171,6 +171,9 @@ fn build_painted_frame() -> PaintedFrame {
             focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: Some(CommandId::from_uuid(Uuid::from_u128(5))),
+            last_applied_floating_pane_move_command_id: Some(CommandId::from_uuid(
+                Uuid::from_u128(6),
+            )),
             is_mouse_selection_enabled: false,
         },
     }
@@ -647,6 +650,8 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                 "focused_pane_id": "00000000-0000-0000-0000-000000000004",
                 "lock_mode": "Normal",
                 "last_applied_lock_command_id": "00000000-0000-0000-0000-000000000005",
+                "last_applied_floating_pane_move_command_id":
+                    "00000000-0000-0000-0000-000000000006",
                 "is_mouse_selection_enabled": false
             }
         })

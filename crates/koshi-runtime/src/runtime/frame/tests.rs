@@ -309,6 +309,7 @@ fn build_render_snapshot(content_pane_id: PaneId, empty_pane_id: PaneId) -> Rend
             focused_pane_id: Some(content_pane_id),
             lock_mode: LockMode::Locked,
             last_applied_lock_command_id: Some(CommandId::new()),
+            last_applied_floating_pane_move_command_id: Some(CommandId::new()),
             is_mouse_selection_enabled: true,
         },
     }
@@ -943,6 +944,9 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
             last_applied_lock_command_id: render_snapshot
                 .client_snapshot
                 .last_applied_lock_command_id,
+            last_applied_floating_pane_move_command_id: render_snapshot
+                .client_snapshot
+                .last_applied_floating_pane_move_command_id,
             is_mouse_selection_enabled: true,
         }
     );

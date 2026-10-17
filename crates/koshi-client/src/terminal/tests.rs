@@ -3321,6 +3321,7 @@ fn proposed_same_tab_swap_replaces_slots_without_mutating_the_snapshot() {
                 focused_pane_id: Some(source_pane_id),
                 lock_mode: LockMode::Normal,
                 last_applied_lock_command_id: None,
+                last_applied_floating_pane_move_command_id: None,
                 is_mouse_selection_enabled: false,
             },
             reported_pane_area: Some(PaneArea::Reported(Size {
@@ -3383,6 +3384,7 @@ fn placement_interpolation_reaches_the_target_without_overshooting() {
                 focused_pane_id: Some(source_pane_id),
                 lock_mode: LockMode::Normal,
                 last_applied_lock_command_id: None,
+                last_applied_floating_pane_move_command_id: None,
                 is_mouse_selection_enabled: false,
             },
             reported_pane_area: Some(PaneArea::Reported(Size {

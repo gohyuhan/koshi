@@ -6,7 +6,9 @@
 //! each raises the bus's ending notice for the queues they do not fit, which
 //! keeps the first ending raised. Then the painted frame: it lands on a live
 //! subscriber's queue, is refused by a desynced one, and on a full queue is
-//! refused while the subscriber stays live. Then a round's mouse answers, which
+//! refused while the subscriber stays live. A frame or a resync snapshot that
+//! finds the queue full marks the subscriber's writer handoff owed a frame
+//! once, and nothing else marks it. Then a round's mouse answers, which
 //! ride the same queue and desync the subscriber when they do not fit. Then
 //! bytes for the terminal a subscriber's client runs in: they wait in the
 //! subscriber's waiting host writes, with their limit, behind one wake on the
@@ -44,17 +46,15 @@ impl EventBus {
         self.subscribers.len()
     }
 
-    /// The waiting host writes of subscriber `subscriber_id`, or `None` when
-    /// it is not registered.
+    /// The writer handoff of subscriber `subscriber_id`, or `None` when it is
+    /// not registered.
     #[must_use]
-    pub(crate) fn find_waiting_host_writes(
+    pub(crate) fn find_writer_handoff(
         &self,
         subscriber_id: SubscriberId,
-    ) -> Option<Arc<WaitingHostWrites>> {
+    ) -> Option<Arc<WriterHandoff>> {
         self.find_subscriber_index(subscriber_id)
-            .map(|subscriber_index| {
-                Arc::clone(&self.subscribers[subscriber_index].waiting_host_writes)
-            })
+            .map(|subscriber_index| Arc::clone(&self.subscribers[subscriber_index].writer_handoff))
     }
 }
 
@@ -95,6 +95,7 @@ fn build_test_render_snapshot() -> Box<RenderSnapshot> {
             focused_pane_id: None,
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: None,
+            last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
         },
     })
@@ -798,6 +799,39 @@ fn a_frame_that_does_not_fit_is_refused_and_leaves_the_subscriber_live() {
 }
 
 #[test]
+fn a_frame_that_does_not_fit_marks_one_owed_frame_and_a_frame_that_fits_marks_none() {
+    let tab_id = TabId::new();
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver, writer_handoff) = bus.subscribe();
+    assert!(bus.try_send_frame(subscriber_id, build_test_render_snapshot()));
+    assert!(!writer_handoff.take_owed_frame_mark());
+    assert_eq!(subscriber_receiver.try_iter().count(), 1);
+    fill_to_capacity(&mut bus, tab_id);
+    assert!(!writer_handoff.take_owed_frame_mark());
+
+    assert!(!bus.try_send_frame(subscriber_id, build_test_render_snapshot()));
+
+    assert!(writer_handoff.take_owed_frame_mark());
+    assert!(!writer_handoff.take_owed_frame_mark());
+}
+
+#[test]
+fn a_resync_snapshot_that_does_not_fit_marks_one_owed_frame_and_the_dropped_event_marks_none() {
+    let tab_id = TabId::new();
+    let mut bus = EventBus::new();
+    let (subscriber_id, _subscriber_receiver, writer_handoff) = bus.subscribe();
+    fill_to_capacity(&mut bus, tab_id);
+    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
+    assert!(!writer_handoff.take_owed_frame_mark());
+
+    assert!(!bus.try_resync(subscriber_id, build_test_render_snapshot()));
+
+    assert!(writer_handoff.take_owed_frame_mark());
+    assert!(!writer_handoff.take_owed_frame_mark());
+}
+
+#[test]
 fn a_subscriber_whose_receiver_is_gone_is_removed_by_the_frame() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
@@ -999,7 +1033,7 @@ fn a_host_write_is_its_osc52_sequence_and_the_targets_it_sets_in_byte_order() {
 #[test]
 fn a_host_write_waits_for_the_subscriber_and_queues_one_wake() {
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, writer_handoff) = bus.subscribe();
 
     assert!(bus.queue_host_write(subscriber_id, &build_clipboard_host_write()));
 
@@ -1008,20 +1042,17 @@ fn a_host_write_waits_for_the_subscriber_and_queues_one_wake() {
         vec![Delivery::HostWrite]
     );
     assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
+        writer_handoff.take_host_write_bytes(),
         CLIPBOARD_WRITE_BYTES
     );
-    assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
-        Vec::<u8>::new()
-    );
+    assert_eq!(writer_handoff.take_host_write_bytes(), Vec::<u8>::new());
     assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
 }
 
 #[test]
 fn host_writes_behind_a_queued_wake_wait_in_order_with_no_second_wake() {
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, writer_handoff) = bus.subscribe();
 
     assert!(bus.queue_host_write(
         subscriber_id,
@@ -1041,7 +1072,7 @@ fn host_writes_behind_a_queued_wake_wait_in_order_with_no_second_wake() {
         vec![Delivery::HostWrite]
     );
     assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
+        writer_handoff.take_host_write_bytes(),
         [
             encode_osc52_copy("c", b"first"),
             encode_osc52_copy("p", b"second"),
@@ -1054,15 +1085,15 @@ fn host_writes_behind_a_queued_wake_wait_in_order_with_no_second_wake() {
 #[test]
 fn a_host_write_after_the_wake_is_read_queues_a_new_wake() {
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, writer_handoff) = bus.subscribe();
     assert!(bus.queue_host_write(
         subscriber_id,
         &HostWrite::from_clipboard_copy("c", b"first")
     ));
     assert_eq!(subscriber_receiver.try_recv(), Ok(Delivery::HostWrite));
-    waiting_host_writes.clear_queued_wake();
+    writer_handoff.clear_queued_wake();
     assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
+        writer_handoff.take_host_write_bytes(),
         encode_osc52_copy("c", b"first")
     );
 
@@ -1076,7 +1107,7 @@ fn a_host_write_after_the_wake_is_read_queues_a_new_wake() {
         vec![Delivery::HostWrite]
     );
     assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
+        writer_handoff.take_host_write_bytes(),
         encode_osc52_copy("c", b"second")
     );
 }
@@ -1084,7 +1115,7 @@ fn a_host_write_after_the_wake_is_read_queues_a_new_wake() {
 #[test]
 fn a_host_write_past_the_limit_beside_other_targets_is_refused_and_queues_no_wake() {
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, writer_handoff) = bus.subscribe();
     let waiting_host_write =
         HostWrite::from_clipboard_copy("c", &vec![b'a'; NEAR_LIMIT_COPIED_BYTE_COUNT]);
     let refused_host_write = HostWrite::from_clipboard_copy("p", b"bcd");
@@ -1094,7 +1125,7 @@ fn a_host_write_past_the_limit_beside_other_targets_is_refused_and_queues_no_wak
     );
     assert!(bus.queue_host_write(subscriber_id, &waiting_host_write));
     assert_eq!(subscriber_receiver.try_recv(), Ok(Delivery::HostWrite));
-    waiting_host_writes.clear_queued_wake();
+    writer_handoff.clear_queued_wake();
 
     assert!(!bus.queue_host_write(subscriber_id, &refused_host_write));
 
@@ -1103,7 +1134,7 @@ fn a_host_write_past_the_limit_beside_other_targets_is_refused_and_queues_no_wak
         Vec::new()
     );
     assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
+        writer_handoff.take_host_write_bytes(),
         waiting_host_write.host_write_bytes
     );
 }
@@ -1111,7 +1142,7 @@ fn a_host_write_past_the_limit_beside_other_targets_is_refused_and_queues_no_wak
 #[test]
 fn waiting_host_writes_up_to_the_limit_keep_every_byte() {
     let mut bus = EventBus::new();
-    let (subscriber_id, _subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let (subscriber_id, _subscriber_receiver, writer_handoff) = bus.subscribe();
     let waiting_host_write =
         HostWrite::from_clipboard_copy("c", &vec![b'a'; NEAR_LIMIT_COPIED_BYTE_COUNT]);
     let kept_host_write = HostWrite::from_clipboard_copy("", b"bcd");
@@ -1124,7 +1155,7 @@ fn waiting_host_writes_up_to_the_limit_keep_every_byte() {
     assert!(bus.queue_host_write(subscriber_id, &kept_host_write));
 
     assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
+        writer_handoff.take_host_write_bytes(),
         [
             waiting_host_write.host_write_bytes,
             kept_host_write.host_write_bytes
@@ -1136,7 +1167,7 @@ fn waiting_host_writes_up_to_the_limit_keep_every_byte() {
 #[test]
 fn a_host_write_for_the_same_targets_replaces_the_waiting_one_past_the_limit() {
     let mut bus = EventBus::new();
-    let (subscriber_id, _subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let (subscriber_id, _subscriber_receiver, writer_handoff) = bus.subscribe();
     let waiting_host_write =
         HostWrite::from_clipboard_copy("c", &vec![b'a'; NEAR_LIMIT_COPIED_BYTE_COUNT]);
     let replacing_host_write = HostWrite::from_clipboard_copy("c", b"bcd");
@@ -1149,7 +1180,7 @@ fn a_host_write_for_the_same_targets_replaces_the_waiting_one_past_the_limit() {
     assert!(bus.queue_host_write(subscriber_id, &replacing_host_write));
 
     assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
+        writer_handoff.take_host_write_bytes(),
         encode_osc52_copy("c", b"bcd")
     );
 }
@@ -1157,7 +1188,7 @@ fn a_host_write_for_the_same_targets_replaces_the_waiting_one_past_the_limit() {
 #[test]
 fn a_host_write_replaces_only_the_waiting_ones_for_the_same_targets_in_any_order() {
     let mut bus = EventBus::new();
-    let (subscriber_id, _subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let (subscriber_id, _subscriber_receiver, writer_handoff) = bus.subscribe();
     assert!(bus.queue_host_write(
         subscriber_id,
         &HostWrite::from_clipboard_copy("pc", b"first")
@@ -1173,7 +1204,7 @@ fn a_host_write_replaces_only_the_waiting_ones_for_the_same_targets_in_any_order
     ));
 
     assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
+        writer_handoff.take_host_write_bytes(),
         [
             encode_osc52_copy("c", b"second"),
             encode_osc52_copy("cp", b"third")
@@ -1185,7 +1216,7 @@ fn a_host_write_replaces_only_the_waiting_ones_for_the_same_targets_in_any_order
 #[test]
 fn a_host_write_longer_than_the_limit_with_nothing_waiting_waits_whole() {
     let mut bus = EventBus::new();
-    let (subscriber_id, _subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let (subscriber_id, _subscriber_receiver, writer_handoff) = bus.subscribe();
     let copied_bytes = build_counting_bytes(MAX_HOST_WRITE_BYTE_COUNT);
     let host_write = HostWrite::from_clipboard_copy("c", &copied_bytes);
     assert!(host_write.host_write_bytes.len() > MAX_HOST_WRITE_BYTE_COUNT);
@@ -1193,7 +1224,7 @@ fn a_host_write_longer_than_the_limit_with_nothing_waiting_waits_whole() {
     assert!(bus.queue_host_write(subscriber_id, &host_write));
 
     assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
+        writer_handoff.take_host_write_bytes(),
         encode_osc52_copy("c", &copied_bytes)
     );
 }
@@ -1201,7 +1232,7 @@ fn a_host_write_longer_than_the_limit_with_nothing_waiting_waits_whole() {
 #[test]
 fn a_host_write_longer_than_the_limit_replaces_the_waiting_one_for_the_same_targets() {
     let mut bus = EventBus::new();
-    let (subscriber_id, _subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let (subscriber_id, _subscriber_receiver, writer_handoff) = bus.subscribe();
     let copied_bytes = build_counting_bytes(MAX_HOST_WRITE_BYTE_COUNT);
     let host_write = HostWrite::from_clipboard_copy("c", &copied_bytes);
     assert!(host_write.host_write_bytes.len() > MAX_HOST_WRITE_BYTE_COUNT);
@@ -1213,7 +1244,7 @@ fn a_host_write_longer_than_the_limit_replaces_the_waiting_one_for_the_same_targ
     assert!(bus.queue_host_write(subscriber_id, &host_write));
 
     assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
+        writer_handoff.take_host_write_bytes(),
         encode_osc52_copy("c", &copied_bytes)
     );
 }
@@ -1221,7 +1252,7 @@ fn a_host_write_longer_than_the_limit_replaces_the_waiting_one_for_the_same_targ
 #[test]
 fn a_host_write_for_an_unknown_subscriber_is_refused() {
     let mut bus = EventBus::new();
-    let (_subscriber_id, subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let (_subscriber_id, subscriber_receiver, writer_handoff) = bus.subscribe();
 
     assert!(!bus.queue_host_write(SubscriberId::new(), &build_clipboard_host_write()));
 
@@ -1229,10 +1260,7 @@ fn a_host_write_for_an_unknown_subscriber_is_refused() {
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
         Vec::<Delivery>::new()
     );
-    assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
-        Vec::<u8>::new()
-    );
+    assert_eq!(writer_handoff.take_host_write_bytes(), Vec::<u8>::new());
     assert_eq!(bus.count_subscribers(), 1);
     assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
 }
@@ -1241,7 +1269,7 @@ fn a_host_write_for_an_unknown_subscriber_is_refused() {
 fn a_full_queue_drops_only_the_wake_and_the_next_host_write_queues_one() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, writer_handoff) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
 
     assert!(bus.queue_host_write(subscriber_id, &build_clipboard_host_write()));
@@ -1257,7 +1285,7 @@ fn a_full_queue_drops_only_the_wake_and_the_next_host_write_queues_one() {
         vec![Delivery::HostWrite]
     );
     assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
+        writer_handoff.take_host_write_bytes(),
         [CLIPBOARD_WRITE_BYTES, &encode_osc52_copy("p", b"next")].concat()
     );
 }
@@ -1266,7 +1294,7 @@ fn a_full_queue_drops_only_the_wake_and_the_next_host_write_queues_one() {
 fn a_desynced_subscriber_with_room_on_its_queue_takes_the_wake() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, writer_handoff) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
     assert_eq!(
@@ -1281,7 +1309,7 @@ fn a_desynced_subscriber_with_room_on_its_queue_takes_the_wake() {
         vec![Delivery::HostWrite]
     );
     assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
+        writer_handoff.take_host_write_bytes(),
         CLIPBOARD_WRITE_BYTES
     );
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
@@ -1291,7 +1319,7 @@ fn a_desynced_subscriber_with_room_on_its_queue_takes_the_wake() {
 fn waiting_host_writes_outlast_a_resync_that_fills_the_last_free_slot() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver, waiting_host_writes) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, writer_handoff) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
     assert!(bus.queue_host_write(subscriber_id, &build_clipboard_host_write()));
@@ -1316,7 +1344,7 @@ fn waiting_host_writes_outlast_a_resync_that_fills_the_last_free_slot() {
         })
     );
     assert_eq!(
-        waiting_host_writes.take_host_write_bytes(),
+        writer_handoff.take_host_write_bytes(),
         CLIPBOARD_WRITE_BYTES
     );
 }
@@ -1324,7 +1352,7 @@ fn waiting_host_writes_outlast_a_resync_that_fills_the_last_free_slot() {
 #[test]
 fn a_subscriber_whose_receiver_is_gone_is_removed_by_the_host_write() {
     let mut bus = EventBus::new();
-    let (subscriber_id, subscriber_receiver, _waiting_host_writes) = bus.subscribe();
+    let (subscriber_id, subscriber_receiver, _writer_handoff) = bus.subscribe();
     drop(subscriber_receiver);
 
     assert!(!bus.queue_host_write(subscriber_id, &build_clipboard_host_write()));

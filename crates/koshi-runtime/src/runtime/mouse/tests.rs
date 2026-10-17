@@ -8,9 +8,11 @@
 
 use super::*;
 
+use std::num::NonZeroU16;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::runtime::command::tests::{build_floating_new_pane_args, create_floating_pane};
 use crate::runtime::pty_inbox::InboxSink;
 use crate::runtime::tests::{apply_mouse_actions, build_viewer, dispatch_mouse_input_at_time};
 use koshi_client::mouse::{MouseAction, TABLINE_DRAG_CELL_COUNT};
@@ -18,17 +20,19 @@ use koshi_client::Client as ViewerClient;
 use koshi_config::layer::{PartialKoshiConfig, PartialMouseConfig};
 use koshi_config::types::WheelScroll;
 use koshi_core::command::{
-    FocusTabArgs, GridPosition, NewPaneArgs, NewPanePlacement, NewTabArgs, Selection,
-    SelectionKind, TabTarget,
+    ClosePaneArgs, FocusTabArgs, GridPosition, MoveFloatingPaneArgs, NewPaneArgs, NewPanePlacement,
+    NewTabArgs, Selection, SelectionKind, TabTarget,
 };
-use koshi_core::geometry::{Direction, PaneArea, Point, Size};
+use koshi_core::geometry::{
+    Direction, FloatingPaneDimension, FloatingPaneSize, PaneArea, Point, Rect, Size,
+};
 use koshi_core::ids::SessionId;
 use koshi_core::key::BindingModifierFlags;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
 use koshi_layout::mode::LayoutMode;
 use koshi_pty::error::PtyError;
 use koshi_renderer::snapshot::{Delivery, ViewerChrome};
-use koshi_renderer::{compute_pane_local_cell, resolve_hit_region, HitRegion};
+use koshi_renderer::{compute_clamped_pane_cell, resolve_hit_region, HitRegion};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 fn build_runtime() -> (Server, ClientId) {
@@ -161,13 +165,17 @@ fn find_pane_content_cell(
                 screen_point,
             ) == (HitRegion::PaneContent { pane_id })
             {
-                let (pane_column, pane_row) = compute_pane_local_cell(
+                let pane_local_cell = compute_clamped_pane_cell(
                     render_snapshot.build_frame_layout(ViewerChrome::default()),
                     pane_id,
                     screen_point,
                 )
                 .expect("local cell");
-                return (screen_point, pane_column, pane_row);
+                return (
+                    screen_point,
+                    pane_local_cell.column + 1,
+                    pane_local_cell.row + 1,
+                );
             }
         }
     }
@@ -175,8 +183,28 @@ fn find_pane_content_cell(
 }
 
 fn build_left_press_input(column_index: u16, row_index: u16) -> MouseInput {
-    MouseInput {
+    build_mouse_input_at(MouseKind::Press(MouseButton::Left), column_index, row_index)
+}
+
+/// The wire action that forwards a left press to `pane_id`'s program at the
+/// 1-based pane cell `(pane_column, pane_row)` a mouse report carries.
+fn build_wire_left_press(pane_id: PaneId, pane_column: u16, pane_row: u16) -> WireMouseAction {
+    WireMouseAction::Forward {
+        pane_id,
         mouse_kind: MouseKind::Press(MouseButton::Left),
+        modifier_flags: BindingModifierFlags::NONE,
+        pane_local_cell: Point {
+            column: pane_column - 1,
+            row: pane_row - 1,
+        },
+    }
+}
+
+/// A `mouse_kind` event with nothing held at the client cell
+/// `(column_index, row_index)`.
+fn build_mouse_input_at(mouse_kind: MouseKind, column_index: u16, row_index: u16) -> MouseInput {
+    MouseInput {
+        mouse_kind,
         position: Point {
             column: column_index,
             row: row_index,
@@ -347,7 +375,7 @@ fn a_tab_switch_by_any_route_reveals_the_new_tab() {
 }
 
 #[test]
-fn clicking_the_right_scroll_arrow_peeks_toward_the_end() {
+fn clicking_the_right_scroll_arrow_peeks_one_tab_toward_the_end() {
     let (mut server, client_id) = build_runtime();
     for _ in 0..30 {
         build_tab(&mut server, client_id); // overflow the 80-column strip
@@ -356,22 +384,8 @@ fn clicking_the_right_scroll_arrow_peeks_toward_the_end() {
     scroll_tabline_to_index(&mut server, &mut viewer, 0);
 
     let pointer_column = find_tabline_pointer_column(&server, &viewer, 0, |region| {
-        matches!(region, HitRegion::TablineScrollRight { .. })
+        region == HitRegion::TablineScrollRight
     });
-    let render_snapshot = server.build_snapshot(client_id).expect("render snapshot");
-    let viewer_chrome = viewer.build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id);
-    let target_tab_index = match resolve_hit_region(
-        render_snapshot.build_frame_layout(viewer_chrome),
-        Point {
-            column: pointer_column,
-            row: 0,
-        },
-    ) {
-        HitRegion::TablineScrollRight { target_tab_index } => target_tab_index,
-        unexpected_hit_region => {
-            panic!("expected a right scroll arrow, got {unexpected_hit_region:?}")
-        }
-    };
 
     dispatch_mouse_input(
         &mut server,
@@ -379,11 +393,7 @@ fn clicking_the_right_scroll_arrow_peeks_toward_the_end() {
         build_left_press_input(pointer_column, 0),
     );
 
-    assert!(
-        target_tab_index > 0,
-        "the right arrow scrolls toward the end"
-    );
-    assert_eq!(get_tabline_offset(&server, &viewer), Some(target_tab_index));
+    assert_eq!(get_tabline_offset(&server, &viewer), Some(1));
 }
 
 #[test]
@@ -398,7 +408,7 @@ fn wheel_over_the_tabline_steps_the_offset() {
     let pointer_column = find_tabline_pointer_column(&server, &viewer, 0, |region| {
         matches!(
             region,
-            HitRegion::Tab { .. } | HitRegion::TablineScrollRight { .. }
+            HitRegion::Tab { .. } | HitRegion::TablineScrollRight
         )
     });
 
@@ -1282,9 +1292,7 @@ fn a_mouse_select_gesture_over_a_mouse_aware_program_forwards_nothing() {
 }
 
 #[test]
-fn forward_mouse_to_pane_reports_whether_the_pane_was_written_to() {
-    // The viewer captures a gesture on the value `forward_mouse_to_pane`
-    // returns. It is false for exactly the events the pane never saw.
+fn a_forwarded_report_clears_the_recovery_notice_only_when_the_pane_takes_it() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
     let session_id = server
@@ -1292,15 +1300,20 @@ fn forward_mouse_to_pane_reports_whether_the_pane_was_written_to() {
         .expect("session")
         .session_id;
     server.show_session_recovery_notice(session_id);
-    let (screen_point, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
+    let (_, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
 
-    // The program asked for no mouse: nothing is written, and the call returns
-    // false.
-    assert!(!server.forward_mouse_to_pane(
+    // The program asked for no mouse: nothing is written.
+    let pane_local_cell = Point {
+        column: pane_column - 1,
+        row: pane_row - 1,
+    };
+    server.forward_mouse_to_pane(
         client_id,
         pane_id,
-        build_left_press_input(screen_point.column, screen_point.row),
-    ));
+        MouseKind::Press(MouseButton::Left),
+        BindingModifierFlags::NONE,
+        pane_local_cell,
+    );
     assert_eq!(
         fake_pty_backend
             .list_pane_write_bytes(pane_id)
@@ -1310,13 +1323,15 @@ fn forward_mouse_to_pane_reports_whether_the_pane_was_written_to() {
     );
     assert!(server.list_sessions()[&session_id].is_recovery_notice_visible);
 
-    // Normal tracking with SGR encoding: the press is written, and reported.
+    // Normal tracking with SGR encoding: the press is written.
     server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
-    assert!(server.forward_mouse_to_pane(
+    server.forward_mouse_to_pane(
         client_id,
         pane_id,
-        build_left_press_input(screen_point.column, screen_point.row),
-    ));
+        MouseKind::Press(MouseButton::Left),
+        BindingModifierFlags::NONE,
+        pane_local_cell,
+    );
     assert_eq!(
         fake_pty_backend
             .list_pane_write_bytes(pane_id)
@@ -1326,14 +1341,16 @@ fn forward_mouse_to_pane_reports_whether_the_pane_was_written_to() {
     );
     assert!(!server.list_sessions()[&session_id].is_recovery_notice_visible);
 
-    // The pane refuses the bytes: the call returns false.
+    // The pane refuses the bytes: nothing is recorded.
     server.show_session_recovery_notice(session_id);
     fake_pty_backend.fail_writes_on(pane_id, PtyError::UnknownPane { pane_id });
-    assert!(!server.forward_mouse_to_pane(
+    server.forward_mouse_to_pane(
         client_id,
         pane_id,
-        build_left_press_input(screen_point.column, screen_point.row),
-    ));
+        MouseKind::Press(MouseButton::Left),
+        BindingModifierFlags::NONE,
+        pane_local_cell,
+    );
     assert_eq!(
         fake_pty_backend
             .list_pane_write_bytes(pane_id)
@@ -1345,7 +1362,8 @@ fn forward_mouse_to_pane_reports_whether_the_pane_was_written_to() {
 }
 
 /// A tab whose only viewer reports [`PaneArea::Starving`] has no effective
-/// size: every pane is suppressed and the click is forwarded to no pane.
+/// size: every pane is suppressed, and a press on the cell that held the
+/// pane's content reaches no program.
 #[test]
 fn a_click_from_a_starving_sole_viewer_forwards_nothing() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
@@ -1361,12 +1379,15 @@ fn a_click_from_a_starving_sole_viewer_forwards_nothing() {
         .get_client_mut_by_id(client_id)
         .expect("client")
         .update_pane_area(Some(PaneArea::Starving));
+    let mut viewer = build_viewer(&mut server, client_id);
 
-    assert!(!server.forward_mouse_to_pane(
-        client_id,
-        pane_id,
+    dispatch_mouse_input_at_time(
+        &mut server,
+        &mut viewer,
         build_left_press_input(screen_point.column, screen_point.row),
-    ));
+        compute_separated_event_time(),
+    );
+
     assert_eq!(
         fake_pty_backend
             .list_pane_write_bytes(pane_id)
@@ -2099,6 +2120,7 @@ fn a_forwarded_wheel_is_dropped_when_the_program_turned_the_mouse_off() {
     let wheel_input = build_wheel_input(ScrollDirection::Up, screen_point);
     let mouse_frame = crate::runtime::tests::build_mouse_frame(
         server.build_snapshot(client_id).expect("render snapshot"),
+        &viewer,
     );
     let mouse_decision = viewer
         .handle_mouse_wheel(wheel_input, &mouse_frame)
@@ -2107,14 +2129,22 @@ fn a_forwarded_wheel_is_dropped_when_the_program_turned_the_mouse_off() {
         mouse_decision.mouse_action,
         Some(MouseAction::Forward {
             pane_id,
-            mouse_input: wheel_input,
+            mouse_kind: MouseKind::Scroll(ScrollDirection::Up),
+            modifier_flags: BindingModifierFlags::NONE,
+            pane_local_cell: Point { column: 0, row: 0 },
         }),
         "the painted frame still said the program wanted the mouse"
     );
 
     // The program turns mouse reporting off between that frame and the write.
     server.handle_pty_output(pane_id, b"\x1b[?1000l");
-    server.forward_mouse_to_pane(client_id, pane_id, wheel_input);
+    server.forward_mouse_to_pane(
+        client_id,
+        pane_id,
+        MouseKind::Scroll(ScrollDirection::Up),
+        BindingModifierFlags::NONE,
+        Point { column: 0, row: 0 },
+    );
 
     assert_eq!(
         fake_pty_backend
@@ -2136,6 +2166,7 @@ fn alternate_scroll_arrows_follow_the_cursor_key_mode_at_the_moment_they_are_wri
     let mut viewer = build_viewer(&mut server, client_id);
     let mouse_frame = crate::runtime::tests::build_mouse_frame(
         server.build_snapshot(client_id).expect("render snapshot"),
+        &viewer,
     );
     let mouse_decision = viewer
         .handle_mouse_wheel(
@@ -2176,6 +2207,7 @@ fn arrow_keys_are_dropped_when_the_pane_left_the_alternate_screen_before_the_wri
     let mut viewer = build_viewer(&mut server, client_id);
     let mouse_frame = crate::runtime::tests::build_mouse_frame(
         server.build_snapshot(client_id).expect("render snapshot"),
+        &viewer,
     );
     let mouse_decision = viewer
         .handle_mouse_wheel(
@@ -2215,10 +2247,12 @@ fn the_mouse_write_methods_do_nothing_for_a_pane_that_is_gone() {
     let missing_pane_id = PaneId::new();
 
     let view_top_row_index = server.scroll_pane_view(client_id, missing_pane_id, true, 3);
-    let was_forwarded = server.forward_mouse_to_pane(
+    server.forward_mouse_to_pane(
         client_id,
         missing_pane_id,
-        build_wheel_input(ScrollDirection::Up, Point { column: 5, row: 5 }),
+        MouseKind::Scroll(ScrollDirection::Up),
+        BindingModifierFlags::NONE,
+        Point { column: 5, row: 5 },
     );
     server.write_alternate_scroll_arrows(missing_pane_id, true, 3);
     let applied_cell_count = server.drag_resize(client_id, missing_pane_id, Direction::Right, 1, 3);
@@ -2249,7 +2283,6 @@ fn the_mouse_write_methods_do_nothing_for_a_pane_that_is_gone() {
         "no view was stored for a missing pane"
     );
     assert_eq!(applied_cell_count, 0, "no border of a missing pane moved");
-    assert!(!was_forwarded, "no report was written to a missing pane");
 }
 
 #[test]
@@ -2432,6 +2465,7 @@ fn a_forward_decided_from_a_stale_frame_writes_nothing_once_tracking_is_off() {
 
     let mouse_frame = crate::runtime::tests::build_mouse_frame(
         server.build_snapshot(client_id).expect("render snapshot"),
+        &viewer,
     );
     let press_input = build_left_press_input(screen_point.column, screen_point.row);
     let mouse_actions =
@@ -2440,7 +2474,9 @@ fn a_forward_decided_from_a_stale_frame_writes_nothing_once_tracking_is_off() {
         mouse_actions,
         vec![MouseAction::Forward {
             pane_id,
-            mouse_input: press_input,
+            mouse_kind: MouseKind::Press(MouseButton::Left),
+            modifier_flags: BindingModifierFlags::NONE,
+            pane_local_cell: Point { column: 0, row: 0 },
         }],
         "the frame said the program wanted the mouse"
     );
@@ -2530,6 +2566,7 @@ fn grabbing_the_border_against_a_collapsed_stack_member_starts_no_resize() {
     let border_cell = find_border_against_stack_header(&server, client_id);
     let mouse_frame = crate::runtime::tests::build_mouse_frame(
         server.build_snapshot(client_id).expect("render snapshot"),
+        &viewer,
     );
 
     let press_mouse_actions = viewer.handle_mouse(
@@ -2673,15 +2710,12 @@ fn a_round_holding_one_forward_writes_the_report_and_answers_with_an_empty_list(
     let pane_id = get_only_pane_id(&server);
     // The program turns on normal tracking with SGR encoding.
     server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
-    let (screen_point, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
+    let (_, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
 
     server.run_client_mouse(
         client_id,
         9,
-        vec![WireMouseAction::Forward {
-            pane_id,
-            mouse_input: build_left_press_input(screen_point.column, screen_point.row),
-        }],
+        vec![build_wire_left_press(pane_id, pane_column, pane_row)],
     );
 
     assert_eq!(
@@ -2766,11 +2800,8 @@ fn a_round_that_reports_nothing_is_still_answered() {
         build_server_with_mouse_event_queue();
     let pane_id = get_only_pane_id(&server);
     server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
-    let (screen_point, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
-    let forward_mouse_action = WireMouseAction::Forward {
-        pane_id,
-        mouse_input: build_left_press_input(screen_point.column, screen_point.row),
-    };
+    let (_, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
+    let forward_mouse_action = build_wire_left_press(pane_id, pane_column, pane_row);
 
     server.run_client_mouse(
         client_id,
@@ -2817,7 +2848,7 @@ fn the_answers_follow_the_order_of_the_actions_that_reported() {
     split_focused_pane(&mut server, client_id);
     feed_pane_scrollback(&mut server, pane_id, 40);
     server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
-    let (screen_point, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
+    let (_, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
     let initial_column_count = get_pane_column_count(&server, client_id, pane_id);
 
     server.run_client_mouse(
@@ -2829,10 +2860,7 @@ fn the_answers_follow_the_order_of_the_actions_that_reported() {
                 is_scrolling_up: true,
                 scroll_line_count: 5,
             },
-            WireMouseAction::Forward {
-                pane_id,
-                mouse_input: build_left_press_input(screen_point.column, screen_point.row),
-            },
+            build_wire_left_press(pane_id, pane_column, pane_row),
             WireMouseAction::Resize {
                 pane_id,
                 border_side: Direction::Right,
@@ -3002,5 +3030,1263 @@ fn a_border_drag_into_a_neighbor_at_its_minimum_reports_no_cells_taken() {
         get_pane_column_count(&server, client_id, pane_id),
         76,
         "and the border stayed at the wall"
+    );
+}
+
+/// Create a `40x12` floating pane for `client_id` with its top-left cell at
+/// `top_left_cell` of the client's `80x22` pane area, pinned when
+/// `is_pinned`, and return it.
+fn create_forty_by_twelve_floating_pane(
+    server: &mut Server,
+    client_id: ClientId,
+    top_left_cell: Point,
+    is_pinned: bool,
+) -> PaneId {
+    create_floating_pane(
+        server,
+        CommandSource::from_key_binding(client_id),
+        build_floating_new_pane_args(
+            Some(FloatingPaneSize {
+                width: FloatingPaneDimension::Cells(NonZeroU16::new(40).expect("nonzero")),
+                height: FloatingPaneDimension::Cells(NonZeroU16::new(12).expect("nonzero")),
+            }),
+            Some(top_left_cell),
+            is_pinned,
+        ),
+    )
+}
+
+/// Attach a new local client to `client_id`'s session through the server, on
+/// `client_id`'s active tab and an `80x24` terminal that reports `pane_area`,
+/// and return the new client's id.
+fn attach_second_client(
+    server: &mut Server,
+    client_id: ClientId,
+    pane_area: Option<PaneArea>,
+) -> ClientId {
+    let session_id = server
+        .get_session_for_client(client_id)
+        .expect("session")
+        .session_id;
+    let active_tab_id = server
+        .build_snapshot(client_id)
+        .expect("render snapshot")
+        .client_snapshot
+        .active_tab_id;
+    let second_client_id = ClientId::new();
+    server.handle_client_attach(
+        session_id,
+        second_client_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        pane_area,
+        active_tab_id,
+        None,
+        SystemTime::UNIX_EPOCH,
+        false,
+    );
+    second_client_id
+}
+
+/// The box `client_id` draws `pane_id` in, counted from its pane area.
+fn get_floating_pane_outer_rect(server: &Server, client_id: ClientId, pane_id: PaneId) -> Rect {
+    server
+        .build_snapshot(client_id)
+        .expect("render snapshot")
+        .session_snapshot
+        .floating_pane_slots
+        .iter()
+        .find(|floating_pane_slot| floating_pane_slot.pane_id == pane_id)
+        .expect("the floating pane is drawn")
+        .outer_rect
+}
+
+/// The last floating pane move `client_id`'s next frame names.
+fn get_frame_floating_pane_move_command_id(
+    server: &Server,
+    client_id: ClientId,
+) -> Option<CommandId> {
+    server
+        .build_snapshot(client_id)
+        .expect("render snapshot")
+        .client_snapshot
+        .last_applied_floating_pane_move_command_id
+}
+
+#[test]
+fn a_round_that_moves_a_floating_pane_names_the_move_in_the_clients_next_frame() {
+    let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
+        build_server_with_mouse_event_queue();
+    let floating_pane_id = create_forty_by_twelve_floating_pane(
+        &mut server,
+        client_id,
+        Point { column: 10, row: 4 },
+        false,
+    );
+    let moved_outer_rect = Rect::from_origin_and_size(
+        Point { column: 2, row: 3 },
+        Size {
+            column_count: 40,
+            row_count: 12,
+        },
+    );
+    let move_args = MoveFloatingPaneArgs {
+        pane_id: floating_pane_id,
+        top_left_cell: Point { column: 2, row: 3 },
+    };
+    let command_id = CommandId::new();
+    assert_eq!(
+        get_frame_floating_pane_move_command_id(&server, client_id),
+        None
+    );
+
+    server.run_client_mouse(
+        client_id,
+        5,
+        vec![WireMouseAction::MoveFloatingPane {
+            command_id,
+            command_args: move_args,
+        }],
+    );
+
+    assert_eq!(
+        list_mouse_answers(&mouse_event_queue),
+        vec![(5, Vec::new())]
+    );
+    assert_eq!(
+        get_frame_floating_pane_move_command_id(&server, client_id),
+        Some(command_id)
+    );
+    assert_eq!(
+        get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+        moved_outer_rect
+    );
+
+    // A move to the cell the client already stores changes nothing, and the
+    // next frame still names it.
+    let client_revision_before_the_repeat = server
+        .build_snapshot(client_id)
+        .expect("render snapshot")
+        .client_snapshot
+        .client_revision;
+    let repeated_command_id = CommandId::new();
+    server.run_client_mouse(
+        client_id,
+        6,
+        vec![WireMouseAction::MoveFloatingPane {
+            command_id: repeated_command_id,
+            command_args: move_args,
+        }],
+    );
+    assert_eq!(
+        get_frame_floating_pane_move_command_id(&server, client_id),
+        Some(repeated_command_id)
+    );
+    assert_eq!(
+        server
+            .build_snapshot(client_id)
+            .expect("render snapshot")
+            .client_snapshot
+            .client_revision,
+        client_revision_before_the_repeat
+    );
+
+    // A move from the client's key bindings is not the mouse's: the frame
+    // keeps naming the mouse move.
+    let _ = server.submit_command(CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::from_key_binding(client_id),
+        Command::MoveFloatingPane(MoveFloatingPaneArgs {
+            pane_id: floating_pane_id,
+            top_left_cell: Point { column: 4, row: 5 },
+        }),
+    ));
+    assert_eq!(
+        get_floating_pane_outer_rect(&server, client_id, floating_pane_id).origin,
+        Point { column: 4, row: 5 }
+    );
+    assert_eq!(
+        get_frame_floating_pane_move_command_id(&server, client_id),
+        Some(repeated_command_id)
+    );
+}
+
+#[test]
+fn a_refused_floating_pane_move_is_rejected_ahead_of_an_empty_answer() {
+    let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
+        build_server_with_mouse_event_queue();
+    // A pinned pane refuses a move.
+    let floating_pane_id = create_forty_by_twelve_floating_pane(
+        &mut server,
+        client_id,
+        Point { column: 10, row: 4 },
+        true,
+    );
+    let command_id = CommandId::new();
+
+    server.run_client_mouse(
+        client_id,
+        6,
+        vec![WireMouseAction::MoveFloatingPane {
+            command_id,
+            command_args: MoveFloatingPaneArgs {
+                pane_id: floating_pane_id,
+                top_left_cell: Point { column: 2, row: 3 },
+            },
+        }],
+    );
+
+    let rejections_and_answers: Vec<Delivery> = mouse_event_queue
+        .try_iter()
+        .filter(|delivery| {
+            matches!(
+                delivery,
+                Delivery::PlacementCommandRejected(_) | Delivery::MouseAnswer { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        rejections_and_answers,
+        vec![
+            Delivery::PlacementCommandRejected(command_id),
+            Delivery::MouseAnswer {
+                request_id: 6,
+                mouse_answers: Vec::new(),
+            },
+        ]
+    );
+    assert_eq!(
+        get_floating_pane_outer_rect(&server, client_id, floating_pane_id).origin,
+        Point { column: 10, row: 4 }
+    );
+    assert_eq!(
+        get_frame_floating_pane_move_command_id(&server, client_id),
+        None
+    );
+}
+
+#[test]
+fn a_floating_pane_right_border_drag_answers_the_cells_it_grew() {
+    let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
+        build_server_with_mouse_event_queue();
+    // Drawn at column 30 of the 80-column pane area: 10 columns of room on
+    // the right.
+    let floating_pane_id = create_forty_by_twelve_floating_pane(
+        &mut server,
+        client_id,
+        Point { column: 30, row: 4 },
+        false,
+    );
+
+    server.run_client_mouse(
+        client_id,
+        7,
+        vec![WireMouseAction::Resize {
+            pane_id: floating_pane_id,
+            border_side: Direction::Right,
+            resize_step: 1,
+            requested_cell_count: 15,
+        }],
+    );
+
+    assert_eq!(
+        list_mouse_answers(&mouse_event_queue),
+        vec![(
+            7,
+            vec![MouseAnswer::Resized {
+                pane_id: floating_pane_id,
+                border_side: Direction::Right,
+                resize_step: 1,
+                applied_cell_count: 10,
+            }]
+        )]
+    );
+    assert_eq!(
+        get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+        Rect::from_origin_and_size(
+            Point { column: 30, row: 4 },
+            Size {
+                column_count: 50,
+                row_count: 12
+            }
+        )
+    );
+}
+
+#[test]
+fn each_floating_pane_border_drag_answers_the_cells_it_shrank() {
+    // A 40x12 pane at (30, 4), shrunk by 2 cells from each side in turn.
+    let shrunk_outer_rect_by_border_side = [
+        (Direction::Left, Point { column: 32, row: 4 }, 38, 12),
+        (Direction::Right, Point { column: 30, row: 4 }, 38, 12),
+        (Direction::Up, Point { column: 30, row: 6 }, 40, 10),
+        (Direction::Down, Point { column: 30, row: 4 }, 40, 10),
+    ];
+    for (border_side, top_left_cell, column_count, row_count) in shrunk_outer_rect_by_border_side {
+        let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
+            build_server_with_mouse_event_queue();
+        let floating_pane_id = create_forty_by_twelve_floating_pane(
+            &mut server,
+            client_id,
+            Point { column: 30, row: 4 },
+            false,
+        );
+
+        server.run_client_mouse(
+            client_id,
+            7,
+            vec![WireMouseAction::Resize {
+                pane_id: floating_pane_id,
+                border_side,
+                resize_step: -1,
+                requested_cell_count: 2,
+            }],
+        );
+
+        assert_eq!(
+            list_mouse_answers(&mouse_event_queue),
+            vec![(
+                7,
+                vec![MouseAnswer::Resized {
+                    pane_id: floating_pane_id,
+                    border_side,
+                    resize_step: -1,
+                    applied_cell_count: 2,
+                }]
+            )],
+            "{border_side:?}"
+        );
+        assert_eq!(
+            get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+            Rect::from_origin_and_size(
+                top_left_cell,
+                Size {
+                    column_count,
+                    row_count
+                }
+            ),
+            "{border_side:?}"
+        );
+    }
+}
+
+#[test]
+fn a_floating_pane_border_drag_from_a_client_too_short_to_draw_it_answers_no_cells() {
+    let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
+        build_server_with_mouse_event_queue();
+    let floating_pane_id = create_forty_by_twelve_floating_pane(
+        &mut server,
+        client_id,
+        Point { column: 30, row: 4 },
+        false,
+    );
+    // A 4-row pane area is below the 5 rows a floating pane needs.
+    let _ = server.handle_client_resize(
+        client_id,
+        Size {
+            column_count: 80,
+            row_count: 6,
+        },
+        Some(PaneArea::Reported(Size {
+            column_count: 80,
+            row_count: 4,
+        })),
+        None,
+    );
+    assert_eq!(
+        server
+            .build_snapshot(client_id)
+            .expect("render snapshot")
+            .session_snapshot
+            .floating_pane_slots,
+        Vec::new()
+    );
+
+    server.run_client_mouse(
+        client_id,
+        7,
+        vec![WireMouseAction::Resize {
+            pane_id: floating_pane_id,
+            border_side: Direction::Right,
+            resize_step: 1,
+            requested_cell_count: 3,
+        }],
+    );
+
+    assert_eq!(
+        list_mouse_answers(&mouse_event_queue),
+        vec![(
+            7,
+            vec![MouseAnswer::Resized {
+                pane_id: floating_pane_id,
+                border_side: Direction::Right,
+                resize_step: 1,
+                applied_cell_count: 0,
+            }]
+        )]
+    );
+}
+
+#[test]
+fn a_pinned_floating_pane_drawn_pulled_in_answers_the_cells_it_shrank_though_its_border_stays() {
+    let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
+        build_server_with_mouse_event_queue();
+    let floating_pane_id = create_forty_by_twelve_floating_pane(
+        &mut server,
+        client_id,
+        Point { column: 20, row: 5 },
+        true,
+    );
+    let _ = server.handle_client_resize(
+        client_id,
+        Size {
+            column_count: 50,
+            row_count: 24,
+        },
+        Some(PaneArea::Reported(Size {
+            column_count: 50,
+            row_count: 22,
+        })),
+        None,
+    );
+    assert_eq!(
+        get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+        Rect::from_origin_and_size(
+            Point { column: 10, row: 5 },
+            Size {
+                column_count: 40,
+                row_count: 12
+            }
+        )
+    );
+
+    server.run_client_mouse(
+        client_id,
+        7,
+        vec![WireMouseAction::Resize {
+            pane_id: floating_pane_id,
+            border_side: Direction::Right,
+            resize_step: -1,
+            requested_cell_count: 3,
+        }],
+    );
+
+    assert_eq!(
+        list_mouse_answers(&mouse_event_queue),
+        vec![(
+            7,
+            vec![MouseAnswer::Resized {
+                pane_id: floating_pane_id,
+                border_side: Direction::Right,
+                resize_step: -1,
+                applied_cell_count: 3,
+            }]
+        )]
+    );
+    assert_eq!(
+        get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+        Rect::from_origin_and_size(
+            Point { column: 13, row: 5 },
+            Size {
+                column_count: 37,
+                row_count: 12
+            }
+        )
+    );
+}
+
+#[test]
+fn a_pinned_floating_pane_drawn_pulled_in_shrinks_only_as_far_as_its_right_border_is_dragged() {
+    let (mut server, _fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
+    let floating_pane_id = create_forty_by_twelve_floating_pane(
+        &mut server,
+        client_id,
+        Point { column: 20, row: 5 },
+        true,
+    );
+    let _ = server.handle_client_resize(
+        client_id,
+        Size {
+            column_count: 50,
+            row_count: 24,
+        },
+        Some(PaneArea::Reported(Size {
+            column_count: 50,
+            row_count: 22,
+        })),
+        None,
+    );
+    let mut viewer = build_viewer(&mut server, client_id);
+    let render_snapshot = server.build_snapshot(client_id).expect("render snapshot");
+    // Screen row 11 crosses the pane, drawn on pane-area rows 5 to 16.
+    let border_row = 11;
+    let border_column = (0..50)
+        .find(|&column_index| {
+            resolve_hit_region(
+                render_snapshot.build_frame_layout(ViewerChrome::default()),
+                Point {
+                    column: column_index,
+                    row: border_row,
+                },
+            ) == HitRegion::PaneBorder {
+                pane_id: floating_pane_id,
+                side: Direction::Right,
+            }
+        })
+        .expect("the pane's right border on screen row 11");
+    let shrunk_outer_rect = Rect::from_origin_and_size(
+        Point { column: 13, row: 5 },
+        Size {
+            column_count: 37,
+            row_count: 12,
+        },
+    );
+
+    dispatch_mouse_input(
+        &mut server,
+        &mut viewer,
+        build_left_press_input(border_column, border_row),
+    );
+    dispatch_mouse_input(
+        &mut server,
+        &mut viewer,
+        build_left_drag_input(border_column - 3, border_row),
+    );
+    assert_eq!(
+        get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+        shrunk_outer_rect
+    );
+
+    // The pointer moves down a row and stays in its column.
+    dispatch_mouse_input(
+        &mut server,
+        &mut viewer,
+        build_left_drag_input(border_column - 3, border_row + 1),
+    );
+
+    assert_eq!(
+        get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+        shrunk_outer_rect
+    );
+}
+
+#[test]
+fn a_floating_pane_border_drag_from_a_too_short_client_answers_the_cells_a_taller_client_allows() {
+    let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
+        build_server_with_mouse_event_queue();
+    let floating_pane_id = create_forty_by_twelve_floating_pane(
+        &mut server,
+        client_id,
+        Point { column: 30, row: 4 },
+        false,
+    );
+    let _ = attach_second_client(
+        &mut server,
+        client_id,
+        Some(PaneArea::Reported(Size {
+            column_count: 80,
+            row_count: 22,
+        })),
+    );
+    // A 4-row pane area is below the 5 rows a floating pane needs.
+    let _ = server.handle_client_resize(
+        client_id,
+        Size {
+            column_count: 80,
+            row_count: 6,
+        },
+        Some(PaneArea::Reported(Size {
+            column_count: 80,
+            row_count: 4,
+        })),
+        None,
+    );
+
+    server.run_client_mouse(
+        client_id,
+        7,
+        vec![WireMouseAction::Resize {
+            pane_id: floating_pane_id,
+            border_side: Direction::Right,
+            resize_step: 1,
+            requested_cell_count: 3,
+        }],
+    );
+
+    assert_eq!(
+        list_mouse_answers(&mouse_event_queue),
+        vec![(
+            7,
+            vec![MouseAnswer::Resized {
+                pane_id: floating_pane_id,
+                border_side: Direction::Right,
+                resize_step: 1,
+                applied_cell_count: 3,
+            }]
+        )]
+    );
+    let (_, floating_member) = server
+        .get_session_for_client(client_id)
+        .expect("session")
+        .floating_set
+        .find_member(floating_pane_id)
+        .expect("floating member");
+    assert_eq!(
+        floating_member.solved_size,
+        Size {
+            column_count: 43,
+            row_count: 12,
+        }
+    );
+}
+
+#[test]
+fn a_handle_drag_moves_only_the_dragging_viewers_view_of_the_floating_pane() {
+    let (mut server, _fake_pty_backend, alice_client_id) = build_runtime_with_fake_pty_backend();
+    let floating_pane_id = create_forty_by_twelve_floating_pane(
+        &mut server,
+        alice_client_id,
+        Point { column: 10, row: 4 },
+        false,
+    );
+    let bob_client_id = attach_second_client(&mut server, alice_client_id, None);
+    let mut alice_viewer = build_viewer(&mut server, alice_client_id);
+    let bob_frame_before_the_drag = server.build_snapshot(bob_client_id).expect("bob's frame");
+
+    // The grab handle sits on screen row 6, columns 12 and 13.
+    dispatch_mouse_input_at_time(
+        &mut server,
+        &mut alice_viewer,
+        build_left_press_input(12, 6),
+        compute_separated_event_time(),
+    );
+    dispatch_mouse_input_at_time(
+        &mut server,
+        &mut alice_viewer,
+        build_mouse_input_at(MouseKind::Drag(MouseButton::Left), 17, 7),
+        compute_separated_event_time(),
+    );
+    assert_eq!(
+        get_floating_pane_outer_rect(&server, alice_client_id, floating_pane_id).origin,
+        Point { column: 10, row: 4 },
+        "the drag reaches no session"
+    );
+    assert_eq!(
+        server.build_snapshot(bob_client_id).expect("bob's frame"),
+        bob_frame_before_the_drag
+    );
+
+    dispatch_mouse_input_at_time(
+        &mut server,
+        &mut alice_viewer,
+        build_mouse_input_at(MouseKind::Release(MouseButton::Left), 17, 7),
+        compute_separated_event_time(),
+    );
+
+    assert_eq!(
+        get_floating_pane_outer_rect(&server, alice_client_id, floating_pane_id).origin,
+        Point { column: 15, row: 5 }
+    );
+    assert_eq!(
+        server.build_snapshot(bob_client_id).expect("bob's frame"),
+        bob_frame_before_the_drag
+    );
+}
+
+/// Forward a `mouse_kind` event from `client_id` to `pane_id` at
+/// `pane_local_cell`, with no modifier held.
+fn forward_mouse_at(
+    server: &mut Server,
+    client_id: ClientId,
+    pane_id: PaneId,
+    mouse_kind: MouseKind,
+    pane_local_cell: Point,
+) {
+    server.forward_mouse_to_pane(
+        client_id,
+        pane_id,
+        mouse_kind,
+        BindingModifierFlags::NONE,
+        pane_local_cell,
+    );
+}
+
+#[test]
+fn a_release_is_written_only_for_a_button_the_client_holds_in_that_pane() {
+    let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
+    let pane_id = get_only_pane_id(&server);
+    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    let pane_local_cell = Point { column: 0, row: 0 };
+    let other_client_id = ClientId::new();
+
+    // No press behind it.
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Release(MouseButton::Left),
+        pane_local_cell,
+    );
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Press(MouseButton::Right),
+        pane_local_cell,
+    );
+    // Another button, then another client.
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Release(MouseButton::Left),
+        pane_local_cell,
+    );
+    forward_mouse_at(
+        &mut server,
+        other_client_id,
+        pane_id,
+        MouseKind::Release(MouseButton::Right),
+        pane_local_cell,
+    );
+    // The held button, then the same release again.
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Release(MouseButton::Right),
+        pane_local_cell,
+    );
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Release(MouseButton::Right),
+        pane_local_cell,
+    );
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![b"\x1b[<2;1;1M".to_vec(), b"\x1b[<2;1;1m".to_vec()],
+        "only the right press and its one release reach the program"
+    );
+}
+
+#[test]
+fn removing_a_client_releases_its_held_button_at_the_cell_of_its_last_drag() {
+    let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
+    let pane_id = get_only_pane_id(&server);
+    let session_id = server
+        .get_session_for_pane(pane_id)
+        .expect("session")
+        .session_id;
+    server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
+    let other_client_id = ClientId::new();
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Press(MouseButton::Left),
+        Point { column: 0, row: 0 },
+    );
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Drag(MouseButton::Left),
+        Point { column: 3, row: 1 },
+    );
+    forward_mouse_at(
+        &mut server,
+        other_client_id,
+        pane_id,
+        MouseKind::Press(MouseButton::Right),
+        Point { column: 5, row: 5 },
+    );
+    server.show_session_recovery_notice(session_id);
+
+    let _ = server.handle_returning_client_detach(client_id);
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![
+            b"\x1b[<0;1;1M".to_vec(),
+            b"\x1b[<32;4;2M".to_vec(),
+            b"\x1b[<2;6;6M".to_vec(),
+            b"\x1b[<0;4;2m".to_vec(),
+        ],
+        "the left release goes out at the cell of the last drag"
+    );
+    assert!(
+        server.list_sessions()[&session_id].is_recovery_notice_visible,
+        "the release koshi writes itself leaves the recovery notice up"
+    );
+
+    // The other client still holds its right button.
+    forward_mouse_at(
+        &mut server,
+        other_client_id,
+        pane_id,
+        MouseKind::Release(MouseButton::Right),
+        Point { column: 5, row: 5 },
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes")
+            .last(),
+        Some(&b"\x1b[<2;6;6m".to_vec())
+    );
+}
+
+#[test]
+fn a_press_the_program_did_not_take_is_never_released() {
+    let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
+    let pane_id = get_only_pane_id(&server);
+    let pane_local_cell = Point { column: 0, row: 0 };
+
+    // The program has not asked for the mouse: the press is not written.
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Press(MouseButton::Left),
+        pane_local_cell,
+    );
+    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Release(MouseButton::Left),
+        pane_local_cell,
+    );
+    let _ = server.handle_returning_client_detach(client_id);
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new(),
+        "a program that never read the press reads no release"
+    );
+}
+
+#[test]
+fn a_release_the_tracking_level_does_not_report_still_ends_the_held_button() {
+    let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
+    let pane_id = get_only_pane_id(&server);
+    let pane_local_cell = Point { column: 0, row: 0 };
+    // X10 compatibility reports presses only.
+    server.handle_pty_output(pane_id, b"\x1b[?9h\x1b[?1006h");
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Press(MouseButton::Left),
+        pane_local_cell,
+    );
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Release(MouseButton::Left),
+        pane_local_cell,
+    );
+    // Normal tracking reports releases.
+    server.handle_pty_output(pane_id, b"\x1b[?1000h");
+
+    let _ = server.handle_returning_client_detach(client_id);
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![b"\x1b[<0;1;1M".to_vec()],
+        "the release ended the held button, so leaving writes no second one"
+    );
+}
+
+#[test]
+fn a_token_that_takes_a_client_over_releases_the_button_that_client_held() {
+    let (mut server, fake_pty_backend, _genesis_client_id) = build_runtime_with_fake_pty_backend();
+    let pane_id = get_only_pane_id(&server);
+    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    let viewport_size = Size {
+        column_count: 80,
+        row_count: 24,
+    };
+    let first_attachment = server
+        .handle_ipc_attach(
+            None,
+            None,
+            viewport_size,
+            None,
+            None,
+            SystemTime::UNIX_EPOCH,
+            true,
+        )
+        .expect("the first dial attaches");
+    forward_mouse_at(
+        &mut server,
+        first_attachment.client_id,
+        pane_id,
+        MouseKind::Press(MouseButton::Left),
+        Point { column: 0, row: 0 },
+    );
+
+    // The viewer dials again before the session read that its first link dropped.
+    let second_attachment = server
+        .handle_ipc_attach(
+            None,
+            Some(first_attachment.resume_token.clone()),
+            viewport_size,
+            None,
+            None,
+            SystemTime::UNIX_EPOCH,
+            true,
+        )
+        .expect("the second dial attaches");
+
+    assert_ne!(second_attachment.client_id, first_attachment.client_id);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![b"\x1b[<0;1;1M".to_vec(), b"\x1b[<0;1;1m".to_vec()],
+        "the take-over releases the left button the first link held"
+    );
+}
+
+#[test]
+fn carrying_the_session_out_releases_every_held_button_in_press_order() {
+    let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
+    let pane_id = get_only_pane_id(&server);
+    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Press(MouseButton::Left),
+        Point { column: 0, row: 0 },
+    );
+    forward_mouse_at(
+        &mut server,
+        ClientId::new(),
+        pane_id,
+        MouseKind::Press(MouseButton::Right),
+        Point { column: 5, row: 5 },
+    );
+
+    let _ = server.carry_out(&[]).expect("a session to carry");
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![
+            b"\x1b[<0;1;1M".to_vec(),
+            b"\x1b[<2;6;6M".to_vec(),
+            b"\x1b[<0;1;1m".to_vec(),
+            b"\x1b[<2;6;6m".to_vec(),
+        ],
+        "every program that read a press reads its release before the swap"
+    );
+}
+
+#[test]
+fn a_second_press_of_a_held_button_keeps_one_held_button_at_the_newer_cell() {
+    let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
+    let pane_id = get_only_pane_id(&server);
+    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Press(MouseButton::Left),
+        Point { column: 0, row: 0 },
+    );
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Press(MouseButton::Left),
+        Point { column: 2, row: 0 },
+    );
+
+    let _ = server.handle_returning_client_detach(client_id);
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![
+            b"\x1b[<0;1;1M".to_vec(),
+            b"\x1b[<0;3;1M".to_vec(),
+            b"\x1b[<0;3;1m".to_vec(),
+        ],
+        "one release, at the cell of the second press"
+    );
+}
+
+#[test]
+fn a_detach_for_a_client_the_session_does_not_hold_still_releases_its_buttons() {
+    let (mut server, fake_pty_backend, _client_id) = build_runtime_with_fake_pty_backend();
+    let pane_id = get_only_pane_id(&server);
+    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    // A round from a client whose record a take-over already removed.
+    let removed_client_id = ClientId::new();
+    forward_mouse_at(
+        &mut server,
+        removed_client_id,
+        pane_id,
+        MouseKind::Press(MouseButton::Left),
+        Point { column: 0, row: 0 },
+    );
+
+    assert_eq!(server.handle_client_detach(removed_client_id), Vec::new());
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![b"\x1b[<0;1;1M".to_vec(), b"\x1b[<0;1;1m".to_vec()],
+        "the connection's end releases the button its late round pressed"
+    );
+}
+
+#[test]
+fn a_drag_is_written_only_for_a_button_the_client_holds_in_that_pane() {
+    let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
+    let pane_id = get_only_pane_id(&server);
+    let other_client_id = ClientId::new();
+
+    // The program has not asked for the mouse: the press is not written.
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Press(MouseButton::Left),
+        Point { column: 0, row: 0 },
+    );
+    server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Drag(MouseButton::Left),
+        Point { column: 3, row: 1 },
+    );
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Release(MouseButton::Left),
+        Point { column: 3, row: 1 },
+    );
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Press(MouseButton::Right),
+        Point { column: 0, row: 0 },
+    );
+    // Another button, then another client.
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Drag(MouseButton::Left),
+        Point { column: 3, row: 1 },
+    );
+    forward_mouse_at(
+        &mut server,
+        other_client_id,
+        pane_id,
+        MouseKind::Drag(MouseButton::Right),
+        Point { column: 3, row: 1 },
+    );
+    // The held button.
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Drag(MouseButton::Right),
+        Point { column: 3, row: 1 },
+    );
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![b"\x1b[<2;1;1M".to_vec(), b"\x1b[<34;4;2M".to_vec()],
+        "only the right press and the drag of the held right button reach the program"
+    );
+}
+
+#[test]
+fn a_drag_the_tracking_level_does_not_report_leaves_the_release_at_the_press_cell() {
+    let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
+    let pane_id = get_only_pane_id(&server);
+    // Normal tracking reports presses and releases, not drags.
+    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Press(MouseButton::Left),
+        Point { column: 0, row: 0 },
+    );
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Drag(MouseButton::Left),
+        Point { column: 3, row: 1 },
+    );
+
+    let _ = server.handle_returning_client_detach(client_id);
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![b"\x1b[<0;1;1M".to_vec(), b"\x1b[<0;1;1m".to_vec()],
+        "the release goes out at the cell of the press the program read"
+    );
+}
+
+#[test]
+fn closing_a_pane_ends_the_buttons_held_in_it_and_keeps_the_others() {
+    let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
+    let kept_pane_id = get_only_pane_id(&server);
+    split_focused_pane(&mut server, client_id);
+    let closed_pane_id = *server
+        .live_pane_ids
+        .iter()
+        .find(|&&pane_id| pane_id != kept_pane_id)
+        .expect("the split pane");
+    for pane_id in [kept_pane_id, closed_pane_id] {
+        server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+        forward_mouse_at(
+            &mut server,
+            client_id,
+            pane_id,
+            MouseKind::Press(MouseButton::Left),
+            Point { column: 0, row: 0 },
+        );
+    }
+
+    let _ = server.dispatch(CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::from_key_binding(client_id),
+        Command::ClosePane(ClosePaneArgs {
+            pane_id: Some(closed_pane_id),
+            should_force_close: true,
+            should_kill_process_tree: false,
+        }),
+    ));
+
+    assert_eq!(
+        server.live_pane_ids.iter().copied().collect::<Vec<_>>(),
+        vec![kept_pane_id]
+    );
+    assert_eq!(
+        server
+            .held_mouse_buttons
+            .iter()
+            .map(|held_mouse_button| held_mouse_button.pane_id)
+            .collect::<Vec<_>>(),
+        vec![kept_pane_id],
+        "only the button held in the pane that stays is still held"
+    );
+    let _ = server.handle_returning_client_detach(client_id);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(kept_pane_id)
+            .expect("writes"),
+        vec![b"\x1b[<0;1;1M".to_vec(), b"\x1b[<0;1;1m".to_vec()],
+        "the pane that stays still gets its release"
+    );
+}
+
+#[test]
+fn a_click_in_a_press_only_mode_leaves_no_release_to_write_when_the_client_leaves() {
+    let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
+    let pane_id = get_only_pane_id(&server);
+    // X10 compatibility reports presses only.
+    server.handle_pty_output(pane_id, b"\x1b[?9h\x1b[?1006h");
+    let mut viewer = build_viewer(&mut server, client_id);
+    let (screen_point, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
+    let mouse_gesture = |mouse_kind| MouseInput {
+        mouse_kind,
+        position: screen_point,
+        modifier_flags: BindingModifierFlags::NONE,
+    };
+    dispatch_mouse_input(
+        &mut server,
+        &mut viewer,
+        mouse_gesture(MouseKind::Press(MouseButton::Left)),
+    );
+    dispatch_mouse_input(
+        &mut server,
+        &mut viewer,
+        mouse_gesture(MouseKind::Release(MouseButton::Left)),
+    );
+    // Normal tracking reports releases.
+    server.handle_pty_output(pane_id, b"\x1b[?1000h");
+
+    let _ = server.handle_returning_client_detach(client_id);
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![format!("\x1b[<0;{pane_column};{pane_row}M").into_bytes()],
+        "the click ended with its release, so leaving writes none"
+    );
+}
+
+#[test]
+fn a_release_written_when_the_client_leaves_follows_the_pointer_cell_into_a_grown_grid() {
+    let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
+    let pane_id = get_only_pane_id(&server);
+    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    let resize_pane_grid = |server: &mut Server, column_count: u16, row_count: u16| {
+        server
+            .terminal_engine_by_pane_id
+            .get_mut(&pane_id)
+            .expect("the pane's engine")
+            .resize_terminal_state(koshi_core::process::PtySize {
+                column_count,
+                row_count,
+            });
+    };
+    resize_pane_grid(&mut server, 40, 12);
+    forward_mouse_at(
+        &mut server,
+        client_id,
+        pane_id,
+        MouseKind::Press(MouseButton::Left),
+        Point {
+            column: 70,
+            row: 20,
+        },
+    );
+    resize_pane_grid(&mut server, 80, 24);
+
+    let _ = server.handle_returning_client_detach(client_id);
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![b"\x1b[<0;40;12M".to_vec(), b"\x1b[<0;71;21m".to_vec()],
+        "the press is pulled to the 40x12 edge; the release lands at the pointer's cell"
     );
 }

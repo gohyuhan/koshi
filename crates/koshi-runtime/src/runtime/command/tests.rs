@@ -23950,14 +23950,6 @@ fn every_view_of_a_client_names_the_floating_pane_that_takes_its_input() {
     );
     assert_eq!(
         runtime
-            .build_frame_layout(alice_client_id)
-            .expect("alice's frame layout")
-            .client_snapshot
-            .focused_pane_id,
-        Some(floating_pane_id)
-    );
-    assert_eq!(
-        runtime
             .build_placement_snapshot(alice_client_id, tiled_pane_id, tab_id)
             .expect("alice's placement preview")
             .client_snapshot

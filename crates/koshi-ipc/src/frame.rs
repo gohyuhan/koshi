@@ -602,6 +602,10 @@ pub struct FrameClient {
     /// session ran before it built this frame. `None` before the session runs
     /// one, and again after the session restarts.
     pub last_applied_lock_command_id: Option<CommandId>,
+    /// The last floating pane move that the client's mouse sent and the
+    /// session ran before it built this frame. `None` before the session runs
+    /// one, and again after the session restarts.
+    pub last_applied_floating_pane_move_command_id: Option<CommandId>,
     /// Whether this client grabs the mouse for text selection. Adds the
     /// `SELECT` tag to the mode indicator, and decides whether a press in a
     /// mouse-aware pane begins a highlight.

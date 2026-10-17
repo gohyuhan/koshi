@@ -5,9 +5,10 @@
 //! can be dragged, whether releasing a highlight copies it — so two viewers of
 //! one session can answer the same event differently. It also holds a
 //! [`MouseFrame`] of the frame it last painted, which says where every surface
-//! sits, which line each pane's top visible row is, and which mouse modes each
-//! pane's program had. That is everything a mouse event needs, so the viewer
-//! decides and the session only executes.
+//! sits, which line each pane's top visible row is, which mouse modes each
+//! pane's program had, and the viewer chrome it was painted with. That is
+//! everything a mouse event needs, so the viewer decides and the session only
+//! executes.
 //!
 //! Mouse-select mode is the one piece of session state read from the viewer's
 //! own copy rather than from the frame passed in: routing reads
@@ -18,12 +19,15 @@
 //!
 //! Every answer comes back from [`Client::handle_mouse`] as a list of
 //! [`MouseAction`]: move a pane's view, hand the event to a pane's program,
-//! send alternate-scroll arrows, move a pane border, or run a [`Command`]. The
-//! binary's event loop passes each one to the session in the order it is given.
+//! send alternate-scroll arrows, move a pane border, run a [`Command`], or
+//! move this client's view of a floating pane. The binary's event loop passes
+//! each one to the session in the order it is given.
 //!
-//! The gesture state lives here too: the run of clicks, the pane a held button
-//! is captured to, and the border, tab-strip, or selection drag under way. Each
-//! is read and updated inside the single call that answers one event.
+//! The gesture state lives here too: the run of clicks, the one koshi gesture
+//! the held left button drives (a selection, border, tab-strip or grab-handle
+//! drag), the pane a held button is captured to, the release owed to a program
+//! whose capture koshi ended, and the floating pane move this viewer sent and
+//! draws ahead of the session.
 //!
 //! What the viewer does **not** decide is how a forwarded event is encoded, how
 //! far a scroll may travel, or which text a highlight covers. It names a pane
@@ -47,19 +51,22 @@ use ratatui::layout::Rect as RatatuiRect;
 
 use koshi_config::types::WheelScroll;
 use koshi_core::command::{
-    ClearSelectionArgs, Command, CopyArgs, FocusPaneArgs, FocusTabArgs, FocusTarget, GridPosition,
-    PanePlacementAnchor, PanePlacementTarget, Selection, SelectionKind, SetSelectionArgs,
-    TabTarget, VisualCommand,
+    ClearSelectionArgs, ClosePaneArgs, Command, CopyArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
+    GridPosition, MoveFloatingPaneArgs, PanePlacementAnchor, PanePlacementTarget, Selection,
+    SelectionKind, SetPaneMinimizedArgs, SetPanePinnedArgs, SetSelectionArgs, TabTarget,
+    VisualCommand,
 };
 use koshi_core::geometry::{Direction, Point, Size};
-use koshi_core::ids::{ClientId, PaneId, TabId};
+use koshi_core::ids::{ClientId, CommandId, PaneId, TabId};
 use koshi_core::key::BindingModifierFlags;
 use koshi_core::mouse::{
     is_mouse_kind_reported, MouseButton, MouseInput, MouseKind, MouseTracking, ScrollDirection,
 };
 use koshi_ipc::placement::PanePlacementTabSnapshot;
 use koshi_layout::placement::PlacementDestinations;
-use koshi_renderer::snapshot::{MouseFrame, MousePane, PaneSlot, ViewerChrome};
+use koshi_renderer::snapshot::{
+    FloatingPaneMoveDraft, FrameLayout, MouseFrame, MousePane, PaneSlot, ViewerChrome,
+};
 use koshi_renderer::{
     compute_clamped_pane_cell, compute_content_rect, compute_pane_area,
     compute_placement_handle_rect, find_first_visible_tab_index, find_pane_content_rect,
@@ -103,9 +110,9 @@ fn is_point_in_ratatui_rect(screen_point: Point, target_rect: RatatuiRect) -> bo
 /// the session must do about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WheelDecision {
-    /// The pane under the pointer, or `None` over koshi's own chrome. The
-    /// viewer marks it hovered, and the renderer colors it as the wheel's
-    /// target.
+    /// The pane whose content is under the pointer, or `None` over any other
+    /// region. The viewer marks it hovered, and the renderer draws it in the
+    /// hover color while it is not focused.
     pub hovered_pane_id: Option<PaneId>,
     /// What to do, or `None` when this tick does nothing — a horizontal wheel
     /// where only a vertical one acts, or a plain pane under a viewer whose
@@ -128,13 +135,19 @@ pub enum MouseAction {
         /// Lines to move, from this viewer's `mouse.scroll_line_count`.
         scroll_line_count: usize,
     },
-    /// Hand the event to the program in `pane_id` as a mouse report. The session
-    /// encodes it from that pane's live tracking level and encoding.
+    /// Hand the event to the program in `pane_id` as a mouse report at the
+    /// cell `pane_local_cell`. The session encodes it from that pane's live
+    /// tracking level and encoding.
     Forward {
         /// The pane whose program receives the report.
         pane_id: PaneId,
-        /// The event, with the cell it landed on and the modifiers held.
-        mouse_input: MouseInput,
+        /// What the mouse did.
+        mouse_kind: MouseKind,
+        /// The modifier keys held during the event.
+        modifier_flags: BindingModifierFlags,
+        /// The cell in the pane's content the event names, `(0, 0)` at its
+        /// top-left content cell.
+        pane_local_cell: Point,
     },
     /// Send `arrow_count` cursor arrow keys to `pane_id` — the alternate-scroll (`?1007`)
     /// translation of a wheel tick on the alternate screen.
@@ -150,14 +163,24 @@ pub enum MouseAction {
     /// client's mouse. Focus and every selection change travel this way, and the
     /// session validates them as it validates a command typed at the CLI.
     Command(Box<Command>),
-    /// Move `pane_id`'s `border_side` border `requested_cell_count` cells, one cell per step, in the
+    /// Move this client's view of a floating pane under `command_id`. The
+    /// session names `command_id` in a `PlacementCommandRejected` when it
+    /// refuses the move.
+    MoveFloatingPane {
+        /// The id the move command carries.
+        command_id: CommandId,
+        /// The floating pane and its new top-left cell.
+        command_args: MoveFloatingPaneArgs,
+    },
+    /// Move `pane_id`'s `border_side` border `requested_cell_count` cells in the
     /// direction `resize_step` names — `1` outward (the pane grows), `-1` inward.
     ///
-    /// The session applies the steps one at a time and stops at the first it
-    /// refuses, then reports how many it took; the viewer advances its drag
-    /// anchor by exactly that many, so a pointer pushed past a pane's minimum
-    /// size leaves the border pinned at that limit and a reverse drag moves it
-    /// the instant the pointer crosses back.
+    /// The session moves the border up to `requested_cell_count` cells, as far
+    /// as the panes' minimum sizes and the pane area allow, then reports how
+    /// many cells the pane's size changed; the viewer advances its drag anchor
+    /// by exactly that many, so a pointer pushed past a pane's minimum size
+    /// leaves the border at that limit and a reverse drag moves it the instant
+    /// the pointer crosses back.
     Resize {
         /// The pane whose border moves.
         pane_id: PaneId,
@@ -201,8 +224,8 @@ pub(crate) struct SelectionDrag {
 /// A pane-border drag under way: the pane whose border was grabbed, which side
 /// it is, and the cell the last *accepted* resize tracked to. The tracked cell
 /// advances only over the cells a resize was accepted for, so pushing the
-/// pointer past a pane's minimum size leaves the border pinned at that limit and
-/// a reverse drag moves it the instant the pointer crosses back.
+/// pointer past a pane's minimum size leaves the border at that limit and a
+/// reverse drag moves it the instant the pointer crosses back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ResizeDrag {
     /// The pane whose border is being dragged.
@@ -223,6 +246,53 @@ pub(crate) struct TablineDrag {
     anchor_column: u16,
     /// The first visible tab index when the drag began.
     anchor_first_visible_tab_index: usize,
+}
+
+/// A floating pane's grab handle held by the left button: the pane, the
+/// top-left cell this viewer draws it at, and where the press found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FloatingPaneHandleDrag {
+    /// The floating pane being moved.
+    pane_id: PaneId,
+    /// The top-left cell the viewer draws the pane at, counted from its
+    /// pane-area origin. It may lie past the pane area, and the frame draws
+    /// the pane moved inside it.
+    top_left_cell: Point,
+    /// The screen cell the press landed on.
+    press_position: Point,
+    /// The top-left cell the pane was drawn at when the press landed.
+    press_top_left_cell: Point,
+}
+
+/// A floating pane move that a grab-handle release sent under `command_id`,
+/// drawn at `top_left_cell` until an applied frame names it, the session
+/// rejects it, or the session drops events. While one waits, a press on a
+/// grab handle starts no drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SentFloatingPaneMove {
+    /// The floating pane the move names.
+    pane_id: PaneId,
+    /// The top-left cell the move sent, counted from the viewer's pane-area
+    /// origin.
+    top_left_cell: Point,
+    /// The id the move command carries.
+    command_id: CommandId,
+}
+
+/// The one koshi gesture the held left button drives, from the press that
+/// began it until its release. A left press ends any gesture still recorded
+/// before it acts: the highlight a selection made stands and is not copied,
+/// and a grab-handle drag sends no move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LeftButtonGesture {
+    /// Highlighting text in a pane.
+    Selection(SelectionDrag),
+    /// Moving a pane border.
+    BorderResize(ResizeDrag),
+    /// Scrolling the tab strip by dragging it.
+    TablinePeek(TablineDrag),
+    /// Moving a floating pane by its grab handle.
+    FloatingPaneMove(FloatingPaneHandleDrag),
 }
 
 /// The run of clicks a press makes — one, two, or three — which is what picks
@@ -259,13 +329,17 @@ pub(crate) struct LastPress {
     click_count: ClickCount,
 }
 
-/// The pane and button held by a forwarded mouse gesture.
+/// The pane and button held by a forwarded mouse gesture, and the cell its
+/// last forwarded report named.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MouseCapture {
     /// The pane receiving the gesture.
     pane_id: PaneId,
     /// The button that began the gesture.
     button: MouseButton,
+    /// The cell in the pane's content that the last forwarded press or drag
+    /// named, `(0, 0)` at its top-left content cell.
+    last_pane_local_cell: Point,
 }
 
 /// The tab and first visible tab index recorded by a tab-strip peek.
@@ -278,9 +352,13 @@ pub(crate) struct TablinePeek {
 }
 
 impl Client {
-    /// The pane this viewer's pointer is over, where its tab strip is scrolled,
-    /// and whether it is dialing the session again, for the frame it is about to
-    /// paint or hit-test.
+    /// The pane this viewer's pointer is over, the pane whose placement handle
+    /// it marks, its input mode, its pane placement preview, where its tab
+    /// strip is scrolled, whether it is dialing the session again, and where it
+    /// draws a floating pane it moves, for the frame it is about to paint, and
+    /// for the tab-strip steps and the grab-handle release that read it before
+    /// that paint. While the pane placement preview shows, no pane is hovered
+    /// and no placement handle is marked.
     ///
     /// A peek made on a tab other than `active_tab_id` is not applied, so a tab
     /// switch reveals the new tab. The peek is thrown away outright the moment
@@ -314,6 +392,20 @@ impl Client {
                 LinkStatus::Redialing(reconnecting) => Some(reconnecting),
                 LinkStatus::Linked | LinkStatus::AwaitingRestartedSession => None,
             },
+            floating_pane_move_draft: match (self.left_button_gesture, self.sent_floating_pane_move)
+            {
+                (Some(LeftButtonGesture::FloatingPaneMove(floating_pane_handle_drag)), _) => {
+                    Some(FloatingPaneMoveDraft {
+                        pane_id: floating_pane_handle_drag.pane_id,
+                        top_left_cell: floating_pane_handle_drag.top_left_cell,
+                    })
+                }
+                (_, Some(sent_floating_pane_move)) => Some(FloatingPaneMoveDraft {
+                    pane_id: sent_floating_pane_move.pane_id,
+                    top_left_cell: sent_floating_pane_move.top_left_cell,
+                }),
+                (_, None) => None,
+            },
         }
     }
 
@@ -334,9 +426,10 @@ impl Client {
     ///
     /// - While a submitted placement waits for the session, every event is
     ///   consumed and the placement drag ends.
-    /// - With placement mode off, an unshifted left press on a placement handle
-    ///   opens placement mode for that pane until the drag ends. A Shift press
-    ///   and every other event return `None`.
+    /// - With placement mode off, an unshifted left press on a tiled pane's
+    ///   placement handle opens placement mode for that pane until the drag
+    ///   ends. A press on a floating pane's grab handle, a Shift press, and
+    ///   every other event return `None`.
     /// - With placement mode on, a left press on a tab previews that tab. A
     ///   left press on pane content, a placement handle, or a stack header
     ///   starts a drag, and picks that pane as the source unless it already is
@@ -345,10 +438,11 @@ impl Client {
     ///   that focuses `pane-123`, which expands it in its stack. A pane picked
     ///   while another tab is previewed keeps focus where it is.
     /// - A left drag selects the target under the pointer: a swap, or an
-    ///   insertion while Shift was held at the press. A left release after the
-    ///   pointer moved submits the target under it. A release that submits
-    ///   nothing cancels placement mode that lasts until its drag ends. Every
-    ///   other event is consumed.
+    ///   insertion while Shift was held at the press. A left drag onto a scroll
+    ///   arrow also steps the tab strip one tab, as a wheel tick over the tab
+    ///   strip does. A left release after the pointer moved submits the target
+    ///   under it. A release that submits nothing cancels placement mode that
+    ///   lasts until its drag ends. Every other event is consumed.
     pub(crate) fn handle_placement_mouse(
         &mut self,
         mouse_input: MouseInput,
@@ -359,7 +453,7 @@ impl Client {
             self.end_placement_drag();
             return Some(PlacementInputAction::Consumed);
         }
-        let frame_layout = self.build_frame_layout(mouse_frame);
+        let frame_layout = mouse_frame.build_frame_layout();
         let region = resolve_hit_region(frame_layout, mouse_input.position);
         if !self.is_placement_mode_active() {
             if mouse_input
@@ -371,6 +465,12 @@ impl Client {
             if let (MouseKind::Press(MouseButton::Left), HitRegion::PlacementHandle { pane_id }) =
                 (mouse_input.mouse_kind, region)
             {
+                if frame_layout
+                    .find_drawn_floating_pane_slot(pane_id)
+                    .is_some()
+                {
+                    return None;
+                }
                 let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
                 let Some((source_pane_id, destination_tab_id)) =
                     self.begin_mouse_placement_mode(pane_id, active_tab_id)
@@ -429,17 +529,23 @@ impl Client {
                     )
                 }
                 HitRegion::PaneBorder { .. }
+                | HitRegion::PaneTitlebar { .. }
+                | HitRegion::PanePinToggle { .. }
+                | HitRegion::PaneMinimizeButton { .. }
+                | HitRegion::PaneCloseButton { .. }
                 | HitRegion::Tabline
-                | HitRegion::TablineScrollLeft { .. }
-                | HitRegion::TablineScrollRight { .. }
+                | HitRegion::TablineScrollLeft
+                | HitRegion::TablineScrollRight
                 | HitRegion::Statusline
                 | HitRegion::None => PlacementInputAction::Consumed,
             },
             MouseKind::Drag(MouseButton::Left) => {
                 match region {
-                    HitRegion::TablineScrollLeft { target_tab_index }
-                    | HitRegion::TablineScrollRight { target_tab_index } => {
-                        self.peek_tabline(mouse_frame, target_tab_index);
+                    HitRegion::TablineScrollLeft => {
+                        self.step_tabline_peek(mouse_frame, ScrollDirection::Left);
+                    }
+                    HitRegion::TablineScrollRight => {
+                        self.step_tabline_peek(mouse_frame, ScrollDirection::Right);
                     }
                     _ => {}
                 }
@@ -457,10 +563,8 @@ impl Client {
                 PlacementInputAction::Consumed
             }
             MouseKind::Scroll(scroll_direction) => {
-                if let Some(target_tab_index) =
-                    self.compute_tabline_step(mouse_frame, region, scroll_direction)
-                {
-                    self.peek_tabline(mouse_frame, target_tab_index);
+                if is_tab_strip_region(region) {
+                    self.step_tabline_peek(mouse_frame, scroll_direction);
                 }
                 PlacementInputAction::Consumed
             }
@@ -557,11 +661,8 @@ impl Client {
         if tab_snapshot.is_every_pane_suppressed {
             return None;
         }
-        let viewport_size = mouse_frame.committed_regions.viewport_size;
-        let render_area =
-            RatatuiRect::new(0, 0, viewport_size.column_count, viewport_size.row_count);
         let destination_layout_rect = compute_content_rect(
-            compute_pane_area(&mouse_frame.committed_regions, render_area),
+            compute_mouse_frame_pane_area(mouse_frame),
             tab_snapshot.tab_size,
         );
         if !is_point_in_ratatui_rect(screen_point, destination_layout_rect) {
@@ -657,18 +758,33 @@ impl Client {
 
     /// Decide what `mouse_input` means against `mouse_frame`, the last frame
     /// this viewer painted, and return everything the session must do about it,
-    /// in order.
+    /// in order. `mouse_frame` is the frame last passed to
+    /// [`drop_gestures_the_frame_ended`](Self::drop_gestures_the_frame_ended).
+    /// The hovered pane and the hovered placement handle are cleared first
+    /// when `mouse_frame` no longer draws their pane.
     ///
     /// A **wheel tick** is answered by [`handle_mouse_wheel`](Self::handle_mouse_wheel).
     /// The rest is routed by what the press began: a border drag resizes, a
-    /// tab-strip drag scrolls the strip, a content drag highlights, and anything
-    /// else is the program's. A **left press** acts on the region it landed on —
-    /// a tab focuses that tab, a scroll arrow peeks the strip, a stack header
-    /// focuses that pane, pane content focuses the pane or begins a highlight,
-    /// a border begins a resize, the bare tab strip begins a peek-drag. A
-    /// **release** ends whichever drag was under way. A buttonless **move**
-    /// updates which pane is hovered and reaches the program if it asked for
-    /// moves.
+    /// floating pane's grab-handle drag moves that pane in this viewer's own
+    /// view, a tab-strip drag scrolls the strip, a content drag highlights, and
+    /// anything else is the program's. A **left press** acts on the region it
+    /// landed on — a tab focuses that tab, a scroll arrow steps the strip one tab, a
+    /// stack header focuses that pane, pane content focuses the pane or begins
+    /// a highlight, a border begins a resize, the bare tab strip begins a
+    /// peek-drag. On a floating pane, a press on the grab handle begins a move,
+    /// a press on the border, the grab handle or the titlebar also focuses and
+    /// raises the pane, and the pin toggle, minimize and close buttons act
+    /// without focusing it. A **left release** ends whichever drag was under
+    /// way, and a grab-handle release sends the move. A press, drag or release
+    /// of another button goes to the program, and a left drag under way goes
+    /// on. A buttonless **move** updates which pane is hovered and reaches the
+    /// program if it asked for moves.
+    ///
+    /// A **press** first ends every gesture its button still holds: a left
+    /// press drops koshi's left-button gesture with no copy and no move sent,
+    /// and a press of the button a capture holds ends that capture. A capture
+    /// ended without its release puts one release of its button, at its last
+    /// cell, ahead of every other action.
     ///
     /// A left press on the content of an already-focused plain shell at the
     /// pane's third visible row, with the pane's top row on line 940, arms a
@@ -680,8 +796,24 @@ impl Client {
         current_time: Instant,
     ) -> Vec<MouseAction> {
         self.note_active_tab(mouse_frame.client_snapshot.active_tab_id);
-        self.drop_gestures_the_frame_ended(mouse_frame);
-        match mouse_input.mouse_kind {
+        self.hovered_pane_id = self
+            .hovered_pane_id
+            .filter(|&pane_id| is_pane_drawn(mouse_frame, pane_id));
+        self.placement_handle_pane_id = self
+            .placement_handle_pane_id
+            .filter(|&pane_id| is_pane_drawn(mouse_frame, pane_id));
+        if let MouseKind::Press(pressed_button) = mouse_input.mouse_kind {
+            if pressed_button == MouseButton::Left {
+                self.left_button_gesture = None;
+            }
+            if self
+                .mouse_capture
+                .is_some_and(|mouse_capture| mouse_capture.button == pressed_button)
+            {
+                self.end_mouse_capture();
+            }
+        }
+        let mut mouse_actions = match mouse_input.mouse_kind {
             MouseKind::Scroll(_) => match self.handle_mouse_wheel(mouse_input, mouse_frame) {
                 Some(wheel_decision) => {
                     self.hovered_pane_id = wheel_decision.hovered_pane_id;
@@ -695,17 +827,23 @@ impl Client {
             MouseKind::Drag(MouseButton::Left) => {
                 self.handle_left_drag(mouse_input, mouse_frame, current_time)
             }
-            MouseKind::Release(_) => self.release_mouse_gesture(mouse_input, mouse_frame),
+            MouseKind::Release(MouseButton::Left) => {
+                self.release_mouse_gesture(mouse_input, mouse_frame)
+            }
             MouseKind::Motion => {
                 let hit_region =
-                    resolve_hit_region(self.build_frame_layout(mouse_frame), mouse_input.position);
+                    resolve_hit_region(mouse_frame.build_frame_layout(), mouse_input.position);
                 self.update_pointer_hover(mouse_frame, mouse_input.position, hit_region);
                 self.forward_mouse_input(mouse_input, mouse_frame)
             }
-            MouseKind::Press(_) | MouseKind::Drag(_) => {
+            MouseKind::Press(_) | MouseKind::Drag(_) | MouseKind::Release(_) => {
                 self.forward_mouse_input(mouse_input, mouse_frame)
             }
+        };
+        if let Some(capture_release) = self.take_mouse_capture_release() {
+            mouse_actions.insert(0, capture_release);
         }
+        mouse_actions
     }
 
     /// How long until a selection drag held past a pane's edge must scroll the
@@ -713,9 +851,18 @@ impl Client {
     /// no longer than this, so a still pointer keeps pulling text in.
     #[must_use]
     pub fn compute_next_mouse_wakeup(&self, current_time: Instant) -> Option<Duration> {
-        self.selection_drag
+        self.find_selection_drag()
             .and_then(|selection_drag| selection_drag.next_scroll_time)
             .map(|next_scroll_time| next_scroll_time.saturating_duration_since(current_time))
+    }
+
+    /// The selection drag the held left button drives, or `None` when it
+    /// drives another gesture or none.
+    fn find_selection_drag(&self) -> Option<SelectionDrag> {
+        match self.left_button_gesture {
+            Some(LeftButtonGesture::Selection(selection_drag)) => Some(selection_drag),
+            _ => None,
+        }
     }
 
     /// Scroll a selection drag held past a pane's edge, if its next step is due
@@ -734,7 +881,7 @@ impl Client {
         current_time: Instant,
         mouse_frame: &MouseFrame,
     ) -> Vec<MouseAction> {
-        let Some(selection_drag) = self.selection_drag else {
+        let Some(selection_drag) = self.find_selection_drag() else {
             return Vec::new();
         };
         if selection_drag
@@ -755,17 +902,17 @@ impl Client {
         else {
             // The pane moved out from under a pointer that is no longer outside
             // it; stop scrolling and let the next drag event drive.
-            self.selection_drag = Some(SelectionDrag {
+            self.left_button_gesture = Some(LeftButtonGesture::Selection(SelectionDrag {
                 next_scroll_time: None,
                 ..selection_drag
-            });
+            }));
             return Vec::new();
         };
         self.selection_scroll_origin_row_index = Some(view_top_row_index);
-        self.selection_drag = Some(SelectionDrag {
+        self.left_button_gesture = Some(LeftButtonGesture::Selection(SelectionDrag {
             next_scroll_time: Some(current_time + SELECTION_SCROLL_INTERVAL_DURATION),
             ..selection_drag
-        });
+        }));
         vec![MouseAction::Scroll {
             pane_id: selection_drag.pane_id,
             is_scrolling_up: scroll_direction < 0,
@@ -793,7 +940,7 @@ impl Client {
             return Vec::new();
         };
         let Some(selection_drag) = self
-            .selection_drag
+            .find_selection_drag()
             .filter(|selection_drag| selection_drag.pane_id == pane_id)
         else {
             return Vec::new();
@@ -801,14 +948,14 @@ impl Client {
         let Some(reported_view_top_row_index) =
             view_top_row_index.filter(|&view_top_row_index| view_top_row_index != origin_row_index)
         else {
-            self.selection_drag = Some(SelectionDrag {
+            self.left_button_gesture = Some(LeftButtonGesture::Selection(SelectionDrag {
                 next_scroll_time: None,
                 ..selection_drag
-            });
+            }));
             return Vec::new();
         };
-        let Some((column_index, row_index)) = compute_clamped_pane_cell(
-            self.build_frame_layout(mouse_frame),
+        let Some(pane_local_cell) = compute_clamped_pane_cell(
+            mouse_frame.build_frame_layout(),
             pane_id,
             selection_drag.pointer_position,
         ) else {
@@ -821,8 +968,8 @@ impl Client {
                     selection_kind: selection_drag.selection_kind,
                     anchor: selection_drag.anchor_grid_position,
                     cursor: GridPosition {
-                        row_index: reported_view_top_row_index + u64::from(row_index),
-                        column_index,
+                        row_index: reported_view_top_row_index + u64::from(pane_local_cell.row),
+                        column_index: pane_local_cell.column,
                     },
                 },
             }),
@@ -832,23 +979,70 @@ impl Client {
     /// Drop the selection gesture under way, if any, leaving the highlight it
     /// made. Called when a key reaches the pane's program.
     pub fn end_mouse_selection(&mut self) {
-        self.selection_drag = None;
+        self.left_button_gesture.take_if(|left_button_gesture| {
+            matches!(left_button_gesture, LeftButtonGesture::Selection(_))
+        });
+    }
+
+    /// Drop every gesture a held button drives: koshi's left-button gesture,
+    /// the placement drag, and the pane a held button was captured to, whose
+    /// program is owed a release ([`end_mouse_capture`](Self::end_mouse_capture)).
+    /// The highlight a selection drag already made, and a floating pane move
+    /// already sent, stand.
+    pub(crate) fn end_held_mouse_gestures(&mut self) {
+        self.left_button_gesture = None;
+        self.placement_state.placement_drag = None;
+        self.end_mouse_capture();
+    }
+
+    /// End the capture before its button's release reaches the pane's
+    /// program. That program is owed one release of the capture's button at
+    /// the capture's last cell
+    /// ([`take_mouse_capture_release`](Self::take_mouse_capture_release)).
+    /// Does nothing when no capture is held.
+    fn end_mouse_capture(&mut self) {
+        if let Some(mouse_capture) = self.mouse_capture.take() {
+            self.unreleased_mouse_capture = Some(mouse_capture);
+        }
+    }
+
+    /// Take the release this viewer owes the program of a capture it ended:
+    /// one release of the capture's button, at the capture's last cell, with
+    /// no modifier held. `None` when no release is owed.
+    ///
+    /// A left capture in `pane-7` whose last drag named cell `(4, 2)`, ended
+    /// by placement mode opening, gives a left release at `(4, 2)` to
+    /// `pane-7`.
+    pub(crate) fn take_mouse_capture_release(&mut self) -> Option<MouseAction> {
+        let MouseCapture {
+            pane_id,
+            button,
+            last_pane_local_cell,
+        } = self.unreleased_mouse_capture.take()?;
+        Some(MouseAction::Forward {
+            pane_id,
+            mouse_kind: MouseKind::Release(button),
+            modifier_flags: BindingModifierFlags::NONE,
+            pane_local_cell: last_pane_local_cell,
+        })
     }
 
     /// Drop every gesture under way: the selection drag, the border drag, the
-    /// tab-strip peek-drag, the pane a held button was captured to, and the
-    /// placement drag. The highlight a selection drag already made stands.
+    /// tab-strip peek-drag, the floating pane grab-handle drag, the placement
+    /// drag, the pane a held button was captured to, and the floating pane
+    /// move this viewer draws ahead of the session after a release sent it.
+    /// No release is owed for the capture, and a release already owed is
+    /// dropped. The highlight a selection drag already made stands. Called
+    /// when a new link to the session replaces the old one.
     /// Placement mode that lasts until its drag ends is cancelled. Placement
     /// mode that lasts until Esc stays on and loses its unconfirmed target.
     ///
     /// The pane under the pointer, where the tab strip is peeked, and the line a
     /// pending edge-scroll was asked from are left as they are.
     pub fn end_mouse_gestures(&mut self) {
-        self.selection_drag = None;
-        self.resize_drag = None;
-        self.tabline_drag = None;
-        self.mouse_capture = None;
-        self.placement_state.placement_drag = None;
+        self.end_held_mouse_gestures();
+        self.unreleased_mouse_capture = None;
+        self.sent_floating_pane_move = None;
         if self.should_placement_mode_end_with_drag() {
             self.cancel_placement_mode();
         } else if !self.is_placement_confirmation_pending() {
@@ -862,8 +1056,10 @@ impl Client {
     /// viewer painted. Returns `None` when `mouse_input` is not a wheel tick.
     ///
     /// Over the tab strip the tick steps the strip. Elsewhere it targets the
-    /// pane under the pointer, or this viewer's focused terminal pane when the
-    /// pointer is over chrome, and that pane is answered by precedence:
+    /// pane whose content is under the pointer, the floating pane whose
+    /// titlebar, border, grab handle or buttons are under the pointer, or this
+    /// viewer's focused terminal pane when the pointer is over other chrome,
+    /// and that pane is answered by precedence:
     ///
     /// 1. a highlight in the pane makes the tick scroll koshi's own scrollback;
     /// 2. else a program asking for the mouse gets the tick as a report;
@@ -887,25 +1083,22 @@ impl Client {
         let MouseKind::Scroll(scroll_direction) = mouse_input.mouse_kind else {
             return None;
         };
-        let hit_region =
-            resolve_hit_region(self.build_frame_layout(mouse_frame), mouse_input.position);
-        if let Some(target_first_visible_tab_index) =
-            self.compute_tabline_step(mouse_frame, hit_region, scroll_direction)
-        {
-            self.peek_tabline(mouse_frame, target_first_visible_tab_index);
+        let frame_layout = mouse_frame.build_frame_layout();
+        let hit_region = resolve_hit_region(frame_layout, mouse_input.position);
+        if is_tab_strip_region(hit_region) {
+            self.step_tabline_peek(mouse_frame, scroll_direction);
             return Some(WheelDecision {
                 hovered_pane_id: None,
                 mouse_action: None,
             });
         }
-        let hovered_pane_id = find_pane_under_region(hit_region);
-        let mouse_action = hovered_pane_id
-            .or_else(|| find_focused_pane(mouse_frame))
+        let mouse_action = find_wheel_target_pane(frame_layout, hit_region)
+            .or_else(|| find_focused_pane(frame_layout))
             .and_then(|pane_id| {
                 self.handle_wheel_on_pane(mouse_input, scroll_direction, mouse_frame, pane_id)
             });
         Some(WheelDecision {
-            hovered_pane_id,
+            hovered_pane_id: find_content_pane(hit_region),
             mouse_action,
         })
     }
@@ -925,9 +1118,16 @@ impl Client {
             return build_scroll_action(pane_id, scroll_direction, scroll_line_count);
         }
         if is_mouse_kind_reported(mouse_pane.mouse_tracking, mouse_input.mouse_kind) {
+            let pane_local_cell = compute_clamped_pane_cell(
+                mouse_frame.build_frame_layout(),
+                pane_id,
+                mouse_input.position,
+            )?;
             return Some(MouseAction::Forward {
                 pane_id,
-                mouse_input,
+                mouse_kind: mouse_input.mouse_kind,
+                modifier_flags: mouse_input.modifier_flags,
+                pane_local_cell,
             });
         }
         if mouse_pane.is_on_alternate_screen && mouse_pane.is_alternate_scroll_enabled {
@@ -954,7 +1154,8 @@ impl Client {
         mouse_frame: &MouseFrame,
         current_time: Instant,
     ) -> Vec<MouseAction> {
-        match resolve_hit_region(self.build_frame_layout(mouse_frame), mouse_input.position) {
+        let frame_layout = mouse_frame.build_frame_layout();
+        match resolve_hit_region(frame_layout, mouse_input.position) {
             HitRegion::Tab { tab_id } => {
                 // The click reveals the tab it names, so any peek is over.
                 self.tabline_peek = None;
@@ -965,9 +1166,12 @@ impl Client {
                     },
                 )))]
             }
-            HitRegion::TablineScrollLeft { target_tab_index }
-            | HitRegion::TablineScrollRight { target_tab_index } => {
-                self.peek_tabline(mouse_frame, target_tab_index);
+            HitRegion::TablineScrollLeft => {
+                self.step_tabline_peek(mouse_frame, ScrollDirection::Left);
+                Vec::new()
+            }
+            HitRegion::TablineScrollRight => {
+                self.step_tabline_peek(mouse_frame, ScrollDirection::Right);
                 Vec::new()
             }
             HitRegion::StackHeader { pane_id } => {
@@ -977,30 +1181,94 @@ impl Client {
                 self.press_pane_content(pane_id, mouse_input, mouse_frame, current_time)
             }
             HitRegion::PaneBorder { pane_id, side } => {
+                if let Some(floating_pane_slot) =
+                    frame_layout.find_drawn_floating_pane_slot(pane_id)
+                {
+                    // A pinned float keeps its left and top edges.
+                    let can_border_move = !floating_pane_slot.is_pinned
+                        || matches!(side, Direction::Right | Direction::Down);
+                    if self.client_config.mouse.can_resize_pane_border && can_border_move {
+                        self.left_button_gesture =
+                            Some(LeftButtonGesture::BorderResize(ResizeDrag {
+                                pane_id,
+                                border_side: side,
+                                last_accepted_position: mouse_input.position,
+                            }));
+                    }
+                    return self.build_floating_pane_focus_actions(mouse_frame, pane_id);
+                }
                 // Only a real divider — one with a pane drawn beside it to
                 // resize against — begins a drag.
                 if self.client_config.mouse.can_resize_pane_border
                     && has_border_neighbor(mouse_frame, pane_id, side)
                 {
-                    self.resize_drag = Some(ResizeDrag {
+                    self.left_button_gesture = Some(LeftButtonGesture::BorderResize(ResizeDrag {
                         pane_id,
                         border_side: side,
                         last_accepted_position: mouse_input.position,
-                    });
+                    }));
                 }
                 Vec::new()
             }
-            HitRegion::PlacementHandle { .. } => Vec::new(),
+            HitRegion::PlacementHandle { pane_id } => {
+                let Some(floating_pane_slot) = frame_layout.find_drawn_floating_pane_slot(pane_id)
+                else {
+                    return Vec::new();
+                };
+                if !floating_pane_slot.is_pinned && self.sent_floating_pane_move.is_none() {
+                    self.left_button_gesture = Some(LeftButtonGesture::FloatingPaneMove(
+                        FloatingPaneHandleDrag {
+                            pane_id,
+                            top_left_cell: floating_pane_slot.outer_rect.origin,
+                            press_position: mouse_input.position,
+                            press_top_left_cell: floating_pane_slot.outer_rect.origin,
+                        },
+                    ));
+                }
+                self.build_floating_pane_focus_actions(mouse_frame, pane_id)
+            }
+            HitRegion::PaneTitlebar { pane_id } => {
+                self.build_floating_pane_focus_actions(mouse_frame, pane_id)
+            }
+            HitRegion::PanePinToggle { pane_id } => {
+                let Some(floating_pane_slot) = frame_layout.find_drawn_floating_pane_slot(pane_id)
+                else {
+                    return Vec::new();
+                };
+                vec![MouseAction::Command(Box::new(Command::SetPanePinned(
+                    SetPanePinnedArgs {
+                        pane_id: Some(pane_id),
+                        is_pinned: !floating_pane_slot.is_pinned,
+                    },
+                )))]
+            }
+            HitRegion::PaneMinimizeButton { pane_id } => {
+                vec![MouseAction::Command(Box::new(Command::SetPaneMinimized(
+                    SetPaneMinimizedArgs {
+                        pane_id: Some(pane_id),
+                        is_minimized: true,
+                    },
+                )))]
+            }
+            HitRegion::PaneCloseButton { pane_id } => {
+                vec![MouseAction::Command(Box::new(Command::ClosePane(
+                    ClosePaneArgs {
+                        pane_id: Some(pane_id),
+                        should_force_close: false,
+                        should_kill_process_tree: false,
+                    },
+                )))]
+            }
             HitRegion::Tabline => {
                 // A frame carrying no first visible tab index begins no
                 // peek-drag.
-                if let Some(first_visible_tab_index) =
-                    find_first_visible_tab_index(self.build_frame_layout(mouse_frame))
-                {
-                    self.tabline_drag = Some(TablineDrag {
+                if let Some(first_visible_tab_index) = find_first_visible_tab_index(
+                    self.build_frame_layout_with_current_chrome(mouse_frame),
+                ) {
+                    self.left_button_gesture = Some(LeftButtonGesture::TablinePeek(TablineDrag {
                         anchor_column: mouse_input.position.column,
                         anchor_first_visible_tab_index: first_visible_tab_index,
-                    });
+                    }));
                 }
                 Vec::new()
             }
@@ -1096,7 +1364,7 @@ impl Client {
             is_on_alternate_screen: find_mouse_pane(mouse_frame, pane_id)
                 .is_some_and(|mouse_pane| mouse_pane.is_on_alternate_screen),
         };
-        self.selection_drag = Some(selection_drag);
+        self.left_button_gesture = Some(LeftButtonGesture::Selection(selection_drag));
         let mut selection_actions = vec![MouseAction::Command(Box::new(Command::Visual(
             VisualCommand::ClearSelection(ClearSelectionArgs { pane_id }),
         )))];
@@ -1119,54 +1387,67 @@ impl Client {
         mouse_frame: &MouseFrame,
         current_time: Instant,
     ) -> Vec<MouseAction> {
-        if let Some(resize_drag) = self.resize_drag {
-            return self.drag_resize_to(resize_drag, mouse_input.position);
-        }
-        if let Some(tabline_drag) = self.tabline_drag {
-            self.drag_tabline_to(tabline_drag, mouse_frame, mouse_input.position.column);
-            return Vec::new();
-        }
-        if let Some(selection_drag) = self.selection_drag {
-            return self.drag_selection_to(
+        match self.left_button_gesture {
+            Some(LeftButtonGesture::Selection(selection_drag)) => self.drag_selection_to(
                 selection_drag,
                 mouse_input.position,
                 mouse_frame,
                 current_time,
-            );
+            ),
+            Some(LeftButtonGesture::BorderResize(resize_drag)) => {
+                self.drag_resize_to(resize_drag, mouse_input.position)
+            }
+            Some(LeftButtonGesture::TablinePeek(tabline_drag)) => {
+                self.drag_tabline_to(tabline_drag, mouse_frame, mouse_input.position.column);
+                Vec::new()
+            }
+            Some(LeftButtonGesture::FloatingPaneMove(floating_pane_handle_drag)) => {
+                self.drag_floating_pane_to(floating_pane_handle_drag, mouse_input.position);
+                Vec::new()
+            }
+            None => self.forward_mouse_input(mouse_input, mouse_frame),
         }
-        self.forward_mouse_input(mouse_input, mouse_frame)
     }
 
-    /// End whichever drag was under way. A release that ends a koshi drag is
-    /// koshi's; any other release belongs to the program under the pointer.
+    /// End the koshi gesture the left release `mouse_input` finds under way.
+    /// With no gesture under way, the release belongs to the program under the
+    /// pointer.
     ///
     /// **Releasing the selection IS the copy**: the viewer dispatches
     /// [`VisualCommand::Copy`] for the pane it was highlighting, and the session
     /// reads the highlighted text at that instant and puts it on the clipboard.
+    /// A grab-handle release sends the move
+    /// ([`submit_floating_pane_move`](Self::submit_floating_pane_move)). A
+    /// border or tab-strip release sends nothing.
     fn release_mouse_gesture(
         &mut self,
         mouse_input: MouseInput,
         mouse_frame: &MouseFrame,
     ) -> Vec<MouseAction> {
-        let selection_drag = self.selection_drag.take();
-        let is_resizing = self.resize_drag.take().is_some();
-        let is_peeking = self.tabline_drag.take().is_some();
-        if !(selection_drag.is_some() || is_resizing || is_peeking) {
-            return self.forward_mouse_input(mouse_input, mouse_frame);
-        }
-        // A plain click, whose press highlighted nothing, has no highlight to
-        // copy; the session finds none and copies nothing.
-        match selection_drag {
-            Some(selection_drag) => vec![MouseAction::Command(Box::new(Command::Visual(
-                VisualCommand::Copy(CopyArgs {
-                    pane_id: selection_drag.pane_id,
-                    should_trim_trailing_whitespace: self
-                        .client_config
-                        .copy
-                        .should_trim_trailing_whitespace,
-                }),
-            )))],
-            None => Vec::new(),
+        match self.left_button_gesture.take() {
+            // A plain click, whose press highlighted nothing, has no highlight
+            // to copy; the session finds none and copies nothing.
+            Some(LeftButtonGesture::Selection(selection_drag)) => {
+                vec![MouseAction::Command(Box::new(Command::Visual(
+                    VisualCommand::Copy(CopyArgs {
+                        pane_id: selection_drag.pane_id,
+                        should_trim_trailing_whitespace: self
+                            .client_config
+                            .copy
+                            .should_trim_trailing_whitespace,
+                    }),
+                )))]
+            }
+            Some(LeftButtonGesture::BorderResize(_) | LeftButtonGesture::TablinePeek(_)) => {
+                Vec::new()
+            }
+            Some(LeftButtonGesture::FloatingPaneMove(floating_pane_handle_drag)) => self
+                .submit_floating_pane_move(
+                    floating_pane_handle_drag,
+                    mouse_input.position,
+                    mouse_frame,
+                ),
+            None => self.forward_mouse_input(mouse_input, mouse_frame),
         }
     }
 
@@ -1187,11 +1468,11 @@ impl Client {
         let next_scroll_time = self
             .compute_edge_scroll_direction(mouse_frame, selection_drag.pane_id, pointer_position)
             .map(|_| current_time + SELECTION_SCROLL_INTERVAL_DURATION);
-        self.selection_drag = Some(SelectionDrag {
+        self.left_button_gesture = Some(LeftButtonGesture::Selection(SelectionDrag {
             pointer_position,
             next_scroll_time,
             ..selection_drag
-        });
+        }));
         self.extend_selection(selection_drag, pointer_position, mouse_frame)
     }
 
@@ -1225,11 +1506,11 @@ impl Client {
 
     /// Move the grabbed border to follow a drag whose pointer is now at `pointer_position`.
     ///
-    /// Asks for the move one cell at a time toward the border, so a fast drag
-    /// that jumps several cells fills right up to a pane's minimum size instead
-    /// of being refused whole. The whole distance from the anchor is named every
-    /// time; [`note_resize_applied`](Self::note_resize_applied) moves the anchor
-    /// over the cells the session says it took.
+    /// Asks for the whole distance from the anchor every time. The session
+    /// moves the border as far as it can, so a fast drag that jumps several
+    /// cells fills right up to a pane's minimum size instead of being refused
+    /// whole; [`note_resize_applied`](Self::note_resize_applied) moves the
+    /// anchor over the cells the session says the pane's size changed.
     fn drag_resize_to(&self, resize_drag: ResizeDrag, pointer_position: Point) -> Vec<MouseAction> {
         let resize_cell_delta = compute_resize_cell_delta(
             resize_drag.border_side,
@@ -1248,9 +1529,9 @@ impl Client {
     }
 
     /// Advance the border drag's anchor over the `applied_cell_count` cells the session
-    /// accepted of a move asked for on `pane_id`'s `border_side` in direction `resize_step`. The
-    /// first refused step is the wall, so the anchor stops there and a reverse
-    /// drag moves the border the instant the pointer crosses back.
+    /// changed `pane_id`'s size by, for a move of its `border_side` border asked for in
+    /// direction `resize_step`. Where the resize stopped is the wall, so the anchor stops
+    /// there and a reverse drag resizes the pane the instant the pointer crosses back.
     ///
     /// Nothing moves unless the drag now held is the one `pane_id` and `border_side` name:
     /// an answer for a border the viewer has let go of, or for another border of
@@ -1266,34 +1547,24 @@ impl Client {
         resize_step: i16,
         applied_cell_count: u16,
     ) {
-        let Some(resize_drag) = self.resize_drag.filter(|resize_drag| {
-            resize_drag.pane_id == pane_id && resize_drag.border_side == border_side
-        }) else {
+        let Some(LeftButtonGesture::BorderResize(resize_drag)) = self.left_button_gesture else {
             return;
         };
-        if applied_cell_count > 0 {
-            self.resize_drag = Some(ResizeDrag {
-                last_accepted_position: advance_resize_anchor(
-                    resize_drag.border_side,
-                    resize_drag.last_accepted_position,
-                    resize_step,
-                    applied_cell_count,
-                ),
-                ..resize_drag
-            });
+        if resize_drag.pane_id != pane_id
+            || resize_drag.border_side != border_side
+            || applied_cell_count == 0
+        {
+            return;
         }
-    }
-
-    /// Capture the gesture `button` began in `pane_id`. The caller runs this for
-    /// every press it forwards, as it forwards it.
-    ///
-    /// The capture is what carries the rest of the gesture: the drags and the
-    /// release that follow go to this same pane even as the pointer leaves it,
-    /// re-stamped with this button. A press that is never forwarded — koshi's
-    /// own, or one the pane's tracking level does not ask for — captures
-    /// nothing.
-    pub fn note_press_forwarded(&mut self, pane_id: PaneId, button: MouseButton) {
-        self.mouse_capture = Some(MouseCapture { pane_id, button });
+        self.left_button_gesture = Some(LeftButtonGesture::BorderResize(ResizeDrag {
+            last_accepted_position: advance_resize_anchor(
+                resize_drag.border_side,
+                resize_drag.last_accepted_position,
+                resize_step,
+                applied_cell_count,
+            ),
+            ..resize_drag
+        }));
     }
 
     /// Scroll the tab strip to follow an in-flight drag whose pointer is now at
@@ -1314,32 +1585,26 @@ impl Client {
         self.peek_tabline(mouse_frame, target_first_visible_tab_index);
     }
 
-    /// The tab index a wheel tick over the tab strip scrolls to, or `None` when
-    /// the tick did not land on the strip. Up and left step toward the first
-    /// tab, down and right toward the last.
-    fn compute_tabline_step(
-        &self,
-        mouse_frame: &MouseFrame,
-        hit_region: HitRegion,
-        scroll_direction: ScrollDirection,
-    ) -> Option<usize> {
-        if !matches!(
-            hit_region,
-            HitRegion::Tabline
-                | HitRegion::Tab { .. }
-                | HitRegion::TablineScrollLeft { .. }
-                | HitRegion::TablineScrollRight { .. }
-        ) {
-            return None;
-        }
-        let first_visible_tab_index =
-            find_first_visible_tab_index(self.build_frame_layout(mouse_frame))?;
-        Some(match scroll_direction {
+    /// Peek this viewer's tab strip one tab on from the first tab it shows with
+    /// this viewer's current chrome, which holds every peek made since the last
+    /// paint. Up and left step toward the first tab, down and right toward the
+    /// last. A frame that draws no tab strip leaves the peek as it is.
+    ///
+    /// Two right-arrow clicks before a repaint, on a strip that showed tab `0`
+    /// first, peek from tab `2`.
+    fn step_tabline_peek(&mut self, mouse_frame: &MouseFrame, scroll_direction: ScrollDirection) {
+        let Some(first_visible_tab_index) =
+            find_first_visible_tab_index(self.build_frame_layout_with_current_chrome(mouse_frame))
+        else {
+            return;
+        };
+        let target_first_visible_tab_index = match scroll_direction {
             ScrollDirection::Up | ScrollDirection::Left => {
                 first_visible_tab_index.saturating_sub(1)
             }
             ScrollDirection::Down | ScrollDirection::Right => first_visible_tab_index + 1,
-        })
+        };
+        self.peek_tabline(mouse_frame, target_first_visible_tab_index);
     }
 
     /// Peek this viewer's tab strip from tab index `target_first_visible_tab_index`, recorded
@@ -1388,61 +1653,76 @@ impl Client {
 
     /// Hand `mouse_input` to the program in the pane it belongs to.
     ///
-    /// A button gesture is captured: the press picks the focused pane under the
-    /// pointer, and the drags and release that follow go to that same pane even
-    /// as the pointer leaves it. The capture itself is recorded by
-    /// [`Client::note_press_forwarded`], which the caller runs for every press
-    /// this returns. A bare move goes to the focused pane. A drag or release
-    /// with no capture — the press was koshi's, it focused nothing, or the
-    /// pane's tracking level did not ask for it — is dropped, so no program
-    /// ever sees a release without its press.
+    /// A button gesture is captured: a forwarded press records its pane, its
+    /// button and its cell, and the drags and release that follow go to that
+    /// same pane even as the pointer leaves it. A forwarded press first ends
+    /// the capture already held, whose program is owed a release
+    /// ([`end_mouse_capture`](Self::end_mouse_capture)). Each forwarded drag
+    /// records its cell. Any release ends the capture and goes to the captured
+    /// pane as a release of the captured button, whichever button it names.
+    ///
+    /// A press or a bare move goes to the focused pane under the pointer. A
+    /// drag or release with no capture — the press was koshi's, it focused
+    /// nothing, or the pane's tracking level did not ask for it — is dropped.
+    /// No program receives a release without its press.
     ///
     /// A press or a bare move outside the pane's content reaches no program: it
-    /// names no cell there. A captured drag or release does reach it, clamped to
-    /// its nearest edge by the session, so a gesture that wandered off the pane
-    /// still ends inside it.
+    /// names no cell there. A captured drag or release does reach it, at the
+    /// content cell nearest the pointer, so a gesture that wandered off the
+    /// pane still ends inside it. A release whose pane has no content cell in
+    /// `mouse_frame` goes out at the capture's last cell.
     ///
-    /// The pane's tracking level from the painted frame gates the forward, and
-    /// the session re-reads the live level before it writes.
+    /// The pane's tracking level from the painted frame gates a press, a drag
+    /// and a bare move. A captured release is forwarded whatever that level
+    /// says. The session reads the live level before it writes, and a release
+    /// ends the button it holds even when that level writes no release.
+    ///
+    /// Example: the frame shows `vim` in X10 mode (`?9`), which reports
+    /// presses only. A left press is forwarded and captured. The left release
+    /// is forwarded too, and the session writes no bytes for it.
     fn forward_mouse_input(
         &mut self,
         mouse_input: MouseInput,
         mouse_frame: &MouseFrame,
     ) -> Vec<MouseAction> {
-        let mouse_capture = self.mouse_capture;
-        // Any release ends the capture, whether or not it forwards and whichever
-        // button it names.
-        if matches!(mouse_input.mouse_kind, MouseKind::Release(_)) {
-            self.mouse_capture = None;
+        let frame_layout = mouse_frame.build_frame_layout();
+        if let MouseKind::Release(_) = mouse_input.mouse_kind {
+            let Some(mouse_capture) = self.mouse_capture.take() else {
+                return Vec::new();
+            };
+            let pane_local_cell = compute_clamped_pane_cell(
+                frame_layout,
+                mouse_capture.pane_id,
+                mouse_input.position,
+            )
+            .unwrap_or(mouse_capture.last_pane_local_cell);
+            return vec![MouseAction::Forward {
+                pane_id: mouse_capture.pane_id,
+                mouse_kind: MouseKind::Release(mouse_capture.button),
+                modifier_flags: mouse_input.modifier_flags,
+                pane_local_cell,
+            }];
         }
         let (pane_id, mouse_kind) = match mouse_input.mouse_kind {
-            MouseKind::Press(_) | MouseKind::Motion => match find_focused_pane(mouse_frame) {
+            MouseKind::Press(_) | MouseKind::Motion => match find_focused_pane(frame_layout) {
                 Some(focused_pane_id)
-                    if find_pane_content_rect(
-                        self.build_frame_layout(mouse_frame),
-                        focused_pane_id,
-                    )
-                    .is_some_and(|content_rect| {
-                        content_rect.is_point_inside(mouse_input.position)
-                    }) =>
+                    if resolve_hit_region(frame_layout, mouse_input.position)
+                        == (HitRegion::PaneContent {
+                            pane_id: focused_pane_id,
+                        }) =>
                 {
                     (focused_pane_id, mouse_input.mouse_kind)
                 }
                 _ => return Vec::new(),
             },
-            // A captured drag or release is re-stamped with the button its press
-            // named.
-            MouseKind::Drag(_) | MouseKind::Release(_) => match mouse_capture {
-                Some(MouseCapture {
-                    pane_id: captured_pane_id,
-                    button: captured_button,
-                }) => (
-                    captured_pane_id,
-                    replace_mouse_button(mouse_input.mouse_kind, captured_button),
-                ),
+            // A captured drag is re-stamped with the button its press named.
+            MouseKind::Drag(_) => match self.mouse_capture {
+                Some(mouse_capture) => {
+                    (mouse_capture.pane_id, MouseKind::Drag(mouse_capture.button))
+                }
                 None => return Vec::new(),
             },
-            MouseKind::Scroll(_) => return Vec::new(),
+            MouseKind::Release(_) | MouseKind::Scroll(_) => return Vec::new(),
         };
         let Some(mouse_pane) = find_mouse_pane(mouse_frame, pane_id) else {
             return Vec::new();
@@ -1450,45 +1730,79 @@ impl Client {
         if !is_mouse_kind_reported(mouse_pane.mouse_tracking, mouse_kind) {
             return Vec::new();
         }
+        let Some(pane_local_cell) =
+            compute_clamped_pane_cell(frame_layout, pane_id, mouse_input.position)
+        else {
+            return Vec::new();
+        };
+        match mouse_kind {
+            MouseKind::Press(pressed_button) => {
+                self.end_mouse_capture();
+                self.mouse_capture = Some(MouseCapture {
+                    pane_id,
+                    button: pressed_button,
+                    last_pane_local_cell: pane_local_cell,
+                });
+            }
+            MouseKind::Drag(_) => {
+                if let Some(mouse_capture) = self.mouse_capture.as_mut() {
+                    mouse_capture.last_pane_local_cell = pane_local_cell;
+                }
+            }
+            MouseKind::Release(_) | MouseKind::Motion | MouseKind::Scroll(_) => {}
+        }
         vec![MouseAction::Forward {
             pane_id,
-            mouse_input: MouseInput {
-                mouse_kind,
-                ..mouse_input
-            },
+            mouse_kind,
+            modifier_flags: mouse_input.modifier_flags,
+            pane_local_cell,
         }]
     }
 
-    /// Drop any gesture the newest frame ended.
+    /// Drop any gesture `mouse_frame`, the frame this viewer just painted,
+    /// ended. Called once for each painted frame, before any mouse event is
+    /// placed against it.
     ///
-    /// A gesture aimed at a pane the frame no longer draws is over: a pane that
-    /// closed, was hidden, or left with a tab switch cannot be dragged or
-    /// forwarded to, so the gesture ends where it stands.
+    /// A gesture aimed at a pane the frame no longer draws ends where it
+    /// stands: a pane that closed, was hidden, or left with a tab switch. A
+    /// capture ended this way leaves its program owed a release
+    /// (`end_mouse_capture`).
     ///
     /// A selection drag also ends when its pane swapped between the primary and
-    /// the alternate screen. Its anchor names a line of the screen the press
-    /// landed on, and the other screen's rows are different text.
-    fn drop_gestures_the_frame_ended(&mut self, mouse_frame: &MouseFrame) {
-        let is_pane_drawn =
-            |pane_id: PaneId| find_visible_pane_slot(mouse_frame, pane_id).is_some();
-        self.selection_drag = self.selection_drag.filter(|selection_drag| {
-            is_pane_drawn(selection_drag.pane_id)
-                && find_mouse_pane(mouse_frame, selection_drag.pane_id).is_none_or(|mouse_pane| {
-                    mouse_pane.is_on_alternate_screen == selection_drag.is_on_alternate_screen
-                })
-        });
-        self.resize_drag = self
-            .resize_drag
-            .filter(|resize_drag| is_pane_drawn(resize_drag.pane_id));
-        self.mouse_capture = self
+    /// the alternate screen since the press. Its anchor names a line of the
+    /// screen the press landed on.
+    ///
+    /// Example: a left press in `vim` in a floating pane holds a capture with
+    /// last cell `(4, 2)`. A key hides the floating panes, and the next frame
+    /// does not draw that pane. That frame ends the capture, and
+    /// `take_mouse_capture_release` gives a left release at `(4, 2)`.
+    pub fn drop_gestures_the_frame_ended(&mut self, mouse_frame: &MouseFrame) {
+        self.left_button_gesture =
+            self.left_button_gesture
+                .filter(|left_button_gesture| match left_button_gesture {
+                    LeftButtonGesture::Selection(selection_drag) => {
+                        is_pane_drawn(mouse_frame, selection_drag.pane_id)
+                            && find_mouse_pane(mouse_frame, selection_drag.pane_id).is_none_or(
+                                |mouse_pane| {
+                                    mouse_pane.is_on_alternate_screen
+                                        == selection_drag.is_on_alternate_screen
+                                },
+                            )
+                    }
+                    LeftButtonGesture::BorderResize(resize_drag) => {
+                        is_pane_drawn(mouse_frame, resize_drag.pane_id)
+                    }
+                    LeftButtonGesture::TablinePeek(_) => true,
+                    LeftButtonGesture::FloatingPaneMove(floating_pane_handle_drag) => {
+                        is_pane_drawn(mouse_frame, floating_pane_handle_drag.pane_id)
+                    }
+                });
+        if self
             .mouse_capture
-            .filter(|mouse_capture| is_pane_drawn(mouse_capture.pane_id));
-        self.hovered_pane_id = self
-            .hovered_pane_id
-            .filter(|&pane_id| is_pane_drawn(pane_id));
-        self.placement_handle_pane_id = self
-            .placement_handle_pane_id
-            .filter(|&pane_id| is_pane_drawn(pane_id));
+            .is_some_and(|mouse_capture| !is_pane_drawn(mouse_frame, mouse_capture.pane_id))
+        {
+            self.end_mouse_capture();
+        }
     }
 
     /// Update the viewer-owned hover state from the region under the pointer.
@@ -1505,10 +1819,18 @@ impl Client {
                 pane_id,
                 side: Direction::Up,
             } => Some(pane_id),
-            _ => find_pane_under_region(hit_region),
+            _ => find_content_pane(hit_region),
         };
         self.hovered_pane_id = hovered_pane_id;
         self.placement_handle_pane_id = match hit_region {
+            HitRegion::PlacementHandle { pane_id }
+                if mouse_frame
+                    .build_frame_layout()
+                    .find_drawn_floating_pane_slot(pane_id)
+                    .is_some() =>
+            {
+                Some(pane_id)
+            }
             HitRegion::PlacementHandle { pane_id }
             | HitRegion::PaneBorder {
                 pane_id,
@@ -1516,6 +1838,151 @@ impl Client {
             } => find_visible_pane_handle(mouse_frame, pane_id, screen_point),
             _ => None,
         };
+    }
+
+    /// Move the held grab handle's draft by the cells the pointer, now at
+    /// `pointer_position`, moved since the press.
+    ///
+    /// The draft's cell may lie past the pane area: the frame draws the pane
+    /// moved inside it ([`FrameLayout::list_drawn_floating_pane_slots`]). A
+    /// pane pressed at `(10, 4)`, with the pointer moved from `(12, 5)` to
+    /// `(9, 2)`, gets the draft `(7, 1)`. Nothing reaches the session.
+    fn drag_floating_pane_to(
+        &mut self,
+        floating_pane_handle_drag: FloatingPaneHandleDrag,
+        pointer_position: Point,
+    ) {
+        let FloatingPaneHandleDrag {
+            press_position,
+            press_top_left_cell,
+            ..
+        } = floating_pane_handle_drag;
+        let column_delta = i32::from(pointer_position.column) - i32::from(press_position.column);
+        let row_delta = i32::from(pointer_position.row) - i32::from(press_position.row);
+        self.left_button_gesture = Some(LeftButtonGesture::FloatingPaneMove(
+            FloatingPaneHandleDrag {
+                top_left_cell: Point {
+                    column: shift_cell_coordinate(press_top_left_cell.column, column_delta),
+                    row: shift_cell_coordinate(press_top_left_cell.row, row_delta),
+                },
+                ..floating_pane_handle_drag
+            },
+        ));
+    }
+
+    /// End the grab-handle drag `floating_pane_handle_drag` on a left release
+    /// at `release_position`, and return what the release sends.
+    ///
+    /// The release first moves the draft to `release_position`, as a drag does
+    /// ([`drag_floating_pane_to`](Self::drag_floating_pane_to)). The move then
+    /// names the top-left cell the frame draws the pane at, inside the pane
+    /// area. A release at the cell the press landed on, a pane drawn back at
+    /// the cell the press found it at, and a pane the frame no longer draws or
+    /// this viewer pinned, send nothing, and the pane is drawn where the frame
+    /// places it. Any other release sends one `MoveFloatingPane` under a new
+    /// command id. The viewer keeps drawing the pane at the sent cell until the
+    /// session rejects the move, or until it applies a frame that names the
+    /// move ([`settle_floating_pane_move`](Self::settle_floating_pane_move)).
+    ///
+    /// A `40`-column pane drawn at column `30` of an `80`-column pane area,
+    /// pressed at `(32, 6)`, sends nothing on a release at `(32, 6)`, even
+    /// after the pane area shrinks to `60` columns and the frame draws the pane
+    /// at column `20`.
+    fn submit_floating_pane_move(
+        &mut self,
+        floating_pane_handle_drag: FloatingPaneHandleDrag,
+        release_position: Point,
+        mouse_frame: &MouseFrame,
+    ) -> Vec<MouseAction> {
+        let FloatingPaneHandleDrag {
+            pane_id,
+            press_position,
+            press_top_left_cell,
+            ..
+        } = floating_pane_handle_drag;
+        self.drag_floating_pane_to(floating_pane_handle_drag, release_position);
+        let drawn_floating_pane_slot = self
+            .build_frame_layout_with_current_chrome(mouse_frame)
+            .find_drawn_floating_pane_slot(pane_id);
+        self.left_button_gesture = None;
+        let Some(floating_pane_slot) = drawn_floating_pane_slot else {
+            return Vec::new();
+        };
+        let top_left_cell = floating_pane_slot.outer_rect.origin;
+        if release_position == press_position
+            || floating_pane_slot.is_pinned
+            || top_left_cell == press_top_left_cell
+        {
+            return Vec::new();
+        }
+        let command_id = CommandId::new();
+        self.sent_floating_pane_move = Some(SentFloatingPaneMove {
+            pane_id,
+            top_left_cell,
+            command_id,
+        });
+        vec![MouseAction::MoveFloatingPane {
+            command_id,
+            command_args: MoveFloatingPaneArgs {
+                pane_id,
+                top_left_cell,
+            },
+        }]
+    }
+
+    /// A `FocusPane` for the floating pane `pane_id`, which also raises it, or
+    /// nothing when `mouse_frame` shows it focused already.
+    fn build_floating_pane_focus_actions(
+        &self,
+        mouse_frame: &MouseFrame,
+        pane_id: PaneId,
+    ) -> Vec<MouseAction> {
+        if mouse_frame.client_snapshot.focused_pane_id == Some(pane_id) {
+            return Vec::new();
+        }
+        vec![build_focus_pane_action(self.client_id, pane_id)]
+    }
+
+    /// Drop the floating pane handle drag under way and return `true`, or
+    /// return `false` when no handle drag is under way. A move already sent
+    /// stays. The pane is drawn where the frame places it again, and nothing
+    /// reaches the session.
+    pub(crate) fn cancel_floating_pane_move_drag(&mut self) -> bool {
+        self.left_button_gesture
+            .take_if(|left_button_gesture| {
+                matches!(left_button_gesture, LeftButtonGesture::FloatingPaneMove(_))
+            })
+            .is_some()
+    }
+
+    /// Stop drawing the sent floating pane move ahead of the session when
+    /// `last_applied_move_command_id`, read off the frame being applied, names
+    /// it: that frame places the pane from the move on. A sent move the frame
+    /// does not name, and a handle drag under way, are left as they are.
+    pub(crate) fn settle_floating_pane_move(
+        &mut self,
+        last_applied_move_command_id: Option<CommandId>,
+    ) {
+        self.sent_floating_pane_move
+            .take_if(|sent_floating_pane_move| {
+                Some(sent_floating_pane_move.command_id) == last_applied_move_command_id
+            });
+    }
+
+    /// Drop the sent floating pane move `command_id` names, which the session
+    /// rejected, and return `true`. Returns `false`, changing nothing, when
+    /// `command_id` names no sent move of this viewer.
+    pub(crate) fn reject_floating_pane_move(&mut self, command_id: CommandId) -> bool {
+        self.sent_floating_pane_move
+            .take_if(|sent_floating_pane_move| sent_floating_pane_move.command_id == command_id)
+            .is_some()
+    }
+
+    /// Drop the sent floating pane move after the session dropped events, which
+    /// may hold its rejection: the next frame shows the pane where the session
+    /// places it. A handle drag under way is left as it is.
+    pub(crate) fn forget_sent_floating_pane_move(&mut self) {
+        self.sent_floating_pane_move = None;
     }
 
     /// The position in `pane_id`'s text that the screen cell `screen_point` names, with a
@@ -1531,12 +1998,12 @@ impl Client {
         pane_id: PaneId,
         screen_point: Point,
     ) -> Option<GridPosition> {
-        let (column_index, row_index) =
-            compute_clamped_pane_cell(self.build_frame_layout(mouse_frame), pane_id, screen_point)?;
+        let pane_local_cell =
+            compute_clamped_pane_cell(mouse_frame.build_frame_layout(), pane_id, screen_point)?;
         let view_top_row_index = find_mouse_pane(mouse_frame, pane_id)?.view_top_row_index;
         Some(GridPosition {
-            row_index: view_top_row_index + u64::from(row_index),
-            column_index,
+            row_index: view_top_row_index + u64::from(pane_local_cell.row),
+            column_index: pane_local_cell.column,
         })
     }
 
@@ -1552,7 +2019,7 @@ impl Client {
         pane_id: PaneId,
         screen_point: Point,
     ) -> Option<i8> {
-        let content_rect = find_pane_content_rect(self.build_frame_layout(mouse_frame), pane_id)?;
+        let content_rect = find_pane_content_rect(mouse_frame.build_frame_layout(), pane_id)?;
         let bottom_row_index = content_rect
             .origin
             .row
@@ -1566,13 +2033,18 @@ impl Client {
         }
     }
 
-    /// `mouse_frame` borrowed for hit-testing, with this viewer's own `ViewerChrome` state.
-    fn build_frame_layout<'a>(
+    /// `mouse_frame` borrowed with this viewer's chrome as it stands now, in
+    /// place of the chrome `mouse_frame` was painted with. The two differ from
+    /// any chrome change until the next paint: two wheel ticks over the tab
+    /// strip before a paint read a strip peeked from tab `1`, not tab `0`.
+    fn build_frame_layout_with_current_chrome<'a>(
         &self,
         mouse_frame: &'a MouseFrame,
-    ) -> koshi_renderer::snapshot::FrameLayout<'a> {
-        mouse_frame
-            .build_frame_layout(self.build_viewer_chrome(mouse_frame.client_snapshot.active_tab_id))
+    ) -> FrameLayout<'a> {
+        let mut frame_layout = mouse_frame.build_frame_layout();
+        frame_layout.viewer_chrome =
+            self.build_viewer_chrome(mouse_frame.client_snapshot.active_tab_id);
+        frame_layout
     }
 }
 
@@ -1585,12 +2057,43 @@ fn build_focus_pane_action(client_id: ClientId, pane_id: PaneId) -> MouseAction 
     })))
 }
 
-/// The pane a hit-tested `hit_region` sits in, or `None` when it is chrome. Only a
-/// pane's own content counts as hovering that pane — the wheel scrolls it and
-/// the renderer marks its border.
-fn find_pane_under_region(hit_region: HitRegion) -> Option<PaneId> {
+/// Whether `hit_region` is on the tab strip: the tabline row, a tab, or a
+/// scroll arrow.
+fn is_tab_strip_region(hit_region: HitRegion) -> bool {
+    matches!(
+        hit_region,
+        HitRegion::Tabline
+            | HitRegion::Tab { .. }
+            | HitRegion::TablineScrollLeft
+            | HitRegion::TablineScrollRight
+    )
+}
+
+/// The pane whose content `hit_region` is, or `None` over every other region,
+/// a pane's border, grab handle, titlebar and buttons included.
+fn find_content_pane(hit_region: HitRegion) -> Option<PaneId> {
     match hit_region {
         HitRegion::PaneContent { pane_id } => Some(pane_id),
+        _ => None,
+    }
+}
+
+/// The pane a wheel tick over `hit_region` targets: the pane whose content it
+/// is, or the floating pane `frame_layout` draws whose titlebar, border, grab
+/// handle, pin toggle, minimize button or close button it is. `None` over
+/// every other region, a tiled pane's border and placement handle included.
+fn find_wheel_target_pane(frame_layout: FrameLayout<'_>, hit_region: HitRegion) -> Option<PaneId> {
+    match hit_region {
+        HitRegion::PaneContent { pane_id }
+        | HitRegion::PaneTitlebar { pane_id }
+        | HitRegion::PanePinToggle { pane_id }
+        | HitRegion::PaneMinimizeButton { pane_id }
+        | HitRegion::PaneCloseButton { pane_id } => Some(pane_id),
+        HitRegion::PaneBorder { pane_id, .. } | HitRegion::PlacementHandle { pane_id } => {
+            frame_layout
+                .find_drawn_floating_pane_slot(pane_id)
+                .map(|_| pane_id)
+        }
         _ => None,
     }
 }
@@ -1656,10 +2159,7 @@ fn find_pane_outer_screen_rect(
     mouse_frame: &MouseFrame,
     pane_id: PaneId,
 ) -> Option<koshi_core::geometry::Rect> {
-    let content_rect = find_pane_content_rect(
-        mouse_frame.build_frame_layout(ViewerChrome::default()),
-        pane_id,
-    )?;
+    let content_rect = find_pane_content_rect(mouse_frame.build_frame_layout(), pane_id)?;
     Some(koshi_core::geometry::Rect::from_origin_and_size(
         Point {
             column: content_rect.origin.column.saturating_sub(1),
@@ -1672,12 +2172,14 @@ fn find_pane_outer_screen_rect(
     ))
 }
 
-/// Return the pane id when the pointer is inside its painted placement handle.
+/// Return `pane_id` when it is a visible tiled pane and `screen_point` is inside its
+/// painted placement handle, else `None`. A floating pane returns `None`.
 fn find_visible_pane_handle(
     mouse_frame: &MouseFrame,
     pane_id: PaneId,
     screen_point: Point,
 ) -> Option<PaneId> {
+    find_visible_pane_slot(mouse_frame, pane_id)?;
     let pane_outer_rect = find_pane_outer_screen_rect(mouse_frame, pane_id)?;
     compute_placement_handle_rect(pane_outer_rect)
         .filter(|handle_rect| handle_rect.is_point_inside(screen_point))
@@ -1754,6 +2256,16 @@ fn find_visible_pane_slot(mouse_frame: &MouseFrame, pane_id: PaneId) -> Option<&
         .find(|pane_slot| pane_slot.is_visible && pane_slot.pane_id == pane_id)
 }
 
+/// Whether `mouse_frame` draws `pane_id`: a visible slot of its active tab, or
+/// a floating pane this viewer draws.
+fn is_pane_drawn(mouse_frame: &MouseFrame, pane_id: PaneId) -> bool {
+    find_visible_pane_slot(mouse_frame, pane_id).is_some()
+        || mouse_frame
+            .build_frame_layout()
+            .find_drawn_floating_pane_slot(pane_id)
+            .is_some()
+}
+
 /// Whether two pane boxes cover any of the same rows.
 fn has_row_overlap(
     first_pane_rect: koshi_core::geometry::Rect,
@@ -1783,18 +2295,33 @@ fn find_mouse_pane(mouse_frame: &MouseFrame, pane_id: PaneId) -> Option<&MousePa
         .find(|mouse_pane| mouse_pane.pane_id == pane_id)
 }
 
-/// This client's focused pane when `mouse_frame`'s active tab places it — the pane an
-/// event over chrome falls through to. `None` when no pane is focused or the
-/// tab places no slot for it.
-fn find_focused_pane(mouse_frame: &MouseFrame) -> Option<PaneId> {
-    let focused_pane_id = mouse_frame.client_snapshot.focused_pane_id?;
-    mouse_frame
+/// This client's focused pane when `frame_layout` places it — a slot of the
+/// active tab, or a floating pane this viewer draws. It is the pane an event
+/// over chrome falls through to. `None` when no pane is focused or the frame
+/// places it nowhere.
+fn find_focused_pane(frame_layout: FrameLayout<'_>) -> Option<PaneId> {
+    let focused_pane_id = frame_layout.client_snapshot.focused_pane_id?;
+    let is_focused_pane_placed = frame_layout
         .session_snapshot
         .active_tab_snapshot
         .pane_slots
         .iter()
         .any(|pane_slot| pane_slot.pane_id == focused_pane_id)
-        .then_some(focused_pane_id)
+        || frame_layout
+            .find_drawn_floating_pane_slot(focused_pane_id)
+            .is_some();
+    is_focused_pane_placed.then_some(focused_pane_id)
+}
+
+/// The screen rectangle of the pane area `mouse_frame` was painted with. An
+/// `80x24` viewport with the tabline on row 0 and the statusline on row 23
+/// gives `x: 0, y: 1, width: 80, height: 22`.
+fn compute_mouse_frame_pane_area(mouse_frame: &MouseFrame) -> RatatuiRect {
+    let viewport_size = mouse_frame.committed_regions.viewport_size;
+    compute_pane_area(
+        &mouse_frame.committed_regions,
+        RatatuiRect::new(0, 0, viewport_size.column_count, viewport_size.row_count),
+    )
 }
 
 /// A scrollback movement for a vertical tick; a horizontal tick moves no
@@ -1873,18 +2400,8 @@ fn advance_resize_anchor(
     }
 }
 
-/// `cell_coordinate` moved `cell_delta` cells, saturating at both ends of the cell range, so a
-/// border at a viewport edge cannot wrap.
+/// `cell_coordinate` moved `cell_delta` cells, held between `0` and
+/// `u16::MAX`: `3` moved `-5` cells is `0`.
 fn shift_cell_coordinate(cell_coordinate: u16, cell_delta: i32) -> u16 {
     (i32::from(cell_coordinate) + cell_delta).clamp(0, i32::from(u16::MAX)) as u16
-}
-
-/// `mouse_kind` with its button replaced by `mouse_button`. Only a drag or release carries a
-/// button koshi re-stamps from the capture; other kinds are returned unchanged.
-fn replace_mouse_button(mouse_kind: MouseKind, mouse_button: MouseButton) -> MouseKind {
-    match mouse_kind {
-        MouseKind::Drag(_) => MouseKind::Drag(mouse_button),
-        MouseKind::Release(_) => MouseKind::Release(mouse_button),
-        unchanged_mouse_kind => unchanged_mouse_kind,
-    }
 }

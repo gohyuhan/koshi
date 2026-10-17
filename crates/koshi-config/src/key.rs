@@ -1,6 +1,6 @@
 //! Parses key chords and the leader prefix from config text.
 //!
-//! The grammar is Neovim's. One chord is either a bare printable character
+//! One chord is either a bare printable character
 //! (`n`), or an angle-bracketed token carrying an optional modifier run
 //! (`<C-p>`, `<A-S-n>`, `<F5>`, `<Space>`). Modifiers are `C-` Control, `A-`
 //! Alt, `S-` Shift, `D-` Super, each written once, in any order, and matched

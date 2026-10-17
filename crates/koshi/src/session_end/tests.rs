@@ -76,15 +76,16 @@ fn write_endpoint_file_naming_process(
     endpoint_file_path
 }
 
-/// A child process that runs for 600 s: `sleep 600` on Linux and macOS,
-/// `ping` 600 times on Windows.
+/// A child process that runs for 600 s: `/bin/sleep 600` on Linux and macOS,
+/// `ping` 600 times on Windows. On Linux and macOS the spawn searches no
+/// `PATH` directory, and starts no process other than the child.
 fn spawn_long_running_child() -> Child {
     let mut child_command = if cfg!(windows) {
         let mut child_command = ProcessCommand::new("ping");
         child_command.args(["-n", "600", "127.0.0.1"]);
         child_command
     } else {
-        let mut child_command = ProcessCommand::new("sleep");
+        let mut child_command = ProcessCommand::new("/bin/sleep");
         child_command.arg("600");
         child_command
     };

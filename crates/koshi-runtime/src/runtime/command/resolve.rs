@@ -656,8 +656,6 @@ impl Server {
     /// ([`Self::resolve_floating_pane_view_target`]). Shared by validation and
     /// [`Self::handle_move_floating_pane`].
     ///
-    /// `None` when the acting client already stores `Moved(top_left_cell)` for
-    /// the pane.
     /// A pane the acting client minimized, and a pane that client does not
     /// show, both resolve. A pane the acting client pinned is
     /// [`RejectReason::InvalidState`] `<pane> is pinned`.
@@ -666,7 +664,7 @@ impl Server {
         command_args: &MoveFloatingPaneArgs,
         command_source: &CommandSource,
         session: Option<&Session>,
-    ) -> Result<Option<FloatingPaneViewTarget>, Rejection> {
+    ) -> Result<FloatingPaneViewTarget, Rejection> {
         let floating_pane_view_target = self.resolve_floating_pane_view_target(
             Some(command_args.pane_id),
             command_source,
@@ -687,10 +685,7 @@ impl Server {
                 &format!("{} is pinned", floating_pane_view_target.pane_id),
             ));
         }
-        if client_position == FloatingPanePosition::Moved(command_args.top_left_cell) {
-            return Ok(None);
-        }
-        Ok(Some(floating_pane_view_target))
+        Ok(floating_pane_view_target)
     }
 
     /// Resolve a [`Command::SetPanePinned`]: the pane and the acting client
@@ -702,9 +697,9 @@ impl Server {
     /// client pinned, or an unpin of a pane it did not pin. An unpin of a
     /// pinned pane is [`PanePinChange::Unpin`]. A pin is
     /// [`PanePinChange::Pin`] at the top-left cell where the client draws the
-    /// pane ([`place_floating_pane`]), or would draw it when the client
-    /// minimized it or does not show it: a `20x10` pane at `Moved((70, 2))` on
-    /// an `80x22` pane area pins at `(60, 2)`.
+    /// pane ([`Session::find_client_floating_pane_rect`]), or would draw it
+    /// when the client minimized it or does not show it: a `20x10` pane at
+    /// `Moved((70, 2))` on an `80x22` pane area pins at `(60, 2)`.
     ///
     /// A pin for a client with no floating viewport
     /// ([`Client::get_floating_viewport`]) is [`RejectReason::InvalidState`]
@@ -736,9 +731,9 @@ impl Server {
             }
             (false, FloatingPanePosition::Pinned(_)) => PanePinChange::Unpin,
             (true, FloatingPanePosition::Default | FloatingPanePosition::Moved(_)) => {
-                let (cascade_index, floating_member) =
-                    Self::require_floating_member(pane_session, pane_id)?;
-                let Some(client_viewport) = client.get_floating_viewport() else {
+                Self::require_floating_member(pane_session, pane_id)?;
+                let Some(drawn_rect) = pane_session.find_client_floating_pane_rect(client, pane_id)
+                else {
                     return Err(Rejection::from_reason_and_help(
                         RejectReason::InvalidState,
                         &format!(
@@ -747,12 +742,6 @@ impl Server {
                         ),
                     ));
                 };
-                let drawn_rect = place_floating_pane(
-                    client_position,
-                    floating_member.solved_size,
-                    cascade_index,
-                    client_viewport,
-                );
                 PanePinChange::Pin(drawn_rect.origin)
             }
         };
@@ -1044,13 +1033,14 @@ impl Server {
     /// `20` of an `80`-column pane area and grown right by `30`, it asks for
     /// `Cells(60)`.
     ///
-    /// The acting client's top-left cell is where it draws the pane before the
-    /// resize ([`place_floating_pane`]), moved left or up by the cells the
-    /// pane grew for `Left` or `Up`: the edge opposite the moved border keeps
-    /// its cell. A pane the acting client pinned keeps its pinned cell: a
-    /// `40`-column pane pinned at column `20` and drawn at column `10` of a
-    /// `50`-column pane area is drawn at column `13` once its width shrinks by
-    /// `3`.
+    /// The acting client's top-left cell is the cell of the rectangle the
+    /// session places the pane in for that client before the resize, minimized
+    /// or not ([`Session::find_client_floating_pane_rect`]), moved left or up
+    /// by the cells the pane grew for `Left` or `Up`: the edge opposite the
+    /// moved border keeps its cell. A pane the acting client pinned keeps its
+    /// pinned cell: a `40`-column pane pinned at column `20` and drawn at
+    /// column `10` of a `50`-column pane area is drawn at column `13` once its
+    /// width shrinks by `3`.
     /// A client with no floating viewport ([`Client::get_floating_viewport`])
     /// keeps its view, and only the shared floating viewport limits the
     /// growth.
@@ -1088,7 +1078,7 @@ impl Server {
             command_source,
             session,
         )?;
-        let (cascade_index, floating_member) = Self::require_floating_member(session, pane_id)?;
+        let (_, floating_member) = Self::require_floating_member(session, pane_id)?;
         let mut desired_size = floating_member.desired_size;
         let outer_size = floating_member.solved_size;
         let Some(shared_floating_viewport) = session.get_shared_floating_viewport() else {
@@ -1124,9 +1114,7 @@ impl Server {
             )
         };
         let client_viewport = client.get_floating_viewport();
-        let drawn_rect = client_viewport.map(|client_viewport| {
-            place_floating_pane(client_position, outer_size, cascade_index, client_viewport)
-        });
+        let drawn_rect = session.find_client_floating_pane_rect(client, pane_id);
         // The cells from the edge that stays to the acting client's pane area
         // edge on the moved side.
         let room_cell_count =

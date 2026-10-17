@@ -85,14 +85,16 @@ fn build_copying_viewer(
     viewer
 }
 
-/// Fire the selection drag's scroll timer at `current_time`, as the binary's
-/// loop does.
+/// Paint a frame, drop the gestures it ended, and fire the selection drag's
+/// scroll timer at `current_time` against it, as the binary's loop does.
 fn expire_mouse_scroll(server: &mut Server, viewer: &mut ViewerClient, current_time: Instant) {
     let mouse_frame = build_mouse_frame(
         server
             .build_snapshot(viewer.get_client_id())
             .expect("render snapshot"),
+        viewer,
     );
+    viewer.drop_gestures_the_frame_ended(&mouse_frame);
     let mouse_actions = viewer.expire_mouse_scroll(current_time, &mouse_frame);
     apply_mouse_actions(server, viewer, &mouse_frame, mouse_actions);
 }
@@ -2836,7 +2838,7 @@ fn a_press_on_a_scrolled_view_highlights_the_history_line_the_user_saw() {
 
     // The frame the viewer is looking at, taken before the output arrives.
     let painted_mouse_frame =
-        build_mouse_frame(server.build_snapshot(client_id).expect("snapshot"));
+        build_mouse_frame(server.build_snapshot(client_id).expect("snapshot"), &viewer);
     let screen_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
 
     // Eight more lines land while the pointer is on its way down.
@@ -3077,7 +3079,9 @@ fn a_drag_ends_when_its_pane_swaps_to_the_alternate_screen() {
     server.handle_pty_output(pane_id, b"\x1b[?1049h");
 
     let drag_point_after_swap = get_pane_screen_cell(&server, client_id, pane_id, 8, 0);
-    let mouse_frame = build_mouse_frame(server.build_snapshot(client_id).expect("snapshot"));
+    let mouse_frame =
+        build_mouse_frame(server.build_snapshot(client_id).expect("snapshot"), &viewer);
+    viewer.drop_gestures_the_frame_ended(&mouse_frame);
     let mouse_actions = viewer.handle_mouse(
         build_mouse_drag(drag_point_after_swap),
         &mouse_frame,

@@ -40,8 +40,9 @@ use crate::{
         SCREEN_NOT_RESTORED_NOTICE_BYTES,
     },
     runtime::{
-        bus::{EventBus, HostWrite, WaitingHostWrites},
+        bus::{EventBus, HostWrite, WriterHandoff},
         event::RuntimeEvent,
+        mouse::HeldMouseButton,
         reload::{merge_app_layer_into_client_config, merge_app_layer_into_server_config},
         render_schedule::RenderScheduler,
         saved_view::SavedViewStore,
@@ -218,6 +219,14 @@ pub struct Server {
     /// that same frame, and a mouse round's answer goes to the subscriber that
     /// views the client whose viewer sent the round.
     pub(crate) subscriptions: Vec<(SubscriberId, ClientId)>,
+    /// Every mouse button whose press the session wrote to a pane's program
+    /// and whose release it has not written, in the order the presses were
+    /// written. [`forward_mouse_to_pane`](Self::forward_mouse_to_pane) adds and
+    /// ends entries. Removing a client's record releases that client's entries,
+    /// and [`carry_out`](Self::carry_out) releases every entry. Removing a pane
+    /// ends its entries with no release written. Nothing in it is carried
+    /// across an image swap.
+    pub(crate) held_mouse_buttons: Vec<HeldMouseButton>,
     /// Control-socket server, present once the session's socket is serving.
     /// Shutdown takes it to stop accepting and withdraw the endpoint file.
     pub(crate) ipc_server: Option<IpcServer>,
@@ -295,6 +304,7 @@ impl Server {
             pty_size_by_pane_id: HashMap::new(),
             event_bus: EventBus::new(),
             subscriptions: Vec::new(),
+            held_mouse_buttons: Vec::new(),
             ipc_server: None,
             render_scheduler: RenderScheduler::new(),
             inbox_receiver,
@@ -453,6 +463,11 @@ impl Server {
     /// `None` when this server holds no session, leaving it untouched: there is
     /// no session to name and nothing to carry.
     ///
+    /// Before anything moves, a release is written for every mouse button a
+    /// client holds, at that button's last cell
+    /// (`release_every_mouse_button`). `held_mouse_buttons` is left empty and
+    /// is not carried.
+    ///
     /// The header's `session_id` and `session_name` are read from the same
     /// session the body carries, so the two halves name one session.
     ///
@@ -471,6 +486,7 @@ impl Server {
         let session = self.get_sole_session()?;
         let session_id = session.session_id;
         let session_name = session.session_name.clone();
+        self.release_every_mouse_button();
         let carried_panes = panes
             .iter()
             .map(|pane| {
@@ -540,21 +556,20 @@ impl Server {
     }
 
     /// The server→client door: register a subscriber for every published
-    /// event and hand back the receiving end of its own bounded queue, with the
-    /// host-write bytes that wait for `client_id`'s own terminal
-    /// ([`WaitingHostWrites`]). Dropping the receiver ends the subscription.
+    /// event and hand back the receiving end of its own bounded queue, with what
+    /// waits beside that queue for the thread that writes the client's
+    /// connection: the host-write bytes for `client_id`'s own terminal, and the
+    /// owed-frame mark ([`WriterHandoff`]). Dropping the receiver ends the
+    /// subscription.
     ///
     /// `client_id` is the client the subscriber views as: the one whose frame
     /// [`push_frames`](Self::push_frames) queues each due render, and the one
     /// [`resync_lagged`](Self::resync_lagged) builds when an event does
     /// not fit the queue.
-    pub fn subscribe(
-        &mut self,
-        client_id: ClientId,
-    ) -> (Receiver<Delivery>, Arc<WaitingHostWrites>) {
-        let (subscriber_id, delivery_receiver, waiting_host_writes) = self.event_bus.subscribe();
+    pub fn subscribe(&mut self, client_id: ClientId) -> (Receiver<Delivery>, Arc<WriterHandoff>) {
+        let (subscriber_id, delivery_receiver, writer_handoff) = self.event_bus.subscribe();
         self.subscriptions.push((subscriber_id, client_id));
-        (delivery_receiver, waiting_host_writes)
+        (delivery_receiver, writer_handoff)
     }
 
     /// Drop every subscription registered as viewing `client_id`, closing the
@@ -578,18 +593,29 @@ impl Server {
     }
 
     /// Put a fresh frame on the queue of every subscriber paused by a dropped
-    /// event, returning it to live delivery. Called once per pass of
-    /// the event loop, before the frame the loop paints.
+    /// event, returning it to live delivery. Called once per pass of the
+    /// event loop, before the frame the loop paints
+    /// ([`push_due_frames`](Self::push_due_frames)).
     ///
     /// The frame is this subscriber's viewing client's, built by
     /// [`build_snapshot`](Self::build_snapshot). A subscriber that views no
     /// client, or whose client is no longer attached, can never be resynced, so
     /// its subscription is dropped.
+    ///
+    /// A paused subscriber owed a frame is skipped, and no frame is built for
+    /// it: a frame or resync snapshot found its queue full, and its writing
+    /// thread has not taken the owed-frame mark since
+    /// ([`WriterHandoff::take_owed_frame_mark`]). The
+    /// [`RuntimeEvent::QueueRoomFreed`] that thread sends after it takes the
+    /// mark starts the pass that resyncs the subscriber.
     pub fn resync_lagged(&mut self) {
         if !self.event_bus.has_desynced_subscribers() {
             return;
         }
         for desynced_subscriber_id in self.event_bus.list_desynced_subscriber_ids() {
+            if self.event_bus.is_frame_owed(desynced_subscriber_id) {
+                continue;
+            }
             let Some(client_id) = self
                 .subscriptions
                 .iter()
@@ -612,30 +638,33 @@ impl Server {
                 self.event_bus.unsubscribe(desynced_subscriber_id);
                 continue;
             };
-            // A full queue leaves the subscriber paused; the next pass builds it
-            // a newer frame and tries again.
             self.event_bus
                 .try_resync(desynced_subscriber_id, Box::new(snapshot));
         }
-        let bus = &self.event_bus;
-        self.subscriptions
-            .retain(|&(subscriber_id, _)| bus.has_subscriber(subscriber_id));
+        self.remove_ended_subscriptions();
     }
 
     /// Put each client's current frame on its queue. Called once per due
     /// render, after [`resync_lagged`](Self::resync_lagged).
     ///
     /// The frame is the subscriber's viewing client's, built by
-    /// [`build_snapshot`](Self::build_snapshot).
+    /// [`build_snapshot`](Self::build_snapshot). A subscriber that is paused,
+    /// or owed a frame as [`resync_lagged`](Self::resync_lagged) states, is
+    /// skipped, and no frame is built for it.
     ///
-    /// A frame that does not fit the queue is dropped and the next due render
-    /// offers a newer one. A subscriber the send removed — its receiver is gone
-    /// — takes its `subscriptions` entry with it.
+    /// A frame that does not fit the queue is dropped and marks the
+    /// subscriber owed a frame, which [`RuntimeEvent::QueueRoomFreed`] answers
+    /// with a newer one for that subscriber alone. A subscriber the send
+    /// removed — its receiver is gone — takes its `subscriptions` entry with
+    /// it.
     pub fn push_frames(&mut self) {
         // The list is taken out for the walk and put back after it. Nothing in
         // the loop touches `subscriptions` itself.
         let subscriptions = std::mem::take(&mut self.subscriptions);
         for &(subscriber_id, client_id) in &subscriptions {
+            if !self.event_bus.can_take_frame(subscriber_id) {
+                continue;
+            }
             let Some(snapshot) = self.build_snapshot(client_id) else {
                 continue;
             };
@@ -643,6 +672,40 @@ impl Server {
                 .try_send_frame(subscriber_id, Box::new(snapshot));
         }
         self.subscriptions = subscriptions;
+        self.remove_ended_subscriptions();
+    }
+
+    /// Put `client_id`'s current frame on the queue of the subscriber that
+    /// views `client_id`, and on no other queue. Called for
+    /// [`RuntimeEvent::QueueRoomFreed`].
+    ///
+    /// Queues nothing, and builds no frame, when no subscriber views
+    /// `client_id`, or when the subscriber is paused or owed a frame
+    /// ([`EventBus::can_take_frame`](crate::runtime::bus::EventBus::can_take_frame)):
+    /// a paused subscriber takes its resync snapshot from
+    /// [`resync_lagged`](Self::resync_lagged). Queues nothing when the session
+    /// no longer holds the client. A frame that does not fit the queue is
+    /// dropped and marks the subscriber owed a frame. A subscriber the send
+    /// removed — its receiver is gone — takes its `subscriptions` entry with
+    /// it.
+    pub(crate) fn push_client_frame(&mut self, client_id: ClientId) {
+        let Some(subscriber_id) = self.find_subscriber_id_by_client_id(client_id) else {
+            return;
+        };
+        if !self.event_bus.can_take_frame(subscriber_id) {
+            return;
+        }
+        let Some(snapshot) = self.build_snapshot(client_id) else {
+            return;
+        };
+        self.event_bus
+            .try_send_frame(subscriber_id, Box::new(snapshot));
+        self.remove_ended_subscriptions();
+    }
+
+    /// Drop every `subscriptions` entry whose subscriber the bus no longer
+    /// holds.
+    fn remove_ended_subscriptions(&mut self) {
         let bus = &self.event_bus;
         self.subscriptions
             .retain(|&(subscriber_id, _)| bus.has_subscriber(subscriber_id));
@@ -704,8 +767,10 @@ impl Server {
         }
     }
 
-    /// Put one rejected placement command on the queue of the client that sent
-    /// it.
+    /// Put one rejected pane placement command or floating pane move on the
+    /// queue of the client that sent it. Returns `true` when it is queued, and
+    /// `false` when `client_id` has no subscriber or the subscriber is
+    /// disconnected or desynchronized.
     pub(crate) fn send_placement_command_rejection(
         &mut self,
         client_id: ClientId,

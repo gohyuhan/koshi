@@ -321,12 +321,10 @@ Drag a pane's handle in normal mode to swap it with another pane. In pane
 placement mode, dragging a pane onto another also swaps them. To insert, press
 `<C-p> m`, wait for `PLACE PANE` in the tabline, then hold Shift when you start
 the drag. Koshi asks compatible terminals to send Shift mouse events during
-this mode. Ghostty
-honors the request when mouse reporting is enabled and `mouse-shift-capture`
-is `false` or `true`. It already sends Shift with `always`; `never` keeps Shift
-for terminal selection. Other terminals can keep Shift for their own text
-selection. Outside pane placement mode, Shift+drag over pane content keeps its
-text selection behavior, and a Shift press on a handle does not start placement.
+this mode. A terminal that honors the request sends Shift with the drag. Other
+terminals can keep Shift for their own text selection. Outside pane placement
+mode, Shift+drag over pane content keeps its text selection behavior, and a
+Shift press on a handle does not start placement.
 Shift+Arrow also selects an insertion edge without a mouse.
 
 The preview dims visible affected panes. The moving pane and destination use

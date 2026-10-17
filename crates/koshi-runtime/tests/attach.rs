@@ -29,7 +29,7 @@ use koshi_core::geometry::{Direction, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord};
 use koshi_core::lock::LockMode;
-use koshi_core::mouse::{MouseAnswer, MouseButton, MouseInput, MouseKind, MouseTracking};
+use koshi_core::mouse::{MouseAnswer, MouseButton, MouseKind, MouseTracking};
 use koshi_core::process::{ExitStatus, PtySize};
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::event::SessionEvent;
@@ -1778,21 +1778,20 @@ fn fill_pane_scrollback(
     (ipc_connection, top_row_index)
 }
 
-/// One left press with nothing held, at the client cell `position`.
-fn build_left_mouse_press(position: Point) -> MouseInput {
-    MouseInput {
+/// The forward of one left press with nothing held, at the pane's top-left
+/// content cell `(0, 0)`.
+fn build_left_mouse_press_forward(pane_id: PaneId) -> WireMouseAction {
+    WireMouseAction::Forward {
+        pane_id,
         mouse_kind: MouseKind::Press(MouseButton::Left),
-        position,
         modifier_flags: BindingModifierFlags::NONE,
+        pane_local_cell: Point { column: 0, row: 0 },
     }
 }
 
-/// A cell above and left of any pane's content. It clamps into the pane's
-/// top-left content cell whatever the bars and border around the pane measure.
-const MOUSE_PRESS_POSITION: Point = Point { column: 0, row: 0 };
-
-/// The report the program in the pane reads for [`MOUSE_PRESS_POSITION`]: a left press at
-/// the pane's own column 1, row 1, in the SGR form the pane asked for.
+/// The report the program in the pane reads for
+/// [`build_left_mouse_press_forward`]: a left press at the pane's own column
+/// 1, row 1, in the SGR form the pane asked for.
 const MOUSE_REPORT_BYTES: &[u8] = b"\x1b[<0;1;1M";
 
 #[test]
@@ -1813,10 +1812,9 @@ fn an_attached_client_forwards_a_mouse_press_into_its_pane() {
             viewer_connection
                 .send(&IpcRequest {
                     request_id: 4,
-                    request_kind: IpcRequestKind::Mouse(vec![WireMouseAction::Forward {
+                    request_kind: IpcRequestKind::Mouse(vec![build_left_mouse_press_forward(
                         pane_id,
-                        mouse_input: build_left_mouse_press(MOUSE_PRESS_POSITION),
-                    }]),
+                    )]),
                 })
                 .expect("send mouse round");
 
@@ -1852,10 +1850,9 @@ fn the_answer_to_a_round_that_reports_nothing_still_reaches_the_viewer() {
             viewer_connection
                 .send(&IpcRequest {
                     request_id: 4,
-                    request_kind: IpcRequestKind::Mouse(vec![WireMouseAction::Forward {
+                    request_kind: IpcRequestKind::Mouse(vec![build_left_mouse_press_forward(
                         pane_id,
-                        mouse_input: build_left_mouse_press(MOUSE_PRESS_POSITION),
-                    }]),
+                    )]),
                 })
                 .expect("send mouse round");
 
@@ -2013,10 +2010,7 @@ fn one_round_runs_every_action_it_holds_and_is_answered_once() {
                             is_scrolling_up: true,
                             scroll_line_count: SCROLL_LINE_COUNT,
                         },
-                        WireMouseAction::Forward {
-                            pane_id,
-                            mouse_input: build_left_mouse_press(MOUSE_PRESS_POSITION),
-                        },
+                        build_left_mouse_press_forward(pane_id),
                     ]),
                 })
                 .expect("send mouse round");

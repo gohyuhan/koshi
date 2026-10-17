@@ -26,7 +26,7 @@ use koshi_core::geometry::{PaneArea, Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::key::BindingModifierFlags;
 use koshi_core::lock::LockMode;
-use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, MouseTracking};
+use koshi_core::mouse::{MouseButton, MouseKind, MouseTracking};
 use koshi_core::process::PtySize;
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::event::SessionEvent;
@@ -902,13 +902,13 @@ fn wait_for_mouse_tracking(
     ipc_connection
 }
 
-/// Send one mouse round holding a single left press on `pane_id` at the client
-/// cell `screen_point`, then read `ipc_connection`'s stream until that round
-/// is answered.
+/// Send one mouse round holding a single left press on `pane_id` at the
+/// 0-based pane cell `pane_local_cell`, then read `ipc_connection`'s stream
+/// until that round is answered.
 fn send_mouse_press(
     mut ipc_connection: Connection,
     pane_id: PaneId,
-    screen_point: Point,
+    pane_local_cell: Point,
     request_id: u64,
 ) -> Connection {
     ipc_connection
@@ -916,11 +916,9 @@ fn send_mouse_press(
             request_id,
             request_kind: IpcRequestKind::Mouse(vec![WireMouseAction::Forward {
                 pane_id,
-                mouse_input: MouseInput {
-                    mouse_kind: MouseKind::Press(MouseButton::Left),
-                    position: screen_point,
-                    modifier_flags: BindingModifierFlags::NONE,
-                },
+                mouse_kind: MouseKind::Press(MouseButton::Left),
+                modifier_flags: BindingModifierFlags::NONE,
+                pane_local_cell,
             }]),
         })
         .expect("send mouse round");
@@ -936,22 +934,18 @@ fn send_mouse_press(
 }
 
 #[test]
-fn a_mouse_click_is_answered_against_the_clicking_clients_own_view() {
-    // The one cell both clients press, each in its own terminal. The tab they
-    // share is 80 by 28: the small client's 80x30 terminal holds it at (0, 1),
-    // putting the pane's content at (1, 2), and the large client's 100x40
-    // terminal centers it at (10, 6), putting the pane's content at (11, 7).
-    // This cell is the pane's column 11, row 6 for the small client, and the
-    // pane's column 1, row 1 for the large one.
-    const SHARED_PANE_CELL_POSITION: Point = Point { column: 11, row: 7 };
+fn a_mouse_press_from_each_client_reaches_the_pane_cell_it_names() {
+    // The tab both clients share is 80 by 28, so the pane's grid is 78x26.
+    // The small client names the pane's 0-based cell (10, 5): the report reads
+    // column 11, row 6. The large client names (0, 0): column 1, row 1.
+    const SMALL_CLIENT_PANE_CELL: Point = Point { column: 10, row: 5 };
+    const LARGE_CLIENT_PANE_CELL: Point = Point { column: 0, row: 0 };
 
-    // A cell in the large client's own 100x40 terminal, past the right and bottom
-    // edges of the pane's content there (columns 11 to 88, rows 7 to 32): the
-    // letterbox margin around the shared tab. It is pulled to the nearest
-    // content cell, the pane's column 78, row 26.
-    const LETTERBOX_MARGIN_CELL_POSITION: Point = Point {
-        column: 90,
-        row: 35,
+    // A cell past the grid's last column and row. It is pulled to the pane's
+    // column 78, row 26.
+    const PAST_THE_GRID_PANE_CELL: Point = Point {
+        column: 200,
+        row: 200,
     };
 
     let (_server, fake_pty_backend, pane_id) = serve_test_session(
@@ -979,24 +973,12 @@ fn a_mouse_click_is_answered_against_the_clicking_clients_own_view() {
             let small_client_connection =
                 wait_for_mouse_tracking(&fake_pty_backend, pane_id, small_client_connection);
 
-            let small_client_connection = send_mouse_press(
-                small_client_connection,
-                pane_id,
-                SHARED_PANE_CELL_POSITION,
-                3,
-            );
-            let large_client_connection = send_mouse_press(
-                large_client_connection,
-                pane_id,
-                SHARED_PANE_CELL_POSITION,
-                3,
-            );
-            let large_client_connection = send_mouse_press(
-                large_client_connection,
-                pane_id,
-                LETTERBOX_MARGIN_CELL_POSITION,
-                4,
-            );
+            let small_client_connection =
+                send_mouse_press(small_client_connection, pane_id, SMALL_CLIENT_PANE_CELL, 3);
+            let large_client_connection =
+                send_mouse_press(large_client_connection, pane_id, LARGE_CLIENT_PANE_CELL, 3);
+            let large_client_connection =
+                send_mouse_press(large_client_connection, pane_id, PAST_THE_GRID_PANE_CELL, 4);
 
             (
                 vec![large_client_connection, small_client_connection],
@@ -1005,9 +987,7 @@ fn a_mouse_click_is_answered_against_the_clicking_clients_own_view() {
         },
     );
 
-    // Three reports, in the order the rounds ran. The same terminal cell names
-    // a different pane cell for each client: each round is placed in the view
-    // of the client that sent it.
+    // Three reports, in the order the rounds ran.
     assert_eq!(
         fake_pty_backend
             .list_pane_write_bytes(pane_id)
@@ -1331,10 +1311,7 @@ fn run_server_until_quit(
         {
             let _ = server.handle_runtime_event(runtime_event);
         }
-        server.resync_lagged();
-        if server.poll_render(Instant::now()) {
-            server.push_frames();
-        }
+        server.push_due_frames(Instant::now());
     }
 
     let (server, _, ()) = served_test_session.finish();

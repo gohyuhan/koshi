@@ -11,7 +11,7 @@ use super::*;
 fn build_mouse_frame(render_snapshot: RenderSnapshot) -> MouseFrame {
     let committed_regions =
         CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0);
-    MouseFrame::from_snapshot(&render_snapshot, committed_regions)
+    MouseFrame::from_snapshot(&render_snapshot, committed_regions, ViewerChrome::default())
 }
 
 use koshi_core::geometry::Point;
@@ -114,6 +114,7 @@ fn build_render_snapshot_fixture(terminal_grid: Arc<Grid>) -> RenderSnapshot {
         focused_pane_id: Some(pane_id),
         lock_mode: LockMode::Normal,
         last_applied_lock_command_id: None,
+        last_applied_floating_pane_move_command_id: None,
         is_mouse_selection_enabled: false,
     };
 
@@ -370,7 +371,7 @@ fn a_mouse_frame_from_a_render_snapshot_without_panes_carries_no_mouse_panes() {
 }
 
 #[test]
-fn mouse_frame_from_snapshot_keeps_the_supplied_region_solve() {
+fn mouse_frame_from_snapshot_keeps_the_supplied_region_solve_and_viewer_chrome() {
     let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
     // A viewport and revision that differ from the client's own, so a builder
     // that re-derived the solve instead of carrying it lands elsewhere.
@@ -382,9 +383,20 @@ fn mouse_frame_from_snapshot_keeps_the_supplied_region_solve() {
         12,
     );
 
-    let mouse_frame = MouseFrame::from_snapshot(&render_snapshot, committed_regions.clone());
+    let viewer_chrome = ViewerChrome {
+        tabline_offset: Some(2),
+        floating_pane_move_draft: Some(FloatingPaneMoveDraft {
+            pane_id: PaneId::new(),
+            top_left_cell: Point { column: 7, row: 1 },
+        }),
+        ..ViewerChrome::default()
+    };
+
+    let mouse_frame =
+        MouseFrame::from_snapshot(&render_snapshot, committed_regions.clone(), viewer_chrome);
 
     assert_eq!(mouse_frame.committed_regions, committed_regions);
+    assert_eq!(mouse_frame.viewer_chrome, viewer_chrome);
     assert_eq!(
         mouse_frame.committed_regions.viewport_size,
         Size {
@@ -443,6 +455,7 @@ fn viewer_chrome_defaults_to_no_pointer_no_tab_offset_and_no_reconnect() {
             reconnecting: None,
             is_pane_placement_visible: false,
             placement_source_pane_id: None,
+            floating_pane_move_draft: None,
         }
     );
 }
@@ -495,29 +508,7 @@ fn an_active_viewer_mode_replaces_the_frames_base_mode_in_tabline_inputs() {
 }
 
 #[test]
-fn an_owned_frame_layout_borrows_its_session_and_client() {
-    let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
-    let owned_frame_layout = OwnedFrameLayout {
-        session_snapshot: render_snapshot.session_snapshot.clone(),
-        client_snapshot: render_snapshot.client_snapshot.clone(),
-    };
-
-    let frame_layout = owned_frame_layout.build_frame_layout(ViewerChrome::default());
-
-    assert_eq!(
-        *frame_layout.session_snapshot,
-        render_snapshot.session_snapshot
-    );
-    assert_eq!(
-        *frame_layout.client_snapshot,
-        render_snapshot.client_snapshot
-    );
-    assert_eq!(frame_layout.viewer_chrome, ViewerChrome::default());
-    assert_eq!(frame_layout.committed_regions, None);
-}
-
-#[test]
-fn a_mouse_frame_layout_carries_the_regions_that_were_painted() {
+fn a_mouse_frame_layout_carries_the_regions_and_viewer_chrome_that_were_painted() {
     let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
     let committed_regions = CommittedRegions::build_core(
         Size {
@@ -526,11 +517,17 @@ fn a_mouse_frame_layout_carries_the_regions_that_were_painted() {
         },
         3,
     );
-    let mouse_frame = MouseFrame::from_snapshot(&render_snapshot, committed_regions.clone());
+    let viewer_chrome = ViewerChrome {
+        tabline_offset: Some(1),
+        ..ViewerChrome::default()
+    };
+    let mouse_frame =
+        MouseFrame::from_snapshot(&render_snapshot, committed_regions.clone(), viewer_chrome);
 
-    let frame_layout = mouse_frame.build_frame_layout(ViewerChrome::default());
+    let frame_layout = mouse_frame.build_frame_layout();
 
     assert_eq!(frame_layout.committed_regions, Some(&committed_regions));
+    assert_eq!(frame_layout.viewer_chrome, viewer_chrome);
 }
 
 #[test]
