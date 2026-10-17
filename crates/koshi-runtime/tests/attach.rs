@@ -21,8 +21,8 @@ use common::{
 
 use koshi_core::command::{
     CloseTabArgs, Command, CommandEnvelope, CommandSource, DetachArgs, FocusPaneArgs, FocusTabArgs,
-    FocusTarget, LockModeArgs, NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor,
-    PanePlacementTarget, PlacePaneArgs, PlacementRevision, TabTarget,
+    FocusTarget, LockModeArgs, MoveFloatingPaneArgs, NewPaneArgs, NewPanePlacement, NewTabArgs,
+    PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, PlacementRevision, TabTarget,
 };
 use koshi_core::event::Event;
 use koshi_core::geometry::{Direction, Point, Size};
@@ -1558,6 +1558,47 @@ fn a_pane_swap_confirmed_before_another_viewers_new_pane_is_rejected_to_its_view
                 ],
                 (),
             )
+        },
+    );
+}
+
+#[test]
+fn a_refused_floating_pane_move_from_a_key_binding_is_rejected_to_its_viewer() {
+    let (_server, _fake_pty_backend, ()) = serve_test_session(
+        "floating-move-refused",
+        |runtime_directory, session_id, _fake_pty_backend| {
+            let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
+            let (client_id, _, attached_session_structure, _) =
+                attach_test_client(&mut viewer_connection, 2);
+            let tiled_pane_id = attached_session_structure.tabs[0]
+                .layout
+                .list_leaf_pane_ids()[0];
+            let move_command_id = CommandId::new();
+            viewer_connection
+                .send(&IpcRequest {
+                    request_id: 3,
+                    request_kind: IpcRequestKind::SubmitCommand(Box::new(
+                        CommandEnvelope::from_parts(
+                            move_command_id,
+                            CommandSource::from_key_binding(client_id),
+                            Command::MoveFloatingPane(MoveFloatingPaneArgs {
+                                pane_id: tiled_pane_id,
+                                top_left_cell: Point { column: 2, row: 3 },
+                            }),
+                        ),
+                    )),
+                })
+                .expect("send the floating pane move of a tiled pane");
+
+            let expected_rejection = SessionEvent::PlacementCommandRejected {
+                command_id: move_command_id,
+            };
+            let (viewer_connection, _) =
+                read_session_frames_until(viewer_connection, move |session_event| {
+                    *session_event == expected_rejection
+                });
+
+            (vec![viewer_connection], ())
         },
     );
 }

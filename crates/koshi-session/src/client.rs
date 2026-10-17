@@ -153,8 +153,9 @@ pub struct Client {
     /// resume file does not carry it.
     #[serde(skip)]
     last_applied_lock_command_id: Option<CommandId>,
-    /// The last floating pane move that this client's mouse sent and the
-    /// session ran, also when the move left the pane where it was. `None`
+    /// The last floating pane move that this client's mouse or key binding
+    /// sent and the session ran, also when the move left the pane where it
+    /// was. `None`
     /// before the session runs one, and again after the session restarts: the
     /// resume file does not carry it.
     #[serde(skip)]
@@ -507,15 +508,15 @@ impl Client {
         self.last_applied_lock_command_id = Some(lock_command_id);
     }
 
-    /// The last floating pane move that this client's mouse sent and the
-    /// session ran, or `None` before the session runs one.
+    /// The last floating pane move that this client's mouse or key binding
+    /// sent and the session ran, or `None` before the session runs one.
     #[must_use]
     pub fn get_last_applied_floating_pane_move_command_id(&self) -> Option<CommandId> {
         self.last_applied_floating_pane_move_command_id
     }
 
     /// Record `move_command_id` as the last floating pane move that this
-    /// client's mouse sent and the session ran.
+    /// client's mouse or key binding sent and the session ran.
     pub fn set_last_applied_floating_pane_move_command_id(&mut self, move_command_id: CommandId) {
         self.last_applied_floating_pane_move_command_id = Some(move_command_id);
     }

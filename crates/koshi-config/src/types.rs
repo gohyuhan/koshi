@@ -168,6 +168,11 @@ pub struct ClientConfig {
     /// accepted layout arrives. A placement the session rejects leaves the mode
     /// as it was: a mode that lasts until Esc stays on, and a mode that lasts
     /// until its pane-handle drag ends is closed.
+    ///
+    /// It also governs floating pane move mode: `true` keeps the mode on after
+    /// the session runs a floating pane move sent with Enter or a mouse
+    /// release, and `false` ends the mode once the session runs the move. A
+    /// move the session rejects leaves the mode on.
     pub should_stay_in_pane_placement_mode_after_placement: bool,
     /// Whether a viewer whose link to a session on another machine drops dials
     /// that machine again by itself. While it dials, the viewer draws
@@ -406,8 +411,9 @@ pub struct ModeBindings {
 }
 
 /// The built-in default binding table: the `normal`-mode set, the reserved
-/// unlock, quit, and mouse-select in `locked` mode, and the placement actions
-/// in the `pane-placement` mode.
+/// unlock, quit, and mouse-select in `locked` mode, the placement actions in
+/// the `pane-placement` mode, the chooser actions in the `pane-move-choice`
+/// mode, and the floating pane move actions in the `floating-pane-move` mode.
 ///
 /// Sequences written with `<leader>` resolve against `leader`: rebinding the
 /// leader moves them. Explicit chords — `<A-f>`, the reserved unlock, and
@@ -423,7 +429,9 @@ pub struct ModeBindings {
 /// Tab, Enter, Esc, and Backspace. Pane operations — lifecycle, directional
 /// splits, and directional focus — live under the `<C-p>` prefix, resize under
 /// `<C-s>`, and tab lifecycle under `<C-t>`. Placement actions live in the
-/// `pane-placement` mode. An action choice with a fixed set of values is part
+/// `pane-placement` mode, the chooser's `t`, `f`, Enter and Esc in the
+/// `pane-move-choice` mode, and the floating pane move keys in the
+/// `floating-pane-move` mode. An action choice with a fixed set of values is part
 /// of the action name (`new-pane-left`, `select-pane-target-left`). Any key
 /// here can be rebound from `keybinding.kdl`.
 pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings> {
@@ -638,6 +646,66 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
     .into_iter()
     .collect();
 
+    // The pane move chooser and floating pane move mode are viewer-local
+    // submodes too, each overlaying the base mode while it is open.
+    let pane_move_choice_mode_bindings: BTreeMap<KeySequence, BoundAction> = [
+        (
+            parse_default_key_sequence("t"),
+            build_bound_action("begin-tiled-pane-placement"),
+        ),
+        (
+            parse_default_key_sequence("f"),
+            build_bound_action("begin-floating-pane-move"),
+        ),
+        (
+            parse_default_key_sequence("<CR>"),
+            build_bound_action("confirm-pane-move-choice"),
+        ),
+        (
+            parse_default_key_sequence("<Esc>"),
+            build_bound_action("cancel-pane-move-choice"),
+        ),
+    ]
+    .into_iter()
+    .collect();
+
+    let floating_pane_move_mode_bindings: BTreeMap<KeySequence, BoundAction> = [
+        (
+            parse_default_key_sequence("<Left>"),
+            build_bound_action("move-floating-pane-left"),
+        ),
+        (
+            parse_default_key_sequence("<Down>"),
+            build_bound_action("move-floating-pane-down"),
+        ),
+        (
+            parse_default_key_sequence("<Up>"),
+            build_bound_action("move-floating-pane-up"),
+        ),
+        (
+            parse_default_key_sequence("<Right>"),
+            build_bound_action("move-floating-pane-right"),
+        ),
+        (
+            parse_default_key_sequence("<Tab>"),
+            build_bound_action("select-next-floating-pane"),
+        ),
+        (
+            parse_default_key_sequence("<S-Tab>"),
+            build_bound_action("select-previous-floating-pane"),
+        ),
+        (
+            parse_default_key_sequence("<CR>"),
+            build_bound_action("confirm-floating-pane-move"),
+        ),
+        (
+            parse_default_key_sequence("<Esc>"),
+            build_bound_action("cancel-floating-pane-move"),
+        ),
+    ]
+    .into_iter()
+    .collect();
+
     BTreeMap::from([
         (
             ModeName::from_text("normal"),
@@ -657,6 +725,20 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
             ModeName::from_text("pane-placement"),
             ModeBindings {
                 bound_action_by_key_sequence: pane_placement_mode_bindings,
+                removed_key_sequences: BTreeSet::new(),
+            },
+        ),
+        (
+            ModeName::from_text("pane-move-choice"),
+            ModeBindings {
+                bound_action_by_key_sequence: pane_move_choice_mode_bindings,
+                removed_key_sequences: BTreeSet::new(),
+            },
+        ),
+        (
+            ModeName::from_text("floating-pane-move"),
+            ModeBindings {
+                bound_action_by_key_sequence: floating_pane_move_mode_bindings,
                 removed_key_sequences: BTreeSet::new(),
             },
         ),

@@ -110,7 +110,8 @@ fn no_layers_yield_an_empty_merged_keymap() {
 #[test]
 fn a_built_in_mode_no_layer_binds_is_absent_from_the_merged_keymap() {
     // A built-in mode never seeds an entry of its own. The shipped defaults
-    // bind `normal`, `locked`, and `pane-placement`; `resize` gets no entry.
+    // bind `normal`, `locked`, `pane-placement`, `pane-move-choice` and
+    // `floating-pane-move`; `resize` gets no entry.
     let merged_keymap = merge_keymaps(
         &[build_default_keymap_layer()],
         None,
@@ -124,8 +125,10 @@ fn a_built_in_mode_no_layer_binds_is_absent_from_the_merged_keymap() {
             .cloned()
             .collect::<Vec<_>>(),
         vec![
+            parse_mode_name("floating-pane-move"),
             parse_mode_name("locked"),
             parse_mode_name("normal"),
+            parse_mode_name("pane-move-choice"),
             parse_mode_name("pane-placement"),
         ]
     );
@@ -1012,8 +1015,10 @@ fn unregistered_mode_is_skipped() {
             .cloned()
             .collect::<Vec<_>>(),
         vec![
+            parse_mode_name("floating-pane-move"),
             parse_mode_name("locked"),
             parse_mode_name("normal"),
+            parse_mode_name("pane-move-choice"),
             parse_mode_name("pane-placement"),
         ]
     );

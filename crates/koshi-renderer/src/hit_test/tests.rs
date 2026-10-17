@@ -88,6 +88,7 @@ fn build_render_snapshot(
             },
             tabs_metadata,
             floating_pane_slots: Vec::new(),
+            floating_pane_ids: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {
@@ -96,6 +97,7 @@ fn build_render_snapshot(
             viewport_size,
             active_tab_id,
             focused_pane_id: None,
+            active_tab_focused_pane_id: None,
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,

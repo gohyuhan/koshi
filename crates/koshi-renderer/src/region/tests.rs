@@ -45,6 +45,7 @@ fn build_region_test_render_snapshot() -> RenderSnapshot {
                 is_active: true,
             }],
             floating_pane_slots: Vec::new(),
+            floating_pane_ids: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {
@@ -56,6 +57,7 @@ fn build_region_test_render_snapshot() -> RenderSnapshot {
             },
             active_tab_id: tab_id,
             focused_pane_id: None,
+            active_tab_focused_pane_id: None,
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,

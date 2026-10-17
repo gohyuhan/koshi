@@ -2,7 +2,8 @@
 //!
 //! [`LockMode`] is the interaction mode a single client is in — whether
 //! keystrokes drive the focused pane, are held verbatim for the pane, or are
-//! interpreted by one of Koshi's modal layers (resize, pane placement, tab, scroll).
+//! interpreted by one of Koshi's modal layers (resize, pane placement, the
+//! pane move chooser, floating pane move, tab, scroll).
 //! It is client-scoped: two clients attached to the same session hold
 //! independent modes. The command layer's `SetLockMode` carries a `bool` and
 //! moves a client only into or out of [`LockMode::Locked`].
@@ -36,26 +37,52 @@ pub enum LockMode {
     TabMode,
     /// Scroll mode: keys navigate the focused pane's scrollback.
     ScrollMode,
+    /// The pane move chooser, opened by `core:begin-pane-placement` while the
+    /// viewer draws at least one floating pane that it did not pin.
+    ///
+    /// - The viewer overlays the mode on Normal or Locked without changing the
+    ///   stored base mode, as it does pane placement mode.
+    /// - `core:begin-tiled-pane-placement` opens pane placement mode,
+    ///   `core:begin-floating-pane-move` opens floating pane move mode, and
+    ///   `core:confirm-pane-move-choice` opens the one for the kind of the
+    ///   focused pane. `core:cancel-pane-move-choice` returns to the base mode.
+    /// - Opening floating pane move mode sends `FocusPane` for the pane that
+    ///   mode selects. Opening pane placement mode reads its preview. The
+    ///   chooser itself sends no command.
+    PaneMoveChoice,
+    /// Floating pane move mode, opened by `core:begin-floating-pane-move`.
+    ///
+    /// - The viewer overlays the mode on Normal or Locked without changing the
+    ///   stored base mode.
+    /// - Moving and selecting a floating pane changes only this viewer's
+    ///   drawing. Selecting a pane also sends `FocusPane` for it.
+    /// - `core:confirm-floating-pane-move` or a mouse release sends
+    ///   [`Command::MoveFloatingPane`](crate::command::Command::MoveFloatingPane),
+    ///   the only command that moves the pane. Esc sends nothing.
+    FloatingPaneMove,
 }
 
 impl LockMode {
     /// Whether input that binds nothing reaches the pane in this mode.
     /// `Normal` and `Locked` pass what they do not bind; the modal layers
-    /// (`Resize`, `PanePlacement`, `TabMode`, `ScrollMode`) own the keyboard while
-    /// they are held and discard it.
+    /// (`Resize`, `PanePlacement`, `TabMode`, `ScrollMode`, `PaneMoveChoice`,
+    /// `FloatingPaneMove`) own the keyboard while they are held and discard
+    /// it.
     #[must_use]
     pub fn should_pass_unbound_input_to_pane(self) -> bool {
         matches!(self, LockMode::Normal | LockMode::Locked)
     }
 
     /// Every built-in mode, in declaration order.
-    pub const ALL: [LockMode; 6] = [
+    pub const ALL: [LockMode; 8] = [
         LockMode::Normal,
         LockMode::Locked,
         LockMode::Resize,
         LockMode::PanePlacement,
         LockMode::TabMode,
         LockMode::ScrollMode,
+        LockMode::PaneMoveChoice,
+        LockMode::FloatingPaneMove,
     ];
 
     /// The mode's canonical keymap name — the string the keybinding config
@@ -69,6 +96,8 @@ impl LockMode {
             LockMode::PanePlacement => "pane-placement",
             LockMode::TabMode => "tab",
             LockMode::ScrollMode => "scroll",
+            LockMode::PaneMoveChoice => "pane-move-choice",
+            LockMode::FloatingPaneMove => "floating-pane-move",
         }
     }
 }

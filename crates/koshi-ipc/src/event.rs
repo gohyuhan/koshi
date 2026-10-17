@@ -263,7 +263,8 @@ pub enum SessionEvent {
         session_id: SessionId,
     },
     /// A pane placement command from this client's key binding, or a
-    /// floating pane move from its mouse round, was rejected.
+    /// floating pane move from its key binding or its mouse round, was
+    /// rejected.
     PlacementCommandRejected {
         /// The rejected command.
         command_id: CommandId,

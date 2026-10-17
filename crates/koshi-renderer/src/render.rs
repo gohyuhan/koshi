@@ -990,6 +990,8 @@ fn lock_mode_tag(lock_mode: LockMode) -> Option<&'static str> {
         LockMode::PanePlacement => Some("PLACE PANE"),
         LockMode::TabMode => Some("TAB"),
         LockMode::ScrollMode => Some("SCROLL"),
+        LockMode::PaneMoveChoice => Some("MOVE"),
+        LockMode::FloatingPaneMove => Some("MOVE FLOAT"),
     }
 }
 

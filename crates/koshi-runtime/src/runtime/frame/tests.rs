@@ -293,6 +293,7 @@ fn build_render_snapshot(content_pane_id: PaneId, empty_pane_id: PaneId) -> Rend
                 },
             ],
             floating_pane_slots: Vec::new(),
+            floating_pane_ids: Vec::new(),
         },
         pane_snapshots: vec![
             build_pane_snapshot(content_pane_id),
@@ -307,6 +308,7 @@ fn build_render_snapshot(content_pane_id: PaneId, empty_pane_id: PaneId) -> Rend
             },
             active_tab_id: tab_id,
             focused_pane_id: Some(content_pane_id),
+            active_tab_focused_pane_id: Some(content_pane_id),
             lock_mode: LockMode::Locked,
             last_applied_lock_command_id: Some(CommandId::new()),
             last_applied_floating_pane_move_command_id: Some(CommandId::new()),
@@ -799,6 +801,12 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
             is_pinned: true,
         },
     ];
+    let minimized_floating_pane_id = PaneId::new();
+    render_snapshot.session_snapshot.floating_pane_ids = vec![
+        upper_floating_pane_id,
+        minimized_floating_pane_id,
+        lower_floating_pane_id,
+    ];
 
     let painted_frame = build_wire_frame(&render_snapshot);
 
@@ -819,13 +827,22 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
             },
         ]
     );
+    assert_eq!(
+        painted_frame.session_snapshot.floating_pane_ids,
+        [
+            upper_floating_pane_id,
+            minimized_floating_pane_id,
+            lower_floating_pane_id
+        ]
+    );
 }
 
 #[test]
 fn the_session_tab_slot_and_client_fields_copy_straight_across() {
     let focused_pane_id = PaneId::new();
     let empty_pane_id = PaneId::new();
-    let render_snapshot = build_render_snapshot(focused_pane_id, empty_pane_id);
+    let mut render_snapshot = build_render_snapshot(focused_pane_id, empty_pane_id);
+    render_snapshot.client_snapshot.active_tab_focused_pane_id = Some(empty_pane_id);
 
     let painted_frame = build_wire_frame(&render_snapshot);
 
@@ -940,6 +957,7 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
             },
             active_tab_id: render_snapshot.session_snapshot.active_tab_snapshot.tab_id,
             focused_pane_id: Some(focused_pane_id),
+            active_tab_focused_pane_id: Some(empty_pane_id),
             lock_mode: LockMode::Locked,
             last_applied_lock_command_id: render_snapshot
                 .client_snapshot

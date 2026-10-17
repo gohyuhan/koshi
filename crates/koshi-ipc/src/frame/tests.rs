@@ -115,6 +115,10 @@ fn build_painted_frame() -> PaintedFrame {
                 },
                 is_pinned: true,
             }],
+            floating_pane_ids: vec![
+                PaneId::from_uuid(Uuid::from_u128(6)),
+                PaneId::from_uuid(Uuid::from_u128(5)),
+            ],
         },
         pane_snapshots: vec![FramePane {
             pane_id,
@@ -169,6 +173,7 @@ fn build_painted_frame() -> PaintedFrame {
             },
             active_tab_id: tab_id,
             focused_pane_id: Some(pane_id),
+            active_tab_focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: Some(CommandId::from_uuid(Uuid::from_u128(5))),
             last_applied_floating_pane_move_command_id: Some(CommandId::from_uuid(
@@ -319,22 +324,51 @@ fn a_frame_without_a_placement_revision_is_refused() {
 }
 
 #[test]
-fn a_frame_without_floating_pane_slots_is_refused() {
-    let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("the frame encodes");
-    encoded_json["session_snapshot"]
-        .as_object_mut()
-        .expect("the session snapshot is an object")
-        .remove("floating_pane_slots")
-        .expect("the floating pane slots are present");
+fn a_frame_without_its_floating_pane_lists_is_refused() {
+    let encoded_json = serde_json::to_value(build_painted_frame()).expect("the frame encodes");
+    for field_name in ["floating_pane_slots", "floating_pane_ids"] {
+        let mut frame_json_without_field = encoded_json.clone();
+        frame_json_without_field["session_snapshot"]
+            .as_object_mut()
+            .expect("the session snapshot is an object")
+            .remove(field_name)
+            .expect("the floating pane list is present");
 
-    let decode_error = serde_json::from_str::<PaintedFrame>(&encoded_json.to_string())
-        .expect_err("a frame without floating pane slots is refused");
+        let decode_error =
+            serde_json::from_str::<PaintedFrame>(&frame_json_without_field.to_string())
+                .expect_err("a frame without the floating pane list is refused");
+        assert_eq!(
+            decode_error.to_string(),
+            format!(
+                "missing field `{field_name}` at line 1 column {}",
+                decode_error.column()
+            )
+        );
+    }
+}
+
+#[test]
+fn the_active_tab_focus_travels_under_its_own_name_and_null_means_none() {
+    let painted_frame = build_painted_frame();
+    let mut encoded_json = serde_json::to_value(&painted_frame).expect("the frame encodes");
     assert_eq!(
-        decode_error.to_string(),
-        format!(
-            "missing field `floating_pane_slots` at line 1 column {}",
-            decode_error.column()
-        )
+        encoded_json["client_snapshot"]["active_tab_focused_pane_id"],
+        json!(Uuid::from_u128(4).to_string())
+    );
+    assert_eq!(
+        encoded_json["session_snapshot"]["floating_pane_ids"],
+        json!([
+            Uuid::from_u128(6).to_string(),
+            Uuid::from_u128(5).to_string()
+        ])
+    );
+
+    encoded_json["client_snapshot"]["active_tab_focused_pane_id"] = serde_json::Value::Null;
+    let decoded_frame: PaintedFrame =
+        serde_json::from_str(&encoded_json.to_string()).expect("a null active tab focus decodes");
+    assert_eq!(
+        decoded_frame.client_snapshot.active_tab_focused_pane_id,
+        None
     );
 }
 
@@ -603,7 +637,11 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                         "size": { "column_count": 2, "row_count": 1 }
                     },
                     "is_pinned": true
-                }]
+                }],
+                "floating_pane_ids": [
+                    "00000000-0000-0000-0000-000000000006",
+                    "00000000-0000-0000-0000-000000000005"
+                ]
             },
             "pane_snapshots": [{
                 "pane_id": "00000000-0000-0000-0000-000000000004",
@@ -648,6 +686,7 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                 "viewport_size": { "column_count": 4, "row_count": 3 },
                 "active_tab_id": "00000000-0000-0000-0000-000000000002",
                 "focused_pane_id": "00000000-0000-0000-0000-000000000004",
+                "active_tab_focused_pane_id": "00000000-0000-0000-0000-000000000004",
                 "lock_mode": "Normal",
                 "last_applied_lock_command_id": "00000000-0000-0000-0000-000000000005",
                 "last_applied_floating_pane_move_command_id":

@@ -15,7 +15,10 @@ use koshi_config::layer::{PartialColorPalette, PartialLayoutDefaults};
 use koshi_config::types::{
     BoundAction, KeybindingsConfig, ModeBindings, ModeName, RgbColor, WheelScroll,
 };
-use koshi_core::action::{ActionReference, MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT};
+use koshi_core::action::{
+    ActionReference, MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT, MOVE_FLOATING_PANE_HINT,
+    MOVE_FOCUSED_PANE_HINT, MOVE_TILED_PANE_HINT,
+};
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
 use koshi_core::event::{InputModeChanged, MouseSelectChanged, SubscriberLagged};
 use koshi_core::geometry::{Direction, Rect, Size, SplitDirection};
@@ -444,7 +447,12 @@ fn a_missing_placement_target_cancels_the_active_interaction() {
     let destination_tab_id = TabId::new();
     let request_started_at = Instant::now();
     client.set_session_id(session_id);
-    client.set_frame_view(source_tab_id, Some(source_pane_id), vec![source_tab_id]);
+    client.set_frame_view(
+        source_tab_id,
+        Some(source_pane_id),
+        Some(source_pane_id),
+        vec![source_tab_id],
+    );
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
         source_tab_id,
@@ -475,6 +483,7 @@ fn a_stale_missing_target_refusal_keeps_the_newer_placement_selection() {
     client.set_session_id(SessionId::new());
     client.set_frame_view(
         source_tab_id,
+        Some(source_pane_id),
         Some(source_pane_id),
         vec![
             source_tab_id,
@@ -687,7 +696,7 @@ fn the_next_submitted_placement_waits_for_its_own_commit() {
     );
     record_committed_placement(&mut client);
     client.set_placement_revisions(1, 0);
-    client.set_frame_view(TabId::new(), None, Vec::new());
+    client.set_frame_view(TabId::new(), None, None, Vec::new());
     let placement_mode = client
         .placement_state
         .placement_mode
@@ -823,6 +832,7 @@ fn a_reconciled_keyboard_placement_keeps_pane_placement_mode_when_the_active_tab
     client.set_frame_view(
         source_tab_id,
         Some(source_pane_id),
+        Some(source_pane_id),
         vec![source_tab_id, destination_tab_id],
     );
     client.placement_state.placement_mode = Some(PlacementMode {
@@ -843,6 +853,7 @@ fn a_reconciled_keyboard_placement_keeps_pane_placement_mode_when_the_active_tab
 
     client.set_frame_view(
         destination_tab_id,
+        Some(source_pane_id),
         Some(source_pane_id),
         vec![source_tab_id, destination_tab_id],
     );
@@ -865,6 +876,7 @@ fn a_frame_that_focuses_the_source_pane_and_drops_its_former_tab_keeps_pane_plac
     client.set_frame_view(
         current_tab_id,
         Some(PaneId::new()),
+        Some(PaneId::new()),
         vec![former_tab_id, current_tab_id],
     );
     client.placement_state.placement_mode = Some(PlacementMode {
@@ -877,7 +889,12 @@ fn a_frame_that_focuses_the_source_pane_and_drops_its_former_tab_keeps_pane_plac
     });
     client.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
 
-    client.set_frame_view(current_tab_id, Some(source_pane_id), vec![current_tab_id]);
+    client.set_frame_view(
+        current_tab_id,
+        Some(source_pane_id),
+        Some(source_pane_id),
+        vec![current_tab_id],
+    );
 
     assert!(client.is_placement_mode_active());
     assert_eq!(
@@ -899,6 +916,7 @@ fn closing_the_former_tab_after_a_cross_tab_placement_keeps_pane_placement_mode(
     client.set_frame_view(
         former_tab_id,
         Some(source_pane_id),
+        Some(source_pane_id),
         vec![former_tab_id, destination_tab_id],
     );
     client.placement_state.placement_mode = Some(PlacementMode {
@@ -919,11 +937,13 @@ fn closing_the_former_tab_after_a_cross_tab_placement_keeps_pane_placement_mode(
     client.set_frame_view(
         destination_tab_id,
         Some(source_pane_id),
+        Some(source_pane_id),
         vec![former_tab_id, destination_tab_id],
     );
 
     client.set_frame_view(
         destination_tab_id,
+        Some(source_pane_id),
         Some(source_pane_id),
         vec![destination_tab_id],
     );
@@ -982,7 +1002,7 @@ fn reconnect_clears_unconfirmed_target_and_reconciles_confirmation() {
         Some(build_pending_placement_command(command_id))
     );
 
-    client.set_frame_view(TabId::new(), None, Vec::new());
+    client.set_frame_view(TabId::new(), None, None, Vec::new());
 
     assert_eq!(client.get_placement_target(), None);
     assert!(!client.is_placement_confirmation_pending());
@@ -1056,7 +1076,7 @@ pub(crate) fn build_expected_submit_placement(
     client: &Client,
     command: Command,
 ) -> PlacementInputAction {
-    PlacementInputAction::SubmitPlacement {
+    PlacementInputAction::SubmitCommand {
         command_id: client
             .get_pending_placement_command()
             .expect("the confirmation recorded a pending placement command")
@@ -1402,6 +1422,7 @@ fn build_render_snapshot(
             },
             tabs_metadata: Vec::new(),
             floating_pane_slots: Vec::new(),
+            floating_pane_ids: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {
@@ -1413,6 +1434,7 @@ fn build_render_snapshot(
             },
             active_tab_id,
             focused_pane_id: None,
+            active_tab_focused_pane_id: None,
             lock_mode,
             last_applied_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
@@ -1949,7 +1971,15 @@ fn a_keybinding_file_without_a_pane_placement_cancel_binding_is_refused() {
     let conflict_report = keymap_conflict_report.expect("a keybinding file was given");
     assert_eq!(
         conflict_report.diagnostics,
-        vec![koshi_config::conflict::ConflictDiagnostic::PanePlacementCancelBindingMissing]
+        vec![
+            koshi_config::conflict::ConflictDiagnostic::ModeCancelBindingMissing {
+                mode_name: ModeName::from_text("pane-placement"),
+                cancel_action_reference: ActionReference::from_core_action_name(
+                    "cancel-pane-placement"
+                )
+                .expect("valid action name"),
+            }
+        ]
     );
     assert_eq!(conflict_report.get_verdict(), KeymapVerdict::Reject);
     assert_eq!(
@@ -2243,7 +2273,7 @@ fn a_keybinding_file_removes_a_default_binding_only_in_the_mode_that_declares_it
         KeyMatch::default()
     );
     assert!(client
-        .build_frame_hints(client.get_lock_mode(), false)
+        .build_frame_hints(client.get_lock_mode(), false, false)
         .removed_key_sequences
         .contains(&ctrl_q_sequence));
     // Locked mode's own quit binding is untouched: removal is scoped to the
@@ -2270,11 +2300,68 @@ fn count_hint_bindings_with_action_display_name(
 }
 
 #[test]
+fn frame_hints_label_the_move_choosers_enter_by_the_focused_panes_kind() {
+    let (client, _delivery_sender) = build_test_client_with_event_sender();
+    // Each case: whether the focused pane is floating, then how many entries
+    // read `Move Tiled Pane` and `Move Floating Pane`.
+    for (is_focused_pane_floating, tiled_hint_count, floating_hint_count) in
+        [(false, 2, 1), (true, 1, 2)]
+    {
+        let move_choice_hints =
+            client.build_frame_hints(LockMode::PaneMoveChoice, false, is_focused_pane_floating);
+
+        assert_eq!(
+            count_hint_bindings_with_action_display_name(
+                &move_choice_hints,
+                MOVE_FOCUSED_PANE_HINT
+            ),
+            0
+        );
+        assert_eq!(
+            count_hint_bindings_with_action_display_name(&move_choice_hints, MOVE_TILED_PANE_HINT),
+            tiled_hint_count
+        );
+        assert_eq!(
+            count_hint_bindings_with_action_display_name(
+                &move_choice_hints,
+                MOVE_FLOATING_PANE_HINT
+            ),
+            floating_hint_count
+        );
+    }
+}
+
+#[test]
+fn the_focused_pane_is_floating_only_when_the_session_lists_it_as_floating() {
+    let tiled_pane_id = PaneId::new();
+    let floating_pane_id = PaneId::new();
+    let mut render_snapshot = build_render_snapshot(ClientId::new(), LockMode::Normal, false);
+    render_snapshot.session_snapshot.floating_pane_ids = vec![floating_pane_id];
+    for (focused_pane_id, expected_is_focused_pane_floating) in [
+        (Some(floating_pane_id), true),
+        (Some(tiled_pane_id), false),
+        (None, false),
+    ] {
+        render_snapshot.client_snapshot.focused_pane_id = focused_pane_id;
+
+        assert_eq!(
+            is_focused_pane_floating(
+                &render_snapshot.session_snapshot,
+                &render_snapshot.client_snapshot
+            ),
+            expected_is_focused_pane_floating
+        );
+    }
+}
+
+#[test]
 fn frame_hints_flip_the_mouse_select_label_only_while_it_is_on() {
     let (client, _delivery_sender) = build_test_client_with_event_sender();
 
-    let mouse_selection_disabled_hints = client.build_frame_hints(client.get_lock_mode(), false);
-    let mouse_selection_enabled_hints = client.build_frame_hints(client.get_lock_mode(), true);
+    let mouse_selection_disabled_hints =
+        client.build_frame_hints(client.get_lock_mode(), false, false);
+    let mouse_selection_enabled_hints =
+        client.build_frame_hints(client.get_lock_mode(), true, false);
 
     assert_eq!(
         count_hint_bindings_with_action_display_name(
@@ -2322,9 +2409,9 @@ fn frame_hints_flip_the_mouse_select_label_only_while_it_is_on() {
 #[test]
 fn frame_hints_follow_the_viewers_own_mode() {
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
-    let normal_mode_hints = client.build_frame_hints(client.get_lock_mode(), false);
+    let normal_mode_hints = client.build_frame_hints(client.get_lock_mode(), false, false);
     client.set_lock_mode(LockMode::Locked);
-    let locked_mode_hints = client.build_frame_hints(client.get_lock_mode(), false);
+    let locked_mode_hints = client.build_frame_hints(client.get_lock_mode(), false, false);
 
     assert_eq!(
         normal_mode_hints.hint_bindings.len(),
@@ -2864,6 +2951,24 @@ fn a_viewer_waiting_for_no_lock_command_takes_each_frames_lock_mode() {
     client.apply_render_snapshot(&build_render_snapshot(client_id, LockMode::Normal, false));
     assert_eq!(client.get_lock_mode(), LockMode::Normal);
     assert_eq!(client.get_pending_lock_command_id(), None);
+}
+
+#[test]
+fn a_rejected_paint_puts_back_the_move_mode_and_the_active_tab_focus() {
+    let (mut client, _delivery_sender) = build_test_client_with_event_sender();
+    let client_id = client.get_client_id();
+    let tiled_pane_id = PaneId::new();
+    client.active_tab_focused_pane_id = Some(tiled_pane_id);
+    client.pane_move_mode = Some(PaneMoveMode::Choice);
+    let viewer_restore_point = client.build_viewer_restore_point();
+    client.apply_render_snapshot(&build_render_snapshot(client_id, LockMode::Locked, false));
+    assert_eq!(client.pane_move_mode, None);
+    assert_eq!(client.active_tab_focused_pane_id, None);
+
+    client.restore_viewer(viewer_restore_point);
+
+    assert_eq!(client.pane_move_mode, Some(PaneMoveMode::Choice));
+    assert_eq!(client.active_tab_focused_pane_id, Some(tiled_pane_id));
 }
 
 #[test]

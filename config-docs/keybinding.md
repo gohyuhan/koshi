@@ -39,9 +39,9 @@ Keys use angle brackets. Spaces join keys into a sequence.
 ## `mode` blocks
 
 A `mode` block holds the bindings for one built-in keymap — `"normal"`,
-`"locked"`, or `"pane-placement"`. Normal and locked are base modes.
-Pane placement is a local mode that takes priority while a pane placement is
-open.
+`"locked"`, `"pane-placement"`, `"pane-move-choice"`, or
+`"floating-pane-move"`. Normal and locked are base modes. The other three are
+local modes. Each one takes priority over the base mode while it is open.
 
 - `bind "<key>" "core:action"` — exactly two strings: the key sequence and the
   **full** action reference (namespaced, e.g. `core:new-tab`; a bare `new-tab`
@@ -122,11 +122,36 @@ mode "pane-placement" {
     bind "<CR>" "core:confirm-pane-placement"
     bind "<Esc>" "core:cancel-pane-placement"
 }
+
+mode "pane-move-choice" {
+    // The chooser owns these keys while it is open.
+    bind "t" "core:begin-tiled-pane-placement"
+    bind "f" "core:begin-floating-pane-move"
+    bind "<CR>" "core:confirm-pane-move-choice"
+    bind "<Esc>" "core:cancel-pane-move-choice"
+}
+
+mode "floating-pane-move" {
+    // Floating pane move mode owns these keys while it is open.
+    bind "<Left>" "core:move-floating-pane-left"
+    bind "<Down>" "core:move-floating-pane-down"
+    bind "<Up>" "core:move-floating-pane-up"
+    bind "<Right>" "core:move-floating-pane-right"
+    bind "<Tab>" "core:select-next-floating-pane"
+    bind "<S-Tab>" "core:select-previous-floating-pane"
+    bind "<CR>" "core:confirm-floating-pane-move"
+    bind "<Esc>" "core:cancel-floating-pane-move"
+}
 ```
 
 ## Pane placement mode
 
-`core:begin-pane-placement` opens the local `pane-placement` mode. It keeps the
+`core:begin-pane-placement` opens the local `pane-placement` mode when this
+client draws no floating pane that it did not pin. Otherwise it opens the pane
+move chooser (see [below](#the-pane-move-chooser)). Pane placement mode moves
+tiled and stacked panes only: its pane is the focused pane of the active tab,
+also while a floating pane is focused. While it is open, this client draws no
+floating pane, and a click never reaches one. The mode keeps the
 current base mode: entering from locked mode keeps the client locked after
 cancellation. While it is active, the `pane-placement` keymap has priority over
 the normal or locked keymap. An unbound key and every key release are consumed
@@ -173,11 +198,65 @@ mode "pane-placement" {
 
 The effective `pane-placement` map must keep one live
 `core:cancel-pane-placement` binding. Removing Escape without binding that
-action to another key rejects the keymap.
+action to another key rejects the keymap. The same rule holds for
+`core:cancel-pane-move-choice` in `pane-move-choice` and
+`core:cancel-floating-pane-move` in `floating-pane-move`.
 
 `<leader>p m` opens the mode, then `<Right>` selects a destination instead of
 running `core:focus-pane-right`. A normal-mode binding for `<leader>p
 <Right>` still applies before placement opens.
+
+## The pane move chooser
+
+`<leader>p m` opens the chooser when this client draws at least one floating
+pane that it did not pin. The tabline shows the tag `MOVE`, and the hint bar
+lists the chooser keys. The chooser itself sends no command. The mode that a
+key opens sends what that mode sends: floating pane move mode focuses the
+pane it selects.
+
+- `t` (`core:begin-tiled-pane-placement`) opens pane placement mode.
+- `f` (`core:begin-floating-pane-move`) opens floating pane move mode.
+- Enter (`core:confirm-pane-move-choice`) opens floating pane move mode when a
+  floating pane is focused, and pane placement mode otherwise. The hint bar
+  names the mode Enter opens: `Move Floating Pane` or `Move Tiled Pane`.
+- Escape (`core:cancel-pane-move-choice`) returns to the base mode.
+
+The chooser discards every other key. A mouse click acts as it does in the
+base mode. `core:begin-tiled-pane-placement` and
+`core:begin-floating-pane-move` also work bound in `normal` or `locked`, with
+no chooser.
+
+## Floating pane move mode
+
+Floating pane move mode moves one floating pane inside this client's view.
+The tabline shows the tag `MOVE FLOAT`. The mode selects the focused floating
+pane, or the front-most floating pane when a tiled pane is focused, and
+focuses the selected pane. It never selects a pinned or minimized floating
+pane.
+
+- Arrow keys move the selected pane one cell. The pane stops at the edge of
+  the pane area. Only this client draws the moved pane until you confirm.
+- Tab and Shift+Tab select the next or previous floating pane in the order
+  the panes were created, and focus it. With floating panes `a`, `b` and `c`
+  created in that order and `c` selected, Shift+Tab selects `b`, then `a`,
+  then `c`. A move you did not confirm is discarded.
+- A left-button press on a floating pane's content or grab handle selects
+  that pane and focuses it. A drag moves it, and the release sends the move.
+  A press on any other place does nothing.
+- Enter sends the move. Pane placement mode's setting
+  `stay-in-pane-placement-mode-after-placement` also covers this mode: `#true`
+  (the default) keeps the mode open for the next move, and `#false` ends it
+  once the session runs the move. Until the session answers, the keys and the
+  mouse of the mode do nothing, and Escape does not close it. A move the
+  session rejects keeps the mode open, and the pane goes back to where the
+  session places it. A mouse release that sends a move does the same.
+- Escape discards the move and returns to the base mode. During a drag, the
+  first Escape ends only the drag.
+
+Each confirmed move sends one `MoveFloatingPane` command. It changes only
+this client's view: other clients keep the pane where they put it. If the
+selected pane is pinned, minimized or closed while the mode is open, the
+unconfirmed move is discarded and nothing is sent.
 
 ### Pane placement mode and `koshi move-pane`
 
