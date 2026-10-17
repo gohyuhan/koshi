@@ -27,7 +27,8 @@
 //! the held left button drives (a selection, border, tab-strip or grab-handle
 //! drag), the pane a held button is captured to, the release owed to a program
 //! whose capture koshi ended, and the floating pane move this viewer sent and
-//! draws ahead of the session.
+//! draws ahead of the session. While floating pane move mode is on, it owns
+//! every mouse event, and a left drag of an unpinned floating pane moves it.
 //!
 //! What the viewer does **not** decide is how a forwarded event is encoded, how
 //! far a scroll may travel, or which text a highlight covers. It names a pane
@@ -77,10 +78,10 @@ use crate::input::{
     build_placement_destinations, find_destination_tab_snapshot, is_same_tab_placement_noop,
 };
 use crate::terminal::project_core_rect;
-use crate::{Client, LinkStatus, PlacementInputAction};
+use crate::{Client, FloatingPaneMoveSelection, LinkStatus, PaneMoveMode, PlacementInputAction};
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// How long after a press a second press still counts as a double click, and a
 /// third as a triple.
@@ -264,10 +265,11 @@ pub(crate) struct FloatingPaneHandleDrag {
     press_top_left_cell: Point,
 }
 
-/// A floating pane move that a grab-handle release sent under `command_id`,
-/// drawn at `top_left_cell` until an applied frame names it, the session
-/// rejects it, or the session drops events. While one waits, a press on a
-/// grab handle starts no drag.
+/// A floating pane move that a grab-handle release, or Enter in floating pane
+/// move mode, sent under `command_id`, drawn at `top_left_cell` until an
+/// applied frame names it, the session rejects it, or the session drops
+/// events. While one waits, a press on a grab handle starts no drag, and the
+/// arrow keys of floating pane move mode move nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SentFloatingPaneMove {
     /// The floating pane the move names.
@@ -360,6 +362,10 @@ impl Client {
     /// that paint. While the pane placement preview shows, no pane is hovered
     /// and no placement handle is marked.
     ///
+    /// The floating pane move draft is the grab-handle drag under way, else
+    /// the cell the arrow keys of floating pane move mode moved the selected
+    /// pane to, else the floating pane move this viewer sent.
+    ///
     /// A peek made on a tab other than `active_tab_id` is not applied, so a tab
     /// switch reveals the new tab. The peek is thrown away outright the moment
     /// the viewer sees a frame on another tab
@@ -392,19 +398,34 @@ impl Client {
                 LinkStatus::Redialing(reconnecting) => Some(reconnecting),
                 LinkStatus::Linked | LinkStatus::AwaitingRestartedSession => None,
             },
-            floating_pane_move_draft: match (self.left_button_gesture, self.sent_floating_pane_move)
-            {
-                (Some(LeftButtonGesture::FloatingPaneMove(floating_pane_handle_drag)), _) => {
+            floating_pane_move_draft: match (
+                self.left_button_gesture,
+                self.pane_move_mode,
+                self.sent_floating_pane_move,
+            ) {
+                (Some(LeftButtonGesture::FloatingPaneMove(floating_pane_handle_drag)), _, _) => {
                     Some(FloatingPaneMoveDraft {
                         pane_id: floating_pane_handle_drag.pane_id,
                         top_left_cell: floating_pane_handle_drag.top_left_cell,
                     })
                 }
-                (_, Some(sent_floating_pane_move)) => Some(FloatingPaneMoveDraft {
+                (
+                    _,
+                    Some(PaneMoveMode::FloatingPaneMove(FloatingPaneMoveSelection {
+                        selected_pane_id,
+                        draft_top_left_cell: Some(draft_top_left_cell),
+                        ..
+                    })),
+                    _,
+                ) => Some(FloatingPaneMoveDraft {
+                    pane_id: selected_pane_id,
+                    top_left_cell: draft_top_left_cell,
+                }),
+                (_, _, Some(sent_floating_pane_move)) => Some(FloatingPaneMoveDraft {
                     pane_id: sent_floating_pane_move.pane_id,
                     top_left_cell: sent_floating_pane_move.top_left_cell,
                 }),
-                (_, None) => None,
+                (_, _, None) => None,
             },
         }
     }
@@ -424,6 +445,7 @@ impl Client {
     /// Route `mouse_input` while pane placement owns the mouse. Returns `None`
     /// when the event is not placement input and takes the normal mouse path.
     ///
+    /// - While floating pane move mode is on, every event returns `None`.
     /// - While a submitted placement waits for the session, every event is
     ///   consumed and the placement drag ends.
     /// - With placement mode off, an unshifted left press on a tiled pane's
@@ -449,6 +471,9 @@ impl Client {
         mouse_frame: &MouseFrame,
         current_time: Instant,
     ) -> Option<PlacementInputAction> {
+        if self.is_floating_pane_move_mode_on() {
+            return None;
+        }
         if self.is_placement_confirmation_pending() {
             self.end_placement_drag();
             return Some(PlacementInputAction::Consumed);
@@ -786,6 +811,9 @@ impl Client {
     /// ended without its release puts one release of its button, at its last
     /// cell, ahead of every other action.
     ///
+    /// While floating pane move mode is on, the mode answers every event other
+    /// than those first steps, and no event reaches a pane's program.
+    ///
     /// A left press on the content of an already-focused plain shell at the
     /// pane's third visible row, with the pane's top row on line 940, arms a
     /// character drag anchored at line 942 and dispatches nothing yet.
@@ -813,7 +841,26 @@ impl Client {
                 self.end_mouse_capture();
             }
         }
-        let mut mouse_actions = match mouse_input.mouse_kind {
+        let mut mouse_actions = if self.is_floating_pane_move_mode_on() {
+            self.handle_floating_pane_move_mouse(mouse_input, mouse_frame)
+        } else {
+            self.handle_mouse_event_on_frame(mouse_input, mouse_frame, current_time)
+        };
+        if let Some(capture_release) = self.take_mouse_capture_release() {
+            mouse_actions.insert(0, capture_release);
+        }
+        mouse_actions
+    }
+
+    /// Answer `mouse_input` outside floating pane move mode, by what the press
+    /// began, as [`handle_mouse`](Self::handle_mouse) describes.
+    fn handle_mouse_event_on_frame(
+        &mut self,
+        mouse_input: MouseInput,
+        mouse_frame: &MouseFrame,
+        current_time: Instant,
+    ) -> Vec<MouseAction> {
+        match mouse_input.mouse_kind {
             MouseKind::Scroll(_) => match self.handle_mouse_wheel(mouse_input, mouse_frame) {
                 Some(wheel_decision) => {
                     self.hovered_pane_id = wheel_decision.hovered_pane_id;
@@ -839,11 +886,93 @@ impl Client {
             MouseKind::Press(_) | MouseKind::Drag(_) | MouseKind::Release(_) => {
                 self.forward_mouse_input(mouse_input, mouse_frame)
             }
-        };
-        if let Some(capture_release) = self.take_mouse_capture_release() {
-            mouse_actions.insert(0, capture_release);
         }
-        mouse_actions
+    }
+
+    /// Answer `mouse_input` while floating pane move mode owns the mouse. The
+    /// pane under the pointer and the marked grab handle follow the pointer,
+    /// and no event reaches a pane's program.
+    ///
+    /// - A left press on the content or the grab handle of a floating pane
+    ///   this viewer draws unpinned selects that pane and starts a grab-handle
+    ///   drag of it, unless a sent floating pane move waits. A press on
+    ///   another pane drops the draft. The press returns a `FocusPane` for the
+    ///   pane when `mouse_frame` does not focus it.
+    /// - A left drag moves that drag's draft
+    ///   ([`drag_floating_pane_to`](Self::drag_floating_pane_to)).
+    /// - A left release sends the move
+    ///   ([`submit_floating_pane_move`](Self::submit_floating_pane_move)).
+    ///   A release that sends a move drops the draft, and the mode waits for
+    ///   that move
+    ///   ([`record_sent_floating_pane_move`](Self::record_sent_floating_pane_move)).
+    /// - Every other event returns nothing.
+    fn handle_floating_pane_move_mouse(
+        &mut self,
+        mouse_input: MouseInput,
+        mouse_frame: &MouseFrame,
+    ) -> Vec<MouseAction> {
+        let frame_layout = self.build_frame_layout_with_current_chrome(mouse_frame);
+        let hit_region = resolve_hit_region(frame_layout, mouse_input.position);
+        self.update_pointer_hover(mouse_frame, mouse_input.position, hit_region);
+        match mouse_input.mouse_kind {
+            MouseKind::Press(MouseButton::Left) => {
+                let (HitRegion::PaneContent { pane_id } | HitRegion::PlacementHandle { pane_id }) =
+                    hit_region
+                else {
+                    return Vec::new();
+                };
+                let Some(floating_pane_slot) = frame_layout.find_drawn_floating_pane_slot(pane_id)
+                else {
+                    return Vec::new();
+                };
+                if floating_pane_slot.is_pinned || self.sent_floating_pane_move.is_some() {
+                    return Vec::new();
+                }
+                let is_selected_pane = matches!(
+                    self.pane_move_mode,
+                    Some(PaneMoveMode::FloatingPaneMove(floating_pane_move_selection))
+                        if floating_pane_move_selection.selected_pane_id == pane_id
+                );
+                if !is_selected_pane {
+                    self.pane_move_mode =
+                        Some(PaneMoveMode::FloatingPaneMove(FloatingPaneMoveSelection {
+                            selected_pane_id: pane_id,
+                            draft_top_left_cell: None,
+                            pending_move_command_id: None,
+                        }));
+                }
+                self.left_button_gesture = Some(LeftButtonGesture::FloatingPaneMove(
+                    FloatingPaneHandleDrag {
+                        pane_id,
+                        top_left_cell: floating_pane_slot.outer_rect.origin,
+                        press_position: mouse_input.position,
+                        press_top_left_cell: floating_pane_slot.outer_rect.origin,
+                    },
+                ));
+                self.build_floating_pane_focus_actions(mouse_frame, pane_id)
+            }
+            MouseKind::Drag(MouseButton::Left) => {
+                if let Some(LeftButtonGesture::FloatingPaneMove(floating_pane_handle_drag)) =
+                    self.left_button_gesture
+                {
+                    self.drag_floating_pane_to(floating_pane_handle_drag, mouse_input.position);
+                }
+                Vec::new()
+            }
+            MouseKind::Release(MouseButton::Left) => {
+                let Some(LeftButtonGesture::FloatingPaneMove(floating_pane_handle_drag)) =
+                    self.left_button_gesture
+                else {
+                    return Vec::new();
+                };
+                self.submit_floating_pane_move(
+                    floating_pane_handle_drag,
+                    mouse_input.position,
+                    mouse_frame,
+                )
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// How long until a selection drag held past a pane's edge must scroll the
@@ -1029,13 +1158,17 @@ impl Client {
 
     /// Drop every gesture under way: the selection drag, the border drag, the
     /// tab-strip peek-drag, the floating pane grab-handle drag, the placement
-    /// drag, the pane a held button was captured to, and the floating pane
-    /// move this viewer draws ahead of the session after a release sent it.
+    /// drag, the pane a held button was captured to, the floating pane move
+    /// this viewer draws ahead of the session after it sent it, and the cell
+    /// the arrow keys of floating pane move mode moved the selected pane to.
     /// No release is owed for the capture, and a release already owed is
     /// dropped. The highlight a selection drag already made stands. Called
     /// when a new link to the session replaces the old one.
     /// Placement mode that lasts until its drag ends is cancelled. Placement
     /// mode that lasts until Esc stays on and loses its unconfirmed target.
+    /// The move chooser and floating pane move mode stay on, and floating
+    /// pane move mode keeps its selected pane. A wait for the move the mode
+    /// sent ends at the next applied frame.
     ///
     /// The pane under the pointer, where the tab strip is peeked, and the line a
     /// pending edge-scroll was asked from are left as they are.
@@ -1043,6 +1176,7 @@ impl Client {
         self.end_held_mouse_gestures();
         self.unreleased_mouse_capture = None;
         self.sent_floating_pane_move = None;
+        self.set_floating_pane_move_draft(None);
         if self.should_placement_mode_end_with_drag() {
             self.cancel_placement_mode();
         } else if !self.is_placement_confirmation_pending() {
@@ -1772,6 +1906,11 @@ impl Client {
     /// the alternate screen since the press. Its anchor names a line of the
     /// screen the press landed on.
     ///
+    /// Floating pane move mode drops the cell its arrow keys moved the
+    /// selected pane to when the frame does not draw that pane or draws it
+    /// pinned. The mode and its selected pane stay, and nothing reaches the
+    /// session.
+    ///
     /// Example: a left press in `vim` in a floating pane holds a capture with
     /// last cell `(4, 2)`. A key hides the floating panes, and the next frame
     /// does not draw that pane. That frame ends the capture, and
@@ -1802,6 +1941,17 @@ impl Client {
             .is_some_and(|mouse_capture| !is_pane_drawn(mouse_frame, mouse_capture.pane_id))
         {
             self.end_mouse_capture();
+        }
+        if let Some(PaneMoveMode::FloatingPaneMove(floating_pane_move_selection)) =
+            self.pane_move_mode.as_mut()
+        {
+            let is_selected_pane_movable = mouse_frame
+                .build_frame_layout()
+                .find_drawn_floating_pane_slot(floating_pane_move_selection.selected_pane_id)
+                .is_some_and(|floating_pane_slot| !floating_pane_slot.is_pinned);
+            if !is_selected_pane_movable {
+                floating_pane_move_selection.draft_top_left_cell = None;
+            }
         }
     }
 
@@ -1915,12 +2065,7 @@ impl Client {
         {
             return Vec::new();
         }
-        let command_id = CommandId::new();
-        self.sent_floating_pane_move = Some(SentFloatingPaneMove {
-            pane_id,
-            top_left_cell,
-            command_id,
-        });
+        let command_id = self.record_sent_floating_pane_move(pane_id, top_left_cell);
         vec![MouseAction::MoveFloatingPane {
             command_id,
             command_args: MoveFloatingPaneArgs {
@@ -1943,6 +2088,44 @@ impl Client {
         vec![build_focus_pane_action(self.client_id, pane_id)]
     }
 
+    /// Record a floating pane move of `pane_id` to `top_left_cell` under a new
+    /// command id as the move this viewer sent and draws ahead of the
+    /// session, and return that command id. While floating pane move mode is
+    /// on, the mode drops its draft and waits for this move
+    /// ([`end_floating_pane_move_wait`](Self::end_floating_pane_move_wait)).
+    pub(crate) fn record_sent_floating_pane_move(
+        &mut self,
+        pane_id: PaneId,
+        top_left_cell: Point,
+    ) -> CommandId {
+        let command_id = CommandId::new();
+        self.sent_floating_pane_move = Some(SentFloatingPaneMove {
+            pane_id,
+            top_left_cell,
+            command_id,
+        });
+        if let Some(PaneMoveMode::FloatingPaneMove(floating_pane_move_selection)) =
+            self.pane_move_mode.as_mut()
+        {
+            floating_pane_move_selection.draft_top_left_cell = None;
+            floating_pane_move_selection.pending_move_command_id = Some(command_id);
+        }
+        command_id
+    }
+
+    /// Whether the held left button drives a floating pane's grab-handle drag.
+    pub(crate) fn is_floating_pane_move_drag_active(&self) -> bool {
+        matches!(
+            self.left_button_gesture,
+            Some(LeftButtonGesture::FloatingPaneMove(_))
+        )
+    }
+
+    /// Whether floating pane move mode is on.
+    fn is_floating_pane_move_mode_on(&self) -> bool {
+        matches!(self.pane_move_mode, Some(PaneMoveMode::FloatingPaneMove(_)))
+    }
+
     /// Drop the floating pane handle drag under way and return `true`, or
     /// return `false` when no handle drag is under way. A move already sent
     /// stays. The pane is drawn where the frame places it again, and nothing
@@ -1959,6 +2142,13 @@ impl Client {
     /// `last_applied_move_command_id`, read off the frame being applied, names
     /// it: that frame places the pane from the move on. A sent move the frame
     /// does not name, and a handle drag under way, are left as they are.
+    ///
+    /// When this frame names the sent move, or a resync or a new link dropped
+    /// the sent move before this frame, floating pane move mode's wait for
+    /// the move it sent ends
+    /// ([`end_floating_pane_move_wait`](Self::end_floating_pane_move_wait)).
+    /// The move ran when `last_applied_move_command_id` names it, and counts
+    /// as rejected otherwise.
     pub(crate) fn settle_floating_pane_move(
         &mut self,
         last_applied_move_command_id: Option<CommandId>,
@@ -1967,15 +2157,62 @@ impl Client {
             .take_if(|sent_floating_pane_move| {
                 Some(sent_floating_pane_move.command_id) == last_applied_move_command_id
             });
+        if self.sent_floating_pane_move.is_some() {
+            return;
+        }
+        let Some(PaneMoveMode::FloatingPaneMove(FloatingPaneMoveSelection {
+            pending_move_command_id: Some(pending_move_command_id),
+            ..
+        })) = self.pane_move_mode
+        else {
+            return;
+        };
+        self.end_floating_pane_move_wait(
+            Some(pending_move_command_id) == last_applied_move_command_id,
+        );
     }
 
     /// Drop the sent floating pane move `command_id` names, which the session
-    /// rejected, and return `true`. Returns `false`, changing nothing, when
-    /// `command_id` names no sent move of this viewer.
+    /// rejected, end floating pane move mode's wait for it as a rejected move
+    /// ([`end_floating_pane_move_wait`](Self::end_floating_pane_move_wait)),
+    /// and return `true`. Returns `false`, changing nothing, when `command_id`
+    /// names no sent move of this viewer.
     pub(crate) fn reject_floating_pane_move(&mut self, command_id: CommandId) -> bool {
-        self.sent_floating_pane_move
+        let is_sent_move_rejected = self
+            .sent_floating_pane_move
             .take_if(|sent_floating_pane_move| sent_floating_pane_move.command_id == command_id)
-            .is_some()
+            .is_some();
+        if is_sent_move_rejected {
+            self.end_floating_pane_move_wait(false);
+        }
+        is_sent_move_rejected
+    }
+
+    /// End floating pane move mode's wait for the move it sent. With
+    /// `stay-in-pane-placement-mode-after-placement #false`, a move the
+    /// session ran (`is_move_accepted` `true`) ends the mode. A rejected move
+    /// (`false`), and the setting `#true`, leave the mode on with its selected
+    /// pane. Does nothing when the mode waits for no move.
+    fn end_floating_pane_move_wait(&mut self, is_move_accepted: bool) {
+        let Some(PaneMoveMode::FloatingPaneMove(floating_pane_move_selection)) =
+            self.pane_move_mode.as_mut()
+        else {
+            return;
+        };
+        if floating_pane_move_selection
+            .pending_move_command_id
+            .take()
+            .is_none()
+        {
+            return;
+        }
+        if is_move_accepted
+            && !self
+                .client_config
+                .should_stay_in_pane_placement_mode_after_placement
+        {
+            self.close_pane_move_mode();
+        }
     }
 
     /// Drop the sent floating pane move after the session dropped events, which
@@ -2037,7 +2274,7 @@ impl Client {
     /// place of the chrome `mouse_frame` was painted with. The two differ from
     /// any chrome change until the next paint: two wheel ticks over the tab
     /// strip before a paint read a strip peeked from tab `1`, not tab `0`.
-    fn build_frame_layout_with_current_chrome<'a>(
+    pub(crate) fn build_frame_layout_with_current_chrome<'a>(
         &self,
         mouse_frame: &'a MouseFrame,
     ) -> FrameLayout<'a> {

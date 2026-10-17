@@ -74,6 +74,7 @@ fn build_render_snapshot_fixture(terminal_grid: Arc<Grid>) -> RenderSnapshot {
             is_active: true,
         }],
         floating_pane_slots: Vec::new(),
+        floating_pane_ids: Vec::new(),
     };
 
     let pane_snapshot = PaneSnapshot {
@@ -112,6 +113,7 @@ fn build_render_snapshot_fixture(terminal_grid: Arc<Grid>) -> RenderSnapshot {
         },
         active_tab_id: tab_id,
         focused_pane_id: Some(pane_id),
+        active_tab_focused_pane_id: Some(pane_id),
         lock_mode: LockMode::Normal,
         last_applied_lock_command_id: None,
         last_applied_floating_pane_move_command_id: None,

@@ -32,7 +32,7 @@ const CLI_ONLY: [&str; 9] = [
 
 /// The viewer-local actions. They are resolved to [`DispatchPlan::ClientAction`]
 /// and therefore do not belong to the command table below.
-const CLIENT_ACTIONS: [&str; 14] = [
+const CLIENT_ACTIONS: [&str; 26] = [
     "begin-pane-placement",
     "select-pane-target-left",
     "select-pane-target-down",
@@ -47,6 +47,18 @@ const CLIENT_ACTIONS: [&str; 14] = [
     "select-previous-placement-tab",
     "confirm-pane-placement",
     "cancel-pane-placement",
+    "begin-tiled-pane-placement",
+    "begin-floating-pane-move",
+    "confirm-pane-move-choice",
+    "cancel-pane-move-choice",
+    "move-floating-pane-left",
+    "move-floating-pane-down",
+    "move-floating-pane-up",
+    "move-floating-pane-right",
+    "select-next-floating-pane",
+    "select-previous-floating-pane",
+    "confirm-floating-pane-move",
+    "cancel-floating-pane-move",
 ];
 
 /// The `layout.new-pane-direction` the resolving client holds throughout this

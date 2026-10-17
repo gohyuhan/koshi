@@ -101,6 +101,7 @@ pub(crate) fn build_wire_frame_with_content_ids(
                     is_pinned: floating_pane_slot.is_pinned,
                 })
                 .collect(),
+            floating_pane_ids: session_snapshot.floating_pane_ids.clone(),
         },
         pane_snapshots: render_snapshot
             .pane_snapshots
@@ -113,6 +114,7 @@ pub(crate) fn build_wire_frame_with_content_ids(
             viewport_size: client_snapshot.viewport_size,
             active_tab_id: client_snapshot.active_tab_id,
             focused_pane_id: client_snapshot.focused_pane_id,
+            active_tab_focused_pane_id: client_snapshot.active_tab_focused_pane_id,
             lock_mode: client_snapshot.lock_mode,
             last_applied_lock_command_id: client_snapshot.last_applied_lock_command_id,
             last_applied_floating_pane_move_command_id: client_snapshot

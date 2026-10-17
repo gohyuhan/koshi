@@ -570,9 +570,16 @@ A placement the session rejects, such as one built on a layout that changed
 before it arrived, leaves pane placement mode as it was. Pane placement mode
 opened with `<C-p> m` stays on, and a drag started on a pane's grab handle ends.
 
+The setting also covers floating pane move mode (`MOVE FLOAT`). `#true` keeps
+the mode on after the session runs a floating pane move sent with Enter or a
+mouse release. `#false` ends the mode once the session runs the move. A move
+the session rejects leaves the mode on. For example, `<C-p> m`, `f`, Right,
+Enter moves the floating pane one cell right, and with `#true` the tab bar
+still shows `MOVE FLOAT`.
+
 | Setting | Meaning | Default | Since |
 |---|---|---|---|
-| `stay-in-pane-placement-mode-after-placement` | boolean — keep pane placement mode on after a placement is accepted | `#true` | ≥ 0.5.0 |
+| `stay-in-pane-placement-mode-after-placement` | boolean — keep pane placement mode on after a placement is accepted, and floating pane move mode on after a move is run (≥ 0.6.0) | `#true` | ≥ 0.5.0 |
 
 ## `auto-close-session`
 

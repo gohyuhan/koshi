@@ -86,7 +86,7 @@ use koshi_terminal::style::Style;
 use super::*;
 use crate::attach::paint::build_render_snapshot;
 use crate::tests::TEST_VIEWPORT_SIZE;
-use crate::{PlacementMode, PlacementModeLifetime};
+use crate::{FloatingPaneMoveSelection, PaneMoveMode, PlacementMode, PlacementModeLifetime};
 use koshi_test_support::fixtures::{
     build_test_runtime_directory, connect_test_socket_pair,
     spawn_session_listening_before_it_advertises, write_router_endpoint_file,
@@ -133,7 +133,13 @@ fn report_terminal_size(client: &mut Client, uplink: &mut Uplink) {
 fn process_runtime_input(client: &mut Client, uplink: &mut Uplink, runtime_event: RuntimeEvent) {
     let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
     assert_eq!(
-        process_runtime_input_with_cell_size(client, uplink, &mut cell_size_query, runtime_event),
+        process_runtime_input_with_cell_size(
+            client,
+            uplink,
+            &mut cell_size_query,
+            None,
+            runtime_event
+        ),
         ControlFlow::Continue(())
     );
 }
@@ -178,6 +184,7 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
             },
             tab_snapshots: Vec::new(),
             floating_pane_slots: Vec::new(),
+            floating_pane_ids: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: FrameClient {
@@ -189,6 +196,7 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
             },
             active_tab_id,
             focused_pane_id: None,
+            active_tab_focused_pane_id: None,
             lock_mode,
             last_applied_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
@@ -2277,6 +2285,7 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
                 is_active: true,
             }],
             floating_pane_slots: Vec::new(),
+            floating_pane_ids: Vec::new(),
         },
         mouse_panes: mouse_panes.to_vec(),
         client_snapshot: ClientSnapshot {
@@ -2285,6 +2294,7 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
             viewport_size: TEST_VIEWPORT_SIZE,
             active_tab_id: tab_id,
             focused_pane_id: mouse_panes.first().map(|mouse_pane| mouse_pane.pane_id),
+            active_tab_focused_pane_id: mouse_panes.first().map(|mouse_pane| mouse_pane.pane_id),
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
@@ -4619,6 +4629,7 @@ fn a_terminal_resize_reports_its_measured_cell_size() {
             &mut client,
             &mut control_socket.uplink,
             &mut cell_size_query,
+            None,
             RuntimeEvent::Resize {
                 client_id,
                 viewport_size: Size {
@@ -5041,6 +5052,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
                 is_active: true,
             }],
             floating_pane_slots: Vec::new(),
+            floating_pane_ids: Vec::new(),
         },
         pane_snapshots: vec![PaneSnapshot {
             pane_id,
@@ -5078,6 +5090,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
             viewport_size: TEST_VIEWPORT_SIZE,
             active_tab_id: tab_id,
             focused_pane_id: Some(pane_id),
+            active_tab_focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
@@ -5241,6 +5254,7 @@ fn draw_pane_placement_mode<B: Backend>(
     let source_pane_id = PaneId::new();
     let mut painted_frame = build_test_painted_frame_with_lock_mode(LockMode::Normal);
     painted_frame.client_snapshot.focused_pane_id = Some(source_pane_id);
+    painted_frame.client_snapshot.active_tab_focused_pane_id = Some(source_pane_id);
     let active_tab_id = painted_frame.client_snapshot.active_tab_id;
     screen
         .draw_painted_frame(client, Box::new(painted_frame.clone()))
@@ -5920,7 +5934,12 @@ fn enter_submits_keyboard_placement_and_repaints_without_resize() {
 
     let source_pane_id = PaneId::new();
     let target_pane_id = PaneId::new();
-    client.set_frame_view(active_tab_id, Some(source_pane_id), vec![active_tab_id]);
+    client.set_frame_view(
+        active_tab_id,
+        Some(source_pane_id),
+        Some(source_pane_id),
+        vec![active_tab_id],
+    );
     client.placement_state.placement_snapshot =
         Some(Arc::new(crate::tests::build_test_placement_snapshot(
             session_id,
@@ -6009,6 +6028,7 @@ fn mouse_pickup_reads_placement_and_focuses_dragged_pane() {
     let client_id = client.get_client_id();
     client.set_frame_view(
         active_tab_id,
+        Some(initial_focused_pane_id),
         Some(initial_focused_pane_id),
         vec![active_tab_id],
     );
@@ -6212,7 +6232,12 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
         });
 
     client.set_session_id(session_id);
-    client.set_frame_view(active_tab_id, Some(source_pane_id), vec![active_tab_id]);
+    client.set_frame_view(
+        active_tab_id,
+        Some(source_pane_id),
+        Some(source_pane_id),
+        vec![active_tab_id],
+    );
     client.set_placement_revisions(0, 0);
     client.placement_state.placement_snapshot = Some(Arc::new(placement_snapshot));
     client.placement_state.placement_mode = Some(PlacementMode {
@@ -6492,7 +6517,12 @@ fn placement_presentation_describes_both_swap_destinations() {
         build_pane_snapshot(target_pane_id, "nvim"),
     ];
 
-    client.set_frame_view(active_tab_id, Some(source_pane_id), vec![active_tab_id]);
+    client.set_frame_view(
+        active_tab_id,
+        Some(source_pane_id),
+        Some(source_pane_id),
+        vec![active_tab_id],
+    );
     client.placement_state.placement_snapshot =
         Some(Arc::new(crate::tests::build_test_placement_snapshot(
             render_snapshot.session_snapshot.session_id,
@@ -6567,6 +6597,7 @@ fn placement_presentation_names_group_tab_and_cross_tab_results() {
         });
     client.set_frame_view(
         source_tab_id,
+        Some(source_pane_id),
         Some(source_pane_id),
         vec![source_tab_id, destination_tab_id],
     );
@@ -6754,7 +6785,7 @@ fn get_hint_row(screen: &Screen<TestBackend>) -> String {
 /// one press that opens a sequence and sends nothing.
 fn get_sequence_opener(client: &Client) -> KeyChord {
     client
-        .build_frame_hints(client.get_lock_mode(), false)
+        .build_frame_hints(client.get_lock_mode(), false, false)
         .hint_bindings
         .iter()
         .find(|hint_binding| hint_binding.key_sequence.list_chords().len() > 1)
@@ -7745,6 +7776,151 @@ fn a_restart_during_pane_placement_holds_nothing() {
     );
 }
 
+/// The move chooser and floating pane move mode of a floating pane that no
+/// frame names.
+fn list_pane_move_modes() -> [PaneMoveMode; 2] {
+    [
+        PaneMoveMode::Choice,
+        PaneMoveMode::FloatingPaneMove(FloatingPaneMoveSelection {
+            selected_pane_id: PaneId::new(),
+            draft_top_left_cell: None,
+            pending_move_command_id: None,
+        }),
+    ]
+}
+
+#[test]
+fn a_restart_during_a_move_mode_holds_nothing() {
+    for pane_move_mode in list_pane_move_modes() {
+        let mut client = build_test_client();
+        client.pane_move_mode = Some(pane_move_mode);
+        let mut restart_recovery = LinkRecovery::RestartRejoin {
+            input_hold: Some(InputHold::default()),
+        };
+
+        restart_recovery.hold_input(&mut client, HeldInput::Paste(String::from("typed")));
+
+        let LinkRecovery::RestartRejoin { input_hold } = restart_recovery else {
+            panic!("holding never changes the recovery");
+        };
+        assert_eq!(
+            input_hold.map(|input_hold| input_hold.held_inputs),
+            Some(Vec::new())
+        );
+    }
+}
+
+#[test]
+fn the_move_modes_keep_key_releases_and_pastes_from_the_pane() {
+    for pane_move_mode in list_pane_move_modes() {
+        let mut client = build_test_client();
+        let client_id = client.get_client_id();
+        let mut control_socket = build_test_control_socket();
+        client.pane_move_mode = Some(pane_move_mode);
+
+        process_runtime_input(
+            &mut client,
+            &mut control_socket.uplink,
+            RuntimeEvent::KeyInput {
+                client_id,
+                key_input: build_key_release_for_chord(build_plain_chord('t')),
+            },
+        );
+        process_runtime_input(
+            &mut client,
+            &mut control_socket.uplink,
+            RuntimeEvent::HostPaste {
+                client_id,
+                pasted_text: String::from("typed"),
+            },
+        );
+
+        // The sentinel goes out behind the release and the paste. A release
+        // or a paste that was sent reads back ahead of it.
+        control_socket
+            .uplink
+            .send_request(IpcRequestKind::Discovery);
+        let request: IpcRequest = control_socket
+            .session_connection
+            .recv()
+            .expect("read the first request");
+        assert_eq!(
+            request,
+            IpcRequest {
+                request_id: FIRST_POST_ATTACH_REQUEST_ID,
+                request_kind: IpcRequestKind::Discovery,
+            }
+        );
+    }
+}
+
+#[test]
+fn losing_the_outer_terminals_focus_ends_a_move_mode() {
+    for pane_move_mode in list_pane_move_modes() {
+        let mut client = build_test_client();
+        let client_id = client.get_client_id();
+        client.pane_move_mode = Some(pane_move_mode);
+        let mut screen = build_test_screen();
+        let (request_sender, _request_receiver) = mpsc::channel();
+        let mut uplink = build_test_uplink(request_sender);
+        let (incoming_sender, incoming_receiver) = build_incoming_channel();
+        for runtime_event in [
+            RuntimeEvent::OuterTerminalFocusLost { client_id },
+            RuntimeEvent::Quit,
+        ] {
+            incoming_sender
+                .send(Incoming::Input(Box::new(runtime_event)))
+                .expect("the attachment loop accepts the input");
+        }
+        let mut terminal_mode_bytes: &mut [u8] = &mut [];
+
+        let attachment_ending = run_attachment(
+            &build_local_home(),
+            SessionId::new(),
+            client_id,
+            ConnectionToken::generate(),
+            None,
+            &mut client,
+            &mut screen,
+            &mut uplink,
+            terminal::GraphicsSupport::Unsupported,
+            &mut terminal::CellSizeQuery::from_current_measurement(None, false, false),
+            &mut terminal_mode_bytes,
+            incoming_sender,
+            incoming_receiver,
+        );
+
+        assert_eq!(attachment_ending, AttachmentEnding::TerminalGone);
+        assert_eq!(client.pane_move_mode, None);
+    }
+}
+
+#[test]
+fn losing_the_outer_terminals_focus_while_redialing_ends_a_move_mode() {
+    for pane_move_mode in list_pane_move_modes() {
+        let mut viewer = TestViewerWithoutLink::new();
+        viewer.client.pane_move_mode = Some(pane_move_mode);
+        let client_id = viewer.client.get_client_id();
+        viewer.queue_incoming_event(Incoming::Input(Box::new(
+            RuntimeEvent::OuterTerminalFocusLost { client_id },
+        )));
+        viewer.queue_incoming_event(viewer.build_key_press_event(build_quit_chord()));
+        let (attempt_rejoin, _attempt_count) = build_counted_attempt();
+
+        let stretch_result = viewer.run_without_link(
+            LinkRecovery::Redial(RedialSchedule::from_link_drop_at(Instant::now())),
+            Vec::new(),
+            attempt_rejoin,
+        );
+
+        assert_eq!(
+            stretch_result.err(),
+            Some(AttachmentEnding::LeftWhileReconnecting)
+        );
+        assert_eq!(viewer.client.pane_move_mode, None);
+    }
+}
+
 #[test]
 fn quitting_while_a_redial_waits_leaves_before_any_dial() {
     let mut viewer = TestViewerWithoutLink::new();
@@ -8340,12 +8516,12 @@ fn a_toggle_lock_binding_goes_up_as_the_lock_mode_it_sets() {
     };
 
     assert_eq!(
-        uplink.submit_bound_action(&mut client, toggle_lock_binding.clone()),
+        uplink.submit_bound_action(&mut client, toggle_lock_binding.clone(), None),
         ControlFlow::Continue(())
     );
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
     assert_eq!(
-        uplink.submit_bound_action(&mut client, toggle_lock_binding),
+        uplink.submit_bound_action(&mut client, toggle_lock_binding, None),
         ControlFlow::Continue(())
     );
 
@@ -8797,6 +8973,7 @@ fn quitting_with_a_link_writes_the_quit_and_leaves_without_the_sessions_answer()
             &mut client,
             &mut test_control_socket.uplink,
             &mut terminal::CellSizeQuery::from_current_measurement(None, false, false),
+            None,
             RuntimeEvent::KeyInput {
                 client_id,
                 key_input: crate::tests::build_key_input_for_chord(build_quit_chord()),

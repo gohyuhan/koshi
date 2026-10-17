@@ -194,6 +194,12 @@ impl Server {
             active_tab_snapshot,
             tabs_metadata,
             floating_pane_slots: list_floating_pane_slots(session, client),
+            floating_pane_ids: session
+                .floating_set
+                .list_members()
+                .iter()
+                .map(|floating_member| floating_member.pane_id)
+                .collect(),
         };
 
         // One content snapshot per solved slot, in slot order, then one per
@@ -530,9 +536,9 @@ fn list_floating_pane_slots(session: &Session, client: &Client) -> Vec<FloatingP
 }
 
 /// The viewer state of `client` that a frame and a placement preview carry:
-/// its id, placement revision, viewport size, active tab, focused pane, lock
-/// mode, last applied lock command and floating pane move, and whether
-/// mouse-select is on.
+/// its id, placement revision, viewport size, active tab, the pane that takes
+/// its input, its focused pane in the active tab, lock mode, last applied lock
+/// command and floating pane move, and whether mouse-select is on.
 fn build_client_snapshot(client: &Client) -> ClientSnapshot {
     ClientSnapshot {
         client_id: client.get_client_id(),
@@ -540,6 +546,7 @@ fn build_client_snapshot(client: &Client) -> ClientSnapshot {
         viewport_size: client.get_viewport_size(),
         active_tab_id: client.get_active_tab_id(),
         focused_pane_id: client.get_active_focused_pane_id(),
+        active_tab_focused_pane_id: client.get_focused_pane_id(client.get_active_tab_id()),
         lock_mode: client.get_lock_mode(),
         last_applied_lock_command_id: client.get_last_applied_lock_command_id(),
         last_applied_floating_pane_move_command_id: client

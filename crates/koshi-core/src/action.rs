@@ -297,6 +297,30 @@ pub enum ClientActionKind {
     ConfirmPanePlacement,
     /// Cancel pane placement and return to the base input mode.
     CancelPanePlacement,
+    /// Open pane placement mode for the focused pane of the active tab, also
+    /// while a floating pane takes the viewer's input.
+    BeginTiledPanePlacement,
+    /// Open floating pane move mode on the focused floating pane, or on the
+    /// front-most floating pane the viewer draws and did not pin.
+    BeginFloatingPaneMove,
+    /// Open floating pane move mode when a floating pane takes the viewer's
+    /// input, and pane placement mode otherwise.
+    ConfirmPaneMoveChoice,
+    /// Close the pane move chooser and return to the base input mode.
+    CancelPaneMoveChoice,
+    /// Move the selected floating pane's draft one cell in `direction` during
+    /// floating pane move mode.
+    MoveFloatingPane(Direction),
+    /// Select the next floating pane in creation order during floating pane
+    /// move mode.
+    SelectNextFloatingPane,
+    /// Select the previous floating pane in creation order during floating
+    /// pane move mode.
+    SelectPreviousFloatingPane,
+    /// Send the selected floating pane's draft as a floating pane move.
+    ConfirmFloatingPaneMove,
+    /// Discard the draft and leave floating pane move mode.
+    CancelFloatingPaneMove,
 }
 
 /// Everything the registry knows about one action: how to show it, what it can
@@ -354,12 +378,28 @@ pub const MOUSE_SELECT_HINT: &str = "Mouse Select";
 /// long as mouse-select is on.
 pub const MOUSE_UNSELECT_HINT: &str = "Mouse Unselect";
 
+/// The registry display name of `core:begin-tiled-pane-placement`, and the
+/// hint-bar label of `core:confirm-pane-move-choice` while no floating pane
+/// takes the viewer's input.
+pub const MOVE_TILED_PANE_HINT: &str = "Move Tiled Pane";
+
+/// The registry display name of `core:begin-floating-pane-move`, and the
+/// hint-bar label of `core:confirm-pane-move-choice` while a floating pane
+/// takes the viewer's input.
+pub const MOVE_FLOATING_PANE_HINT: &str = "Move Floating Pane";
+
+/// The registry display name of `core:confirm-pane-move-choice`. The viewer
+/// swaps it for [`MOVE_TILED_PANE_HINT`] or [`MOVE_FLOATING_PANE_HINT`] as it
+/// paints each frame.
+pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
+
 /// The built-in action table, loaded into the runtime registry at startup.
 /// `koshi actions list` prints the entries in this order.
 ///
 /// The `begin-pane-placement` action starts the viewer-local pane placement
-/// mode. Its placement actions select and confirm viewer-local targets; the
-/// other command-backed actions use values their NAME bakes into the command
+/// mode, or the pane move chooser while the viewer draws a floating pane it
+/// did not pin. The placement, chooser and floating pane move actions select
+/// and confirm viewer-local targets; the other command-backed actions use values their NAME bakes into the command
 /// the resolver builds — `lock`/`unlock` both build `SetLockMode`; the
 /// `new-pane-*`, `focus-pane-*`, and `resize-pane-*` families each build their
 /// family's command with the named direction; `focus-next-floating-pane` and
@@ -593,6 +633,102 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::CancelPanePlacement),
+        ),
+        build_core_action_seed(
+            "begin-tiled-pane-placement",
+            MOVE_TILED_PANE_HINT,
+            "Open pane placement mode for the focused pane of the active tab",
+            PaneSession,
+            vec![Pane],
+            CoreClient(ClientActionKind::BeginTiledPanePlacement),
+        ),
+        build_core_action_seed(
+            "begin-floating-pane-move",
+            MOVE_FLOATING_PANE_HINT,
+            "Open floating pane move mode on a floating pane this client shows",
+            PaneSession,
+            vec![Pane],
+            CoreClient(ClientActionKind::BeginFloatingPaneMove),
+        ),
+        build_core_action_seed(
+            "confirm-pane-move-choice",
+            MOVE_FOCUSED_PANE_HINT,
+            "Open the move mode for the kind of the focused pane in the pane move chooser",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::ConfirmPaneMoveChoice),
+        ),
+        build_core_action_seed(
+            "cancel-pane-move-choice",
+            "Cancel Move",
+            "Close the pane move chooser and return to the base input mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::CancelPaneMoveChoice),
+        ),
+        build_core_action_seed(
+            "move-floating-pane-left",
+            "Move Floating Pane Left",
+            "Move the selected floating pane one cell left in floating pane move mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::MoveFloatingPane(Direction::Left)),
+        ),
+        build_core_action_seed(
+            "move-floating-pane-down",
+            "Move Floating Pane Down",
+            "Move the selected floating pane one cell down in floating pane move mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::MoveFloatingPane(Direction::Down)),
+        ),
+        build_core_action_seed(
+            "move-floating-pane-up",
+            "Move Floating Pane Up",
+            "Move the selected floating pane one cell up in floating pane move mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::MoveFloatingPane(Direction::Up)),
+        ),
+        build_core_action_seed(
+            "move-floating-pane-right",
+            "Move Floating Pane Right",
+            "Move the selected floating pane one cell right in floating pane move mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::MoveFloatingPane(Direction::Right)),
+        ),
+        build_core_action_seed(
+            "select-next-floating-pane",
+            "Select Next Floating Pane",
+            "Select and focus the next floating pane in creation order in floating pane move mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectNextFloatingPane),
+        ),
+        build_core_action_seed(
+            "select-previous-floating-pane",
+            "Select Previous Floating Pane",
+            "Select and focus the previous floating pane in creation order in floating pane move mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectPreviousFloatingPane),
+        ),
+        build_core_action_seed(
+            "confirm-floating-pane-move",
+            "Confirm Floating Pane Move",
+            "Move the selected floating pane to its draft in floating pane move mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::ConfirmFloatingPaneMove),
+        ),
+        build_core_action_seed(
+            "cancel-floating-pane-move",
+            "Cancel Floating Pane Move",
+            "Discard the floating pane draft and return to the base input mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::CancelFloatingPaneMove),
         ),
         build_core_action_seed(
             "move-pane",

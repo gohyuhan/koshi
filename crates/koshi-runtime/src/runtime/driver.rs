@@ -119,9 +119,10 @@ impl Server {
             } => {
                 let placement_client_id =
                     match (&command_envelope.command_source, &command_envelope.command) {
-                        (CommandSource::KeyBinding { client_id }, Command::PlacePane(_)) => {
-                            Some(*client_id)
-                        }
+                        (
+                            CommandSource::KeyBinding { client_id },
+                            Command::PlacePane(_) | Command::MoveFloatingPane(_),
+                        ) => Some(*client_id),
                         _ => None,
                     };
                 let command_result = self.submit_command(*command_envelope);

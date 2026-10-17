@@ -966,10 +966,10 @@ impl Server {
     /// placement revision, the pane's size, and every other client's view
     /// stay as they are.
     ///
-    /// A command whose source is [`CommandSource::Mouse`] naming the acting
-    /// client came from that client's own connection: the client records
-    /// `command_id` as its last applied floating pane move, also when the
-    /// position stays as it was.
+    /// A command whose source is [`CommandSource::Mouse`] or
+    /// [`CommandSource::KeyBinding`] naming the acting client came from that
+    /// client's own connection: the client records `command_id` as its last
+    /// applied floating pane move, also when the position stays as it was.
     pub(super) fn handle_move_floating_pane(
         &mut self,
         command_id: CommandId,
@@ -994,7 +994,9 @@ impl Server {
             ensure_client_placement_revision_capacity(session, &[client_id])?;
         }
         let client = Self::require_client_mut(session, client_id)?;
-        if *command_source == CommandSource::from_mouse(client_id) {
+        if *command_source == CommandSource::from_mouse(client_id)
+            || *command_source == CommandSource::from_key_binding(client_id)
+        {
             client.set_last_applied_floating_pane_move_command_id(command_id);
         }
         if !is_position_changed {

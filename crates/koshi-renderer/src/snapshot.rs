@@ -310,7 +310,8 @@ pub enum Delivery {
     /// The session the subscriber's client leaves this one for.
     SwitchTo(SessionId),
     /// A pane placement command from the subscriber's key binding, or a
-    /// floating pane move from its mouse round, was rejected.
+    /// floating pane move from its key binding or its mouse round, was
+    /// rejected.
     PlacementCommandRejected(CommandId),
 }
 
@@ -632,6 +633,10 @@ pub struct SessionSnapshot {
     /// [`PaneArea::Starving`], or a pane area narrower than 4 columns or shorter
     /// than 5 rows.
     pub floating_pane_slots: Vec<FloatingPaneSlot>,
+    /// Every floating pane of the session, in the order the panes became
+    /// floating, whether or not the viewing client shows it. With floats `a`,
+    /// `b` and `c` made in that order and `b` minimized, it holds `[a, b, c]`.
+    pub floating_pane_ids: Vec<PaneId>,
 }
 
 /// One tab's entry in the tab bar: enough to draw the tab list without its full
@@ -1174,6 +1179,10 @@ pub struct ClientSnapshot {
     /// neither. The renderer highlights the pane whose [`PaneSlot::pane_id`]
     /// or [`FloatingPaneSlot::pane_id`] matches, and places the cursor there.
     pub focused_pane_id: Option<PaneId>,
+    /// The pane the client focused in its active tab, also while a focused
+    /// floating pane takes its input. `None` when the client focuses no pane
+    /// in that tab. Pane placement mode places this pane.
+    pub active_tab_focused_pane_id: Option<PaneId>,
     /// The client's input mode, as the session has it: it drives the mode tag,
     /// decides whether a paste from the client's own terminal reaches the pane,
     /// and is what `koshi list-clients` reports.
@@ -1184,8 +1193,9 @@ pub struct ClientSnapshot {
     /// lock command keeps its own lock mode until a frame names that command
     /// here.
     pub last_applied_lock_command_id: Option<CommandId>,
-    /// The last floating pane move that the client's mouse sent and the
-    /// session ran before it built this snapshot. `None` before the session
+    /// The last floating pane move that the client's own connection sent,
+    /// from its mouse or a key binding, and the session ran before it built
+    /// this snapshot. `None` before the session
     /// runs one, and again after the session restarts. A viewer that sent a
     /// move keeps drawing the pane at the move's cell until a frame names that
     /// move here.

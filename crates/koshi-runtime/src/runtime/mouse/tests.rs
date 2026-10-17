@@ -3116,7 +3116,7 @@ fn get_frame_floating_pane_move_command_id(
 }
 
 #[test]
-fn a_round_that_moves_a_floating_pane_names_the_move_in_the_clients_next_frame() {
+fn a_floating_pane_move_from_the_clients_own_connection_is_named_in_its_next_frame() {
     let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
         build_server_with_mouse_event_queue();
     let floating_pane_id = create_forty_by_twelve_floating_pane(
@@ -3193,10 +3193,11 @@ fn a_round_that_moves_a_floating_pane_names_the_move_in_the_clients_next_frame()
         client_revision_before_the_repeat
     );
 
-    // A move from the client's key bindings is not the mouse's: the frame
-    // keeps naming the mouse move.
+    // A move from the client's own key bindings comes from its own
+    // connection too: the next frame names it.
+    let key_binding_command_id = CommandId::new();
     let _ = server.submit_command(CommandEnvelope::from_parts(
-        CommandId::new(),
+        key_binding_command_id,
         CommandSource::from_key_binding(client_id),
         Command::MoveFloatingPane(MoveFloatingPaneArgs {
             pane_id: floating_pane_id,
@@ -3209,7 +3210,26 @@ fn a_round_that_moves_a_floating_pane_names_the_move_in_the_clients_next_frame()
     );
     assert_eq!(
         get_frame_floating_pane_move_command_id(&server, client_id),
-        Some(repeated_command_id)
+        Some(key_binding_command_id)
+    );
+
+    // A move from the command line that names this client's view moves the
+    // pane, and the frame keeps naming the key binding move.
+    let _ = server.submit_command(CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::from_external_cli(None, Some(client_id)),
+        Command::MoveFloatingPane(MoveFloatingPaneArgs {
+            pane_id: floating_pane_id,
+            top_left_cell: Point { column: 6, row: 7 },
+        }),
+    ));
+    assert_eq!(
+        get_floating_pane_outer_rect(&server, client_id, floating_pane_id).origin,
+        Point { column: 6, row: 7 }
+    );
+    assert_eq!(
+        get_frame_floating_pane_move_command_id(&server, client_id),
+        Some(key_binding_command_id)
     );
 }
 

@@ -18,8 +18,9 @@
 //!   only by the defaults layer is a *steal*, not a collision: the user's
 //!   binding takes the key and the displaced default action becomes unbound.
 //! - **A fatal finding** — the locked-mode unlock escape is shadowed, missing,
-//!   or typeable, or the `pane-placement` mode has no live cancellation binding —
-//!   refuses the keymap outright ([`KeymapVerdict::Reject`]).
+//!   or typeable, or the `pane-placement`, `pane-move-choice` or
+//!   `floating-pane-move` mode has no live cancellation binding — refuses the
+//!   keymap outright ([`KeymapVerdict::Reject`]).
 //!
 //! Every judgment above runs on **firing bindings only**. A binding fires
 //! when the resolver accepts it as written AND a keypress can reach it. It
@@ -137,7 +138,7 @@ pub enum ConflictSeverity {
     Warning,
     /// A user-vs-user key collision; the user keymap reverts to defaults.
     Collision,
-    /// The locked-mode unlock escape or the `pane-placement` cancellation is
+    /// The locked-mode unlock escape or a viewer-local mode's cancellation is
     /// broken; the keymap is refused.
     Fatal,
 }
@@ -202,9 +203,17 @@ pub enum ConflictDiagnostic {
         /// The configured alternative chord.
         unlock_alternative_chord: KeyChord,
     },
-    /// The effective `pane-placement` map has no live `core:cancel-pane-placement`
-    /// binding. An active placement then has no keyboard cancellation.
-    PanePlacementCancelBindingMissing,
+    /// The effective map of `mode_name` has no live binding to
+    /// `cancel_action_reference`, so the mode, once open, has no keyboard
+    /// cancellation. Checked for `pane-placement` (`core:cancel-pane-placement`),
+    /// `pane-move-choice` (`core:cancel-pane-move-choice`) and
+    /// `floating-pane-move` (`core:cancel-floating-pane-move`).
+    ModeCancelBindingMissing {
+        /// The viewer-local mode with no cancellation key.
+        mode_name: ModeName,
+        /// The action that cancels that mode.
+        cancel_action_reference: ActionReference,
+    },
     /// A locked-mode sequence of two or more chords holds the reserved unlock
     /// chord. The chord resolves the instant it is pressed, ahead of the
     /// keymap and whether or not a sequence is open, and the sequence never
@@ -292,7 +301,7 @@ impl ConflictDiagnostic {
             Self::ReservedUnlockShadowed { .. }
             | Self::ReservedUnlockMissing { .. }
             | Self::UnlockAlternativeTypeable { .. }
-            | Self::PanePlacementCancelBindingMissing => ConflictSeverity::Fatal,
+            | Self::ModeCancelBindingMissing { .. } => ConflictSeverity::Fatal,
             Self::AmbiguousPrefix { .. }
             | Self::DeadUnderReservedUnlock { .. }
             | Self::ExceedsChordDepth { .. }
@@ -366,10 +375,14 @@ impl fmt::Display for ConflictDiagnostic {
                 "`unlock_alternative` `{unlock_alternative_chord}` is a key plain typing produces; \
                  hold Ctrl, Alt, or Super"
             ),
-            Self::PanePlacementCancelBindingMissing => write!(
+            Self::ModeCancelBindingMissing {
+                mode_name,
+                cancel_action_reference,
+            } => write!(
                 formatter,
-                "the `pane-placement` mode has no live `core:cancel-pane-placement` binding; \
-                 bind that action to a key before removing its last cancellation key"
+                "the `{}` mode has no live `{cancel_action_reference}` binding; \
+                 bind that action to a key before removing its last cancellation key",
+                mode_name.get_name()
             ),
             Self::DeadUnderReservedUnlock {
                 layer_origin,
@@ -547,7 +560,7 @@ pub fn detect_conflicts(
         &locked_mode_name,
         &mut conflict_diagnostics,
     );
-    validate_pane_placement_cancel_binding(&effective_bindings_by_mode, &mut conflict_diagnostics);
+    validate_mode_cancel_bindings(&effective_bindings_by_mode, &mut conflict_diagnostics);
 
     ConflictReport {
         diagnostics: conflict_diagnostics,
@@ -955,30 +968,42 @@ fn validate_reserved_unlock_binding(
     }
 }
 
-/// Push [`ConflictDiagnostic::PanePlacementCancelBindingMissing`] when no key
-/// in the effective `pane-placement` map is bound to `core:cancel-pane-placement`.
-fn validate_pane_placement_cancel_binding(
+/// The viewer-local modes that own the keyboard until cancelled, each with
+/// the action that cancels it.
+const CANCELLED_MODE_ACTION_NAMES: [(&str, &str); 3] = [
+    ("pane-placement", "cancel-pane-placement"),
+    ("pane-move-choice", "cancel-pane-move-choice"),
+    ("floating-pane-move", "cancel-floating-pane-move"),
+];
+
+/// Push one [`ConflictDiagnostic::ModeCancelBindingMissing`] for each mode in
+/// [`CANCELLED_MODE_ACTION_NAMES`] whose effective map binds no key to its
+/// cancel action, in that list's order.
+fn validate_mode_cancel_bindings(
     effective_bindings_by_mode: &BTreeMap<
         &ModeName,
         BTreeMap<&KeySequence, (LayerOrigin, &BoundAction)>,
     >,
     conflict_diagnostics: &mut Vec<ConflictDiagnostic>,
 ) {
-    let pane_placement_mode_name = ModeName::from_text("pane-placement");
-    let cancel_action_reference = ActionReference::from_core_action_name("cancel-pane-placement")
-        .expect(
-        "the built-in pane placement cancellation action name satisfies the action-name grammar",
-    );
-    let has_cancel_binding = effective_bindings_by_mode
-        .get(&pane_placement_mode_name)
-        .is_some_and(|mode_bindings| {
-            mode_bindings
-                .values()
-                .any(|(_, bound_action)| bound_action.action_reference == cancel_action_reference)
-        });
-
-    if !has_cancel_binding {
-        conflict_diagnostics.push(ConflictDiagnostic::PanePlacementCancelBindingMissing);
+    for (mode_name, cancel_action_name) in CANCELLED_MODE_ACTION_NAMES {
+        let mode_name = ModeName::from_text(mode_name);
+        let cancel_action_reference = ActionReference::from_core_action_name(cancel_action_name)
+            .expect("a built-in cancel action name satisfies the action-name grammar");
+        let has_cancel_binding =
+            effective_bindings_by_mode
+                .get(&mode_name)
+                .is_some_and(|mode_bindings| {
+                    mode_bindings.values().any(|(_, bound_action)| {
+                        bound_action.action_reference == cancel_action_reference
+                    })
+                });
+        if !has_cancel_binding {
+            conflict_diagnostics.push(ConflictDiagnostic::ModeCancelBindingMissing {
+                mode_name,
+                cancel_action_reference,
+            });
+        }
     }
 }
 

@@ -1935,8 +1935,56 @@ fn a_focused_floating_pane_gets_a_slot_placed_for_its_client() {
         Some(floating_pane_id)
     );
     assert_eq!(
+        render_snapshot.client_snapshot.active_tab_focused_pane_id,
+        Some(tiled_pane_id)
+    );
+    assert_eq!(
+        render_snapshot.session_snapshot.floating_pane_ids,
+        [floating_pane_id]
+    );
+    assert_eq!(
         list_snapshot_pane_ids(&render_snapshot),
         [tiled_pane_id, floating_pane_id]
+    );
+}
+
+#[test]
+fn floating_pane_ids_list_every_floating_pane_in_the_order_it_became_floating() {
+    let mut server = build_test_runtime();
+    let floating_pane_size = Size {
+        column_count: 20,
+        row_count: 8,
+    };
+    let (mut session, session_id, _tab_id, tiled_pane_id, client_id, first_floating_pane_id) =
+        build_session_with_floating_member(floating_pane_size);
+    let second_floating_pane_id = PaneId::new();
+    add_floating_member(&mut session, second_floating_pane_id, floating_pane_size);
+    let third_floating_pane_id = PaneId::new();
+    add_floating_member(&mut session, third_floating_pane_id, floating_pane_size);
+    let client = get_attached_client_mut(&mut session, client_id);
+    assert!(client.focus_floating_pane(third_floating_pane_id));
+    assert!(client.focus_floating_pane(second_floating_pane_id));
+    assert!(client.minimize_floating_pane(second_floating_pane_id));
+    assert!(client.focus_floating_pane(first_floating_pane_id));
+    server.session_by_id.insert(session_id, session);
+
+    let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
+
+    assert_eq!(
+        render_snapshot.session_snapshot.floating_pane_ids,
+        [
+            first_floating_pane_id,
+            second_floating_pane_id,
+            third_floating_pane_id
+        ]
+    );
+    assert_eq!(
+        render_snapshot.client_snapshot.focused_pane_id,
+        Some(first_floating_pane_id)
+    );
+    assert_eq!(
+        render_snapshot.client_snapshot.active_tab_focused_pane_id,
+        Some(tiled_pane_id)
     );
 }
 
@@ -1956,6 +2004,10 @@ fn a_minimized_floating_pane_gets_no_slot_and_no_content() {
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
 
     assert_eq!(render_snapshot.session_snapshot.floating_pane_slots, []);
+    assert_eq!(
+        render_snapshot.session_snapshot.floating_pane_ids,
+        [floating_pane_id]
+    );
     assert_eq!(list_snapshot_pane_ids(&render_snapshot), [tiled_pane_id]);
 }
 

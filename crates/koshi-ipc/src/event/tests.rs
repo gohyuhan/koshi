@@ -73,6 +73,7 @@ fn build_test_painted_frame() -> PaintedFrame {
                 is_active: true,
             }],
             floating_pane_slots: Vec::new(),
+            floating_pane_ids: Vec::new(),
         },
         pane_snapshots: vec![FramePane {
             pane_id,
@@ -106,6 +107,7 @@ fn build_test_painted_frame() -> PaintedFrame {
             },
             active_tab_id: tab_id,
             focused_pane_id: Some(pane_id),
+            active_tab_focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
             last_applied_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,

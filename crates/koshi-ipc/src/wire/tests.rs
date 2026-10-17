@@ -1043,6 +1043,7 @@ fn build_test_painted_frame() -> crate::frame::PaintedFrame {
             },
             tab_snapshots: Vec::new(),
             floating_pane_slots: Vec::new(),
+            floating_pane_ids: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: crate::frame::FrameClient {
@@ -1054,6 +1055,7 @@ fn build_test_painted_frame() -> crate::frame::PaintedFrame {
             },
             active_tab_id: TabId::new(),
             focused_pane_id: None,
+            active_tab_focused_pane_id: None,
             lock_mode: koshi_core::lock::LockMode::default(),
             last_applied_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,

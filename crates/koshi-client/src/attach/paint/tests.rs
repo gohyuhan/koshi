@@ -386,6 +386,7 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
                 },
             ],
             floating_pane_slots: Vec::new(),
+            floating_pane_ids: Vec::new(),
         },
         pane_snapshots,
         client_snapshot: ClientSnapshot {
@@ -397,6 +398,7 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
             },
             active_tab_id,
             focused_pane_id: Some(content_pane_id),
+            active_tab_focused_pane_id: Some(content_pane_id),
             lock_mode: LockMode::Locked,
             last_applied_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
@@ -407,10 +409,15 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
 
 #[test]
 fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
+    let empty_pane_id = PaneId::new();
+    let (lower_floating_pane_id, upper_floating_pane_id) = (PaneId::new(), PaneId::new());
     let mut expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot(PaneId::new()),
-        build_empty_pane_snapshot(PaneId::new()),
+        build_empty_pane_snapshot(empty_pane_id),
     ]);
+    expected_render_snapshot
+        .client_snapshot
+        .active_tab_focused_pane_id = Some(empty_pane_id);
     expected_render_snapshot.is_recovery_notice_visible = true;
     expected_render_snapshot
         .client_snapshot
@@ -422,7 +429,7 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
         .session_snapshot
         .floating_pane_slots = vec![
         FloatingPaneSlot {
-            pane_id: PaneId::new(),
+            pane_id: lower_floating_pane_id,
             outer_rect: Rect {
                 origin: Point { column: 2, row: 1 },
                 size: Size {
@@ -440,7 +447,7 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
             is_pinned: false,
         },
         FloatingPaneSlot {
-            pane_id: PaneId::new(),
+            pane_id: upper_floating_pane_id,
             outer_rect: Rect {
                 origin: Point { column: 8, row: 0 },
                 size: Size {
@@ -457,6 +464,11 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
             },
             is_pinned: true,
         },
+    ];
+    expected_render_snapshot.session_snapshot.floating_pane_ids = vec![
+        upper_floating_pane_id,
+        PaneId::new(),
+        lower_floating_pane_id,
     ];
     assert_eq!(
         build_render_snapshot(&build_wire_frame(&expected_render_snapshot)),

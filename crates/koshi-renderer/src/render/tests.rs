@@ -126,6 +126,7 @@ fn build_render_snapshot(
             },
             tabs_metadata,
             floating_pane_slots: Vec::new(),
+            floating_pane_ids: Vec::new(),
         },
         pane_snapshots,
         client_snapshot: ClientSnapshot {
@@ -134,6 +135,7 @@ fn build_render_snapshot(
             viewport_size,
             active_tab_id: tab_id,
             focused_pane_id,
+            active_tab_focused_pane_id: focused_pane_id,
             lock_mode,
             last_applied_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
@@ -4331,6 +4333,14 @@ fn the_mode_indicator_names_every_lock_mode() {
     );
     assert_eq!(build_mode_tags(LockMode::TabMode, false, None), "TAB");
     assert_eq!(build_mode_tags(LockMode::ScrollMode, false, None), "SCROLL");
+    assert_eq!(
+        build_mode_tags(LockMode::PaneMoveChoice, false, None),
+        "MOVE"
+    );
+    assert_eq!(
+        build_mode_tags(LockMode::FloatingPaneMove, false, None),
+        "MOVE FLOAT"
+    );
 
     // Every non-plain mode joins the mouse-select mode tag the same way.
     assert_eq!(
@@ -4348,6 +4358,10 @@ fn the_mode_indicator_names_every_lock_mode() {
     assert_eq!(
         build_mode_tags(LockMode::ScrollMode, true, None),
         "SCROLL · SELECT"
+    );
+    assert_eq!(
+        build_mode_tags(LockMode::FloatingPaneMove, true, None),
+        "MOVE FLOAT · SELECT"
     );
 }
 

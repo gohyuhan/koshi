@@ -114,6 +114,9 @@ pub struct FrameSession {
     /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving), or a
     /// pane area narrower than 4 columns or shorter than 5 rows.
     pub floating_pane_slots: Vec<FrameFloatingPaneSlot>,
+    /// Every floating pane of the session, in the order the panes became
+    /// floating, whether or not the viewing client shows it.
+    pub floating_pane_ids: Vec<PaneId>,
 }
 
 /// The active tab, with its layout already solved into placed pane slots.
@@ -596,15 +599,20 @@ pub struct FrameClient {
     /// or [`FrameFloatingPaneSlot::pane_id`] matches, and places the cursor
     /// there.
     pub focused_pane_id: Option<PaneId>,
+    /// The pane the client focused in its active tab, also while a focused
+    /// floating pane takes its input. `None` when the client focuses no pane
+    /// in that tab.
+    pub active_tab_focused_pane_id: Option<PaneId>,
     /// The client's input mode, as the session has it.
     pub lock_mode: LockMode,
     /// The last lock command that the client's own connection sent and the
     /// session ran before it built this frame. `None` before the session runs
     /// one, and again after the session restarts.
     pub last_applied_lock_command_id: Option<CommandId>,
-    /// The last floating pane move that the client's mouse sent and the
-    /// session ran before it built this frame. `None` before the session runs
-    /// one, and again after the session restarts.
+    /// The last floating pane move that the client's own connection sent, from
+    /// its mouse or a key binding, and the session ran before it built this
+    /// frame. `None` before the session runs one, and again after the session
+    /// restarts.
     pub last_applied_floating_pane_move_command_id: Option<CommandId>,
     /// Whether this client grabs the mouse for text selection. Adds the
     /// `SELECT` tag to the mode indicator, and decides whether a press in a

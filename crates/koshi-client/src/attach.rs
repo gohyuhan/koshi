@@ -1538,11 +1538,13 @@ impl Uplink {
         self.send_request(IpcRequestKind::SubmitCommand(Box::new(command_envelope)));
     }
 
-    /// Send what one placement key or mouse event asks of the session:
+    /// Send what one viewer-local action, or one mouse event that pane
+    /// placement owns, asks of the session:
     ///
     /// - `ReadPlacement` sends one preview read, then `FocusPane` for
     ///   `pane_id_to_focus` when it is `Some`.
-    /// - `SubmitPlacement` sends the placement command under its `command_id`.
+    /// - `SubmitCommand` sends its command under its `command_id`, issued by
+    ///   `client`'s key binding.
     /// - `Consumed` sends nothing.
     fn submit_placement_input_action(
         &mut self,
@@ -1560,7 +1562,7 @@ impl Uplink {
                     self.submit_mouse_focus_pane(client, pane_id_to_focus);
                 }
             }
-            PlacementInputAction::SubmitPlacement {
+            PlacementInputAction::SubmitCommand {
                 command_id,
                 command,
             } => {
@@ -1591,10 +1593,11 @@ impl Uplink {
         .ok()
     }
 
-    /// Resolve one fired binding against the action table and run its plan.
-    /// Returns [`ControlFlow::Break`] when the plan is [`Command::Quit`], which
-    /// is queued like every other session command, and
-    /// [`ControlFlow::Continue`] for every other binding.
+    /// Resolve one fired binding against the action table and run its plan
+    /// against `mouse_frame`, the frame this terminal last painted. Returns
+    /// [`ControlFlow::Break`] when the plan is [`Command::Quit`], which is
+    /// queued like every other session command, and [`ControlFlow::Continue`]
+    /// for every other binding.
     ///
     /// A lock binding switches `client` to the lock mode it sets at once, as
     /// [`Client::apply_lock_command`] says, and goes up as `SetLockMode` for
@@ -1606,6 +1609,7 @@ impl Uplink {
         &mut self,
         client: &mut Client,
         bound_action: BoundAction,
+        mouse_frame: Option<&MouseFrame>,
     ) -> ControlFlow<()> {
         let Some(dispatch_plan) = self.resolve_bound_action(client, &bound_action) else {
             return ControlFlow::Continue(());
@@ -1621,7 +1625,7 @@ impl Uplink {
             return ControlFlow::Continue(());
         }
         let is_quit_plan = is_quit_dispatch_plan(&dispatch_plan);
-        self.run_dispatch_plan(client, dispatch_plan);
+        self.run_dispatch_plan(client, dispatch_plan, mouse_frame);
         if is_quit_plan {
             ControlFlow::Break(())
         } else {
@@ -1630,15 +1634,22 @@ impl Uplink {
     }
 
     /// Run `dispatch_plan`: queue its command under a new command id, issued by
-    /// `client`'s key binding, or run its viewer-local action on `client` and
-    /// send what that action asks of the session.
-    fn run_dispatch_plan(&mut self, client: &mut Client, dispatch_plan: DispatchPlan) {
+    /// `client`'s key binding, or run its viewer-local action on `client`
+    /// against `mouse_frame`, the frame this terminal last painted, and send
+    /// what that action asks of the session.
+    fn run_dispatch_plan(
+        &mut self,
+        client: &mut Client,
+        dispatch_plan: DispatchPlan,
+        mouse_frame: Option<&MouseFrame>,
+    ) {
         match dispatch_plan {
             DispatchPlan::Command(command) => {
                 self.submit_key_binding_command(client, CommandId::new(), *command);
             }
             DispatchPlan::ClientAction(client_action_kind) => {
-                let placement_input_action = client.apply_client_action(client_action_kind);
+                let placement_input_action =
+                    client.apply_client_action(client_action_kind, mouse_frame);
                 self.submit_placement_input_action(client, placement_input_action);
             }
         }
@@ -2614,6 +2625,7 @@ fn run_attachment<B: Backend, W: Write>(
                     }
                     RuntimeEvent::OuterTerminalFocusLost { .. } => {
                         client.cancel_placement_mode();
+                        client.close_pane_move_mode();
                         client.cancel_floating_pane_move_drag();
                     }
                     other_runtime_event => {
@@ -2621,6 +2633,7 @@ fn run_attachment<B: Backend, W: Write>(
                             client,
                             uplink,
                             cell_size_query,
+                            last_mouse_frame.as_ref(),
                             other_runtime_event,
                         )
                         .is_break()
@@ -2773,7 +2786,9 @@ fn run_attachment<B: Backend, W: Write>(
             uplink.send_request(IpcRequestKind::Ping);
             next_ping_at = Some(current_time + ping_interval);
         }
-        if fire_expired_key_sequence(client, uplink, current_time).is_break() {
+        if fire_expired_key_sequence(client, uplink, last_mouse_frame.as_ref(), current_time)
+            .is_break()
+        {
             break leave_after_quit(uplink);
         }
         if client.expire_placement_read(current_time) {
@@ -3469,7 +3484,8 @@ enum LinkRecovery {
 
 impl LinkRecovery {
     /// Hold `held_input` for a restarted session, oldest first. A redial drops
-    /// it, and so does a rejoin while pane placement is on for `client`. An
+    /// it, and so does a rejoin while pane placement mode, the move chooser, or
+    /// floating pane move mode is on for `client`. An
     /// input past [`MAX_HELD_INPUT_COUNT`] inputs or past
     /// [`MAX_FRAME_BYTE_COUNT`] bytes of paste text drops everything held, and
     /// everything typed after it during this rejoin.
@@ -3483,7 +3499,7 @@ impl LinkRecovery {
         let LinkRecovery::RestartRejoin { input_hold } = self else {
             return;
         };
-        if client.is_placement_mode_active() {
+        if client.find_viewer_local_input_mode().is_some() {
             return;
         }
         let Some(holding_input_hold) = input_hold else {
@@ -3739,7 +3755,10 @@ fn run_without_link<B: Backend>(
                 RuntimeEvent::CellSize { cell_size, .. } => {
                     let _ = cell_size_query.accept_cell_size_reply(cell_size);
                 }
-                RuntimeEvent::OuterTerminalFocusLost { .. } => client.cancel_placement_mode(),
+                RuntimeEvent::OuterTerminalFocusLost { .. } => {
+                    client.cancel_placement_mode();
+                    client.close_pane_move_mode();
+                }
                 // A resize and a mouse event are dropped and not recorded; the
                 // new link reads the terminal's size itself.
                 _ => {}
@@ -3840,7 +3859,7 @@ fn hold_fired_binding(
 
 /// Send what a restart rejoin held up a new connection, oldest first: a key as
 /// [`IpcRequestKind::Keyboard`], a binding's plan through
-/// [`Uplink::run_dispatch_plan`], a lock command as `SetLockMode` under its
+/// [`Uplink::run_dispatch_plan`] with no painted frame, a lock command as `SetLockMode` under its
 /// own command id, and a paste as [`IpcRequestKind::Paste`].
 ///
 /// `client` stops waiting for a lock command sent on the connection that
@@ -3856,7 +3875,7 @@ fn send_held_inputs(client: &mut Client, uplink: &mut Uplink, held_inputs: Vec<H
                 uplink.send_request(IpcRequestKind::Keyboard { key_input });
             }
             HeldInput::DispatchPlan(dispatch_plan) => {
-                uplink.run_dispatch_plan(client, dispatch_plan);
+                uplink.run_dispatch_plan(client, dispatch_plan, None);
             }
             HeldInput::LockCommand {
                 lock_command_id,
@@ -4657,7 +4676,9 @@ fn build_input_channel() -> (mpsc::SyncSender<RuntimeEvent>, mpsc::Receiver<Runt
 /// away.
 ///
 /// `cell_size_query` holds the attachment's terminal query state: a resize
-/// invalidates it and a cell-size reply settles it.
+/// invalidates it and a cell-size reply settles it. A fired binding's
+/// viewer-local action reads `mouse_frame`, the frame this terminal last
+/// painted.
 ///
 /// Returns [`ControlFlow::Break`] when the key fired the quit binding, after
 /// `core:quit` is queued, and [`ControlFlow::Continue`] for every other event.
@@ -4665,6 +4686,7 @@ fn process_runtime_input_with_cell_size(
     client: &mut Client,
     uplink: &mut Uplink,
     cell_size_query: &mut terminal::CellSizeQuery,
+    mouse_frame: Option<&MouseFrame>,
     runtime_event: RuntimeEvent,
 ) -> ControlFlow<()> {
     match runtime_event {
@@ -4681,17 +4703,18 @@ fn process_runtime_input_with_cell_size(
             }
         }
         RuntimeEvent::KeyInput { key_input, .. } => {
-            // A release has no binding chord. Placement owns releases while
-            // active; every other release goes to the focused pane.
+            // A release has no binding chord. Pane placement mode, the move
+            // chooser, and floating pane move mode own releases while on;
+            // every other release goes to the focused pane.
             let Some(chord) = key_input.to_binding_chord() else {
-                if !client.is_placement_mode_active() {
+                if client.find_viewer_local_input_mode().is_none() {
                     uplink.send_request(IpcRequestKind::Keyboard { key_input });
                 }
                 return ControlFlow::Continue(());
             };
             match client.resolve_key(chord, Instant::now()) {
                 KeyOutcome::Fire(bound_action) => {
-                    return uplink.submit_bound_action(client, bound_action);
+                    return uplink.submit_bound_action(client, bound_action, mouse_frame);
                 }
                 KeyOutcome::PassThrough(_) => {
                     // The key belongs to the program in the pane, so a
@@ -4727,7 +4750,7 @@ fn process_runtime_input_with_cell_size(
             }
         }
         RuntimeEvent::HostPaste { pasted_text, .. } => {
-            if client.is_placement_mode_active() {
+            if client.find_viewer_local_input_mode().is_some() {
                 return ControlFlow::Continue(());
             }
             // The text belongs to the program in the pane, so a selection
@@ -4748,9 +4771,11 @@ fn send_next_queued_placement_read(client: &mut Client, uplink: &mut Uplink) {
 }
 
 /// Fire the viewer's open key sequence if its ambiguity deadline has passed at
-/// `current_time`, sending the commands it resolves to up the connection.
-/// Returns [`ControlFlow::Break`] when the sequence fired the quit binding,
-/// after `core:quit` is queued, and [`ControlFlow::Continue`] otherwise.
+/// `current_time`, sending the commands it resolves to up the connection. A
+/// viewer-local action reads `mouse_frame`, the frame this terminal last
+/// painted. Returns [`ControlFlow::Break`] when the sequence fired the quit
+/// binding, after `core:quit` is queued, and [`ControlFlow::Continue`]
+/// otherwise.
 ///
 /// A sequence that is both a complete binding and a longer one's prefix fires
 /// when its deadline passes. The viewer holds it, so it decides; the session
@@ -4758,12 +4783,13 @@ fn send_next_queued_placement_read(client: &mut Client, uplink: &mut Uplink) {
 fn fire_expired_key_sequence(
     client: &mut Client,
     uplink: &mut Uplink,
+    mouse_frame: Option<&MouseFrame>,
     current_time: Instant,
 ) -> ControlFlow<()> {
     let Some(bound_action) = client.expire_key_sequence(current_time) else {
         return ControlFlow::Continue(());
     };
-    uplink.submit_bound_action(client, bound_action)
+    uplink.submit_bound_action(client, bound_action, mouse_frame)
 }
 
 /// Answer one mouse event with pane placement, against `mouse_frame`, the frame

@@ -72,8 +72,10 @@ fn default_server_and_client_configs_match_expected_settings() {
             .keys()
             .collect::<Vec<_>>(),
         vec![
+            &ModeName::from_text("floating-pane-move"),
             &ModeName::from_text("locked"),
             &ModeName::from_text("normal"),
+            &ModeName::from_text("pane-move-choice"),
             &ModeName::from_text("pane-placement")
         ]
     );
@@ -399,7 +401,13 @@ fn mode_name_maps_answer_string_lookups() {
 #[test]
 fn the_default_modes_remove_no_sequences() {
     let default_mode_bindings_by_name = build_default_mode_bindings(Leader::default());
-    for mode_name in ["normal", "locked", "pane-placement"] {
+    for mode_name in [
+        "normal",
+        "locked",
+        "pane-placement",
+        "pane-move-choice",
+        "floating-pane-move",
+    ] {
         assert_eq!(
             default_mode_bindings_by_name[&ModeName::from_text(mode_name)].removed_key_sequences,
             BTreeSet::new(),
@@ -885,6 +893,78 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
             "cancel-pane-placement",
             ClientActionKind::CancelPanePlacement,
         ),
+        build_expected_client_binding(
+            "pane-move-choice",
+            "t",
+            "begin-tiled-pane-placement",
+            ClientActionKind::BeginTiledPanePlacement,
+        ),
+        build_expected_client_binding(
+            "pane-move-choice",
+            "f",
+            "begin-floating-pane-move",
+            ClientActionKind::BeginFloatingPaneMove,
+        ),
+        build_expected_client_binding(
+            "pane-move-choice",
+            "<CR>",
+            "confirm-pane-move-choice",
+            ClientActionKind::ConfirmPaneMoveChoice,
+        ),
+        build_expected_client_binding(
+            "pane-move-choice",
+            "<Esc>",
+            "cancel-pane-move-choice",
+            ClientActionKind::CancelPaneMoveChoice,
+        ),
+        build_expected_client_binding(
+            "floating-pane-move",
+            "<Left>",
+            "move-floating-pane-left",
+            ClientActionKind::MoveFloatingPane(Direction::Left),
+        ),
+        build_expected_client_binding(
+            "floating-pane-move",
+            "<Down>",
+            "move-floating-pane-down",
+            ClientActionKind::MoveFloatingPane(Direction::Down),
+        ),
+        build_expected_client_binding(
+            "floating-pane-move",
+            "<Up>",
+            "move-floating-pane-up",
+            ClientActionKind::MoveFloatingPane(Direction::Up),
+        ),
+        build_expected_client_binding(
+            "floating-pane-move",
+            "<Right>",
+            "move-floating-pane-right",
+            ClientActionKind::MoveFloatingPane(Direction::Right),
+        ),
+        build_expected_client_binding(
+            "floating-pane-move",
+            "<Tab>",
+            "select-next-floating-pane",
+            ClientActionKind::SelectNextFloatingPane,
+        ),
+        build_expected_client_binding(
+            "floating-pane-move",
+            "<S-Tab>",
+            "select-previous-floating-pane",
+            ClientActionKind::SelectPreviousFloatingPane,
+        ),
+        build_expected_client_binding(
+            "floating-pane-move",
+            "<CR>",
+            "confirm-floating-pane-move",
+            ClientActionKind::ConfirmFloatingPaneMove,
+        ),
+        build_expected_client_binding(
+            "floating-pane-move",
+            "<Esc>",
+            "cancel-floating-pane-move",
+            ClientActionKind::CancelFloatingPaneMove,
+        ),
         build_expected_binding(
             "normal",
             "<C-g>",
@@ -986,7 +1066,10 @@ fn default_keybindings_use_non_typeable_openers_and_avoid_ambiguous_ctrl_chords(
         KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Tab)),
     ];
     for (mode_name, mode_bindings) in &client_config.keybindings.mode_bindings_by_name {
-        if mode_name.get_name() == "pane-placement" {
+        // The viewer-local modes discard every key they do not bind.
+        if ["pane-placement", "pane-move-choice", "floating-pane-move"]
+            .contains(&mode_name.get_name())
+        {
             continue;
         }
         for key_sequence in mode_bindings.bound_action_by_key_sequence.keys() {

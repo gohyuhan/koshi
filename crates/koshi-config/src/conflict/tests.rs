@@ -92,6 +92,17 @@ fn detect_test_conflicts(layers: &[KeymapLayer]) -> ConflictReport {
     )
 }
 
+/// The fatal finding for `mode_name` binding no key to `core:<cancel_action_name>`.
+fn build_mode_cancel_binding_missing(
+    mode_name: &str,
+    cancel_action_name: &str,
+) -> ConflictDiagnostic {
+    ConflictDiagnostic::ModeCancelBindingMissing {
+        mode_name: parse_mode_name(mode_name),
+        cancel_action_reference: build_core_action(cancel_action_name),
+    }
+}
+
 #[test]
 fn build_keymap_layers_appends_the_user_layer_verbatim() {
     let key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'n');
@@ -152,6 +163,8 @@ fn list_builtin_mode_names_returns_every_lock_mode() {
             "pane-placement",
             "tab",
             "scroll",
+            "pane-move-choice",
+            "floating-pane-move",
         ]
         .map(parse_mode_name),
     );
@@ -781,7 +794,9 @@ fn no_layers_report_missing_required_bindings() {
             ConflictDiagnostic::ReservedUnlockMissing {
                 reserved_unlock_chord: KeybindingsConfig::RESERVED_UNLOCK,
             },
-            ConflictDiagnostic::PanePlacementCancelBindingMissing,
+            build_mode_cancel_binding_missing("pane-placement", "cancel-pane-placement"),
+            build_mode_cancel_binding_missing("pane-move-choice", "cancel-pane-move-choice"),
+            build_mode_cancel_binding_missing("floating-pane-move", "cancel-floating-pane-move"),
         ]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Reject);
@@ -1252,7 +1267,7 @@ fn every_diagnostic_maps_to_its_exact_severity() {
             ConflictSeverity::Fatal,
         ),
         (
-            ConflictDiagnostic::PanePlacementCancelBindingMissing,
+            build_mode_cancel_binding_missing("pane-placement", "cancel-pane-placement"),
             ConflictSeverity::Fatal,
         ),
         (
@@ -1388,12 +1403,21 @@ fn display_messages_are_exact() {
         "`unlock_alternative` `u` is a key plain typing produces; hold Ctrl, Alt, or Super"
     );
 
-    let pane_placement_cancel_binding_missing =
-        ConflictDiagnostic::PanePlacementCancelBindingMissing;
     assert_eq!(
-        pane_placement_cancel_binding_missing.to_string(),
+        build_mode_cancel_binding_missing("pane-placement", "cancel-pane-placement").to_string(),
         "the `pane-placement` mode has no live `core:cancel-pane-placement` binding; bind that action to a key \
          before removing its last cancellation key"
+    );
+    assert_eq!(
+        build_mode_cancel_binding_missing("pane-move-choice", "cancel-pane-move-choice").to_string(),
+        "the `pane-move-choice` mode has no live `core:cancel-pane-move-choice` binding; bind that action to a \
+         key before removing its last cancellation key"
+    );
+    assert_eq!(
+        build_mode_cancel_binding_missing("floating-pane-move", "cancel-floating-pane-move")
+            .to_string(),
+        "the `floating-pane-move` mode has no live `core:cancel-floating-pane-move` binding; bind that action \
+         to a key before removing its last cancellation key"
     );
 
     let dead_under_reserved_unlock = ConflictDiagnostic::DeadUnderReservedUnlock {
@@ -1618,7 +1642,62 @@ fn removing_the_pane_placement_cancel_binding_is_fatal() {
 
     assert_eq!(
         report.diagnostics,
-        vec![ConflictDiagnostic::PanePlacementCancelBindingMissing]
+        vec![build_mode_cancel_binding_missing(
+            "pane-placement",
+            "cancel-pane-placement"
+        )]
+    );
+    assert_eq!(report.get_verdict(), KeymapVerdict::Reject);
+}
+
+#[test]
+fn removing_the_pane_move_choice_cancel_binding_is_fatal() {
+    let escape_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::NONE,
+        Key::Named(NamedKey::Esc),
+    ));
+    let report = detect_test_conflicts(&[
+        build_default_keymap_layer(),
+        build_keymap_layer_with_removed(
+            LayerOrigin::User,
+            "pane-move-choice",
+            Vec::new(),
+            vec![escape_sequence],
+        ),
+    ]);
+
+    assert_eq!(
+        report.diagnostics,
+        vec![build_mode_cancel_binding_missing(
+            "pane-move-choice",
+            "cancel-pane-move-choice"
+        )]
+    );
+    assert_eq!(report.get_verdict(), KeymapVerdict::Reject);
+}
+
+#[test]
+fn removing_the_floating_pane_move_cancel_binding_is_fatal() {
+    let escape_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::NONE,
+        Key::Named(NamedKey::Esc),
+    ));
+    let report = detect_test_conflicts(&[
+        build_default_keymap_layer(),
+        build_keymap_layer_with_removed(
+            LayerOrigin::User,
+            "floating-pane-move",
+            Vec::new(),
+            vec![escape_sequence],
+        ),
+    ]);
+
+    assert_eq!(
+        report.diagnostics,
+        vec![build_mode_cancel_binding_missing(
+            "floating-pane-move",
+            "cancel-floating-pane-move"
+        )]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Reject);
 }
@@ -1686,7 +1765,10 @@ fn higher_layer_removing_the_last_pane_placement_cancel_binding_is_fatal() {
 
     assert_eq!(
         report.diagnostics,
-        vec![ConflictDiagnostic::PanePlacementCancelBindingMissing]
+        vec![build_mode_cancel_binding_missing(
+            "pane-placement",
+            "cancel-pane-placement"
+        )]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Reject);
 }
@@ -1713,7 +1795,10 @@ fn replacing_pane_placement_cancel_action_without_another_cancel_binding_is_fata
 
     assert_eq!(
         report.diagnostics,
-        vec![ConflictDiagnostic::PanePlacementCancelBindingMissing]
+        vec![build_mode_cancel_binding_missing(
+            "pane-placement",
+            "cancel-pane-placement"
+        )]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Reject);
 }
@@ -1911,7 +1996,9 @@ fn a_chord_depth_of_zero_fails_the_unlock_guarantee() {
             ConflictDiagnostic::ReservedUnlockMissing {
                 reserved_unlock_chord: KeybindingsConfig::RESERVED_UNLOCK,
             },
-            ConflictDiagnostic::PanePlacementCancelBindingMissing,
+            build_mode_cancel_binding_missing("pane-placement", "cancel-pane-placement"),
+            build_mode_cancel_binding_missing("pane-move-choice", "cancel-pane-move-choice"),
+            build_mode_cancel_binding_missing("floating-pane-move", "cancel-floating-pane-move"),
         ]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Reject);

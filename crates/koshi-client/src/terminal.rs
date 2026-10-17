@@ -23,7 +23,7 @@ use ratatui::widgets::Widget;
 use ratatui::Terminal;
 
 use crate::attach::ViewerPaint;
-use crate::Client;
+use crate::{is_focused_pane_floating, Client};
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
 use koshi_core::geometry::{PixelCellSize, Point, Rect as CoreRect, Size};
 use koshi_core::ids::{ClientId, PaneId};
@@ -1979,6 +1979,10 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
     let keymap_hints = client.build_frame_hints(
         frame_paint.lock_mode,
         frame_paint.is_mouse_selection_enabled,
+        is_focused_pane_floating(
+            &displayed_snapshot.session_snapshot,
+            &displayed_snapshot.client_snapshot,
+        ),
     );
     let terminal_size = terminal.size().map_err(PaintError::Backend)?;
     let mut render_area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
