@@ -233,8 +233,10 @@ pub(crate) struct FloatingPaneMoveSelection {
     /// `None` while the mode waits for no move. The wait ends when the session
     /// rejects the move, or at the first frame applied with no sent move drawn
     /// ahead of the session: the move ran when that frame names it. While it
-    /// is set, the mode stays on, and keys that move, select, open, or close
-    /// change nothing.
+    /// is set, the mode stays on, keys that move, select, open, or close
+    /// change nothing, and a left press selects and drags nothing. This holds
+    /// also after a resync or a new link drops the sent move that this viewer
+    /// draws ahead of the session.
     pub(crate) pending_move_command_id: Option<CommandId>,
 }
 

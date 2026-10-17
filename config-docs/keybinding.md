@@ -210,7 +210,9 @@ running `core:focus-pane-right`. A normal-mode binding for `<leader>p
 
 `<leader>p m` opens the chooser when this client draws at least one floating
 pane that it did not pin. The tabline shows the tag `MOVE`, and the hint bar
-lists the chooser keys. The chooser sends nothing to the session.
+lists the chooser keys. The chooser itself sends no command. The mode that a
+key opens sends what that mode sends: floating pane move mode focuses the
+pane it selects.
 
 - `t` (`core:begin-tiled-pane-placement`) opens pane placement mode.
 - `f` (`core:begin-floating-pane-move`) opens floating pane move mode.
@@ -228,8 +230,9 @@ no chooser.
 
 Floating pane move mode moves one floating pane inside this client's view.
 The tabline shows the tag `MOVE FLOAT`. The mode selects the focused floating
-pane, or the front-most floating pane when a tiled pane is focused. It never
-selects a pinned or minimized floating pane.
+pane, or the front-most floating pane when a tiled pane is focused, and
+focuses the selected pane. It never selects a pinned or minimized floating
+pane.
 
 - Arrow keys move the selected pane one cell. The pane stops at the edge of
   the pane area. Only this client draws the moved pane until you confirm.
@@ -238,8 +241,8 @@ selects a pinned or minimized floating pane.
   created in that order and `c` selected, Shift+Tab selects `b`, then `a`,
   then `c`. A move you did not confirm is discarded.
 - A left-button press on a floating pane's content or grab handle selects
-  that pane. A drag moves it, and the release sends the move. A press on any
-  other place does nothing.
+  that pane and focuses it. A drag moves it, and the release sends the move.
+  A press on any other place does nothing.
 - Enter sends the move. Pane placement mode's setting
   `stay-in-pane-placement-mode-after-placement` also covers this mode: `#true`
   (the default) keeps the mode open for the next move, and `#false` ends it

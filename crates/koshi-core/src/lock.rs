@@ -46,7 +46,9 @@ pub enum LockMode {
     ///   `core:begin-floating-pane-move` opens floating pane move mode, and
     ///   `core:confirm-pane-move-choice` opens the one for the kind of the
     ///   focused pane. `core:cancel-pane-move-choice` returns to the base mode.
-    ///   None of them sends a command.
+    /// - Opening floating pane move mode sends `FocusPane` for the pane that
+    ///   mode selects. Opening pane placement mode reads its preview. The
+    ///   chooser itself sends no command.
     PaneMoveChoice,
     /// Floating pane move mode, opened by `core:begin-floating-pane-move`.
     ///

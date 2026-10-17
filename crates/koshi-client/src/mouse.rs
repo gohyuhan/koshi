@@ -894,10 +894,12 @@ impl Client {
     /// and no event reaches a pane's program.
     ///
     /// - A left press on the content or the grab handle of a floating pane
-    ///   this viewer draws unpinned selects that pane and starts a grab-handle
-    ///   drag of it, unless a sent floating pane move waits. A press on
-    ///   another pane drops the draft. The press returns a `FocusPane` for the
-    ///   pane when `mouse_frame` does not focus it.
+    ///   this viewer draws unpinned selects that pane, starts a grab-handle
+    ///   drag of it, and returns a `FocusPane` for it, whichever pane
+    ///   `mouse_frame` focuses. A press on another pane drops the draft. The
+    ///   press does nothing while a sent floating pane move waits for the
+    ///   session, and while the mode waits for the move it sent
+    ///   ([`is_floating_pane_move_pending`](Self::is_floating_pane_move_pending)).
     /// - A left drag moves that drag's draft
     ///   ([`drag_floating_pane_to`](Self::drag_floating_pane_to)).
     /// - A left release sends the move
@@ -925,7 +927,10 @@ impl Client {
                 else {
                     return Vec::new();
                 };
-                if floating_pane_slot.is_pinned || self.sent_floating_pane_move.is_some() {
+                if floating_pane_slot.is_pinned
+                    || self.sent_floating_pane_move.is_some()
+                    || self.is_floating_pane_move_pending()
+                {
                     return Vec::new();
                 }
                 let is_selected_pane = matches!(
@@ -949,7 +954,7 @@ impl Client {
                         press_top_left_cell: floating_pane_slot.outer_rect.origin,
                     },
                 ));
-                self.build_floating_pane_focus_actions(mouse_frame, pane_id)
+                vec![build_focus_pane_action(self.client_id, pane_id)]
             }
             MouseKind::Drag(MouseButton::Left) => {
                 if let Some(LeftButtonGesture::FloatingPaneMove(floating_pane_handle_drag)) =
@@ -1329,7 +1334,7 @@ impl Client {
                                 last_accepted_position: mouse_input.position,
                             }));
                     }
-                    return self.build_floating_pane_focus_actions(mouse_frame, pane_id);
+                    return vec![build_focus_pane_action(self.client_id, pane_id)];
                 }
                 // Only a real divider — one with a pane drawn beside it to
                 // resize against — begins a drag.
@@ -1359,10 +1364,10 @@ impl Client {
                         },
                     ));
                 }
-                self.build_floating_pane_focus_actions(mouse_frame, pane_id)
+                vec![build_focus_pane_action(self.client_id, pane_id)]
             }
             HitRegion::PaneTitlebar { pane_id } => {
-                self.build_floating_pane_focus_actions(mouse_frame, pane_id)
+                vec![build_focus_pane_action(self.client_id, pane_id)]
             }
             HitRegion::PanePinToggle { pane_id } => {
                 let Some(floating_pane_slot) = frame_layout.find_drawn_floating_pane_slot(pane_id)
@@ -2073,19 +2078,6 @@ impl Client {
                 top_left_cell,
             },
         }]
-    }
-
-    /// A `FocusPane` for the floating pane `pane_id`, which also raises it, or
-    /// nothing when `mouse_frame` shows it focused already.
-    fn build_floating_pane_focus_actions(
-        &self,
-        mouse_frame: &MouseFrame,
-        pane_id: PaneId,
-    ) -> Vec<MouseAction> {
-        if mouse_frame.client_snapshot.focused_pane_id == Some(pane_id) {
-            return Vec::new();
-        }
-        vec![build_focus_pane_action(self.client_id, pane_id)]
     }
 
     /// Record a floating pane move of `pane_id` to `top_left_cell` under a new

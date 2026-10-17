@@ -2600,49 +2600,22 @@ fn run_attachment<B: Backend, W: Write>(
                     attachment_ending = Some(AttachmentEnding::TerminalGone);
                     break;
                 }
-                Incoming::Input(runtime_event) => match *runtime_event {
-                    // A mouse event belongs to the viewer: the frame it painted
-                    // says which pane the pointer is over, what that pane's
-                    // program asked for, and which gesture is under way. Before
-                    // the first paint there is no frame to place it against.
-                    RuntimeEvent::MouseInput { mouse_input, .. } => {
-                        if let Some(mouse_frame) = last_mouse_frame.as_ref() {
-                            client.apply_events();
-                            if !handle_placement_mouse_event(
-                                client,
-                                uplink,
-                                mouse_frame,
-                                mouse_input,
-                            ) {
-                                handle_mouse_event(
-                                    client,
-                                    mouse_frame,
-                                    mouse_input,
-                                    &mut pending_mouse_actions,
-                                );
-                            }
-                        }
+                Incoming::Input(runtime_event) => {
+                    if handle_terminal_input_event(
+                        client,
+                        uplink,
+                        cell_size_query,
+                        last_mouse_frame.as_ref(),
+                        *runtime_event,
+                        &mut sent_border_moves,
+                        &mut pending_mouse_actions,
+                    )
+                    .is_break()
+                    {
+                        attachment_ending = Some(leave_after_quit(uplink));
+                        break;
                     }
-                    RuntimeEvent::OuterTerminalFocusLost { .. } => {
-                        client.cancel_placement_mode();
-                        client.close_pane_move_mode();
-                        client.cancel_floating_pane_move_drag();
-                    }
-                    other_runtime_event => {
-                        if process_runtime_input_with_cell_size(
-                            client,
-                            uplink,
-                            cell_size_query,
-                            last_mouse_frame.as_ref(),
-                            other_runtime_event,
-                        )
-                        .is_break()
-                        {
-                            attachment_ending = Some(leave_after_quit(uplink));
-                            break;
-                        }
-                    }
-                },
+                }
                 // No answer reaches this loop: [`run_without_link`] reads the
                 // answer of its one running attempt before it hands a link
                 // back, and the loop ends when it hands none back.
@@ -4792,24 +4765,72 @@ fn fire_expired_key_sequence(
     uplink.submit_bound_action(client, bound_action, mouse_frame)
 }
 
-/// Answer one mouse event with pane placement, against `mouse_frame`, the frame
-/// this terminal last painted. Returns `true` when placement took the event and
-/// sent what it decided through `uplink`, and `false` when the event takes the
-/// normal mouse path. An unshifted left press on a placement handle opens
-/// placement; see [`Client::handle_placement_mouse`] for every other case.
-fn handle_placement_mouse_event(
+/// Answer one input event read from this terminal, other than its hangup,
+/// against `mouse_frame`, the frame this terminal last painted. Requests leave
+/// `uplink` in the order of the inputs that caused them.
+///
+/// - A mouse event that pane placement takes
+///   ([`Client::handle_placement_mouse`]) writes the held mouse actions as one
+///   round ([`flush_mouse_round`]), then sends what placement decided. An
+///   unshifted left press on a placement handle opens placement.
+/// - Any other mouse event adds what the viewer decided to
+///   `pending_mouse_actions` ([`handle_mouse_event`]), which the pass writes at
+///   its end. Before the first paint, `mouse_frame` is `None`, and a mouse
+///   event changes nothing.
+/// - A loss of the outer terminal's focus ends pane placement mode, the move
+///   chooser, floating pane move mode, and a grab-handle drag, and sends
+///   nothing.
+/// - Every other event writes the held mouse actions as one round, then sends
+///   its own requests
+///   ([`process_runtime_input_with_cell_size`]).
+///
+/// Example: a left press on floating pane `B`, then `Tab` in floating pane
+/// move mode, in one pass, write the round with `FocusPane` for `B`, then the
+/// `FocusPane` that `Tab` sends.
+///
+/// Returns [`ControlFlow::Break`] when a key fired the quit binding, and
+/// [`ControlFlow::Continue`] for every other event.
+fn handle_terminal_input_event(
     client: &mut Client,
     uplink: &mut Uplink,
-    mouse_frame: &MouseFrame,
-    mouse_input: MouseInput,
-) -> bool {
-    let Some(placement_input_action) =
-        client.handle_placement_mouse(mouse_input, mouse_frame, Instant::now())
-    else {
-        return false;
-    };
-    uplink.submit_placement_input_action(client, placement_input_action);
-    true
+    cell_size_query: &mut terminal::CellSizeQuery,
+    mouse_frame: Option<&MouseFrame>,
+    runtime_event: RuntimeEvent,
+    sent_border_moves: &mut Vec<SentBorderMove>,
+    pending_mouse_actions: &mut Vec<MouseAction>,
+) -> ControlFlow<()> {
+    match runtime_event {
+        RuntimeEvent::MouseInput { mouse_input, .. } => {
+            let Some(mouse_frame) = mouse_frame else {
+                return ControlFlow::Continue(());
+            };
+            client.apply_events();
+            match client.handle_placement_mouse(mouse_input, mouse_frame, Instant::now()) {
+                Some(placement_input_action) => {
+                    flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);
+                    uplink.submit_placement_input_action(client, placement_input_action);
+                }
+                None => handle_mouse_event(client, mouse_frame, mouse_input, pending_mouse_actions),
+            }
+            ControlFlow::Continue(())
+        }
+        RuntimeEvent::OuterTerminalFocusLost { .. } => {
+            client.cancel_placement_mode();
+            client.close_pane_move_mode();
+            client.cancel_floating_pane_move_drag();
+            ControlFlow::Continue(())
+        }
+        other_runtime_event => {
+            flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);
+            process_runtime_input_with_cell_size(
+                client,
+                uplink,
+                cell_size_query,
+                mouse_frame,
+                other_runtime_event,
+            )
+        }
+    }
 }
 
 /// Make `mouse_frame`, the frame this terminal just painted, the frame the
@@ -4996,9 +5017,11 @@ fn rebase_border_moves(
 /// Hand the pile to the writer thread, whatever else is already out there. The
 /// one place anything mouse-shaped is sent.
 ///
-/// Nothing is waited for and nothing is timed: the pile is only ever what one
-/// pass of the loop decided, so a link fast enough to keep the loop level sends
-/// the single action that woke it and folds nothing.
+/// Nothing is waited for and nothing is timed: the pile is only ever what the
+/// mouse events of one pass decided since the pass last wrote, at its start or
+/// before the request of another input
+/// ([`handle_terminal_input_event`]), so a link fast enough to keep the loop
+/// level sends the single action that woke it and folds nothing.
 ///
 /// A border move names the whole distance from its drag anchor, so the cells the
 /// moves already on the wire asked for come off it here, and so do the cells

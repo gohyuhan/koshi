@@ -309,8 +309,7 @@ impl Client {
 
     /// Open floating pane move mode for the floating pane that `mouse_frame`
     /// draws unpinned and focuses, or else for the front-most floating pane it
-    /// draws unpinned, and return a `FocusPane` for that pane when the frame
-    /// does not focus it.
+    /// draws unpinned, and return a `FocusPane` for that pane.
     ///
     /// Active pane placement mode ends first. Opening the mode drops an open
     /// key sequence and every gesture a held button drives
@@ -354,7 +353,7 @@ impl Client {
             draft_top_left_cell: None,
             pending_move_command_id: None,
         }));
-        self.build_floating_pane_focus_input_action(mouse_frame, selected_pane_id)
+        self.build_floating_pane_focus_input_action(selected_pane_id)
     }
 
     /// Open floating pane move mode when `mouse_frame` focuses a floating
@@ -386,8 +385,10 @@ impl Client {
     /// ([`FrameLayout::list_drawn_floating_pane_slots`]). Nothing reaches the
     /// session. Returns `Consumed`, changing nothing, outside floating pane
     /// move mode, while a sent floating pane move waits for the session, while
-    /// a grab-handle drag is under way, and when the frame does not draw the
-    /// selected pane or draws it pinned.
+    /// the mode waits for the move it sent
+    /// ([`is_floating_pane_move_pending`](Self::is_floating_pane_move_pending)),
+    /// while a grab-handle drag is under way, and when the frame does not draw
+    /// the selected pane or draws it pinned.
     ///
     /// A `20x8` pane drawn at `(10, 4)` moves to `(11, 4)` on Right, and a pane
     /// drawn at column `0` stays at column `0` on Left.
@@ -406,7 +407,10 @@ impl Client {
         let Some(mouse_frame) = mouse_frame else {
             return PlacementInputAction::Consumed;
         };
-        if self.sent_floating_pane_move.is_some() || self.is_floating_pane_move_drag_active() {
+        if self.sent_floating_pane_move.is_some()
+            || self.is_floating_pane_move_pending()
+            || self.is_floating_pane_move_drag_active()
+        {
             return PlacementInputAction::Consumed;
         }
         let selected_pane_id = floating_pane_move_selection.selected_pane_id;
@@ -451,8 +455,7 @@ impl Client {
     /// one, `1` for the next and `-1` for the previous, among the floating
     /// panes that `mouse_frame` draws unpinned, in the order the panes became
     /// floating, wrapping around at either end. The new selection drops the
-    /// draft and any grab-handle drag, and returns a `FocusPane` for the pane
-    /// when the frame does not focus it.
+    /// draft and any grab-handle drag, and returns a `FocusPane` for the pane.
     ///
     /// A selected pane that is not one of those panes moves the selection to
     /// the first of them for `1` and to the last for `-1`. Returns `Consumed`,
@@ -515,7 +518,7 @@ impl Client {
             draft_top_left_cell: None,
             pending_move_command_id: None,
         }));
-        self.build_floating_pane_focus_input_action(mouse_frame, next_pane_id)
+        self.build_floating_pane_focus_input_action(next_pane_id)
     }
 
     /// Send the cell the arrow keys moved the selected floating pane to as
@@ -599,15 +602,8 @@ impl Client {
     }
 
     /// A key-binding `FocusPane` for the floating pane `pane_id`, which also
-    /// raises it, or `Consumed` when `mouse_frame` shows it focused already.
-    fn build_floating_pane_focus_input_action(
-        &self,
-        mouse_frame: &MouseFrame,
-        pane_id: PaneId,
-    ) -> PlacementInputAction {
-        if mouse_frame.client_snapshot.focused_pane_id == Some(pane_id) {
-            return PlacementInputAction::Consumed;
-        }
+    /// raises it, whichever pane the painted frame focuses.
+    fn build_floating_pane_focus_input_action(&self, pane_id: PaneId) -> PlacementInputAction {
         PlacementInputAction::SubmitCommand {
             command_id: CommandId::new(),
             command: Command::FocusPane(FocusPaneArgs {

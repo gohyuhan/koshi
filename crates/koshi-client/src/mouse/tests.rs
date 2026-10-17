@@ -6019,7 +6019,11 @@ fn a_pinned_floating_pane_resizes_only_from_its_right_and_bottom_borders() {
             &mouse_frame,
             advance_time_by_seconds(current_time, 3 * step_index + 2),
         );
-        assert_eq!(press_actions, Vec::new(), "the pane is focused already");
+        assert_eq!(
+            press_actions,
+            vec![build_focus_pane_command(&client, floating_pane_id)],
+            "a border press focuses the pane the frame focuses too"
+        );
         drag_actions
     };
 
@@ -6190,7 +6194,7 @@ fn a_floating_panes_titlebar_controls_act_without_focusing_it() {
 }
 
 #[test]
-fn a_floating_panes_titlebar_focuses_it_until_it_is_focused() {
+fn a_floating_panes_titlebar_focuses_it_also_when_the_painted_frame_focuses_it() {
     let tiled_pane_id = PaneId::new();
     let floating_pane_id = PaneId::new();
     let unfocused_mouse_frame = build_floating_mouse_frame(
@@ -6223,7 +6227,7 @@ fn a_floating_panes_titlebar_focuses_it_until_it_is_focused() {
             &focused_mouse_frame,
             advance_time_by_seconds(current_time, 1)
         ),
-        Vec::new()
+        vec![build_focus_pane_command(&client, floating_pane_id)]
     );
 }
 
@@ -6619,24 +6623,99 @@ fn floating_pane_move_mode_hands_no_event_to_a_pane_or_a_pinned_floating_pane() 
 #[test]
 fn floating_pane_move_mode_starts_no_drag_while_a_sent_move_waits() {
     let floating_pane_id = PaneId::new();
-    let mouse_frame = build_floating_mouse_frame(
+    let small_floating_pane_id = PaneId::new();
+    let mouse_frame = build_two_floating_pane_frame(
         build_plain_mouse_pane(PaneId::new()),
-        build_plain_mouse_pane(floating_pane_id),
-        false,
         floating_pane_id,
+        small_floating_pane_id,
+        false,
+    );
+    let keep_answer: fn(&mut Client) = |_client| {};
+    // A resync and a new link drop the move drawn ahead of the session, and
+    // the mode waits on until the next frame.
+    let answer_losses: [fn(&mut Client); 3] = [
+        keep_answer,
+        Client::forget_sent_floating_pane_move,
+        Client::end_mouse_gestures,
+    ];
+    for lose_answer in answer_losses {
+        let mut client = build_floating_pane_move_client(&mouse_frame);
+        let command_id =
+            client.record_sent_floating_pane_move(floating_pane_id, Point { column: 20, row: 6 });
+        lose_answer(&mut client);
+
+        // Screen `(22, 8)` is inside the selected pane at either cell, and
+        // `(65, 7)` is inside the small pane.
+        for press_position in [Point { column: 22, row: 8 }, Point { column: 65, row: 7 }] {
+            assert_eq!(
+                client.handle_mouse(
+                    build_left_mouse_press(press_position),
+                    &mouse_frame,
+                    Instant::now(),
+                ),
+                Vec::new(),
+                "{press_position:?}"
+            );
+            assert_eq!(client.left_button_gesture, None, "{press_position:?}");
+            assert_eq!(
+                client.pane_move_mode,
+                Some(PaneMoveMode::FloatingPaneMove(FloatingPaneMoveSelection {
+                    selected_pane_id: floating_pane_id,
+                    draft_top_left_cell: None,
+                    pending_move_command_id: Some(command_id),
+                })),
+                "{press_position:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_press_in_floating_pane_move_mode_focuses_its_pane_also_when_the_painted_frame_focuses_it() {
+    let floating_pane_id = PaneId::new();
+    let small_floating_pane_id = PaneId::new();
+    let mouse_frame = build_two_floating_pane_frame(
+        build_plain_mouse_pane(PaneId::new()),
+        floating_pane_id,
+        small_floating_pane_id,
+        false,
     );
     let mut client = build_floating_pane_move_client(&mouse_frame);
-    client.record_sent_floating_pane_move(floating_pane_id, Point { column: 20, row: 6 });
+    let current_time = Instant::now();
 
-    assert_eq!(
-        client.handle_mouse(
-            build_left_mouse_press(Point { column: 22, row: 8 }),
-            &mouse_frame,
-            Instant::now(),
+    // No frame arrives between the presses: the painted frame still focuses
+    // the large pane when the second press selects it again.
+    for (press_position, expected_pane_id) in [
+        (Point { column: 65, row: 7 }, small_floating_pane_id),
+        (
+            Point {
+                column: 30,
+                row: 10,
+            },
+            floating_pane_id,
         ),
-        Vec::new()
-    );
-    assert_eq!(client.left_button_gesture, None);
+    ] {
+        assert_eq!(
+            client.handle_mouse(
+                build_left_mouse_press(press_position),
+                &mouse_frame,
+                current_time,
+            ),
+            vec![build_focus_pane_command(&client, expected_pane_id)]
+        );
+        assert_eq!(
+            client.handle_mouse(
+                build_left_mouse_release(press_position),
+                &mouse_frame,
+                current_time,
+            ),
+            Vec::new()
+        );
+        assert_eq!(
+            client.pane_move_mode,
+            build_floating_pane_move_mode(expected_pane_id, None)
+        );
+    }
 }
 
 #[test]

@@ -77,6 +77,7 @@ use koshi_renderer::snapshot::{
     GridView, ImagePlacementSnapshot, MousePane, PaneSlot, PaneSnapshot, RenderSnapshot,
     ScrollbackMetadata, SessionSnapshot, TabMetadata, TabSnapshot,
 };
+use koshi_renderer::{resolve_hit_region, HitRegion};
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
 };
@@ -3047,6 +3048,204 @@ fn an_empty_answer_changes_nothing() {
             requested_cell_count: 3,
         }],
         "nothing was reported, so the anchor stayed where it was"
+    );
+}
+
+#[test]
+fn a_click_then_a_key_in_one_pass_reach_the_session_in_that_order() {
+    let back_floating_pane_id = PaneId::new();
+    let front_floating_pane_id = PaneId::new();
+    let mut mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(PaneId::new())]);
+    for (floating_pane_id, column) in [(back_floating_pane_id, 0), (front_floating_pane_id, 40)] {
+        mouse_frame
+            .session_snapshot
+            .floating_pane_ids
+            .push(floating_pane_id);
+        mouse_frame
+            .session_snapshot
+            .floating_pane_slots
+            .push(FloatingPaneSlot::from_outer_rect(
+                floating_pane_id,
+                Rect::from_origin_and_size(
+                    Point { column, row: 2 },
+                    Size {
+                        column_count: 20,
+                        row_count: 8,
+                    },
+                ),
+                false,
+            ));
+        mouse_frame
+            .mouse_panes
+            .push(build_plain_mouse_pane(floating_pane_id));
+    }
+    mouse_frame.client_snapshot.focused_pane_id = Some(front_floating_pane_id);
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    client.pane_move_mode = Some(PaneMoveMode::FloatingPaneMove(FloatingPaneMoveSelection {
+        selected_pane_id: front_floating_pane_id,
+        draft_top_left_cell: None,
+        pending_move_command_id: None,
+    }));
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+    let mut sent_border_moves = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
+    // Screen `(5, 7)` is pane-area `(5, 6)`, inside the back pane's content.
+    let back_pane_content_cell = Point { column: 5, row: 7 };
+
+    // One pass: a click on the back pane, then Tab, then the pass's end.
+    for runtime_event in [
+        RuntimeEvent::MouseInput {
+            client_id,
+            mouse_input: build_mouse_press(back_pane_content_cell),
+        },
+        RuntimeEvent::MouseInput {
+            client_id,
+            mouse_input: build_mouse_release(back_pane_content_cell),
+        },
+        RuntimeEvent::KeyInput {
+            client_id,
+            key_input: crate::tests::build_key_input_for_chord(KeyChord::from_parts(
+                BindingModifierFlags::NONE,
+                Key::Named(NamedKey::Tab),
+            )),
+        },
+    ] {
+        assert_eq!(
+            handle_terminal_input_event(
+                &mut client,
+                &mut uplink,
+                &mut cell_size_query,
+                Some(&mouse_frame),
+                runtime_event,
+                &mut sent_border_moves,
+                &mut pending_mouse_actions,
+            ),
+            ControlFlow::Continue(())
+        );
+    }
+    flush_mouse_round(
+        &mut uplink,
+        &mut sent_border_moves,
+        &mut pending_mouse_actions,
+    );
+
+    assert_eq!(
+        request_receiver.try_recv().expect("the click's round"),
+        IpcRequest {
+            request_id: FIRST_POST_ATTACH_REQUEST_ID,
+            request_kind: IpcRequestKind::Mouse(vec![WireMouseAction::Command(Box::new(
+                Command::FocusPane(FocusPaneArgs {
+                    focus_target: FocusTarget::Pane(back_floating_pane_id),
+                    client_id: Some(client_id),
+                })
+            ))]),
+        }
+    );
+    let tab_request = request_receiver.try_recv().expect("the Tab's command");
+    assert_eq!(tab_request.request_id, FIRST_POST_ATTACH_REQUEST_ID + 1);
+    let IpcRequestKind::SubmitCommand(tab_command_envelope) = tab_request.request_kind else {
+        panic!("Tab submits a command, got {:?}", tab_request.request_kind);
+    };
+    assert_eq!(
+        tab_command_envelope.command,
+        Command::FocusPane(FocusPaneArgs {
+            focus_target: FocusTarget::Pane(front_floating_pane_id),
+            client_id: Some(client_id),
+        })
+    );
+    assert_eq!(
+        request_receiver.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
+    );
+    assert_eq!(
+        client.pane_move_mode,
+        Some(PaneMoveMode::FloatingPaneMove(FloatingPaneMoveSelection {
+            selected_pane_id: front_floating_pane_id,
+            draft_top_left_cell: None,
+            pending_move_command_id: None,
+        }))
+    );
+}
+
+#[test]
+fn held_mouse_actions_leave_before_the_requests_of_a_placement_handle_press() {
+    let pane_id = PaneId::new();
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    client.placement_handle_pane_id = Some(pane_id);
+    let painted_mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
+    let active_tab_id = painted_mouse_frame.client_snapshot.active_tab_id;
+    let mouse_frame = MouseFrame {
+        viewer_chrome: client.build_viewer_chrome(active_tab_id),
+        ..painted_mouse_frame
+    };
+    // The placement handle sits on the pane's top border, at screen `(1, 1)`.
+    let handle_cell = Point { column: 1, row: 1 };
+    assert_eq!(
+        resolve_hit_region(mouse_frame.build_frame_layout(), handle_cell),
+        HitRegion::PlacementHandle { pane_id }
+    );
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+    let mut sent_border_moves = Vec::new();
+    // A wheel tick earlier in the same pass.
+    let mut pending_mouse_actions = vec![MouseAction::Scroll {
+        pane_id,
+        is_scrolling_up: true,
+        scroll_line_count: 3,
+    }];
+
+    assert_eq!(
+        handle_terminal_input_event(
+            &mut client,
+            &mut uplink,
+            &mut cell_size_query,
+            Some(&mouse_frame),
+            RuntimeEvent::MouseInput {
+                client_id,
+                mouse_input: build_mouse_press(handle_cell),
+            },
+            &mut sent_border_moves,
+            &mut pending_mouse_actions,
+        ),
+        ControlFlow::Continue(())
+    );
+
+    assert_eq!(pending_mouse_actions, Vec::new());
+    let request_kinds: Vec<IpcRequestKind> = request_receiver
+        .try_iter()
+        .map(|ipc_request| ipc_request.request_kind)
+        .collect();
+    let [scroll_round, placement_read, IpcRequestKind::SubmitCommand(focus_command_envelope)] =
+        request_kinds.as_slice()
+    else {
+        panic!("expected a round, a read and a command, got {request_kinds:?}");
+    };
+    assert_eq!(
+        *scroll_round,
+        IpcRequestKind::Mouse(vec![WireMouseAction::Scroll {
+            pane_id,
+            is_scrolling_up: true,
+            scroll_line_count: 3,
+        }])
+    );
+    assert_eq!(
+        *placement_read,
+        IpcRequestKind::ReadPanePlacement {
+            pane_id,
+            destination_tab_id: active_tab_id,
+        }
+    );
+    assert_eq!(
+        focus_command_envelope.command,
+        Command::FocusPane(FocusPaneArgs {
+            focus_target: FocusTarget::Pane(pane_id),
+            client_id: Some(client_id),
+        })
     );
 }
 
@@ -6043,14 +6242,30 @@ fn mouse_pickup_reads_placement_and_focuses_dragged_pane() {
     };
     let (request_sender, request_receiver) = mpsc::channel();
     let mut uplink = build_test_uplink(request_sender);
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+    let mut pending_mouse_actions = Vec::new();
 
-    assert!(handle_placement_mouse_event(
-        &mut client,
-        &mut uplink,
-        &mouse_frame,
-        build_mouse_press(placement_handle_position),
-    ));
+    assert_eq!(
+        handle_terminal_input_event(
+            &mut client,
+            &mut uplink,
+            &mut cell_size_query,
+            Some(&mouse_frame),
+            RuntimeEvent::MouseInput {
+                client_id,
+                mouse_input: build_mouse_press(placement_handle_position),
+            },
+            &mut Vec::new(),
+            &mut pending_mouse_actions,
+        ),
+        ControlFlow::Continue(())
+    );
     assert_eq!(client.get_placement_source_pane_id(), Some(dragged_pane_id));
+    assert_eq!(
+        pending_mouse_actions,
+        Vec::new(),
+        "pane placement takes the press"
+    );
 
     let placement_read_request = request_receiver
         .try_recv()
