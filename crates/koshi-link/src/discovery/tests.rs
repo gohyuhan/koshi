@@ -11,7 +11,7 @@ use koshi_core::discovery::{
 use koshi_core::event::RejectReason;
 use koshi_core::geometry::Size;
 use koshi_core::lock::LockMode;
-use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcResponse, IpcResult};
+use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcResponse, IpcResult, ProcessImageId};
 use koshi_ipc::transport::{Connection, Listener};
 use koshi_test_support::fixtures::{
     build_test_runtime_directory, close_connection_after_peer_hangs_up,
@@ -101,6 +101,7 @@ fn spawn_overview_server(
             IpcResult::Hello {
                 protocol_version: koshi_ipc::protocol::PROTOCOL_VERSION,
                 build_version: env!("CARGO_PKG_VERSION").to_string(),
+                process_image_id: ProcessImageId::get_own(),
             },
         );
         send_ipc_response(

@@ -18,13 +18,9 @@ use crate::frame::{
     FrameImageChunk, FrameImageRecordHeader, FrameImageTransfer, FramePane, FrameScrollback,
     FrameSession, FrameSlot, FrameTab, FrameTabMetadata,
 };
+use crate::protocol::tests::build_fixed_test_uuid;
 
 use super::*;
-
-/// The one UUID every id below is built from, so an encoding is byte-stable.
-fn build_fixed_test_uuid() -> uuid::Uuid {
-    uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")
-}
 
 /// A one-pane frame at fixed ids, so its encoding is byte-stable. The pane
 /// shows no terminal content this frame, so its `window` is `None`; the frame's

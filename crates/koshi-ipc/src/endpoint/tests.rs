@@ -2,7 +2,7 @@
 //! roundtrip through the atomic writer, the format number it carries, the two
 //! format 1 shapes it converts, redaction in `Debug`, the private mode of a
 //! fresh file, and the missing / unreadable / unwritable failure cases. Also
-//! the address helpers, the empty advertisement marker, and the program file.
+//! the address helpers and the program file.
 
 use std::time::SystemTime;
 
@@ -130,48 +130,6 @@ fn a_resume_file_exactly_as_old_as_the_window_reads_as_a_swap_that_died() {
         !is_replacing_its_image(runtime_directory_fixture.path(), session_id),
         "a resume file as old as the window is a swap that died"
     );
-}
-
-#[test]
-fn the_resolve_advertisement_marker_path_is_session_uuid_directly_inside_the_shared_dir() {
-    let uuid = Uuid::parse_str("0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b").expect("valid uuid");
-    let session_id = SessionId::from_uuid(uuid);
-    assert_eq!(
-        resolve_advertisement_marker_path(Path::new("/run/koshi"), session_id),
-        Path::new("/run/koshi/session-0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b")
-    );
-}
-
-/// A written marker exists and holds zero bytes.
-#[test]
-fn a_written_advertisement_marker_is_an_empty_file() {
-    let test_directory = TempDir::new().expect("create test directory");
-    let advertisement_marker_path =
-        resolve_advertisement_marker_path(test_directory.path(), SessionId::new());
-
-    write_advertisement_marker(&advertisement_marker_path).expect("write advertisement marker");
-
-    assert_eq!(
-        std::fs::metadata(&advertisement_marker_path)
-            .expect("stat advertisement marker")
-            .len(),
-        0
-    );
-}
-
-#[test]
-fn deleting_the_advertisement_marker_takes_it_off_the_disk() {
-    let test_directory = TempDir::new().expect("create test directory");
-    let advertisement_marker_path =
-        resolve_advertisement_marker_path(test_directory.path(), SessionId::new());
-    write_advertisement_marker(&advertisement_marker_path).expect("write advertisement marker");
-
-    delete_advertisement_marker(&advertisement_marker_path);
-
-    assert!(!advertisement_marker_path.exists());
-    // A second deletion of a path with nothing at it does nothing and reports nothing.
-    delete_advertisement_marker(&advertisement_marker_path);
-    assert!(!advertisement_marker_path.exists());
 }
 
 #[test]
@@ -545,43 +503,6 @@ fn an_empty_file_is_unreadable() {
             panic!("expected EndpointFileUnreadable, got {unexpected_error:?}")
         }
     }
-}
-
-#[test]
-fn writing_the_advertisement_marker_into_a_missing_directory_names_the_marker() {
-    let test_directory = TempDir::new().expect("create test directory");
-    let advertisement_marker_path = resolve_advertisement_marker_path(
-        &test_directory.path().join("no-such-subdir"),
-        SessionId::new(),
-    );
-
-    let advertisement_marker_error = write_advertisement_marker(&advertisement_marker_path)
-        .expect_err("a missing directory refuses the write");
-
-    let expected_error_detail = std::fs::write(&advertisement_marker_path, b"")
-        .expect_err("the same write fails the same way")
-        .to_string();
-    assert_eq!(
-        advertisement_marker_error.to_string(),
-        format!(
-            "advertisement marker {} could not be written: {expected_error_detail}",
-            advertisement_marker_path.display()
-        )
-    );
-    let IpcError::AdvertisementMarkerWrite {
-        advertisement_marker_path: reported_marker_path,
-        error_detail: reported_error_detail,
-    } = advertisement_marker_error
-    else {
-        panic!("expected AdvertisementMarkerWrite, got {advertisement_marker_error:?}");
-    };
-    assert_eq!(
-        (reported_marker_path, reported_error_detail),
-        (
-            advertisement_marker_path.display().to_string(),
-            expected_error_detail
-        )
-    );
 }
 
 #[test]

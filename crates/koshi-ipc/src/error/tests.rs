@@ -64,6 +64,17 @@ fn no_listener_display_names_the_address() {
 }
 
 #[test]
+fn peer_is_other_user_display_names_the_address() {
+    let ipc_error = IpcError::PeerIsOtherUser {
+        socket_address: "koshi-router-1".to_string(),
+    };
+    assert_eq!(
+        ipc_error.to_string(),
+        "the koshi listening at koshi-router-1 runs as another user"
+    );
+}
+
+#[test]
 fn socket_busy_display_names_the_address() {
     let ipc_error = IpcError::SocketBusy {
         socket_address: "/run/koshi/session-abc.sock".to_string(),
@@ -106,19 +117,6 @@ fn endpoint_file_write_display_names_the_path_and_detail() {
     assert_eq!(
         ipc_error.to_string(),
         "endpoint file /run/koshi/session-abc.json could not be written: storage io error: permission denied"
-    );
-}
-
-#[test]
-fn advertisement_marker_write_display_names_the_marker_and_detail() {
-    let ipc_error = IpcError::AdvertisementMarkerWrite {
-        advertisement_marker_path: "/tmp/koshi/501/session-1".to_string(),
-        error_detail: "No such file or directory (os error 2)".to_string(),
-    };
-    assert_eq!(
-        ipc_error.to_string(),
-        "advertisement marker /tmp/koshi/501/session-1 could not be written: \
-         No such file or directory (os error 2)"
     );
 }
 

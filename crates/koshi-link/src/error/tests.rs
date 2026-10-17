@@ -86,6 +86,19 @@ fn list_every_error_class() -> Vec<(CliError, &'static str, i32)> {
             4,
         ),
         (
+            CliError::RouterAnswerTimedOut,
+            "IPC unavailable: the router did not answer in time",
+            4,
+        ),
+        (
+            CliError::CommittedRequestUnanswered {
+                detail: "ipc peer disconnected".into(),
+            },
+            "IPC unavailable: the session took the request and gave no answer (ipc peer \
+             disconnected); it may still run, so check before you run it again",
+            4,
+        ),
+        (
             CliError::SessionNotFound {
                 session_name: "session-x".into(),
             },

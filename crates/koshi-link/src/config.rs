@@ -27,6 +27,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::Arc;
 
 use koshi_config::app_config::{parse_app_config, AppConfigFile};
@@ -41,6 +42,7 @@ use koshi_core::geometry::Direction;
 use koshi_core::ids::SessionId;
 use koshi_layout::template::ProfileTemplate;
 use koshi_observability::logging::LoggingParameters;
+#[cfg(unix)]
 use koshi_runtime::ipc_server::{OtherUsers, OtherUsersSetting};
 
 #[cfg(test)]
@@ -144,8 +146,8 @@ pub fn build_logging_parameters(
 /// started closes the connections it had admitted.
 ///
 /// The socket's directory is `koshi.kdl`'s `shared-sessions-dir` when it names
-/// one, and the platform's machine-wide location otherwise. No directory from
-/// either — Windows reporting no `ProgramData` — serves only this user.
+/// one, and `/tmp/koshi` otherwise.
+#[cfg(unix)]
 #[must_use]
 pub fn resolve_other_users_policy(
     app_config_layer: Option<&PartialKoshiConfig>,
@@ -159,7 +161,7 @@ pub fn resolve_other_users_policy(
     if !is_other_user_access_forced && !server_config.should_allow_other_users {
         return None;
     }
-    let shared_sessions_directory = resolve_shared_sessions_directory(&server_config)?;
+    let shared_sessions_directory = resolve_shared_sessions_directory(&server_config);
     let other_user_access_check: OtherUsersSetting = if is_other_user_access_forced {
         Arc::new(|| true)
     } else {
@@ -173,17 +175,18 @@ pub fn resolve_other_users_policy(
 }
 
 /// The machine-wide directory the sessions of one user are advertised in:
-/// `server_config`'s `shared-sessions-dir` when it names one, and the
-/// platform's own machine-wide location otherwise. `None` when neither names
-/// one — Windows reporting no `ProgramData`.
+/// `server_config`'s `shared-sessions-dir` when it names one, and `/tmp/koshi`
+/// otherwise.
 ///
 /// The session server creates its socket here, and a `koshi` command looks
 /// here for the sessions the other local users started.
-pub fn resolve_shared_sessions_directory(server_config: &ServerConfig) -> Option<PathBuf> {
+#[cfg(unix)]
+#[must_use]
+pub fn resolve_shared_sessions_directory(server_config: &ServerConfig) -> PathBuf {
     server_config
         .shared_sessions_directory
         .clone()
-        .or_else(koshi_paths::resolve_shared_sessions_directory)
+        .unwrap_or_else(koshi_paths::resolve_shared_sessions_directory)
 }
 
 /// The `server` settings `koshi.kdl` in `config_directory` carries right now.
@@ -200,24 +203,42 @@ pub fn load_current_server_config(config_directory: Option<&Path>) -> ServerConf
 
 /// Whether `koshi.kdl` in `config_directory` carries `allow-other-users` right
 /// now.
+#[cfg(unix)]
 fn is_other_user_access_allowed(config_directory: Option<&Path>) -> bool {
     load_current_server_config(config_directory).should_allow_other_users
 }
 
 /// The machine-wide directory holding the sessions other local users started,
-/// or `None` while `allow-other-users` is off in `koshi.kdl` in
-/// `config_directory`, while `config_directory` is `None`, or while the machine
-/// reports no such directory.
+/// as [`compute_shared_sessions_base_directory`] gives it for `koshi.kdl` in
+/// `config_directory`. A `config_directory` of `None` gives `None`.
 ///
 /// `koshi.kdl` is read again on each call, so the answer is the one the file
 /// holds at this moment.
 #[must_use]
 pub fn find_shared_sessions_base_directory(config_directory: Option<&Path>) -> Option<PathBuf> {
-    let server_config = load_current_server_config(config_directory);
-    if !server_config.should_allow_other_users {
-        return None;
+    compute_shared_sessions_base_directory(&load_current_server_config(config_directory))
+}
+
+/// The machine-wide directory holding the sessions other local users started,
+/// as [`resolve_shared_sessions_directory`] names it, while `server_config`
+/// has `allow-other-users` on. `None` while it is off, and always `None` on
+/// Windows, where `allow-other-users` and `shared-sessions-dir` have no effect.
+///
+/// Example: `allow-other-users #true` with no `shared-sessions-dir` gives
+/// `Some("/tmp/koshi")` on Linux and macOS, and `None` on Windows.
+#[must_use]
+pub fn compute_shared_sessions_base_directory(server_config: &ServerConfig) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        server_config
+            .should_allow_other_users
+            .then(|| resolve_shared_sessions_directory(server_config))
     }
-    resolve_shared_sessions_directory(&server_config)
+    #[cfg(windows)]
+    {
+        let _ = server_config;
+        None
+    }
 }
 
 /// Records `koshi.kdl`'s top-level `allow-beta-features` on the beta gate that

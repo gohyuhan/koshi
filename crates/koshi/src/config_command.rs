@@ -60,13 +60,14 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "koshi.allow-other-users",
         "koshi.kdl",
         "#false",
-        "Let other users of this machine reach your sessions.",
+        "Let other users of this machine reach your sessions. macOS and Linux only; no effect \
+         on Windows.",
     ),
     build_config_field_help(
         "koshi.shared-sessions-dir",
         "koshi.kdl",
-        "\"/tmp/koshi\", %ProgramData%\\koshi on Windows",
-        "Directory the shared session sockets live in.",
+        "\"/tmp/koshi\"",
+        "Directory the shared session sockets live in. No effect on Windows.",
     ),
     build_config_field_help(
         "koshi.remote-listen",

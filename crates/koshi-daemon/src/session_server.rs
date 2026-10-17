@@ -302,7 +302,8 @@ enum ServeOutcome {
 ///
 /// `should_allow_other_users_override` is the `--allow-other-users` flag the router
 /// passes on: `Some(true)` serves the other users of this machine whatever
-/// `koshi.kdl` says, and `None` leaves that answer to the file.
+/// `koshi.kdl` says, and `None` leaves that answer to the file. On Windows both
+/// have no effect.
 ///
 /// `resume_file_path` is the `--resume` flag the image being replaced passes on: the
 /// carried state this session comes up from instead of being seeded. A resume
@@ -1462,7 +1463,9 @@ fn build_carried_pty_sizes(resume_header: &ResumeHeader) -> HashMap<PaneId, PtyS
 }
 
 /// Bind this session's control socket and write the endpoint file advertising
-/// it, under the reach `--allow-other-users` and `koshi.kdl` give it.
+/// it, under the reach `--allow-other-users` and `koshi.kdl` give it on Linux
+/// and macOS. On Windows both have no effect: only this user reaches the
+/// socket.
 ///
 /// Every bind of this session's socket goes through here: the first one, and
 /// the one a rebuilt session takes. The token a client waits for changes once
@@ -1479,12 +1482,17 @@ fn bind_session_socket(
     session_start: &SessionStart,
     runtime_event_sender: &Sender<RuntimeEvent>,
 ) -> Result<IpcServer, IpcError> {
-    let config_directory = session_start.config_directory.as_deref();
-    let other_users_policy = koshi_link::config::resolve_other_users_policy(
-        koshi_link::config::load_app_layer(config_directory).as_ref(),
-        session_start.is_other_user_access_allowed,
-        config_directory,
-    );
+    #[cfg(unix)]
+    let other_users_policy = {
+        let config_directory = session_start.config_directory.as_deref();
+        koshi_link::config::resolve_other_users_policy(
+            koshi_link::config::load_app_layer(config_directory).as_ref(),
+            session_start.is_other_user_access_allowed,
+            config_directory,
+        )
+    };
+    #[cfg(windows)]
+    let other_users_policy = None;
     IpcServer::start(
         &session_start.runtime_directory,
         session_start.session_id,

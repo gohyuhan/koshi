@@ -39,13 +39,14 @@ fn explain_reports_file_default_and_meaning_for_each_config_file_kind() {
         (
             "koshi.allow-other-users",
             "koshi.allow-other-users\nfile: koshi.kdl\ndefault: #false\n\
-             Let other users of this machine reach your sessions.\n",
+             Let other users of this machine reach your sessions. macOS and Linux only; no effect \
+             on Windows.\n",
         ),
         (
             "koshi.shared-sessions-dir",
             "koshi.shared-sessions-dir\nfile: koshi.kdl\n\
-             default: \"/tmp/koshi\", %ProgramData%\\koshi on Windows\n\
-             Directory the shared session sockets live in.\n",
+             default: \"/tmp/koshi\"\n\
+             Directory the shared session sockets live in. No effect on Windows.\n",
         ),
         (
             "koshi.auto-close-session",

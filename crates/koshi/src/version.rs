@@ -176,7 +176,9 @@ pub fn build_unreachable_server_error(
 }
 
 /// Every koshi server this user can reach and the build it named: the router
-/// first, then one row per session, in session id order.
+/// first, then one row per session, in session id order. The router has
+/// [`SESSION_ANSWER_TIMEOUT_DURATION`](ipc_client::SESSION_ANSWER_TIMEOUT_DURATION)
+/// to answer.
 ///
 /// The sessions are the same set `list-sessions` asks — this user's own, as
 /// [`list_own_sessions`](ipc_client::list_own_sessions) gives them, and while
@@ -239,7 +241,10 @@ fn list_server_version_rows_in_runtime_directory(
     let mut server_version_rows = vec![ServerVersionRow::from_version_probe(
         ServerKind::Router,
         None,
-        router_client::find_running_router_version(runtime_directory),
+        router_client::find_running_router_version(
+            runtime_directory,
+            Some(Instant::now() + ipc_client::SESSION_ANSWER_TIMEOUT_DURATION),
+        ),
     )];
     let answer_deadline = Instant::now() + ipc_client::SESSION_ANSWER_TIMEOUT_DURATION;
     let census_plan =

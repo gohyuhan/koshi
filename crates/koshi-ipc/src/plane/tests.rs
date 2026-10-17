@@ -18,8 +18,8 @@ use koshi_core::geometry::Size;
 
 use crate::handshake::{Handshake, Peer};
 use crate::protocol::{
-    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, SessionPlane,
-    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, ProcessImageId,
+    SessionPlane, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 use crate::transport::Listener;
 
@@ -80,10 +80,7 @@ fn serve_test_connection(
 
 /// The same again, and it says when it has the connection.
 ///
-/// The receiver yields once, right after `accept` returns. On Windows a caller
-/// that connects and drops before it is accepted occupies the pipe until the
-/// next `accept`, and this helper accepts once: a test that drops its caller
-/// without sending anything waits for the receiver first.
+/// The receiver yields once, right after `accept` returns.
 fn serve_connection_and_announce(
     socket_address: &str,
     connection_token: ConnectionToken,
@@ -173,6 +170,7 @@ fn a_hello_is_answered_here_with_the_settled_version_and_the_build() {
                 answer_result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_version: TEST_BUILD_VERSION.to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
             }
         );
@@ -254,6 +252,7 @@ fn a_request_before_the_hello_is_refused_here_and_the_connection_keeps_serving()
             IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 build_version: TEST_BUILD_VERSION.to_string(),
+                process_image_id: ProcessImageId::get_own(),
             }
         );
         assert_eq!(
@@ -352,6 +351,7 @@ fn a_frame_read_whole_but_unreadable_is_refused_and_the_connection_keeps_serving
                 answer_result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_version: TEST_BUILD_VERSION.to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
             }
         );
@@ -403,6 +403,7 @@ fn a_kind_this_build_does_not_have_before_the_hello_is_refused_as_hello_required
                 answer_result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_version: TEST_BUILD_VERSION.to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
             }
         );
@@ -534,6 +535,7 @@ fn a_refused_hello_keeps_the_connection_serving_for_the_next_hello() {
                 answer_result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_version: TEST_BUILD_VERSION.to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
             }
         );
@@ -610,6 +612,7 @@ fn a_peer_whose_access_is_withdrawn_after_the_hello_is_answered_nothing_more() {
                 answer_result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_version: TEST_BUILD_VERSION.to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
             }
         );

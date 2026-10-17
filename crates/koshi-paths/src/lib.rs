@@ -2,7 +2,8 @@
 //! runtime files.
 //!
 //! The resolvers use platform conventions and return per-user paths, except
-//! [`resolve_shared_sessions_directory`], which returns a machine-wide path. `KOSHI_RUNTIME_DIR`
+//! [`resolve_shared_sessions_directory`], which returns a machine-wide path on Linux and macOS
+//! and does not exist on Windows. `KOSHI_RUNTIME_DIR`
 //! is the only `KOSHI_*` variable that changes a path; it names [`resolve_runtime_directory`]
 //! when it holds an absolute path. Other `KOSHI_*` variables are ignored:
 //!
@@ -12,7 +13,7 @@
 //! | [`resolve_data_directory`] | `~/.local/share/koshi` | `~/Library/Application Support/koshi` | `%APPDATA%\koshi\data` |
 //! | [`resolve_state_directory`] | `~/.local/state/koshi` | `~/Library/Application Support/koshi` | `%LOCALAPPDATA%\koshi\data` |
 //! | [`resolve_runtime_directory`] | `/tmp/koshi-<uid>` | `/tmp/koshi-<uid>` | `<data_directory>\run` |
-//! | [`resolve_shared_sessions_directory`] | `/tmp/koshi` | `/tmp/koshi` | `%ProgramData%\koshi` |
+//! | [`resolve_shared_sessions_directory`] | `/tmp/koshi` | `/tmp/koshi` | none |
 //! | [`resolve_previous_release_runtime_directories`] | `$XDG_RUNTIME_DIR/koshi` or `/run/user/<uid>/koshi`, `~/.local/share/koshi/run` | `~/Library/Application Support/koshi/run` | `%APPDATA%\koshi\data\run` |
 //!
 //! The [`directories`] crate resolves [`resolve_config_directory`], [`resolve_data_directory`], and
@@ -20,19 +21,17 @@
 //! `XDG_STATE_HOME` replaces its matching base; a relative value is ignored. On Windows, an
 //! absolute `APPDATA` replaces the `%APPDATA%` known folder and an absolute `LOCALAPPDATA`
 //! replaces the `%LOCALAPPDATA%` known folder; a relative or empty value is ignored.
-//! [`resolve_runtime_directory`] reads no `XDG_*` variable. Linux and macOS use a fixed path
-//! for [`resolve_shared_sessions_directory`].
+//! [`resolve_runtime_directory`] reads no `XDG_*` variable.
 //!
 //! A per-user resolver returns `None` when the platform cannot provide the
 //! required base directories. On Linux and macOS, `HOME` must be set and
 //! non-empty, or the passwd database must provide a home directory. On
 //! Windows, the matching variable must hold an absolute path, or the `%APPDATA%` and
-//! `%LOCALAPPDATA%` known folders must resolve. On Windows, [`resolve_shared_sessions_directory`]
-//! returns `None` when `%ProgramData%` is unset or not absolute.
+//! `%LOCALAPPDATA%` known folders must resolve.
 //!
 //! Resolvers do not inspect the filesystem or create directories. Startup uses
-//! [`ensure_private_directory`], [`ensure_shared_base`], and
-//! [`ensure_shared_user_directory`] to create the directories it needs.
+//! [`ensure_private_directory`] to create the directories it needs, and on Linux and macOS
+//! [`ensure_shared_base`] and [`ensure_shared_user_directory`].
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -52,11 +51,6 @@ const ROAMING_APP_DATA_ENVIRONMENT_VARIABLE: &str = "APPDATA";
 /// [`resolve_state_directory`].
 #[cfg(windows)]
 const LOCAL_APP_DATA_ENVIRONMENT_VARIABLE: &str = "LOCALAPPDATA";
-
-/// The Windows environment variable naming the `%ProgramData%` folder, which
-/// holds [`resolve_shared_sessions_directory`].
-#[cfg(windows)]
-const PROGRAM_DATA_ENVIRONMENT_VARIABLE: &str = "ProgramData";
 
 /// The path the environment variable `variable_name` holds, or `None` when it is
 /// unset or not absolute. An empty value is not absolute.
@@ -240,25 +234,15 @@ pub fn resolve_previous_release_runtime_directories() -> Vec<PathBuf> {
     previous_release_runtime_directories
 }
 
-/// Returns the machine-wide directory for shared session sockets. Windows
-/// also stores marker files there for sessions listening on named pipes.
+/// Returns the machine-wide directory for shared session sockets: `/tmp/koshi`.
 ///
-/// Unix returns `/tmp/koshi`. Windows returns `koshi` under `%ProgramData%`, or
-/// `None` when that variable is unset or not absolute. Create the directory
-/// with [`ensure_shared_base`], then use [`ensure_shared_user_directory`] to get this
-/// user's directory. A `shared-sessions-dir` in `koshi.kdl` uses its own path
-/// instead.
+/// Create the directory with [`ensure_shared_base`], then use
+/// [`ensure_shared_user_directory`] to get this user's directory. A
+/// `shared-sessions-dir` in `koshi.kdl` uses its own path instead.
+#[cfg(unix)]
 #[must_use]
-pub fn resolve_shared_sessions_directory() -> Option<PathBuf> {
-    #[cfg(unix)]
-    {
-        Some(PathBuf::from("/tmp/koshi"))
-    }
-    #[cfg(windows)]
-    {
-        find_absolute_path_variable(PROGRAM_DATA_ENVIRONMENT_VARIABLE)
-            .map(|program_data_path| program_data_path.join("koshi"))
-    }
+pub fn resolve_shared_sessions_directory() -> PathBuf {
+    PathBuf::from("/tmp/koshi")
 }
 
 /// Returns a [`io::ErrorKind::PermissionDenied`] error with the message
@@ -372,52 +356,37 @@ fn verify_directory_mode(
 /// Creates and validates the machine-wide shared directory at
 /// `shared_base_path`.
 ///
-/// On Unix it creates `shared_base_path` without creating its parents. A missing parent
+/// It creates `shared_base_path` without creating its parents. A missing parent
 /// returns [`io::ErrorKind::NotFound`]. `shared_base_path` must be a directory with mode
 /// `1777`; another mode is replaced and checked. A symbolic link, regular
 /// file, failed mode change, or different mode returns
 /// [`io::ErrorKind::PermissionDenied`] with the path. An existing directory
 /// owned by another user is accepted when its mode is `1777` or can be changed
-/// to `1777`. Open and metadata read errors are returned unchanged. On Windows it
-/// creates `shared_base_path` and missing parents with the parent's ACLs.
+/// to `1777`. Open and metadata read errors are returned unchanged.
+#[cfg(unix)]
 pub fn ensure_shared_base(shared_base_path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        create_directory_if_absent(shared_base_path)?;
-        let shared_base_directory = open_directory_without_following(shared_base_path)?;
-        verify_directory_mode(&shared_base_directory, shared_base_path, 0o1777)
-    }
-    #[cfg(windows)]
-    {
-        std::fs::create_dir_all(shared_base_path)
-    }
+    create_directory_if_absent(shared_base_path)?;
+    let shared_base_directory = open_directory_without_following(shared_base_path)?;
+    verify_directory_mode(&shared_base_directory, shared_base_path, 0o1777)
 }
 
 /// Creates and validates this user's directory under `shared_base_path`, then returns its
 /// path.
 ///
-/// On Unix the path is named after the effective user id, such as
-/// `/tmp/koshi/501`, and must be owned by that user with mode `0755`. It
-/// creates no parents; a missing `shared_base_path` returns [`io::ErrorKind::NotFound`] and
-/// remains uncreated. A different owner, symbolic link, or regular file at the
-/// user path returns [`io::ErrorKind::PermissionDenied`] with the path. Another
-/// mode is replaced and checked. On Windows it creates `shared_base_path` and missing
-/// parents, returns `shared_base_path`, and uses no per-user directory.
+/// The path is named after the effective user id, such as `/tmp/koshi/1001`,
+/// and must be owned by that user with mode `0755`. It creates no parents; a
+/// missing `shared_base_path` returns [`io::ErrorKind::NotFound`] and remains
+/// uncreated. A different owner, symbolic link, or regular file at the user
+/// path returns [`io::ErrorKind::PermissionDenied`] with the path. Another mode
+/// is replaced and checked.
+#[cfg(unix)]
 pub fn ensure_shared_user_directory(shared_base_path: &Path) -> io::Result<PathBuf> {
-    #[cfg(unix)]
-    {
-        let user_directory_path = shared_base_path.join(get_effective_user_id().to_string());
-        create_directory_if_absent(&user_directory_path)?;
-        let user_directory = open_directory_without_following(&user_directory_path)?;
-        verify_owner_is_this_user(&user_directory, &user_directory_path)?;
-        verify_directory_mode(&user_directory, &user_directory_path, 0o755)?;
-        Ok(user_directory_path)
-    }
-    #[cfg(windows)]
-    {
-        std::fs::create_dir_all(shared_base_path)?;
-        Ok(shared_base_path.to_path_buf())
-    }
+    let user_directory_path = shared_base_path.join(get_effective_user_id().to_string());
+    create_directory_if_absent(&user_directory_path)?;
+    let user_directory = open_directory_without_following(&user_directory_path)?;
+    verify_owner_is_this_user(&user_directory, &user_directory_path)?;
+    verify_directory_mode(&user_directory, &user_directory_path, 0o755)?;
+    Ok(user_directory_path)
 }
 
 /// Creates `directory_path` and missing parents, then validates the final

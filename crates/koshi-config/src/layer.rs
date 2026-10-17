@@ -205,8 +205,8 @@ pub struct PartialKoshiConfig {
     /// address, so nothing binds).
     pub remote_listen_address: Option<Option<SocketAddr>>,
     /// Shared sessions directory override. The outer `Option` is whether this
-    /// layer sets the field; the inner `Option` is the value (`None` = the
-    /// platform's machine-wide directory).
+    /// layer sets the field; the inner `Option` is the value (`None` =
+    /// `/tmp/koshi`).
     pub shared_sessions_directory: Option<Option<PathBuf>>,
     /// Auto-close override.
     pub should_auto_close_session: Option<bool>,

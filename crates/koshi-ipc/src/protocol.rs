@@ -16,6 +16,7 @@
 //! transport layer. The Hello checks belong to [`handshake`](crate::handshake).
 
 use std::fmt;
+use std::sync::OnceLock;
 
 use koshi_core::command::{Command, CommandEnvelope, CommandResult, MoveFloatingPaneArgs};
 use koshi_core::compat::SESSION_PROTOCOL;
@@ -29,6 +30,7 @@ use koshi_core::redact::REDACTED;
 use serde::de::{self, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use subtle::ConstantTimeEq;
+use uuid::Uuid;
 
 use crate::attach::AttachedSessionStructureSnapshot;
 use crate::layout::SessionLayout;
@@ -116,6 +118,13 @@ impl ConnectionToken {
     pub fn expose_secret(&self) -> &str {
         &self.0
     }
+
+    /// Whether the secret is the empty text: the token a session asks another
+    /// local user for. Every generated token is 64 characters long.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl PartialEq for ConnectionToken {
@@ -142,6 +151,32 @@ impl fmt::Debug for ConnectionToken {
 impl fmt::Display for ConnectionToken {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(REDACTED)
+    }
+}
+
+/// Identifies one process image of a session server or a router: the program a
+/// process runs from its start, or from its last `exec`. A server that
+/// replaces its image answers its next Hello with another id. A server that
+/// keeps its image keeps its id, also when it rotates its connection token.
+/// The wire form is the bare uuid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProcessImageId(Uuid);
+
+impl ProcessImageId {
+    /// Generate a fresh id, a `UUIDv7`.
+    #[must_use]
+    pub fn generate() -> Self {
+        ProcessImageId(Uuid::now_v7())
+    }
+
+    /// The id of the process image this code runs in. The first call
+    /// generates it, and every call after it in the same image returns that
+    /// id.
+    #[must_use]
+    pub fn get_own() -> Self {
+        static OWN_PROCESS_IMAGE_ID: OnceLock<ProcessImageId> = OnceLock::new();
+        *OWN_PROCESS_IMAGE_ID.get_or_init(ProcessImageId::generate)
     }
 }
 
@@ -508,7 +543,9 @@ pub enum IpcRequestKind {
     /// third of its link timeout while it waits for the answer to its
     /// `Attach`, and goes on sending one every third of its link timeout once
     /// it has joined. On a connection with no attached client, a `Ping`
-    /// closes the connection.
+    /// closes the connection, unless a request waits there for its
+    /// [`Commit`](Self::Commit): then the session reads the `Ping` and drops
+    /// it.
     Ping,
     /// One part of a clipboard copy that a stand-in clipboard tool in a pane
     /// sends before the last part, which goes as
@@ -535,7 +572,9 @@ pub enum IpcRequestKind {
     /// connection sent as [`ClipboardCopyPart`](Self::ClipboardCopyPart)
     /// since its last answered copy, then these bytes.
     ///
-    /// The session answers [`IpcResult::ClipboardCopyRouted`]. Each client on
+    /// It travels inside a [`Prepare`](Self::Prepare), and the
+    /// [`Commit`](Self::Commit) that runs it is answered with
+    /// [`IpcResult::ClipboardCopyRouted`]. Each client on
     /// another machine that focuses `pane_id` takes the copy as an `OSC 52`
     /// host write. `should_run_clipboard_tool` is `false` when only such
     /// clients focus the pane and each one took the copy, and `true` in every
@@ -563,18 +602,60 @@ pub enum IpcRequestKind {
         #[serde(with = "crate::bytes")]
         copied_bytes: Vec<u8>,
     },
+    /// Hand the session a request to hold until the caller sends
+    /// [`Commit`](Self::Commit). The session runs the held request only on
+    /// that `Commit`. A caller that gives up before it sends the `Commit` knows
+    /// that the request never runs.
+    ///
+    /// The held request is a [`SubmitCommand`](Self::SubmitCommand), an
+    /// [`Attach`](Self::Attach), a [`ClipboardCopy`](Self::ClipboardCopy) or a
+    /// [`Restart`](Self::Restart).
+    /// Every other kind is refused with [`IpcErrorCode::RequestFailed`], and
+    /// nothing is held.
+    ///
+    /// The session answers [`IpcResult::Prepared`] once its dispatcher has
+    /// answered for the request. A `ClipboardCopy` that no client on another
+    /// machine would take is answered at once with
+    /// [`IpcResult::ClipboardCopyRouted`] carrying
+    /// `should_run_clipboard_tool` `true`, and nothing is held: copies are not
+    /// allowed, the copy passes `max-copy-bytes`, or no client on another
+    /// machine focuses the pane. A `ClipboardCopy` from another machine or
+    /// from another user of this machine is refused as it is without
+    /// `Prepare`.
+    ///
+    /// The session drops the held request, and every clipboard part the
+    /// connection holds, when the connection ends and when the next request
+    /// is anything but a `Commit`, a [`Ping`](Self::Ping) or a
+    /// [`Hello`](Self::Hello). A frame that does not decode and a kind this
+    /// build does not have leave it in place too.
+    ///
+    /// A `SubmitCommand`, an `Attach`, a `ClipboardCopy` or a `Restart` that
+    /// arrives on its own, with no `Prepare`, is refused with
+    /// [`IpcErrorCode::RequestFailed`] and does not run. On a connection that
+    /// already carries an attached client's event stream, a `SubmitCommand`
+    /// runs as it arrives.
+    ///
+    /// Example: `Prepare(SubmitCommand(Quit))`, answered `Prepared`, then a
+    /// closed connection: the session never quits.
+    Prepare(Box<IpcRequestKind>),
+    /// Run the request that [`Prepare`](Self::Prepare) handed the session on
+    /// this connection. The answer is the held request's own answer, under
+    /// this request's `request_id`. With nothing held, the session refuses it
+    /// with [`IpcErrorCode::RequestFailed`] and the connection keeps serving.
+    Commit,
 }
 
 /// The most `copied_bytes` one [`IpcRequestKind::ClipboardCopy`] or
-/// [`IpcRequestKind::ClipboardCopyPart`] carries: 12582783.
+/// [`IpcRequestKind::ClipboardCopyPart`] carries: 12582774.
 ///
-/// A `ClipboardCopy` with an empty copy, the request id 18446744073709551615
-/// and 12 target bytes encodes to a frame of 172 bytes. A pane id always
-/// encodes to 36 characters. Base64 writes each 3 bytes as 4 characters, so
-/// (16777216 - 172) / 4 * 3 = 12582783 bytes fit in one
+/// A [`Prepare`](IpcRequestKind::Prepare) carrying a `ClipboardCopy` with an
+/// empty copy, the request id 18446744073709551615 and 12 target bytes
+/// encodes to a frame of 184 bytes. A pane id always encodes to 36
+/// characters. Base64 writes each 3 bytes as 4 characters, so
+/// (16777216 - 184) / 4 * 3 = 12582774 bytes fit in one
 /// [`MAX_FRAME_BYTE_COUNT`](crate::transport::MAX_FRAME_BYTE_COUNT) frame,
 /// and 3 bytes more do not.
-pub const MAX_CLIPBOARD_COPY_PART_BYTE_COUNT: usize = 12_582_783;
+pub const MAX_CLIPBOARD_COPY_PART_BYTE_COUNT: usize = 12_582_774;
 
 impl IpcRequestKind {
     /// The Hello this build opens a connection with: the versions it speaks,
@@ -613,6 +694,8 @@ impl IpcRequestKind {
             IpcRequestKind::Ping => "Ping",
             IpcRequestKind::ClipboardCopyPart { .. } => "ClipboardCopyPart",
             IpcRequestKind::ClipboardCopy { .. } => "ClipboardCopy",
+            IpcRequestKind::Prepare(_) => "Prepare",
+            IpcRequestKind::Commit => "Commit",
         }
     }
 }
@@ -718,6 +801,9 @@ pub enum IpcResult {
         protocol_version: u32,
         /// The build version of the answering session server, e.g. `0.3.0`.
         build_version: String,
+        /// The process image of the answering session server, as
+        /// [`ProcessImageId::get_own`] gives it.
+        process_image_id: ProcessImageId,
     },
     /// Answers [`IpcRequestKind::Attach`]: the client is registered and its
     /// event subscription is live. Every field is the server's own answer, and
@@ -763,6 +849,9 @@ pub enum IpcResult {
         /// is on another machine, and each one took the copy.
         should_run_clipboard_tool: bool,
     },
+    /// Answers [`IpcRequestKind::Prepare`]: the session holds the request, and
+    /// runs it when [`IpcRequestKind::Commit`] arrives.
+    Prepared,
 }
 
 /// Why a request was refused.
@@ -837,6 +926,7 @@ impl crate::plane::Plane for SessionPlane {
         IpcResult::Hello {
             protocol_version: agreed_protocol_version,
             build_version: build_version.to_string(),
+            process_image_id: ProcessImageId::get_own(),
         }
     }
 }
@@ -862,6 +952,8 @@ impl WireVariants for IpcRequestKind {
         "Ping",
         "ClipboardCopyPart",
         "ClipboardCopy",
+        "Prepare",
+        "Commit",
     ];
 }
 
@@ -885,6 +977,7 @@ impl WireVariants for IpcResult {
         "Error",
         "ClipboardCopyPartTaken",
         "ClipboardCopyRouted",
+        "Prepared",
     ];
 }
 
@@ -901,6 +994,7 @@ impl WireName for IpcResult {
             IpcResult::Error(_) => "Error",
             IpcResult::ClipboardCopyPartTaken => "ClipboardCopyPartTaken",
             IpcResult::ClipboardCopyRouted { .. } => "ClipboardCopyRouted",
+            IpcResult::Prepared => "Prepared",
         }
     }
 }

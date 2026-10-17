@@ -146,6 +146,16 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         });
     }
 
+    // `--allow-other-users` is refused on Windows, where only the user who
+    // started a session reaches it.
+    if cfg!(windows) && cli.should_allow_other_users {
+        return Err(CliError::InvalidArgs {
+            detail: "--allow-other-users works on macOS and Linux only; on Windows only you \
+                     reach your sessions"
+                .to_string(),
+        });
+    }
+
     if let Some(CliCommand::Actions { command }) = &cli.command {
         // `actions` renders from the static action table on this machine and
         // asks nothing over IPC.

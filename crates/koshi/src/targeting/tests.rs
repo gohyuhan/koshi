@@ -15,7 +15,9 @@ use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_ipc::endpoint::EndpointFile;
-use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
+use koshi_ipc::protocol::{
+    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, ProcessImageId,
+};
 use koshi_ipc::transport::{Connection, Listener};
 use uuid::uuid;
 
@@ -196,6 +198,7 @@ fn serve_discovery(runtime_directory: &Path, session_overview: SessionOverview) 
             IpcResult::Hello {
                 protocol_version: koshi_ipc::protocol::PROTOCOL_VERSION,
                 build_version: env!("CARGO_PKG_VERSION").to_string(),
+                process_image_id: ProcessImageId::get_own(),
             },
         );
         send_ipc_reply(

@@ -39,6 +39,7 @@ use koshi_ipc::supervisor::{
 };
 use koshi_ipc::transport::{Connection, FrameReader, FrameWriter, Listener};
 use koshi_ipc::wire::MaybeKnown;
+use koshi_observability::repeated_warning::WarningRateLimiter;
 use koshi_pty::backend::state::{PtyBackend, PtySink};
 use koshi_pty::portable::PortablePtyBackend;
 
@@ -386,9 +387,12 @@ fn close_every_pane(link_sink: &LinkSink, pty_backend: &PortablePtyBackend) {
 
 /// Start the thread that accepts links.
 ///
-/// A failed accept pauses for [`ACCEPT_RETRY_DELAY_DURATION`] and retries. The thread
+/// A failed accept is logged at warn level at most once inside
+/// [`LOG_WINDOW_DURATION`](koshi_observability::repeated_warning::LOG_WINDOW_DURATION),
+/// pauses for [`ACCEPT_RETRY_DELAY_DURATION`] and retries. The thread
 /// ends when the main loop drops its receiver, which is the supervisor exiting.
 fn start_accept_thread(supervisor_listener: Listener, connection_sender: Sender<Connection>) {
+    let mut accept_failure_warning = WarningRateLimiter::new();
     let _ = std::thread::Builder::new()
         .name("koshi-pty-accept".to_string())
         .spawn(move || loop {
@@ -404,7 +408,16 @@ fn start_accept_thread(supervisor_listener: Listener, connection_sender: Sender<
                         return;
                     }
                 }
-                Err(_) => std::thread::sleep(ACCEPT_RETRY_DELAY_DURATION),
+                Err(accept_error) => {
+                    if accept_failure_warning.record_warning_if_due(Instant::now()) {
+                        tracing::warn!(
+                            %accept_error,
+                            "the supervisor could not accept a link; \
+                             retrying every {ACCEPT_RETRY_DELAY_DURATION:?}"
+                        );
+                    }
+                    std::thread::sleep(ACCEPT_RETRY_DELAY_DURATION);
+                }
             }
         });
 }

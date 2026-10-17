@@ -191,6 +191,17 @@ impl Server {
                 let _ =
                     response_sender.send(self.can_take_clipboard_tool_copy(held_copy_byte_count));
             }
+            RuntimeEvent::IpcPrepare { response_sender } => {
+                let _ = response_sender.send(());
+            }
+            RuntimeEvent::IpcClipboardCopyPrepare {
+                pane_id,
+                copied_byte_count,
+                response_sender,
+            } => {
+                let _ = response_sender
+                    .send(self.can_route_clipboard_tool_copy(pane_id, copied_byte_count));
+            }
             RuntimeEvent::IpcClipboardCopy {
                 pane_id,
                 clipboard_targets,

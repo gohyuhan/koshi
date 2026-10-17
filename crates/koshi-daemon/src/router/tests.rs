@@ -25,10 +25,10 @@ use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
 use koshi_core::discovery::{SessionDiscovery, SessionOverview};
-use koshi_ipc::endpoint::resolve_advertisement_marker_path;
 use koshi_ipc::endpoint::RESTART_WINDOW_DURATION;
 use koshi_ipc::protocol::{
-    IncomingResponse, IpcRequest, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    IncomingResponse, IpcRequest, IpcResponse, IpcResult, ProcessImageId, MIN_PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
 };
 use koshi_ipc::remote_tokens::{
     hash_connection_token, TokenEntry, TokenRecord, TOKEN_STORE_FORMAT,
@@ -379,7 +379,6 @@ fn removing_one_session_leaves_every_other_entry_in_place() {
     assert_eq!(
         remove_session_from_registry(
             runtime_directory.path(),
-            None,
             &mut session_registry,
             removed_session_id,
             read_current_endpoint_file(runtime_directory.path(), removed_session_id).as_ref(),
@@ -421,7 +420,6 @@ fn removing_a_session_takes_the_files_it_advertised_with_it() {
     assert_eq!(
         remove_session_from_registry(
             runtime_directory.path(),
-            None,
             &mut session_registry,
             removed_session_id,
             read_current_endpoint_file(runtime_directory.path(), removed_session_id).as_ref(),
@@ -455,7 +453,6 @@ fn removing_a_session_that_is_not_in_the_list_still_clears_its_files() {
     assert_eq!(
         remove_session_from_registry(
             runtime_directory.path(),
-            None,
             &mut session_registry,
             removed_session_id,
             read_current_endpoint_file(runtime_directory.path(), removed_session_id).as_ref(),
@@ -703,7 +700,6 @@ fn removing_a_session_takes_its_resume_program_and_clipboard_tool_files_with_it(
     assert_eq!(
         remove_session_from_registry(
             runtime_directory.path(),
-            None,
             &mut session_registry,
             gone_session_id,
             read_current_endpoint_file(runtime_directory.path(), gone_session_id).as_ref(),
@@ -749,7 +745,6 @@ fn removing_a_session_that_is_replacing_its_image_leaves_it_and_its_files_alone(
     assert_eq!(
         remove_session_from_registry(
             runtime_directory.path(),
-            None,
             &mut session_registry,
             replacing_session_id,
             read_current_endpoint_file(runtime_directory.path(), replacing_session_id).as_ref(),
@@ -799,7 +794,6 @@ fn removing_a_session_whose_process_still_runs_leaves_it_and_its_files_alone() {
     assert_eq!(
         remove_session_from_registry(
             runtime_directory.path(),
-            None,
             &mut session_registry,
             running_session_id,
             read_current_endpoint_file(runtime_directory.path(), running_session_id).as_ref(),
@@ -842,7 +836,6 @@ fn removing_a_session_whose_process_still_runs_removes_it_where_a_refused_connec
     assert_eq!(
         remove_session_from_registry(
             runtime_directory.path(),
-            None,
             &mut session_registry,
             running_session_id,
             read_current_endpoint_file(runtime_directory.path(), running_session_id).as_ref(),
@@ -883,7 +876,6 @@ fn removing_a_session_whose_process_id_another_process_took_over_removes_it() {
     assert_eq!(
         remove_session_from_registry(
             runtime_directory.path(),
-            None,
             &mut session_registry,
             reused_session_id,
             read_current_endpoint_file(runtime_directory.path(), reused_session_id).as_ref(),
@@ -916,7 +908,6 @@ fn a_probe_finding_nothing_listening_removes_the_session_while_its_process_still
 
     let session_probe_verdict = apply_session_probe(
         runtime_directory.path(),
-        None,
         &mut router_sessions,
         running_session_id,
         Some(&probed_endpoint_file),
@@ -1058,7 +1049,6 @@ fn a_description_that_ran_out_of_time_records_that_it_did_not_answer_within_5_se
 
     apply_session_description(
         runtime_directory.path(),
-        None,
         &mut router_sessions,
         &build_unread_router_events_sender(),
         silent_session_id,
@@ -1148,7 +1138,6 @@ fn a_probe_finding_nothing_listening_while_the_process_runs_keeps_the_session_an
 
     let session_probe_verdict = apply_session_probe(
         runtime_directory.path(),
-        None,
         &mut router_sessions,
         running_session_id,
         Some(&probed_endpoint_file),
@@ -1378,35 +1367,21 @@ fn the_orphan_sweep_leaves_an_old_resume_file_beside_any_endpoint_file() {
 
 /// Advertise `session_id` in `shared_sessions_directory` the way a session another local user
 /// started advertises itself, and hand back the control-socket address that
-/// names. On Unix that is a subdirectory named after another user's id; on
-/// Windows it is a marker file beside the ones this user writes.
+/// names: a path in a subdirectory named after another user's id.
+#[cfg(unix)]
 fn advertise_foreign_session(
     shared_sessions_directory: &Path,
     runtime_directory: &Path,
     session_id: SessionId,
 ) -> String {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::MetadataExt;
 
-        let own_user_id = std::fs::metadata(runtime_directory)
-            .expect("read the runtime directory")
-            .uid();
-        let other_user_directory = shared_sessions_directory.join((own_user_id + 1).to_string());
-        std::fs::create_dir_all(&other_user_directory).expect("create the other user's directory");
-        compute_socket_address(&other_user_directory, session_id)
-    }
-    #[cfg(windows)]
-    {
-        let _ = runtime_directory;
-        std::fs::create_dir_all(shared_sessions_directory).expect("create the shared directory");
-        std::fs::write(
-            resolve_advertisement_marker_path(shared_sessions_directory, session_id),
-            b"",
-        )
-        .expect("plant the marker");
-        compute_socket_address(shared_sessions_directory, session_id)
-    }
+    let own_user_id = std::fs::metadata(runtime_directory)
+        .expect("read the runtime directory")
+        .uid();
+    let other_user_directory = shared_sessions_directory.join((own_user_id + 1).to_string());
+    std::fs::create_dir_all(&other_user_directory).expect("create the other user's directory");
+    compute_socket_address(&other_user_directory, session_id)
 }
 
 /// The overview of a session with no tab, pane or client, named
@@ -1478,6 +1453,7 @@ fn spawn_session_server_answering_once_released(
                 answer_result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_version: env!("CARGO_PKG_VERSION").to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
             },
             IpcResponse {
@@ -1531,6 +1507,7 @@ fn write_test_endpoint_file_for_process(
     .expect("the endpoint file is written");
 }
 
+#[cfg(unix)]
 #[test]
 fn the_startup_registers_a_session_another_local_user_started() {
     // The router lists the other user's session with its address and process
@@ -1574,6 +1551,7 @@ fn the_startup_registers_a_session_another_local_user_started() {
         .expect("the other user's session exits");
 }
 
+#[cfg(unix)]
 #[test]
 fn the_startup_leaves_out_a_shared_advert_nothing_listens_behind() {
     // The other user's session crashed and left its advert behind. The
@@ -1586,14 +1564,9 @@ fn the_startup_leaves_out_a_shared_advert_nothing_listens_behind() {
         runtime_directory.path(),
         foreign_session_id,
     );
-    // On Unix the socket file the session bound outlives it. On Windows the
-    // pipe went with the process: only the marker is left.
-    let leftover_advert_path = if cfg!(unix) {
-        std::fs::write(&foreign_socket_address, b"").expect("plant the leftover socket file");
-        PathBuf::from(&foreign_socket_address)
-    } else {
-        resolve_advertisement_marker_path(shared_sessions_directory.path(), foreign_session_id)
-    };
+    // The socket file the session bound outlives it.
+    std::fs::write(&foreign_socket_address, b"").expect("plant the leftover socket file");
+    let leftover_advert_path = PathBuf::from(&foreign_socket_address);
 
     let router_sessions = create_settled_router_sessions(
         runtime_directory.path(),
@@ -1783,7 +1756,6 @@ fn settle_router_sessions(
     loop {
         advance_waiting_requests(
             runtime_directory,
-            None,
             router_sessions,
             remote_state,
             router_events_sender,
@@ -1875,6 +1847,7 @@ fn run_attach_lookup(
 ) -> RouterResult {
     let (router_events_sender, router_events_receiver) = mpsc::channel();
     let (response_sender, response_receiver) = mpsc::channel();
+    #[cfg(unix)]
     let foreign_session_listing = match list_foreign_sessions_for_lookup(
         shared_sessions_base_directory,
         runtime_directory,
@@ -1885,6 +1858,11 @@ fn run_attach_lookup(
         Err(foreign_session_lookup_error) => {
             return build_refused_result(foreign_session_lookup_error.to_string())
         }
+    };
+    #[cfg(windows)]
+    let foreign_session_listing = {
+        let _ = shared_sessions_base_directory;
+        ForeignSessionListing::default()
     };
     start_attach_lookup(
         runtime_directory,
@@ -2212,6 +2190,7 @@ fn spawn_version_mismatched_session_server(socket_address: &str) -> JoinHandle<(
             answer_result: IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION + 1,
                 build_version: env!("CARGO_PKG_VERSION").to_string(),
+                process_image_id: ProcessImageId::get_own(),
             },
         });
     })
@@ -3196,15 +3175,20 @@ fn an_unwatched_session_that_is_gone_leaves_the_list_and_the_loop_ends_idle() {
 
 #[test]
 fn a_full_event_queue_does_not_hold_off_a_probe_that_is_due() {
-    // The probe interval is zero, so a probe is due on the first turn. 20 000
-    // row requests are queued before the loop starts. The probe reaches the
-    // session's listener before the last row request is answered.
-    const QUEUED_ROW_REQUEST_COUNT: usize = 20_000;
+    // The probe interval is zero, so a probe is due on the first turn. The
+    // restart and then 1 000 row requests are queued before the loop starts.
+    // The loop serves the restart on its first turn and ends on its second,
+    // with every row request still queued: the probe reaches the session's
+    // listener, and no row request is answered.
+    const QUEUED_ROW_REQUEST_COUNT: usize = 1_000;
     let probed_session_id = SessionId::new();
     let runtime_directory = build_test_runtime_directory();
     let socket_address = compute_socket_address(runtime_directory.path(), probed_session_id);
     let session_listener = bind_test_session_listener(&socket_address);
     let (router_events_sender, router_events_receiver) = mpsc::channel();
+    router_events_sender
+        .send(RouterEvent::RestartDue)
+        .expect("the restart is queued");
     let rows_receivers: Vec<Receiver<Vec<RemoteSessionRow>>> = (0..QUEUED_ROW_REQUEST_COUNT)
         .map(|_| {
             let (rows_sender, rows_receiver) = mpsc::channel();
@@ -3217,9 +3201,6 @@ fn a_full_event_queue_does_not_hold_off_a_probe_that_is_due() {
             rows_receiver
         })
         .collect();
-    router_events_sender
-        .send(RouterEvent::RestartDue)
-        .expect("the restart is queued");
     let held_runtime_directory = runtime_directory.path().to_path_buf();
     let loop_thread = std::thread::spawn(move || {
         let mut router_sessions = RouterSessions::from_session_registry(SessionRegistry::from([(
@@ -3250,15 +3231,13 @@ fn a_full_event_queue_does_not_hold_off_a_probe_that_is_due() {
     probe_accepted_receiver
         .recv_timeout(LOOP_END_TIMEOUT_DURATION)
         .expect("the probe reaches the session");
-    assert_eq!(
-        rows_receivers
-            .last()
-            .expect("row requests are queued")
-            .try_recv(),
-        Err(mpsc::TryRecvError::Empty),
-        "the probe started before the queued requests were all served"
-    );
     assert_eq!(join_dispatch_loop_thread(loop_thread), RouterExit::Restart);
+    // The loop's receiver is gone, and every event still queued went with it.
+    let answered_row_request_count = rows_receivers
+        .iter()
+        .filter(|rows_receiver| rows_receiver.try_recv() != Err(mpsc::TryRecvError::Disconnected))
+        .count();
+    assert_eq!(answered_row_request_count, 0);
 }
 
 #[test]
@@ -3409,7 +3388,6 @@ fn a_probe_that_finds_nothing_while_the_endpoint_file_turned_unreadable_removes_
 
     let session_probe_verdict = apply_session_probe(
         runtime_directory.path(),
-        None,
         &mut router_sessions,
         unreadable_session_id,
         Some(&probed_endpoint_file),
@@ -3493,7 +3471,6 @@ fn a_probe_that_finds_nothing_after_the_endpoint_file_was_rewritten_removes_noth
 
     let session_probe_verdict = apply_session_probe(
         runtime_directory.path(),
-        None,
         &mut router_sessions,
         rebound_session_id,
         Some(&probed_endpoint_file),
@@ -3532,7 +3509,6 @@ fn a_probe_report_for_a_session_no_longer_listed_changes_nothing() {
 
     let session_probe_verdict = apply_session_probe(
         runtime_directory.path(),
-        None,
         &mut router_sessions,
         removed_session_id,
         None,
@@ -3653,7 +3629,6 @@ fn a_lookup_waiting_on_a_probe_of_a_session_since_removed_resolves_its_selector_
     assert_eq!(response_receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
     advance_waiting_requests(
         runtime_directory.path(),
-        None,
         &mut router_sessions,
         &build_no_remote_state(),
         &router_events_sender,
@@ -3826,7 +3801,6 @@ fn a_description_answer_sent_before_the_wait_ended_is_applied_before_the_lookup_
 
     advance_waiting_requests(
         runtime_directory.path(),
-        None,
         &mut router_sessions,
         &build_no_remote_state(),
         &router_events_sender,
@@ -4428,6 +4402,7 @@ fn build_foreign_socket_address(session_id: SessionId) -> String {
     compute_socket_address(Path::new("/srv/koshi-shared/5000"), session_id)
 }
 
+#[cfg(unix)]
 #[test]
 fn a_lookup_by_id_asks_only_the_other_users_session_it_names() {
     let first_foreign_session_id = SessionId::new();
@@ -4716,6 +4691,7 @@ fn a_failed_description_of_another_users_session_records_the_failure() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_gone_answer_from_another_users_session_removes_nothing_of_that_user() {
     let runtime_directory = build_test_runtime_directory();
@@ -4726,12 +4702,8 @@ fn a_gone_answer_from_another_users_session_removes_nothing_of_that_user() {
         runtime_directory.path(),
         foreign_session_id,
     );
-    let leftover_advert_path = if cfg!(unix) {
-        std::fs::write(&foreign_socket_address, b"").expect("plant the leftover socket file");
-        PathBuf::from(&foreign_socket_address)
-    } else {
-        resolve_advertisement_marker_path(shared_sessions_directory.path(), foreign_session_id)
-    };
+    std::fs::write(&foreign_socket_address, b"").expect("plant the leftover socket file");
+    let leftover_advert_path = PathBuf::from(&foreign_socket_address);
     let mut router_sessions = RouterSessions::from_session_registry(SessionRegistry::new());
 
     serve_router_event_and_settle(
@@ -4760,6 +4732,7 @@ fn a_gone_answer_from_another_users_session_removes_nothing_of_that_user() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_lookup_finds_a_session_another_local_user_started_after_the_router_started() {
     let runtime_directory = build_test_runtime_directory();
@@ -4840,7 +4813,6 @@ fn the_description_scan_skips_a_session_a_starting_session_server_holds() {
     );
     apply_session_description(
         runtime_directory.path(),
-        None,
         &mut router_sessions,
         &build_unread_router_events_sender(),
         starting_session_id,
@@ -5021,7 +4993,6 @@ fn a_remote_locate_request_for_a_listed_name_waits_for_every_unlisted_session_to
     );
     advance_waiting_requests(
         runtime_directory.path(),
-        None,
         &mut router_sessions,
         &remote_state,
         &router_events_sender,
@@ -5073,7 +5044,6 @@ fn a_session_creation_waits_while_a_description_asked_less_than_5_seconds_ago_is
 
     advance_session_creations(
         runtime_directory.path(),
-        None,
         &mut router_sessions,
         &build_unread_router_events_sender(),
         asked_at,
@@ -5114,7 +5084,6 @@ fn a_session_creation_does_not_wait_for_a_description_asked_5_seconds_ago() {
 
     advance_session_creations(
         runtime_directory.path(),
-        None,
         &mut router_sessions,
         &build_unread_router_events_sender(),
         now,
@@ -5227,7 +5196,6 @@ fn a_starting_session_server_past_its_ready_deadline_is_killed_and_refused() {
 
     advance_session_creations(
         runtime_directory.path(),
-        None,
         &mut router_sessions,
         &build_unread_router_events_sender(),
         Instant::now(),
@@ -5267,7 +5235,6 @@ fn a_ready_report_registers_the_session_and_answers_its_creation() {
 
     finish_session_creation(
         runtime_directory.path(),
-        None,
         &mut router_sessions,
         &router_events_sender,
         starting_session_id,
@@ -5329,7 +5296,6 @@ fn a_ready_report_from_another_build_kills_the_session_server_and_refuses_the_cr
 
     finish_session_creation(
         runtime_directory.path(),
-        None,
         &mut router_sessions,
         &build_unread_router_events_sender(),
         starting_session_id,
@@ -5618,7 +5584,6 @@ fn a_starting_session_server_whose_ready_report_is_sent_is_kept_past_its_deadlin
 
     advance_session_creations(
         runtime_directory.path(),
-        None,
         &mut router_sessions,
         &build_unread_router_events_sender(),
         now,
@@ -5662,7 +5627,6 @@ fn removing_a_session_removes_the_shared_socket_its_endpoint_file_names() {
     assert_eq!(
         remove_session_from_registry(
             runtime_directory.path(),
-            None,
             &mut SessionRegistry::new(),
             gone_session_id,
             read_current_endpoint_file(runtime_directory.path(), gone_session_id).as_ref(),
@@ -5695,7 +5659,6 @@ fn removing_a_session_leaves_a_shared_file_named_for_another_session_alone() {
     assert_eq!(
         remove_session_from_registry(
             runtime_directory.path(),
-            None,
             &mut SessionRegistry::new(),
             gone_session_id,
             read_current_endpoint_file(runtime_directory.path(), gone_session_id).as_ref(),
@@ -6685,6 +6648,7 @@ fn the_accept_loop_serves_a_connection_this_user_opened() {
             answer_result: RouterResult::Hello {
                 protocol_version: ROUTER_PROTOCOL_VERSION,
                 build_version: BUILD_VERSION.to_string(),
+                process_image_id: Some(ProcessImageId::get_own()),
             },
         }
     );
@@ -7444,6 +7408,7 @@ fn spawn_bridged_session_server(
                 answer_result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_version: env!("CARGO_PKG_VERSION").to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
             })
             .expect("answer the hello");
@@ -9033,14 +8998,12 @@ fn a_removal_finds_the_endpoint_file_rewritten_since_the_caller_read_it_and_keep
     let session_removals = [
         remove_session_from_registry(
             runtime_directory.path(),
-            None,
             &mut session_registry,
             rebound_session_id,
             Some(&read_before_rebind_endpoint_file),
         ),
         remove_session_from_registry(
             runtime_directory.path(),
-            None,
             &mut session_registry,
             rebound_session_id,
             None,

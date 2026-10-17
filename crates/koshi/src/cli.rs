@@ -48,7 +48,8 @@ pub struct Cli {
     pub is_headless: bool,
 
     /// Let the other users of this machine reach the session this command
-    /// creates, whatever `koshi.kdl` says. Only with `--headless`.
+    /// creates, whatever `koshi.kdl` says. Only with `--headless`. macOS and
+    /// Linux only: refused on Windows.
     #[arg(long = "allow-other-users", requires = "is_headless")]
     pub should_allow_other_users: bool,
 
@@ -728,7 +729,7 @@ pub enum CliCommand {
         #[arg(long = "profile", value_name = "NAME")]
         profile_name: Option<String>,
         /// Let the other users of this machine reach this session, whatever
-        /// `koshi.kdl` says.
+        /// `koshi.kdl` says. No effect on Windows.
         #[arg(long = "allow-other-users")]
         should_allow_other_users: bool,
         /// Come up from the state at this path instead of seeding a new

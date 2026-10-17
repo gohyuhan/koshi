@@ -24,13 +24,12 @@ fn build_doctor_context(root_directory: &Path) -> DoctorContext {
         runtime_directory_mode: Some(0o700),
         log_directory: Some(root_directory.join("log")),
         session_log_file: Ok(None),
-        shared_sessions_directory: Some(root_directory.join("shared")),
+        shared_sessions_directory: None,
         shell: root_directory.join("shell"),
         shell_source: ShellSource::Environment,
         path_entries: Some(root_directory.as_os_str().to_os_string()),
         term: Some("xterm-256color".to_string()),
         colorterm: None,
-        is_other_user_access_allowed: false,
         remote_listen_address: None,
         is_logging_enabled: false,
         standing_grant_count: Ok(0),
@@ -957,7 +956,7 @@ fn session_directory_without_other_users_and_without_a_home_directory() {
         check_session_directory(&doctor_context),
         DoctorOutcome {
             verdict: Verdict::Ok,
-            reason: "allow-other-users is off, so only you may reach your sessions".to_string(),
+            reason: "only you may reach your sessions".to_string(),
             help: None,
             detail: None,
         }
@@ -1015,7 +1014,8 @@ fn session_directory_without_other_users_leaves_out_a_mode_it_does_not_know() {
 fn session_directory_with_other_users_names_the_shared_directory() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
-    doctor_context.is_other_user_access_allowed = true;
+    let shared_sessions_directory = test_directory.path().join("shared");
+    doctor_context.shared_sessions_directory = Some(shared_sessions_directory.clone());
 
     assert_eq!(
         check_session_directory(&doctor_context),
@@ -1023,27 +1023,8 @@ fn session_directory_with_other_users_names_the_shared_directory() {
             verdict: Verdict::Ok,
             reason: format!(
                 "allow-other-users is on: sessions are also advertised in {}, which every user of this machine may reach",
-                doctor_context.shared_sessions_directory.as_deref().unwrap().display()
+                shared_sessions_directory.display()
             ),
-            help: None,
-            detail: None,
-        }
-    );
-}
-
-#[test]
-fn session_directory_with_other_users_and_no_shared_directory() {
-    let test_directory = TempDir::new().unwrap();
-    let mut doctor_context = build_doctor_context(test_directory.path());
-    doctor_context.is_other_user_access_allowed = true;
-    doctor_context.shared_sessions_directory = None;
-
-    assert_eq!(
-        check_session_directory(&doctor_context),
-        DoctorOutcome {
-            verdict: Verdict::Ok,
-            reason: "allow-other-users is on, and this machine names no shared session directory, so no other user reaches your sessions"
-                .to_string(),
             help: None,
             detail: None,
         }
@@ -1273,17 +1254,14 @@ fn no_session_or_remote_access_check_ever_fails() {
     let test_directory = TempDir::new().unwrap();
 
     let mut doctor_contexts = Vec::new();
-    for is_other_user_access_allowed in [false, true] {
-        for shared_sessions_directory in [None, Some(test_directory.path().join("shared"))] {
-            for runtime_directory_path in [None, Some(test_directory.path().join("runtime"))] {
-                for runtime_directory_mode in [None, Some(0o700), Some(0o755)] {
-                    let mut doctor_context = build_doctor_context(test_directory.path());
-                    doctor_context.is_other_user_access_allowed = is_other_user_access_allowed;
-                    doctor_context.shared_sessions_directory = shared_sessions_directory.clone();
-                    doctor_context.runtime_directory = runtime_directory_path.clone();
-                    doctor_context.runtime_directory_mode = runtime_directory_mode;
-                    doctor_contexts.push(doctor_context);
-                }
+    for shared_sessions_directory in [None, Some(test_directory.path().join("shared"))] {
+        for runtime_directory_path in [None, Some(test_directory.path().join("runtime"))] {
+            for runtime_directory_mode in [None, Some(0o700), Some(0o755)] {
+                let mut doctor_context = build_doctor_context(test_directory.path());
+                doctor_context.shared_sessions_directory = shared_sessions_directory.clone();
+                doctor_context.runtime_directory = runtime_directory_path.clone();
+                doctor_context.runtime_directory_mode = runtime_directory_mode;
+                doctor_contexts.push(doctor_context);
             }
         }
     }

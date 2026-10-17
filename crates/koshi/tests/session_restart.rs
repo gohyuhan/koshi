@@ -59,7 +59,7 @@ use common::{
     send_attach_lookup, start_router_process, terminate_process, wait_for_session_lookup_refusal,
     RunningProcess, SessionProcess, SESSION_SERVER_NAME, WAIT_DURATION,
 };
-use koshi_test_support::fixtures::start_program_process;
+use koshi_test_support::fixtures::{send_committed_request, start_program_process};
 
 /// How long a poll in this suite pauses between attempts: 50 milliseconds.
 const RESTART_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(50);
@@ -313,7 +313,8 @@ struct AttachedClientStream {
 
 impl AttachedClientStream {
     /// Join `session_id` as a viewing client at `viewport_size`, the way the
-    /// attached client joins it: Hello, then Attach on the same connection.
+    /// attached client joins it: Hello, then the Attach as a `Prepare` and its
+    /// `Commit`, on the same connection.
     ///
     /// `resume_client_id` names the client record to come back as after the
     /// session replaced its own image, and is `None` on a first attach.
@@ -337,9 +338,7 @@ impl AttachedClientStream {
                 link_timeout_ms: None,
             },
         };
-        connection
-            .send(&attach_request)
-            .expect("the session reads the attach");
+        send_committed_request(&mut connection, attach_request);
         let ipc_response: IpcResponse = connection.recv().expect("the session answers the attach");
         assert_eq!(ipc_response.request_id, Some(2));
         let IpcResult::Attached {

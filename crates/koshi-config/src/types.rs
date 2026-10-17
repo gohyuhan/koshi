@@ -68,14 +68,14 @@ pub struct ServerConfig {
     /// Whether entry points marked `#[beta_feature]` may run.
     pub should_allow_beta_features: bool,
     /// Whether other users of this machine may reach this session's socket.
+    /// Nothing reads it on Windows.
     pub should_allow_other_users: bool,
     /// The IP address and port the remote listener binds, such as
     /// `0.0.0.0:7654`. Setting it opens nothing; `koshi share grant` switches
     /// remote access on.
     pub remote_listen_address: Option<SocketAddr>,
     /// The directory the session sockets other users reach live in. `None`
-    /// takes the platform's machine-wide directory, `/tmp/koshi` on Unix and
-    /// `%ProgramData%\koshi` on Windows.
+    /// takes `/tmp/koshi`. Nothing reads it on Windows.
     pub shared_sessions_directory: Option<PathBuf>,
     /// Whether the session ends when its last client leaves.
     pub should_auto_close_session: bool,

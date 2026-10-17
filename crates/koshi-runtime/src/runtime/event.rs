@@ -263,6 +263,25 @@ pub enum RuntimeEvent {
         /// Where the dispatcher sends its answer.
         response_sender: Sender<bool>,
     },
+    /// A caller hands the session a request to hold until its `Commit`. The
+    /// dispatcher answers at once.
+    IpcPrepare {
+        /// Where the dispatcher sends its answer.
+        response_sender: Sender<()>,
+    },
+    /// A stand-in clipboard tool in `pane_id` hands the session a copy of
+    /// `copied_byte_count` bytes to hold until its `Commit`. The dispatcher
+    /// answers whether a client would take the copy: `true` when
+    /// `pane-clipboard-writes` allows writes, `copied_byte_count` is at most
+    /// `max-copy-bytes`, and a client on another machine focuses `pane_id`.
+    IpcClipboardCopyPrepare {
+        /// The pane the tool runs in.
+        pane_id: PaneId,
+        /// Every byte of the copy, counted.
+        copied_byte_count: usize,
+        /// Where the dispatcher sends its answer.
+        response_sender: Sender<bool>,
+    },
     /// A stand-in clipboard tool in `pane_id` hands the session a whole copy.
     /// Each client on another machine whose focused pane is `pane_id` takes the
     /// copy as an `OSC 52` host write. The dispatcher answers whether the tool

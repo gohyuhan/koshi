@@ -3,8 +3,7 @@
 //! its limit is logged once rather than once per attempt, that a window ends
 //! on its own, and that the table cannot grow past the count it is bounded at.
 //!
-//! Also [`WarningRateLimiter`], which writes a repeated warning once per window,
-//! [`RemoteConnectionEndReport`], which reports a bridged connection ended once, the two
+//! Also [`RemoteConnectionEndReport`], which reports a bridged connection ended once, the two
 //! functions that read and write one frame, the frames an admitted connection
 //! sends, what [`bind_remote_listener`] refuses, the refusal of a caller
 //! offering TLS 1.2 alone, and the check of the router's program file that
@@ -212,46 +211,6 @@ fn a_full_table_drops_the_address_whose_window_opened_first() {
 }
 
 #[test]
-fn a_repeated_warning_is_written_once_per_window() {
-    // Used by the full admission window, a failed accept and the router's full
-    // connection list.
-    let mut repeated_warning = WarningRateLimiter::new();
-    let window_started_at = Instant::now();
-
-    assert!(
-        repeated_warning.is_due(window_started_at),
-        "the first refusal says so"
-    );
-    for refusal_index in 0..50 {
-        assert!(
-            !repeated_warning.is_due(add_seconds_to_instant(
-                window_started_at,
-                refusal_index % LOG_WINDOW_DURATION.as_secs(),
-            )),
-            "refusal {refusal_index} inside the same window is silent"
-        );
-    }
-
-    let after_window_end =
-        add_seconds_to_instant(window_started_at, LOG_WINDOW_DURATION.as_secs() + 1);
-    assert!(
-        repeated_warning.is_due(after_window_end),
-        "a limit still refusing says so again"
-    );
-    assert!(
-        !repeated_warning.is_due(after_window_end),
-        "and then goes quiet again"
-    );
-}
-
-#[test]
-fn a_warning_that_has_never_been_written_is_due_at_once() {
-    // No line has been written: there is no window to be inside of.
-    let mut warning_rate_limiter = WarningRateLimiter::new();
-    assert!(warning_rate_limiter.is_due(Instant::now()));
-}
-
-#[test]
 fn a_bridged_connection_is_reported_ended_once_however_many_directions_get_there() {
     // Both directions end the connection and either may end first.
     let (router_events_sender, router_events_receiver) = mpsc::channel();
@@ -425,27 +384,6 @@ fn an_address_whose_window_is_exactly_over_starts_a_fresh_one() {
         ),
         PeerAddressAttemptDecision::Serve,
         "at exactly {RATE_WINDOW_DURATION:?} the window is over"
-    );
-}
-
-#[test]
-fn a_warning_written_exactly_one_window_ago_is_written_again() {
-    // The quiet spell ends at LOG_WINDOW_DURATION, not one moment after it.
-    let window_started_at = Instant::now();
-
-    let mut warning_within_window = WarningRateLimiter::new();
-    assert!(warning_within_window.is_due(window_started_at));
-    assert!(
-        !warning_within_window
-            .is_due(window_started_at + LOG_WINDOW_DURATION - Duration::from_millis(1)),
-        "one millisecond before the window ends the warning is still silent"
-    );
-
-    let mut warning_at_window_end = WarningRateLimiter::new();
-    assert!(warning_at_window_end.is_due(window_started_at));
-    assert!(
-        warning_at_window_end.is_due(window_started_at + LOG_WINDOW_DURATION),
-        "at exactly {LOG_WINDOW_DURATION:?} the warning is written again"
     );
 }
 
@@ -1525,7 +1463,7 @@ mod bridge_round_trip {
     use koshi_ipc::event::SessionEvent;
     use koshi_ipc::protocol::{IpcResponse, IpcResult};
     use koshi_ipc::router::SessionSelector;
-    use koshi_ipc::transport::Listener;
+    use koshi_ipc::transport::{FrameReader, FrameWriter, Listener};
     use koshi_link::remote_client;
     use koshi_pty::backend::state::PtyBackend;
     use koshi_runtime::ipc_server::IpcServer;
@@ -1533,7 +1471,9 @@ mod bridge_round_trip {
     use koshi_runtime::runtime::pty_inbox::InboxSink;
     use koshi_runtime::server::Server;
     use koshi_test_support::fake_pty::FakePtyBackend;
-    use koshi_test_support::fixtures::build_test_runtime_directory;
+    use koshi_test_support::fixtures::{
+        build_test_runtime_directory, send_committed_request, send_committed_request_through_halves,
+    };
     use koshi_test_support::throttle::pump_throttled;
     use tempfile::TempDir;
 
@@ -1975,6 +1915,37 @@ mod bridge_round_trip {
         relay_address
     }
 
+    /// Send the session Attach numbered 2, at [`TEST_VIEWPORT_SIZE`] and
+    /// naming `link_timeout_ms`, through `writer` with
+    /// [`send_committed_request_through_halves`]. The Attach answer is the
+    /// next frame `reader` reads.
+    ///
+    /// # Panics
+    ///
+    /// Panics as [`send_committed_request_through_halves`] states.
+    fn send_committed_attach(
+        reader: &mut FrameReader,
+        writer: &mut FrameWriter,
+        link_timeout_ms: Option<u32>,
+    ) {
+        send_committed_request_through_halves(
+            reader,
+            writer,
+            IpcRequest {
+                request_id: 2,
+                request_kind: IpcRequestKind::Attach {
+                    viewport_size: TEST_VIEWPORT_SIZE,
+                    resume_client_id: None,
+                    resume_token: None,
+                    pane_area: None,
+                    graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
+                    cell_size: None,
+                    link_timeout_ms,
+                },
+            },
+        );
+    }
+
     /// Submit `command` to the session over its own control connection, the
     /// way `koshi <verb>` does from outside every pane.
     fn submit_session_command(running_session: &RunningSession, command: Command) -> CommandResult {
@@ -2007,12 +1978,13 @@ mod bridge_round_trip {
             CommandSource::from_external_cli(Some(running_session.session_id), None),
             command,
         );
-        connection
-            .send(&IpcRequest {
+        send_committed_request(
+            &mut connection,
+            IpcRequest {
                 request_id: 2,
                 request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
-            })
-            .expect("the server reads the command");
+            },
+        );
         let command_response: IpcResponse =
             connection.recv().expect("the server answers the command");
         match command_response.answer_result {
@@ -2048,20 +2020,7 @@ mod bridge_round_trip {
             unexpected_response => panic!("the Hello was answered with {unexpected_response:?}"),
         }
 
-        writer
-            .send(&IpcRequest {
-                request_id: 2,
-                request_kind: IpcRequestKind::Attach {
-                    viewport_size: TEST_VIEWPORT_SIZE,
-                    resume_client_id: None,
-                    resume_token: None,
-                    pane_area: None,
-                    graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
-                    cell_size: None,
-                    link_timeout_ms: None,
-                },
-            })
-            .expect("the attach is written");
+        send_committed_attach(&mut reader, &mut writer, None);
         let attach_response: IpcResponse = reader.recv().expect("the session answers the attach");
         let IpcResult::Attached { .. } = attach_response.answer_result else {
             panic!(
@@ -2139,20 +2098,7 @@ mod bridge_round_trip {
             unexpected_response => panic!("the Hello was answered with {unexpected_response:?}"),
         }
 
-        writer
-            .send(&IpcRequest {
-                request_id: 2,
-                request_kind: IpcRequestKind::Attach {
-                    viewport_size: TEST_VIEWPORT_SIZE,
-                    resume_client_id: None,
-                    resume_token: None,
-                    pane_area: None,
-                    graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
-                    cell_size: None,
-                    link_timeout_ms: None,
-                },
-            })
-            .expect("the attach is written");
+        send_committed_attach(&mut reader, &mut writer, None);
         let attach_response: IpcResponse = reader.recv().expect("the session answers the attach");
         let IpcResult::Attached { client_id, .. } = attach_response.answer_result else {
             panic!(
@@ -2358,21 +2304,8 @@ mod bridge_round_trip {
         let _hello_response: IpcResponse = reader.recv().expect("the session answers the Hello");
 
         std::thread::sleep(SHORT_LINK_TIMEOUT_DURATION + SILENCE_PAST_TIMEOUT_DURATION);
-        writer
-            .send(&IpcRequest {
-                request_id: 2,
-                request_kind: IpcRequestKind::Attach {
-                    viewport_size: TEST_VIEWPORT_SIZE,
-                    resume_client_id: None,
-                    resume_token: None,
-                    pane_area: None,
-                    graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
-                    cell_size: None,
-                    link_timeout_ms: Some(MIN_LINK_TIMEOUT_MS),
-                },
-            })
-            .expect("the attach is written");
         reader.set_deadline(Some(Instant::now() + BRIDGE_END_TIMEOUT_DURATION));
+        send_committed_attach(&mut reader, &mut writer, Some(MIN_LINK_TIMEOUT_MS));
 
         let attach_response: IpcResponse = reader.recv().expect("the session answers the attach");
         assert_eq!(attach_response.request_id, Some(2));
@@ -2533,20 +2466,7 @@ mod bridge_round_trip {
         )
         .expect("the attach request is written");
         let _hello_response: IpcResponse = reader.recv().expect("the session answers the Hello");
-        writer
-            .send(&IpcRequest {
-                request_id: 2,
-                request_kind: IpcRequestKind::Attach {
-                    viewport_size: TEST_VIEWPORT_SIZE,
-                    resume_client_id: None,
-                    resume_token: None,
-                    pane_area: None,
-                    graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
-                    cell_size: None,
-                    link_timeout_ms: Some(MIN_LINK_TIMEOUT_MS),
-                },
-            })
-            .expect("the attach is written");
+        send_committed_attach(&mut reader, &mut writer, Some(MIN_LINK_TIMEOUT_MS));
         let attach_response: IpcResponse = reader.recv().expect("the session answers the attach");
         let IpcResult::Attached { .. } = attach_response.answer_result else {
             panic!(

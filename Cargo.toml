@@ -90,4 +90,4 @@ windows-sys = "0.61.2"
 # zip reads deflate-compressed archives only: its default codec backends
 # (bzip2, ppmd, lzma, zstd, xz) are off, and `deflate-flate2` decodes through
 # the flate2 crate that the tar.gz reader uses.
-zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.0.4", default-features = false, features = ["deflate-flate2"] }

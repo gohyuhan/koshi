@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use koshi_core::process::ShellKind;
 
 use super::*;
+use crate::protocol::tests::build_fixed_test_uuid;
 use crate::protocol::IpcErrorCode;
 
 #[cfg(unix)]
@@ -31,11 +32,6 @@ fn a_working_directory_that_is_not_valid_utf8_has_no_encoding_on_this_wire() {
         serde_json::to_string(&SupervisorResult::Cwd(None)).expect("no directory encodes"),
         r#"{"Cwd":null}"#
     );
-}
-
-/// The one UUID every fixed id below uses.
-fn build_fixed_test_uuid() -> uuid::Uuid {
-    uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")
 }
 
 /// The pane every fixed request below names.

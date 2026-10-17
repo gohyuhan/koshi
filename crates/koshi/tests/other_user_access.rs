@@ -16,33 +16,24 @@
 //! can take one on. Those tests print why they were skipped and return when
 //! this process is not root; every other test runs everywhere.
 //!
-//! Windows takes the same switch through a different shape: a named pipe has no
-//! filesystem location, so an empty marker file in the shared directory is what
-//! names a session other local users may reach, and `%ProgramData%` is where
-//! that directory sits. The Windows tests cover the marker, a connection from
-//! this user, and `koshi list-sessions` over the shared directory. Each session
-//! server takes the runtime directory and the switch on the command line, and
-//! `ProgramData` names the folder that holds the shared directory. `APPDATA`
-//! and `LOCALAPPDATA` point inside the test home, which holds the `koshi.kdl`
-//! the listing reads.
+//! On Windows no other user reaches a session. `koshi --headless
+//! --allow-other-users` is refused, and the switch in `koshi.kdl` has no
+//! effect. The Windows tests pin the refusal, a session server given the switch
+//! both ways that creates no shared directory and still serves this user, and
+//! `koshi list-sessions` with the switch on. `APPDATA` and `LOCALAPPDATA` point
+//! inside the test home, which holds the `koshi.kdl` each command reads.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 #[cfg(windows)]
 use std::process::Stdio;
-#[cfg(windows)]
-use std::time::Instant;
 
 use koshi_core::command::CliExitCode;
-#[cfg(windows)]
-use koshi_core::command::{Command, CommandEnvelope, CommandSource};
-#[cfg(windows)]
-use koshi_core::ids::CommandId;
 use koshi_core::ids::SessionId;
-#[cfg(windows)]
-use koshi_ipc::endpoint::resolve_advertisement_marker_path;
 use koshi_ipc::endpoint::EndpointFile;
 #[cfg(windows)]
-use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult, PROTOCOL_VERSION};
+use koshi_ipc::protocol::{IpcResponse, IpcResult, ProcessImageId, PROTOCOL_VERSION};
 #[cfg(windows)]
 use koshi_ipc::transport::Connection;
 #[cfg(unix)]
@@ -52,6 +43,8 @@ mod common;
 
 #[cfg(windows)]
 use common::session_connection::build_hello_request;
+#[cfg(windows)]
+use common::SessionProcess;
 #[cfg(unix)]
 use common::{
     build_koshi_command_at, copy_koshi_binary, resolve_config_directory_under_home,
@@ -61,8 +54,6 @@ use common::{
     build_koshi_command_under_home, build_short_test_directory,
     resolve_runtime_directory_under_home, write_test_config, SESSION_SERVER_NAME,
 };
-#[cfg(windows)]
-use common::{SessionProcess, POLL_INTERVAL_DURATION, WAIT_DURATION};
 use koshi_test_support::fixtures::start_program_process;
 
 /// Run `process_command` to its end and hand back its exit status and both output
@@ -88,16 +79,19 @@ fn render_single_session_listing(session_id: SessionId) -> String {
     )
 }
 
-// --- Unix ---
-
-/// A `koshi.kdl` with the switch on, sharing sessions through `shared_directory_base`.
-#[cfg(unix)]
+/// A `koshi.kdl` with the switch on, naming `shared_directory_base` as its
+/// shared directory. Each `\` in the path is written as `\\`.
 fn build_switched_on_config(shared_directory_base: &Path) -> String {
     format!(
         "version 1\nallow-other-users #true\nshared-sessions-dir \"{}\"\n",
-        shared_directory_base.display()
+        shared_directory_base
+            .display()
+            .to_string()
+            .replace('\\', "\\\\")
     )
 }
+
+// --- Unix ---
 
 /// Let every local user reach the `koshi.kdl` written under `home_directory`: every
 /// directory from the config directory up to `home_directory` opens to `0755`, and the
@@ -498,18 +492,11 @@ fn the_koshi_binary_carries_no_setuid_or_setgid_bit() {
 
 // --- Windows ---
 
-/// The machine-wide shared directory a server started with `program_data`
-/// advertises in.
-#[cfg(windows)]
-fn resolve_shared_directory_under_program_data(program_data: &Path) -> PathBuf {
-    program_data.join("koshi")
-}
-
 /// Start one session's server serving `runtime_directory`, with its files under
-/// `home_directory`, the switch forced on, and `%ProgramData%` pointed at
-/// `program_data`.
+/// `home_directory`, `--allow-other-users` on its command line, and
+/// `%ProgramData%` pointed at `program_data`.
 #[cfg(windows)]
-fn start_shared_session_server(
+fn start_session_server_with_the_switch_forced(
     home_directory: &Path,
     runtime_directory: &Path,
     program_data: &Path,
@@ -530,33 +517,10 @@ fn start_shared_session_server(
     SessionProcess { child_process }
 }
 
-/// Poll every [`POLL_INTERVAL_DURATION`] for the marker naming `session_id`
-/// among the sessions other local users may reach, and hand back its path. The
-/// server writes it after the endpoint file.
-///
-/// # Panics
-/// When no marker exists within [`WAIT_DURATION`].
-#[cfg(windows)]
-fn wait_for_session_advertisement_marker(
-    shared_directory: &Path,
-    session_id: SessionId,
-) -> PathBuf {
-    let marker_path = resolve_advertisement_marker_path(shared_directory, session_id);
-    let wait_deadline = Instant::now() + WAIT_DURATION;
-    loop {
-        if marker_path.exists() {
-            return marker_path;
-        }
-        assert!(
-            Instant::now() < wait_deadline,
-            "no session server advertised {session_id} in the shared directory"
-        );
-        std::thread::sleep(POLL_INTERVAL_DURATION);
-    }
-}
-
 /// Open a connection to the session at `endpoint_file` and complete the Hello,
-/// presenting the token the endpoint file carries.
+/// presenting the token the endpoint file carries. The Hello answer names
+/// [`PROTOCOL_VERSION`], this build, and the session server's own process
+/// image, which is not this test process's image.
 #[cfg(windows)]
 fn open_windows_session_connection(endpoint_file: &EndpointFile) -> Connection {
     let mut connection = Connection::connect(&endpoint_file.socket_address)
@@ -566,66 +530,68 @@ fn open_windows_session_connection(endpoint_file: &EndpointFile) -> Connection {
         .expect("the server reads the Hello");
     let ipc_response: IpcResponse = connection.recv().expect("the server answers the Hello");
     assert_eq!(ipc_response.request_id, Some(1));
-    assert_eq!(
-        ipc_response.answer_result,
+    match ipc_response.answer_result {
         IpcResult::Hello {
-            protocol_version: PROTOCOL_VERSION,
-            build_version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version,
+            build_version,
+            process_image_id,
+        } => {
+            assert_eq!(protocol_version, PROTOCOL_VERSION);
+            assert_eq!(build_version, env!("CARGO_PKG_VERSION"));
+            assert_ne!(process_image_id, ProcessImageId::get_own());
         }
-    );
+        unexpected_result => panic!("the Hello was answered with {unexpected_result:?}"),
+    }
     connection
 }
 
-/// The marker naming a session other local users may reach lives for as long as
-/// the session serves, and goes when the session quits.
+/// `koshi --headless --allow-other-users` is refused before any session is
+/// created: exit code 2, the reason on the error stream, and no endpoint file
+/// in the runtime directory.
 #[cfg(windows)]
 #[test]
-fn the_shared_marker_names_the_session_while_it_serves_and_goes_when_it_quits() {
+fn the_allow_other_users_flag_is_refused_on_windows() {
     let test_home_directory = build_short_test_directory();
-    let runtime_directory = build_short_test_directory();
-    let program_data = build_short_test_directory();
-    let shared_directory = resolve_shared_directory_under_program_data(program_data.path());
-    let session_id = SessionId::new();
-    let mut session_process = start_shared_session_server(
-        test_home_directory.path(),
-        runtime_directory.path(),
-        program_data.path(),
-        session_id,
-    );
-    let endpoint_file =
-        session_process.wait_for_session_endpoint(runtime_directory.path(), session_id);
-    let marker_path = wait_for_session_advertisement_marker(&shared_directory, session_id);
 
-    let mut connection = open_windows_session_connection(&endpoint_file);
-    let command_envelope = CommandEnvelope::from_parts(
-        CommandId::new(),
-        CommandSource::from_external_cli(Some(session_id), None),
-        Command::Quit,
+    let refused_output = run_koshi_command(
+        build_koshi_command_under_home(test_home_directory.path())
+            .args(["--headless", "--allow-other-users"]),
     );
-    connection
-        .send(&IpcRequest {
-            request_id: 2,
-            request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
-        })
-        .expect("the server reads the quit");
 
+    assert_eq!(
+        String::from_utf8_lossy(&refused_output.stderr).trim_end(),
+        "koshi: invalid arguments: --allow-other-users works on macOS and Linux only; \
+         on Windows only you reach your sessions"
+    );
+    assert_eq!(String::from_utf8_lossy(&refused_output.stdout), "");
+    assert_eq!(
+        refused_output.status.code(),
+        Some(CliExitCode::UsageOrConfig.get_exit_code())
+    );
     assert!(
-        session_process.wait_for_session_server_exit(),
-        "the session server outlived the quit"
+        !resolve_runtime_directory_under_home(test_home_directory.path()).exists(),
+        "a refused flag creates no runtime directory"
     );
-    assert!(!marker_path.exists(), "the marker outlived the session");
 }
 
-/// The user who started the session still reaches it once the switch is on: the
-/// same pipe, the same token, the same Hello.
+/// A session server started with `--allow-other-users`, and with the switch
+/// and `shared-sessions-dir` in its `koshi.kdl`, creates neither the shared
+/// directory `koshi.kdl` names nor `koshi` under `%ProgramData%`, and serves
+/// this user over the pipe its endpoint file names.
 #[cfg(windows)]
 #[test]
-fn a_client_of_this_user_completes_the_hello_on_a_shared_session() {
+fn a_session_server_given_the_switch_creates_no_shared_directory_and_serves_this_user() {
     let test_home_directory = build_short_test_directory();
+    let shared_directory_base = build_short_test_directory();
+    let configured_shared_directory = shared_directory_base.path().join("shared");
+    write_test_config(
+        test_home_directory.path(),
+        &build_switched_on_config(&configured_shared_directory),
+    );
     let runtime_directory = build_short_test_directory();
     let program_data = build_short_test_directory();
     let session_id = SessionId::new();
-    let mut session_process = start_shared_session_server(
+    let mut session_process = start_session_server_with_the_switch_forced(
         test_home_directory.path(),
         runtime_directory.path(),
         program_data.path(),
@@ -633,23 +599,25 @@ fn a_client_of_this_user_completes_the_hello_on_a_shared_session() {
     );
     let endpoint_file =
         session_process.wait_for_session_endpoint(runtime_directory.path(), session_id);
-    wait_for_session_advertisement_marker(
-        &resolve_shared_directory_under_program_data(program_data.path()),
-        session_id,
-    );
 
     // The Hello is checked inside `open_windows_session_connection`, which fails the test on any
     // other answer.
     let _connection = open_windows_session_connection(&endpoint_file);
+    assert!(
+        !configured_shared_directory.exists(),
+        "the shared directory koshi.kdl names was created"
+    );
+    assert!(
+        !program_data.path().join("koshi").exists(),
+        "koshi under %ProgramData% was created"
+    );
 }
 
-/// Turning the switch on leaves the single-user flow alone: the walk over the
-/// shared directory passes over this user's own session, which the endpoint
-/// file already names, so `koshi list-sessions` lists the session once and
-/// prints nothing on its error stream.
+/// With the switch on in `koshi.kdl`, `koshi list-sessions` lists this user's
+/// own session once and prints nothing on its error stream.
 #[cfg(windows)]
 #[test]
-fn this_users_own_session_is_found_once_over_the_shared_directory() {
+fn this_users_own_session_is_listed_once_with_the_switch_on() {
     let test_home_directory = build_short_test_directory();
     write_test_config(
         test_home_directory.path(),
@@ -658,23 +626,14 @@ fn this_users_own_session_is_found_once_over_the_shared_directory() {
     let runtime_directory = resolve_runtime_directory_under_home(test_home_directory.path());
     std::fs::create_dir_all(&runtime_directory).expect("a runtime directory under the test home");
     let program_data = build_short_test_directory();
-    let shared_directory = resolve_shared_directory_under_program_data(program_data.path());
     let session_id = SessionId::new();
-    let mut session_process = start_shared_session_server(
+    let mut session_process = start_session_server_with_the_switch_forced(
         test_home_directory.path(),
         &runtime_directory,
         program_data.path(),
         session_id,
     );
     session_process.wait_for_session_endpoint(&runtime_directory, session_id);
-    wait_for_session_advertisement_marker(&shared_directory, session_id);
-
-    // The marker is in the shared directory, and the walk over it lists
-    // nothing: this user's own session is never asked for the empty token.
-    assert_eq!(
-        koshi_link::ipc_client::list_foreign_sessions(&shared_directory, &runtime_directory),
-        koshi_link::ipc_client::ForeignSessionListing::default()
-    );
 
     let list_output = run_koshi_command(
         build_koshi_command_under_home(test_home_directory.path())

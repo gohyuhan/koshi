@@ -30,13 +30,15 @@ use koshi_ipc::endpoint::EndpointFile;
 #[cfg(unix)]
 use koshi_ipc::event::SessionEvent;
 #[cfg(unix)]
-use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
+use koshi_ipc::protocol::{IpcRequestKind, IpcResult};
 #[cfg(unix)]
 use koshi_ipc::router::resolve_router_endpoint_path;
 use koshi_test_support::fixtures::build_test_runtime_directory;
 
 mod common;
 
+#[cfg(unix)]
+use common::session_connection::send_session_request;
 use common::session_connection::{
     attach_client_on_connection, read_session_ending, wait_for_session_connection,
 };
@@ -168,16 +170,10 @@ fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
     )
     .expect("the session advertises a socket");
     let (mut control_connection, _) = wait_for_session_connection(&runtime_directory, session_id);
-    control_connection
-        .send(&IpcRequest {
-            request_id: 3,
-            request_kind: IpcRequestKind::Restart,
-        })
-        .expect("the server reads the restart");
-    let ipc_response: IpcResponse = control_connection
-        .recv()
-        .expect("the server answers the restart");
-    assert_eq!(ipc_response.answer_result, IpcResult::Restarting);
+    assert_eq!(
+        send_session_request(&mut control_connection, 3, IpcRequestKind::Restart),
+        IpcResult::Restarting
+    );
     drop(control_connection);
 
     // Every image binds a socket under a fresh token, so a token other than the

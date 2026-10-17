@@ -9,7 +9,8 @@ use koshi_core::discovery::{SessionDiscovery, SessionOverview};
 use koshi_core::event::{Event, QuitCause, RejectReason};
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::protocol::{
-    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, PROTOCOL_VERSION,
+    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, ProcessImageId,
+    PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::{Connection, Listener};
 use uuid::Uuid;
@@ -21,6 +22,7 @@ fn build_hello_accepted() -> IpcResult {
     IpcResult::Hello {
         protocol_version: PROTOCOL_VERSION,
         build_version: env!("CARGO_PKG_VERSION").to_string(),
+        process_image_id: ProcessImageId::get_own(),
     }
 }
 
@@ -80,6 +82,43 @@ fn send_ipc_reply(connection: &mut Connection, request_id: u64, ipc_result: IpcR
         .expect("send scripted reply");
 }
 
+/// Answer the Hello numbered `hello_request_id` on `kill_connection`, answer
+/// `kill_prepare_request` with `Prepared`, read the `Commit` that follows,
+/// and answer it with a quit for [`QuitCause::Requested`].
+///
+/// # Panics
+/// When `kill_prepare_request` is not a `Prepare` of a submitted
+/// [`Command::Quit`], or the next request is not a `Commit`.
+fn answer_prepared_quit(
+    kill_connection: &mut Connection,
+    hello_request_id: u64,
+    kill_prepare_request: IpcRequest,
+) {
+    let IpcRequestKind::Prepare(prepared_request_kind) = kill_prepare_request.request_kind else {
+        panic!("expected a Prepare after the Hello");
+    };
+    let IpcRequestKind::SubmitCommand(command_envelope) = *prepared_request_kind else {
+        panic!("expected a prepared submitted command");
+    };
+    assert_eq!(command_envelope.command, Command::Quit);
+    send_ipc_reply(kill_connection, hello_request_id, build_hello_accepted());
+    send_ipc_reply(
+        kill_connection,
+        kill_prepare_request.request_id,
+        IpcResult::Prepared,
+    );
+    let kill_commit_request: IpcRequest = kill_connection.recv().expect("read kill commit");
+    assert_eq!(kill_commit_request.request_kind, IpcRequestKind::Commit);
+    send_ipc_reply(
+        kill_connection,
+        kill_commit_request.request_id,
+        IpcResult::CommandResult(CommandResult::Ok {
+            command_id: command_envelope.command_id,
+            emitted_events: vec![Event::Quit(QuitCause::Requested)],
+        }),
+    );
+}
+
 fn serve_kill_session(
     runtime_directory: &Path,
     session_overview: SessionOverview,
@@ -123,31 +162,18 @@ fn serve_kill_session(
 
         let mut kill_connection = listener.accept().expect("accept kill command");
         let kill_hello_request: IpcRequest = kill_connection.recv().expect("read kill hello");
-        let kill_command_request: IpcRequest = kill_connection.recv().expect("read kill request");
-        let IpcRequestKind::SubmitCommand(command_envelope) = kill_command_request.request_kind
-        else {
-            panic!("expected a submitted command");
-        };
-        assert_eq!(command_envelope.command, Command::Quit);
-        send_ipc_reply(
+        let kill_prepare_request: IpcRequest = kill_connection.recv().expect("read kill prepare");
+        answer_prepared_quit(
             &mut kill_connection,
             kill_hello_request.request_id,
-            build_hello_accepted(),
-        );
-        send_ipc_reply(
-            &mut kill_connection,
-            kill_command_request.request_id,
-            IpcResult::CommandResult(CommandResult::Ok {
-                command_id: command_envelope.command_id,
-                emitted_events: vec![Event::Quit(QuitCause::Requested)],
-            }),
+            kill_prepare_request,
         );
     })
 }
 
 /// A stand-in session for `session_id` that serves one connection: a Hello,
-/// then a submitted [`Command::Quit`], answered with
-/// [`QuitCause::Requested`]. Any other first request after the Hello, such as
+/// then a `Prepare` of a submitted [`Command::Quit`] and its `Commit`,
+/// answered with [`QuitCause::Requested`]. Any other first request after the Hello, such as
 /// a discovery request, panics the thread, and joining it raises that panic.
 fn serve_kill_session_without_discovery(
     runtime_directory: &Path,
@@ -170,28 +196,15 @@ fn serve_kill_session_without_discovery(
     std::thread::spawn(move || {
         let mut kill_connection = listener.accept().expect("accept kill command");
         let kill_hello_request: IpcRequest = kill_connection.recv().expect("read kill hello");
-        let kill_command_request: IpcRequest = kill_connection.recv().expect("read kill request");
+        let kill_prepare_request: IpcRequest = kill_connection.recv().expect("read kill prepare");
         assert_eq!(
             kill_hello_request.request_kind,
             IpcRequestKind::build_hello_request(connection_token.clone())
         );
-        let IpcRequestKind::SubmitCommand(command_envelope) = kill_command_request.request_kind
-        else {
-            panic!("expected a submitted command as the first request");
-        };
-        assert_eq!(command_envelope.command, Command::Quit);
-        send_ipc_reply(
+        answer_prepared_quit(
             &mut kill_connection,
             kill_hello_request.request_id,
-            build_hello_accepted(),
-        );
-        send_ipc_reply(
-            &mut kill_connection,
-            kill_command_request.request_id,
-            IpcResult::CommandResult(CommandResult::Ok {
-                command_id: command_envelope.command_id,
-                emitted_events: vec![Event::Quit(QuitCause::Requested)],
-            }),
+            kill_prepare_request,
         );
     })
 }

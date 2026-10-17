@@ -9,6 +9,12 @@
 //! with a reply channel; the dispatcher's answer comes back on it and leaves as
 //! the connection's response frame.
 //!
+//! A `SubmitCommand`, an `Attach`, a `ClipboardCopy` and a `Restart` change
+//! the session, and a control connection runs one only after a `Prepare`
+//! hands it over and a `Commit` follows. The connection holds the request in
+//! between, and drops it when the connection ends first. A caller that gives
+//! up before it writes the `Commit` leaves nothing behind.
+//!
 //! A `SubmitCommand`'s [`CommandSource`] is set here, from the connection the
 //! request arrived on, over whatever source the peer wrote: a control
 //! connection carries a CLI source, and an attached client's connection
@@ -20,14 +26,15 @@
 //! carries that client's key presses, resizes, pasted text and commands to the
 //! dispatcher and writes nothing back. The peer going away detaches the client.
 //!
-//! Passing [`OtherUsers`] to [`IpcServer::start`] moves the control socket to
-//! the machine-wide shared directory and widens it: the other local users of
-//! this machine can reach it. The endpoint file keeps its private place and
-//! its `0600` mode either way. Every accepted connection is gated by the user
-//! the OS reports for it: the user who started the session is always served,
-//! and another local user is served only while `allow-other-users` is on. The
-//! setting is read again for each of that user's requests. Turning it off
-//! closes their connections.
+//! On Linux and macOS, passing [`OtherUsers`] to [`IpcServer::start`] moves the
+//! control socket to the machine-wide shared directory and widens it: the
+//! other local users of this machine can reach it. On Windows [`OtherUsers`]
+//! has no value, and only the user who started a session reaches it. The
+//! endpoint file keeps its private place and its `0600` mode either way. Every
+//! accepted connection is gated by the user the OS reports for it: the user
+//! who started the session is always served, and another local user is served
+//! only while `allow-other-users` is on. The setting is read again for each of
+//! that user's requests. Turning it off closes their connections.
 //!
 //! The decisions every koshi server makes the same way — a request kind this
 //! build does not have, a malformed-but-aligned frame, an oversize frame, and
@@ -53,7 +60,7 @@
 //! another request. The dispatcher calls it before it stops draining the inbox.
 //!
 //! [`IpcServer::shutdown`] stops accepting, joins the accept loop, and
-//! removes the endpoint file, the socket and any shared marker.
+//! removes the endpoint file and the socket.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -67,8 +74,7 @@ use koshi_core::command::{CommandEnvelope, CommandSource};
 use koshi_core::constant::{compute_heartbeat_interval, MIN_LINK_TIMEOUT_MS};
 use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_ipc::endpoint::{
-    compute_socket_address, delete_advertisement_marker, delete_socket_file,
-    resolve_advertisement_marker_path, write_advertisement_marker, EndpointFile, ServerProgramFile,
+    compute_socket_address, delete_socket_file, EndpointFile, ServerProgramFile,
 };
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
@@ -82,11 +88,12 @@ use koshi_ipc::protocol::{
     IpcRequestKind, IpcResponse, IpcResult, SessionPlane,
 };
 use koshi_ipc::transport::{self, Connection, FrameWriter, Listener, ReadCloser};
-use koshi_ipc::validate::{
-    reclaim_stale_socket, validate_shared_socket_address, validate_socket_address,
-};
+#[cfg(unix)]
+use koshi_ipc::validate::validate_shared_socket_address;
+use koshi_ipc::validate::{reclaim_stale_socket, validate_socket_address};
 use koshi_ipc::wire::MaybeKnown;
 use koshi_observability::logging::recent_events;
+use koshi_observability::repeated_warning::WarningRateLimiter;
 use koshi_renderer::snapshot::{
     Delivery, ImagePlacementSnapshot, PlacementSnapshot, RenderSnapshot,
 };
@@ -109,6 +116,11 @@ const ACCEPT_RETRY_DELAY_DURATION: Duration = Duration::from_millis(100);
 /// answer.
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The sentence that refuses a clipboard copy, or a part of one, on a
+/// connection from another machine or from another user of this machine.
+const CLIPBOARD_COPY_ORIGIN_REFUSAL: &str =
+    "a pane clipboard copy must come from this machine and this user";
+
 /// Reads the `allow-other-users` setting from the configuration again and
 /// reports whether it is on. Called for each connection from another local
 /// user and for each request that user sends.
@@ -118,10 +130,10 @@ pub type OtherUsersSetting = Arc<dyn Fn() -> bool + Send + Sync>;
 /// machine.
 ///
 /// Only the control socket moves: it binds in this user's directory under the
-/// machine-wide shared directory, carrying mode `0666` on Unix and a security
-/// descriptor granting Authenticated Users read and write on Windows. The
-/// endpoint file stays in the private runtime directory at mode `0600`: the
-/// token it carries stays readable only by the user who started the session.
+/// machine-wide shared directory, at mode `0666`. The endpoint file stays in
+/// the private runtime directory at mode `0600`: the token it carries stays
+/// readable only by the user who started the session.
+#[cfg(unix)]
 pub struct OtherUsers {
     /// The machine-wide directory koshi shares between local users, from
     /// `koshi_paths::resolve_shared_sessions_directory`. This user's directory inside it
@@ -130,6 +142,11 @@ pub struct OtherUsers {
     /// The live read of the `allow-other-users` setting.
     pub is_enabled: OtherUsersSetting,
 }
+
+/// On Windows no value exists, and [`IpcServer::start`] always takes `None`:
+/// only the user who started a session reaches it.
+#[cfg(windows)]
+pub enum OtherUsers {}
 
 /// What the control socket takes in: every connection being served, how many of
 /// them carry an attached client, and whether what a peer sends still reaches
@@ -331,10 +348,6 @@ pub struct IpcServer {
     /// session runs. `None` for a session served with no executable watch,
     /// which writes no program file.
     program_file_path: Option<PathBuf>,
-    /// The empty marker naming this session among those other local users may
-    /// reach, written on Windows where a pipe has no filesystem entry. `None`
-    /// on Unix, and `None` for a session only its own user may reach.
-    shared_socket_marker_path: Option<PathBuf>,
     /// Set by [`shutdown`](Self::shutdown); the accept loop exits when it
     /// observes the flag.
     is_shutting_down: Arc<AtomicBool>,
@@ -360,13 +373,11 @@ impl IpcServer {
     /// and leaves nothing behind.
     ///
     /// `other_users` `None` binds the socket inside `runtime_directory`, where only
-    /// the user who started the session can reach it. `Some` binds it in this
-    /// user's directory under the machine-wide shared directory instead and
-    /// opens it to the other local users: mode `0666` on Unix, a pipe carrying
-    /// the Authenticated Users access of [`Listener::bind_shared`] on Windows,
-    /// where the marker naming the pipe is written as well. The endpoint file
-    /// is written to the same private path at the same `0600` mode either way;
-    /// only the address it carries differs.
+    /// the user who started the session can reach it. `Some`, on Linux and
+    /// macOS, binds it in this user's directory under the machine-wide shared
+    /// directory instead and opens it to the other local users at mode `0666`.
+    /// The endpoint file is written to the same private path at the same `0600`
+    /// mode either way; only the address it carries differs.
     ///
     /// `executable_watch` `Some` checks the program file the session started
     /// from on each connection the socket takes, as
@@ -391,32 +402,25 @@ impl IpcServer {
                 ),
             }
         })?;
-        let (socket_address, shared_socket_marker_path) = match &other_users {
+        let (socket_address, allow_other_users_setting) = match other_users {
             None => {
                 let socket_address = compute_socket_address(runtime_directory, session_id);
                 validate_socket_address(&socket_address, runtime_directory)?;
                 (socket_address, None)
             }
+            #[cfg(unix)]
             Some(other_users) => {
                 let shared_user_directory =
                     ensure_shared_directories(&other_users.shared_directory)?;
                 let socket_address = compute_socket_address(&shared_user_directory, session_id);
                 validate_shared_socket_address(&socket_address, &shared_user_directory)?;
-                // On Windows, a marker file names the session listening on the
-                // pipe. A pipe has no filesystem entry.
-                let shared_socket_marker_path = cfg!(windows)
-                    .then(|| resolve_advertisement_marker_path(&shared_user_directory, session_id));
-                (socket_address, shared_socket_marker_path)
+                (socket_address, Some(other_users.is_enabled))
             }
         };
         reclaim_stale_socket(&socket_address)?;
-        let listener = if other_users.is_some() {
-            Listener::bind_shared(&socket_address)?
-        } else {
-            Listener::bind(&socket_address)?
-        };
+        let listener = Listener::bind(&socket_address)?;
         #[cfg(unix)]
-        if other_users.is_some() {
+        if allow_other_users_setting.is_some() {
             if let Err(socket_error) = widen_socket(&socket_address) {
                 drop(listener);
                 delete_socket_file(&socket_address);
@@ -434,18 +438,13 @@ impl IpcServer {
         let program_file_path = executable_watch.as_ref().map(|_| {
             ServerProgramFile::resolve_session_program_file_path(runtime_directory, session_id)
         });
-        let advertisement_result = endpoint_file
-            .write_to_path(&endpoint_path)
-            .and_then(|()| match (&executable_watch, &program_file_path) {
-                (Some(executable_watch), Some(program_file_path)) => executable_watch
-                    .build_server_program_file()
-                    .write_to_path(program_file_path),
-                _ => Ok(()),
-            })
-            .and_then(|()| match &shared_socket_marker_path {
-                None => Ok(()),
-                Some(shared_socket_marker_path) => {
-                    write_advertisement_marker(shared_socket_marker_path)
+        let advertisement_result =
+            endpoint_file.write_to_path(&endpoint_path).and_then(|()| {
+                match (&executable_watch, &program_file_path) {
+                    (Some(executable_watch), Some(program_file_path)) => executable_watch
+                        .build_server_program_file()
+                        .write_to_path(program_file_path),
+                    _ => Ok(()),
                 }
             });
         if let Err(advertisement_error) = advertisement_result {
@@ -461,7 +460,6 @@ impl IpcServer {
             return Err(advertisement_error);
         }
 
-        let allow_other_users_setting = other_users.map(|other_users| other_users.is_enabled);
         let is_shutting_down = Arc::new(AtomicBool::new(false));
         let accept_shutdown_flag = Arc::clone(&is_shutting_down);
         let connection_intake = Arc::new(Intake::default());
@@ -484,7 +482,6 @@ impl IpcServer {
             socket_address,
             endpoint_path,
             program_file_path,
-            shared_socket_marker_path,
             is_shutting_down,
             connection_token,
             connection_intake,
@@ -552,8 +549,8 @@ impl IpcServer {
     }
 
     /// Stop serving: no further connection is accepted, the accept loop is
-    /// joined, and the program file, the endpoint file, the socket and any
-    /// shared marker are removed, in that order. Connections already being
+    /// joined, and the program file, the endpoint file and the socket are
+    /// removed, in that order. Connections already being
     /// served run out on their own threads; with the dispatcher draining, their
     /// in-flight requests end in a closed connection rather than a mutation.
     ///
@@ -584,9 +581,6 @@ impl IpcServer {
             let _ = std::fs::remove_file(program_file_path);
         }
         let _ = std::fs::remove_file(&self.endpoint_path);
-        if let Some(shared_socket_marker_path) = &self.shared_socket_marker_path {
-            delete_advertisement_marker(shared_socket_marker_path);
-        }
         delete_socket_file(&self.socket_address);
     }
 }
@@ -594,6 +588,7 @@ impl IpcServer {
 /// Create the machine-wide shared directory and this user's directory inside
 /// it, and hand back this user's directory: where a session other local users
 /// may reach binds its control socket.
+#[cfg(unix)]
 fn ensure_shared_directories(shared_directory: &Path) -> Result<PathBuf, IpcError> {
     koshi_paths::ensure_shared_base(shared_directory).map_err(|directory_error| {
         IpcError::Transport {
@@ -614,8 +609,7 @@ fn ensure_shared_directories(shared_directory: &Path) -> Result<PathBuf, IpcErro
 }
 
 /// Set the socket file at `socket_address` to mode `0666`: every local user of
-/// this machine may connect to it. Unix only: on Windows the address is a pipe
-/// name with no filesystem entry.
+/// this machine may connect to it.
 #[cfg(unix)]
 fn widen_socket(socket_address: &str) -> Result<(), IpcError> {
     use std::os::unix::fs::PermissionsExt;
@@ -636,8 +630,9 @@ impl Drop for IpcServer {
 }
 
 /// Accept connections until the shutdown flag is set, giving each its own
-/// serving thread. A failed accept pauses for [`ACCEPT_RETRY_DELAY_DURATION`]
-/// and retries.
+/// serving thread. A failed accept is logged at warn level at most once inside
+/// [`LOG_WINDOW_DURATION`](koshi_observability::repeated_warning::LOG_WINDOW_DURATION),
+/// pauses for [`ACCEPT_RETRY_DELAY_DURATION`] and retries.
 ///
 /// `allow_other_users_setting` is the live read of the `allow-other-users`
 /// setting, and is `None` for a session only its own user may reach. Each
@@ -665,10 +660,20 @@ fn run_accept_loop(
     connection_intake: &Arc<Intake>,
     executable_watch: Option<&Arc<ExecutableWatch>>,
 ) {
+    let mut accept_failure_warning = WarningRateLimiter::new();
     transport::accept_until_shutdown(
         listener,
         is_shutting_down,
         ACCEPT_RETRY_DELAY_DURATION,
+        |accept_error| {
+            if accept_failure_warning.record_warning_if_due(Instant::now()) {
+                tracing::warn!(
+                    %accept_error,
+                    "the session could not accept a connection; \
+                     retrying every {ACCEPT_RETRY_DELAY_DURATION:?}"
+                );
+            }
+        },
         |connection| {
             // The OS reports which user opened the connection.
             let Ok(is_same_user) = connection.is_peer_same_user() else {
@@ -727,6 +732,35 @@ fn run_accept_loop(
 /// reply. `RecentEvents` is answered on this thread, from the process-wide log
 /// ring, and reaches no dispatcher.
 ///
+/// A `SubmitCommand`, an `Attach`, a `ClipboardCopy` and a `Restart` run only
+/// through `Prepare` and `Commit`:
+///
+/// 1. A `Prepare` carrying one of them asks the dispatcher for an answer
+///    first: [`RuntimeEvent::IpcClipboardCopyPrepare`] for a `ClipboardCopy`,
+///    and [`RuntimeEvent::IpcPrepare`] for the others. The connection then
+///    holds the request and answers `Prepared`. A `ClipboardCopy` that the
+///    dispatcher says no client would take is answered `ClipboardCopyRouted`
+///    with `should_run_clipboard_tool` set to `true`, the connection drops
+///    every byte it holds, and nothing is held.
+/// 2. A `Commit` runs the held request as this function runs that kind below,
+///    and its answer goes out under the `Commit`'s request id.
+/// 3. A `Ping` leaves the held request in place. Every other request this
+///    function serves drops it, and the clipboard bytes the connection holds,
+///    before it is served. A Hello, a frame that does not decode and a kind
+///    this build does not have are answered by [`plane::read_next_request`]
+///    and leave it in place.
+///
+/// Each refusal below is [`IpcErrorCode::RequestFailed`], and the connection
+/// keeps serving:
+///
+/// - one of the four kinds that arrives without `Prepare`, with the sentence
+///   `the session runs Restart requests only after Prepare and Commit` for a
+///   `Restart`;
+/// - a `Prepare` carrying any other kind, with `the session cannot prepare
+///   Discovery requests` for a `Discovery`;
+/// - a `Commit` with nothing held, with `no request waits for a Commit on this
+///   connection`.
+///
 /// A clipboard copy that a stand-in clipboard tool sends is held on this
 /// connection part by part:
 ///
@@ -737,15 +771,16 @@ fn run_accept_loop(
 ///    `ClipboardCopyPartTaken`. If no, the connection drops every byte it
 ///    holds and answers `ClipboardCopyRouted` with `should_run_clipboard_tool`
 ///    set to `true`.
-/// 2. A `ClipboardCopy` hands the dispatcher the held bytes, then its own
-///    bytes, as one copy
+/// 2. A committed `ClipboardCopy` hands the dispatcher the held bytes, then
+///    its own bytes, as one copy
 ///    ([`Server::route_clipboard_tool_copy`](crate::server::Server::route_clipboard_tool_copy)),
 ///    and answers `ClipboardCopyRouted` with the dispatcher's answer. The
 ///    connection then holds no bytes.
 ///
-/// Both kinds are refused with [`IpcErrorCode::RequestFailed`] on a connection
-/// from another machine or from another local user, and the connection keeps
-/// serving.
+/// A `ClipboardCopyPart`, a `Prepare` carrying a `ClipboardCopy`, and a
+/// committed `ClipboardCopy` are refused with [`IpcErrorCode::RequestFailed`]
+/// on a connection from another machine or from another local user. The
+/// connection drops every byte it holds, and keeps serving.
 ///
 /// A `SubmitCommand` on this connection has its source stamped by
 /// [`stamp_cli_command_source`] before it crosses to the dispatcher: this connection carries
@@ -795,6 +830,7 @@ fn serve_connection(
 ) {
     let mut handshake = Handshake::from_expected_token_and_peer(connection_token, peer);
     let mut held_copy_bytes: Vec<u8> = Vec::new();
+    let mut prepared_request_kind: Option<IpcRequestKind> = None;
     // The setting is read again for each request. `None` is a connection from
     // the user who started the session, whose admission cannot be withdrawn.
     let admission_setting = live_setting.clone();
@@ -828,11 +864,115 @@ fn serve_connection(
                 request_kind,
             } => (Some(request_id), request_kind),
         };
+        let (request_kind, is_committed) = match request_kind {
+            IpcRequestKind::Commit => match prepared_request_kind.take() {
+                Some(committed_request_kind) => (committed_request_kind, true),
+                None => (IpcRequestKind::Commit, false),
+            },
+            IpcRequestKind::Ping if prepared_request_kind.is_some() => continue,
+            request_kind => {
+                if prepared_request_kind.take().is_some() {
+                    held_copy_bytes = Vec::new();
+                }
+                (request_kind, false)
+            }
+        };
 
         let outgoing_response = match request_kind {
             IpcRequestKind::Hello { .. } => {
                 unreachable!("Hello is answered by the connection thread before dispatch")
             }
+            IpcRequestKind::Commit => build_request_failed_response(
+                request_id,
+                "no request waits for a Commit on this connection".to_owned(),
+            ),
+            uncommitted_request_kind @ (IpcRequestKind::SubmitCommand(_)
+            | IpcRequestKind::Attach { .. }
+            | IpcRequestKind::ClipboardCopy { .. }
+            | IpcRequestKind::Restart)
+                if !is_committed =>
+            {
+                build_request_failed_response(
+                    request_id,
+                    format!(
+                        "the session runs {} requests only after Prepare and Commit",
+                        uncommitted_request_kind.get_request_kind_name()
+                    ),
+                )
+            }
+            IpcRequestKind::Prepare(prepared_kind) => match *prepared_kind {
+                IpcRequestKind::ClipboardCopy { .. }
+                    if handshake.is_remote_caller() || live_setting.is_some() =>
+                {
+                    held_copy_bytes = Vec::new();
+                    build_request_failed_response(
+                        request_id,
+                        CLIPBOARD_COPY_ORIGIN_REFUSAL.to_owned(),
+                    )
+                }
+                IpcRequestKind::ClipboardCopy {
+                    pane_id,
+                    clipboard_targets,
+                    copied_bytes,
+                } => {
+                    let copied_byte_count = held_copy_bytes.len() + copied_bytes.len();
+                    let dispatch_response = request_dispatcher_response(
+                        &served_connection.intake,
+                        inbox_sender,
+                        |response_sender| RuntimeEvent::IpcClipboardCopyPrepare {
+                            pane_id,
+                            copied_byte_count,
+                            response_sender,
+                        },
+                    );
+                    // No dispatcher left: the connection closes with no answer.
+                    let Some(can_route_clipboard_tool_copy) = dispatch_response else {
+                        return;
+                    };
+                    let answer_result = if can_route_clipboard_tool_copy {
+                        prepared_request_kind = Some(IpcRequestKind::ClipboardCopy {
+                            pane_id,
+                            clipboard_targets,
+                            copied_bytes,
+                        });
+                        IpcResult::Prepared
+                    } else {
+                        held_copy_bytes = Vec::new();
+                        IpcResult::ClipboardCopyRouted {
+                            should_run_clipboard_tool: true,
+                        }
+                    };
+                    IpcResponse {
+                        request_id,
+                        answer_result,
+                    }
+                }
+                preparable_request_kind @ (IpcRequestKind::SubmitCommand(_)
+                | IpcRequestKind::Attach { .. }
+                | IpcRequestKind::Restart) => {
+                    let dispatch_response = request_dispatcher_response(
+                        &served_connection.intake,
+                        inbox_sender,
+                        |response_sender| RuntimeEvent::IpcPrepare { response_sender },
+                    );
+                    // No dispatcher left: the connection closes with no answer.
+                    if dispatch_response.is_none() {
+                        return;
+                    }
+                    prepared_request_kind = Some(preparable_request_kind);
+                    IpcResponse {
+                        request_id,
+                        answer_result: IpcResult::Prepared,
+                    }
+                }
+                unpreparable_request_kind => build_request_failed_response(
+                    request_id,
+                    format!(
+                        "the session cannot prepare {} requests",
+                        unpreparable_request_kind.get_request_kind_name()
+                    ),
+                ),
+            },
             IpcRequestKind::SubmitCommand(command_envelope) => {
                 let stamped_command_envelope =
                     Box::new(stamp_cli_command_source(*command_envelope));
@@ -855,16 +995,13 @@ fn serve_connection(
             IpcRequestKind::Attach {
                 link_timeout_ms: Some(link_timeout_ms),
                 ..
-            } if link_timeout_ms < MIN_LINK_TIMEOUT_MS => IpcResponse {
+            } if link_timeout_ms < MIN_LINK_TIMEOUT_MS => build_request_failed_response(
                 request_id,
-                answer_result: IpcResult::Error(IpcErrorPayload {
-                    code: IpcErrorCode::RequestFailed,
-                    message: format!(
-                        "a link timeout of {link_timeout_ms} ms is below the minimum of \
-                         {MIN_LINK_TIMEOUT_MS} ms"
-                    ),
-                }),
-            },
+                format!(
+                    "a link timeout of {link_timeout_ms} ms is below the minimum of \
+                     {MIN_LINK_TIMEOUT_MS} ms"
+                ),
+            ),
             IpcRequestKind::Attach {
                 viewport_size,
                 resume_client_id,
@@ -1007,13 +1144,9 @@ fn serve_connection(
                     },
                     // The dispatcher named what is wrong. Nothing was torn
                     // down, and the connection keeps serving.
-                    Some(Err(restart_refusal)) => IpcResponse {
-                        request_id,
-                        answer_result: IpcResult::Error(IpcErrorPayload {
-                            code: IpcErrorCode::RequestFailed,
-                            message: restart_refusal.to_string(),
-                        }),
-                    },
+                    Some(Err(restart_refusal)) => {
+                        build_request_failed_response(request_id, restart_refusal.to_string())
+                    }
                     // No dispatcher left: the connection closes with no
                     // answer.
                     None => return,
@@ -1024,14 +1157,8 @@ fn serve_connection(
             IpcRequestKind::ClipboardCopyPart { .. } | IpcRequestKind::ClipboardCopy { .. }
                 if handshake.is_remote_caller() || live_setting.is_some() =>
             {
-                IpcResponse {
-                    request_id,
-                    answer_result: IpcResult::Error(IpcErrorPayload {
-                        code: IpcErrorCode::RequestFailed,
-                        message: "a pane clipboard copy must come from this machine and this user"
-                            .to_owned(),
-                    }),
-                }
+                held_copy_bytes = Vec::new();
+                build_request_failed_response(request_id, CLIPBOARD_COPY_ORIGIN_REFUSAL.to_owned())
             }
             IpcRequestKind::ClipboardCopyPart { copied_bytes } => {
                 let held_copy_byte_count = held_copy_bytes.len() + copied_bytes.len();
@@ -1528,7 +1655,9 @@ fn stream_events(
             | IpcRequestKind::RecentEvents
             | IpcRequestKind::Restart
             | IpcRequestKind::ClipboardCopyPart { .. }
-            | IpcRequestKind::ClipboardCopy { .. } => break,
+            | IpcRequestKind::ClipboardCopy { .. }
+            | IpcRequestKind::Prepare(_)
+            | IpcRequestKind::Commit => break,
         };
         if !served_connection
             .intake
@@ -2202,6 +2331,18 @@ fn restart_into_installed_version(
             }
         }
         None => {}
+    }
+}
+
+/// The answer that refuses the request `request_id` with
+/// [`IpcErrorCode::RequestFailed`] and `message`.
+fn build_request_failed_response(request_id: Option<u64>, message: String) -> IpcResponse {
+    IpcResponse {
+        request_id,
+        answer_result: IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::RequestFailed,
+            message,
+        }),
     }
 }
 

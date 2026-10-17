@@ -58,7 +58,7 @@ use koshi_ipc::endpoint::{compute_socket_address, EndpointFile};
 use koshi_ipc::frame::{FrameClient, FrameSession, FrameSlot, FrameTab, PaintedFrame};
 use koshi_ipc::placement::PanePlacementPaneSnapshot;
 use koshi_ipc::protocol::{
-    ConnectionToken, IncomingResponse, IpcErrorCode, IpcErrorPayload, IpcResponse, IpcResult,
+    ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcResponse, IpcResult, ProcessImageId,
     PROTOCOL_VERSION,
 };
 use koshi_ipc::remote_servers::SavedServer;
@@ -70,7 +70,6 @@ use koshi_ipc::router::{
 use koshi_ipc::transport::{
     build_frame_halves, Connection, Deadlined, Listener, MAX_FRAME_BYTE_COUNT,
 };
-use koshi_ipc::wire::MaybeKnown;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::snapshot::{
@@ -89,8 +88,9 @@ use crate::attach::paint::build_render_snapshot;
 use crate::tests::TEST_VIEWPORT_SIZE;
 use crate::{PlacementMode, PlacementModeLifetime};
 use koshi_test_support::fixtures::{
-    build_test_runtime_directory, spawn_session_listening_before_it_advertises,
-    write_router_endpoint_file, write_session_endpoint_file,
+    build_test_runtime_directory, connect_test_socket_pair,
+    spawn_session_listening_before_it_advertises, write_router_endpoint_file,
+    write_session_endpoint_file,
 };
 
 impl<B: Backend> Screen<B> {
@@ -364,6 +364,7 @@ fn build_recording_router(runtime_directory: &Path) -> Arc<Mutex<Vec<&'static st
                 RouterRequestKind::Hello { .. } => RouterResult::Hello {
                     protocol_version: ROUTER_PROTOCOL_VERSION,
                     build_version: String::new(),
+                    process_image_id: Some(ProcessImageId::get_own()),
                 },
                 _ => RouterResult::Error(IpcErrorPayload {
                     code: IpcErrorCode::BadToken,
@@ -1003,28 +1004,17 @@ fn build_attached_result(
     }
 }
 
-/// Build an Attach answer, request 2, carrying [`build_attached_result`].
-fn build_attached_response(
-    client_id: ClientId,
-    session_id: SessionId,
-    pane_area: Option<PaneArea>,
-) -> IncomingResponse {
-    IpcResponse {
-        request_id: Some(2),
-        answer_result: MaybeKnown::Known(build_attached_result(client_id, session_id, pane_area)),
-    }
-}
-
 /// A stand-in session that has just come back from replacing its own process
 /// image: it binds `session_id`'s socket, advertises it under [`NEW_CONNECTION_TOKEN`],
 /// and serves one connection.
 ///
 /// `protocol_version_refusal_message` is the sentence it refuses the Hello with as
 /// [`IpcErrorCode::UnsupportedVersion`], and `None` accepts the Hello.
-/// `attach_answer` is how it answers the Attach: `Ok` is the client id it hands
-/// back, `Err` is the sentence it refuses with. It records the Attach it read
-/// before it answers. A caller holding that answer finds its request already in
-/// the returned slot.
+/// A `Prepare` carrying an Attach is answered `Prepared`, and the Attach is
+/// recorded in the returned slot. `attach_answer` is how it answers the
+/// `Commit` that runs the Attach: `Ok` is the client id it hands back, `Err` is
+/// the sentence it refuses with. A caller holding that answer finds its Attach
+/// already in the returned slot.
 fn spawn_restarted_session(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -1056,21 +1046,24 @@ fn spawn_restarted_session(
                     None => IpcResult::Hello {
                         protocol_version: PROTOCOL_VERSION,
                         build_version: String::from("0.0.0"),
+                        process_image_id: ProcessImageId::get_own(),
                     },
                 },
-                IpcRequestKind::Attach { .. } => {
+                IpcRequestKind::Prepare(prepared_kind)
+                    if matches!(**prepared_kind, IpcRequestKind::Attach { .. }) =>
+                {
                     *request_kind_slot
                         .lock()
-                        .expect("the slot outlives every panic") =
-                        Some(request.request_kind.clone());
-                    match attach_answer {
-                        Ok(client_id) => build_attached_result(client_id, session_id, None),
-                        Err(message) => IpcResult::Error(IpcErrorPayload {
-                            code: IpcErrorCode::BadToken,
-                            message: String::from(message),
-                        }),
-                    }
+                        .expect("the slot outlives every panic") = Some((**prepared_kind).clone());
+                    IpcResult::Prepared
                 }
+                IpcRequestKind::Commit => match attach_answer {
+                    Ok(client_id) => build_attached_result(client_id, session_id, None),
+                    Err(message) => IpcResult::Error(IpcErrorPayload {
+                        code: IpcErrorCode::BadToken,
+                        message: String::from(message),
+                    }),
+                },
                 _ => IpcResult::Error(IpcErrorPayload {
                     code: IpcErrorCode::UnsupportedKind,
                     message: String::from("the stand-in session serves only a join"),
@@ -1090,7 +1083,7 @@ fn an_attach_answer_is_taken_whether_or_not_it_echoes_a_pane_area() {
     let client_id = ClientId::new();
     let session_id = SessionId::new();
 
-    let echoed_attached_session = parse_attached_session(build_attached_response(
+    let echoed_attached_session = parse_attached_session(build_attached_result(
         client_id,
         session_id,
         Some(PaneArea::Reported(Size {
@@ -1100,7 +1093,7 @@ fn an_attach_answer_is_taken_whether_or_not_it_echoes_a_pane_area() {
     ))
     .expect("the answer of a session that echoes the field is accepted");
     let silent_attached_session =
-        parse_attached_session(build_attached_response(client_id, session_id, None))
+        parse_attached_session(build_attached_result(client_id, session_id, None))
             .expect("the answer of an older session is accepted too");
 
     assert_eq!(echoed_attached_session, (client_id, session_id, None));
@@ -1184,8 +1177,9 @@ impl Deadlined for RecordedLinkHalf {
 }
 
 /// The frames a serving machine sends to join a client to `session_id` as
-/// `client_id`, as bytes: the session's answer to the Hello, its answer to the
-/// Attach, then the string `after the join`.
+/// `client_id`, as bytes: the session's answer to the Hello, its `Prepared`
+/// answer to the `Prepare`, numbered 2, its answer to the `Commit`, numbered 3,
+/// then the string `after the join`.
 fn encode_remote_join_answers(client_id: ClientId, session_id: SessionId) -> Vec<u8> {
     let encoding_half = build_recorded_link_half(Vec::new());
     let encoded_bytes = Arc::clone(&encoding_half.written_bytes);
@@ -1199,15 +1193,22 @@ fn encode_remote_join_answers(client_id: ClientId, session_id: SessionId) -> Vec
             answer_result: IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 build_version: String::from("0.0.0"),
+                process_image_id: ProcessImageId::get_own(),
             },
         })
         .expect("the Hello answer is encoded");
     frame_writer
         .send(&IpcResponse {
             request_id: Some(2),
+            answer_result: IpcResult::Prepared,
+        })
+        .expect("the Prepare answer is encoded");
+    frame_writer
+        .send(&IpcResponse {
+            request_id: Some(3),
             answer_result: build_attached_result(client_id, session_id, None),
         })
-        .expect("the Attach answer is encoded");
+        .expect("the Commit answer is encoded");
     frame_writer
         .send(&"after the join")
         .expect("the frame after the join is encoded");
@@ -1236,8 +1237,46 @@ fn assert_every_step_held_and_clear(
     link_limits_at_steps.clear();
 }
 
+/// Asserts that `link_limits_at_steps` holds at least one step holding
+/// `prepare_link_limits`, then at least one step, each holding one deadline
+/// inside `commit_deadline_range` and no idle timeout, and nothing else. Then
+/// clears the record.
+#[track_caller]
+fn assert_prepare_then_commit_steps_and_clear(
+    link_limits_at_steps: &Mutex<Vec<LinkLimits>>,
+    prepare_link_limits: LinkLimits,
+    commit_deadline_range: std::ops::RangeInclusive<Instant>,
+) {
+    let mut link_limits_at_steps = link_limits_at_steps
+        .lock()
+        .expect("the record outlives every panic");
+    let prepare_step_count = link_limits_at_steps
+        .iter()
+        .take_while(|link_limits| **link_limits == prepare_link_limits)
+        .count();
+    assert!(prepare_step_count > 0);
+    let commit_link_limits = *link_limits_at_steps
+        .get(prepare_step_count)
+        .expect("a step runs after the Prepare is answered");
+    assert_eq!(commit_link_limits.idle_timeout, None);
+    let commit_deadline = commit_link_limits
+        .deadline
+        .expect("the Commit runs under a deadline");
+    assert!(
+        commit_deadline_range.contains(&commit_deadline),
+        "the Commit deadline {commit_deadline:?} is outside {commit_deadline_range:?}"
+    );
+    let commit_step_count = link_limits_at_steps.len() - prepare_step_count;
+    assert_eq!(
+        link_limits_at_steps[prepare_step_count..],
+        vec![commit_link_limits; commit_step_count]
+    );
+    link_limits_at_steps.clear();
+}
+
 #[test]
-fn a_remote_join_runs_under_the_join_deadline_then_gives_each_half_only_the_link_idle_timeout() {
+fn a_remote_join_prepares_under_the_link_deadline_commits_under_a_fresh_join_timeout_then_keeps_only_the_idle_timeout(
+) {
     let client_id = ClientId::new();
     let session_id = SessionId::new();
     let link_reader_half =
@@ -1247,10 +1286,11 @@ fn a_remote_join_runs_under_the_join_deadline_then_gives_each_half_only_the_link
     let write_link_limits = Arc::clone(&link_writer_half.link_limits_at_steps);
     let (mut frame_reader, mut frame_writer) =
         build_frame_halves(Box::new(link_reader_half), Box::new(link_writer_half));
-    let join_deadline = Instant::now() + remote_client::JOIN_TIMEOUT_DURATION;
-    frame_reader.set_deadline(Some(join_deadline));
-    frame_writer.set_deadline(Some(join_deadline));
+    let link_deadline = Instant::now() + remote_client::JOIN_TIMEOUT_DURATION * 2;
+    frame_reader.set_deadline(Some(link_deadline));
+    frame_writer.set_deadline(Some(link_deadline));
     let connection_token = ConnectionToken::generate();
+    let join_started_at = Instant::now();
 
     let joined_session = join_remote_session(
         remote_client::RemoteLink {
@@ -1266,17 +1306,28 @@ fn a_remote_join_runs_under_the_join_deadline_then_gives_each_half_only_the_link
         MIN_LINK_TIMEOUT_MS,
     )
     .expect("the session joins");
+    let join_ended_at = Instant::now();
 
     assert_eq!(joined_session.client_id, client_id);
     assert_eq!(joined_session.session_id, session_id);
     assert_eq!(joined_session.connection_token, connection_token);
     assert_eq!(joined_session.resume_token, None);
-    let join_link_limits = LinkLimits {
-        deadline: Some(join_deadline),
+    let prepare_link_limits = LinkLimits {
+        deadline: Some(link_deadline),
         idle_timeout: None,
     };
-    assert_every_step_held_and_clear(&read_link_limits, join_link_limits);
-    assert_every_step_held_and_clear(&write_link_limits, join_link_limits);
+    let commit_deadline_range = (join_started_at + remote_client::JOIN_TIMEOUT_DURATION)
+        ..=(join_ended_at + remote_client::JOIN_TIMEOUT_DURATION);
+    assert_prepare_then_commit_steps_and_clear(
+        &read_link_limits,
+        prepare_link_limits,
+        commit_deadline_range.clone(),
+    );
+    assert_prepare_then_commit_steps_and_clear(
+        &write_link_limits,
+        prepare_link_limits,
+        commit_deadline_range,
+    );
     let JoinedSession {
         mut reader,
         mut writer,
@@ -1298,7 +1349,8 @@ fn a_remote_join_runs_under_the_join_deadline_then_gives_each_half_only_the_link
 }
 
 #[test]
-fn a_remote_join_pings_every_third_of_the_link_timeout_until_the_attach_answer_arrives() {
+fn a_remote_join_pings_every_third_of_the_link_timeout_until_the_prepare_and_the_commit_are_answered(
+) {
     let (client_connection, serving_connection) = connect_test_socket_pair();
     let (client_frame_reader, client_frame_writer) = client_connection.split();
     let (mut serving_frame_reader, mut serving_frame_writer) = serving_connection.split();
@@ -1336,27 +1388,52 @@ fn a_remote_join_pings_every_third_of_the_link_timeout_until_the_attach_answer_a
             answer_result: IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 build_version: String::from("0.0.0"),
+                process_image_id: ProcessImageId::get_own(),
             },
         })
         .expect("the Hello answer is written");
-    let session_attach: IpcRequest = serving_frame_reader
+    let session_prepare: IpcRequest = serving_frame_reader
         .recv()
-        .expect("the session's Attach arrives");
-    // The Attach answer is held back until two pings have arrived.
-    let pings_before_the_answer: Vec<IpcRequest> = (0..2)
+        .expect("the session's Prepare arrives");
+    // The Prepare's answer is held back until two pings have arrived.
+    let pings_before_prepared: Vec<IpcRequest> = (0..2)
         .map(|_| {
             serving_frame_reader
                 .recv()
-                .expect("a ping arrives while the Attach waits")
+                .expect("a ping arrives while the Prepare waits")
         })
         .collect();
     let second_ping_delay = hello_answer_sent_at.elapsed();
+    let prepared_sent_at = Instant::now();
     serving_frame_writer
         .send(&IpcResponse {
             request_id: Some(2),
+            answer_result: IpcResult::Prepared,
+        })
+        .expect("the Prepare answer is written");
+    let session_commit = loop {
+        let session_request: IpcRequest = serving_frame_reader
+            .recv()
+            .expect("the session's Commit arrives");
+        if session_request.request_kind != IpcRequestKind::Ping {
+            break session_request;
+        }
+    };
+    // The Commit's answer is held back until two pings have arrived.
+    let pings_before_attached: Vec<IpcRequest> = (0..2)
+        .map(|_| {
+            serving_frame_reader
+                .recv()
+                .expect("a ping arrives while the Commit waits")
+        })
+        .collect();
+    let second_commit_ping_delay = prepared_sent_at.elapsed();
+    serving_frame_writer
+        .send(&IpcResponse {
+            request_id: Some(3),
             answer_result: build_attached_result(client_id, session_id, None),
         })
-        .expect("the Attach answer is written");
+        .expect("the Commit answer is written");
     let joined_ids = join_result_receiver
         .recv_timeout(Duration::from_secs(10))
         .expect("the join ends")
@@ -1369,22 +1446,40 @@ fn a_remote_join_pings_every_third_of_the_link_timeout_until_the_attach_answer_a
             link_timeout_ms: Some(MIN_LINK_TIMEOUT_MS),
         }
     );
-    assert_eq!(session_attach.request_id, 2);
+    assert_eq!(session_prepare.request_id, 2);
+    let IpcRequestKind::Prepare(prepared_kind) = session_prepare.request_kind else {
+        panic!("the second frame is the session's Prepare");
+    };
     let IpcRequestKind::Attach {
         link_timeout_ms, ..
-    } = session_attach.request_kind
+    } = *prepared_kind
     else {
-        panic!("the second frame is the session's Attach");
+        panic!("the Prepare carries the session's Attach");
     };
     assert_eq!(link_timeout_ms, Some(MIN_LINK_TIMEOUT_MS));
     let join_ping = IpcRequest {
         request_id: 2,
         request_kind: IpcRequestKind::Ping,
     };
-    assert_eq!(pings_before_the_answer, vec![join_ping.clone(), join_ping]);
+    assert_eq!(
+        pings_before_prepared,
+        vec![join_ping.clone(), join_ping.clone()]
+    );
     assert!(
         second_ping_delay >= compute_heartbeat_interval(MIN_LINK_TIMEOUT_MS) * 2,
         "the second ping came {second_ping_delay:?} after the Hello answer"
+    );
+    assert_eq!(
+        session_commit,
+        IpcRequest {
+            request_id: 3,
+            request_kind: IpcRequestKind::Commit,
+        }
+    );
+    assert_eq!(pings_before_attached, vec![join_ping.clone(), join_ping]);
+    assert!(
+        second_commit_ping_delay >= compute_heartbeat_interval(MIN_LINK_TIMEOUT_MS) * 2,
+        "the second ping after the Commit came {second_commit_ping_delay:?} after the Prepare answer"
     );
     assert_eq!(joined_ids, (client_id, session_id));
 }
@@ -1439,11 +1534,22 @@ fn coming_back_after_a_restart_keeps_the_client_record_and_graphics_capability()
     );
 }
 
+/// The Attach that `prepare_request`, a `Prepare` built by
+/// [`build_attach_prepare_request`], carries.
+#[track_caller]
+fn take_prepared_attach(prepare_request: IpcRequest) -> IpcRequestKind {
+    assert_eq!(prepare_request.request_id, 2);
+    let IpcRequestKind::Prepare(prepared_kind) = prepare_request.request_kind else {
+        panic!("expected a Prepare");
+    };
+    *prepared_kind
+}
+
 #[test]
 fn attach_advertises_the_selected_native_protocol() {
     let iterm_attach_request =
-        build_attach_request(None, None, terminal::GraphicsSupport::Iterm, None, None);
-    let sixel_attach_request = build_attach_request(
+        build_attach_prepare_request(None, None, terminal::GraphicsSupport::Iterm, None, None);
+    let sixel_attach_request = build_attach_prepare_request(
         None,
         None,
         terminal::GraphicsSupport::Sixel {
@@ -1458,7 +1564,7 @@ fn attach_advertises_the_selected_native_protocol() {
     let IpcRequestKind::Attach {
         graphics_capabilities,
         ..
-    } = iterm_attach_request.request_kind
+    } = take_prepared_attach(iterm_attach_request)
     else {
         panic!("expected an attach request");
     };
@@ -1473,7 +1579,7 @@ fn attach_advertises_the_selected_native_protocol() {
     let IpcRequestKind::Attach {
         graphics_capabilities,
         ..
-    } = sixel_attach_request.request_kind
+    } = take_prepared_attach(sixel_attach_request)
     else {
         panic!("expected an attach request");
     };
@@ -2315,25 +2421,6 @@ fn build_test_uplink(request_sender: mpsc::Sender<IpcRequest>) -> Uplink {
         registry: ActionRegistry::new(),
         next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
     }
-}
-
-/// Open one local socket connection at a fresh address and return its two
-/// ends: the one that connected, then the one that accepted.
-fn connect_test_socket_pair() -> (Connection, Connection) {
-    // On Unix the address is a socket-file path under `/tmp`. On Windows it is
-    // a pipe name, and the directory is unused. A new session id makes each
-    // address unique.
-    #[cfg(unix)]
-    let socket_directory = std::path::PathBuf::from("/tmp");
-    #[cfg(windows)]
-    let socket_directory = std::env::temp_dir();
-    let socket_address = compute_socket_address(&socket_directory, SessionId::new());
-    let listener = Listener::bind(&socket_address).expect("bind the control socket");
-    let accept_thread = thread::spawn(move || listener.accept().expect("accept the connection"));
-    let client_connection =
-        Connection::connect(&socket_address).expect("connect to the control socket");
-    let session_connection = accept_thread.join().expect("the accepting thread finished");
-    (client_connection, session_connection)
 }
 
 fn build_test_control_socket() -> TestControlSocket {
@@ -10213,7 +10300,7 @@ fn a_committed_placement_records_only_the_tab_ids_it_names() {
 #[test]
 fn an_attach_request_carries_the_link_timeout_it_is_given() {
     for link_timeout_ms in [None, Some(30_000)] {
-        let attach_request = build_attach_request(
+        let attach_request = build_attach_prepare_request(
             None,
             None,
             terminal::GraphicsSupport::Unsupported,
@@ -10223,7 +10310,7 @@ fn an_attach_request_carries_the_link_timeout_it_is_given() {
         let IpcRequestKind::Attach {
             link_timeout_ms: sent_link_timeout_ms,
             ..
-        } = attach_request.request_kind
+        } = take_prepared_attach(attach_request)
         else {
             panic!("expected an attach request");
         };

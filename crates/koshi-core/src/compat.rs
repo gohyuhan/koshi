@@ -95,6 +95,16 @@ pub struct Surface {
 ///   `modifier_flags` and `pane_local_cell`, the cell in the pane's content
 ///   that the client resolved; 4 carried the client's screen cell in
 ///   `mouse_input`. The `MoveFloatingPane` mouse action exists in 5 only.
+/// - The `Prepare` and `Commit` requests and the `Prepared` answer exist in 5
+///   only. A `SubmitCommand`, an `Attach`, a `ClipboardCopy` and a `Restart`
+///   run only as the request a `Prepare` holds, once its `Commit` arrives, and
+///   one sent alone is refused with the `RequestFailed` code. A
+///   `SubmitCommand` on a connection that carries an attached client's event
+///   stream runs as it arrives. 4 ran `SubmitCommand`, `Attach` and `Restart`
+///   as they arrived.
+/// - The `Hello` answer carries `process_image_id`: the id of the answering
+///   session's process image, which a restart into a new image changes. The
+///   field is required, and 4 has no such field.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A
@@ -111,6 +121,10 @@ pub const SESSION_PROTOCOL: Surface = Surface {
 /// socket.
 ///
 /// `v0.4.0` speaks 2. `v0.5.0` speaks 3. The floor is 3.
+///
+/// The `Hello` answer carries `process_image_id`: the id of the answering
+/// router's process image, which a restart into a new image changes. A
+/// `v0.5.0` router leaves it out, and a `v0.5.0` caller ignores it.
 ///
 /// A request the router reads and refuses, other than one naming a session it
 /// does not have, is answered with the `RequestFailed` code. A `v0.5.0-pr.1`

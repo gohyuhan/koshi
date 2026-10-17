@@ -36,7 +36,7 @@ use koshi_ipc::supervisor::{
     IncomingSupervisorMessage, SupervisorEvent, SupervisorMessage, SupervisorRequest,
     SupervisorRequestKind, SupervisorResponse, SupervisorResult, SUPERVISOR_PROTOCOL_VERSION,
 };
-use koshi_ipc::transport::{Connection, FrameReader, FrameWriter};
+use koshi_ipc::transport::{Connection, FrameReader, FrameWriter, CONNECT_WAIT_DURATION};
 use koshi_ipc::wire::{MaybeKnown, WireName};
 
 use crate::backend::state::{CarriedPtyPane, PtyBackend, PtySink, UNOBSERVED_EXIT};
@@ -159,8 +159,9 @@ impl SupervisorPtyBackend {
     /// result, and no second link is opened.
     ///
     /// # Errors
-    /// Returns [`PtyError::Io`] when the link cannot be opened, when the
-    /// supervisor does not answer within the answer wait, when it refuses the
+    /// Returns [`PtyError::Io`] when the link cannot be opened, when another OS
+    /// user serves `supervisor_address`, when the supervisor does not answer
+    /// within the answer wait, when it refuses the
     /// Hello, pane list, or a recorded exit's kill, or when it answers a request
     /// with the wrong response kind. After a second link was opened, the
     /// failure is that link's.
@@ -213,15 +214,16 @@ impl SupervisorPtyBackend {
         pane_ids: &[PaneId],
         supervisor_protocol_version: u32,
     ) -> Result<SupervisorPtyBackend, LinkOpenError> {
-        let connection = Connection::connect(supervisor_address).map_err(|io_error| {
-            LinkOpenError::OtherFailure {
-                link_error: PtyError::Io {
-                    detail: format!(
-                        "the supervisor at {supervisor_address} could not be reached: {io_error}"
-                    ),
-                },
-            }
-        })?;
+        let connection =
+            Connection::connect_to_own_server_within(supervisor_address, CONNECT_WAIT_DURATION)
+                .map_err(|connect_error| LinkOpenError::OtherFailure {
+                    link_error: PtyError::Io {
+                        detail: format!(
+                            "the supervisor at {supervisor_address} could not be reached: \
+                             {connect_error}"
+                        ),
+                    },
+                })?;
         let link_closer = connection.create_read_closer().ok();
         let (frame_reader, frame_writer) = connection.split();
         let (response_sender, response_receiver) = channel();

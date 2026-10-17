@@ -14,7 +14,7 @@ from standard input.
 | `koshi` | Open one session, tab, and shell pane |
 | `koshi --profile <NAME>` | Open `profile/<NAME>.kdl` |
 | `koshi --headless` | Open a session with no terminal attached, print its id, and return to the shell |
-| `koshi --headless --allow-other-users` | Open that session so the other users of this machine may reach it |
+| `koshi --headless --allow-other-users` | Open that session so the other users of this machine may reach it (macOS and Linux only) |
 | `koshi update` | Check for and install the latest release |
 | `koshi restart-servers` | Restart the router and every running session into the koshi program on disk; every pane keeps running |
 
@@ -106,8 +106,17 @@ program file, and names it, such as `koshi: <session id> runs koshi 0.5.0 from
 /opt/koshi/koshi, a program file this koshi does not replace; it keeps running
 koshi 0.5.0`. A koshi built from source restarts every running server into the
 koshi at its path. Each one has 20 seconds to answer the restart request and 20
-seconds to come back on the new release. One that does not is reported as not
-confirmed, and the update goes on. A session keeps its panes, the programs
+seconds to come back on the new release. A session that takes the request has 5
+seconds more to answer it. One that does not come back is reported as not
+confirmed, and the update goes on. A server comes back when a new process
+answers with the new release. An answer from the process that took the request
+does not count, even when it names the new release. A session that does not
+take the request in time does not restart. A session that took the request and
+gave no answer may still restart, and its line says so. A router that does not
+answer its first message in time is not asked to restart, and its line says so.
+A router that took the request and gave no answer may still restart, and the
+update waits 20 seconds for it to come back on the new release, as for a router
+that answered. A session keeps its panes, the programs
 running in them and their scrollback. A client from the installed build can
 reattach to that session. The installed build migrates `version 1` KDL files to
 `version 2` when a running session asks it which resume formats it reads, before
@@ -179,8 +188,8 @@ refuses the restart when a pane's program stopped reading its input, when a pane
 has no terminal to carry, when this machine cannot run the new binary, or when
 the new binary does not read the resume file this build writes. A session
 running a koshi with no restart at all, one that still reports the old version
-after the restart, and one that answers nothing within ten seconds are all
-reported the same way.
+after the restart, one that answers nothing within 20 seconds, and one that took
+the request and gave no answer are all reported the same way.
 
 `koshi restart-servers` restarts each running session, then the router, into the
 koshi program on disk, as `koshi update` does for a koshi built from source. Use
@@ -334,6 +343,9 @@ Attach to it later with `koshi attach session-<uuid>`.
 
 `--allow-other-users` goes only with `--headless`. The session it starts serves
 the other users of this machine for its whole life, whatever `koshi.kdl` says.
+It works on macOS and Linux only. On Windows koshi refuses it with exit code 2
+and `koshi: invalid arguments: --allow-other-users works on macOS and Linux
+only; on Windows only you reach your sessions`, and starts no session.
 
 ## Configuration
 
@@ -461,7 +473,8 @@ exactly one session is running. An unknown name or id exits 3.
 `kill-session` ends a session of yours whatever koshi version it runs:
 
 1. Koshi lists every process that runs under the session process. Then it
-   sends the session a quit request, and the session has 5 seconds to answer.
+   sends the session a quit request. The session has 5 seconds to take the
+   request, and 5 seconds more to answer it.
 2. If the session quits, koshi ends each listed process that still runs. An
    example is a `sleep 600 &` that a pane shell started in a process group of
    its own. Koshi prints `the session quit; koshi ended 1 process it left
@@ -1087,7 +1100,7 @@ The version column reads:
 | a build, like `0.4.0` | The server answered and named it |
 | `unknown` | The server answered and is too old to name its build |
 | `not running` | Nothing is listening there |
-| `unreachable` | The server could not be asked, the session is restarting, or a session did not answer within 5 seconds after the router was checked; the reason prints on standard error |
+| `unreachable` | The server could not be asked, the session is restarting, the router did not answer within 5 seconds, or a session did not answer within 5 seconds after the router was checked; the reason prints on standard error |
 
 A server that could not be asked does not stop the rest of the answer: the
 other rows still print, and the command exits 4. Up to 16 sessions are asked

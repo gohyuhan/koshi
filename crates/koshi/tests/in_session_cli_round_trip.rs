@@ -40,7 +40,7 @@ use koshi_core::process::{KillPolicy, PtySize};
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
 use koshi_link::error::CliError;
-use koshi_test_support::fixtures::build_test_runtime_directory;
+use koshi_test_support::fixtures::{build_test_runtime_directory, send_committed_request};
 
 use common::in_process_session::{
     attach_test_client, list_emitted_events, AttachedClient, RunningSession,
@@ -130,9 +130,9 @@ fn run_external_cli_invocation(
     (command_result, exit_code)
 }
 
-/// Submit `command` to `session` over its control socket, enveloped the way the
-/// CLI running inside `pane_id` envelopes it, and hand back the dispatcher's
-/// result.
+/// Submit `command` to `session` over its control socket as a `Prepare` and
+/// its `Commit`, enveloped the way the CLI running inside `pane_id` envelopes
+/// it, and hand back the dispatcher's result.
 fn submit_session_command(
     session: &RunningSession,
     client: &AttachedClient,
@@ -151,13 +151,13 @@ fn submit_session_command(
         ),
         command,
     );
-    let submit_request = IpcRequest {
-        request_id: 2,
-        request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
-    };
-    connection
-        .send(&submit_request)
-        .expect("the server reads the command");
+    send_committed_request(
+        &mut connection,
+        IpcRequest {
+            request_id: 2,
+            request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
+        },
+    );
     let ipc_response: IpcResponse = connection.recv().expect("the server answers the command");
     assert_eq!(ipc_response.request_id, Some(2));
     match ipc_response.answer_result {

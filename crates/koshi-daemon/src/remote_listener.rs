@@ -84,8 +84,10 @@ use koshi_ipc::remote_wire::{
 use koshi_ipc::router::{SessionSelector, ROUTER_RESTARTING_MESSAGE};
 use koshi_ipc::tls::{self, TlsReader, TlsWriter};
 use koshi_ipc::transport::{
-    Connection, Deadlined, RawReader, RawWriter, ReadCloser, MAX_FRAME_BYTE_COUNT,
+    Connection, Deadlined, RawReader, RawWriter, ReadCloser, CONNECT_WAIT_DURATION,
+    MAX_FRAME_BYTE_COUNT,
 };
+use koshi_observability::repeated_warning::WarningRateLimiter;
 use koshi_runtime::executable_watch::ExecutableWatch;
 
 use crate::router::{check_router_executable_file, RouterEvent};
@@ -118,9 +120,6 @@ const MAX_ADMISSION_COUNT: usize = 64;
 
 /// How long the accept loop pauses after a failed accept before trying again.
 const ACCEPT_RETRY_DELAY_DURATION: Duration = Duration::from_millis(100);
-
-/// How often one repeated warning about this port is written at most.
-pub(crate) const LOG_WINDOW_DURATION: Duration = Duration::from_secs(60);
 
 /// How long a refusal has to reach the caller it answers, counted from the
 /// write. A refusal written before admission is cut short at the admission
@@ -283,43 +282,13 @@ fn build_remote_server_tls_config(certificate_file: &CertificateFile) -> io::Res
         .map_err(|certificate_error| io::Error::other(certificate_error.to_string()))
 }
 
-/// One repeated warning, written at most once inside [`LOG_WINDOW_DURATION`].
-pub(crate) struct WarningRateLimiter {
-    /// When the last line was written, or `None` when none has been.
-    last_warning_at: Option<Instant>,
-}
-
-impl WarningRateLimiter {
-    /// A warning that has not been written yet.
-    pub(crate) fn new() -> WarningRateLimiter {
-        Self {
-            last_warning_at: None,
-        }
-    }
-
-    /// Whether to write the line at `current_time`. True when no line has been
-    /// written, and when the last one was written [`LOG_WINDOW_DURATION`] or
-    /// longer ago. The caller writes the line; this only answers.
-    ///
-    /// Example — with [`LOG_WINDOW_DURATION`] at 60 seconds, ten thousand calls spread
-    /// over five minutes answer true five times.
-    pub(crate) fn is_due(&mut self, current_time: Instant) -> bool {
-        if self.last_warning_at.is_some_and(|warning_written_at| {
-            current_time.duration_since(warning_written_at) < LOG_WINDOW_DURATION
-        }) {
-            return false;
-        }
-        self.last_warning_at = Some(current_time);
-        true
-    }
-}
-
 /// Accept connections and give each its own thread, dropping the ones from an
 /// address that has opened more than [`MAX_ATTEMPT_COUNT`] inside
 /// [`RATE_WINDOW_DURATION`] and the ones that arrive while
 /// [`MAX_ADMISSION_COUNT`] connections are already waiting to present a
 /// secret. A failed accept is reported at most once inside
-/// [`LOG_WINDOW_DURATION`], waits [`ACCEPT_RETRY_DELAY_DURATION`], and retries.
+/// [`LOG_WINDOW_DURATION`](koshi_observability::repeated_warning::LOG_WINDOW_DURATION),
+/// waits [`ACCEPT_RETRY_DELAY_DURATION`], and retries.
 /// Each connection given a thread runs a check of `executable_watch` first.
 fn run_remote_accept_loop(
     listener: &TcpListener,
@@ -335,7 +304,7 @@ fn run_remote_accept_loop(
         let (tcp_stream, peer_address) = match listener.accept() {
             Ok(accepted_connection) => accepted_connection,
             Err(accept_error) => {
-                if accept_failure_warning.is_due(Instant::now()) {
+                if accept_failure_warning.record_warning_if_due(Instant::now()) {
                     tracing::warn!(
                         %accept_error,
                         "the remote port could not accept a connection; \
@@ -365,7 +334,7 @@ fn run_remote_accept_loop(
             }
         }
         let Some(admission_slot) = AdmissionSlot::enter_admission(&admission_count) else {
-            if full_admission_warning.is_due(current_time) {
+            if full_admission_warning.record_warning_if_due(current_time) {
                 tracing::warn!(
                     "{MAX_ADMISSION_COUNT} remote connections are waiting to present a secret; \
                      closing the ones that arrive until some of them finish"
@@ -866,14 +835,19 @@ fn build_bridged_hello(
 /// Hands back the connection's two raw halves and the handle that closes its
 /// read direction.
 ///
-/// `None` when the endpoint file cannot be read, its socket cannot be reached,
-/// the read direction cannot be made closable, or the Hello cannot be sent.
+/// `None` when the endpoint file cannot be read, its socket cannot be reached
+/// or another OS user serves it, the read direction cannot be made closable,
+/// or the Hello cannot be sent.
 fn open_local_session_bridge(
     session_endpoint_path: &Path,
     session_protocol_versions: (u32, u32),
 ) -> Option<(RawReader, RawWriter, ReadCloser)> {
     let session_endpoint = EndpointFile::load_from_path(session_endpoint_path).ok()?;
-    let mut session_connection = Connection::connect(&session_endpoint.socket_address).ok()?;
+    let mut session_connection = Connection::connect_to_own_server_within(
+        &session_endpoint.socket_address,
+        CONNECT_WAIT_DURATION,
+    )
+    .ok()?;
     let session_read_closer = session_connection.create_read_closer().ok()?;
     session_connection
         .send(&build_bridged_hello(

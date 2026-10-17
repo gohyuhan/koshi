@@ -15,9 +15,12 @@ use koshi_ipc::endpoint::{
     compute_socket_address, resolve_clipboard_tool_directory_path, EndpointFile,
 };
 use koshi_ipc::handshake::{Handshake, Peer};
-use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
+use koshi_ipc::protocol::{
+    ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
+    IpcResult, ProcessImageId,
+};
 use koshi_ipc::router::{compute_router_socket_address, resolve_router_endpoint_path};
-use koshi_ipc::transport::{Connection, Listener};
+use koshi_ipc::transport::{Connection, FrameReader, FrameWriter, Listener};
 use serde_json::value::RawValue;
 use tempfile::TempDir;
 
@@ -374,7 +377,7 @@ fn spawn_previous_release_server(
 ///    file under the token made from `connection_secret`.
 /// 4. Accept the second caller's Hello and answer it with build `9.9.9`.
 ///    Answer each request after it with what `answer_request` gives for its
-///    kind.
+///    kind, and for the held kind on a `Commit`.
 ///
 /// A request behind a refused Hello gets the `HelloRequired` refusal. Each
 /// connection ends when its caller hangs up, and the thread ends after the
@@ -426,8 +429,12 @@ pub fn spawn_session_listening_before_it_advertises(
 /// Accept one caller on `session_listener` and answer each request it sends
 /// until it hangs up, behind the gate a session holding
 /// `session_connection_token` keeps for a caller of its own user. An accepted
-/// Hello gets build `9.9.9`, a refused request gets the gate's refusal, and
-/// every other request gets what `answer_request` gives for its kind.
+/// Hello gets build `9.9.9` and this process's image, as
+/// [`ProcessImageId::get_own`] gives it, and a refused request gets the gate's
+/// refusal. A `Prepare` is answered `Prepared` and its request is held. A
+/// `Commit` gets what `answer_request` gives for the held request's kind, and
+/// a `RequestFailed` refusal when nothing is held. Every other request gets
+/// what `answer_request` gives for its kind.
 fn answer_session_requests(
     session_listener: &Listener,
     session_connection_token: ConnectionToken,
@@ -441,18 +448,31 @@ fn answer_session_requests(
             is_other_user_access_allowed: false,
         },
     );
+    let mut prepared_request_kind: Option<IpcRequestKind> = None;
     while let Ok(ipc_request) = session_connection.recv::<IpcRequest>() {
         let answer_result = match session_handshake.validate_request_kind(&ipc_request.request_kind)
         {
             Err(refusal) => IpcResult::Error(refusal),
-            Ok(()) => match &ipc_request.request_kind {
+            Ok(()) => match ipc_request.request_kind {
                 IpcRequestKind::Hello { .. } => IpcResult::Hello {
                     protocol_version: session_handshake
                         .get_agreed_protocol_version()
                         .expect("an accepted Hello settles a version"),
                     build_version: "9.9.9".to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
-                request_kind => answer_request(request_kind),
+                IpcRequestKind::Prepare(held_request_kind) => {
+                    prepared_request_kind = Some(*held_request_kind);
+                    IpcResult::Prepared
+                }
+                IpcRequestKind::Commit => match prepared_request_kind.take() {
+                    Some(held_request_kind) => answer_request(&held_request_kind),
+                    None => IpcResult::Error(IpcErrorPayload {
+                        code: IpcErrorCode::RequestFailed,
+                        message: "no request waits for a Commit on this connection".to_string(),
+                    }),
+                },
+                request_kind => answer_request(&request_kind),
             },
         };
         // A send to a caller that has hung up fails, and the failure is
@@ -490,6 +510,123 @@ pub fn write_router_endpoint_file(runtime_directory: &Path, connection_secret: &
 pub fn close_connection_after_peer_hangs_up(connection: Connection) {
     let (mut raw_reader, _raw_writer) = connection.split_raw();
     let _ = std::io::copy(&mut raw_reader, &mut std::io::sink());
+}
+
+/// Send `ipc_request`'s kind inside a `Prepare` on `connection`, under
+/// `ipc_request`'s request id.
+///
+/// # Panics
+///
+/// Panics when the `Prepare` cannot be written.
+pub fn send_prepare_request(connection: &mut Connection, ipc_request: IpcRequest) {
+    connection
+        .send(&IpcRequest {
+            request_id: ipc_request.request_id,
+            request_kind: IpcRequestKind::Prepare(Box::new(ipc_request.request_kind)),
+        })
+        .expect("send the Prepare");
+}
+
+/// Read the `Prepared` answer numbered `request_id` on `connection`, then send
+/// the `Commit` numbered `request_id`.
+///
+/// # Panics
+///
+/// Panics when the answer cannot be read, is not `Prepared` under
+/// `request_id`, or the `Commit` cannot be written.
+#[track_caller]
+pub fn read_prepared_and_send_commit(connection: &mut Connection, request_id: u64) {
+    let prepare_reply: IpcResponse = connection.recv().expect("the Prepare is answered");
+    assert_eq!(
+        prepare_reply,
+        IpcResponse {
+            request_id: Some(request_id),
+            answer_result: IpcResult::Prepared,
+        }
+    );
+    connection
+        .send(&IpcRequest {
+            request_id,
+            request_kind: IpcRequestKind::Commit,
+        })
+        .expect("send the Commit");
+}
+
+/// Send `ipc_request` with [`send_prepare_request`], then
+/// [`read_prepared_and_send_commit`] under its request id. The held request's
+/// answer is the next frame on `connection`, under that id.
+///
+/// # Panics
+///
+/// Panics as those two functions state.
+#[track_caller]
+pub fn send_committed_request(connection: &mut Connection, ipc_request: IpcRequest) {
+    let request_id = ipc_request.request_id;
+    send_prepare_request(connection, ipc_request);
+    read_prepared_and_send_commit(connection, request_id);
+}
+
+/// Send `ipc_request` through `frame_writer` as a `Prepare`, read its
+/// `Prepared` answer from `frame_reader`, then send its `Commit`: the
+/// [`send_committed_request`] steps on the two halves of one link. The held
+/// request's answer is the next frame `frame_reader` reads, under the request
+/// id of `ipc_request`.
+///
+/// # Panics
+///
+/// Panics when a frame cannot be written or read, or when the answer to the
+/// `Prepare` is not `Prepared` under the request id of `ipc_request`.
+#[track_caller]
+pub fn send_committed_request_through_halves(
+    frame_reader: &mut FrameReader,
+    frame_writer: &mut FrameWriter,
+    ipc_request: IpcRequest,
+) {
+    let request_id = ipc_request.request_id;
+    frame_writer
+        .send(&IpcRequest {
+            request_id,
+            request_kind: IpcRequestKind::Prepare(Box::new(ipc_request.request_kind)),
+        })
+        .expect("send the Prepare");
+    let prepare_reply: IpcResponse = frame_reader.recv().expect("the Prepare is answered");
+    assert_eq!(
+        prepare_reply,
+        IpcResponse {
+            request_id: Some(request_id),
+            answer_result: IpcResult::Prepared,
+        }
+    );
+    frame_writer
+        .send(&IpcRequest {
+            request_id,
+            request_kind: IpcRequestKind::Commit,
+        })
+        .expect("send the Commit");
+}
+
+/// Open one local socket connection at a fresh address and return its two
+/// ends: the one that connected, then the one that accepted. On Unix the
+/// address is a socket file under `/tmp`. On Windows it is a pipe name. A new
+/// session id makes each address unique.
+///
+/// # Panics
+///
+/// Panics when the address cannot be bound, connected to, or accepted on.
+#[must_use]
+pub fn connect_test_socket_pair() -> (Connection, Connection) {
+    #[cfg(unix)]
+    let socket_directory = PathBuf::from("/tmp");
+    #[cfg(windows)]
+    let socket_directory = std::env::temp_dir();
+    let socket_address = compute_socket_address(&socket_directory, SessionId::new());
+    let listener = Listener::bind(&socket_address).expect("bind the control socket");
+    let accept_thread =
+        std::thread::spawn(move || listener.accept().expect("accept the connection"));
+    let client_connection =
+        Connection::connect(&socket_address).expect("connect to the control socket");
+    let session_connection = accept_thread.join().expect("the accepting thread finished");
+    (client_connection, session_connection)
 }
 
 /// Take the exclusive update lock in `runtime_directory` the way `koshi

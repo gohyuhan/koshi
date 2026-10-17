@@ -61,7 +61,8 @@ pub enum SessionEnding {
 /// 1. The processes under the session's process are listed. On Windows, the
 ///    processes holding the session's panes and the processes under them are
 ///    listed too.
-/// 2. The session is sent `Quit`, and has 5 s to answer.
+/// 2. The session is sent `Quit`. It has 5 s to take the `Quit`, and 5 s more
+///    to answer it.
 /// 3. If it answered and its process ends within 2 s, or its process is gone
 ///    after a failed `Quit`, the processes under the session's process from
 ///    step 1 that still run are ended: [`SessionEnding::Quit`]. On Windows,
@@ -74,8 +75,9 @@ pub enum SessionEnding {
 ///    under them are added. All of them, then the session's process, are
 ///    ended, with the processes from step 1: [`SessionEnding::Stopped`].
 ///
-/// A session whose process is not confirmed is sent `Quit` alone, with 5 s
-/// to answer: [`SessionEnding::Quit`] with `stopped_process_count` `0`.
+/// A session whose process is not confirmed is sent `Quit` alone, with the
+/// same 5 s to take it and 5 s more to answer it: [`SessionEnding::Quit`] with
+/// `stopped_process_count` `0`.
 ///
 /// `stopped_process_count` counts the listed processes that still run when
 /// koshi ends them. A process that ends before that is not counted. On
@@ -338,9 +340,10 @@ fn is_other_koshi_process_of_current_user(process_record: &ProcessRecord) -> boo
 }
 
 /// Send `Quit` to the session `session_id` at `endpoint_file`, read from
-/// `runtime_directory` or the shared directory, which has 5 s to answer. A
-/// session of this user's that refuses the connection token is sent the `Quit`
-/// once more inside those 5 s, as
+/// `runtime_directory` or the shared directory. The session has 5 s to take
+/// the `Quit`, and 5 s more to answer it. A session of this user's that
+/// refuses the connection token is sent the `Quit` once more inside the first
+/// 5 s, as
 /// [`run_session_exchange_with_token_wait`](ipc_client::run_session_exchange_with_token_wait)
 /// states.
 ///
@@ -410,13 +413,18 @@ fn quit_unconfirmed_session(
 
 /// The sentence a failed `Quit` reports: the `detail` of
 /// [`CliError::PreviousReleaseServer`], without its `koshi restart-servers`
-/// advice, and the error's own sentence for every other failure.
+/// advice, the sentence of [`CliError::CommittedRequestUnanswered`], without
+/// its advice to check before the request runs again, and the error's own
+/// sentence for every other failure.
 ///
 /// Example — a koshi 0.4.0 session gives `the server answered in the format of
 /// koshi 0.4.0 or older, which this koshi cannot talk to`.
 fn format_quit_failure(quit_error: &CliError) -> String {
     match quit_error {
         CliError::PreviousReleaseServer { detail } => detail.clone(),
+        CliError::CommittedRequestUnanswered { detail } => {
+            format!("IPC unavailable: the session took the request and gave no answer ({detail})")
+        }
         other_quit_error => other_quit_error.to_string(),
     }
 }

@@ -1,15 +1,19 @@
 //! The `koshi` program run under the name of a clipboard tool, the way a
 //! program in a pane runs it, from the arguments to the exit code.
 //!
-//! Each test links the `koshi` binary under test as `xclip` into a folder of
-//! stand-ins. A test that needs the real `xclip` writes a fake one into a
-//! second folder that comes after the stand-ins on `PATH`. The fake writes its
-//! arguments, one per line, to `arguments.txt` in the test folder, and its
-//! standard input to `input.bin`, then runs one last command.
+//! Each test links the `koshi` binary under test as `xclip` or `wl-copy` into
+//! a folder of stand-ins. A test that needs the real tool writes a fake one of
+//! the same name into a second folder that comes after the stand-ins on
+//! `PATH`. The fake writes its arguments, one per line, to `arguments.txt` in
+//! the test folder, and its standard input to `input.bin`, then runs one last
+//! command.
 //!
 //! The tests that copy inside a session start one with
 //! `common::in_process_session::RunningSession`, and run the stand-in with the
-//! `KOSHI_*` variables of the session's root pane. The tests of a session's
+//! `KOSHI_*` variables of the session's root pane. The tests of a copy whose
+//! `Commit` gets no answer run the stand-in against a fake session that
+//! answers the `Prepare` with `Prepared`, reads the `Commit`, then closes the
+//! connection. The tests of a session's
 //! folder of stand-ins start a `koshi serve-session` process under a fresh test
 //! home, with a `PATH` that names one folder holding a fake `xclip`.
 //!
@@ -37,16 +41,23 @@ use std::time::Instant;
 
 #[cfg(unix)]
 use koshi_config::layer::{PartialKoshiConfig, PartialPaneClipboardWriteConfig};
+#[cfg(unix)]
+use koshi_core::ids::PaneId;
 use koshi_core::ids::SessionId;
+#[cfg(unix)]
+use koshi_ipc::endpoint::compute_socket_address;
 use koshi_ipc::endpoint::{resolve_clipboard_tool_directory_path, EndpointFile};
 #[cfg(unix)]
 use koshi_ipc::event::SessionEvent;
 #[cfg(unix)]
 use koshi_ipc::protocol::{
-    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MAX_CLIPBOARD_COPY_PART_BYTE_COUNT,
+    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, ProcessImageId,
+    MAX_CLIPBOARD_COPY_PART_BYTE_COUNT, PROTOCOL_VERSION,
 };
 #[cfg(unix)]
-use koshi_ipc::transport::Connection;
+use koshi_ipc::transport::{Connection, Listener};
+#[cfg(unix)]
+use koshi_test_support::fixtures::{build_test_runtime_directory, write_session_endpoint_file};
 use koshi_test_support::fixtures::{start_program_process, write_printing_program};
 use tempfile::TempDir;
 
@@ -66,11 +77,11 @@ use common::{
 const CLIPBOARD_TOOL_DIRECTORY_NAME: &str =
     "session-0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b.clipboard-tools";
 
-/// The last command of a fake real `xclip` that exits with code 3.
+/// The last command of a fake real tool that exits with code 3.
 #[cfg(unix)]
 const EXIT_WITH_CODE_3_COMMAND: &str = "exit 3";
 
-/// The last command of a fake real `xclip` that ends itself with `SIGTERM`.
+/// The last command of a fake real tool that ends itself with `SIGTERM`.
 #[cfg(unix)]
 const END_BY_SIGTERM_COMMAND: &str = "kill -TERM $$";
 
@@ -91,48 +102,51 @@ const WRITE_PANE_PATH_SCRIPT: &str =
 /// The line end that [`WRITE_PANE_PATH_SCRIPT`] writes after the `PATH`.
 const PANE_PATH_LINE_END: &str = if cfg!(windows) { "\r\n" } else { "\n" };
 
-/// One test folder: a folder of stand-ins that holds the link `xclip` to the
-/// `koshi` binary under test, and an empty folder for the fake real `xclip`.
+/// One test folder: a folder of stand-ins that holds a link named after a
+/// clipboard tool, such as `xclip`, to the `koshi` binary under test, and an
+/// empty folder for the fake real tool.
 #[cfg(unix)]
 struct StandInFixture {
     /// The test folder. Dropping it removes every file the test made.
     test_directory: TempDir,
-    /// The link named `xclip` to the `koshi` binary under test.
+    /// The link, named after the clipboard tool, to the `koshi` binary under
+    /// test.
     stand_in_path: PathBuf,
     /// The folder of stand-ins.
     clipboard_tool_directory: PathBuf,
-    /// The folder the fake real `xclip` goes into.
+    /// The folder the fake real tool goes into.
     real_tool_directory: PathBuf,
 }
 
 #[cfg(unix)]
 impl StandInFixture {
     /// The `PATH` that lists the folder of stand-ins, then the folder of the
-    /// fake real `xclip`.
+    /// fake real tool.
     fn build_path_entries(&self) -> OsString {
         std::env::join_paths([&self.clipboard_tool_directory, &self.real_tool_directory])
             .expect("no folder holds the separator")
     }
 
-    /// The bytes the fake real `xclip` wrote to `file_name` in the test
-    /// folder, or `None` when it wrote no such file.
+    /// The bytes the fake real tool wrote to `file_name` in the test folder,
+    /// or `None` when it wrote no such file.
     fn read_recorded_file(&self, file_name: &str) -> Option<Vec<u8>> {
         std::fs::read(self.test_directory.path().join(file_name)).ok()
     }
 }
 
-/// A [`StandInFixture`] whose real tool folder holds a fake `xclip` that runs
-/// `real_tool_last_command` after it records its arguments and its standard
-/// input, or nothing when `real_tool_last_command` is `None`. The fake names
-/// every file and program by its absolute path, so it runs with any `PATH`.
+/// A [`StandInFixture`] whose stand-in is named `tool_name`, and whose real
+/// tool folder holds a fake `tool_name` that runs `real_tool_last_command`
+/// after it records its arguments and its standard input, or nothing when
+/// `real_tool_last_command` is `None`. The fake names every file and program
+/// by its absolute path, so it runs with any `PATH`.
 #[cfg(unix)]
-fn build_stand_in_fixture(real_tool_last_command: Option<&str>) -> StandInFixture {
+fn build_stand_in_fixture(tool_name: &str, real_tool_last_command: Option<&str>) -> StandInFixture {
     let test_directory = build_short_test_directory();
     let clipboard_tool_directory = test_directory.path().join(CLIPBOARD_TOOL_DIRECTORY_NAME);
     let real_tool_directory = test_directory.path().join("bin");
     std::fs::create_dir(&clipboard_tool_directory).expect("the stand-in folder is made");
     std::fs::create_dir(&real_tool_directory).expect("the real tool folder is made");
-    let stand_in_path = clipboard_tool_directory.join("xclip");
+    let stand_in_path = clipboard_tool_directory.join(tool_name);
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_koshi"), &stand_in_path)
         .expect("the stand-in link is made");
     if let Some(real_tool_last_command) = real_tool_last_command {
@@ -141,7 +155,7 @@ fn build_stand_in_fixture(real_tool_last_command: Option<&str>) -> StandInFixtur
             test_directory.path().join("arguments.txt").display(),
             test_directory.path().join("input.bin").display(),
         );
-        let real_tool_path = real_tool_directory.join("xclip");
+        let real_tool_path = real_tool_directory.join(tool_name);
         std::fs::write(&real_tool_path, real_tool_script).expect("the fake real tool is written");
         std::fs::set_permissions(&real_tool_path, std::fs::Permissions::from_mode(0o755))
             .expect("the fake real tool may run");
@@ -187,20 +201,76 @@ fn run_stand_in(
         .expect("the stand-in ends")
 }
 
+/// The `KOSHI_*` variables of the pane `pane_id` in the session `session_id`,
+/// with `KOSHI_RUNTIME_DIR` naming `runtime_directory`.
+#[cfg(unix)]
+fn build_pane_variables(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    pane_id: PaneId,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("KOSHI", "1".to_string()),
+        ("KOSHI_SESSION_ID", session_id.to_string()),
+        ("KOSHI_PANE_ID", pane_id.to_string()),
+        ("KOSHI_RUNTIME_DIR", runtime_directory.display().to_string()),
+    ]
+}
+
 /// The `KOSHI_*` variables of `session`'s root pane, with `KOSHI_RUNTIME_DIR`
 /// naming the session's runtime directory.
 #[cfg(unix)]
 fn build_root_pane_variables(session: &RunningSession) -> Vec<(&'static str, String)> {
-    let root_pane_id = session.list_pane_ids()[0];
-    vec![
-        ("KOSHI", "1".to_string()),
-        ("KOSHI_SESSION_ID", session.session_id.to_string()),
-        ("KOSHI_PANE_ID", root_pane_id.to_string()),
-        (
-            "KOSHI_RUNTIME_DIR",
-            session.runtime_directory.path().display().to_string(),
-        ),
-    ]
+    build_pane_variables(
+        session.runtime_directory.path(),
+        session.session_id,
+        session.list_pane_ids()[0],
+    )
+}
+
+/// Serve one connection for `session_id` in `runtime_directory` as a session
+/// that takes a copy and gives no answer. It answers the Hello, answers the
+/// `Prepare` behind the Hello with `Prepared`, reads the `Commit`, then closes
+/// the connection. Hands back the session's thread, which ends with the
+/// `Prepare` and the `Commit` it read.
+#[cfg(unix)]
+fn spawn_session_leaving_the_commit_unanswered(
+    runtime_directory: &Path,
+    session_id: SessionId,
+) -> std::thread::JoinHandle<(IpcRequest, IpcRequest)> {
+    let session_listener = Listener::bind(&compute_socket_address(runtime_directory, session_id))
+        .expect("bind the fake session");
+    write_session_endpoint_file(
+        runtime_directory,
+        session_id,
+        "k7QxSecret",
+        std::process::id(),
+    );
+    std::thread::spawn(move || {
+        let mut session_connection = session_listener.accept().expect("accept the stand-in");
+        let hello_request: IpcRequest = session_connection.recv().expect("read the Hello");
+        let prepare_request: IpcRequest = session_connection
+            .recv()
+            .expect("read the Prepare behind the Hello");
+        session_connection
+            .send(&IpcResponse {
+                request_id: Some(hello_request.request_id),
+                answer_result: IpcResult::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    build_version: env!("CARGO_PKG_VERSION").to_string(),
+                    process_image_id: ProcessImageId::get_own(),
+                },
+            })
+            .expect("answer the Hello");
+        session_connection
+            .send(&IpcResponse {
+                request_id: Some(prepare_request.request_id),
+                answer_result: IpcResult::Prepared,
+            })
+            .expect("answer the Prepare");
+        let commit_request: IpcRequest = session_connection.recv().expect("read the Commit");
+        (prepare_request, commit_request)
+    })
 }
 
 /// A session whose `pane-clipboard-writes` allows writes.
@@ -268,7 +338,7 @@ fn wait_for_next_host_write(session_events: &std::sync::mpsc::Receiver<SessionEv
 #[cfg(unix)]
 #[test]
 fn a_read_runs_the_real_tool_in_place_with_its_arguments_and_input() {
-    let stand_in_fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
+    let stand_in_fixture = build_stand_in_fixture("xclip", Some(EXIT_WITH_CODE_3_COMMAND));
 
     let stand_in_output = run_stand_in(
         &stand_in_fixture,
@@ -292,7 +362,7 @@ fn a_read_runs_the_real_tool_in_place_with_its_arguments_and_input() {
 #[cfg(unix)]
 #[test]
 fn a_copy_outside_a_session_runs_the_real_tool_with_every_byte_of_the_input() {
-    let stand_in_fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
+    let stand_in_fixture = build_stand_in_fixture("xclip", Some(EXIT_WITH_CODE_3_COMMAND));
 
     let stand_in_output = run_stand_in(
         &stand_in_fixture,
@@ -316,7 +386,7 @@ fn a_copy_outside_a_session_runs_the_real_tool_with_every_byte_of_the_input() {
 #[cfg(unix)]
 #[test]
 fn a_stand_in_with_no_real_tool_on_path_exits_with_127() {
-    let stand_in_fixture = build_stand_in_fixture(None);
+    let stand_in_fixture = build_stand_in_fixture("xclip", None);
 
     let stand_in_output = run_stand_in(
         &stand_in_fixture,
@@ -336,7 +406,7 @@ fn a_stand_in_with_no_real_tool_on_path_exits_with_127() {
 #[cfg(unix)]
 #[test]
 fn a_copy_whose_real_tool_a_signal_ends_exits_with_128_plus_the_signal_number() {
-    let stand_in_fixture = build_stand_in_fixture(Some(END_BY_SIGTERM_COMMAND));
+    let stand_in_fixture = build_stand_in_fixture("xclip", Some(END_BY_SIGTERM_COMMAND));
 
     let stand_in_output = run_stand_in(
         &stand_in_fixture,
@@ -359,7 +429,7 @@ fn a_copy_whose_real_tool_a_signal_ends_exits_with_128_plus_the_signal_number() 
 fn a_copy_in_a_pane_only_a_client_on_another_machine_focuses_reaches_that_client_alone() {
     let session = start_session_allowing_pane_clipboard_writes();
     let remote_session_events = attach_client_from_another_machine(&session);
-    let stand_in_fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
+    let stand_in_fixture = build_stand_in_fixture("xclip", Some(EXIT_WITH_CODE_3_COMMAND));
 
     let stand_in_output = run_stand_in(
         &stand_in_fixture,
@@ -382,7 +452,7 @@ fn a_copy_in_a_pane_only_a_client_on_another_machine_focuses_reaches_that_client
 fn a_copy_that_is_not_utf8_runs_the_real_tool_and_reaches_no_client() {
     let session = start_session_allowing_pane_clipboard_writes();
     let remote_session_events = attach_client_from_another_machine(&session);
-    let stand_in_fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
+    let stand_in_fixture = build_stand_in_fixture("xclip", Some(EXIT_WITH_CODE_3_COMMAND));
 
     let stand_in_output = run_stand_in(
         &stand_in_fixture,
@@ -415,11 +485,11 @@ fn a_copy_that_is_not_utf8_runs_the_real_tool_and_reaches_no_client() {
 #[cfg(unix)]
 #[test]
 fn a_copy_past_max_copy_bytes_runs_the_real_tool_with_every_byte_read_then_the_rest() {
-    // The first part holds 12582783 bytes, past the 8388608 of
+    // The first part holds 12582774 bytes, past the 8388608 of
     // `max-copy-bytes`, and 4096 bytes follow the one byte read behind it.
     let session = start_session_allowing_pane_clipboard_writes();
     let _remote_session_events = attach_client_from_another_machine(&session);
-    let stand_in_fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
+    let stand_in_fixture = build_stand_in_fixture("xclip", Some(EXIT_WITH_CODE_3_COMMAND));
     let input_bytes = vec![b'a'; MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 4097];
 
     let stand_in_output = run_stand_in(
@@ -442,7 +512,7 @@ fn a_copy_past_max_copy_bytes_runs_the_real_tool_with_every_byte_read_then_the_r
 fn a_copy_in_a_pane_a_client_on_this_machine_focuses_runs_the_real_tool_with_every_byte() {
     let session = start_session_allowing_pane_clipboard_writes();
     let _local_client = attach_test_client(&session);
-    let stand_in_fixture = build_stand_in_fixture(Some(EXIT_WITH_CODE_3_COMMAND));
+    let stand_in_fixture = build_stand_in_fixture("xclip", Some(EXIT_WITH_CODE_3_COMMAND));
 
     let stand_in_output = run_stand_in(
         &stand_in_fixture,
@@ -457,6 +527,100 @@ fn a_copy_in_a_pane_a_client_on_this_machine_focuses_runs_the_real_tool_with_eve
         stand_in_fixture.read_recorded_file("input.bin"),
         Some(b"hi\n".to_vec())
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_copy_of_standard_input_whose_commit_gets_no_answer_exits_with_1_and_runs_no_real_tool() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let pane_id = PaneId::new();
+    let session_thread =
+        spawn_session_leaving_the_commit_unanswered(runtime_directory.path(), session_id);
+    let stand_in_fixture = build_stand_in_fixture("xclip", Some(EXIT_WITH_CODE_3_COMMAND));
+
+    let stand_in_output = run_stand_in(
+        &stand_in_fixture,
+        &["-selection", "clipboard"],
+        b"hi",
+        &stand_in_fixture.build_path_entries(),
+        &build_pane_variables(runtime_directory.path(), session_id, pane_id),
+    );
+
+    let (prepare_request, commit_request) = session_thread.join().expect("the fake session ends");
+    assert_eq!(
+        prepare_request,
+        IpcRequest {
+            request_id: 2,
+            request_kind: IpcRequestKind::Prepare(Box::new(IpcRequestKind::ClipboardCopy {
+                pane_id,
+                clipboard_targets: "c".to_string(),
+                copied_bytes: b"hi".to_vec(),
+            })),
+        }
+    );
+    assert_eq!(
+        commit_request,
+        IpcRequest {
+            request_id: 3,
+            request_kind: IpcRequestKind::Commit,
+        }
+    );
+    assert_eq!(stand_in_output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&stand_in_output.stderr),
+        "koshi: xclip: IPC unavailable: the session took the request and gave no answer \
+         (ipc peer disconnected); it may still run, so check before you run it again\n"
+    );
+    assert_eq!(stand_in_fixture.read_recorded_file("arguments.txt"), None);
+    assert_eq!(stand_in_fixture.read_recorded_file("input.bin"), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_copy_of_argument_text_whose_commit_gets_no_answer_exits_with_1_and_runs_no_real_tool() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let pane_id = PaneId::new();
+    let session_thread =
+        spawn_session_leaving_the_commit_unanswered(runtime_directory.path(), session_id);
+    let stand_in_fixture = build_stand_in_fixture("wl-copy", Some(EXIT_WITH_CODE_3_COMMAND));
+
+    let stand_in_output = run_stand_in(
+        &stand_in_fixture,
+        &["hi"],
+        b"",
+        &stand_in_fixture.build_path_entries(),
+        &build_pane_variables(runtime_directory.path(), session_id, pane_id),
+    );
+
+    let (prepare_request, commit_request) = session_thread.join().expect("the fake session ends");
+    assert_eq!(
+        prepare_request,
+        IpcRequest {
+            request_id: 2,
+            request_kind: IpcRequestKind::Prepare(Box::new(IpcRequestKind::ClipboardCopy {
+                pane_id,
+                clipboard_targets: "c".to_string(),
+                copied_bytes: b"hi".to_vec(),
+            })),
+        }
+    );
+    assert_eq!(
+        commit_request,
+        IpcRequest {
+            request_id: 3,
+            request_kind: IpcRequestKind::Commit,
+        }
+    );
+    assert_eq!(stand_in_output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&stand_in_output.stderr),
+        "koshi: wl-copy: IPC unavailable: the session took the request and gave no answer \
+         (ipc peer disconnected); it may still run, so check before you run it again\n"
+    );
+    assert_eq!(stand_in_fixture.read_recorded_file("arguments.txt"), None);
+    assert_eq!(stand_in_fixture.read_recorded_file("input.bin"), None);
 }
 
 /// A `koshi serve-session` process under a fresh test home, whose `PATH`

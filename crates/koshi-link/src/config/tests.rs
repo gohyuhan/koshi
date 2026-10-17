@@ -748,6 +748,7 @@ fn a_layout_section_naming_no_direction_still_opens_rightward() {
 
 // --- Who may reach a session's control socket ---
 
+#[cfg(unix)]
 /// A `koshi.kdl` layer with `should_allow_other_users` and no shared directory.
 fn build_other_user_access_config_layer(should_allow_other_users: bool) -> PartialKoshiConfig {
     PartialKoshiConfig {
@@ -756,6 +757,7 @@ fn build_other_user_access_config_layer(should_allow_other_users: bool) -> Parti
     }
 }
 
+#[cfg(unix)]
 /// A `koshi.kdl` layer with `should_allow_other_users` and
 /// `shared_sessions_directory`.
 fn build_other_user_access_config_layer_with_shared_sessions_directory(
@@ -769,12 +771,14 @@ fn build_other_user_access_config_layer_with_shared_sessions_directory(
     }
 }
 
+#[cfg(unix)]
 /// The directory `other_users_policy` shares through, or `None` when the
 /// session serves only the user who started it.
 fn get_shared_sessions_directory(other_users_policy: Option<OtherUsers>) -> Option<PathBuf> {
     other_users_policy.map(|other_users_access_policy| other_users_access_policy.shared_directory)
 }
 
+#[cfg(unix)]
 #[test]
 fn a_fresh_install_serves_only_the_user_who_started_the_session() {
     assert_eq!(
@@ -783,6 +787,7 @@ fn a_fresh_install_serves_only_the_user_who_started_the_session() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_config_turning_the_switch_off_serves_only_that_user() {
     assert_eq!(
@@ -795,6 +800,7 @@ fn a_config_turning_the_switch_off_serves_only_that_user() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_config_turning_the_switch_on_shares_through_the_machine_wide_directory() {
     assert_eq!(
@@ -803,10 +809,11 @@ fn a_config_turning_the_switch_on_shares_through_the_machine_wide_directory() {
             false,
             None,
         )),
-        koshi_paths::resolve_shared_sessions_directory()
+        Some(PathBuf::from("/tmp/koshi"))
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_config_naming_a_shared_directory_shares_through_that_one() {
     assert_eq!(
@@ -824,6 +831,7 @@ fn a_config_naming_a_shared_directory_shares_through_that_one() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn naming_a_shared_directory_alone_serves_only_this_user() {
     // `shared-sessions-dir` without `allow-other-users #true` shares nothing.
@@ -842,6 +850,7 @@ fn naming_a_shared_directory_alone_serves_only_this_user() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn the_flag_shares_a_session_whose_config_says_no() {
     let other_users_policy = resolve_other_users_policy(
@@ -866,11 +875,12 @@ fn the_flag_shares_a_session_whose_config_says_no() {
     assert!((other_users_policy.is_enabled)());
 }
 
+#[cfg(unix)]
 #[test]
 fn the_flag_shares_a_session_that_has_no_config_file_at_all() {
     assert_eq!(
         get_shared_sessions_directory(resolve_other_users_policy(None, true, None)),
-        koshi_paths::resolve_shared_sessions_directory()
+        Some(PathBuf::from("/tmp/koshi"))
     );
 }
 
@@ -928,6 +938,7 @@ fn no_config_directory_reads_no_file_and_keeps_every_default() {
     assert_eq!(find_shared_sessions_base_directory(None), None);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_config_directory_turning_the_switch_on_names_its_shared_directory() {
     let config_directory = build_config_directory_with_app_config(
@@ -937,6 +948,38 @@ fn a_config_directory_turning_the_switch_on_names_its_shared_directory() {
     assert_eq!(
         find_shared_sessions_base_directory(Some(config_directory.path())),
         Some(PathBuf::from("/var/run/koshi"))
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_config_directory_turning_the_switch_on_names_no_shared_directory_on_windows() {
+    let config_directory = build_config_directory_with_app_config(
+        "version 2\nallow-other-users #true\nshared-sessions-dir \"C:\\\\koshi-shared\"\n",
+    );
+
+    assert_eq!(
+        find_shared_sessions_base_directory(Some(config_directory.path())),
+        None
+    );
+}
+
+#[test]
+fn a_config_turning_the_switch_on_loads_with_no_warning() {
+    let config_directory = build_config_directory_with_app_config(
+        "version 2\nallow-other-users #true\nshared-sessions-dir \"/var/run/koshi\"\n",
+    );
+
+    let (loaded_config, config_warnings) = load_config_files(Some(config_directory.path()));
+
+    assert_eq!(config_warnings, Vec::<String>::new());
+    let app_config_layer = loaded_config.app_config_layer.expect("koshi.kdl applies");
+    assert_eq!(
+        (
+            app_config_layer.should_allow_other_users,
+            app_config_layer.shared_sessions_directory
+        ),
+        (Some(true), Some(Some(PathBuf::from("/var/run/koshi"))))
     );
 }
 
@@ -952,6 +995,7 @@ fn a_config_directory_leaving_the_switch_off_names_no_shared_directory() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_switch_left_to_the_file_is_read_from_the_config_directory_on_every_call() {
     let config_directory = build_config_directory_with_app_config(

@@ -823,40 +823,11 @@ fn plant_directory(directory_path: &Path, directory_mode: u32) {
 fn the_shared_directory_uses_the_machine_wide_location() {
     assert_eq!(
         resolve_shared_sessions_directory(),
-        Some(PathBuf::from("/tmp/koshi"))
+        PathBuf::from("/tmp/koshi")
     );
 }
 
-#[cfg(windows)]
-#[test]
-fn the_shared_directory_is_koshi_under_program_data() {
-    let mut environment_guard = EnvGuard::new();
-    environment_guard.set_environment_variable("ProgramData", r"C:\TestProgramData");
-
-    assert_eq!(
-        resolve_shared_sessions_directory(),
-        Some(PathBuf::from(r"C:\TestProgramData\koshi"))
-    );
-}
-
-#[cfg(windows)]
-#[test]
-fn a_machine_reporting_no_program_data_has_no_shared_directory() {
-    let mut environment_guard = EnvGuard::new();
-    environment_guard.unset_environment_variable("ProgramData");
-
-    assert_eq!(resolve_shared_sessions_directory(), None);
-}
-
-#[cfg(windows)]
-#[test]
-fn a_relative_program_data_gives_no_shared_directory() {
-    let mut environment_guard = EnvGuard::new();
-    environment_guard.set_environment_variable("ProgramData", r"TestProgramData\koshi");
-
-    assert_eq!(resolve_shared_sessions_directory(), None);
-}
-
+#[cfg(unix)]
 #[test]
 fn ensure_shared_base_creates_it_and_accepts_it_again() {
     let test_directory = tempfile::tempdir().expect("tempdir");
@@ -867,7 +838,6 @@ fn ensure_shared_base_creates_it_and_accepts_it_again() {
 
     assert!(shared_base_path.is_dir());
     // Mode `1777`: world-writable with the sticky bit.
-    #[cfg(unix)]
     assert_eq!(get_directory_mode(&shared_base_path), 0o1777);
 }
 
@@ -938,6 +908,7 @@ fn ensure_shared_base_refuses_a_regular_file_planted_in_its_place() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn ensure_shared_user_directory_hands_back_this_users_own_directory() {
     let test_directory = tempfile::tempdir().expect("tempdir");
@@ -950,18 +921,12 @@ fn ensure_shared_user_directory_hands_back_this_users_own_directory() {
 
     assert_eq!(user_directory, existing_user_directory);
     assert!(user_directory.is_dir());
-    #[cfg(unix)]
-    {
-        assert_eq!(
-            user_directory,
-            shared_base_path.join(get_effective_user_id().to_string())
-        );
-        // Mode `0755`.
-        assert_eq!(get_directory_mode(&user_directory), 0o755);
-    }
-    // On Windows the shared base path itself is the directory.
-    #[cfg(windows)]
-    assert_eq!(user_directory, shared_base_path);
+    assert_eq!(
+        user_directory,
+        shared_base_path.join(get_effective_user_id().to_string())
+    );
+    // Mode `0755`.
+    assert_eq!(get_directory_mode(&user_directory), 0o755);
 }
 
 #[cfg(unix)]

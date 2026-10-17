@@ -9,12 +9,9 @@ use std::time::{Duration, UNIX_EPOCH};
 use koshi_core::ids::SessionId;
 
 use super::*;
+use crate::plane::Plane;
+use crate::protocol::tests::{build_fixed_test_process_image_id, build_fixed_test_uuid};
 use crate::protocol::IpcErrorCode;
-
-/// The one UUID every fixed id below uses.
-fn build_fixed_test_uuid() -> uuid::Uuid {
-    uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")
-}
 
 /// A token holding a fixed secret.
 fn build_test_connection_token() -> ConnectionToken {
@@ -192,9 +189,10 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
             answer_result: RouterResult::Hello {
                 protocol_version: ROUTER_PROTOCOL_VERSION,
                 build_version: "0.9.9".to_string(),
+                process_image_id: Some(build_fixed_test_process_image_id()),
             },
         }),
-        r#"{"request_id":1,"answer_result":{"Hello":{"protocol_version":3,"build_version":"0.9.9"}}}"#
+        r#"{"request_id":1,"answer_result":{"Hello":{"protocol_version":3,"build_version":"0.9.9","process_image_id":"00000000-0000-0000-0000-000000000001"}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterResponse {
@@ -342,6 +340,35 @@ fn the_remote_access_answers_keep_their_wire_bytes() {
 }
 
 #[test]
+fn the_control_plane_answers_a_hello_with_the_agreed_version_the_build_and_its_own_image() {
+    assert_eq!(
+        ControlPlane::build_hello_response(3, "0.6.0"),
+        RouterResult::Hello {
+            protocol_version: 3,
+            build_version: "0.6.0".to_string(),
+            process_image_id: Some(ProcessImageId::get_own()),
+        }
+    );
+}
+
+#[test]
+fn a_hello_answer_of_koshi_0_5_0_reads_with_no_process_image() {
+    let hello_response: RouterResponse = serde_json::from_str(
+        r#"{"request_id":1,"answer_result":{"Hello":{"protocol_version":3,"build_version":"0.5.0"}}}"#,
+    )
+    .expect("a koshi 0.5.0 Hello answer decodes");
+
+    assert_eq!(
+        hello_response.answer_result,
+        RouterResult::Hello {
+            protocol_version: 3,
+            build_version: "0.5.0".to_string(),
+            process_image_id: None,
+        }
+    );
+}
+
+#[test]
 fn this_build_speaks_control_plane_version_three_only() {
     // Version 3 is this build's own: a session the router does not have is
     // refused with NotFound.
@@ -448,6 +475,7 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
             RouterResult::Hello {
                 protocol_version: ROUTER_PROTOCOL_VERSION,
                 build_version: "0.9.9".to_string(),
+                process_image_id: Some(build_fixed_test_process_image_id()),
             },
             "Hello",
         ),

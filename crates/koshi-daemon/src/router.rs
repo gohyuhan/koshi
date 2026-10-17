@@ -117,8 +117,6 @@ use koshi_ipc::endpoint::{
     is_replacing_its_image, resolve_clipboard_tool_directory_path, resolve_resume_file_path,
     EndpointFile, ServerProgramFile,
 };
-#[cfg(windows)]
-use koshi_ipc::endpoint::{delete_advertisement_marker, resolve_advertisement_marker_path};
 use koshi_ipc::error::{IpcError, RemoteFile};
 use koshi_ipc::plane::{self, RequestDisposition};
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
@@ -145,6 +143,7 @@ use koshi_link::discovery::repeat_while_live_session_refuses;
 use koshi_link::error::CliError;
 use koshi_link::ipc_client::{self, DuplicatedForeignSession, ForeignSessionListing, UnreadPath};
 use koshi_link::router_client::{ROUTER_SUBCOMMAND, RUNTIME_DIRECTORY_FLAG};
+use koshi_observability::repeated_warning::WarningRateLimiter;
 use koshi_runtime::executable_watch::ExecutableWatch;
 use koshi_runtime::server::is_binary_runnable;
 
@@ -152,7 +151,6 @@ use koshi_runtime::server::is_binary_runnable;
 use crate::process;
 use crate::remote_listener::{
     self, AdmissionAsk, BoundRemoteListener, LocateRefusal, RemoteConnectionAdmission,
-    WarningRateLimiter,
 };
 use crate::session_server::{ALLOW_OTHER_USERS_FLAG, SESSION_SERVER_SUBCOMMAND};
 
@@ -816,9 +814,8 @@ impl std::error::Error for ChildReapError {}
 /// after the cleanup every other end runs.
 ///
 /// `config_directory` holds the `koshi.kdl` the router reads: at the start for
-/// `remote-listen` and the shared directory, on every attach lookup for the
-/// shared directory, and on Windows for the marker a removed session leaves.
-/// `None` reads no file.
+/// `remote-listen` and the shared directory, and on every attach lookup for the
+/// shared directory. `None` reads no file.
 pub fn run_router(
     runtime_directory: &Path,
     config_directory: Option<&Path>,
@@ -1229,7 +1226,9 @@ fn start_router_accept_thread(
 /// Only this router's own user is served. A connection opened by another user,
 /// and one whose user cannot be read, is closed without being served. Each
 /// served connection runs a check of `executable_watch`, as
-/// [`check_router_executable_file`] states.
+/// [`check_router_executable_file`] states. A failed accept is logged at warn
+/// level at most once inside
+/// [`LOG_WINDOW_DURATION`](koshi_observability::repeated_warning::LOG_WINDOW_DURATION).
 fn run_router_accept_loop(
     listener: &Listener,
     router_connection_token: &ConnectionToken,
@@ -1237,10 +1236,20 @@ fn run_router_accept_loop(
     is_shutting_down: &AtomicBool,
     executable_watch: &Arc<ExecutableWatch>,
 ) {
+    let mut accept_failure_warning = WarningRateLimiter::new();
     transport::accept_until_shutdown(
         listener,
         is_shutting_down,
         ACCEPT_RETRY_DELAY_DURATION,
+        |accept_error| {
+            if accept_failure_warning.record_warning_if_due(Instant::now()) {
+                tracing::warn!(
+                    %accept_error,
+                    "the router could not accept a connection; \
+                     retrying every {ACCEPT_RETRY_DELAY_DURATION:?}"
+                );
+            }
+        },
         |connection| {
             // The OS reports which user opened the connection.
             if !matches!(connection.is_peer_same_user(), Ok(true)) {
@@ -1441,7 +1450,6 @@ fn run_dispatch_loop(
         let turn_started_at = Instant::now();
         advance_waiting_requests(
             runtime_directory,
-            config_directory,
             router_sessions,
             remote_state,
             router_events_sender,
@@ -1575,7 +1583,6 @@ fn serve_router_event(
             description_answer,
         } => apply_session_description(
             runtime_directory,
-            config_directory,
             router_sessions,
             router_events_sender,
             session_id,
@@ -1590,7 +1597,6 @@ fn serve_router_event(
         } => {
             let session_probe_verdict = apply_session_probe(
                 runtime_directory,
-                config_directory,
                 router_sessions,
                 session_id,
                 probed_endpoint_file.as_ref(),
@@ -1609,7 +1615,6 @@ fn serve_router_event(
             ready_report,
         } => finish_session_creation(
             runtime_directory,
-            config_directory,
             router_sessions,
             router_events_sender,
             session_id,
@@ -1679,13 +1684,23 @@ fn serve_router_request(
             return;
         }
         RouterRequestKind::AttachLookup { session_selector } => {
-            match list_foreign_sessions_for_lookup(
+            #[cfg(unix)]
+            let foreign_session_lookup = list_foreign_sessions_for_lookup(
                 koshi_link::config::find_shared_sessions_base_directory(config_directory)
                     .as_deref(),
                 runtime_directory,
                 &router_sessions.session_registry,
                 &session_selector,
-            ) {
+            );
+            #[cfg(windows)]
+            let foreign_session_lookup: Result<
+                ForeignSessionListing,
+                ipc_client::ForeignSessionLookupError,
+            > = {
+                let _ = config_directory;
+                Ok(ForeignSessionListing::default())
+            };
+            match foreign_session_lookup {
                 Ok(foreign_session_listing) => start_attach_lookup(
                     runtime_directory,
                     router_sessions,
@@ -1829,7 +1844,10 @@ fn admit_remote_token(
     remote_connection_stream: TcpStream,
 ) -> Option<RemoteConnectionAdmission> {
     if remote_state.admitted_remote_connections.len() >= MAX_LIVE_REMOTE_CONNECTION_COUNT {
-        if remote_state.full_capacity_warning.is_due(Instant::now()) {
+        if remote_state
+            .full_capacity_warning
+            .record_warning_if_due(Instant::now())
+        {
             tracing::warn!(
                 "{MAX_LIVE_REMOTE_CONNECTION_COUNT} remote connections are already admitted; \
                  refusing the ones that arrive until some of them end"
@@ -2168,11 +2186,8 @@ fn check_restart_binary(executable_path: &Path) -> RouterResult {
 /// nothing more: attach lookups through [`advance_attach_lookup`], remote
 /// attaches through [`advance_remote_locate`], and session creations through
 /// [`advance_session_creations`].
-///
-/// `config_directory` is the one [`run_router`] was given.
 fn advance_waiting_requests(
     runtime_directory: &Path,
-    config_directory: Option<&Path>,
     router_sessions: &mut RouterSessions,
     remote_state: &RemoteState,
     router_events_sender: &Sender<RouterEvent>,
@@ -2206,7 +2221,6 @@ fn advance_waiting_requests(
     }
     advance_session_creations(
         runtime_directory,
-        config_directory,
         router_sessions,
         router_events_sender,
         now,
@@ -2274,11 +2288,8 @@ fn find_next_waiting_request_wake_at(
 /// creation keeps waiting.
 /// Otherwise each queued creation, in arrival order, starts its session server
 /// through [`start_session_server`].
-///
-/// `config_directory` goes to [`refuse_starting_session_server`].
 fn advance_session_creations(
     runtime_directory: &Path,
-    config_directory: Option<&Path>,
     router_sessions: &mut RouterSessions,
     router_events_sender: &Sender<RouterEvent>,
     now: Instant,
@@ -2292,7 +2303,6 @@ fn advance_session_creations(
         }
         refuse_starting_session_server(
             runtime_directory,
-            config_directory,
             &mut router_sessions.session_registry,
             starting_session_server,
             "the session did not report a bound socket".to_string(),
@@ -2418,11 +2428,8 @@ fn start_session_server(
 /// advertised, and refuses the creation with the reason. A report for a
 /// session server no longer starting, one whose deadline passed first, changes
 /// nothing.
-///
-/// `config_directory` goes to [`refuse_starting_session_server`].
 fn finish_session_creation(
     runtime_directory: &Path,
-    config_directory: Option<&Path>,
     router_sessions: &mut RouterSessions,
     router_events_sender: &Sender<RouterEvent>,
     session_id: SessionId,
@@ -2443,7 +2450,6 @@ fn finish_session_creation(
         Err(ready_report_error) => {
             refuse_starting_session_server(
                 runtime_directory,
-                config_directory,
                 &mut router_sessions.session_registry,
                 starting_session_server,
                 ready_report_error,
@@ -2487,11 +2493,8 @@ fn finish_session_creation(
 /// session server that bound its socket before it was killed left an endpoint
 /// file behind: that file, and what it advertised in the shared directory, are
 /// removed.
-///
-/// `config_directory` goes to [`delete_session_files`].
 fn refuse_starting_session_server(
     runtime_directory: &Path,
-    config_directory: Option<&Path>,
     session_registry: &mut SessionRegistry,
     mut starting_session_server: StartingSessionServer,
     refusal_message: String,
@@ -2503,7 +2506,6 @@ fn refuse_starting_session_server(
             .flatten();
     delete_session_files(
         runtime_directory,
-        config_directory,
         session_registry,
         starting_session_server.session_id,
         advertised_endpoint_file.as_ref(),
@@ -2988,7 +2990,8 @@ fn is_session_gone_error(cli_error: &CliError) -> bool {
 /// goes through [`start_unlisted_session_descriptions`]: the sessions this user
 /// started, and, while `shared_sessions_base_directory` is given, the sessions
 /// other local users started, as
-/// [`list_foreign_sessions`](ipc_client::list_foreign_sessions) lists them.
+/// [`list_foreign_sessions`](ipc_client::list_foreign_sessions) lists them on
+/// Linux and macOS. On Windows `shared_sessions_base_directory` is not read.
 /// Nothing is waited for: each answer registers its session once it reaches
 /// the dispatcher, and a lookup that arrives first waits for it. A session
 /// server that outlived an earlier router is registered this way.
@@ -2999,16 +3002,23 @@ fn create_router_sessions(
 ) -> RouterSessions {
     delete_orphan_resume_files(runtime_directory);
     let mut router_sessions = RouterSessions::from_session_registry(SessionRegistry::new());
+    #[cfg(unix)]
+    let foreign_session_listing = shared_sessions_base_directory
+        .map(|shared_sessions_base_directory| {
+            ipc_client::list_foreign_sessions(shared_sessions_base_directory, runtime_directory)
+        })
+        .unwrap_or_default();
+    #[cfg(windows)]
+    let foreign_session_listing = {
+        let _ = shared_sessions_base_directory;
+        ForeignSessionListing::default()
+    };
     start_unlisted_session_descriptions(
         runtime_directory,
         &mut router_sessions,
         router_events_sender,
         list_own_sessions_or_none(runtime_directory),
-        shared_sessions_base_directory
-            .map(|shared_sessions_base_directory| {
-                ipc_client::list_foreign_sessions(shared_sessions_base_directory, runtime_directory)
-            })
-            .unwrap_or_default(),
+        foreign_session_listing,
     );
     router_sessions
 }
@@ -3030,7 +3040,8 @@ fn list_own_sessions_or_none(runtime_directory: &Path) -> Vec<SessionId> {
 /// `session_selector` asks, from the shared directory under
 /// `shared_sessions_base_directory`. Nothing is read while
 /// `shared_sessions_base_directory` is `None`, which it is while
-/// `allow-other-users` is off.
+/// `allow-other-users` is off. On Windows an attach lookup asks no other
+/// user's session, and this is not called.
 ///
 /// - A [`SessionSelector::SessionId`] the list holds reads nothing.
 /// - Any other [`SessionSelector::SessionId`] reads the one path
@@ -3049,6 +3060,7 @@ fn list_own_sessions_or_none(runtime_directory: &Path) -> Vec<SessionId> {
 /// # Errors
 /// The failure [`find_foreign_session_address`](ipc_client::find_foreign_session_address)
 /// gives, such as an id that sockets of two users advertise.
+#[cfg(unix)]
 fn list_foreign_sessions_for_lookup(
     shared_sessions_base_directory: Option<&Path>,
     runtime_directory: &Path,
@@ -3468,12 +3480,9 @@ fn fetch_own_session_description(
 /// - Any other failure, such as a refused Hello or a protocol version outside
 ///   this build's range: its files stay, and the reason
 ///   [`build_description_failure_reason`] gives is recorded.
-///
-/// `config_directory` goes to [`remove_session_from_registry`].
 #[allow(clippy::too_many_arguments)]
 fn apply_session_description(
     runtime_directory: &Path,
-    config_directory: Option<&Path>,
     router_sessions: &mut RouterSessions,
     router_events_sender: &Sender<RouterEvent>,
     session_id: SessionId,
@@ -3504,7 +3513,6 @@ fn apply_session_description(
         (DescribedSessionOrigin::ThisUser, None) => {
             let Some(unanswered_session_reason) = apply_session_removal(
                 runtime_directory,
-                config_directory,
                 router_sessions,
                 router_events_sender,
                 session_id,
@@ -3553,7 +3561,6 @@ fn apply_session_description(
             Err(description_error) if is_session_gone_error(&description_error) => {
                 let Some(unanswered_session_reason) = apply_session_removal(
                     runtime_directory,
-                    config_directory,
                     router_sessions,
                     router_events_sender,
                     session_id,
@@ -3583,11 +3590,8 @@ fn apply_session_description(
 ///   [`UnansweredSessionReason::ReplacingItsImage`].
 /// - [`SessionRemoval::ProcessStillRunning`] gives
 ///   [`UnansweredSessionReason::ProcessStillRunning`] with its process id.
-///
-/// `config_directory` goes to [`remove_session_from_registry`].
 fn apply_session_removal(
     runtime_directory: &Path,
-    config_directory: Option<&Path>,
     router_sessions: &mut RouterSessions,
     router_events_sender: &Sender<RouterEvent>,
     session_id: SessionId,
@@ -3595,7 +3599,6 @@ fn apply_session_removal(
 ) -> Option<UnansweredSessionReason> {
     match remove_session_from_registry(
         runtime_directory,
-        config_directory,
         &mut router_sessions.session_registry,
         session_id,
         expected_endpoint_file,
@@ -3806,11 +3809,8 @@ fn probe_session_address_once(
 /// `/srv/koshi-shared/1000/session-<uuid>.sock`. A probe that read the old file
 /// and found nothing at the old address gives `NothingListening` with
 /// [`SessionRemoval::Rebound`], and nothing is removed.
-///
-/// `config_directory` goes to [`remove_session_from_registry`].
 fn apply_session_probe(
     runtime_directory: &Path,
-    config_directory: Option<&Path>,
     router_sessions: &mut RouterSessions,
     session_id: SessionId,
     probed_endpoint_file: Option<&EndpointFile>,
@@ -3841,7 +3841,6 @@ fn apply_session_probe(
         SessionProbeOutcome::NoListener => {
             SessionProbeVerdict::NothingListening(remove_session_from_registry(
                 runtime_directory,
-                config_directory,
                 &mut router_sessions.session_registry,
                 session_id,
                 probed_endpoint_file,
@@ -3934,11 +3933,8 @@ fn resolve_session_selector(
 ///    listed.
 ///
 /// Otherwise the session is removed, and this gives [`SessionRemoval::Removed`].
-///
-/// `config_directory` goes to [`delete_session_files`].
 fn remove_session_from_registry(
     runtime_directory: &Path,
-    config_directory: Option<&Path>,
     session_registry: &mut SessionRegistry,
     session_id: SessionId,
     expected_endpoint_file: Option<&EndpointFile>,
@@ -3963,7 +3959,6 @@ fn remove_session_from_registry(
     }
     delete_session_files(
         runtime_directory,
-        config_directory,
         session_registry,
         session_id,
         current_endpoint_file.as_ref(),
@@ -3981,12 +3976,8 @@ fn remove_session_from_registry(
 /// [`delete_shared_session_advertisement`], from the socket address
 /// `advertised_endpoint_file` names. A session another local user started has
 /// no endpoint file here: nothing of that user's is removed.
-///
-/// `config_directory` holds the `koshi.kdl` that names the shared directory a
-/// removed session's Windows marker sits in.
 fn delete_session_files(
     runtime_directory: &Path,
-    config_directory: Option<&Path>,
     session_registry: &mut SessionRegistry,
     session_id: SessionId,
     advertised_endpoint_file: Option<&EndpointFile>,
@@ -4007,11 +3998,7 @@ fn delete_session_files(
     ));
     delete_socket_file(&compute_socket_address(runtime_directory, session_id));
     if let Some(advertised_endpoint_file) = advertised_endpoint_file {
-        delete_shared_session_advertisement(
-            session_id,
-            &advertised_endpoint_file.socket_address,
-            config_directory,
-        );
+        delete_shared_session_advertisement(session_id, &advertised_endpoint_file.socket_address);
     }
 }
 
@@ -4028,44 +4015,17 @@ fn convert_to_unix_process_id(process_id: u32) -> Option<libc::pid_t> {
 /// Remove what the session `session_id` of this user's advertised in the
 /// shared directory, given the socket address its endpoint file named.
 ///
-/// On Unix, the socket file at `advertised_socket_address` is removed when its
-/// file name is `session-<uuid>.sock` for `session_id`, such as
+/// The socket file at `advertised_socket_address` is removed when its file
+/// name is `session-<uuid>.sock` for `session_id`, such as
 /// `/tmp/koshi/1000/session-<uuid>.sock`. A file of any other name is left
-/// alone. On Windows the address is a pipe name, and the marker
-/// `session-<uuid>` for `session_id` in the shared directory `koshi.kdl` in
-/// `config_directory` names is removed, whether or not `allow-other-users` is
-/// on.
-fn delete_shared_session_advertisement(
-    session_id: SessionId,
-    advertised_socket_address: &str,
-    config_directory: Option<&Path>,
-) {
-    #[cfg(unix)]
+/// alone. On Windows the address is a pipe name, and nothing is removed.
+fn delete_shared_session_advertisement(session_id: SessionId, advertised_socket_address: &str) {
+    let advertised_socket_file_name = format!("{session_id}.sock");
+    if Path::new(advertised_socket_address)
+        .file_name()
+        .is_some_and(|socket_file_name| socket_file_name == advertised_socket_file_name.as_str())
     {
-        let _ = config_directory;
-        let advertised_socket_file_name = format!("{session_id}.sock");
-        if Path::new(advertised_socket_address)
-            .file_name()
-            .is_some_and(|socket_file_name| {
-                socket_file_name == advertised_socket_file_name.as_str()
-            })
-        {
-            delete_socket_file(advertised_socket_address);
-        }
-    }
-    #[cfg(windows)]
-    {
-        let _ = advertised_socket_address;
-        if let Some(shared_sessions_directory) =
-            koshi_link::config::resolve_shared_sessions_directory(
-                &koshi_link::config::load_current_server_config(config_directory),
-            )
-        {
-            delete_advertisement_marker(&resolve_advertisement_marker_path(
-                &shared_sessions_directory,
-                session_id,
-            ));
-        }
+        delete_socket_file(advertised_socket_address);
     }
 }
 

@@ -153,6 +153,27 @@ impl Server {
         is_routed
     }
 
+    /// Whether a client takes a stand-in clipboard tool copy of
+    /// `copied_byte_count` bytes from `pane_id` when
+    /// [`route_clipboard_tool_copy`](Self::route_clipboard_tool_copy) routes
+    /// it: the session takes the copy
+    /// ([`can_take_clipboard_tool_copy`](Self::can_take_clipboard_tool_copy)),
+    /// and a client on another machine focuses `pane_id`.
+    ///
+    /// Example: one client on this machine and one on another machine focus
+    /// `pane_id`, and the copy fits `max-copy-bytes`: `true`.
+    pub(crate) fn can_route_clipboard_tool_copy(
+        &self,
+        pane_id: PaneId,
+        copied_byte_count: usize,
+    ) -> bool {
+        self.can_take_clipboard_tool_copy(copied_byte_count)
+            && self
+                .list_clients_focusing_pane(pane_id)
+                .iter()
+                .any(|&(_, client_origin)| client_origin != ClientOrigin::Local)
+    }
+
     /// Whether the session takes a stand-in clipboard tool copy of
     /// `copied_byte_count` bytes: `pane-clipboard-writes` allows writes, and
     /// `copied_byte_count` is at most its `max-copy-bytes`.

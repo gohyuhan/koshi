@@ -31,7 +31,7 @@ use koshi_core::ids::SessionId;
 use serde::{Deserialize, Serialize};
 
 use crate::handshake::{GateWords, VersionGate};
-use crate::protocol::{ConnectionToken, IpcErrorPayload};
+use crate::protocol::{ConnectionToken, IpcErrorPayload, ProcessImageId};
 use crate::remote_tokens::{TokenEntry, TokenScope};
 use crate::wire::{Answer, Envelope, MaybeKnown, WireName, WireVariants};
 
@@ -244,6 +244,11 @@ pub enum RouterResult {
         protocol_version: u32,
         /// The build version of the answering router, e.g. `0.3.0`.
         build_version: String,
+        /// The id of the answering router's process image, which a restart
+        /// into a new image changes. Every router of this build names its
+        /// own. A koshi 0.5.0 router leaves the field out, which reads as
+        /// `None`.
+        process_image_id: Option<ProcessImageId>,
     },
     /// Answers [`RouterRequestKind::CreateSession`]: where the new session
     /// listens.
@@ -545,6 +550,7 @@ impl crate::plane::Plane for ControlPlane {
         RouterResult::Hello {
             protocol_version: agreed_protocol_version,
             build_version: build_version.to_string(),
+            process_image_id: Some(ProcessImageId::get_own()),
         }
     }
 }

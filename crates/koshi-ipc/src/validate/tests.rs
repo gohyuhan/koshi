@@ -421,23 +421,6 @@ fn a_pipe_name_outside_the_koshi_namespace_is_untrusted() {
     );
 }
 
-#[cfg(windows)]
-#[test]
-fn a_koshi_prefixed_shared_pipe_name_passes() {
-    validate_shared_socket_address("koshi-session-abc", Path::new("unused")).expect("validate");
-}
-
-#[cfg(windows)]
-#[test]
-fn a_shared_pipe_name_outside_the_koshi_namespace_is_untrusted() {
-    let validation_error =
-        validate_shared_socket_address("other-session-abc", Path::new("unused")).unwrap_err();
-    assert_eq!(
-        validation_error.to_string(),
-        "untrusted socket address other-session-abc: pipe name is outside the koshi- namespace"
-    );
-}
-
 // --- reclaim_stale_socket ---
 
 #[test]

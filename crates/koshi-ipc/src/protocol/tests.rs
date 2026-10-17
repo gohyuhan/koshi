@@ -2,7 +2,8 @@
 //! round trip and keeps its own tag, an unknown field is refused on the
 //! envelope and ignored on the payload, the connection token prints as
 //! `***` and is equal only to a token holding the same bytes, and a clipboard
-//! copy of [`MAX_CLIPBOARD_COPY_PART_BYTE_COUNT`] bytes fits one frame.
+//! copy of [`MAX_CLIPBOARD_COPY_PART_BYTE_COUNT`] bytes inside a `Prepare` fits
+//! one frame.
 
 use std::num::NonZeroU16;
 use std::path::PathBuf;
@@ -345,6 +346,8 @@ pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
             clipboard_targets: "c".to_string(),
             copied_bytes: b"lo".to_vec(),
         },
+        IpcRequestKind::Prepare(Box::new(IpcRequestKind::Restart)),
+        IpcRequestKind::Commit,
     ]
 }
 
@@ -354,6 +357,7 @@ pub(crate) fn list_all_ipc_results() -> Vec<IpcResult> {
         IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
             build_version: "0.3.0".to_string(),
+            process_image_id: build_fixed_test_process_image_id(),
         },
         IpcResult::Attached {
             client_id: ClientId::from_uuid(build_fixed_test_uuid()),
@@ -378,12 +382,19 @@ pub(crate) fn list_all_ipc_results() -> Vec<IpcResult> {
         IpcResult::ClipboardCopyRouted {
             should_run_clipboard_tool: false,
         },
+        IpcResult::Prepared,
     ]
 }
 
-/// The one UUID every fixed id in this file uses.
-fn build_fixed_test_uuid() -> uuid::Uuid {
+/// The one UUID every fixed id in the koshi-ipc tests uses:
+/// `00000000-0000-0000-0000-000000000001`.
+pub(crate) fn build_fixed_test_uuid() -> uuid::Uuid {
     uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")
+}
+
+/// The process image id built from [`build_fixed_test_uuid`].
+pub(crate) fn build_fixed_test_process_image_id() -> ProcessImageId {
+    ProcessImageId(build_fixed_test_uuid())
 }
 
 /// Encode `wire_message` as JSON and decode it back.
@@ -457,14 +468,25 @@ fn the_session_plane_answers_a_refusal_as_an_error_result() {
 }
 
 #[test]
-fn the_session_plane_answers_a_hello_with_the_agreed_version_and_the_build() {
+fn the_session_plane_answers_a_hello_with_the_agreed_version_the_build_and_its_own_image() {
     assert_eq!(
         SessionPlane::build_hello_response(2, "0.3.0"),
         IpcResult::Hello {
             protocol_version: 2,
             build_version: "0.3.0".to_string(),
+            process_image_id: ProcessImageId::get_own(),
         }
     );
+}
+
+#[test]
+fn every_read_of_the_own_process_image_id_gives_the_same_id() {
+    assert_eq!(ProcessImageId::get_own(), ProcessImageId::get_own());
+}
+
+#[test]
+fn every_generated_process_image_id_is_a_fresh_one() {
+    assert_ne!(ProcessImageId::generate(), ProcessImageId::generate());
 }
 
 #[test]
@@ -1836,6 +1858,7 @@ fn hello_response_round_trips() {
         answer_result: IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
             build_version: "0.3.0".to_string(),
+            process_image_id: build_fixed_test_process_image_id(),
         },
     };
 
@@ -1856,9 +1879,22 @@ fn a_hello_response_without_the_build_version_is_refused() {
 }
 
 #[test]
+fn a_hello_response_without_the_process_image_id_is_refused() {
+    let decode_error = serde_json::from_str::<IpcResponse>(
+        r#"{"request_id":1,"answer_result":{"Hello":{"protocol_version":5,"build_version":"0.6.0"}}}"#,
+    )
+    .expect_err("every session server names its process image");
+
+    assert_eq!(
+        decode_error.to_string(),
+        "missing field `process_image_id` at line 1 column 87"
+    );
+}
+
+#[test]
 fn a_hello_answer_carrying_an_unknown_field_ignores_it() {
     let decoded_wire_message: IpcResponse = serde_json::from_str(
-        r#"{"request_id":1,"answer_result":{"Hello":{"protocol_version":2,"build_version":"0.3.0","build_date":"2026-01-01"}}}"#,
+        r#"{"request_id":1,"answer_result":{"Hello":{"protocol_version":2,"build_version":"0.3.0","process_image_id":"00000000-0000-0000-0000-000000000001","build_date":"2026-01-01"}}}"#,
     )
     .expect("a field this build does not know is ignored");
 
@@ -1869,6 +1905,7 @@ fn a_hello_answer_carrying_an_unknown_field_ignores_it() {
             answer_result: IpcResult::Hello {
                 protocol_version: 2,
                 build_version: "0.3.0".to_string(),
+                process_image_id: build_fixed_test_process_image_id(),
             },
         }
     );
@@ -2323,7 +2360,7 @@ fn a_response_with_a_misspelled_request_id_is_refused() {
     // `a_response_envelope_this_build_reads_decodes`; the misspelled field is
     // the only fault in these bytes.
     let decode_attempt: Result<IpcResponse, _> = serde_json::from_str(
-        r#"{"requst_id":7,"answer_result":{"Hello":{"protocol_version":4,"build_version":"0.5.0"}},"request_id":7}"#,
+        r#"{"requst_id":7,"answer_result":{"Hello":{"protocol_version":4,"build_version":"0.5.0","process_image_id":"00000000-0000-0000-0000-000000000001"}},"request_id":7}"#,
     );
 
     let decode_error =
@@ -2337,7 +2374,7 @@ fn a_response_with_a_misspelled_request_id_is_refused() {
 #[test]
 fn a_response_envelope_this_build_reads_decodes() {
     let decoded_wire_message: IpcResponse = serde_json::from_str(
-        r#"{"request_id":7,"answer_result":{"Hello":{"protocol_version":4,"build_version":"0.5.0"}}}"#,
+        r#"{"request_id":7,"answer_result":{"Hello":{"protocol_version":4,"build_version":"0.5.0","process_image_id":"00000000-0000-0000-0000-000000000001"}}}"#,
     )
     .expect("the same bytes without the misspelling decode");
 
@@ -2348,6 +2385,7 @@ fn a_response_envelope_this_build_reads_decodes() {
             answer_result: IpcResult::Hello {
                 protocol_version: 4,
                 build_version: "0.5.0".to_string(),
+                process_image_id: build_fixed_test_process_image_id(),
             },
         }
     );
@@ -2539,23 +2577,31 @@ fn two_generated_tokens_differ() {
     assert_ne!(ConnectionToken::generate(), ConnectionToken::generate());
 }
 
-/// A `ClipboardCopy` with the longest request id and target field this build
-/// sends, carrying `copied_byte_count` bytes of `0xff`.
-fn build_largest_clipboard_copy_request(copied_byte_count: usize) -> IpcRequest {
+#[test]
+fn only_the_empty_secret_is_an_empty_token() {
+    assert!(ConnectionToken::from_secret("").is_empty());
+    assert!(!ConnectionToken::from_secret("k").is_empty());
+    assert!(!ConnectionToken::generate().is_empty());
+}
+
+/// A `Prepare` carrying a `ClipboardCopy` with the longest request id and
+/// target field this build sends, carrying `copied_byte_count` bytes of
+/// `0xff`.
+fn build_largest_prepared_clipboard_copy_request(copied_byte_count: usize) -> IpcRequest {
     IpcRequest {
         request_id: u64::MAX,
-        request_kind: IpcRequestKind::ClipboardCopy {
+        request_kind: IpcRequestKind::Prepare(Box::new(IpcRequestKind::ClipboardCopy {
             pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
             clipboard_targets: "cpqs01234567".to_string(),
             copied_bytes: vec![0xff; copied_byte_count],
-        },
+        })),
     }
 }
 
 #[test]
-fn a_clipboard_copy_of_the_largest_part_fills_one_frame_exactly() {
+fn a_prepared_clipboard_copy_of_the_largest_part_fills_one_frame_exactly() {
     let clipboard_copy_request =
-        build_largest_clipboard_copy_request(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT);
+        build_largest_prepared_clipboard_copy_request(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT);
 
     assert_eq!(
         serde_json::to_vec(&clipboard_copy_request)
@@ -2573,9 +2619,9 @@ fn a_clipboard_copy_of_the_largest_part_fills_one_frame_exactly() {
 }
 
 #[test]
-fn a_clipboard_copy_three_bytes_past_the_largest_part_is_refused_by_the_frame_limit() {
+fn a_prepared_clipboard_copy_three_bytes_past_the_largest_part_is_refused_by_the_frame_limit() {
     let clipboard_copy_request =
-        build_largest_clipboard_copy_request(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 3);
+        build_largest_prepared_clipboard_copy_request(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 3);
 
     assert_eq!(
         serde_json::to_vec(&clipboard_copy_request)
@@ -2611,6 +2657,31 @@ fn a_clipboard_copy_part_round_trips_as_base64() {
     assert_eq!(
         round_trip_wire_message(&clipboard_copy_part),
         clipboard_copy_part
+    );
+}
+
+#[test]
+fn a_prepare_carries_its_request_and_a_commit_and_a_prepared_answer_carry_nothing() {
+    let prepare_request_kind = IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(
+        Box::new(build_test_command_envelope()),
+    )));
+
+    assert_eq!(
+        serde_json::to_value(IpcRequestKind::Prepare(Box::new(IpcRequestKind::Restart)))
+            .expect("request kind encodes"),
+        json!({ "Prepare": "Restart" })
+    );
+    assert_eq!(
+        round_trip_wire_message(&prepare_request_kind),
+        prepare_request_kind
+    );
+    assert_eq!(
+        serde_json::to_value(IpcRequestKind::Commit).expect("request kind encodes"),
+        json!("Commit")
+    );
+    assert_eq!(
+        serde_json::to_value(IpcResult::Prepared).expect("result encodes"),
+        json!("Prepared")
     );
 }
 
