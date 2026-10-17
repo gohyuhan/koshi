@@ -136,6 +136,15 @@ pub fn build_ipc_unavailable_error(ipc_error: IpcError) -> CliError {
     }
 }
 
+/// The [`CliError::CommittedRequestUnanswered`] for `ipc_error`, the failure
+/// of the write of a `Commit` or of the read of its answer, carrying its text
+/// filtered by [`sanitize_reported_text`].
+pub fn build_committed_request_unanswered_error(ipc_error: IpcError) -> CliError {
+    CliError::CommittedRequestUnanswered {
+        detail: sanitize_reported_text(&ipc_error.to_string()),
+    }
+}
+
 /// `command_result` with a rejection's hint filtered by [`sanitize_reported_text`].
 /// An applied result is unchanged, and so is a rejection carrying no hint.
 ///

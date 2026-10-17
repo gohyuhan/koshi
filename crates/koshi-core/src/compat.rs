@@ -95,6 +95,12 @@ pub struct Surface {
 ///   `modifier_flags` and `pane_local_cell`, the cell in the pane's content
 ///   that the client resolved; 4 carried the client's screen cell in
 ///   `mouse_input`. The `MoveFloatingPane` mouse action exists in 5 only.
+/// - The `Prepare` and `Commit` requests and the `Prepared` answer exist in 5
+///   only. A `SubmitCommand`, an `Attach`, a `ClipboardCopy` and a `Restart`
+///   run only as the request a `Prepare` holds, once its `Commit` arrives, and
+///   one sent alone is refused with the `RequestFailed` code. A
+///   `SubmitCommand` on a connection that carries an attached client's event
+///   stream runs as it arrives. 4 ran each of the four as it arrived.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A

@@ -24,6 +24,41 @@ use koshi_test_support::fixtures::{
     PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT,
 };
 
+/// The deadline a test router restart gets when the stand-in router answers
+/// it: 60 seconds from now.
+fn build_test_answer_deadline() -> Instant {
+    Instant::now() + Duration::from_secs(60)
+}
+
+/// Bind the router's address in `runtime_directory`, write the endpoint file
+/// advertising it, and accept one caller on a thread of its own. The stand-in
+/// answers nothing, reads every request until the caller closes the
+/// connection, and hands back the kind of each request it read. Also hands
+/// back the token the endpoint file carries.
+fn spawn_router_answering_nothing(
+    runtime_directory: &Path,
+) -> (JoinHandle<Vec<RouterRequestKind>>, ConnectionToken) {
+    let router_socket_address = compute_router_socket_address(runtime_directory);
+    let router_listener = Listener::bind(&router_socket_address).expect("bind the stand-in router");
+    let router_connection_token = ConnectionToken::generate();
+    EndpointFile {
+        socket_address: router_socket_address,
+        connection_token: router_connection_token.clone(),
+        process_id: std::process::id(),
+    }
+    .write_to_path(&resolve_router_endpoint_path(runtime_directory))
+    .expect("write the router endpoint file");
+    let router_thread = std::thread::spawn(move || {
+        let mut router_connection = router_listener.accept().expect("accept the caller");
+        let mut request_kinds = Vec::new();
+        while let Ok(router_request) = router_connection.recv::<RouterRequest>() {
+            request_kinds.push(router_request.request_kind);
+        }
+        request_kinds
+    });
+    (router_thread, router_connection_token)
+}
+
 /// How the stand-in router answers the caller.
 enum RouterScript {
     /// The endpoint file carries the router's own token, so the Hello opens
@@ -272,16 +307,20 @@ fn a_token_retry_hands_back_the_endpoint_file_its_second_run_used() {
         ],
     );
 
-    let (exchanged_router_endpoint, router_result) =
-        run_router_exchange(runtime_directory.path(), |connection, router_endpoint| {
+    let (exchanged_router_endpoint, router_result) = run_router_exchange(
+        runtime_directory.path(),
+        None,
+        |connection, router_endpoint| {
             exchange_router_request_on_connection(
                 connection,
                 router_endpoint,
                 &RouterRequestKind::RemoteStatus,
+                None,
             )
-        })
-        .expect("the endpoint file is read")
-        .expect("the stand-in router listens");
+        },
+    )
+    .expect("the endpoint file is read")
+    .expect("the stand-in router listens");
 
     assert_eq!(
         router_result.expect("the second run is answered"),
@@ -302,10 +341,11 @@ fn a_token_retry_hands_back_the_endpoint_file_its_second_run_used() {
 fn a_restart_with_no_router_running_restarts_nothing() {
     let runtime_directory = build_test_runtime_directory();
 
-    let restarted = restart_running_router(runtime_directory.path())
-        .expect("an empty runtime directory answers");
+    let router_restart =
+        restart_running_router(runtime_directory.path(), build_test_answer_deadline())
+            .expect("an empty runtime directory answers");
 
-    assert!(!restarted);
+    assert_eq!(router_restart, RouterRestart::NotRunning);
     assert!(!resolve_router_endpoint_path(runtime_directory.path()).exists());
 }
 
@@ -317,11 +357,58 @@ fn a_restarting_reply_reports_the_router_restarted() {
         vec![RouterScript::AcceptAndAnswer(RouterResult::Restarting)],
     );
 
-    let restarted =
-        restart_running_router(runtime_directory.path()).expect("the exchange succeeds");
+    let router_restart =
+        restart_running_router(runtime_directory.path(), build_test_answer_deadline())
+            .expect("the exchange succeeds");
 
-    assert!(restarted);
+    assert_eq!(router_restart, RouterRestart::Restarting);
     router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn a_restart_the_router_answers_nothing_to_by_the_deadline_is_unanswered_and_closes_the_connection()
+{
+    let runtime_directory = build_test_runtime_directory();
+    let (router, router_connection_token) =
+        spawn_router_answering_nothing(runtime_directory.path());
+
+    let router_restart = restart_running_router(
+        runtime_directory.path(),
+        Instant::now() + Duration::from_millis(300),
+    )
+    .expect("the router takes the connection");
+
+    assert_eq!(router_restart, RouterRestart::Unanswered);
+    assert_eq!(
+        router.join().expect("the stand-in router exits"),
+        vec![
+            RouterRequestKind::build_hello_request(router_connection_token),
+            RouterRequestKind::Restart,
+        ]
+    );
+}
+
+#[test]
+fn a_router_version_read_with_no_answer_by_the_deadline_is_a_router_answer_timeout() {
+    let runtime_directory = build_test_runtime_directory();
+    let (router, router_connection_token) =
+        spawn_router_answering_nothing(runtime_directory.path());
+
+    let router_version_error = find_running_router_version(
+        runtime_directory.path(),
+        Some(Instant::now() + Duration::from_millis(300)),
+    )
+    .expect_err("the router answers nothing");
+
+    let CliError::RouterAnswerTimedOut = router_version_error else {
+        panic!("expected RouterAnswerTimedOut, got {router_version_error:?}");
+    };
+    assert_eq!(
+        router.join().expect("the stand-in router exits"),
+        vec![RouterRequestKind::build_hello_request(
+            router_connection_token
+        )]
+    );
 }
 
 #[test]
@@ -335,7 +422,8 @@ fn a_reply_that_answers_no_restart_is_reported_as_unexpected() {
     );
 
     let router_restart_error =
-        restart_running_router(runtime_directory.path()).expect_err("the reply answers no restart");
+        restart_running_router(runtime_directory.path(), build_test_answer_deadline())
+            .expect_err("the reply answers no restart");
 
     let CliError::IpcUnavailable {
         detail: error_detail,
@@ -364,7 +452,8 @@ fn a_refused_restart_reports_the_reason_the_router_gave() {
     );
 
     let router_restart_error =
-        restart_running_router(runtime_directory.path()).expect_err("the restart is refused");
+        restart_running_router(runtime_directory.path(), build_test_answer_deadline())
+            .expect_err("the restart is refused");
 
     let CliError::IpcUnavailable {
         detail: error_detail,
@@ -400,7 +489,8 @@ fn a_router_on_this_build_has_its_unknown_kind_refusal_left_alone() {
     );
 
     let router_restart_error =
-        restart_running_router(runtime_directory.path()).expect_err("the restart is refused");
+        restart_running_router(runtime_directory.path(), build_test_answer_deadline())
+            .expect_err("the restart is refused");
 
     let CliError::IpcUnavailable {
         detail: error_detail,
@@ -426,7 +516,8 @@ fn a_refusal_that_is_not_an_unknown_kind_is_left_as_the_router_wrote_it() {
     );
 
     let router_restart_error =
-        restart_running_router(runtime_directory.path()).expect_err("the restart is refused");
+        restart_running_router(runtime_directory.path(), build_test_answer_deadline())
+            .expect_err("the restart is refused");
 
     let CliError::IpcUnavailable {
         detail: error_detail,
@@ -703,7 +794,7 @@ fn the_running_routers_version_is_read_from_its_hello() {
     let router = spawn_fake_router_for_hello(runtime_directory.path(), build_hello_result("9.9.9"));
 
     let router_version =
-        find_running_router_version(runtime_directory.path()).expect("the exchange succeeds");
+        find_running_router_version(runtime_directory.path(), None).expect("the exchange succeeds");
 
     assert_eq!(router_version, Some("9.9.9".to_string()));
     router.join().expect("the stand-in router exits");
@@ -759,7 +850,7 @@ fn a_router_hello_with_an_empty_build_version_reports_an_empty_version() {
     let router = spawn_fake_router_for_hello(runtime_directory.path(), build_hello_result(""));
 
     let router_version =
-        find_running_router_version(runtime_directory.path()).expect("the exchange succeeds");
+        find_running_router_version(runtime_directory.path(), None).expect("the exchange succeeds");
 
     assert_eq!(router_version, Some(String::new()));
     router.join().expect("the stand-in router exits");
@@ -776,8 +867,8 @@ fn a_router_settling_outside_the_control_plane_range_stops_the_exchange() {
         },
     );
 
-    let router_version_error =
-        find_running_router_version(runtime_directory.path()).expect_err("4 is outside the 3 to 3");
+    let router_version_error = find_running_router_version(runtime_directory.path(), None)
+        .expect_err("4 is outside the 3 to 3");
 
     let CliError::IpcUnavailable {
         detail: error_detail,
@@ -804,7 +895,7 @@ fn a_router_refusing_the_hello_reports_the_sentence_it_sent() {
         }),
     );
 
-    let router_version_error = find_running_router_version(runtime_directory.path())
+    let router_version_error = find_running_router_version(runtime_directory.path(), None)
         .expect_err("a refused hello opens nothing");
 
     let CliError::IpcUnavailable {
@@ -822,7 +913,7 @@ fn a_router_answering_no_hello_at_all_reports_the_reply_that_arrived() {
     let runtime_directory = build_test_runtime_directory();
     let router = spawn_fake_router_for_hello(runtime_directory.path(), RouterResult::Restarting);
 
-    let router_version_error = find_running_router_version(runtime_directory.path())
+    let router_version_error = find_running_router_version(runtime_directory.path(), None)
         .expect_err("a Restarting is not a Hello");
 
     let CliError::IpcUnavailable {
@@ -842,7 +933,7 @@ fn a_router_answering_no_hello_at_all_reports_the_reply_that_arrived() {
 fn no_running_router_yields_no_version() {
     let runtime_directory = build_test_runtime_directory();
     assert_eq!(
-        find_running_router_version(runtime_directory.path())
+        find_running_router_version(runtime_directory.path(), None)
             .expect("a missing router is not an error"),
         None
     );

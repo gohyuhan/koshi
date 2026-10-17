@@ -29,7 +29,7 @@ use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
-use koshi_test_support::fixtures::build_test_runtime_directory;
+use koshi_test_support::fixtures::{build_test_runtime_directory, send_committed_request};
 use tempfile::TempDir;
 
 use super::session_connection::{
@@ -255,20 +255,20 @@ pub struct AttachedClient {
     pub session_events: mpsc::Receiver<SessionEvent>,
 }
 
-/// Attach to `session` straight over its control socket — Hello then Attach on
-/// one connection — and hand back the client the server minted, the structure
-/// it was given, and its event stream.
+/// Attach to `session` straight over its control socket — the Hello, then the
+/// Attach as a `Prepare` and its `Commit`, on one connection — and hand back
+/// the client the server minted, the structure it was given, and its event
+/// stream.
 ///
 /// The connection moves into the thread [`forward_session_events`] starts,
 /// which ends when the session closes it or the [`AttachedClient`] is dropped.
 ///
 /// # Panics
-/// When the attach reply is not `Attached` for request `2` and this session.
+/// When the `Prepare` is not answered `Prepared`, or the reply to the
+/// `Commit` is not `Attached` for request `2` and this session.
 pub fn attach_test_client(session: &RunningSession) -> AttachedClient {
     let mut connection = open_session_connection(&session.load_session_endpoint());
-    connection
-        .send(&build_attach_request())
-        .expect("the server reads the attach");
+    send_committed_request(&mut connection, build_attach_request());
     let ipc_response: IpcResponse = connection.recv().expect("the server answers the attach");
     assert_eq!(ipc_response.request_id, Some(2));
     let IpcResult::Attached {

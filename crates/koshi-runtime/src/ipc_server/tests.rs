@@ -34,7 +34,8 @@ use koshi_terminal::graphics::{
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::Style;
 use koshi_test_support::fixtures::{
-    build_key_input_for_chord, count_program_runs, write_printing_program,
+    build_key_input_for_chord, count_program_runs, read_prepared_and_send_commit,
+    send_committed_request, send_prepare_request, write_printing_program,
 };
 
 use crate::executable_watch::RESTART_RETRY_INTERVAL_DURATION;
@@ -78,19 +79,45 @@ fn delete_test_directory(runtime_directory: &Path) {
 /// A fresh directory to stand in for the machine-wide shared directory: the
 /// [`build_test_runtime_directory`] path for `shared-<directory_tag>`.
 /// [`IpcServer::start`] creates it and this user's directory inside it.
+#[cfg(unix)]
 fn build_test_shared_directory(directory_tag: &str) -> PathBuf {
     build_test_runtime_directory(&format!("shared-{directory_tag}"))
 }
 
+/// Answer `runtime_event` when it is the [`RuntimeEvent::IpcPrepare`] probe a
+/// `Prepare` sends, and hand back every other event.
+fn answer_prepare_probe(runtime_event: RuntimeEvent) -> Option<RuntimeEvent> {
+    match runtime_event {
+        RuntimeEvent::IpcPrepare { response_sender } => {
+            let _ = response_sender.send(());
+            None
+        }
+        other_runtime_event => Some(other_runtime_event),
+    }
+}
+
+/// Read the next event on `inbox_receiver`, which must be the
+/// [`RuntimeEvent::IpcPrepare`] probe of a `Prepare`, and answer it.
+#[track_caller]
+fn answer_next_prepare_probe(inbox_receiver: &Receiver<RuntimeEvent>) {
+    let Ok(RuntimeEvent::IpcPrepare { response_sender }) = inbox_receiver.recv() else {
+        panic!("expected the Prepare probe");
+    };
+    response_sender
+        .send(())
+        .expect("the connection waits for the probe answer");
+}
+
 /// A stand-in for the dispatcher thread: drains the inbox, answers every
-/// submitted command with `Ok` echoing its id, and every discovery request
-/// with `session_overview`. Exits when every inbox sender is gone.
+/// submitted command with `Ok` echoing its id, every discovery request with
+/// `session_overview`, and each `IpcPrepare` probe ([`answer_prepare_probe`]).
+/// Exits when every inbox sender is gone.
 fn spawn_answering_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
     session_overview: Option<SessionOverview>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        while let Ok(runtime_event) = inbox_receiver.recv() {
+        for runtime_event in inbox_receiver.iter().filter_map(answer_prepare_probe) {
             match runtime_event {
                 RuntimeEvent::Ipc {
                     command_envelope,
@@ -294,7 +321,8 @@ fn spawn_frame_dispatcher(
 /// A stand-in dispatcher that accepts attaches: it answers every attach as
 /// `client_id`, holds the delivery queue it hands out open, and closes those
 /// queues on a detach. The writing thread of each attached connection stays
-/// blocked until then. Every other event it drains is forwarded to the
+/// blocked until then. It answers each `IpcPrepare` probe
+/// ([`answer_prepare_probe`]). Every other event it drains is forwarded to the
 /// returned receiver. Exits when every inbox sender is gone.
 fn spawn_attaching_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
@@ -305,7 +333,7 @@ fn spawn_attaching_dispatcher(
     let dispatcher_thread = std::thread::spawn(move || {
         let mut delivery_senders = Vec::new();
         let ending_notice = Arc::new(EndingNotice::default());
-        while let Ok(runtime_event) = inbox_receiver.recv() {
+        for runtime_event in inbox_receiver.iter().filter_map(answer_prepare_probe) {
             match runtime_event {
                 RuntimeEvent::IpcAttach {
                     response_sender, ..
@@ -362,8 +390,9 @@ fn spawn_ending_dispatcher(
 
 /// Drain `inbox_receiver` until every inbox sender is gone. The first attach
 /// is answered as `client_id` in `session_id`, streaming `delivery_receiver`
-/// and `writer_handoff` under `ending_notice`. Every attach after it and
-/// every other event is dropped.
+/// and `writer_handoff` under `ending_notice`. Each `IpcPrepare` probe is
+/// answered ([`answer_prepare_probe`]). Every attach after it and every other
+/// event is dropped.
 fn answer_first_attach(
     inbox_receiver: &Receiver<RuntimeEvent>,
     client_id: ClientId,
@@ -373,7 +402,7 @@ fn answer_first_attach(
     ending_notice: Arc<EndingNotice>,
 ) {
     let mut unanswered_delivery_receiver = Some(delivery_receiver);
-    while let Ok(runtime_event) = inbox_receiver.recv() {
+    for runtime_event in inbox_receiver.iter().filter_map(answer_prepare_probe) {
         let RuntimeEvent::IpcAttach {
             response_sender, ..
         } = runtime_event
@@ -731,7 +760,7 @@ fn a_dropped_frame_wakes_the_dispatcher_for_its_client_after_the_next_read() {
     let (forwarded_event_sender, forwarded_event_receiver) = mpsc::channel();
     let dispatcher_thread = std::thread::spawn(move || {
         let mut unanswered_stream = Some((delivery_receiver, writer_handoff));
-        while let Ok(runtime_event) = inbox_receiver.recv() {
+        for runtime_event in inbox_receiver.iter().filter_map(answer_prepare_probe) {
             match runtime_event {
                 RuntimeEvent::IpcAttach {
                     response_sender, ..
@@ -957,8 +986,9 @@ fn build_attach_request(
     }
 }
 
-/// Open a connection, say hello, attach on it, and read both replies back.
-/// The connection comes back carrying `client_id`'s stream.
+/// Open a connection, say hello, attach on it with `Prepare` and `Commit`, and
+/// read every reply back. The connection comes back carrying `client_id`'s
+/// stream.
 fn attach_test_client(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -981,8 +1011,9 @@ fn attach_test_client_with_graphics(
 ) -> Connection {
     let mut connection = connect_greeted_connection(runtime_directory, session_id);
 
-    connection
-        .send(&IpcRequest {
+    send_committed_request(
+        &mut connection,
+        IpcRequest {
             request_id: 2,
             request_kind: IpcRequestKind::Attach {
                 viewport_size: CLIENT_VIEWPORT_SIZE,
@@ -993,8 +1024,8 @@ fn attach_test_client_with_graphics(
                 cell_size: None,
                 link_timeout_ms: None,
             },
-        })
-        .expect("send attach");
+        },
+    );
     let attach_reply: IpcResponse = connection.recv().expect("attach reply");
     assert_eq!(attach_reply.request_id, Some(2));
     assert_eq!(
@@ -1025,8 +1056,9 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
     let _: IpcResponse = connection.recv().expect("hello reply");
     let measured_cell_size =
         PixelCellSize::from_pixel_dimensions(10, 20).expect("positive cell dimensions");
-    connection
-        .send(&IpcRequest {
+    send_prepare_request(
+        &mut connection,
+        IpcRequest {
             request_id: 2,
             request_kind: IpcRequestKind::Attach {
                 viewport_size: CLIENT_VIEWPORT_SIZE,
@@ -1037,8 +1069,10 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
                 cell_size: Some(measured_cell_size),
                 link_timeout_ms: None,
             },
-        })
-        .expect("send attach");
+        },
+    );
+    answer_next_prepare_probe(&inbox_receiver);
+    read_prepared_and_send_commit(&mut connection, 2);
 
     let RuntimeEvent::IpcAttach {
         cell_size,
@@ -1588,6 +1622,7 @@ fn start_test_server(
 /// A served socket the other local users of this machine may reach, in a fresh
 /// shared directory, with a stand-in dispatcher and the `allow-other-users`
 /// setting reading `is_other_user_access_enabled`.
+#[cfg(unix)]
 fn start_shared_test_server(
     directory_tag: &str,
     is_other_user_access_enabled: bool,
@@ -1618,14 +1653,15 @@ fn start_shared_test_server(
 }
 
 /// A stand-in dispatcher that reports every submitted command's envelope on the
-/// returned receiver before answering it with `Ok`. Every other event it drains
+/// returned receiver before answering it with `Ok`. It answers each
+/// `IpcPrepare` probe ([`answer_prepare_probe`]). Every other event it drains
 /// is dropped. Exits when every inbox sender is gone.
 fn spawn_reporting_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
 ) -> (JoinHandle<()>, Receiver<CommandEnvelope>) {
     let (command_envelope_sender, command_envelope_receiver) = mpsc::channel();
     let dispatcher_thread = std::thread::spawn(move || {
-        while let Ok(runtime_event) = inbox_receiver.recv() {
+        for runtime_event in inbox_receiver.iter().filter_map(answer_prepare_probe) {
             if let RuntimeEvent::Ipc {
                 command_envelope,
                 response_sender,
@@ -1689,19 +1725,21 @@ fn greet_connection(connection: &mut Connection, runtime_directory: &Path, sessi
     assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
 }
 
-/// Submit `command_envelope` on `connection` and hand back the envelope the
-/// dispatcher was given, after reading the reply the submission earns.
+/// Submit `command_envelope` on `connection` with `Prepare` and `Commit`, and
+/// hand back the envelope the dispatcher was given, after reading the reply
+/// the submission earns.
 fn submit_command_envelope(
     connection: &mut Connection,
     received_command_envelopes: &Receiver<CommandEnvelope>,
     command_envelope: CommandEnvelope,
 ) -> CommandEnvelope {
-    connection
-        .send(&IpcRequest {
+    send_committed_request(
+        connection,
+        IpcRequest {
             request_id: 2,
             request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
-        })
-        .expect("send submit");
+        },
+    );
     let dispatched_command_envelope = received_command_envelopes
         .recv()
         .expect("the dispatcher was given the command");
@@ -1758,15 +1796,16 @@ fn connect_to_session_socket(runtime_directory: &Path, session_id: SessionId) ->
 }
 
 /// A stand-in dispatcher answering every layout request with `session_layout`.
-/// The returned receiver carries the tab each request named. Exits when every
-/// inbox sender is gone.
+/// The returned receiver carries the tab each request named. It answers each
+/// `IpcPrepare` probe ([`answer_prepare_probe`]). Exits when every inbox sender
+/// is gone.
 fn spawn_layout_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
     session_layout: Option<SessionLayout>,
 ) -> (JoinHandle<()>, Receiver<Option<TabId>>) {
     let (requested_tab_id_sender, requested_tab_id_receiver) = mpsc::channel();
     let dispatcher_thread = std::thread::spawn(move || {
-        while let Ok(runtime_event) = inbox_receiver.recv() {
+        for runtime_event in inbox_receiver.iter().filter_map(answer_prepare_probe) {
             if let RuntimeEvent::IpcLayout {
                 tab_id,
                 response_sender,
@@ -1958,17 +1997,19 @@ fn a_submitted_command_round_trips_with_the_dispatchers_result() {
     connection
         .send(&build_hello_request(&runtime_directory, session_id))
         .expect("send hello");
-    connection
-        .send(&IpcRequest {
+    send_prepare_request(
+        &mut connection,
+        IpcRequest {
             request_id: 2,
             request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope.clone())),
-        })
-        .expect("send submit");
+        },
+    );
 
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
     assert_eq!(hello_reply.request_id, Some(1));
     assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
 
+    read_prepared_and_send_commit(&mut connection, 2);
     let submit_reply: IpcResponse = connection.recv().expect("submit reply");
     assert_eq!(submit_reply.request_id, Some(2));
     assert_eq!(
@@ -2012,12 +2053,13 @@ fn a_request_kind_this_build_lacks_is_refused_by_name_and_the_connection_keeps_s
     // The connection is still open and still serving: the next request is
     // answered normally.
     let command_envelope = build_test_command_envelope();
-    connection
-        .send(&IpcRequest {
+    send_committed_request(
+        &mut connection,
+        IpcRequest {
             request_id: 3,
             request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope.clone())),
-        })
-        .expect("send a command after the refusal");
+        },
+    );
     let command_response: IpcResponse = connection.recv().expect("command reply");
     assert_eq!(command_response.request_id, Some(3));
     assert_eq!(
@@ -2094,12 +2136,13 @@ fn a_caller_speaking_a_wider_range_settles_on_this_builds_highest() {
     );
 
     let command_envelope = build_test_command_envelope();
-    connection
-        .send(&IpcRequest {
+    send_committed_request(
+        &mut connection,
+        IpcRequest {
             request_id: 2,
             request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope.clone())),
-        })
-        .expect("send a command");
+        },
+    );
     let command_response: IpcResponse = connection.recv().expect("command reply");
     assert_eq!(
         command_response.answer_result,
@@ -3023,12 +3066,13 @@ fn a_gone_dispatcher_closes_the_connection_instead_of_answering() {
         .expect("start serving");
     let mut connection = connect_greeted_connection(&runtime_directory, session_id);
 
-    connection
-        .send(&IpcRequest {
+    send_prepare_request(
+        &mut connection,
+        IpcRequest {
             request_id: 2,
             request_kind: IpcRequestKind::SubmitCommand(Box::new(build_test_command_envelope())),
-        })
-        .expect("send submit");
+        },
+    );
     assert!(
         matches!(
             connection.recv::<IpcResponse>(),
@@ -3238,6 +3282,7 @@ fn a_session_only_its_own_user_may_reach_binds_inside_the_runtime_directory() {
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_session_other_local_users_may_reach_keeps_its_endpoint_file_private() {
     let (ipc_server, session_id, runtime_directory, shared_directory, dispatcher_thread) =
@@ -3292,30 +3337,7 @@ fn the_socket_of_a_session_other_local_users_may_reach_is_open_to_every_local_us
     delete_test_directory(&shared_directory);
 }
 
-#[cfg(windows)]
-#[test]
-fn the_marker_naming_a_shared_session_lives_while_serving_and_goes_at_shutdown() {
-    let (ipc_server, session_id, runtime_directory, shared_directory, dispatcher_thread) =
-        start_shared_test_server("shared-marker", true);
-    let advertisement_marker_path =
-        resolve_advertisement_marker_path(&shared_directory, session_id);
-
-    assert!(
-        advertisement_marker_path.exists(),
-        "marker present while serving"
-    );
-
-    ipc_server.shutdown();
-    dispatcher_thread.join().expect("dispatcher exits");
-
-    assert!(
-        !advertisement_marker_path.exists(),
-        "marker gone after shutdown"
-    );
-    delete_test_directory(&runtime_directory);
-    delete_test_directory(&shared_directory);
-}
-
+#[cfg(unix)]
 #[test]
 fn the_user_who_started_the_session_attaches_over_the_shared_socket_with_the_token() {
     let runtime_directory = build_test_runtime_directory("shared-attach");
@@ -3429,9 +3451,7 @@ fn attach_as_other_user(
         .expect("send hello");
     let hello_response: IpcResponse = caller_connection.recv().expect("hello reply");
     assert_eq!(hello_response.answer_result, build_accepted_hello_result());
-    caller_connection
-        .send(&build_attach_request(None, None))
-        .expect("send attach");
+    send_committed_request(caller_connection, build_attach_request(None, None));
     let attach_response: IpcResponse = caller_connection.recv().expect("attach reply");
     assert_eq!(
         attach_response.answer_result,
@@ -3679,22 +3699,17 @@ fn a_lost_connection_ends_an_attached_clients_reading_half() {
     delete_socket_file(&socket_address);
 }
 
+#[cfg(unix)]
 #[test]
 fn the_directory_other_local_users_reach_holds_only_the_socket() {
+    use std::os::unix::fs::MetadataExt;
+
     let (ipc_server, session_id, runtime_directory, shared_directory, dispatcher_thread) =
         start_shared_test_server("shared-only", true);
-    #[cfg(unix)]
-    let user_directory = {
-        use std::os::unix::fs::MetadataExt;
-
-        let owner_user_id = std::fs::metadata(&runtime_directory)
-            .expect("stat runtime directory")
-            .uid();
-        shared_directory.join(owner_user_id.to_string())
-    };
-    // On Windows the advertisement lives in the shared directory itself.
-    #[cfg(windows)]
-    let user_directory = shared_directory.clone();
+    let owner_user_id = std::fs::metadata(&runtime_directory)
+        .expect("stat runtime directory")
+        .uid();
+    let user_directory = shared_directory.join(owner_user_id.to_string());
 
     let mut directory_entry_names: Vec<String> = std::fs::read_dir(&user_directory)
         .expect("read the shared directory")
@@ -3710,25 +3725,23 @@ fn the_directory_other_local_users_reach_holds_only_the_socket() {
 
     // The endpoint file carrying the token is not among them: it stays in the
     // private runtime directory.
-    #[cfg(unix)]
     assert_eq!(directory_entry_names, vec![format!("{session_id}.sock")]);
-    #[cfg(windows)]
-    assert_eq!(directory_entry_names, vec![session_id.to_string()]);
 
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
     delete_test_directory(&shared_directory);
 }
 
 /// A stand-in dispatcher that answers every restart request with
-/// `restart_verdict` and every discovery request with `session_overview`.
-/// Exits when every inbox sender is gone.
+/// `restart_verdict`, every discovery request with `session_overview`, and
+/// each `IpcPrepare` probe ([`answer_prepare_probe`]). Exits when every inbox
+/// sender is gone.
 fn spawn_restart_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
     restart_verdict: Result<(), RestartRefusal>,
     session_overview: Option<SessionOverview>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        while let Ok(runtime_event) = inbox_receiver.recv() {
+        for runtime_event in inbox_receiver.iter().filter_map(answer_prepare_probe) {
             match runtime_event {
                 RuntimeEvent::IpcRestart { response_sender } => {
                     let _ = response_sender.send(restart_verdict.clone());
@@ -3759,20 +3772,21 @@ fn start_restartable_test_server(
     (ipc_server, session_id, runtime_directory, dispatcher_thread)
 }
 
-/// Sends the Hello and a restart, and returns the connection and the answer to
-/// the restart.
+/// Sends the Hello and a restart with `Prepare` and `Commit`, and returns the
+/// connection and the answer to the restart.
 fn send_restart_request(
     runtime_directory: &Path,
     session_id: SessionId,
 ) -> (Connection, IpcResult) {
     let mut connection = connect_greeted_connection(runtime_directory, session_id);
 
-    connection
-        .send(&IpcRequest {
+    send_committed_request(
+        &mut connection,
+        IpcRequest {
             request_id: 2,
             request_kind: IpcRequestKind::Restart,
-        })
-        .expect("send restart");
+        },
+    );
     let restart_response: IpcResponse = connection.recv().expect("restart reply");
     assert_eq!(restart_response.request_id, Some(2));
     (connection, restart_response.answer_result)
@@ -4240,9 +4254,7 @@ fn rotating_the_token_takes_connections_again_after_the_intake_closed() {
 
     // What this connection sends reaches the dispatcher again.
     let typed_key_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('r'));
-    connection
-        .send(&build_attach_request(None, None))
-        .expect("send attach");
+    send_committed_request(&mut connection, build_attach_request(None, None));
     let attach_reply: IpcResponse = connection.recv().expect("attach reply");
     assert_eq!(attach_reply.request_id, Some(2));
     connection
@@ -4363,9 +4375,10 @@ fn a_request_a_client_sends_after_the_intake_closes_never_reaches_the_dispatcher
 
     ipc_server.close_intake();
 
-    // After the close: the send fails outright, or the press is read and never
-    // handed over. Either way no event reaches the dispatcher, including the
-    // detach the connection's own ending queues.
+    // After the close: the send fails outright, the press is read and never
+    // handed over, or the reading loop ends before it reads the press. In each
+    // case no event reaches the dispatcher, including the detach the
+    // connection's own ending queues.
     let _ = connection.send(&IpcRequest {
         request_id: 4,
         request_kind: IpcRequestKind::Keyboard {
@@ -4539,8 +4552,9 @@ fn closing_a_served_connections_read_direction_ends_only_its_reads() {
 
 /// A stand-in dispatcher that reports the `is_remote` flag of every attach it
 /// is asked for and accepts each one as `client_id`. Holds the delivery queues
-/// it hands out open, and the writing threads stay blocked. Exits when every
-/// inbox sender is gone.
+/// it hands out open, and the writing threads stay blocked. It answers each
+/// `IpcPrepare` probe ([`answer_prepare_probe`]). Exits when every inbox sender
+/// is gone.
 fn spawn_origin_reporting_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
     client_id: ClientId,
@@ -4550,7 +4564,7 @@ fn spawn_origin_reporting_dispatcher(
     let dispatcher_thread = std::thread::spawn(move || {
         let mut delivery_senders = Vec::new();
         let ending_notice = Arc::new(EndingNotice::default());
-        while let Ok(runtime_event) = inbox_receiver.recv() {
+        for runtime_event in inbox_receiver.iter().filter_map(answer_prepare_probe) {
             match runtime_event {
                 RuntimeEvent::IpcAttach {
                     is_remote,
@@ -4603,9 +4617,7 @@ fn attach_saying_remote(
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
     assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
 
-    connection
-        .send(&build_attach_request(None, None))
-        .expect("send attach");
+    send_committed_request(&mut connection, build_attach_request(None, None));
     let attach_reply: IpcResponse = connection.recv().expect("attach reply");
     assert_eq!(
         attach_reply.answer_result,
@@ -4653,14 +4665,14 @@ fn an_attach_is_marked_remote_exactly_when_its_hello_named_another_machine() {
 }
 
 /// A stand-in dispatcher that answers every restart request with `Ok(())` and
-/// reports each one on `restart_report_sender`. Exits when every inbox sender
-/// is gone.
+/// reports each one on `restart_report_sender`. It answers each `IpcPrepare`
+/// probe ([`answer_prepare_probe`]). Exits when every inbox sender is gone.
 fn spawn_restart_reporting_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
     restart_report_sender: Sender<()>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        while let Ok(runtime_event) = inbox_receiver.recv() {
+        for runtime_event in inbox_receiver.iter().filter_map(answer_prepare_probe) {
             if let RuntimeEvent::IpcRestart { response_sender } = runtime_event {
                 let _ = response_sender.send(Ok(()));
                 let _ = restart_report_sender.send(());
@@ -5077,9 +5089,10 @@ fn an_accepted_restart_into_the_installed_version_schedules_no_retry() {
 }
 
 /// A stand-in dispatcher that answers the first attach as `client_id` in
-/// `session_id`, streaming the delivery queue whose sender it hands back, and
-/// forwards every other event it drains to the returned receiver. Exits when
-/// every inbox sender is gone.
+/// `session_id`, streaming the delivery queue whose sender it hands back,
+/// answers each `IpcPrepare` probe ([`answer_prepare_probe`]), and forwards
+/// every other event it drains to the returned receiver. Exits when every
+/// inbox sender is gone.
 fn spawn_forwarding_frame_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
     client_id: ClientId,
@@ -5089,7 +5102,7 @@ fn spawn_forwarding_frame_dispatcher(
     let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
     let dispatcher_thread = std::thread::spawn(move || {
         let mut unanswered_delivery_receiver = Some(delivery_receiver);
-        while let Ok(runtime_event) = inbox_receiver.recv() {
+        for runtime_event in inbox_receiver.iter().filter_map(answer_prepare_probe) {
             match runtime_event {
                 RuntimeEvent::IpcAttach {
                     response_sender, ..
@@ -5123,7 +5136,13 @@ enum ClipboardRequestReport {
     /// A `ClipboardCopyPart` asked whether the session takes a copy of
     /// `held_copy_byte_count` bytes.
     CopyPart { held_copy_byte_count: usize },
-    /// A `ClipboardCopy` handed over a whole copy.
+    /// A `Prepare` carrying a `ClipboardCopy` asked whether the session routes
+    /// a copy of `copied_byte_count` bytes from `pane_id`.
+    CopyPrepare {
+        pane_id: PaneId,
+        copied_byte_count: usize,
+    },
+    /// A committed `ClipboardCopy` handed over a whole copy.
     Copy {
         pane_id: PaneId,
         clipboard_targets: String,
@@ -5131,11 +5150,12 @@ enum ClipboardRequestReport {
     },
 }
 
-/// A stand-in dispatcher that takes a copy of at most
+/// A stand-in dispatcher that takes, and routes, a copy of at most
 /// `maximum_copy_byte_count` bytes, answers every whole copy with
 /// `should_run_clipboard_tool`, and reports each clipboard request on the
-/// returned receiver. Every other event it drains is dropped. Exits when every
-/// inbox sender is gone.
+/// returned receiver. It answers each `IpcPrepare` probe
+/// ([`answer_prepare_probe`]). Every other event it drains is dropped. Exits
+/// when every inbox sender is gone.
 fn spawn_clipboard_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
     maximum_copy_byte_count: usize,
@@ -5143,7 +5163,7 @@ fn spawn_clipboard_dispatcher(
 ) -> (JoinHandle<()>, Receiver<ClipboardRequestReport>) {
     let (request_report_sender, request_report_receiver) = mpsc::channel();
     let dispatcher_thread = std::thread::spawn(move || {
-        while let Ok(runtime_event) = inbox_receiver.recv() {
+        for runtime_event in inbox_receiver.iter().filter_map(answer_prepare_probe) {
             let request_report = match runtime_event {
                 RuntimeEvent::IpcClipboardCopyPart {
                     held_copy_byte_count,
@@ -5152,6 +5172,17 @@ fn spawn_clipboard_dispatcher(
                     let _ = response_sender.send(held_copy_byte_count <= maximum_copy_byte_count);
                     ClipboardRequestReport::CopyPart {
                         held_copy_byte_count,
+                    }
+                }
+                RuntimeEvent::IpcClipboardCopyPrepare {
+                    pane_id,
+                    copied_byte_count,
+                    response_sender,
+                } => {
+                    let _ = response_sender.send(copied_byte_count <= maximum_copy_byte_count);
+                    ClipboardRequestReport::CopyPrepare {
+                        pane_id,
+                        copied_byte_count,
                     }
                 }
                 RuntimeEvent::IpcClipboardCopy {
@@ -5243,6 +5274,20 @@ fn build_copy_request(pane_id: PaneId, copied_bytes: &[u8]) -> IpcRequestKind {
     }
 }
 
+/// A `Prepare` carrying [`build_copy_request`] for `pane_id` and
+/// `copied_bytes`.
+fn build_copy_prepare_request(pane_id: PaneId, copied_bytes: &[u8]) -> IpcRequestKind {
+    IpcRequestKind::Prepare(Box::new(build_copy_request(pane_id, copied_bytes)))
+}
+
+/// The `Prepared` answer to request `request_id`.
+fn build_prepared_response(request_id: u64) -> IpcResponse {
+    IpcResponse {
+        request_id: Some(request_id),
+        answer_result: IpcResult::Prepared,
+    }
+}
+
 /// The answer to request `request_id` that routes a copy and tells the caller
 /// whether to run the real clipboard tool.
 fn build_copy_routed_response(request_id: u64, should_run_clipboard_tool: bool) -> IpcResponse {
@@ -5273,17 +5318,26 @@ fn a_copy_in_one_request_reaches_the_dispatcher_as_it_is_and_carries_its_answer_
     let mut connection = connect_greeted_connection(&runtime_directory, session_id);
     let pane_id = PaneId::new();
 
-    let copy_response = exchange_request(
+    let prepare_response = exchange_request(
         &mut connection,
         2,
-        IpcRequestKind::ClipboardCopy {
+        IpcRequestKind::Prepare(Box::new(IpcRequestKind::ClipboardCopy {
             pane_id,
             clipboard_targets: "pX".to_string(),
             copied_bytes: b"hi".to_vec(),
-        },
+        })),
     );
+    let commit_response = exchange_request(&mut connection, 3, IpcRequestKind::Commit);
 
-    assert_eq!(copy_response, build_copy_routed_response(2, false));
+    assert_eq!(prepare_response, build_prepared_response(2));
+    assert_eq!(commit_response, build_copy_routed_response(3, false));
+    assert_eq!(
+        request_reports.recv_timeout(Duration::from_secs(5)),
+        Ok(ClipboardRequestReport::CopyPrepare {
+            pane_id,
+            copied_byte_count: 2,
+        })
+    );
     assert_eq!(
         request_reports.recv_timeout(Duration::from_secs(5)),
         Ok(ClipboardRequestReport::Copy {
@@ -5324,8 +5378,23 @@ fn taken_copy_parts_reach_the_dispatcher_with_the_last_request_as_one_copy() {
         );
     }
     assert_eq!(
-        exchange_request(&mut connection, 4, build_copy_request(pane_id, b"ef")),
-        build_copy_routed_response(4, true)
+        exchange_request(
+            &mut connection,
+            4,
+            build_copy_prepare_request(pane_id, b"ef")
+        ),
+        build_prepared_response(4)
+    );
+    assert_eq!(
+        exchange_request(&mut connection, 5, IpcRequestKind::Commit),
+        build_copy_routed_response(5, true)
+    );
+    assert_eq!(
+        request_reports.recv_timeout(Duration::from_secs(5)),
+        Ok(ClipboardRequestReport::CopyPrepare {
+            pane_id,
+            copied_byte_count: 6,
+        })
     );
     assert_eq!(
         request_reports.recv_timeout(Duration::from_secs(5)),
@@ -5337,8 +5406,23 @@ fn taken_copy_parts_reach_the_dispatcher_with_the_last_request_as_one_copy() {
     );
     // The connection holds nothing once the copy is routed.
     assert_eq!(
-        exchange_request(&mut connection, 5, build_copy_request(pane_id, b"x")),
-        build_copy_routed_response(5, true)
+        exchange_request(
+            &mut connection,
+            6,
+            build_copy_prepare_request(pane_id, b"x")
+        ),
+        build_prepared_response(6)
+    );
+    assert_eq!(
+        exchange_request(&mut connection, 7, IpcRequestKind::Commit),
+        build_copy_routed_response(7, true)
+    );
+    assert_eq!(
+        request_reports.recv_timeout(Duration::from_secs(5)),
+        Ok(ClipboardRequestReport::CopyPrepare {
+            pane_id,
+            copied_byte_count: 1,
+        })
     );
     assert_eq!(
         request_reports.recv_timeout(Duration::from_secs(5)),
@@ -5372,8 +5456,16 @@ fn a_copy_part_the_session_does_not_take_drops_every_held_byte_and_says_run_the_
         build_copy_routed_response(3, true)
     );
     assert_eq!(
-        exchange_request(&mut connection, 4, build_copy_request(pane_id, b"x")),
-        build_copy_routed_response(4, false)
+        exchange_request(
+            &mut connection,
+            4,
+            build_copy_prepare_request(pane_id, b"x")
+        ),
+        build_prepared_response(4)
+    );
+    assert_eq!(
+        exchange_request(&mut connection, 5, IpcRequestKind::Commit),
+        build_copy_routed_response(5, false)
     );
 
     drop(connection);
@@ -5388,6 +5480,10 @@ fn a_copy_part_the_session_does_not_take_drops_every_held_byte_and_says_run_the_
             },
             ClipboardRequestReport::CopyPart {
                 held_copy_byte_count: 4
+            },
+            ClipboardRequestReport::CopyPrepare {
+                pane_id,
+                copied_byte_count: 1,
             },
             ClipboardRequestReport::Copy {
                 pane_id,
@@ -5421,7 +5517,11 @@ fn a_clipboard_request_from_another_machine_is_refused_and_the_connection_keeps_
         build_clipboard_refusal_response(2)
     );
     assert_eq!(
-        exchange_request(&mut connection, 3, build_copy_request(PaneId::new(), b"x")),
+        exchange_request(
+            &mut connection,
+            3,
+            build_copy_prepare_request(PaneId::new(), b"x")
+        ),
         build_clipboard_refusal_response(3)
     );
 
@@ -5456,7 +5556,7 @@ fn a_clipboard_request_from_another_local_user_is_refused_and_the_connection_kee
         exchange_request(
             &mut caller_connection,
             3,
-            build_copy_request(PaneId::new(), b"x")
+            build_copy_prepare_request(PaneId::new(), b"x")
         ),
         build_clipboard_refusal_response(3)
     );
@@ -5479,7 +5579,7 @@ fn a_clipboard_request_with_no_dispatcher_closes_the_connection() {
         ("clipboard-part-gone", build_copy_part_request(b"ab")),
         (
             "clipboard-copy-gone",
-            build_copy_request(PaneId::new(), b"x"),
+            build_copy_prepare_request(PaneId::new(), b"x"),
         ),
     ] {
         let runtime_directory = build_test_runtime_directory(directory_tag);
@@ -5537,9 +5637,10 @@ fn attach_test_client_over_link(
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
     assert_eq!(hello_reply.answer_result, build_accepted_hello_result());
-    connection
-        .send(&build_attach_request(resume_client_id, link_timeout_ms))
-        .expect("send attach");
+    send_committed_request(
+        &mut connection,
+        build_attach_request(resume_client_id, link_timeout_ms),
+    );
     let attach_reply: IpcResponse = connection.recv().expect("attach reply");
     assert_eq!(attach_reply.request_id, Some(2));
     assert_eq!(
@@ -5845,9 +5946,10 @@ fn an_attach_with_a_link_timeout_below_the_minimum_is_refused_and_the_connection
         },
     };
 
-    connection
-        .send(&build_attach_request(2, MIN_LINK_TIMEOUT_MS - 1))
-        .expect("send the attach below the minimum");
+    send_committed_request(
+        &mut connection,
+        build_attach_request(2, MIN_LINK_TIMEOUT_MS - 1),
+    );
     let refusal: IpcResponse = connection.recv().expect("the refusal");
     assert_eq!(refusal.request_id, Some(2));
     assert_eq!(
@@ -5858,9 +5960,10 @@ fn an_attach_with_a_link_timeout_below_the_minimum_is_refused_and_the_connection
         })
     );
 
-    connection
-        .send(&build_attach_request(3, MIN_LINK_TIMEOUT_MS))
-        .expect("send the attach at the minimum");
+    send_committed_request(
+        &mut connection,
+        build_attach_request(3, MIN_LINK_TIMEOUT_MS),
+    );
     let attach_reply: IpcResponse = connection.recv().expect("attach reply");
     assert_eq!(attach_reply.request_id, Some(3));
     assert_eq!(
@@ -6020,9 +6123,12 @@ fn an_attach_whose_answer_cannot_be_written_reports_its_client_returning_only_wh
         let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
             .expect("start serving");
         let mut connection = connect_greeted_connection(&runtime_directory, session_id);
-        connection
-            .send(&build_attach_request(resume_client_id, None))
-            .expect("send attach");
+        send_prepare_request(
+            &mut connection,
+            build_attach_request(resume_client_id, None),
+        );
+        answer_next_prepare_probe(&inbox_receiver);
+        read_prepared_and_send_commit(&mut connection, 2);
         let RuntimeEvent::IpcAttach {
             response_sender, ..
         } = receive_forwarded_event(&inbox_receiver)
@@ -6030,18 +6136,20 @@ fn an_attach_whose_answer_cannot_be_written_reports_its_client_returning_only_wh
             panic!("the attach reaches the dispatcher");
         };
 
-        // The client closes its connection before the session writes the
-        // answer.
-        drop(connection);
+        // The answer names a session whose name alone is as long as the frame
+        // cap: the session cannot write it.
         let (_delivery_sender, delivery_receiver) = mpsc::channel();
+        let mut attach_accepted = build_attach_accepted(
+            client_id,
+            session_id,
+            delivery_receiver,
+            Arc::new(WriterHandoff::default()),
+            Arc::new(EndingNotice::default()),
+        );
+        attach_accepted.session_structure.session_name =
+            "a".repeat(transport::MAX_FRAME_BYTE_COUNT as usize);
         response_sender
-            .send(Some(build_attach_accepted(
-                client_id,
-                session_id,
-                delivery_receiver,
-                Arc::new(WriterHandoff::default()),
-                Arc::new(EndingNotice::default()),
-            )))
+            .send(Some(attach_accepted))
             .expect("the session waits for the answer");
         let RuntimeEvent::ClientDetached {
             client_id: detached_client_id,
@@ -6060,6 +6168,7 @@ fn an_attach_whose_answer_cannot_be_written_reports_its_client_returning_only_wh
             "resume_client_id {resume_client_id:?}"
         );
 
+        drop(connection);
         ipc_server.shutdown();
         delete_test_directory(&runtime_directory);
     }
@@ -6194,4 +6303,510 @@ fn a_resynced_client_reads_the_resync_then_the_frame_it_resumes_from() {
             },
         ]
     );
+}
+
+// --- prepare and commit ---
+
+/// The refusal [`IpcErrorCode::RequestFailed`] carrying `message`, as the
+/// answer to request `request_id`.
+fn build_request_failed_test_response(request_id: u64, message: &str) -> IpcResponse {
+    IpcResponse {
+        request_id: Some(request_id),
+        answer_result: IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::RequestFailed,
+            message: message.to_string(),
+        }),
+    }
+}
+
+#[test]
+fn a_held_command_runs_on_its_commit_and_answers_under_the_commit_id() {
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_command_envelopes) =
+        start_reporting_test_server("prepare-commit-runs");
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+    let command_envelope = build_test_command_envelope();
+
+    let prepare_response = exchange_request(
+        &mut connection,
+        2,
+        IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(Box::new(
+            command_envelope.clone(),
+        )))),
+    );
+    let commit_response = exchange_request(&mut connection, 3, IpcRequestKind::Commit);
+
+    assert_eq!(prepare_response, build_prepared_response(2));
+    assert_eq!(
+        commit_response,
+        IpcResponse {
+            request_id: Some(3),
+            answer_result: IpcResult::CommandResult(CommandResult::Ok {
+                command_id: command_envelope.command_id,
+                emitted_events: Vec::new(),
+            }),
+        }
+    );
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+    assert_eq!(
+        received_command_envelopes
+            .try_iter()
+            .map(|dispatched_command_envelope| dispatched_command_envelope.command_id)
+            .collect::<Vec<CommandId>>(),
+        vec![command_envelope.command_id]
+    );
+}
+
+#[test]
+fn a_held_command_never_runs_when_its_connection_ends_before_the_commit() {
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_command_envelopes) =
+        start_reporting_test_server("prepare-connection-ends");
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+
+    let prepare_response = exchange_request(
+        &mut connection,
+        2,
+        IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(Box::new(
+            build_test_command_envelope(),
+        )))),
+    );
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+
+    assert_eq!(prepare_response, build_prepared_response(2));
+    assert_eq!(
+        received_command_envelopes
+            .try_iter()
+            .collect::<Vec<CommandEnvelope>>(),
+        Vec::new()
+    );
+}
+
+#[test]
+fn a_ping_between_prepare_and_commit_gets_no_answer_and_keeps_the_held_command() {
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_command_envelopes) =
+        start_reporting_test_server("prepare-ping");
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+    let command_envelope = build_test_command_envelope();
+
+    let prepare_response = exchange_request(
+        &mut connection,
+        2,
+        IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(Box::new(
+            command_envelope.clone(),
+        )))),
+    );
+    connection
+        .send(&IpcRequest {
+            request_id: 4,
+            request_kind: IpcRequestKind::Ping,
+        })
+        .expect("send the ping");
+    // The first frame after the ping is the Commit's answer.
+    let commit_response = exchange_request(&mut connection, 3, IpcRequestKind::Commit);
+
+    assert_eq!(prepare_response, build_prepared_response(2));
+    assert_eq!(
+        commit_response,
+        IpcResponse {
+            request_id: Some(3),
+            answer_result: IpcResult::CommandResult(CommandResult::Ok {
+                command_id: command_envelope.command_id,
+                emitted_events: Vec::new(),
+            }),
+        }
+    );
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+    assert_eq!(
+        received_command_envelopes
+            .try_iter()
+            .map(|dispatched_command_envelope| dispatched_command_envelope.command_id)
+            .collect::<Vec<CommandId>>(),
+        vec![command_envelope.command_id]
+    );
+}
+
+#[test]
+fn a_second_prepare_replaces_the_held_command() {
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_command_envelopes) =
+        start_reporting_test_server("prepare-replaced");
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+    let first_command_envelope = build_test_command_envelope();
+    let second_command_envelope = build_test_command_envelope();
+
+    let first_prepare_response = exchange_request(
+        &mut connection,
+        2,
+        IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(Box::new(
+            first_command_envelope,
+        )))),
+    );
+    let second_prepare_response = exchange_request(
+        &mut connection,
+        3,
+        IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(Box::new(
+            second_command_envelope.clone(),
+        )))),
+    );
+    let commit_response = exchange_request(&mut connection, 4, IpcRequestKind::Commit);
+
+    assert_eq!(first_prepare_response, build_prepared_response(2));
+    assert_eq!(second_prepare_response, build_prepared_response(3));
+    assert_eq!(
+        commit_response,
+        IpcResponse {
+            request_id: Some(4),
+            answer_result: IpcResult::CommandResult(CommandResult::Ok {
+                command_id: second_command_envelope.command_id,
+                emitted_events: Vec::new(),
+            }),
+        }
+    );
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+    assert_eq!(
+        received_command_envelopes
+            .try_iter()
+            .map(|dispatched_command_envelope| dispatched_command_envelope.command_id)
+            .collect::<Vec<CommandId>>(),
+        vec![second_command_envelope.command_id]
+    );
+}
+
+#[test]
+fn another_request_between_prepare_and_commit_drops_the_held_request() {
+    let session_overview = build_overview_named("still-here");
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread) =
+        start_restartable_test_server("prepare-dropped", Ok(()), Some(session_overview.clone()));
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+
+    let prepare_response = exchange_request(
+        &mut connection,
+        2,
+        IpcRequestKind::Prepare(Box::new(IpcRequestKind::Restart)),
+    );
+    let discovery_result = request_discovery(&mut connection, 3);
+    let commit_response = exchange_request(&mut connection, 4, IpcRequestKind::Commit);
+
+    assert_eq!(prepare_response, build_prepared_response(2));
+    assert_eq!(discovery_result, IpcResult::Overview(session_overview));
+    assert_eq!(
+        commit_response,
+        build_request_failed_test_response(4, "no request waits for a Commit on this connection")
+    );
+
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+}
+
+#[test]
+fn every_held_kind_without_prepare_a_kind_that_cannot_be_held_and_a_bare_commit_are_refused_before_the_dispatcher(
+) {
+    let runtime_directory = build_test_runtime_directory("prepare-refusals");
+    let session_id = SessionId::new();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+        .expect("start serving");
+    let (mut frame_reader, mut frame_writer) =
+        connect_greeted_connection(&runtime_directory, session_id).split();
+    frame_reader.set_deadline(Some(Instant::now() + Duration::from_secs(10)));
+    let refused_request_kinds = [
+        (
+            IpcRequestKind::SubmitCommand(Box::new(build_test_command_envelope())),
+            "the session runs SubmitCommand requests only after Prepare and Commit",
+        ),
+        (
+            build_attach_request(None, None).request_kind,
+            "the session runs Attach requests only after Prepare and Commit",
+        ),
+        (
+            IpcRequestKind::Restart,
+            "the session runs Restart requests only after Prepare and Commit",
+        ),
+        (
+            build_copy_request(PaneId::new(), b"x"),
+            "the session runs ClipboardCopy requests only after Prepare and Commit",
+        ),
+        (
+            IpcRequestKind::Prepare(Box::new(IpcRequestKind::Discovery)),
+            "the session cannot prepare Discovery requests",
+        ),
+        (
+            IpcRequestKind::Prepare(Box::new(IpcRequestKind::Prepare(Box::new(
+                IpcRequestKind::Restart,
+            )))),
+            "the session cannot prepare Prepare requests",
+        ),
+        (
+            IpcRequestKind::Prepare(Box::new(IpcRequestKind::Commit)),
+            "the session cannot prepare Commit requests",
+        ),
+        (
+            IpcRequestKind::Commit,
+            "no request waits for a Commit on this connection",
+        ),
+    ];
+
+    for (request_index, (request_kind, refusal_message)) in
+        refused_request_kinds.into_iter().enumerate()
+    {
+        let request_id = request_index as u64 + 2;
+        frame_writer
+            .send(&IpcRequest {
+                request_id,
+                request_kind,
+            })
+            .expect("send the request");
+        let refusal_response: IpcResponse = frame_reader.recv().expect("the refusal");
+
+        assert_eq!(
+            refusal_response,
+            build_request_failed_test_response(request_id, refusal_message)
+        );
+    }
+    assert_eq!(
+        inbox_receiver.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
+    );
+
+    drop((frame_reader, frame_writer));
+    ipc_server.shutdown();
+    delete_test_directory(&runtime_directory);
+}
+
+#[test]
+fn a_clipboard_copy_the_session_would_not_route_says_run_the_real_tool_and_drops_every_held_byte() {
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, request_reports) =
+        start_clipboard_test_server("clipboard-prepare-unroutable", 3, false);
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+    let pane_id = PaneId::new();
+
+    assert_eq!(
+        exchange_request(&mut connection, 2, build_copy_part_request(b"ab")),
+        IpcResponse {
+            request_id: Some(2),
+            answer_result: IpcResult::ClipboardCopyPartTaken,
+        }
+    );
+    assert_eq!(
+        exchange_request(
+            &mut connection,
+            3,
+            build_copy_prepare_request(pane_id, b"cd")
+        ),
+        build_copy_routed_response(3, true)
+    );
+    assert_eq!(
+        exchange_request(&mut connection, 4, IpcRequestKind::Commit),
+        build_request_failed_test_response(4, "no request waits for a Commit on this connection")
+    );
+    // The next copy counts only its own byte.
+    assert_eq!(
+        exchange_request(
+            &mut connection,
+            5,
+            build_copy_prepare_request(pane_id, b"x")
+        ),
+        build_prepared_response(5)
+    );
+    assert_eq!(
+        exchange_request(&mut connection, 6, IpcRequestKind::Commit),
+        build_copy_routed_response(6, false)
+    );
+
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+    assert_eq!(
+        request_reports
+            .try_iter()
+            .collect::<Vec<ClipboardRequestReport>>(),
+        vec![
+            ClipboardRequestReport::CopyPart {
+                held_copy_byte_count: 2
+            },
+            ClipboardRequestReport::CopyPrepare {
+                pane_id,
+                copied_byte_count: 4,
+            },
+            ClipboardRequestReport::CopyPrepare {
+                pane_id,
+                copied_byte_count: 1,
+            },
+            ClipboardRequestReport::Copy {
+                pane_id,
+                clipboard_targets: "c".to_string(),
+                copied_bytes: b"x".to_vec(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_request_between_a_clipboard_prepare_and_its_commit_drops_the_held_copy_and_its_parts() {
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, request_reports) =
+        start_clipboard_test_server("clipboard-prepare-dropped", 8, false);
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+    let pane_id = PaneId::new();
+
+    assert_eq!(
+        exchange_request(&mut connection, 2, build_copy_part_request(b"ab")),
+        IpcResponse {
+            request_id: Some(2),
+            answer_result: IpcResult::ClipboardCopyPartTaken,
+        }
+    );
+    assert_eq!(
+        exchange_request(
+            &mut connection,
+            3,
+            build_copy_prepare_request(pane_id, b"cd")
+        ),
+        build_prepared_response(3)
+    );
+    assert_eq!(
+        exchange_request(&mut connection, 4, build_copy_part_request(b"ef")),
+        IpcResponse {
+            request_id: Some(4),
+            answer_result: IpcResult::ClipboardCopyPartTaken,
+        }
+    );
+    assert_eq!(
+        exchange_request(
+            &mut connection,
+            5,
+            build_copy_prepare_request(pane_id, b"x")
+        ),
+        build_prepared_response(5)
+    );
+    assert_eq!(
+        exchange_request(&mut connection, 6, IpcRequestKind::Commit),
+        build_copy_routed_response(6, false)
+    );
+
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+    assert_eq!(
+        request_reports
+            .try_iter()
+            .collect::<Vec<ClipboardRequestReport>>(),
+        vec![
+            ClipboardRequestReport::CopyPart {
+                held_copy_byte_count: 2
+            },
+            ClipboardRequestReport::CopyPrepare {
+                pane_id,
+                copied_byte_count: 4,
+            },
+            ClipboardRequestReport::CopyPart {
+                held_copy_byte_count: 2
+            },
+            ClipboardRequestReport::CopyPrepare {
+                pane_id,
+                copied_byte_count: 3,
+            },
+            ClipboardRequestReport::Copy {
+                pane_id,
+                clipboard_targets: "c".to_string(),
+                copied_bytes: b"efx".to_vec(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_held_clipboard_copy_is_refused_at_its_commit_once_a_second_hello_marks_the_connection_remote()
+{
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, request_reports) =
+        start_clipboard_test_server("clipboard-prepare-remote", 8, false);
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+    let pane_id = PaneId::new();
+
+    assert_eq!(
+        exchange_request(
+            &mut connection,
+            2,
+            build_copy_prepare_request(pane_id, b"hi")
+        ),
+        build_prepared_response(2)
+    );
+    let remote_hello_response = exchange_request(
+        &mut connection,
+        3,
+        IpcRequestKind::Hello {
+            minimum_protocol_version: MIN_PROTOCOL_VERSION,
+            maximum_protocol_version: PROTOCOL_VERSION,
+            connection_token: load_test_endpoint_file(&runtime_directory, session_id)
+                .connection_token,
+            is_remote: true,
+        },
+    );
+    assert_eq!(
+        remote_hello_response.answer_result,
+        build_accepted_hello_result()
+    );
+    assert_eq!(
+        exchange_request(&mut connection, 4, IpcRequestKind::Commit),
+        build_clipboard_refusal_response(4)
+    );
+
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+    assert_eq!(
+        request_reports
+            .try_iter()
+            .collect::<Vec<ClipboardRequestReport>>(),
+        vec![ClipboardRequestReport::CopyPrepare {
+            pane_id,
+            copied_byte_count: 2,
+        }]
+    );
+}
+
+#[test]
+fn a_prepare_or_a_commit_on_an_attached_connection_detaches_its_client_and_runs_nothing() {
+    for (directory_tag, request_kind) in [
+        (
+            "attached-prepare",
+            IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(Box::new(
+                build_test_command_envelope(),
+            )))),
+        ),
+        ("attached-commit", IpcRequestKind::Commit),
+    ] {
+        let client_id = ClientId::new();
+        let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
+            start_attachable_test_server(directory_tag, client_id);
+        let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
+
+        connection
+            .send(&IpcRequest {
+                request_id: 3,
+                request_kind,
+            })
+            .expect("send the request");
+
+        let RuntimeEvent::ClientDetached {
+            client_id: detached_client_id,
+            ..
+        } = received_runtime_events.recv().expect("detach event")
+        else {
+            panic!("expected ClientDetached");
+        };
+        assert_eq!(detached_client_id, client_id);
+        assert_eq!(
+            connection.recv::<SessionEvent>().expect("goodbye frame"),
+            SessionEvent::Detached,
+        );
+        assert!(
+            matches!(
+                connection.recv::<SessionEvent>(),
+                Err(IpcError::Disconnected),
+            ),
+            "the stream ends after the goodbye, with no answer to the request",
+        );
+
+        drop(connection);
+        stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+    }
 }

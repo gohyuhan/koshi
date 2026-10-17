@@ -191,9 +191,13 @@ The real tool runs alone, as it does outside koshi, for these calls:
 - a read, a clear, or a copy of another type than plain text, such as
   `xclip -o`, `wl-copy --clear` or `xclip -target image/png`;
 - a copy longer than `max-copy-bytes`, and a copy that is not UTF-8 text;
-- a copy that the session does not answer within 5 seconds. A copy goes to
+- a copy that the session does not take within 5 seconds. A copy goes to
   the session in parts of up to 12582783 bytes as the stand-in reads it, and
-  the session has 5 seconds to answer each part.
+  the session has 5 seconds to take each part.
+
+When the session took the whole copy and gives no answer within 5 seconds
+more, the stand-in prints that failure and exits with code 1. The real tool
+does not run, and the copy may still reach the terminal on the other machine.
 
 The stand-in keeps every byte of input it read until the copy ends, at most
 `max-copy-bytes` plus 12582784 bytes. When the real tool runs, it reads those
@@ -633,6 +637,10 @@ machine can see them or reach them. Turning this on lets every other user
 logged in to the same machine list your sessions, attach to them, and kill
 them.
 
+This works on macOS and Linux only. On Windows koshi reads the key without an
+error and does nothing with it: only you reach your sessions, and your `koshi`
+lists no session of another user.
+
 Both files have to say so. Your `koshi.kdl` is what opens your sessions to
 other users; their own `koshi.kdl` is what makes their `koshi` look for
 sessions that are not theirs. A user who leaves it off sees only their own
@@ -669,7 +677,7 @@ While this is on, your `koshi` lists the other users' sessions with limits:
   counting the entries of each user's folder that is opened. An entry whose
   name is not a user id, such as `notes`, and a file in a user's folder whose
   name is not `session-<uuid>.sock`, are skipped without being opened.
-- On Unix, at most 256 user folders are opened. A shared directory that holds
+- At most 256 user folders are opened. A shared directory that holds
   one entry or one user folder past either limit is not read further. A
   listing shows the sessions read before the limit, names the directory on
   standard error and exits with code 4, for example `koshi: some sessions were
@@ -677,7 +685,7 @@ While this is on, your `koshi` lists the other users' sessions with limits:
   folders`. A lookup by name is refused and names it the same way, and koshi
   attaches to none of those sessions by name until the whole directory can be
   read.
-- At most 256 sessions of one user are listed, 256 in all on Windows. Each one
+- At most 256 sessions of one user are listed. Each one
   past that is not asked: standard error names how many, and a listing counts
   them among the sessions that did not answer.
 - A lookup by session id reads only that session's own path in each user's
@@ -713,14 +721,14 @@ While this is on, your `koshi` lists the other users' sessions with limits:
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `allow-other-users` | boolean — let other users of this machine reach your sessions | `#false` | ≥ 0.3.0 |
+| `allow-other-users` | boolean — let other users of this machine reach your sessions; macOS and Linux only, no effect on Windows | `#false` | ≥ 0.3.0 |
 
 ## `shared-sessions-dir`
 
 Where the session sockets other users reach are kept. Set it to a directory
 every user who shares the machine can enter, such as `/var/run/koshi`. Leave it
-out and koshi uses the machine-wide directory for the platform: `/tmp/koshi` on
-Linux and macOS, `%ProgramData%\koshi` on Windows.
+out and koshi uses `/tmp/koshi`. On Windows koshi reads the key without an
+error and does nothing with it.
 
 Every user who shares the machine has to name the same directory. A user whose
 file names a different one looks in that one and finds nobody.
@@ -730,7 +738,7 @@ This only says where the sockets go. Nobody else reaches them until
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `shared-sessions-dir` | string — directory the shared session sockets live in | `/tmp/koshi`, `%ProgramData%\koshi` on Windows | ≥ 0.3.0 |
+| `shared-sessions-dir` | string — directory the shared session sockets live in; no effect on Windows | `/tmp/koshi` | ≥ 0.3.0 |
 
 ## `remote-listen`
 
@@ -757,8 +765,7 @@ same machine. Neither key turns the other on.
 This shows every app setting. Fixed values match defaults. `default-shell`,
 `remote-listen` and `shared-sessions-dir` are commented out — they have no
 fixed default. `default-shell` comes from `$SHELL` or `%COMSPEC%`,
-`remote-listen` is unset, and the shared sessions directory is `/tmp/koshi` on
-Linux and macOS, `%ProgramData%\koshi` on Windows.
+`remote-listen` is unset, and the shared sessions directory is `/tmp/koshi`.
 
 ```kdl
 // koshi.kdl — the complete default configuration.

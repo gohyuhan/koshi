@@ -41,7 +41,9 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::LayoutNode;
 use koshi_session::client::{compute_default_pane_area_size, Client, ClientOrigin};
 use koshi_test_support::fake_pty::FakePtyBackend;
-use koshi_test_support::fixtures::build_key_input_for_chord;
+use koshi_test_support::fixtures::{
+    build_key_input_for_chord, read_prepared_and_send_commit, send_committed_request,
+};
 
 /// Attach on `ipc_connection` reporting [`TEST_VIEWPORT_SIZE`], and return what
 /// the reply carried. The connection carries only the client's event stream
@@ -86,8 +88,9 @@ fn attach_test_client_with_resume_token(
     AttachedSessionStructureSnapshot,
     Option<ConnectionToken>,
 ) {
-    ipc_connection
-        .send(&IpcRequest {
+    send_committed_request(
+        ipc_connection,
+        IpcRequest {
             request_id,
             request_kind: IpcRequestKind::Attach {
                 viewport_size,
@@ -98,8 +101,8 @@ fn attach_test_client_with_resume_token(
                 cell_size: None,
                 link_timeout_ms: None,
             },
-        })
-        .expect("send attach");
+        },
+    );
     let attach_response: IpcResponse = ipc_connection.recv().expect("attach reply");
     assert_eq!(attach_response.request_id, Some(request_id));
     let IpcResult::Attached {
@@ -311,13 +314,16 @@ fn nothing_in_the_request_can_raise_the_clients_authority() {
                 .send(&serde_json::json!({
                     "request_id": 2,
                     "request_kind": {
-                        "Attach": {
-                            "viewport_size": { "column_count": 80, "row_count": 24 },
-                            "tier": "admin"
+                        "Prepare": {
+                            "Attach": {
+                                "viewport_size": { "column_count": 80, "row_count": 24 },
+                                "tier": "admin"
+                            }
                         }
                     }
                 }))
                 .expect("send an attach carrying an extra field");
+            read_prepared_and_send_commit(&mut viewer_connection, 2);
 
             let attach_response: IpcResponse = viewer_connection.recv().expect("attach reply");
             assert_eq!(attach_response.request_id, Some(2));

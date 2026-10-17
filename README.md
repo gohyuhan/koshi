@@ -89,7 +89,7 @@ same machine or another one, and the panes are where you left them.
 - 🌐 **Remote sessions** — attach to a session on another machine over TLS 1.3 with hybrid post-quantum key exchange, a certificate fingerprint check, and an access token.
 - 🔑 **Access tokens** — grant, revoke, and list the tokens that reach your sessions; each grant covers one session or every session.
 - 🔁 **Reconnect** — a dropped remote link dials again for two minutes and puts your tabs, focus, and scroll position back.
-- 👤 **Same-machine sharing** — let the other users of this machine list, attach to, and kill your sessions.
+- 👤 **Same-machine sharing** — let the other users of this machine list, attach to, and kill your sessions (macOS and Linux).
 - ♻️ **Update in place** — `koshi update` restarts each running session into the new build, keeping its panes, their programs, and their scrollback.
 - 🩺 **Installation check** — `koshi doctor` rates config, shell, terminal, directories, router, and remote access.
 - 🌍 **Cross-platform** — run on Linux, macOS, or Windows; CI tests all three.
@@ -386,7 +386,7 @@ Full config reference: [config-docs/](config-docs/README.md). Ready-made themes:
 | `koshi` | Start one session with one tab and shell pane |
 | `koshi --profile <NAME>` | Start with `profile/<NAME>.kdl` |
 | `koshi --headless` | Start a session with nothing attached, print its id, and return to the shell |
-| `koshi --headless --allow-other-users` | The same, and let this machine's other users reach the session |
+| `koshi --headless --allow-other-users` | The same, and let this machine's other users reach the session (macOS and Linux) |
 
 ### Sessions and discovery
 

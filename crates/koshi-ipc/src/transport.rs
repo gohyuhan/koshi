@@ -8,11 +8,12 @@
 //! big-endian length, then that many bytes of JSON encoding one message from
 //! [`protocol`](crate::protocol).
 //!
-//! [`Listener::bind_shared`](crate::transport::Listener::bind_shared) binds a
-//! socket the other local users of this machine may open too, and
 //! [`Connection::is_peer_same_user`](crate::transport::Connection::is_peer_same_user)
 //! reports whether a connected peer runs as the same OS user this process
 //! does.
+//! [`Connection::connect_to_own_server_within`](crate::transport::Connection::connect_to_own_server_within)
+//! connects only to a server of the same OS user, and closes any other
+//! connection before it writes a byte.
 //!
 //! A received length prefix is checked against
 //! [`MAX_FRAME_BYTE_COUNT`](crate::transport::MAX_FRAME_BYTE_COUNT) before the payload
@@ -38,10 +39,16 @@
 //! [`Connection::split_raw`](crate::transport::Connection::split_raw) hands
 //! back a local socket's two halves with no frame shape read off them, for
 //! carrying somebody else's frames through.
+//!
+//! Dropping either end of a connection closes it at once, on every platform.
+//! The peer still reads every byte written before the close, then the end of
+//! the stream. A caller that writes and closes its end before the listener
+//! accepts still has its bytes read once the listener accepts.
 
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::net::Shutdown;
+use std::ops::{Deref, DerefMut};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 #[cfg(windows)]
@@ -52,27 +59,59 @@ use std::sync::Arc;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use interprocess::local_socket::traits::{Listener as _, Stream as _, StreamCommon as _};
+use interprocess::local_socket as socket;
+#[cfg(unix)]
+use interprocess::local_socket::traits::Listener as _;
 #[cfg(unix)]
 use interprocess::local_socket::traits::{RecvHalf as _, SendHalf as _};
+use interprocess::local_socket::traits::{Stream as _, StreamCommon as _};
 #[cfg(unix)]
-use interprocess::local_socket::ConnectOptions;
-use interprocess::local_socket::{self as socket, ListenerOptions};
+use interprocess::local_socket::{ConnectOptions, ListenerOptions};
+#[cfg(windows)]
+use interprocess::os::windows::named_pipe::{
+    local_socket as pipe_socket, pipe_mode, DuplexPipeStream, SendPipeStream,
+};
+#[cfg(windows)]
+use interprocess::os::windows::security_descriptor::{AsSecurityDescriptor, SecurityDescriptor};
+#[cfg(unix)]
 use interprocess::ConnectWaitMode;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::HANDLE;
+use widestring::{U16CStr, U16CString};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{
+    LocalFree, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
+    ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE,
+};
+#[cfg(windows)]
+use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, GetSecurityInfo, SE_KERNEL_OBJECT,
+};
 #[cfg(windows)]
 use windows_sys::Win32::Security::{
-    EqualSid, GetTokenInformation, TokenUser, PSID, TOKEN_QUERY, TOKEN_USER,
+    EqualSid, GetTokenInformation, ImpersonateAnonymousToken, RevertToSelf, TokenOwner, TokenUser,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
+    TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
+};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+    SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, WaitNamedPipeW, NMPWAIT_WAIT_FOREVER, PIPE_READMODE_BYTE,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    CreateEventW, GetCurrentProcess, GetCurrentThread, OpenProcess, OpenProcessToken,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 #[cfg(windows)]
-use windows_sys::Win32::System::IO::CancelIoEx;
+use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
 use crate::error::IpcError;
 use crate::wire::{has_exactly_json_fields, Answer};
@@ -82,35 +121,37 @@ use crate::wire::{has_exactly_json_fields, Answer};
 /// past it is refused with nothing written.
 pub const MAX_FRAME_BYTE_COUNT: u32 = 16 * 1024 * 1024;
 
-/// What the shared control pipe grants, in Windows' [security descriptor
-/// string format][sddl]: the Authenticated Users group — every user logged in
-/// to this machine — may open the pipe for reading and writing.
-///
-/// `0x0012019f` is `FILE_GENERIC_READ | FILE_GENERIC_WRITE` spelled out: the
-/// rights `GENERIC_READ | GENERIC_WRITE`, which a caller opens the pipe with,
-/// map to. `FILE_APPEND_DATA` (`0x4`) inside that set is also
-/// `FILE_CREATE_PIPE_INSTANCE`: the right the server uses to create the pipe
-/// instance that serves the next caller.
-///
-/// [sddl]:
-/// https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-string-format
+/// The rights a caller opens a pipe end with: `FILE_GENERIC_READ` and
+/// `FILE_WRITE_DATA`, `0x0012008b`. It holds no `FILE_APPEND_DATA` (`0x4`),
+/// the bit `FILE_GENERIC_WRITE` holds and `FILE_CREATE_PIPE_INSTANCE` shares.
 #[cfg(windows)]
-const SHARED_PIPE_ACCESS: &widestring::U16CStr = widestring::u16cstr!("D:(A;;0x0012019f;;;AU)");
+const PIPE_CALLER_ACCESS: u32 = FILE_GENERIC_READ | FILE_WRITE_DATA;
 
 /// Map a control-socket address — the string an endpoint file stores — to the
-/// platform's socket name: a socket-file path on Unix, a pipe name on
-/// Windows.
+/// Unix socket-file path it names.
+#[cfg(unix)]
 fn resolve_socket_name(socket_address: &str) -> io::Result<socket::Name<'_>> {
-    #[cfg(unix)]
-    {
-        use interprocess::local_socket::{GenericFilePath, ToFsName};
-        socket_address.to_fs_name::<GenericFilePath>()
-    }
-    #[cfg(windows)]
-    {
-        use interprocess::local_socket::{GenericNamespaced, ToNsName};
-        socket_address.to_ns_name::<GenericNamespaced>()
-    }
+    use interprocess::local_socket::{GenericFilePath, ToFsName};
+    socket_address.to_fs_name::<GenericFilePath>()
+}
+
+/// The Windows path of the named pipe at a control-socket address:
+/// `\\.\pipe\<socket_address>`, as the NUL-terminated wide string the
+/// Windows API takes.
+///
+/// Example: `koshi-router` gives `\\.\pipe\koshi-router`.
+///
+/// # Errors
+/// [`io::ErrorKind::InvalidInput`] when `socket_address` holds a NUL
+/// character.
+#[cfg(windows)]
+fn format_pipe_path(socket_address: &str) -> io::Result<U16CString> {
+    U16CString::from_str(format!(r"\\.\pipe\{socket_address}")).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the pipe name holds a NUL character",
+        )
+    })
 }
 
 /// The server end of the control socket: binds the address and accepts one
@@ -120,7 +161,12 @@ fn resolve_socket_name(socket_address: &str) -> io::Result<socket::Name<'_>> {
 /// unlinked.
 #[derive(Debug)]
 pub struct Listener {
+    /// The Unix domain socket bound at the address.
+    #[cfg(unix)]
     socket_listener: socket::Listener,
+    /// The named pipe instances created at the address.
+    #[cfg(windows)]
+    pipe_listener: NamedPipeListener,
 }
 
 impl Listener {
@@ -128,52 +174,276 @@ impl Listener {
     /// bound, does not fit the platform's socket namespace, or the OS
     /// refuses.
     pub fn bind(socket_address: &str) -> Result<Listener, IpcError> {
-        let platform_socket_name = resolve_socket_name(socket_address).map_err(convert_io_error)?;
-        let socket_listener = ListenerOptions::new()
-            .name(platform_socket_name)
-            .create_sync()
-            .map_err(convert_io_error)?;
-        Ok(Listener { socket_listener })
-    }
-
-    /// Bind `socket_address` and start listening, with the other local users of this
-    /// machine able to open it.
-    ///
-    /// On Windows the pipe is created with a security descriptor that grants
-    /// the Authenticated Users group read and write. On Unix this binds
-    /// exactly as [`bind`](Self::bind) does: the socket file arrives at the
-    /// mode the process umask leaves, and the caller widens it afterwards.
-    pub fn bind_shared(socket_address: &str) -> Result<Listener, IpcError> {
         #[cfg(unix)]
         {
-            Listener::bind(socket_address)
-        }
-        #[cfg(windows)]
-        {
-            use interprocess::os::windows::local_socket::ListenerOptionsExt;
-            use interprocess::os::windows::security_descriptor::SecurityDescriptor;
-
-            let access =
-                SecurityDescriptor::deserialize(SHARED_PIPE_ACCESS).map_err(convert_io_error)?;
             let platform_socket_name =
                 resolve_socket_name(socket_address).map_err(convert_io_error)?;
             let socket_listener = ListenerOptions::new()
                 .name(platform_socket_name)
-                .security_descriptor(access)
                 .create_sync()
                 .map_err(convert_io_error)?;
             Ok(Listener { socket_listener })
+        }
+        #[cfg(windows)]
+        {
+            let access = build_pipe_access()?;
+            let pipe_listener =
+                NamedPipeListener::bind(socket_address, access).map_err(convert_io_error)?;
+            Ok(Listener { pipe_listener })
         }
     }
 
     /// Block until a caller connects, then hand back that connection.
     ///
-    /// On Windows a caller that connects and gives up occupies the pipe until
-    /// the next `accept` clears it.
+    /// A caller that connected, wrote and closed its end before this call is
+    /// handed back too: its bytes are read, then the end of the stream.
     pub fn accept(&self) -> Result<Connection, IpcError> {
+        #[cfg(unix)]
         let socket_stream = self.socket_listener.accept().map_err(convert_io_error)?;
+        #[cfg(windows)]
+        let socket_stream = self.pipe_listener.accept().map_err(convert_io_error)?;
         Ok(Connection::from_socket_stream(socket_stream))
     }
+}
+
+/// The size Windows is asked to reserve for each direction of a pipe
+/// instance's buffer: 512 bytes. Windows takes it as a hint.
+#[cfg(windows)]
+const PIPE_BUFFER_BYTE_COUNT: u32 = 512;
+
+/// The server end of a Windows named pipe. One instance at a time waits for
+/// the next caller; [`accept`](Self::accept) hands that instance out once a
+/// caller opens it and creates the instance the caller after it opens.
+#[cfg(windows)]
+#[derive(Debug)]
+struct NamedPipeListener {
+    /// `\\.\pipe\<socket_address>`, as Windows takes a path.
+    pipe_path: U16CString,
+    /// The security descriptor every instance is created with.
+    access: SecurityDescriptor,
+    /// The instance the next caller opens.
+    listening_instance: Mutex<OwnedHandle>,
+}
+
+#[cfg(windows)]
+impl NamedPipeListener {
+    /// Create the first instance of `\\.\pipe\<socket_address>`, with
+    /// `access`.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::InvalidInput`] when `socket_address` holds a NUL
+    /// character. Otherwise the failure of creating the instance, which
+    /// includes another process already having an instance of the pipe.
+    fn bind(socket_address: &str, access: SecurityDescriptor) -> io::Result<NamedPipeListener> {
+        let pipe_path = format_pipe_path(socket_address)?;
+        let listening_instance = create_pipe_instance(&pipe_path, &access, true)?;
+        Ok(NamedPipeListener {
+            pipe_path,
+            access,
+            listening_instance: Mutex::new(listening_instance),
+        })
+    }
+
+    /// Block until a caller opens the listening instance. Then wrap a second
+    /// handle to the opened instance as a stream with [`wrap_pipe_handle`],
+    /// create the instance the next caller opens, and hand the stream out.
+    ///
+    /// A caller that opened the instance, wrote and closed its end before this
+    /// call counts as connected: the stream reads its bytes, then the end of
+    /// the stream.
+    ///
+    /// # Errors
+    /// The failure of the wait, of copying the opened instance's handle, of
+    /// [`wrap_pipe_handle`], or of creating the next instance. On each one
+    /// the opened instance stays the listening one, and the next call hands it
+    /// out without a wait.
+    fn accept(&self) -> io::Result<socket::Stream> {
+        let mut listening_instance = self
+            .listening_instance
+            .lock()
+            .unwrap_or_else(|poison_error| poison_error.into_inner());
+        wait_for_pipe_caller(&listening_instance)?;
+        let socket_stream = wrap_pipe_handle(listening_instance.try_clone()?)?;
+        let next_instance = match create_pipe_instance(&self.pipe_path, &self.access, false) {
+            Ok(next_instance) => next_instance,
+            Err(create_error) => {
+                socket_stream.mark_written_bytes_flushed();
+                return Err(create_error);
+            }
+        };
+        *listening_instance = next_instance;
+        drop(listening_instance);
+        Ok(socket_stream)
+    }
+}
+
+/// Open the caller's end of the named pipe at `socket_address`, overlapped,
+/// with [`PIPE_CALLER_ACCESS`], and with the impersonation level
+/// `SECURITY_IDENTIFICATION`: the server may read this process's user, and
+/// cannot act as it. While every instance holds a caller the listener has not
+/// accepted (`ERROR_PIPE_BUSY`), wait with `WaitNamedPipeW` for a free
+/// instance, for the time left until `connect_wait_duration` after the first
+/// attempt, and open again.
+///
+/// # Errors
+/// [`io::ErrorKind::InvalidInput`] when `socket_address` holds a NUL
+/// character. The failure `CreateFileW` reports for anything but a busy pipe,
+/// such as `ERROR_FILE_NOT_FOUND` when no pipe has that name. The failure
+/// `WaitNamedPipeW` reports, such as `ERROR_SEM_TIMEOUT` when no instance
+/// came free in the time left. [`io::ErrorKind::TimedOut`] when less than 1 ms
+/// is left before a wait.
+#[cfg(windows)]
+fn open_pipe_caller_end(
+    socket_address: &str,
+    connect_wait_duration: Duration,
+) -> io::Result<OwnedHandle> {
+    let connect_deadline = Instant::now() + connect_wait_duration;
+    let pipe_path = format_pipe_path(socket_address)?;
+    loop {
+        let pipe_handle = unsafe {
+            CreateFileW(
+                pipe_path.as_ptr(),
+                PIPE_CALLER_ACCESS,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                std::ptr::null_mut(),
+            )
+        };
+        if pipe_handle != INVALID_HANDLE_VALUE {
+            return Ok(unsafe { OwnedHandle::from_raw_handle(pipe_handle) });
+        }
+        let open_error = io::Error::last_os_error();
+        if open_error.raw_os_error() != Some(ERROR_PIPE_BUSY as i32) {
+            return Err(open_error);
+        }
+        let time_left = connect_deadline.saturating_duration_since(Instant::now());
+        if time_left < MINIMUM_STEP_TIME_LEFT_DURATION {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
+        let wait_milliseconds = u32::try_from(time_left.as_millis())
+            .unwrap_or(u32::MAX)
+            .min(NMPWAIT_WAIT_FOREVER - 1);
+        if unsafe { WaitNamedPipeW(pipe_path.as_ptr(), wait_milliseconds) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+}
+
+/// Wrap `pipe_handle`, a caller's end or an instance of a named pipe, as a
+/// byte-mode local socket stream that keeps `pipe_handle`.
+///
+/// `interprocess` opens the pipe once more while it wraps a handle
+/// (`ReOpenFile` with `GENERIC_READ | GENERIC_WRITE`). When that open
+/// succeeds, it connects a new caller end to a free instance of the pipe, and
+/// the stream keeps that end in place of `pipe_handle`. The wrap runs while
+/// this thread impersonates the anonymous logon token, and the pipe refuses
+/// that open with `ERROR_ACCESS_DENIED`.
+///
+/// # Errors
+/// The failure of impersonating the anonymous logon token, or of reading the
+/// pipe's flags.
+///
+/// # Panics
+/// Panics when `RevertToSelf` fails and this thread still impersonates the
+/// anonymous logon token.
+#[cfg(windows)]
+fn wrap_pipe_handle(pipe_handle: OwnedHandle) -> io::Result<socket::Stream> {
+    if unsafe { ImpersonateAnonymousToken(GetCurrentThread()) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let wrap_outcome = DuplexPipeStream::<pipe_mode::Bytes>::try_from(pipe_handle);
+    assert!(
+        unsafe { RevertToSelf() } != 0,
+        "RevertToSelf failed: the thread still impersonates the anonymous logon token"
+    );
+    let pipe_stream = wrap_outcome?;
+    Ok(socket::Stream::from(pipe_socket::Stream::from(pipe_stream)))
+}
+
+/// Create one instance of the named pipe at `pipe_path`: duplex, byte mode,
+/// overlapped, callers on other machines refused, any number of instances.
+/// It carries `access`. With `is_first_instance` the creation fails when any
+/// process already has an instance of the pipe.
+///
+/// # Errors
+/// The failure `CreateNamedPipeW` reports.
+#[cfg(windows)]
+fn create_pipe_instance(
+    pipe_path: &U16CStr,
+    access: &SecurityDescriptor,
+    is_first_instance: bool,
+) -> io::Result<OwnedHandle> {
+    let security_attributes = SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>())
+            .expect("SECURITY_ATTRIBUTES is a few bytes long"),
+        lpSecurityDescriptor: access.as_sd().cast_mut(),
+        bInheritHandle: 0,
+    };
+    let mut open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
+    if is_first_instance {
+        open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
+    }
+    let pipe_instance = unsafe {
+        CreateNamedPipeW(
+            pipe_path.as_ptr(),
+            open_mode,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            PIPE_UNLIMITED_INSTANCES,
+            PIPE_BUFFER_BYTE_COUNT,
+            PIPE_BUFFER_BYTE_COUNT,
+            0,
+            &security_attributes,
+        )
+    };
+    if pipe_instance == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedHandle::from_raw_handle(pipe_instance) })
+}
+
+/// Block until a caller opens `pipe_instance`. A caller that opened it before
+/// this call counts at once, also when it has closed its end since: Windows
+/// reports `ERROR_PIPE_CONNECTED` for the one, `ERROR_NO_DATA` for the other.
+///
+/// # Errors
+/// The failure of creating the wait's event, of `ConnectNamedPipe`, or of the
+/// wait.
+#[cfg(windows)]
+fn wait_for_pipe_caller(pipe_instance: &OwnedHandle) -> io::Result<()> {
+    let connect_event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+    if connect_event.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let connect_event = unsafe { OwnedHandle::from_raw_handle(connect_event) };
+    let mut connect_overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    connect_overlapped.hEvent = connect_event.as_raw_handle();
+    if unsafe { ConnectNamedPipe(pipe_instance.as_raw_handle(), &mut connect_overlapped) } != 0 {
+        return Ok(());
+    }
+    let connect_error = io::Error::last_os_error();
+    let connect_error_code = connect_error
+        .raw_os_error()
+        .and_then(|error_code| u32::try_from(error_code).ok());
+    match connect_error_code {
+        Some(ERROR_PIPE_CONNECTED | ERROR_NO_DATA) => return Ok(()),
+        Some(ERROR_IO_PENDING) => {}
+        _ => return Err(connect_error),
+    }
+    let mut transferred_byte_count: u32 = 0;
+    let is_connected = unsafe {
+        GetOverlappedResult(
+            pipe_instance.as_raw_handle(),
+            &connect_overlapped,
+            &mut transferred_byte_count,
+            1,
+        )
+    } != 0;
+    if !is_connected {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// How long [`Connection::connect`] waits for the connect to complete: 2
@@ -188,7 +458,7 @@ pub const CONNECT_WAIT_DURATION: std::time::Duration = std::time::Duration::from
 /// from [`Connection::connect`], the server's from [`Listener::accept`].
 #[derive(Debug)]
 pub struct Connection {
-    socket_stream: socket::Stream,
+    socket_stream: WritableSocketEnd<socket::Stream>,
     /// Set by [`ReadCloser::close`]. Every read after it reports
     /// [`IpcError::Disconnected`] without touching the socket.
     is_read_closed: Arc<AtomicBool>,
@@ -198,7 +468,7 @@ impl Connection {
     /// Wrap a connected stream, with its read direction open.
     fn from_socket_stream(socket_stream: socket::Stream) -> Connection {
         Connection {
-            socket_stream,
+            socket_stream: WritableSocketEnd::from_socket_end(socket_stream),
             is_read_closed: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -234,26 +504,59 @@ impl Connection {
                 .connect_sync()
         };
         #[cfg(windows)]
-        let connect_outcome = {
-            use interprocess::os::windows::named_pipe::{
-                local_socket as pipe_socket, pipe_mode, DuplexPipeStream,
-            };
-            DuplexPipeStream::<pipe_mode::Bytes>::connect_by_path_with_wait_mode(
-                format!(r"\\.\pipe\{socket_address}"),
-                ConnectWaitMode::Timeout(connect_wait_duration),
-            )
-            .map(|pipe_stream| socket::Stream::from(pipe_socket::Stream::from(pipe_stream)))
-        };
-        let socket_stream = connect_outcome.map_err(|connect_error| {
-            if is_no_listener_error(&connect_error) {
-                IpcError::NoListener {
-                    socket_address: socket_address.to_string(),
-                }
-            } else {
-                convert_io_error(connect_error)
-            }
-        })?;
+        let connect_outcome =
+            open_pipe_caller_end(socket_address, connect_wait_duration).and_then(wrap_pipe_handle);
+        let socket_stream = connect_outcome
+            .map_err(|connect_error| convert_connect_error(socket_address, connect_error))?;
         Ok(Connection::from_socket_stream(socket_stream))
+    }
+
+    /// Connect to the listener at `socket_address` as
+    /// [`connect_within`](Self::connect_within) does, and keep the connection
+    /// only when this process's OS user serves it. Nothing is written before
+    /// the check, and a connection that fails it is closed.
+    ///
+    /// On Unix the server's user is the effective user id the socket reports
+    /// for the listening process, as [`is_peer_same_user`](Self::is_peer_same_user)
+    /// reads it. On Windows it is the owner of the pipe: the user that created
+    /// the pipe's first instance, or the user its security descriptor names.
+    /// [`bind`](Listener::bind) names this process's user.
+    ///
+    /// # Errors
+    /// What `connect_within` gives, the failure of reading the server's user,
+    /// and [`IpcError::PeerIsOtherUser`] naming `socket_address` when another
+    /// user serves it.
+    ///
+    /// Example: on Windows, another user who created the pipe
+    /// `\\.\pipe\koshi-<session id>` while that session restarts gives
+    /// [`IpcError::PeerIsOtherUser`].
+    pub fn connect_to_own_server_within(
+        socket_address: &str,
+        connect_wait_duration: Duration,
+    ) -> Result<Connection, IpcError> {
+        #[cfg(unix)]
+        {
+            let connection = Connection::connect_within(socket_address, connect_wait_duration)?;
+            if !connection.is_peer_same_user()? {
+                return Err(IpcError::PeerIsOtherUser {
+                    socket_address: socket_address.to_string(),
+                });
+            }
+            Ok(connection)
+        }
+        #[cfg(windows)]
+        {
+            let pipe_handle = open_pipe_caller_end(socket_address, connect_wait_duration)
+                .map_err(|connect_error| convert_connect_error(socket_address, connect_error))?;
+            if !is_pipe_owned_by_own_user(&pipe_handle)? {
+                return Err(IpcError::PeerIsOtherUser {
+                    socket_address: socket_address.to_string(),
+                });
+            }
+            let socket_stream = wrap_pipe_handle(pipe_handle)
+                .map_err(|connect_error| convert_connect_error(socket_address, connect_error))?;
+            Ok(Connection::from_socket_stream(socket_stream))
+        }
     }
 
     /// Send one message as one frame. Blocks until the bytes are handed to
@@ -269,7 +572,7 @@ impl Connection {
         if self.is_read_closed.load(Ordering::SeqCst) {
             return Err(IpcError::Disconnected);
         }
-        read_message(&mut self.socket_stream)
+        read_message(&mut *self.socket_stream)
     }
 
     /// Read one frame and parse it as an [`Answer`] carrying `Response`, as
@@ -281,7 +584,7 @@ impl Connection {
         if self.is_read_closed.load(Ordering::SeqCst) {
             return Err(IpcError::Disconnected);
         }
-        read_answer(&mut self.socket_stream)
+        read_answer(&mut *self.socket_stream)
     }
 
     /// Take the handle on this connection's read direction, for another thread
@@ -302,11 +605,13 @@ impl Connection {
     }
 
     /// Report whether the peer process runs as the same OS user as this
-    /// process: on Unix its effective user id, on Windows the user in its
-    /// process token. The OS reports the peer's identity through the socket;
-    /// a peer cannot forge it.
+    /// process: on Unix its effective user id, which the socket reports. On
+    /// Windows the pipe reports the peer's process id, and the user is read
+    /// from that process's token.
     ///
-    /// Failing to learn the peer's identity is an error.
+    /// Failing to learn the peer's identity is an error. On Windows that
+    /// includes a peer process of another user: opening it fails with
+    /// `ERROR_ACCESS_DENIED`.
     pub fn is_peer_same_user(&self) -> Result<bool, IpcError> {
         let credentials = self.socket_stream.peer_creds().map_err(convert_io_error)?;
         #[cfg(unix)]
@@ -327,12 +632,14 @@ impl Connection {
                 return Err(convert_io_error(io::Error::last_os_error()));
             }
             let peer_process_handle = unsafe { OwnedHandle::from_raw_handle(peer_process_handle) };
-            let peer_token_buffer = read_token_user_buffer(peer_process_handle.as_raw_handle())?;
-            let own_token_buffer = read_token_user_buffer(unsafe { GetCurrentProcess() })?;
+            let peer_token_buffer =
+                read_token_information_buffer(peer_process_handle.as_raw_handle(), TokenUser)?;
+            let own_token_buffer =
+                read_token_information_buffer(unsafe { GetCurrentProcess() }, TokenUser)?;
             Ok(unsafe {
                 EqualSid(
-                    get_sid_from_token_buffer(&peer_token_buffer),
-                    get_sid_from_token_buffer(&own_token_buffer),
+                    get_user_sid_from_token_buffer(&peer_token_buffer),
+                    get_user_sid_from_token_buffer(&own_token_buffer),
                 )
             } != 0)
         }
@@ -373,6 +680,131 @@ impl Connection {
     pub fn split_raw(self) -> (RawReader, RawWriter) {
         let (reader_half, writer_half) = self.socket_stream.split();
         (RawReader(reader_half), RawWriter(writer_half))
+    }
+}
+
+/// A local socket end that [`WritableSocketEnd`] holds: a whole socket, or
+/// the writing half of a split one.
+trait LocalSocketEnd {
+    /// Mark every byte written to this named pipe end as flushed. Dropping
+    /// the end then closes the pipe at once.
+    #[cfg(windows)]
+    fn mark_written_bytes_flushed(&self);
+}
+
+impl LocalSocketEnd for socket::Stream {
+    #[cfg(windows)]
+    fn mark_written_bytes_flushed(&self) {
+        let socket::Stream::NamedPipe(pipe_stream) = self;
+        pipe_stream.inner().assume_flushed();
+    }
+}
+
+impl LocalSocketEnd for socket::SendHalf {
+    #[cfg(windows)]
+    fn mark_written_bytes_flushed(&self) {
+        let socket::SendHalf::NamedPipe(pipe_half) = self;
+        let send_pipe_stream: &SendPipeStream<pipe_mode::Bytes> = pipe_half.as_ref();
+        send_pipe_stream.assume_flushed();
+    }
+}
+
+/// A local socket end this process writes to: a whole [`Connection`]'s
+/// socket, or the writing half of a split one.
+///
+/// Dropping the end closes it at once. On Windows the drop first marks the
+/// bytes written to the named pipe end as flushed
+/// (`LocalSocketEnd::mark_written_bytes_flushed`), and `interprocess` then
+/// closes the pipe with no wait. The peer still reads every byte written
+/// before the close, then the end of the stream.
+///
+/// Example: a session drops its end of a client's connection right after it
+/// writes `Detached`. The drop returns before the client reads anything, and
+/// the client still reads `Detached`, then the end of the stream.
+#[derive(Debug)]
+struct WritableSocketEnd<SocketEnd: LocalSocketEnd> {
+    /// The socket end. `None` only once [`split`](Self::split) took it.
+    socket_end: Option<SocketEnd>,
+}
+
+impl<SocketEnd: LocalSocketEnd> WritableSocketEnd<SocketEnd> {
+    /// Hold `socket_end`.
+    fn from_socket_end(socket_end: SocketEnd) -> Self {
+        WritableSocketEnd {
+            socket_end: Some(socket_end),
+        }
+    }
+}
+
+impl WritableSocketEnd<socket::Stream> {
+    /// Split the socket into its reading half and its writing half.
+    fn split(mut self) -> (socket::RecvHalf, WritableSocketEnd<socket::SendHalf>) {
+        let socket_stream = self
+            .socket_end
+            .take()
+            .expect("the socket end is held until the end is split");
+        let (recv_half, send_half) = socket_stream.split();
+        (recv_half, WritableSocketEnd::from_socket_end(send_half))
+    }
+}
+
+impl<SocketEnd: LocalSocketEnd> Deref for WritableSocketEnd<SocketEnd> {
+    type Target = SocketEnd;
+
+    fn deref(&self) -> &SocketEnd {
+        self.socket_end
+            .as_ref()
+            .expect("the socket end is held until the end is split")
+    }
+}
+
+impl<SocketEnd: LocalSocketEnd> DerefMut for WritableSocketEnd<SocketEnd> {
+    fn deref_mut(&mut self) -> &mut SocketEnd {
+        self.socket_end
+            .as_mut()
+            .expect("the socket end is held until the end is split")
+    }
+}
+
+impl<SocketEnd: LocalSocketEnd + Write> Write for WritableSocketEnd<SocketEnd> {
+    /// Write `write_bytes` to the socket end.
+    fn write(&mut self, write_bytes: &[u8]) -> io::Result<usize> {
+        let socket_end: &mut SocketEnd = self;
+        socket_end.write(write_bytes)
+    }
+
+    /// Return `Ok` at once: a write hands its bytes to the OS, and this end
+    /// holds none of them.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<SocketEnd: LocalSocketEnd> Write for &WritableSocketEnd<SocketEnd>
+where
+    for<'socket_end> &'socket_end SocketEnd: Write,
+{
+    /// Write `write_bytes` to the socket end.
+    fn write(&mut self, write_bytes: &[u8]) -> io::Result<usize> {
+        let mut socket_end: &SocketEnd = self;
+        socket_end.write(write_bytes)
+    }
+
+    /// Return `Ok` at once: a write hands its bytes to the OS, and this end
+    /// holds none of them.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl<SocketEnd: LocalSocketEnd> Drop for WritableSocketEnd<SocketEnd> {
+    /// Mark the bytes written to the end as flushed. The end then closes with
+    /// no wait.
+    fn drop(&mut self) {
+        if let Some(socket_end) = &self.socket_end {
+            socket_end.mark_written_bytes_flushed();
+        }
     }
 }
 
@@ -543,7 +975,7 @@ struct LocalSocketWriter {
     #[cfg(windows)]
     pipe_step_canceller: PipeStepCanceller,
     /// The socket's own writing half.
-    send_half: socket::SendHalf,
+    send_half: WritableSocketEnd<socket::SendHalf>,
     /// When every write must be finished by, or `None` for no limit.
     deadline: Option<Instant>,
     /// The longest one write waits for the socket to take a byte, or `None`
@@ -553,9 +985,9 @@ struct LocalSocketWriter {
 
 impl LocalSocketWriter {
     /// A writer over `send_half` with no deadline and no idle timeout.
-    fn from_send_half(send_half: socket::SendHalf) -> LocalSocketWriter {
+    fn from_send_half(send_half: WritableSocketEnd<socket::SendHalf>) -> LocalSocketWriter {
         #[cfg(windows)]
-        let socket::SendHalf::NamedPipe(pipe_half) = &send_half;
+        let socket::SendHalf::NamedPipe(pipe_half) = &*send_half;
         LocalSocketWriter {
             #[cfg(windows)]
             pipe_step_canceller: PipeStepCanceller::from_pipe_handle(PipeHandle(
@@ -624,7 +1056,7 @@ impl Write for LocalSocketWriter {
         }
     }
 
-    /// Flush the socket's writing half.
+    /// Return `Ok` at once, as [`WritableSocketEnd`]'s flush does.
     fn flush(&mut self) -> io::Result<()> {
         self.send_half.flush()
     }
@@ -1036,7 +1468,7 @@ impl Read for RawReader {
 /// The writing half of a [`Connection::split_raw`]: the bytes go out as
 /// given, with no frame shape written around them.
 #[derive(Debug)]
-pub struct RawWriter(socket::SendHalf);
+pub struct RawWriter(WritableSocketEnd<socket::SendHalf>);
 
 impl Write for RawWriter {
     fn write(&mut self, raw_bytes: &[u8]) -> io::Result<usize> {
@@ -1170,12 +1602,16 @@ fn read_frame_payload(reader: &mut impl Read) -> Result<Vec<u8>, IpcError> {
     Ok(payload_bytes)
 }
 
-/// Read the user of `process_handle`'s token: the bytes `GetTokenInformation`
-/// writes, which start with a [`TOKEN_USER`] whose `Sid` points into the rest
-/// of the same buffer. The buffer is `u64`: [`TOKEN_USER`] needs 8-byte
-/// alignment.
+/// Read one part of `process_handle`'s token: the bytes `GetTokenInformation`
+/// writes for `token_information_class`. For `TokenUser` they start with a
+/// [`TOKEN_USER`], and for `TokenOwner` with a [`TOKEN_OWNER`], whose SID
+/// pointer points into the rest of the same buffer. The buffer is `u64`: both
+/// structures need 8-byte alignment.
 #[cfg(windows)]
-fn read_token_user_buffer(process_handle: HANDLE) -> Result<Vec<u64>, IpcError> {
+fn read_token_information_buffer(
+    process_handle: HANDLE,
+    token_information_class: TOKEN_INFORMATION_CLASS,
+) -> Result<Vec<u64>, IpcError> {
     let mut token_handle: HANDLE = std::ptr::null_mut();
     if unsafe { OpenProcessToken(process_handle, TOKEN_QUERY, &mut token_handle) } == 0 {
         return Err(convert_io_error(io::Error::last_os_error()));
@@ -1186,7 +1622,7 @@ fn read_token_user_buffer(process_handle: HANDLE) -> Result<Vec<u64>, IpcError> 
     unsafe {
         GetTokenInformation(
             token_handle.as_raw_handle(),
-            TokenUser,
+            token_information_class,
             std::ptr::null_mut(),
             0,
             &mut required_buffer_byte_count,
@@ -1196,7 +1632,7 @@ fn read_token_user_buffer(process_handle: HANDLE) -> Result<Vec<u64>, IpcError> 
     let is_token_information_filled = unsafe {
         GetTokenInformation(
             token_handle.as_raw_handle(),
-            TokenUser,
+            token_information_class,
             token_buffer.as_mut_ptr().cast(),
             (token_buffer.len() * 8) as u32,
             &mut required_buffer_byte_count,
@@ -1208,22 +1644,137 @@ fn read_token_user_buffer(process_handle: HANDLE) -> Result<Vec<u64>, IpcError> 
     Ok(token_buffer)
 }
 
-/// The `Sid` pointer inside a buffer [`read_token_user_buffer`] filled. It stays valid
-/// only while that buffer lives.
+/// The user SID inside a buffer [`read_token_information_buffer`] filled for
+/// `TokenUser`. It stays valid only while that buffer lives.
 #[cfg(windows)]
-fn get_sid_from_token_buffer(token_buffer: &[u64]) -> PSID {
+fn get_user_sid_from_token_buffer(token_buffer: &[u64]) -> PSID {
     unsafe { (*token_buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid }
 }
 
+/// The owner SID inside a buffer [`read_token_information_buffer`] filled for
+/// `TokenOwner`: the owner the token gives the objects it creates. It stays
+/// valid only while that buffer lives.
+#[cfg(windows)]
+fn get_owner_sid_from_token_buffer(token_buffer: &[u64]) -> PSID {
+    unsafe { (*token_buffer.as_ptr().cast::<TOKEN_OWNER>()).Owner }
+}
+
+/// Build the security descriptor of a pipe this process creates, from
+/// Windows' [security descriptor string format][sddl]: this process's user
+/// owns the pipe (`O:`) and has every right on it (`FA`), and no one else has
+/// any access.
+///
+/// Example: for the user `S-1-5-21-1-2-3-1001` the text is
+/// `O:S-1-5-21-1-2-3-1001D:(A;;FA;;;S-1-5-21-1-2-3-1001)`.
+///
+/// # Errors
+/// The failure of reading this process's user, or of parsing the text.
+///
+/// [sddl]:
+/// https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-string-format
+#[cfg(windows)]
+fn build_pipe_access() -> Result<SecurityDescriptor, IpcError> {
+    let own_user_sid = format_own_user_sid()?;
+    let access_text = U16CString::from_str(format!("O:{own_user_sid}D:(A;;FA;;;{own_user_sid})"))
+        .expect("a SID holds no NUL character");
+    SecurityDescriptor::deserialize(&access_text).map_err(convert_io_error)
+}
+
+/// This process's user SID as text, such as `S-1-5-21-1-2-3-1001`.
+///
+/// # Errors
+/// The failure of reading this process's token, or of converting its user SID.
+#[cfg(windows)]
+fn format_own_user_sid() -> Result<String, IpcError> {
+    let own_token_buffer =
+        read_token_information_buffer(unsafe { GetCurrentProcess() }, TokenUser)?;
+    let mut sid_text_pointer: *mut u16 = std::ptr::null_mut();
+    let is_converted = unsafe {
+        ConvertSidToStringSidW(
+            get_user_sid_from_token_buffer(&own_token_buffer),
+            &mut sid_text_pointer,
+        )
+    };
+    if is_converted == 0 {
+        return Err(convert_io_error(io::Error::last_os_error()));
+    }
+    let _sid_text_allocation = LocalAllocation(sid_text_pointer.cast());
+    Ok(unsafe { U16CStr::from_ptr_str(sid_text_pointer) }.to_string_lossy())
+}
+
+/// Report whether the pipe that `pipe_handle` is an end of is owned by this
+/// process's user, or by the owner this process's token gives the objects it
+/// creates: the Administrators group for an elevated administrator. The
+/// handle needs `READ_CONTROL`, which [`PIPE_CALLER_ACCESS`] holds.
+///
+/// # Errors
+/// The failure `GetSecurityInfo` reports for the pipe's owner, or the failure
+/// of reading this process's token.
+#[cfg(windows)]
+fn is_pipe_owned_by_own_user(pipe_handle: &OwnedHandle) -> Result<bool, IpcError> {
+    let mut owner_sid: PSID = std::ptr::null_mut();
+    let mut pipe_security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let lookup_status = unsafe {
+        GetSecurityInfo(
+            pipe_handle.as_raw_handle(),
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner_sid,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut pipe_security_descriptor,
+        )
+    };
+    if lookup_status != ERROR_SUCCESS {
+        return Err(convert_io_error(io::Error::from_raw_os_error(
+            lookup_status as i32,
+        )));
+    }
+    let _pipe_security_descriptor_allocation = LocalAllocation(pipe_security_descriptor);
+    let own_process_handle = unsafe { GetCurrentProcess() };
+    let user_token_buffer = read_token_information_buffer(own_process_handle, TokenUser)?;
+    if unsafe {
+        EqualSid(
+            owner_sid,
+            get_user_sid_from_token_buffer(&user_token_buffer),
+        )
+    } != 0
+    {
+        return Ok(true);
+    }
+    let owner_token_buffer = read_token_information_buffer(own_process_handle, TokenOwner)?;
+    let is_default_owner = unsafe {
+        EqualSid(
+            owner_sid,
+            get_owner_sid_from_token_buffer(&owner_token_buffer),
+        )
+    };
+    Ok(is_default_owner != 0)
+}
+
+/// Memory a Windows function allocated for its caller. Dropping it frees the
+/// memory with `LocalFree`.
+#[cfg(windows)]
+struct LocalAllocation(*mut std::ffi::c_void);
+
+#[cfg(windows)]
+impl Drop for LocalAllocation {
+    fn drop(&mut self) {
+        unsafe { LocalFree(self.0) };
+    }
+}
+
 /// Accept connections on `listener` until `is_shutting_down` is set, handing
-/// each accepted connection to `serve_connection`. A failed accept sleeps `retry_delay`
-/// and the loop continues. The flag is read between the accept and the
-/// dispatch: the connection accepted after the flag is set is dropped, not
-/// served.
+/// each accepted connection to `serve_connection`. A failed accept goes to
+/// `report_accept_error`, then sleeps `retry_delay`, and the loop continues.
+/// The flag is read between the accept and the dispatch: the connection
+/// accepted after the flag is set is dropped, not served.
 pub fn accept_until_shutdown(
     listener: &Listener,
     is_shutting_down: &AtomicBool,
     retry_delay: std::time::Duration,
+    mut report_accept_error: impl FnMut(&IpcError),
     mut serve_connection: impl FnMut(Connection),
 ) {
     loop {
@@ -1233,7 +1784,10 @@ pub fn accept_until_shutdown(
         }
         match connection {
             Ok(connection) => serve_connection(connection),
-            Err(_) => std::thread::sleep(retry_delay),
+            Err(accept_error) => {
+                report_accept_error(&accept_error);
+                std::thread::sleep(retry_delay);
+            }
         }
     }
 }
@@ -1247,6 +1801,18 @@ pub fn is_io_timeout(io_error: &io::Error) -> bool {
         io_error.kind(),
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
     )
+}
+
+/// Classify a connect failure at `socket_address`: the failures
+/// [`is_no_listener_error`] names become [`IpcError::NoListener`], and every
+/// other one goes through [`convert_io_error`].
+fn convert_connect_error(socket_address: &str, connect_error: io::Error) -> IpcError {
+    if is_no_listener_error(&connect_error) {
+        return IpcError::NoListener {
+            socket_address: socket_address.to_string(),
+        };
+    }
+    convert_io_error(connect_error)
 }
 
 /// True for the connect failures that mean "nothing answers at this

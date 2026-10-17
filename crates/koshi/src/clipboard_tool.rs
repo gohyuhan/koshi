@@ -39,6 +39,7 @@ use std::process::{Command, ExitCode, Stdio};
 use koshi_host::clipboard_tool::{find_real_clipboard_tool, CLIPBOARD_TOOL_NAMES};
 use koshi_host::program_path::resolve_program_path;
 use koshi_ipc::protocol::MAX_CLIPBOARD_COPY_PART_BYTE_COUNT;
+use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client::{
     open_clipboard_copy_exchange, ClipboardCopyAnswer, SESSION_ANSWER_TIMEOUT_DURATION,
@@ -142,7 +143,9 @@ pub fn find_invoked_clipboard_tool() -> Option<&'static str> {
 ///    [`MAX_CLIPBOARD_COPY_PART_BYTE_COUNT`] bytes, or the argument text. The
 ///    real tool runs with the copy when the copy is not UTF-8, when the
 ///    variables are missing or broken, when the runtime directory is unknown,
-///    when asking the session fails, and when the session answers so.
+///    when asking the session fails, and when the session answers so. When
+///    the session took the whole copy and gave no answer, the stand-in prints
+///    that failure and exits with code 1, and the real tool does not run.
 ///    Otherwise the stand-in exits with code 0.
 /// 4. The real tool of a copy of standard input reads every byte the stand-in
 ///    read, before any newline was trimmed, then the rest of standard input.
@@ -186,11 +189,20 @@ pub fn run_clipboard_tool(tool_name: &str) -> ExitCode {
     match copy_source {
         CopySource::ArgumentText(argument_text) => {
             let mut copy_input = CopyInput::from_input_reader(argument_text.as_bytes(), false);
-            if !matches!(
-                route_copy_input(&mut copy_input, clipboard_targets),
-                Ok(true)
-            ) {
-                return run_real_clipboard_tool(tool_name, &invoked_name, &tool_arguments, None);
+            match route_copy_input(&mut copy_input, clipboard_targets) {
+                Ok(CopyRouting::Routed) => {}
+                Ok(CopyRouting::Unanswered(unanswered_error)) => {
+                    eprintln!("koshi: {tool_name}: {unanswered_error}");
+                    return ExitCode::FAILURE;
+                }
+                Ok(CopyRouting::RunsRealTool) | Err(_) => {
+                    return run_real_clipboard_tool(
+                        tool_name,
+                        &invoked_name,
+                        &tool_arguments,
+                        None,
+                    );
+                }
             }
         }
         CopySource::StandardInput {
@@ -199,14 +211,18 @@ pub fn run_clipboard_tool(tool_name: &str) -> ExitCode {
             let mut copy_input =
                 CopyInput::from_input_reader(std::io::stdin().lock(), should_trim_last_newline);
             match route_copy_input(&mut copy_input, clipboard_targets) {
-                Ok(true) => {}
-                Ok(false) => {
+                Ok(CopyRouting::Routed) => {}
+                Ok(CopyRouting::RunsRealTool) => {
                     return run_real_clipboard_tool(
                         tool_name,
                         &invoked_name,
                         &tool_arguments,
                         Some(copy_input),
                     );
+                }
+                Ok(CopyRouting::Unanswered(unanswered_error)) => {
+                    eprintln!("koshi: {tool_name}: {unanswered_error}");
+                    return ExitCode::FAILURE;
                 }
                 Err(read_error) => {
                     eprintln!("koshi: {tool_name}: reading standard input failed: {read_error}");
@@ -639,24 +655,39 @@ fn is_plain_text_type(content_type: &str) -> bool {
     )
 }
 
+/// What became of a copy that [`route_copy_input`] handed to the session.
+#[derive(Debug)]
+enum CopyRouting {
+    /// Each client that focuses the pane is on another machine and took the
+    /// copy. The real tool does not run.
+    Routed,
+    /// The session holds no part of the copy. The real tool runs.
+    RunsRealTool,
+    /// The session took the whole copy and gave no answer:
+    /// [`CliError::CommittedRequestUnanswered`]. The copy may reach the
+    /// clients. The real tool does not run.
+    Unanswered(CliError),
+}
+
 /// Hand the copy that `copy_input` reads, for `clipboard_targets`, to the
-/// session of the pane that the `KOSHI_*` variables name, and hand back
-/// whether the session routed it: `true` when each client that focuses the
-/// pane is on another machine and took the copy, so the real tool does not
-/// run.
+/// session of the pane that the `KOSHI_*` variables name, and hand back what
+/// became of it ([`CopyRouting`]).
 ///
-/// 1. `false` at once when the `KOSHI_*` variables of a pane are missing or
-///    broken ([`InSessionContext::from_env`]), or the runtime directory is
-///    unknown. Nothing is read.
+/// 1. [`CopyRouting::RunsRealTool`] at once when the `KOSHI_*` variables of a
+///    pane are missing or broken ([`InSessionContext::from_env`]), or the
+///    runtime directory is unknown. Nothing is read.
 /// 2. The first part ([`CopyInput::read_next_copy_part`]) opens the exchange
 ///    ([`open_clipboard_copy_exchange`]). Each later part goes out after the
 ///    session took the part before it
 ///    ([`ClipboardCopyExchange::send_copy_part`](koshi_link::ipc_client::ClipboardCopyExchange::send_copy_part)).
 ///    The session has [`SESSION_ANSWER_TIMEOUT_DURATION`] to answer each
 ///    part.
-/// 3. `false` when the bytes read are not UTF-8, when asking the session
-///    fails, and when the session answers that the real tool runs. The
-///    exchange closes, and the session drops every part it holds.
+/// 3. [`CopyRouting::RunsRealTool`] when the bytes read are not UTF-8, when
+///    asking the session fails before it took the whole copy, and when the
+///    session answers that the real tool runs. The exchange closes, and the
+///    session drops every part it holds.
+/// 4. [`CopyRouting::Unanswered`] when the session took the whole copy and
+///    its answer did not come ([`classify_copy_failure`]).
 ///
 /// # Errors
 /// A read of the input that fails. The exchange closes, and the session
@@ -664,39 +695,55 @@ fn is_plain_text_type(content_type: &str) -> bool {
 fn route_copy_input(
     copy_input: &mut CopyInput<impl Read>,
     clipboard_targets: &str,
-) -> std::io::Result<bool> {
+) -> std::io::Result<CopyRouting> {
     let Ok(Some(in_session_context)) = InSessionContext::from_env() else {
-        return Ok(false);
+        return Ok(CopyRouting::RunsRealTool);
     };
     let Some(runtime_directory) = koshi_paths::resolve_runtime_directory() else {
-        return Ok(false);
+        return Ok(CopyRouting::RunsRealTool);
     };
     let Some((first_copy_part, is_last_part)) = copy_input.read_next_copy_part()? else {
-        return Ok(false);
+        return Ok(CopyRouting::RunsRealTool);
     };
-    let Ok((mut copy_exchange, mut copy_answer)) = open_clipboard_copy_exchange(
+    let (mut copy_exchange, mut copy_answer) = match open_clipboard_copy_exchange(
         &runtime_directory,
         &in_session_context,
         clipboard_targets,
         first_copy_part,
         is_last_part,
         SESSION_ANSWER_TIMEOUT_DURATION,
-    ) else {
-        return Ok(false);
+    ) {
+        Ok(opened_exchange) => opened_exchange,
+        Err(copy_error) => return Ok(classify_copy_failure(copy_error)),
     };
     while copy_answer == ClipboardCopyAnswer::PartTaken {
         let Some((copy_part, is_last_part)) = copy_input.read_next_copy_part()? else {
-            return Ok(false);
+            return Ok(CopyRouting::RunsRealTool);
         };
-        let Ok(next_copy_answer) = copy_exchange.send_copy_part(copy_part, is_last_part) else {
-            return Ok(false);
+        copy_answer = match copy_exchange.send_copy_part(copy_part, is_last_part) {
+            Ok(next_copy_answer) => next_copy_answer,
+            Err(copy_error) => return Ok(classify_copy_failure(copy_error)),
         };
-        copy_answer = next_copy_answer;
     }
-    Ok(copy_answer
-        == ClipboardCopyAnswer::Routed {
+    if copy_answer
+        == (ClipboardCopyAnswer::Routed {
             should_run_clipboard_tool: false,
         })
+    {
+        Ok(CopyRouting::Routed)
+    } else {
+        Ok(CopyRouting::RunsRealTool)
+    }
+}
+
+/// What a failed clipboard copy exchange leaves: [`CopyRouting::Unanswered`]
+/// for [`CliError::CommittedRequestUnanswered`], and
+/// [`CopyRouting::RunsRealTool`] for every other failure.
+fn classify_copy_failure(copy_error: CliError) -> CopyRouting {
+    match copy_error {
+        CliError::CommittedRequestUnanswered { .. } => CopyRouting::Unanswered(copy_error),
+        _ => CopyRouting::RunsRealTool,
+    }
 }
 
 /// Run the real `tool_name`, found by [`find_real_clipboard_tool`] on this

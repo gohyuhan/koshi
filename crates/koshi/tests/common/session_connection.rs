@@ -28,6 +28,7 @@ use koshi_ipc::protocol::{
     GraphicsCapabilities, IpcRequest, IpcRequestKind, IpcResponse, IpcResult,
 };
 use koshi_ipc::transport::Connection;
+use koshi_test_support::fixtures::send_committed_request;
 
 use super::{POLL_INTERVAL_DURATION, WAIT_DURATION};
 
@@ -141,16 +142,16 @@ fn try_open_advertised_session_connection(
     }
 }
 
-/// Send [`build_attach_request`] on `connection`, and hand back the client the
-/// session server minted. The connection carries only that client's event
-/// stream and that client's own requests afterwards.
+/// Send [`build_attach_request`] on `connection` as a `Prepare` and its
+/// `Commit`, and hand back the client the session server minted. The
+/// connection carries only that client's event stream and that client's own
+/// requests afterwards.
 ///
 /// # Panics
-/// When the reply is not `Attached` for request `2` and `session_id`.
+/// When the `Prepare` is not answered `Prepared`, or the reply to the
+/// `Commit` is not `Attached` for request `2` and `session_id`.
 pub fn attach_client_on_connection(connection: &mut Connection, session_id: SessionId) -> ClientId {
-    connection
-        .send(&build_attach_request())
-        .expect("the server reads the attach");
+    send_committed_request(connection, build_attach_request());
     let ipc_response: IpcResponse = connection.recv().expect("the server answers the attach");
     assert_eq!(ipc_response.request_id, Some(2));
     let IpcResult::Attached {
@@ -168,20 +169,25 @@ pub fn attach_client_on_connection(connection: &mut Connection, session_id: Sess
     client_id
 }
 
-/// Ask the session for `request_kind` on a connection that carries no client's event
-/// stream, and hand back its answer.
+/// Ask the session for `request_kind` on a connection that carries no client's
+/// event stream, as a `Prepare` and its `Commit` numbered `request_id`, and
+/// hand back the answer to the `Commit`.
+///
+/// # Panics
+/// When the `Prepare` is not answered `Prepared`, or the answer to the
+/// `Commit` does not come under `request_id`.
 pub fn send_session_request(
     connection: &mut Connection,
     request_id: u64,
     request_kind: IpcRequestKind,
 ) -> IpcResult {
-    let ipc_request = IpcRequest {
-        request_id,
-        request_kind,
-    };
-    connection
-        .send(&ipc_request)
-        .expect("the session reads the request");
+    send_committed_request(
+        connection,
+        IpcRequest {
+            request_id,
+            request_kind,
+        },
+    );
     let ipc_response: IpcResponse = connection.recv().expect("the session answers the request");
     assert_eq!(ipc_response.request_id, Some(request_id));
     ipc_response.answer_result

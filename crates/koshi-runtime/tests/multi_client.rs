@@ -35,6 +35,7 @@ use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult, Wi
 use koshi_ipc::transport::Connection;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
+use koshi_test_support::fixtures::send_committed_request;
 
 /// The PTY size [`common::TEST_VIEWPORT_SIZE`] gives the seeded session's single pane: one
 /// tabline row and one hint row off the terminal, then a 1-cell pane border.
@@ -93,8 +94,9 @@ fn attach_test_client_with_pane_area(
     AttachedSessionStructureSnapshot,
     Option<PaneArea>,
 ) {
-    ipc_connection
-        .send(&IpcRequest {
+    send_committed_request(
+        ipc_connection,
+        IpcRequest {
             request_id,
             request_kind: IpcRequestKind::Attach {
                 viewport_size,
@@ -105,8 +107,8 @@ fn attach_test_client_with_pane_area(
                 cell_size: None,
                 link_timeout_ms: None,
             },
-        })
-        .expect("send attach");
+        },
+    );
     let attach_response: IpcResponse = ipc_connection.recv().expect("attach reply");
     assert_eq!(attach_response.request_id, Some(request_id));
     let IpcResult::Attached {

@@ -236,27 +236,6 @@ fn no_router_answering_reports_no_version_after_the_wait() {
 }
 
 #[test]
-fn a_peer_call_that_answers_inside_its_bound_hands_back_its_answer() {
-    assert_eq!(
-        run_peer_call_within(Duration::from_secs(5), || 7_u32),
-        Some(7)
-    );
-}
-
-#[test]
-fn a_peer_call_that_outlasts_its_bound_gives_no_answer() {
-    let (release_sender, release_receiver) = mpsc::channel::<()>();
-
-    let peer_answer = run_peer_call_within(Duration::from_millis(100), move || {
-        let _ = release_receiver.recv_timeout(Duration::from_secs(10));
-        7_u32
-    });
-
-    assert_eq!(peer_answer, None);
-    drop(release_sender);
-}
-
-#[test]
 fn asking_the_router_to_restart_confirms_it_once_its_hello_reports_the_installed_version() {
     let runtime_directory = build_test_runtime_directory();
     let router_thread = spawn_fake_router_restarting(runtime_directory.path(), "2.0.0", "3.3.3");
@@ -684,8 +663,9 @@ fn a_router_refusing_this_builds_protocol_version_reports_the_version_its_progra
 
 /// What a stand-in session answers with.
 struct SessionRestartScript {
-    /// The answer to the Restart request.
-    restart_result: IpcResult,
+    /// The answer to the `Commit` of the Restart request. `None` ends the
+    /// connection with the `Commit` unanswered.
+    restart_answer: Option<IpcResult>,
     /// The build version every Hello answer of this session carries.
     reported_build_version: String,
 }
@@ -716,11 +696,14 @@ fn bind_advertised_session(
 /// Serve `connection_count` callers as a session would: bind the session's address,
 /// write the endpoint file advertising it, then answer that many callers.
 ///
-/// The first caller writes a Hello and a Restart back to back and is answered
-/// per `session_script`. Every caller after the first writes a Hello alone and is
-/// answered with the script's build version. A caller arriving once `connection_count`
-/// are served finds nothing listening, which is what a session that is
-/// replacing its own image looks like.
+/// The first caller writes a Hello and a `Prepare` of a Restart back to back.
+/// Its Hello is answered with the script's build version and its `Prepare`
+/// with `Prepared`, and the `Commit` it writes next is answered per
+/// `session_script`. The connection ends once that is done. Every caller
+/// after the first writes a Hello alone and is answered with the script's
+/// build version. A caller arriving once `connection_count` are served finds
+/// nothing listening, which is what a session that is replacing its own image
+/// looks like.
 fn spawn_fake_session(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -731,7 +714,7 @@ fn spawn_fake_session(
 
     std::thread::spawn(move || {
         let SessionRestartScript {
-            restart_result,
+            restart_answer,
             reported_build_version,
         } = session_script;
         for connection_index in 0..connection_count {
@@ -750,11 +733,12 @@ fn spawn_fake_session(
             );
 
             if connection_index == 0 {
-                let restart_request: IpcRequest = connection.recv().expect("read the restart");
+                let restart_prepare_request: IpcRequest =
+                    connection.recv().expect("read the restart");
                 assert_eq!(
-                    restart_request.request_kind,
-                    IpcRequestKind::Restart,
-                    "expected a Restart after the Hello"
+                    restart_prepare_request.request_kind,
+                    IpcRequestKind::Prepare(Box::new(IpcRequestKind::Restart)),
+                    "expected a Prepare of a Restart after the Hello"
                 );
                 send_ipc_response(
                     &mut connection,
@@ -766,9 +750,19 @@ fn spawn_fake_session(
                 );
                 send_ipc_response(
                     &mut connection,
-                    restart_request.request_id,
-                    restart_result.clone(),
+                    restart_prepare_request.request_id,
+                    IpcResult::Prepared,
                 );
+                let restart_commit_request: IpcRequest =
+                    connection.recv().expect("read the commit");
+                assert_eq!(restart_commit_request.request_kind, IpcRequestKind::Commit);
+                if let Some(restart_answer) = &restart_answer {
+                    send_ipc_response(
+                        &mut connection,
+                        restart_commit_request.request_id,
+                        restart_answer.clone(),
+                    );
+                }
             } else {
                 send_ipc_response(
                     &mut connection,
@@ -858,7 +852,7 @@ fn a_session_reporting_the_installed_version_confirms_its_restart() {
         runtime_directory.path(),
         session_id,
         SessionRestartScript {
-            restart_result: IpcResult::Restarting,
+            restart_answer: Some(IpcResult::Restarting),
             reported_build_version: "3.3.3".to_string(),
         },
         2,
@@ -1032,7 +1026,7 @@ fn a_session_still_on_the_old_version_is_reported_after_the_wait() {
         runtime_directory.path(),
         session_id,
         SessionRestartScript {
-            restart_result: IpcResult::Restarting,
+            restart_answer: Some(IpcResult::Restarting),
             reported_build_version: "1.0.0".to_string(),
         },
         2,
@@ -1059,6 +1053,72 @@ fn a_session_still_on_the_old_version_is_reported_after_the_wait() {
 }
 
 #[test]
+fn a_session_that_took_the_restart_and_gave_no_answer_is_confirmed_once_it_reports_the_installed_version(
+) {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let session_thread = spawn_fake_session(
+        runtime_directory.path(),
+        session_id,
+        SessionRestartScript {
+            restart_answer: None,
+            reported_build_version: "3.3.3".to_string(),
+        },
+        2,
+    );
+
+    let session_outcomes = restart_advertised_sessions(
+        runtime_directory.path(),
+        "3.3.3",
+        RestartScope::EveryServer,
+        Duration::from_secs(5),
+    )
+    .expect("read the runtime directory");
+
+    assert_eq!(
+        session_outcomes,
+        vec![(session_id, SessionOutcome::Confirmed)]
+    );
+    session_thread
+        .join()
+        .expect("the stand-in served its connections");
+}
+
+#[test]
+fn a_session_that_took_the_restart_and_gave_no_answer_and_kept_its_version_may_still_restart() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let session_thread = spawn_fake_session(
+        runtime_directory.path(),
+        session_id,
+        SessionRestartScript {
+            restart_answer: None,
+            reported_build_version: "1.0.0".to_string(),
+        },
+        2,
+    );
+
+    let session_outcomes = restart_advertised_sessions(
+        runtime_directory.path(),
+        "2.0.0",
+        RestartScope::EveryServer,
+        Duration::from_millis(250),
+    )
+    .expect("read the runtime directory");
+
+    assert_eq!(
+        session_outcomes,
+        vec![(
+            session_id,
+            SessionOutcome::Unanswered("ipc peer disconnected".to_string())
+        )]
+    );
+    session_thread
+        .join()
+        .expect("the stand-in served its connections");
+}
+
+#[test]
 fn a_session_refusing_with_the_malformed_request_code_is_reported_failed_with_its_sentence() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
@@ -1066,12 +1126,12 @@ fn a_session_refusing_with_the_malformed_request_code_is_reported_failed_with_it
         runtime_directory.path(),
         session_id,
         SessionRestartScript {
-            restart_result: IpcResult::Error(IpcErrorPayload {
+            restart_answer: Some(IpcResult::Error(IpcErrorPayload {
                 code: IpcErrorCode::MalformedRequest,
                 message: "the binary at /opt/koshi could not be read: Exec format error (os \
                           error 8)"
                     .to_string(),
-            }),
+            })),
             reported_build_version: "1.0.0".to_string(),
         },
         1,
@@ -1143,7 +1203,7 @@ fn one_session_refusing_still_leaves_every_other_session_asked() {
             runtime_directory.path(),
             confirmed_session_id_one,
             SessionRestartScript {
-                restart_result: IpcResult::Restarting,
+                restart_answer: Some(IpcResult::Restarting),
                 reported_build_version: "3.3.3".to_string(),
             },
             2,
@@ -1152,10 +1212,10 @@ fn one_session_refusing_still_leaves_every_other_session_asked() {
             runtime_directory.path(),
             refusing_session_id,
             SessionRestartScript {
-                restart_result: IpcResult::Error(IpcErrorPayload {
+                restart_answer: Some(IpcResult::Error(IpcErrorPayload {
                     code: IpcErrorCode::RequestFailed,
                     message: "a pane is mid-write".to_string(),
-                }),
+                })),
                 reported_build_version: "3.3.3".to_string(),
             },
             1,
@@ -1164,7 +1224,7 @@ fn one_session_refusing_still_leaves_every_other_session_asked() {
             runtime_directory.path(),
             confirmed_session_id_two,
             SessionRestartScript {
-                restart_result: IpcResult::Restarting,
+                restart_answer: Some(IpcResult::Restarting),
                 reported_build_version: "3.3.3".to_string(),
             },
             2,
@@ -1321,7 +1381,7 @@ fn a_release_update_asks_a_session_on_this_program_file_and_an_older_version() {
         runtime_directory.path(),
         session_id,
         SessionRestartScript {
-            restart_result: IpcResult::Restarting,
+            restart_answer: Some(IpcResult::Restarting),
             reported_build_version: "3.3.3".to_string(),
         },
         2,
@@ -1356,7 +1416,7 @@ fn restarting_every_server_asks_a_session_already_on_the_installed_version() {
         runtime_directory.path(),
         session_id,
         SessionRestartScript {
-            restart_result: IpcResult::Restarting,
+            restart_answer: Some(IpcResult::Restarting),
             reported_build_version: "3.3.3".to_string(),
         },
         2,

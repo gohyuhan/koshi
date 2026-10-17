@@ -61,6 +61,7 @@ use koshi_ipc::transport::{parse_answer, FrameReader, FrameWriter};
 use serde_json::value::RawValue;
 
 use crate::error::CliError;
+use crate::ipc_client;
 use crate::talk::{self, build_ipc_unavailable_error, build_peer_refusal_error};
 
 /// The environment variable holding the secret from a grant, read before the
@@ -1155,9 +1156,18 @@ pub fn dial_through_router_restart<Joined>(
 /// answer settles the version either way, and a session that settled on a
 /// version this build does not speak is refused before the command is written.
 ///
+/// The command goes inside a `Prepare`. Once the session answers `Prepared`, a
+/// `Commit` runs it, and the `Commit`'s answer has [`REPLY_TIMEOUT_DURATION`]
+/// from the moment it is written. Example: a session whose dispatcher stays
+/// busy past the reply timeout never runs the command, and this gives
+/// [`CliError::IpcUnavailable`].
+///
 /// # Errors
 /// Whatever [`connect_saved_server`] reports, and [`CliError::IpcUnavailable`] when
-/// the exchange failed.
+/// the exchange failed before the `Commit`, or the `Prepare` got an answer
+/// that is neither `Prepared` nor a refusal: the command never runs.
+/// [`CliError::CommittedRequestUnanswered`] when the `Commit` got no answer:
+/// the command may run.
 pub fn submit_remote_command(
     server_reference: &ServerReference,
     session_id: SessionId,
@@ -1169,11 +1179,21 @@ pub fn submit_remote_command(
         CommandSource::from_external_cli(Some(session_id), client_id),
         command,
     );
-    let command_request = IpcRequest {
+    let prepare_request = IpcRequest {
         request_id: 2,
-        request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
+        request_kind: IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(Box::new(
+            command_envelope,
+        )))),
     };
-    match send_remote_ipc_request(server_reference, session_id, command_request)? {
+    let (mut frame_reader, mut frame_writer, prepare_result) =
+        send_remote_ipc_request(server_reference, session_id, prepare_request)?;
+    let command_ipc_result = ipc_client::commit_after_prepare_answer(
+        prepare_result,
+        &mut frame_reader,
+        &mut frame_writer,
+        Some(REPLY_TIMEOUT_DURATION),
+    )?;
+    match command_ipc_result {
         IpcResult::CommandResult(command_result) => Ok(talk::filter_rejection_hint(command_result)),
         IpcResult::Error(ipc_error_payload) => Err(build_peer_refusal_error(&ipc_error_payload)),
         unexpected_ipc_result => {
@@ -1202,7 +1222,9 @@ pub fn fetch_remote_overview(
         request_id: 2,
         request_kind: IpcRequestKind::Discovery,
     };
-    match send_remote_ipc_request(server_reference, session_id, discovery_request)? {
+    let (_, _, discovery_result) =
+        send_remote_ipc_request(server_reference, session_id, discovery_request)?;
+    match discovery_result {
         IpcResult::Overview(mut session_overview) => {
             crate::discovery::filter_session_overview_text(&mut session_overview);
             Ok(session_overview)
@@ -1216,7 +1238,8 @@ pub fn fetch_remote_overview(
 
 /// One request against one remote session: dial, attach, settle the version
 /// from the Hello answer the server sent on this caller's behalf, then send
-/// the IPC request and read its answer.
+/// the IPC request and read its answer. Hands back both halves of the link,
+/// which stay open, with the answer.
 ///
 /// The Attach names [`REPLY_TIMEOUT_DURATION`] as its link timeout.
 ///
@@ -1229,7 +1252,7 @@ fn send_remote_ipc_request(
     server_reference: &ServerReference,
     session_id: SessionId,
     ipc_request: IpcRequest,
-) -> Result<IpcResult, CliError> {
+) -> Result<(FrameReader, FrameWriter, IpcResult), CliError> {
     let session_selector = SessionSelector::SessionId(session_id);
     let (mut frame_reader, mut frame_writer, hello_response) =
         dial_through_router_restart(koshi_ipc::endpoint::RESTART_WINDOW_DURATION, || {
@@ -1252,7 +1275,8 @@ fn send_remote_ipc_request(
     let incoming_response: IncomingResponse = frame_reader
         .recv_answer()
         .map_err(build_ipc_unavailable_error)?;
-    talk::SESSION_PEER_WORDS.take_response_result(incoming_response)
+    let ipc_result = talk::SESSION_PEER_WORDS.take_response_result(incoming_response)?;
+    Ok((frame_reader, frame_writer, ipc_result))
 }
 
 /// The sessions on every saved server that answered within 2 seconds, each

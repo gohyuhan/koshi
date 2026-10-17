@@ -617,3 +617,18 @@ fn a_session_hello_filters_the_build_it_named() {
         )
     );
 }
+
+#[test]
+fn an_unanswered_commit_carries_the_failure_with_its_control_characters_removed() {
+    let unanswered_error = build_committed_request_unanswered_error(IpcError::MalformedFrame {
+        error_detail: "unknown variant `\u{1b}[2JAttached`".to_string(),
+    });
+
+    let CliError::CommittedRequestUnanswered { detail } = unanswered_error else {
+        panic!("expected CommittedRequestUnanswered, got {unanswered_error:?}");
+    };
+    assert_eq!(
+        detail,
+        "ipc frame is not a readable message: unknown variant `[2JAttached`"
+    );
+}

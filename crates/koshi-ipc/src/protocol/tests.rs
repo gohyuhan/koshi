@@ -345,6 +345,8 @@ pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
             clipboard_targets: "c".to_string(),
             copied_bytes: b"lo".to_vec(),
         },
+        IpcRequestKind::Prepare(Box::new(IpcRequestKind::Restart)),
+        IpcRequestKind::Commit,
     ]
 }
 
@@ -378,6 +380,7 @@ pub(crate) fn list_all_ipc_results() -> Vec<IpcResult> {
         IpcResult::ClipboardCopyRouted {
             should_run_clipboard_tool: false,
         },
+        IpcResult::Prepared,
     ]
 }
 
@@ -2539,6 +2542,13 @@ fn two_generated_tokens_differ() {
     assert_ne!(ConnectionToken::generate(), ConnectionToken::generate());
 }
 
+#[test]
+fn only_the_empty_secret_is_an_empty_token() {
+    assert!(ConnectionToken::from_secret("").is_empty());
+    assert!(!ConnectionToken::from_secret("k").is_empty());
+    assert!(!ConnectionToken::generate().is_empty());
+}
+
 /// A `ClipboardCopy` with the longest request id and target field this build
 /// sends, carrying `copied_byte_count` bytes of `0xff`.
 fn build_largest_clipboard_copy_request(copied_byte_count: usize) -> IpcRequest {
@@ -2611,6 +2621,31 @@ fn a_clipboard_copy_part_round_trips_as_base64() {
     assert_eq!(
         round_trip_wire_message(&clipboard_copy_part),
         clipboard_copy_part
+    );
+}
+
+#[test]
+fn a_prepare_carries_its_request_and_a_commit_and_a_prepared_answer_carry_nothing() {
+    let prepare_request_kind = IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(
+        Box::new(build_test_command_envelope()),
+    )));
+
+    assert_eq!(
+        serde_json::to_value(IpcRequestKind::Prepare(Box::new(IpcRequestKind::Restart)))
+            .expect("request kind encodes"),
+        json!({ "Prepare": "Restart" })
+    );
+    assert_eq!(
+        round_trip_wire_message(&prepare_request_kind),
+        prepare_request_kind
+    );
+    assert_eq!(
+        serde_json::to_value(IpcRequestKind::Commit).expect("request kind encodes"),
+        json!("Commit")
+    );
+    assert_eq!(
+        serde_json::to_value(IpcResult::Prepared).expect("result encodes"),
+        json!("Prepared")
     );
 }
 

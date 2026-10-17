@@ -289,7 +289,8 @@ pub struct SessionCensusPlan {
 /// [`list_own_sessions`](ipc_client::list_own_sessions) gives them from
 /// `runtime_directory`, and while `shared_sessions_base_directory` is given,
 /// the ones other local users started, as
-/// [`list_foreign_sessions`](ipc_client::list_foreign_sessions) lists them.
+/// [`list_foreign_sessions`](ipc_client::list_foreign_sessions) lists them on
+/// Linux and macOS. On Windows `shared_sessions_base_directory` is not read.
 ///
 /// Example: a runtime directory with an endpoint file for `A`, and a shared
 /// directory whose read fails with `EIO`, give one ask for `A` and one unread
@@ -300,10 +301,16 @@ pub fn plan_session_census(
     shared_sessions_base_directory: Option<&Path>,
 ) -> SessionCensusPlan {
     let own_session_listing = ipc_client::list_own_sessions(runtime_directory);
+    #[cfg(unix)]
     let foreign_session_listing =
         shared_sessions_base_directory.map(|shared_sessions_base_directory| {
             ipc_client::list_foreign_sessions(shared_sessions_base_directory, runtime_directory)
         });
+    #[cfg(windows)]
+    let foreign_session_listing = {
+        let _ = shared_sessions_base_directory;
+        None
+    };
     SessionCensusPlan::from_session_listings(own_session_listing, foreign_session_listing)
 }
 

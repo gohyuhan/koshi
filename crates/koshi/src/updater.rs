@@ -65,7 +65,7 @@ use koshi_link::ipc_client::{
     restart_running_session, SessionRestart, UnreadPath,
 };
 use koshi_link::router_client::{
-    find_running_router_version, restart_running_router, start_router,
+    find_running_router_version, restart_running_router, start_router, RouterRestart,
 };
 use koshi_link::server_build::{
     compare_program_files, find_advertised_server_program_file, find_server_program_file,
@@ -390,14 +390,18 @@ enum RestartScope<'program_path> {
 }
 
 /// How long a router or session has to answer the Restart request, and then
-/// to come back answering Hello with the installed version.
+/// to come back answering Hello with the installed version. A session that
+/// took the Restart has
+/// [`SESSION_ANSWER_TIMEOUT_DURATION`](ipc_client::SESSION_ANSWER_TIMEOUT_DURATION)
+/// more to answer its `Commit`.
 const RESTART_CONFIRM_WAIT_DURATION: Duration = Duration::from_secs(20);
 
 /// The pause between two Hello probes while waiting for the confirmation.
 const RESTART_CONFIRM_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(200);
 
-/// The hard time bound on one Hello probe. A probe that reaches a half-closed
-/// named pipe on Windows reads as no answer once the bound runs out.
+/// How long one Hello probe has, from its connect to the read of its answer.
+/// A probe that reaches a half-closed named pipe on Windows reads as no answer
+/// once this runs out.
 const RESTART_PROBE_TIMEOUT_DURATION: Duration = Duration::from_secs(2);
 
 /// Restart the running sessions, then the router, that `restart_scope` names
@@ -541,8 +545,8 @@ fn restart_router_into_version(
         }
         Ok(Some(VersionProbeOutcome::OtherVersion(reported_version))) => {
             eprintln!(
-                "koshi: the running router still reports {reported_version} after the restart; it keeps \
-                 serving that build; every session keeps running"
+                "koshi: the running router still reports {reported_version} after the restart request; \
+                 it keeps serving that build; every session keeps running"
             );
             false
         }
@@ -729,13 +733,15 @@ fn report_started_router(
     }
 }
 
-/// Ask the router `runtime_directory` advertises to restart, and wait up to
-/// `wait_duration` for its Hello to report `installed_version`.
+/// Ask the router `runtime_directory` advertises to restart, with
+/// `wait_duration` to answer, then wait up to `wait_duration` more for its
+/// Hello to report `installed_version`.
 ///
 /// `Ok(None)` means no router is running, and nothing restarted. A router that
-/// answers nothing to the Restart request within `wait_duration`, and a
-/// restarted router whose Hello answers nothing within `wait_duration`, give
-/// [`VersionProbeOutcome::Silent`].
+/// answers `Restarting` and a router that gives no answer in time
+/// ([`RouterRestart::Unanswered`]) are both waited for with
+/// [`wait_for_version`]. A router whose Hello answers nothing during that wait
+/// gives [`VersionProbeOutcome::Silent`].
 ///
 /// # Errors
 /// The [`CliError`] [`restart_running_router`] gives: a router that refuses the
@@ -745,19 +751,13 @@ fn restart_advertised_router(
     installed_version: &str,
     wait_duration: Duration,
 ) -> Result<Option<VersionProbeOutcome>, CliError> {
-    let router_runtime_directory = runtime_directory.to_path_buf();
-    let router_restart = run_peer_call_within(wait_duration, move || {
-        restart_running_router(&router_runtime_directory)
-    });
-    match router_restart {
-        Some(Ok(false)) => Ok(None),
-        Some(Ok(true)) => Ok(Some(wait_for_version(
+    match restart_running_router(runtime_directory, Instant::now() + wait_duration)? {
+        RouterRestart::NotRunning => Ok(None),
+        RouterRestart::Restarting | RouterRestart::Unanswered => Ok(Some(wait_for_version(
             installed_version,
             wait_duration,
             || probe_router_version(runtime_directory),
         ))),
-        Some(Err(router_restart_error)) => Err(router_restart_error),
-        None => Ok(Some(VersionProbeOutcome::Silent)),
     }
 }
 
@@ -801,74 +801,48 @@ fn wait_for_version(
     }
 }
 
-/// Run `peer_call` on its own thread and hand back what it returns, or `None`
-/// once `answer_wait_duration` runs out first. A call that runs out the wait
-/// leaves its thread behind, and that thread ends when `peer_call` returns or
-/// with this process.
-fn run_peer_call_within<PeerAnswer: Send + 'static>(
-    answer_wait_duration: Duration,
-    peer_call: impl FnOnce() -> PeerAnswer + Send + 'static,
-) -> Option<PeerAnswer> {
-    let (peer_answer_sender, peer_answer_receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = peer_answer_sender.send(peer_call());
-    });
-    peer_answer_receiver.recv_timeout(answer_wait_duration).ok()
-}
-
-/// One probe of the running router's version, bounded by
-/// [`RESTART_PROBE_TIMEOUT_DURATION`]. A probe that runs out the bound reads as
-/// no answer. A router that refuses this build's protocol version reports the
-/// version its program file holds, as [`find_advertised_server_program_file`]
-/// reads it.
+/// One probe of the running router's version, which ends
+/// [`RESTART_PROBE_TIMEOUT_DURATION`] after it starts. A probe that runs past
+/// that reads as no answer. A router that refuses this build's protocol
+/// version reports the version its program file holds, as
+/// [`find_advertised_server_program_file`] reads it.
 fn probe_router_version(runtime_directory: &Path) -> Option<String> {
-    let runtime_directory = runtime_directory.to_path_buf();
-    run_peer_call_within(
-        RESTART_PROBE_TIMEOUT_DURATION,
-        move || match find_running_router_version(&runtime_directory) {
-            Ok(reported_version) => reported_version,
-            Err(CliError::ProtocolVersionRefused { .. }) => find_advertised_server_program_file(
-                &resolve_router_program_file_path(&runtime_directory),
-                &resolve_router_endpoint_path(&runtime_directory),
-            )
-            .map(|router_program_file| router_program_file.build_version),
-            Err(_) => None,
-        },
-    )
-    .flatten()
+    let probe_deadline = Instant::now() + RESTART_PROBE_TIMEOUT_DURATION;
+    match find_running_router_version(runtime_directory, Some(probe_deadline)) {
+        Ok(reported_version) => reported_version,
+        Err(CliError::ProtocolVersionRefused { .. }) => find_advertised_server_program_file(
+            &resolve_router_program_file_path(runtime_directory),
+            &resolve_router_endpoint_path(runtime_directory),
+        )
+        .map(|router_program_file| router_program_file.build_version),
+        Err(_) => None,
+    }
 }
 
-/// One probe of the running session `session_id`'s version, bounded by
-/// [`RESTART_PROBE_TIMEOUT_DURATION`]. A probe that runs out the bound reads as
-/// no answer. A session that refuses this build's protocol version reports
-/// the version its program file holds, as
+/// One probe of the running session `session_id`'s version, which ends
+/// [`RESTART_PROBE_TIMEOUT_DURATION`] after it starts. A probe that runs past
+/// that reads as no answer. A session that refuses this build's protocol
+/// version reports the version its program file holds, as
 /// [`find_advertised_server_program_file`] reads it. A session that answers in
 /// the envelope of koshi 0.1.0 to 0.4.0 reports the build it names in the
 /// Hello of that envelope, as [`find_previous_release_session_version`] reads
 /// it: `0.4.0` from a koshi 0.4.0 session whose restart did not start.
 fn probe_session_version(runtime_directory: &Path, session_id: SessionId) -> Option<String> {
-    let runtime_directory = runtime_directory.to_path_buf();
-    run_peer_call_within(
-        RESTART_PROBE_TIMEOUT_DURATION,
-        move || match find_running_session_version(&runtime_directory, None, session_id, None) {
-            Ok(reported_version) => reported_version,
-            Err(CliError::ProtocolVersionRefused { .. }) => find_advertised_server_program_file(
-                &ServerProgramFile::resolve_session_program_file_path(
-                    &runtime_directory,
-                    session_id,
-                ),
-                &EndpointFile::resolve_endpoint_file_path(&runtime_directory, session_id),
-            )
-            .map(|session_program_file| session_program_file.build_version),
-            Err(CliError::PreviousReleaseServer { .. }) => {
-                find_previous_release_session_version(&runtime_directory, session_id)
-                    .ok()
-                    .flatten()
-            }
-            Err(_) => None,
-        },
-    )
-    .flatten()
+    let probe_deadline = Instant::now() + RESTART_PROBE_TIMEOUT_DURATION;
+    match find_running_session_version(runtime_directory, None, session_id, Some(probe_deadline)) {
+        Ok(reported_version) => reported_version,
+        Err(CliError::ProtocolVersionRefused { .. }) => find_advertised_server_program_file(
+            &ServerProgramFile::resolve_session_program_file_path(runtime_directory, session_id),
+            &EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id),
+        )
+        .map(|session_program_file| session_program_file.build_version),
+        Err(CliError::PreviousReleaseServer { .. }) => {
+            find_previous_release_session_version(runtime_directory, session_id, probe_deadline)
+                .ok()
+                .flatten()
+        }
+        Err(_) => None,
+    }
 }
 
 /// The result of asking one running session to restart.
@@ -881,6 +855,11 @@ enum SessionOutcome {
     /// The session answered nothing within the wait: not the Restart request,
     /// or not one Hello after it.
     Unconfirmed,
+    /// The session took the Restart and gave no answer, and its Hello did not
+    /// report the installed version within the wait after it. Carries the
+    /// failure that ended the read of the answer. The session may still
+    /// restart.
+    Unanswered(String),
     /// The session refused the restart or could not be reached. Carries the
     /// sentence naming what went wrong.
     Failed(String),
@@ -967,6 +946,16 @@ fn restart_sessions_into_version(
                     eprintln!(
                         "koshi: the restart of {session_id} was not confirmed: it answered nothing \
                          within {} seconds; its panes keep running",
+                        RESTART_CONFIRM_WAIT_DURATION.as_secs()
+                    );
+                    has_every_session_restarted = false;
+                }
+                SessionOutcome::Unanswered(unanswered_detail) => {
+                    eprintln!(
+                        "koshi: the restart of {session_id} was not confirmed: it took the request \
+                         and gave no answer ({unanswered_detail}), and did not report koshi \
+                         {expected_version} within {} seconds; it may still restart, and its \
+                         panes keep running",
                         RESTART_CONFIRM_WAIT_DURATION.as_secs()
                     );
                     has_every_session_restarted = false;
@@ -1269,9 +1258,13 @@ pub fn format_koshi_0_1_0_window_note(
 /// [`SessionOutcome::AlreadyOnVersion`], or names another file than
 /// `program_path`, which gives [`SessionOutcome::OnOtherProgramFile`].
 ///
-/// A session no longer listening is left out. A session that answers nothing
-/// to the Restart request within `wait_duration` gives
-/// [`SessionOutcome::Unconfirmed`]. A session that refuses this build's
+/// A session no longer listening is left out. A session whose Hello or
+/// `Prepare` of the Restart gets no answer within `wait_duration` gives
+/// [`SessionOutcome::Unconfirmed`], and runs no Restart. A session that took
+/// the Restart and gave no answer ([`SessionRestart::Unanswered`]) is waited
+/// for as one that answered `Restarting`: its Hello reporting
+/// `installed_version` gives [`SessionOutcome::Confirmed`], and anything else
+/// gives [`SessionOutcome::Unanswered`]. A session that refuses this build's
 /// protocol version gives [`SessionOutcome::AlreadyOnVersion`] when its
 /// program file says it runs `installed_version` and that version is newer
 /// than this build, and [`SessionOutcome::Incompatible`] otherwise. A session
@@ -1317,27 +1310,36 @@ fn restart_advertised_sessions(
             session_outcomes.push((session_id, left_running_outcome));
             continue;
         }
-        let session_runtime_directory = runtime_directory.to_path_buf();
-        let session_restart = run_peer_call_within(wait_duration, move || {
-            restart_running_session(&session_runtime_directory, None, session_id)
-        });
+        let wait_for_installed_version = || {
+            wait_for_version(installed_version, wait_duration, || {
+                probe_session_version(runtime_directory, session_id)
+            })
+        };
+        let session_restart = restart_running_session(
+            runtime_directory,
+            None,
+            session_id,
+            Instant::now() + wait_duration,
+        );
         let session_outcome = match session_restart {
-            Some(Ok(SessionRestart::NotRunning)) => continue,
-            Some(Ok(SessionRestart::WithoutRestartRequest)) => {
-                SessionOutcome::WithoutRestartRequest
-            }
-            Some(Ok(SessionRestart::Restarting)) => {
-                match wait_for_version(installed_version, wait_duration, || {
-                    probe_session_version(runtime_directory, session_id)
-                }) {
+            Ok(SessionRestart::NotRunning) => continue,
+            Ok(SessionRestart::WithoutRestartRequest) => SessionOutcome::WithoutRestartRequest,
+            Ok(SessionRestart::Restarting) => match wait_for_installed_version() {
+                VersionProbeOutcome::Installed => SessionOutcome::Confirmed,
+                VersionProbeOutcome::OtherVersion(reported_version) => {
+                    SessionOutcome::StillOnVersion(reported_version)
+                }
+                VersionProbeOutcome::Silent => SessionOutcome::Unconfirmed,
+            },
+            Ok(SessionRestart::Unanswered(unanswered_detail)) => {
+                match wait_for_installed_version() {
                     VersionProbeOutcome::Installed => SessionOutcome::Confirmed,
-                    VersionProbeOutcome::OtherVersion(reported_version) => {
-                        SessionOutcome::StillOnVersion(reported_version)
+                    VersionProbeOutcome::OtherVersion(_) | VersionProbeOutcome::Silent => {
+                        SessionOutcome::Unanswered(unanswered_detail)
                     }
-                    VersionProbeOutcome::Silent => SessionOutcome::Unconfirmed,
                 }
             }
-            Some(Err(CliError::ProtocolVersionRefused { .. }))
+            Err(CliError::ProtocolVersionRefused { .. })
                 if is_release_newer(installed_version)
                     && find_advertised_server_program_file(
                         &session_program_file_path,
@@ -1349,13 +1351,11 @@ fn restart_advertised_sessions(
             {
                 SessionOutcome::AlreadyOnVersion
             }
-            Some(Err(CliError::ProtocolVersionRefused {
+            Err(CliError::ProtocolVersionRefused {
                 detail: refusal_detail,
-            })) => SessionOutcome::Incompatible(refusal_detail),
-            Some(Err(session_restart_error)) => {
-                SessionOutcome::Failed(session_restart_error.to_string())
-            }
-            None => SessionOutcome::Unconfirmed,
+            }) => SessionOutcome::Incompatible(refusal_detail),
+            Err(CliError::SessionAnswerTimedOut) => SessionOutcome::Unconfirmed,
+            Err(session_restart_error) => SessionOutcome::Failed(session_restart_error.to_string()),
         };
         session_outcomes.push((session_id, session_outcome));
     }

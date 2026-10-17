@@ -116,6 +116,13 @@ impl ConnectionToken {
     pub fn expose_secret(&self) -> &str {
         &self.0
     }
+
+    /// Whether the secret is the empty text: the token a session asks another
+    /// local user for. Every generated token is 64 characters long.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl PartialEq for ConnectionToken {
@@ -508,7 +515,9 @@ pub enum IpcRequestKind {
     /// third of its link timeout while it waits for the answer to its
     /// `Attach`, and goes on sending one every third of its link timeout once
     /// it has joined. On a connection with no attached client, a `Ping`
-    /// closes the connection.
+    /// closes the connection, unless a request waits there for its
+    /// [`Commit`](Self::Commit): then the session reads the `Ping` and drops
+    /// it.
     Ping,
     /// One part of a clipboard copy that a stand-in clipboard tool in a pane
     /// sends before the last part, which goes as
@@ -535,7 +544,9 @@ pub enum IpcRequestKind {
     /// connection sent as [`ClipboardCopyPart`](Self::ClipboardCopyPart)
     /// since its last answered copy, then these bytes.
     ///
-    /// The session answers [`IpcResult::ClipboardCopyRouted`]. Each client on
+    /// It travels inside a [`Prepare`](Self::Prepare), and the
+    /// [`Commit`](Self::Commit) that runs it is answered with
+    /// [`IpcResult::ClipboardCopyRouted`]. Each client on
     /// another machine that focuses `pane_id` takes the copy as an `OSC 52`
     /// host write. `should_run_clipboard_tool` is `false` when only such
     /// clients focus the pane and each one took the copy, and `true` in every
@@ -563,6 +574,47 @@ pub enum IpcRequestKind {
         #[serde(with = "crate::bytes")]
         copied_bytes: Vec<u8>,
     },
+    /// Hand the session a request to hold until the caller sends
+    /// [`Commit`](Self::Commit). The session runs the held request only on
+    /// that `Commit`. A caller that gives up before it sends the `Commit` knows
+    /// that the request never runs.
+    ///
+    /// The held request is a [`SubmitCommand`](Self::SubmitCommand), an
+    /// [`Attach`](Self::Attach), a [`ClipboardCopy`](Self::ClipboardCopy) or a
+    /// [`Restart`](Self::Restart).
+    /// Every other kind is refused with [`IpcErrorCode::RequestFailed`], and
+    /// nothing is held.
+    ///
+    /// The session answers [`IpcResult::Prepared`] once its dispatcher has
+    /// answered for the request. A `ClipboardCopy` that no client on another
+    /// machine would take is answered at once with
+    /// [`IpcResult::ClipboardCopyRouted`] carrying
+    /// `should_run_clipboard_tool` `true`, and nothing is held: copies are not
+    /// allowed, the copy passes `max-copy-bytes`, or no client on another
+    /// machine focuses the pane. A `ClipboardCopy` from another machine or
+    /// from another user of this machine is refused as it is without
+    /// `Prepare`.
+    ///
+    /// The session drops the held request, and every clipboard part the
+    /// connection holds, when the connection ends and when the next request
+    /// is anything but a `Commit`, a [`Ping`](Self::Ping) or a
+    /// [`Hello`](Self::Hello). A frame that does not decode and a kind this
+    /// build does not have leave it in place too.
+    ///
+    /// A `SubmitCommand`, an `Attach`, a `ClipboardCopy` or a `Restart` that
+    /// arrives on its own, with no `Prepare`, is refused with
+    /// [`IpcErrorCode::RequestFailed`] and does not run. On a connection that
+    /// already carries an attached client's event stream, a `SubmitCommand`
+    /// runs as it arrives.
+    ///
+    /// Example: `Prepare(SubmitCommand(Quit))`, answered `Prepared`, then a
+    /// closed connection: the session never quits.
+    Prepare(Box<IpcRequestKind>),
+    /// Run the request that [`Prepare`](Self::Prepare) handed the session on
+    /// this connection. The answer is the held request's own answer, under
+    /// this request's `request_id`. With nothing held, the session refuses it
+    /// with [`IpcErrorCode::RequestFailed`] and the connection keeps serving.
+    Commit,
 }
 
 /// The most `copied_bytes` one [`IpcRequestKind::ClipboardCopy`] or
@@ -613,6 +665,8 @@ impl IpcRequestKind {
             IpcRequestKind::Ping => "Ping",
             IpcRequestKind::ClipboardCopyPart { .. } => "ClipboardCopyPart",
             IpcRequestKind::ClipboardCopy { .. } => "ClipboardCopy",
+            IpcRequestKind::Prepare(_) => "Prepare",
+            IpcRequestKind::Commit => "Commit",
         }
     }
 }
@@ -763,6 +817,9 @@ pub enum IpcResult {
         /// is on another machine, and each one took the copy.
         should_run_clipboard_tool: bool,
     },
+    /// Answers [`IpcRequestKind::Prepare`]: the session holds the request, and
+    /// runs it when [`IpcRequestKind::Commit`] arrives.
+    Prepared,
 }
 
 /// Why a request was refused.
@@ -862,6 +919,8 @@ impl WireVariants for IpcRequestKind {
         "Ping",
         "ClipboardCopyPart",
         "ClipboardCopy",
+        "Prepare",
+        "Commit",
     ];
 }
 
@@ -885,6 +944,7 @@ impl WireVariants for IpcResult {
         "Error",
         "ClipboardCopyPartTaken",
         "ClipboardCopyRouted",
+        "Prepared",
     ];
 }
 
@@ -901,6 +961,7 @@ impl WireName for IpcResult {
             IpcResult::Error(_) => "Error",
             IpcResult::ClipboardCopyPartTaken => "ClipboardCopyPartTaken",
             IpcResult::ClipboardCopyRouted { .. } => "ClipboardCopyRouted",
+            IpcResult::Prepared => "Prepared",
         }
     }
 }

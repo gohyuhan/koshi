@@ -51,6 +51,19 @@ pub enum CliError {
     /// the exchange.
     #[error("IPC unavailable: the session did not answer in time")]
     SessionAnswerTimedOut,
+    /// The router did not finish answering by the deadline the caller gave
+    /// the exchange.
+    #[error("IPC unavailable: the router did not answer in time")]
+    RouterAnswerTimedOut,
+    /// The session holds a request this caller committed, and the `Commit`
+    /// got no answer: its write or the read of its answer failed or ran out of
+    /// time. `detail` names that failure. The request may run, or may have
+    /// run.
+    #[error(
+        "IPC unavailable: the session took the request and gave no answer ({detail}); \
+         it may still run, so check before you run it again"
+    )]
+    CommittedRequestUnanswered { detail: String },
     /// The named (or in-session) session is not running: nothing advertises
     /// its endpoint, or nothing listens behind the advertised socket.
     #[error("session {session_name} is not running")]
@@ -91,8 +104,9 @@ fn format_rejection_message(reason: RejectReason, help: Option<&str>) -> String 
 /// [`CliExitCode`] the binary reports to the OS. A usage or config problem
 /// exits 2, a session that is not running exits 3, an unreachable IPC
 /// endpoint, a refused protocol version, a refused connection token, a server
-/// that koshi 0.1.0 to 0.4.0 started, or a session that did not answer in time
-/// exits 4, and a runtime error, a rejected command, or a failed update exits
+/// that koshi 0.1.0 to 0.4.0 started, a session or a router that did not
+/// answer in time, or a session that took a request and gave no answer exits
+/// 4, and a runtime error, a rejected command, or a failed update exits
 /// 1.
 impl From<&CliError> for CliExitCode {
     fn from(cli_error: &CliError) -> Self {
@@ -107,7 +121,9 @@ impl From<&CliError> for CliExitCode {
             | CliError::ProtocolVersionRefused { .. }
             | CliError::ConnectionTokenRefused { .. }
             | CliError::PreviousReleaseServer { .. }
-            | CliError::SessionAnswerTimedOut => CliExitCode::IpcUnavailable,
+            | CliError::SessionAnswerTimedOut
+            | CliError::RouterAnswerTimedOut
+            | CliError::CommittedRequestUnanswered { .. } => CliExitCode::IpcUnavailable,
             CliError::SessionNotFound { .. } | CliError::NoSessions => CliExitCode::SessionNotFound,
             CliError::Runtime { .. }
             | CliError::CommandRejected { .. }

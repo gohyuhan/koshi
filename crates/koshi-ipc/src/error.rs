@@ -28,11 +28,9 @@ use thiserror::Error;
 /// [`RemoteFileWrite`](IpcError::RemoteFileWrite)).
 ///
 /// Session-fatal: a failed endpoint-file write
-/// ([`EndpointFileWrite`](IpcError::EndpointFileWrite)), a failed program-file
-/// write ([`ProgramFileWrite`](IpcError::ProgramFileWrite)), and a failed
-/// advertisement marker write
-/// ([`AdvertisementMarkerWrite`](IpcError::AdvertisementMarkerWrite)). Each happens during
-/// the server's own startup. No caller reaches a server whose endpoint file
+/// ([`EndpointFileWrite`](IpcError::EndpointFileWrite)) and a failed
+/// program-file write ([`ProgramFileWrite`](IpcError::ProgramFileWrite)).
+/// Each happens during the server's own startup. No caller reaches a server whose endpoint file
 /// and program file never land.
 ///
 /// Recoverable: a frame that arrived whole yet does not decode
@@ -87,6 +85,10 @@ pub enum IpcError {
     /// process that is gone, or nothing exists there at all.
     #[error("no koshi is listening at {socket_address}")]
     NoListener { socket_address: String },
+    /// The process serving the address runs as another OS user than this
+    /// process. The connection was closed before anything was written to it.
+    #[error("the koshi listening at {socket_address} runs as another user")]
+    PeerIsOtherUser { socket_address: String },
     /// A live listener already holds the address this process wants to bind.
     #[error("another process is already listening at {socket_address}")]
     SocketBusy { socket_address: String },
@@ -128,16 +130,6 @@ pub enum IpcError {
     #[error("program file {program_file_path} could not be written: {error_detail}")]
     ProgramFileWrite {
         program_file_path: String,
-        error_detail: String,
-    },
-    /// Writing the advertisement marker at `advertisement_marker_path` failed
-    /// during session startup. No other user of this machine finds this
-    /// session.
-    #[error(
-        "advertisement marker {advertisement_marker_path} could not be written: {error_detail}"
-    )]
-    AdvertisementMarkerWrite {
-        advertisement_marker_path: String,
         error_detail: String,
     },
     /// A remote access file that exists but could not be used: reading it

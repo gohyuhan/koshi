@@ -191,9 +191,10 @@ pub struct DoctorContext {
     /// the message naming what is wrong when `KOSHI` is set and the rest of
     /// the in-session identity is missing or malformed.
     pub session_log_file: Result<Option<PathBuf>, String>,
-    /// The machine-wide directory the shared session sockets live in:
-    /// `koshi.kdl`'s `shared-sessions-dir` when it names one, else this
-    /// platform's own. `None` when neither names one.
+    /// The machine-wide directory your sessions are also advertised in while
+    /// `koshi.kdl`'s `allow-other-users` is on, as
+    /// [`compute_shared_sessions_base_directory`](koshi_link::config::compute_shared_sessions_base_directory)
+    /// gives it. `None` while it is off, and always `None` on Windows.
     pub shared_sessions_directory: Option<PathBuf>,
     /// The program a new pane runs.
     pub shell: PathBuf,
@@ -205,8 +206,6 @@ pub struct DoctorContext {
     pub term: Option<String>,
     /// `COLORTERM`, or `None` when it is unset or empty.
     pub colorterm: Option<String>,
-    /// `koshi.kdl`'s `allow-other-users`.
-    pub is_other_user_access_allowed: bool,
     /// `koshi.kdl`'s `remote-listen` address, or `None` when it names none.
     pub remote_listen_address: Option<SocketAddr>,
     /// `koshi.kdl`'s `logging.enabled`.
@@ -231,10 +230,8 @@ impl DoctorContext {
         let runtime_directory_mode = runtime_directory.as_deref().and_then(read_directory_mode);
         let server_config =
             koshi_link::config::load_current_server_config(config_directory.as_deref());
-        let shared_sessions_directory = server_config
-            .shared_sessions_directory
-            .clone()
-            .or_else(koshi_paths::resolve_shared_sessions_directory);
+        let shared_sessions_directory =
+            koshi_link::config::compute_shared_sessions_base_directory(&server_config);
         let standing_grant_count = match koshi_paths::resolve_data_directory() {
             Some(data_directory) => load_standing_grant_count(&data_directory, SystemTime::now()),
             None => Err("this machine reports no home directory".to_string()),
@@ -277,7 +274,6 @@ impl DoctorContext {
             colorterm: std::env::var_os("COLORTERM")
                 .and_then(|environment_value| environment_value.into_string().ok())
                 .filter(|environment_value| !environment_value.is_empty()),
-            is_other_user_access_allowed: server_config.should_allow_other_users,
             remote_listen_address: server_config.remote_listen_address,
             is_logging_enabled: server_config.logging.is_enabled,
             standing_grant_count,
@@ -540,33 +536,27 @@ fn check_session_log_file(doctor_context: &DoctorContext) -> DoctorOutcome {
 }
 
 fn check_session_directory(doctor_context: &DoctorContext) -> DoctorOutcome {
-    if !doctor_context.is_other_user_access_allowed {
-        let Some(runtime_directory) = doctor_context.runtime_directory.as_deref() else {
-            return DoctorOutcome::build_success_outcome(
-                "allow-other-users is off, so only you may reach your sessions".to_string(),
-            );
-        };
-        let runtime_directory_description = match doctor_context.runtime_directory_mode {
-            Some(directory_mode) => format!(
-                "{} (mode {directory_mode:03o})",
-                runtime_directory.display()
-            ),
-            None => runtime_directory.display().to_string(),
-        };
+    if let Some(shared_sessions_directory) = doctor_context.shared_sessions_directory.as_deref() {
         return DoctorOutcome::build_success_outcome(format!(
-            "sessions are advertised in {runtime_directory_description}, which only you may reach"
-        ));
-    }
-    match doctor_context.shared_sessions_directory.as_deref() {
-        Some(shared_sessions_directory) => DoctorOutcome::build_success_outcome(format!(
             "allow-other-users is on: sessions are also advertised in {}, which every user of this machine may reach",
             shared_sessions_directory.display()
-        )),
-        None => DoctorOutcome::build_success_outcome(
-            "allow-other-users is on, and this machine names no shared session directory, so no other user reaches your sessions"
-                .to_string(),
-        ),
+        ));
     }
+    let Some(runtime_directory) = doctor_context.runtime_directory.as_deref() else {
+        return DoctorOutcome::build_success_outcome(
+            "only you may reach your sessions".to_string(),
+        );
+    };
+    let runtime_directory_description = match doctor_context.runtime_directory_mode {
+        Some(directory_mode) => format!(
+            "{} (mode {directory_mode:03o})",
+            runtime_directory.display()
+        ),
+        None => runtime_directory.display().to_string(),
+    };
+    DoctorOutcome::build_success_outcome(format!(
+        "sessions are advertised in {runtime_directory_description}, which only you may reach"
+    ))
 }
 
 fn check_remote_access(doctor_context: &DoctorContext) -> DoctorOutcome {

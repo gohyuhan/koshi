@@ -632,9 +632,132 @@ fn a_unix_address_maps_to_a_filesystem_path() {
 
 #[cfg(windows)]
 #[test]
-fn a_windows_address_maps_to_the_pipe_namespace() {
-    let socket_name = resolve_socket_name("koshi-test").expect("map");
-    assert!(socket_name.is_namespaced());
+fn a_windows_address_maps_to_its_pipe_path() {
+    assert_eq!(
+        format_pipe_path("koshi-test")
+            .expect("pipe path")
+            .to_string_lossy(),
+        r"\\.\pipe\koshi-test"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_windows_address_holding_a_nul_character_is_refused() {
+    let path_error = format_pipe_path("koshi\0test").expect_err("NUL refused");
+    assert_eq!(path_error.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(
+        path_error.to_string(),
+        "the pipe name holds a NUL character"
+    );
+}
+
+/// The pipe a listener binds is owned by this process's user, and its access
+/// list grants every right to that user and nothing to anyone else.
+#[cfg(windows)]
+#[test]
+fn a_bound_pipe_grants_access_to_this_user_alone() {
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+
+    let socket_address = build_test_socket_address("private-access");
+    let listener = Listener::bind(&socket_address).expect("bind");
+    let pipe_handle =
+        open_pipe_caller_end(&socket_address, CONNECT_WAIT_DURATION).expect("open the pipe");
+    let mut pipe_security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let lookup_status = unsafe {
+        GetSecurityInfo(
+            pipe_handle.as_raw_handle(),
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut pipe_security_descriptor,
+        )
+    };
+    assert_eq!(lookup_status, ERROR_SUCCESS);
+    let _pipe_security_descriptor_allocation = LocalAllocation(pipe_security_descriptor);
+    let mut access_text_pointer: *mut u16 = std::ptr::null_mut();
+    let is_converted = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            pipe_security_descriptor,
+            SDDL_REVISION_1,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut access_text_pointer,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(is_converted, 0, "the security descriptor converts to text");
+    let _access_text_allocation = LocalAllocation(access_text_pointer.cast());
+    let access_text = unsafe { U16CStr::from_ptr_str(access_text_pointer) }.to_string_lossy();
+    let own_user_sid = format_own_user_sid().expect("read this process's user");
+
+    assert_eq!(
+        access_text,
+        format!("O:{own_user_sid}D:(A;;FA;;;{own_user_sid})")
+    );
+    drop(pipe_handle);
+    drop(listener);
+}
+
+/// The raw handle inside `socket_stream`, a named pipe stream.
+#[cfg(windows)]
+fn get_pipe_stream_raw_handle(socket_stream: &socket::Stream) -> HANDLE {
+    let socket::Stream::NamedPipe(pipe_stream) = socket_stream;
+    pipe_stream.inner().as_raw_handle()
+}
+
+/// Wrapping a caller's end keeps the handle it was given while the listener
+/// holds a free instance for the next caller.
+#[cfg(windows)]
+#[test]
+fn wrapping_a_caller_end_keeps_its_handle_while_a_free_instance_waits() {
+    let socket_address = build_test_socket_address("wrap-caller-end");
+    let listener = Listener::bind(&socket_address).expect("bind");
+    let accepting_thread = thread::spawn(move || {
+        let accepted_peer = listener.accept().expect("accept");
+        (accepted_peer, listener)
+    });
+    let caller_end =
+        open_pipe_caller_end(&socket_address, CONNECT_WAIT_DURATION).expect("open the pipe");
+    let (accepted_peer, listener) = accepting_thread.join().expect("accepting thread");
+    let caller_end_handle = caller_end.as_raw_handle();
+
+    let caller_stream = wrap_pipe_handle(caller_end).expect("wrap the caller end");
+
+    assert_eq!(
+        get_pipe_stream_raw_handle(&caller_stream),
+        caller_end_handle
+    );
+    drop(caller_stream);
+    drop(accepted_peer);
+    drop(listener);
+}
+
+/// Wrapping a pipe instance keeps the handle it was given while another
+/// instance of the pipe is free.
+#[cfg(windows)]
+#[test]
+fn wrapping_a_pipe_instance_keeps_its_handle_while_another_instance_is_free() {
+    let socket_address = build_test_socket_address("wrap-instance");
+    let pipe_path = format_pipe_path(&socket_address).expect("pipe path");
+    let access = build_pipe_access().expect("build the pipe access");
+    let pipe_instance = create_pipe_instance(&pipe_path, &access, true).expect("first instance");
+    let free_instance = create_pipe_instance(&pipe_path, &access, false).expect("free instance");
+    let pipe_instance_handle = pipe_instance.as_raw_handle();
+
+    let instance_stream = wrap_pipe_handle(pipe_instance).expect("wrap the instance");
+
+    assert_eq!(
+        get_pipe_stream_raw_handle(&instance_stream),
+        pipe_instance_handle
+    );
+    drop(instance_stream);
+    drop(free_instance);
 }
 
 // --- end to end over a real socket ---
@@ -679,6 +802,62 @@ fn request_and_response_cross_a_real_socket() {
     assert_eq!(server.join().expect("server thread"), hello_request_message);
 }
 
+/// Connect to `listener` at `socket_address` through
+/// [`Connection::connect_to_own_server_within`], send a Hello numbered 9, and
+/// assert the listener read that Hello and the caller read its answer,
+/// `Restarting` numbered 9.
+fn assert_own_server_connect_round_trip(listener: Listener, socket_address: &str) {
+    let server = thread::spawn(move || {
+        let mut connection = listener.accept().expect("accept");
+        let request: IpcRequest = connection.recv().expect("server recv");
+        connection
+            .send(&IpcResponse {
+                request_id: Some(request.request_id),
+                answer_result: IpcResult::Restarting,
+            })
+            .expect("server send");
+        request
+    });
+    let mut connection =
+        Connection::connect_to_own_server_within(socket_address, CONNECT_WAIT_DURATION)
+            .expect("own server connect");
+    let hello_request_message = build_hello_request(9);
+    connection
+        .send(&hello_request_message)
+        .expect("client send");
+    let response: IpcResponse = connection.recv().expect("client recv");
+    assert_eq!(
+        response,
+        IpcResponse {
+            request_id: Some(9),
+            answer_result: IpcResult::Restarting,
+        }
+    );
+    assert_eq!(server.join().expect("server thread"), hello_request_message);
+}
+
+#[test]
+fn an_own_server_connect_keeps_a_listener_this_user_binds() {
+    let socket_address = build_test_socket_address("own-private");
+    let listener = Listener::bind(&socket_address).expect("bind");
+    assert_own_server_connect_round_trip(listener, &socket_address);
+}
+
+#[test]
+fn an_own_server_connect_to_an_address_nothing_listens_at_is_no_listener() {
+    let socket_address = build_test_socket_address("own-nothing");
+    let connect_error =
+        Connection::connect_to_own_server_within(&socket_address, CONNECT_WAIT_DURATION)
+            .expect_err("nothing listens");
+    let IpcError::NoListener {
+        socket_address: reported_socket_address,
+    } = connect_error
+    else {
+        panic!("expected NoListener, got {connect_error:?}");
+    };
+    assert_eq!(reported_socket_address, socket_address);
+}
+
 #[test]
 fn a_write_the_peer_takes_no_byte_of_fails_once_its_idle_timeout_passes() {
     let socket_address = build_test_socket_address("write-idle-timeout");
@@ -706,14 +885,12 @@ fn a_write_the_peer_takes_no_byte_of_fails_once_its_idle_timeout_passes() {
     server.join().expect("server thread");
 }
 
-/// On Windows this pins the shared pipe's security descriptor from both sides:
-/// the caller opens the pipe with `GENERIC_READ | GENERIC_WRITE`, and the
-/// second caller is served only if the descriptor also let the listener create
-/// the pipe instance behind it.
+/// On Windows the second caller is served only if the listener created the
+/// pipe instance behind it.
 #[test]
-fn a_shared_bind_serves_one_caller_after_another() {
-    let socket_address = build_test_socket_address("shared");
-    let listener = Listener::bind_shared(&socket_address).expect("bind shared");
+fn a_bind_serves_one_caller_after_another() {
+    let socket_address = build_test_socket_address("one-after-another");
+    let listener = Listener::bind(&socket_address).expect("bind");
 
     let server = thread::spawn(move || {
         for _ in 0..2 {
@@ -939,6 +1116,191 @@ fn a_frame_the_peer_sent_before_hanging_up_is_read_under_a_deadline() {
 }
 
 #[test]
+fn a_peer_that_never_reads_holds_back_no_other_connections_close() {
+    for frame_write_shape in [
+        FrameWriteShape::WholeConnection,
+        FrameWriteShape::SplitAfterTheWrite,
+        FrameWriteShape::WritingHalfUnderADeadline,
+    ] {
+        // The first connection's listener end writes a frame its caller never
+        // reads, and is dropped while that caller stays open.
+        let (unread_caller, unread_peer) =
+            connect_caller_and_peer(&format!("close-unread-{frame_write_shape:?}"));
+        write_hello_request_and_drop(unread_peer, 1, frame_write_shape);
+        // The second connection's caller writes a frame and is dropped. The
+        // listener end then reads that frame, then the end of the stream.
+        let (closing_caller, closing_peer) =
+            connect_caller_and_peer(&format!("close-read-{frame_write_shape:?}"));
+        write_hello_request_and_drop(closing_caller, 2, frame_write_shape);
+        let (mut reader, _writer) = closing_peer.split();
+        reader.set_deadline(Some(Instant::now() + Duration::from_secs(5)));
+        assert_eq!(
+            reader
+                .recv::<IpcRequest>()
+                .expect("the frame written before the drop is read"),
+            build_hello_request(2)
+        );
+
+        let receive_error = reader.recv::<IpcRequest>().unwrap_err();
+
+        let IpcError::Disconnected = receive_error else {
+            panic!(
+                "the read after the caller is dropped is the end of the stream: {receive_error}"
+            );
+        };
+        drop(unread_caller);
+    }
+}
+
+#[test]
+fn an_address_binds_again_as_soon_as_its_listener_and_written_connection_are_dropped() {
+    // A caller connects and the listener accepts it. Each end writes a frame
+    // the other never reads. Both connection ends and the listener are
+    // dropped, and the same address binds again at once.
+    let socket_address = build_test_socket_address("rebind-written");
+    let listener = Listener::bind(&socket_address).expect("bind");
+    let accepting_thread = thread::spawn(move || {
+        let accepted_peer = listener.accept().expect("accept");
+        (accepted_peer, listener)
+    });
+    let mut caller = Connection::connect(&socket_address).expect("connect");
+    let (mut accepted_peer, listener) = accepting_thread.join().expect("accepting thread");
+    caller.send(&build_hello_request(1)).expect("caller send");
+    accepted_peer
+        .send(&build_hello_request(2))
+        .expect("accepted peer send");
+    drop(caller);
+    drop(accepted_peer);
+    drop(listener);
+
+    let rebind_outcome = Listener::bind(&socket_address);
+
+    rebind_outcome.expect("the address binds again");
+}
+
+#[test]
+fn a_caller_that_hangs_up_before_accept_with_nothing_written_reads_as_the_end_of_the_stream() {
+    // The caller connects and is dropped before the listener accepts, with
+    // nothing written. The listener accepts that connection, and its first
+    // read is the end of the stream.
+    let socket_address = build_test_socket_address("hangup-unwritten-before-accept");
+    let listener = Listener::bind(&socket_address).expect("bind");
+    drop(Connection::connect(&socket_address).expect("connect"));
+    let (accepted_sender, accepted_receiver) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = accepted_sender.send(listener.accept());
+    });
+
+    let mut accepted_peer = accepted_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the listener accepts the connection the caller hung up")
+        .expect("accept");
+
+    let receive_error = accepted_peer.recv::<IpcRequest>().unwrap_err();
+    let IpcError::Disconnected = receive_error else {
+        panic!("the first read is the end of the stream: {receive_error}");
+    };
+}
+
+#[test]
+fn a_flush_returns_at_once_while_the_peer_reads_nothing() {
+    // The caller writes a byte its peer never reads, then flushes.
+    let (caller, unread_peer) = connect_caller_and_peer("flush-unread");
+    let (_reader, mut raw_writer) = caller.split_raw();
+    let (flushed_sender, flushed_receiver) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        raw_writer.write_all(b"x").expect("write one byte");
+        let flush_outcome = raw_writer
+            .flush()
+            .map_err(|flush_error| flush_error.to_string());
+        let _ = flushed_sender.send(flush_outcome);
+    });
+
+    let flush_outcome = flushed_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the flush returns while the peer reads nothing");
+
+    assert_eq!(flush_outcome, Ok(()));
+    drop(unread_peer);
+}
+
+#[test]
+fn a_frame_a_caller_sent_before_hanging_up_reaches_a_listener_that_accepts_afterwards() {
+    // The caller connects, writes a frame and is dropped before the listener
+    // accepts. The listener then accepts that connection and reads the frame,
+    // then the end of the stream.
+    let socket_address = build_test_socket_address("hangup-before-accept");
+    let listener = Listener::bind(&socket_address).expect("bind");
+    let mut caller = Connection::connect(&socket_address).expect("connect");
+    caller.send(&build_hello_request(1)).expect("caller send");
+    drop(caller);
+    let (accepted_sender, accepted_receiver) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = accepted_sender.send(listener.accept());
+    });
+
+    let accepted_peer = accepted_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the listener accepts the connection the caller hung up")
+        .expect("accept");
+
+    let (mut reader, _writer) = accepted_peer.split();
+    reader.set_deadline(Some(Instant::now() + Duration::from_secs(5)));
+    assert_eq!(
+        reader
+            .recv::<IpcRequest>()
+            .expect("the frame written before the hang-up is read"),
+        build_hello_request(1)
+    );
+    let receive_error = reader.recv::<IpcRequest>().unwrap_err();
+    let IpcError::Disconnected = receive_error else {
+        panic!("the read after the frame is the end of the stream: {receive_error}");
+    };
+}
+
+/// How [`write_hello_request_and_drop`] writes its frame.
+#[derive(Clone, Copy, Debug)]
+enum FrameWriteShape {
+    /// The whole connection writes the frame.
+    WholeConnection,
+    /// The whole connection writes the frame, then is split into its two
+    /// halves.
+    SplitAfterTheWrite,
+    /// The connection is split into its two halves, and the writing half
+    /// writes the frame under a 5 s deadline.
+    WritingHalfUnderADeadline,
+}
+
+/// Write the hello request numbered `request_id` through `connection` as
+/// `frame_write_shape` says, then drop every part of the connection.
+fn write_hello_request_and_drop(
+    mut connection: Connection,
+    request_id: u64,
+    frame_write_shape: FrameWriteShape,
+) {
+    match frame_write_shape {
+        FrameWriteShape::WholeConnection => {
+            connection
+                .send(&build_hello_request(request_id))
+                .expect("send through the whole connection");
+        }
+        FrameWriteShape::SplitAfterTheWrite => {
+            connection
+                .send(&build_hello_request(request_id))
+                .expect("send through the whole connection");
+            drop(connection.split());
+        }
+        FrameWriteShape::WritingHalfUnderADeadline => {
+            let (_reader, mut writer) = connection.split();
+            writer.set_deadline(Some(Instant::now() + Duration::from_secs(5)));
+            writer
+                .send(&build_hello_request(request_id))
+                .expect("send through the writing half");
+        }
+    }
+}
+
+#[test]
 fn a_read_after_the_deadline_is_cleared_waits_past_the_old_deadline() {
     // The first frame arrives under a 300 ms deadline. The second arrives
     // 600 ms after the deadline was given, once it is cleared.
@@ -1099,6 +1461,7 @@ fn accept_until_shutdown_serves_each_caller_and_drops_the_wake_up_connection() {
                 &listener,
                 &is_shutting_down,
                 std::time::Duration::from_millis(1),
+                |accept_error| panic!("no accept fails: {accept_error}"),
                 |connection| {
                     served += 1;
                     served_sender

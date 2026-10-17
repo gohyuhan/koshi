@@ -38,6 +38,7 @@ use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
+use koshi_test_support::fixtures::send_committed_request;
 
 /// The terminal size the seeded session is bootstrapped at, before any client
 /// attaches.
@@ -314,9 +315,10 @@ pub fn submit_test_command(
     submit_test_command_for_client(ipc_connection, session_id, None, command, request_id)
 }
 
-/// Submit a command over `ipc_connection`, as an external `koshi` invocation
-/// naming `session_id` and targeting `target_client_id`, and return the events
-/// it emitted. Panics unless the session applied it.
+/// Submit a command over `ipc_connection` with `Prepare` and `Commit`, as an
+/// external `koshi` invocation naming `session_id` and targeting
+/// `target_client_id`, and return the events it emitted. Panics unless the
+/// session applied it.
 pub fn submit_test_command_for_client(
     ipc_connection: &mut Connection,
     session_id: SessionId,
@@ -329,12 +331,13 @@ pub fn submit_test_command_for_client(
         CommandSource::from_external_cli(Some(session_id), target_client_id),
         command,
     );
-    ipc_connection
-        .send(&IpcRequest {
+    send_committed_request(
+        ipc_connection,
+        IpcRequest {
             request_id,
             request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
-        })
-        .expect("send command");
+        },
+    );
     let command_response: IpcResponse = ipc_connection.recv().expect("command reply");
     let IpcResult::CommandResult(CommandResult::Ok {
         command_id: _,

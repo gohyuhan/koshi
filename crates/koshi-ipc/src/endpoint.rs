@@ -28,12 +28,8 @@
 //! is younger than the restart window,
 //! [`resolve_update_lock_path`](crate::endpoint::resolve_update_lock_path) names the file
 //! `koshi update` locks while it restarts the running servers,
-//! [`is_update_restarting_servers`](crate::endpoint::is_update_restarting_servers) reads whether
-//! that lock is held, and
-//! [`resolve_advertisement_marker_path`](crate::endpoint::resolve_advertisement_marker_path),
-//! [`write_advertisement_marker`](crate::endpoint::write_advertisement_marker) and
-//! [`delete_advertisement_marker`](crate::endpoint::delete_advertisement_marker) handle the empty
-//! marker file that names such a session on Windows.
+//! and [`is_update_restarting_servers`](crate::endpoint::is_update_restarting_servers) reads
+//! whether that lock is held.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
@@ -73,8 +69,8 @@ pub const PROGRAM_FILE_FORMAT: u32 = koshi_core::compat::PROGRAM_FILE_FORMAT.max
 /// gives the address other local users reach, the location
 /// [`validate_shared_socket_address`](crate::validate::validate_shared_socket_address)
 /// accepts. On Windows it is the pipe name `koshi-session-<uuid>`, inside the
-/// `koshi-` namespace that same check requires; pipe names share one
-/// machine-wide namespace, and `runtime_directory` goes unused there.
+/// `koshi-` namespace `validate_socket_address` requires there; pipe names
+/// share one machine-wide namespace, and `runtime_directory` goes unused.
 ///
 /// Every consumer derives the address through here, including the
 /// `KOSHI_SOCKET` variable injected into spawned panes.
@@ -174,39 +170,6 @@ pub fn is_update_restarting_servers(runtime_directory: &Path) -> bool {
         update_lock_file.try_lock_shared(),
         Err(std::fs::TryLockError::WouldBlock)
     )
-}
-
-/// Where the marker advertising `session_id` machine-wide lives:
-/// `session-<uuid>`, with no extension, directly inside `shared_directory`.
-///
-/// On Windows, a client lists these markers to learn which sessions listen
-/// on a pipe. The marker carries no bytes: the pipe name follows from the
-/// session id the file is named after.
-#[must_use]
-pub fn resolve_advertisement_marker_path(
-    shared_directory: &Path,
-    session_id: SessionId,
-) -> PathBuf {
-    shared_directory.join(session_id.to_string())
-}
-
-/// Write the marker at `advertisement_marker_path` as an empty file, replacing whatever is there.
-///
-/// # Errors
-/// A marker that cannot be written is [`IpcError::AdvertisementMarkerWrite`] naming
-/// `advertisement_marker_path`.
-pub fn write_advertisement_marker(advertisement_marker_path: &Path) -> Result<(), IpcError> {
-    std::fs::write(advertisement_marker_path, b"").map_err(|io_error| {
-        IpcError::AdvertisementMarkerWrite {
-            advertisement_marker_path: advertisement_marker_path.display().to_string(),
-            error_detail: io_error.to_string(),
-        }
-    })
-}
-
-/// Delete the marker at `advertisement_marker_path`. A path with nothing at it is left alone.
-pub fn delete_advertisement_marker(advertisement_marker_path: &Path) {
-    let _ = std::fs::remove_file(advertisement_marker_path);
 }
 
 /// Unlink the socket file at `socket_address` on Unix, where the address is a

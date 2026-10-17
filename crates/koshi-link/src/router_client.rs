@@ -33,12 +33,13 @@ use koshi_ipc::router::{
     resolve_router_endpoint_path, resolve_router_program_file_path, IncomingRouterResponse,
     RouterRequest, RouterRequestKind, RouterResult, ROUTER_RESTARTING_MESSAGE,
 };
-use koshi_ipc::transport::Connection;
+use koshi_ipc::transport::{compute_time_left_until, Connection, CONNECT_WAIT_DURATION};
 
 use crate::error::CliError;
 use crate::ipc_client::{
-    compute_poll_pause_duration, REFUSED_SERVER_RESTART_START_WAIT_DURATION,
-    REFUSED_TOKEN_ADVERTISE_WAIT_DURATION, RESTART_POLL_INTERVAL_DURATION,
+    bound_by_answer_deadline, compute_poll_pause_duration, is_answer_deadline_reached,
+    REFUSED_SERVER_RESTART_START_WAIT_DURATION, REFUSED_TOKEN_ADVERTISE_WAIT_DURATION,
+    RESTART_POLL_INTERVAL_DURATION,
 };
 use crate::server_build::{find_refusing_server_build, RefusingServerBuild};
 use crate::talk::{self, build_ipc_unavailable_error};
@@ -111,8 +112,8 @@ pub fn submit_router_request(
     request_kind: RouterRequestKind,
 ) -> Result<RouterResult, CliError> {
     let first_router_exchange =
-        run_router_exchange(runtime_directory, |connection, router_endpoint| {
-            exchange_router_request_on_connection(connection, router_endpoint, &request_kind)
+        run_router_exchange(runtime_directory, None, |connection, router_endpoint| {
+            exchange_router_request_on_connection(connection, router_endpoint, &request_kind, None)
         })?;
     let first_router_result = match first_router_exchange {
         None => None,
@@ -182,11 +183,11 @@ pub fn submit_router_request(
 /// started, and [`CliError::IpcUnavailable`] reading `the router did not start`
 /// when no router answers within 5 seconds.
 pub fn start_router(runtime_directory: &Path) -> Result<String, CliError> {
-    if let Some(router_version) = find_running_router_version(runtime_directory)? {
+    if let Some(router_version) = find_running_router_version(runtime_directory, None)? {
         return Ok(router_version);
     }
     start_router_and_exchange(runtime_directory, || {
-        find_running_router_version(runtime_directory)
+        find_running_router_version(runtime_directory, None)
     })
 }
 
@@ -219,29 +220,68 @@ fn start_router_and_exchange<RouterAnswer>(
     }
 }
 
+/// The result of asking the running router to restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouterRestart {
+    /// The router answered that it is replacing its own process image.
+    Restarting,
+    /// The last connect found no router running. No router ran the Restart.
+    NotRunning,
+    /// The Hello and the Restart went out, and their answers did not come by
+    /// the deadline. The connection is closed when this is handed back. The
+    /// router restarts only when it wrote its `Restarting` answer before that
+    /// close.
+    Unanswered,
+}
+
 /// Ask the router that is already running to restart into the binary on disk.
 ///
 /// Sends one Restart exchange. After a Hello refused for its connection token,
 /// it sends one more when the endpoint file carries another token or cannot be
-/// read, or after [`REFUSED_TOKEN_ADVERTISE_WAIT_DURATION`]. A router refuses
-/// the Restart behind a refused Hello. Never starts a router. `Ok(false)`
-/// means the last connect found no router running, and no router ran the
-/// Restart.
+/// read, or after [`REFUSED_TOKEN_ADVERTISE_WAIT_DURATION`], when 1 ms or more
+/// is left until `answer_deadline`. A router refuses the Restart behind a
+/// refused Hello. Never starts a router. The connects, the wait, the writes
+/// and the reads all end by `answer_deadline`, and an exchange that runs past
+/// it gives [`RouterRestart::Unanswered`].
 ///
+/// # Errors
 /// A router that refuses the request is [`CliError::IpcUnavailable`] carrying
 /// the sentence the router sent, filtered by [`sanitize_reported_text`]. A
 /// router whose build has no Restart kind refuses it, and that sentence names
-/// both builds.
-pub fn restart_running_router(runtime_directory: &Path) -> Result<bool, CliError> {
-    match exchange_router_request(runtime_directory, &RouterRequestKind::Restart)? {
-        None => Ok(false),
-        Some(RouterResult::Restarting) => Ok(true),
-        Some(RouterResult::Error(refusal)) => Err(CliError::IpcUnavailable {
+/// both builds. An endpoint file that exists and cannot be read, and a connect
+/// that fails for a reason other than nothing listening, are their failures.
+/// A write or a read that fails is [`CliError::RouterAnswerTimedOut`] once
+/// `answer_deadline` is reached, and what
+/// [`build_ipc_unavailable_error`] gives otherwise.
+pub fn restart_running_router(
+    runtime_directory: &Path,
+    answer_deadline: Instant,
+) -> Result<RouterRestart, CliError> {
+    let restart_exchange = run_router_exchange(
+        runtime_directory,
+        Some(answer_deadline),
+        |connection, router_endpoint| {
+            exchange_router_request_on_connection(
+                connection,
+                router_endpoint,
+                &RouterRequestKind::Restart,
+                Some(answer_deadline),
+            )
+        },
+    )?;
+    let Some((_, restart_result)) = restart_exchange else {
+        return Ok(RouterRestart::NotRunning);
+    };
+    match restart_result {
+        Ok(RouterResult::Restarting) => Ok(RouterRestart::Restarting),
+        Ok(RouterResult::Error(refusal)) => Err(CliError::IpcUnavailable {
             detail: refusal.message,
         }),
-        Some(unexpected_router_result) => {
+        Ok(unexpected_router_result) => {
             Err(talk::ROUTER_PEER_WORDS.build_unexpected_reply_error(&unexpected_router_result))
         }
+        Err(CliError::RouterAnswerTimedOut) => Ok(RouterRestart::Unanswered),
+        Err(restart_exchange_error) => Err(restart_exchange_error),
     }
 }
 
@@ -325,8 +365,20 @@ pub fn query_running_router_remote_connections(runtime_directory: &Path) -> Remo
 /// never starts a router. A router that refuses the connection token its
 /// endpoint file carries is asked once more when that file carries another
 /// token or cannot be read, or after [`REFUSED_TOKEN_ADVERTISE_WAIT_DURATION`].
-pub fn find_running_router_version(runtime_directory: &Path) -> Result<Option<String>, CliError> {
-    match run_router_exchange(runtime_directory, exchange_router_hello)? {
+/// With `answer_deadline`, the connects, the wait, the write and the read all
+/// end by that moment, as [`restart_running_router`] states, and a read that
+/// runs past it is [`CliError::RouterAnswerTimedOut`].
+pub fn find_running_router_version(
+    runtime_directory: &Path,
+    answer_deadline: Option<Instant>,
+) -> Result<Option<String>, CliError> {
+    match run_router_exchange(
+        runtime_directory,
+        answer_deadline,
+        |connection, router_endpoint| {
+            exchange_router_hello(connection, router_endpoint, answer_deadline)
+        },
+    )? {
         None => Ok(None),
         Some((_, router_version_result)) => router_version_result.map(Some),
     }
@@ -334,24 +386,42 @@ pub fn find_running_router_version(runtime_directory: &Path) -> Result<Option<St
 
 /// Send the Hello alone on `connection`, opened to the router
 /// `router_endpoint` names, and give the build the router names in its
-/// answer, as [`talk::parse_router_hello_version`] reads it.
+/// answer, as [`talk::parse_router_hello_version`] reads it. The write and the
+/// read end by `answer_deadline`, as [`build_router_exchange_error`] states.
 fn exchange_router_hello(
-    mut connection: Connection,
+    connection: Connection,
     router_endpoint: &EndpointFile,
+    answer_deadline: Option<Instant>,
 ) -> Result<String, CliError> {
+    let (mut response_reader, mut request_writer) = connection.split();
+    response_reader.set_deadline(answer_deadline);
+    request_writer.set_deadline(answer_deadline);
+    let build_exchange_error =
+        |ipc_error: IpcError| build_router_exchange_error(ipc_error, answer_deadline);
     let hello_request = RouterRequest {
         request_id: 1,
         request_kind: RouterRequestKind::build_hello_request(
             router_endpoint.connection_token.clone(),
         ),
     };
-    connection
+    request_writer
         .send(&hello_request)
-        .map_err(build_ipc_unavailable_error)?;
-    let hello_response: IncomingRouterResponse = connection
+        .map_err(build_exchange_error)?;
+    let hello_response: IncomingRouterResponse = response_reader
         .recv_answer()
-        .map_err(build_ipc_unavailable_error)?;
+        .map_err(build_exchange_error)?;
     talk::parse_router_hello_version(hello_response)
+}
+
+/// The failure for `ipc_error`, which a write or a read of a router exchange
+/// under `answer_deadline` gave: [`CliError::RouterAnswerTimedOut`] once
+/// `answer_deadline` is reached, as [`is_answer_deadline_reached`] decides,
+/// and what [`build_ipc_unavailable_error`] gives otherwise.
+fn build_router_exchange_error(ipc_error: IpcError, answer_deadline: Option<Instant>) -> CliError {
+    if is_answer_deadline_reached(answer_deadline) {
+        return CliError::RouterAnswerTimedOut;
+    }
+    build_ipc_unavailable_error(ipc_error)
 }
 
 /// Wait until the router's endpoint file in `runtime_directory` no longer
@@ -434,14 +504,22 @@ fn wait_for_router_endpoint_change(
 /// of the router before it; once it writes `router.json`, the second run
 /// presents its token and gets its answer.
 ///
+/// With `answer_deadline`, the wait ends by `answer_deadline`, and a wait that
+/// ends with less than 1 ms left hands back the refusal as it is, with no
+/// second connect. Each connect waits no longer than the time left, as
+/// [`connect_to_running_router`] states.
+///
 /// # Errors
 /// The endpoint file exists and cannot be read, or the connect fails for a
 /// reason other than nothing listening.
 fn run_router_exchange<RouterAnswer>(
     runtime_directory: &Path,
+    answer_deadline: Option<Instant>,
     mut router_exchange: impl FnMut(Connection, &EndpointFile) -> Result<RouterAnswer, CliError>,
 ) -> Result<Option<RouterExchangeOutcome<RouterAnswer>>, CliError> {
-    let Some((connection, router_endpoint)) = connect_to_running_router(runtime_directory)? else {
+    let Some((connection, router_endpoint)) =
+        connect_to_running_router(runtime_directory, answer_deadline)?
+    else {
         return Ok(None);
     };
     let exchange_result = router_exchange(connection, &router_endpoint);
@@ -454,9 +532,17 @@ fn run_router_exchange<RouterAnswer>(
     let _ = wait_for_router_endpoint_change(
         runtime_directory,
         &router_endpoint.connection_token,
-        Instant::now() + REFUSED_TOKEN_ADVERTISE_WAIT_DURATION,
+        bound_by_answer_deadline(
+            Instant::now() + REFUSED_TOKEN_ADVERTISE_WAIT_DURATION,
+            answer_deadline,
+        ),
     );
-    let Some((connection, router_endpoint)) = connect_to_running_router(runtime_directory)? else {
+    if is_answer_deadline_reached(answer_deadline) {
+        return Ok(Some((router_endpoint, exchange_result)));
+    }
+    let Some((connection, router_endpoint)) =
+        connect_to_running_router(runtime_directory, answer_deadline)?
+    else {
         return Ok(None);
     };
     let exchange_result = router_exchange(connection, &router_endpoint);
@@ -466,9 +552,19 @@ fn run_router_exchange<RouterAnswer>(
 /// A connection to the running router, with the endpoint file that named it.
 ///
 /// `Ok(None)` means no router is running — the endpoint file is missing, or
-/// nothing listens at the address it names. Nothing is sent.
+/// nothing listens at the address it names. Nothing is sent. The connect waits
+/// at most [`CONNECT_WAIT_DURATION`], and with `answer_deadline` no longer than
+/// the time left until it. The connection is kept only when this OS user
+/// serves the address, as [`Connection::connect_to_own_server_within`] checks.
+///
+/// # Errors
+/// The endpoint file exists and cannot be read, the connect fails for a reason
+/// other than nothing listening, another OS user serves the address, or less
+/// than 1 ms is left until `answer_deadline`: [`CliError::IpcUnavailable`] for
+/// each.
 fn connect_to_running_router(
     runtime_directory: &Path,
+    answer_deadline: Option<Instant>,
 ) -> Result<Option<(Connection, EndpointFile)>, CliError> {
     let endpoint =
         match EndpointFile::load_from_path(&resolve_router_endpoint_path(runtime_directory)) {
@@ -476,7 +572,18 @@ fn connect_to_running_router(
             Err(IpcError::EndpointFileMissing { .. }) => return Ok(None),
             Err(ipc_error) => return Err(build_ipc_unavailable_error(ipc_error)),
         };
-    match Connection::connect(&endpoint.socket_address) {
+    let connect_wait_duration = match answer_deadline {
+        Some(answer_deadline) => compute_time_left_until(answer_deadline)
+            .map_err(|time_left_error| {
+                build_ipc_unavailable_error(IpcError::Transport {
+                    error_detail: time_left_error.to_string(),
+                })
+            })?
+            .min(CONNECT_WAIT_DURATION),
+        None => CONNECT_WAIT_DURATION,
+    };
+    match Connection::connect_to_own_server_within(&endpoint.socket_address, connect_wait_duration)
+    {
         Ok(connection) => Ok(Some((connection, endpoint))),
         Err(IpcError::NoListener { .. }) => Ok(None),
         Err(ipc_error) => Err(build_ipc_unavailable_error(ipc_error)),
@@ -492,8 +599,8 @@ fn exchange_router_request(
     runtime_directory: &Path,
     request_kind: &RouterRequestKind,
 ) -> Result<Option<RouterResult>, CliError> {
-    match run_router_exchange(runtime_directory, |connection, router_endpoint| {
-        exchange_router_request_on_connection(connection, router_endpoint, request_kind)
+    match run_router_exchange(runtime_directory, None, |connection, router_endpoint| {
+        exchange_router_request_on_connection(connection, router_endpoint, request_kind, None)
     })? {
         None => Ok(None),
         Some((_, router_result)) => router_result.map(Some),
@@ -501,16 +608,24 @@ fn exchange_router_request(
 }
 
 /// Pipeline the Hello and `request_kind` back to back on `connection`, opened
-/// to the router `endpoint` names, and read both replies in order.
+/// to the router `endpoint` names, and read both replies in order. The writes
+/// and the reads end by `answer_deadline`, as [`build_router_exchange_error`]
+/// states.
 ///
 /// A [`RouterResult::Error`] comes back through
 /// [`rewrite_router_result_for_build`], so its
 /// message is filtered before any caller reports it.
 fn exchange_router_request_on_connection(
-    mut connection: Connection,
+    connection: Connection,
     endpoint: &EndpointFile,
     request_kind: &RouterRequestKind,
+    answer_deadline: Option<Instant>,
 ) -> Result<RouterResult, CliError> {
+    let (mut response_reader, mut request_writer) = connection.split();
+    response_reader.set_deadline(answer_deadline);
+    request_writer.set_deadline(answer_deadline);
+    let build_exchange_error =
+        |ipc_error: IpcError| build_router_exchange_error(ipc_error, answer_deadline);
     let hello_request = RouterRequest {
         request_id: 1,
         request_kind: RouterRequestKind::build_hello_request(endpoint.connection_token.clone()),
@@ -519,21 +634,21 @@ fn exchange_router_request_on_connection(
         request_id: 2,
         request_kind: request_kind.clone(),
     };
-    connection
+    request_writer
         .send(&hello_request)
-        .map_err(build_ipc_unavailable_error)?;
-    connection
+        .map_err(build_exchange_error)?;
+    request_writer
         .send(&router_request)
-        .map_err(build_ipc_unavailable_error)?;
+        .map_err(build_exchange_error)?;
 
-    let hello_response: IncomingRouterResponse = connection
+    let hello_response: IncomingRouterResponse = response_reader
         .recv_answer()
-        .map_err(build_ipc_unavailable_error)?;
+        .map_err(build_exchange_error)?;
     let router_version = talk::parse_router_hello_version(hello_response)?;
 
-    let router_response: IncomingRouterResponse = connection
+    let router_response: IncomingRouterResponse = response_reader
         .recv_answer()
-        .map_err(build_ipc_unavailable_error)?;
+        .map_err(build_exchange_error)?;
     talk::ROUTER_PEER_WORDS
         .take_response_result(router_response)
         .map(|router_result| rewrite_router_result_for_build(router_result, &router_version))
@@ -613,7 +728,7 @@ fn spawn_router_detached(runtime_directory: &Path) -> Result<(), CliError> {
 ///
 /// `is_other_user_access_allowed` `Some(true)` lets the other users of this machine reach
 /// the new session whatever its `koshi.kdl` says; `None` leaves that answer to
-/// the file.
+/// the file. On Windows both have no effect.
 ///
 /// # Errors
 /// Returns [`CliError::IpcUnavailable`] when the router refuses the create or

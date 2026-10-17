@@ -2931,6 +2931,7 @@ fn dial_session(
                         None,
                         graphics_support,
                         cell_size,
+                        None,
                     )?;
                     Ok(JoinedSession {
                         reader,
@@ -3004,16 +3005,21 @@ fn dial_remote(
 /// The serving machine presents that session's endpoint token and writes the
 /// Hello on this client's behalf, so the first frame read back is the session
 /// server's answer to that Hello. The Attach after it is this client's own,
-/// `resume_client_id` names the client record to come back as, and `resume_token` is the
-/// secret the last attach minted, presented to get that attach's view back.
+/// sent inside a `Prepare` numbered `2` and run by a `Commit` numbered `3`.
+/// `resume_client_id` names the client record to come back as, and
+/// `resume_token` is the secret the last attach minted, presented to get that
+/// attach's view back.
 ///
-/// The join runs under the deadline that `remote_link` holds.
-/// `remote_link_timeout_ms` goes up in the serving machine's Attach and in the
-/// session's Attach. Until the session's answer to that Attach is read, a
-/// `Ping` carrying the Attach's `request_id`, `2`, goes up every heartbeat
-/// interval of `remote_link_timeout_ms` ([`compute_heartbeat_interval`]).
-/// Example: `3000` and a session that answers after 2.5 seconds send two
-/// `Ping` requests, at 1 and 2 seconds. Once joined, the returned reader and
+/// The join runs under the deadline that `remote_link` holds until the
+/// session answers `Prepared`. The `Commit` and its answer then run under a
+/// deadline [`remote_client::JOIN_TIMEOUT_DURATION`] after the `Commit` starts
+/// to be written. `remote_link_timeout_ms` goes up in the serving machine's
+/// Attach and in the session's Attach. Until the session's answer to the
+/// `Prepare`, then to the `Commit`, is read, a `Ping` numbered `2` goes up
+/// every heartbeat interval of `remote_link_timeout_ms`
+/// ([`compute_heartbeat_interval`]). Example: `3000` and a session that
+/// answers the `Prepare` after 2.5 seconds send two `Ping` requests, at 1 and
+/// 2 seconds. Once joined, the returned reader and
 /// writer hold no deadline. Each socket read of the reader waits at most
 /// `remote_link_timeout_ms` for the session's next byte, and each socket
 /// write of the writer waits at most `remote_link_timeout_ms` for the link to
@@ -3023,7 +3029,9 @@ fn dial_remote(
 ///
 /// # Errors
 /// [`DialError::Unreachable`] when a frame of the join could not be written or
-/// read. [`DialError::Restarting`] when the serving router refused the join
+/// read. After the `Commit` starts to be written, it carries
+/// [`CliError::CommittedRequestUnanswered`]: the session may still attach the
+/// client. [`DialError::Restarting`] when the serving router refused the join
 /// with [`koshi_ipc::router::ROUTER_RESTARTING_MESSAGE`]. [`DialError::Refused`]
 /// when the server answered and every identical join after it gets the same
 /// answer: the admitted secret does not reach `session_selector`, the session
@@ -3047,7 +3055,7 @@ fn join_remote_session(
     let hello_response = remote_client::read_forwarded_hello_answer(&mut reader, session_selector)?;
     talk::parse_session_hello_version(hello_response).map_err(DialError::Refused)?;
     writer
-        .send(&build_attach_request(
+        .send(&build_attach_prepare_request(
             resume_client_id,
             resume_token,
             graphics_support,
@@ -3056,33 +3064,25 @@ fn join_remote_session(
         ))
         .map_err(build_link_failure)?;
     let ping_interval = compute_heartbeat_interval(remote_link_timeout_ms);
-    let attach_response = thread::scope(|join_scope| {
-        // Dropped once the Attach answer is read, which ends the pings.
-        let (attach_answer_read_sender, attach_answer_read_receiver) = mpsc::channel::<()>();
-        let ping_writer = &mut writer;
-        thread::Builder::new()
-            .name("koshi-join-pinger".to_string())
-            .spawn_scoped(join_scope, move || {
-                while attach_answer_read_receiver.recv_timeout(ping_interval)
-                    == Err(mpsc::RecvTimeoutError::Timeout)
-                {
-                    let join_ping = IpcRequest {
-                        request_id: 2,
-                        request_kind: IpcRequestKind::Ping,
-                    };
-                    if ping_writer.send(&join_ping).is_err() {
-                        break;
-                    }
-                }
-            })
-            .expect("spawn join ping thread");
-        let attach_response = reader.recv_answer();
-        drop(attach_answer_read_sender);
-        attach_response
-    })
-    .map_err(build_link_failure)?;
-    let (client_id, session_id, minted_resume_token) =
-        parse_attached_session(attach_response).map_err(DialError::Refused)?;
+    let prepare_response = read_answer_while_pinging(&mut reader, &mut writer, ping_interval)
+        .map_err(build_link_failure)?;
+    validate_attach_prepare_answer(prepare_response)?;
+    let commit_deadline = Instant::now() + remote_client::JOIN_TIMEOUT_DURATION;
+    reader.set_deadline(Some(commit_deadline));
+    writer.set_deadline(Some(commit_deadline));
+    let commit_request = IpcRequest {
+        request_id: 3,
+        request_kind: IpcRequestKind::Commit,
+    };
+    writer
+        .send(&commit_request)
+        .map_err(build_committed_attach_failure)?;
+    let attach_response = read_answer_while_pinging(&mut reader, &mut writer, ping_interval)
+        .map_err(build_committed_attach_failure)?;
+    let (client_id, session_id, minted_resume_token) = talk::SESSION_PEER_WORDS
+        .take_response_result(attach_response)
+        .and_then(parse_attached_session)
+        .map_err(DialError::Refused)?;
 
     // Joined: the join's deadline is taken away, and each socket read and
     // write waits at most the link timeout for a byte.
@@ -3111,6 +3111,74 @@ fn build_link_failure(ipc_error: IpcError) -> DialError {
             DialError::Refused(previous_release_refusal)
         }
         link_failure => DialError::Unreachable(link_failure),
+    }
+}
+
+/// The [`DialError::Unreachable`] for `ipc_error`, a failed write of this
+/// client's `Commit` or a failed read of its answer: it carries what
+/// [`talk::build_committed_request_unanswered_error`] gives. The session may
+/// still attach the client it holds.
+fn build_committed_attach_failure(ipc_error: IpcError) -> DialError {
+    DialError::Unreachable(talk::build_committed_request_unanswered_error(ipc_error))
+}
+
+/// Read the next answer on `reader`, and write a `Ping`, numbered 2, on
+/// `writer` every `ping_interval` until the answer is read. A `Ping` that
+/// cannot be written ends the pings, and the read goes on.
+///
+/// Example: an interval of 1 second and an answer read after 2.5 seconds
+/// write two `Ping` requests, at 1 and 2 seconds.
+///
+/// # Errors
+/// The failure of the read.
+fn read_answer_while_pinging(
+    reader: &mut FrameReader,
+    writer: &mut FrameWriter,
+    ping_interval: Duration,
+) -> Result<IncomingResponse, IpcError> {
+    thread::scope(|join_scope| {
+        // Dropped once the answer is read, which ends the pings.
+        let (answer_read_sender, answer_read_receiver) = mpsc::channel::<()>();
+        thread::Builder::new()
+            .name("koshi-join-pinger".to_string())
+            .spawn_scoped(join_scope, move || {
+                while answer_read_receiver.recv_timeout(ping_interval)
+                    == Err(mpsc::RecvTimeoutError::Timeout)
+                {
+                    let join_ping = IpcRequest {
+                        request_id: 2,
+                        request_kind: IpcRequestKind::Ping,
+                    };
+                    if writer.send(&join_ping).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn join ping thread");
+        let incoming_response = reader.recv_answer();
+        drop(answer_read_sender);
+        incoming_response
+    })
+}
+
+/// `Ok` when `prepare_response` is the session's `Prepared` answer to the
+/// `Prepare` carrying this client's Attach.
+///
+/// # Errors
+/// [`DialError::Refused`] carrying what [`talk::build_peer_refusal_error`]
+/// gives for a refusal, and the unexpected reply for every other answer.
+fn validate_attach_prepare_answer(prepare_response: IncomingResponse) -> Result<(), DialError> {
+    let prepare_result = talk::SESSION_PEER_WORDS
+        .take_response_result(prepare_response)
+        .map_err(DialError::Refused)?;
+    match prepare_result {
+        IpcResult::Prepared => Ok(()),
+        IpcResult::Error(refusal) => {
+            Err(DialError::Refused(talk::build_peer_refusal_error(&refusal)))
+        }
+        unexpected_result => Err(DialError::Refused(
+            talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_result),
+        )),
     }
 }
 
@@ -4043,10 +4111,17 @@ fn build_session_selector(selector: &str) -> SessionSelector {
 }
 
 /// Join the session on an open connection, given as its two halves: write the
-/// Hello and the Attach back to back on `writer`, then read both replies in
-/// order on `reader`. Each half keeps the deadline the caller set on it.
-/// Returns the client the server minted for this terminal, the session it
-/// says that client joined, and the secret this attach minted.
+/// Hello and a `Prepare` carrying the Attach back to back on `writer`, then
+/// read both replies in order on `reader`. Each half keeps the deadline the
+/// caller set on it until then. Once the session answers `Prepared`, write the
+/// `Commit`, numbered 3, and read the Attach's answer, both with
+/// `commit_timeout` from the moment the `Commit` is written; `None` waits
+/// however long it takes. Returns the client the server minted for this
+/// terminal, the session it says that client joined, and the secret this
+/// attach minted.
+///
+/// A join that ends before the `Commit` is written leaves no client behind in
+/// the session.
 ///
 /// The client names no identity of its own — the server mints the client id
 /// and answers with it — so every value comes from the reply.
@@ -4062,10 +4137,13 @@ fn build_session_selector(selector: &str) -> SessionSelector {
 /// opened names the client record it comes back as instead.
 ///
 /// # Errors
-/// [`DialError::Unreachable`] when the Hello or the Attach could not be written,
-/// or a reply could not be read. [`DialError::Refused`] for every reply that
-/// arrived and does not join: a refused Hello, a protocol version this build
-/// does not accept, a refused Attach, and an answer of another kind.
+/// [`DialError::Unreachable`] when the Hello or the `Prepare` could not be
+/// written, or a reply to them could not be read. [`DialError::Unreachable`]
+/// carrying [`CliError::CommittedRequestUnanswered`] when the `Commit` could
+/// not be written or its answer could not be read: the session may still
+/// attach the client. [`DialError::Refused`] for every reply that arrived and
+/// does not join: a refused Hello, a protocol version this build does not
+/// accept, a refused `Prepare` or Attach, and an answer of another kind.
 fn join_session(
     reader: &mut FrameReader,
     writer: &mut FrameWriter,
@@ -4073,6 +4151,7 @@ fn join_session(
     resume_client_id: Option<ClientId>,
     graphics_support: terminal::GraphicsSupport,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    commit_timeout: Option<Duration>,
 ) -> Result<(ClientId, SessionId, Option<ConnectionToken>), DialError> {
     let hello = IpcRequest {
         request_id: 1,
@@ -4080,7 +4159,7 @@ fn join_session(
     };
     writer.send(&hello).map_err(build_link_failure)?;
     writer
-        .send(&build_attach_request(
+        .send(&build_attach_prepare_request(
             resume_client_id,
             None,
             graphics_support,
@@ -4091,12 +4170,19 @@ fn join_session(
 
     talk::parse_session_hello_version(reader.recv_answer().map_err(build_link_failure)?)
         .map_err(DialError::Refused)?;
-    parse_attached_session(reader.recv_answer().map_err(build_link_failure)?)
-        .map_err(DialError::Refused)
+    validate_attach_prepare_answer(reader.recv_answer().map_err(build_link_failure)?)?;
+    let attach_result = ipc_client::commit_prepared_request(reader, writer, 3, commit_timeout)
+        .map_err(|commit_error| match commit_error {
+            unanswered_commit @ CliError::CommittedRequestUnanswered { .. } => {
+                DialError::Unreachable(unanswered_commit)
+            }
+            unreadable_answer => DialError::Refused(unreadable_answer),
+        })?;
+    parse_attached_session(attach_result).map_err(DialError::Refused)
 }
 
-/// The Attach this client writes, numbered 2: the request that follows the
-/// Hello on every connection into a session.
+/// The `Prepare` this client writes, numbered 2, carrying its Attach: the
+/// request that follows the Hello on every connection into a session.
 ///
 /// `resume_client_id` names the client record to come back as, and is `None` on a first
 /// join. `resume_token` is the secret the last attach minted, presented to get
@@ -4106,7 +4192,7 @@ fn join_session(
 /// has written it nothing for a third of it. It is `None` on this machine,
 /// where the session writes no `Pong`. Reports the pane area left by the
 /// built-in two-row UI.
-fn build_attach_request(
+fn build_attach_prepare_request(
     resume_client_id: Option<ClientId>,
     resume_token: Option<&ConnectionToken>,
     graphics_support: terminal::GraphicsSupport,
@@ -4116,7 +4202,7 @@ fn build_attach_request(
     let viewport_size = get_terminal_viewport_size();
     IpcRequest {
         request_id: 2,
-        request_kind: IpcRequestKind::Attach {
+        request_kind: IpcRequestKind::Prepare(Box::new(IpcRequestKind::Attach {
             viewport_size,
             resume_client_id,
             resume_token: resume_token.cloned(),
@@ -4124,19 +4210,20 @@ fn build_attach_request(
             graphics_capabilities: graphics_support.build_graphics_capabilities(),
             cell_size,
             link_timeout_ms,
-        },
+        })),
     }
 }
 
 /// The client the server minted for this terminal, the session it says that
-/// client joined, and the secret this attach minted, out of an Attach answer.
+/// client joined, and the secret this attach minted, out of `attach_result`,
+/// the answer to the `Commit` that ran this client's Attach.
 ///
 /// An answer that echoes no pane area is taken as it stands, and logs one
 /// debug line.
 fn parse_attached_session(
-    incoming_response: IncomingResponse,
+    attach_result: IpcResult,
 ) -> Result<(ClientId, SessionId, Option<ConnectionToken>), CliError> {
-    match talk::SESSION_PEER_WORDS.take_response_result(incoming_response)? {
+    match attach_result {
         IpcResult::Attached {
             client_id,
             session_id,
@@ -4166,8 +4253,10 @@ fn parse_attached_session(
 /// fresh client the session minted otherwise.
 ///
 /// `connection_token` is the token this client attached under; the wait watches it for a
-/// change. The connect, the Hello and Attach writes, and the reads of both
-/// replies each end at `restart_deadline`.
+/// change. The connect, the writes of the Hello and of the `Prepare` carrying
+/// the Attach, and the reads of both replies each end at `restart_deadline`.
+/// The `Commit` that runs the Attach and the read of its answer end
+/// [`RESTART_WINDOW_DURATION`] after the `Commit` starts to be written.
 ///
 /// `Err` carries the ending the attachment reports.
 /// [`AttachmentEnding::RestartedIntoIncompatibleBuild`] when the new socket
@@ -4220,6 +4309,7 @@ fn rejoin_session(
         Some(client_id),
         graphics_support,
         cell_size,
+        Some(RESTART_WINDOW_DURATION),
     )
     .map_err(|join_error| match join_error {
         DialError::Refused(join_refusal @ CliError::ProtocolVersionRefused { .. }) => {

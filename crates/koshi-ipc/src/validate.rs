@@ -10,12 +10,10 @@
 //! Who may open the pipe is settled by the listener that creates it and by
 //! the check on the connected peer, not by this module.
 //!
-//! A session other local users may reach sits in this user's own subdirectory
-//! of the machine-wide shared directory.
-//! [`validate_shared_socket_address`](crate::validate::validate_shared_socket_address)
-//! accepts only a path directly inside that subdirectory while it is a
-//! directory owned by this user with mode `0755`. On Windows that check is
-//! the `koshi-` prefix again.
+//! On Unix, a session other local users may reach sits in this user's own
+//! subdirectory of the machine-wide shared directory.
+//! `validate_shared_socket_address` accepts only a path directly inside that
+//! subdirectory while it is a directory owned by this user with mode `0755`.
 //!
 //! A socket file can also be a leftover: the process that bound it died
 //! without unlinking it, the file exists, and nothing listens (a "stale"
@@ -59,19 +57,19 @@ pub fn validate_socket_address(
 /// Check that `socket_address` is a trustworthy place for a koshi control socket other
 /// local users may reach.
 ///
-/// On Unix, `socket_address` must name a file directly inside `shared_user_directory` (no
+/// `socket_address` must name a file directly inside `shared_user_directory` (no
 /// subdirectory, no path that steps out through `..`), and `shared_user_directory`
 /// must be a directory owned by this user with permission bits exactly
 /// `0755`; the set-user-id, set-group-id and sticky bits are not checked. The
 /// check reads `shared_user_directory` without following a symbolic link, and
-/// refuses a link. On Windows, `socket_address` is a pipe name and must start with
-/// `koshi-`; `shared_user_directory` is not read.
+/// refuses a link.
 ///
 /// Each refusal is [`IpcError::UntrustedSocket`] naming `socket_address` and the
 /// reason.
 ///
 /// Callers resolve `shared_user_directory` through
 /// `koshi_paths::ensure_shared_user_directory()`.
+#[cfg(unix)]
 pub fn validate_shared_socket_address(
     socket_address: &str,
     shared_user_directory: &Path,

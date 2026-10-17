@@ -80,10 +80,7 @@ fn serve_test_connection(
 
 /// The same again, and it says when it has the connection.
 ///
-/// The receiver yields once, right after `accept` returns. On Windows a caller
-/// that connects and drops before it is accepted occupies the pipe until the
-/// next `accept`, and this helper accepts once: a test that drops its caller
-/// without sending anything waits for the receiver first.
+/// The receiver yields once, right after `accept` returns.
 fn serve_connection_and_announce(
     socket_address: &str,
     connection_token: ConnectionToken,

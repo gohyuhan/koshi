@@ -46,6 +46,7 @@ use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
 use koshi_ipc::transport::{build_frame_halves, Connection, Deadlined, FrameReader, FrameWriter};
+use koshi_test_support::fixtures::{send_committed_request, send_committed_request_through_halves};
 use koshi_test_support::throttle::pump_throttled;
 
 use common::in_process_session::{
@@ -177,8 +178,8 @@ struct ThrottledClient {
 }
 
 /// Connect to the relay at `relay_socket_address`, do the Hello and the Attach
-/// for `session` over it, and hand back the attached client with its stream
-/// unread.
+/// for `session` over it, the Attach as a `Prepare` and its `Commit`, and hand
+/// back the attached client with its stream unread.
 fn attach_client_through_relay(
     session: &RunningSession,
     relay_socket_address: &str,
@@ -206,9 +207,11 @@ fn attach_client_through_relay(
         );
     };
 
-    client_frame_writer
-        .send(&build_attach_request())
-        .expect("the relay carries the attach");
+    send_committed_request_through_halves(
+        &mut session_frame_reader,
+        &mut client_frame_writer,
+        build_attach_request(),
+    );
     let ipc_response: IpcResponse = session_frame_reader
         .recv()
         .expect("the server answers the attach");
@@ -233,8 +236,9 @@ fn attach_client_through_relay(
     }
 }
 
-/// Submit `command` over `connection`, enveloped the way the CLI running inside
-/// `pane_id` envelops it, and hand back the dispatcher's result.
+/// Submit `command` over `connection` as a `Prepare` and its `Commit`,
+/// enveloped the way the CLI running inside `pane_id` envelops it, and hand
+/// back the dispatcher's result.
 ///
 /// `connection` is used as is, and stays open for the next call: the control
 /// socket serves requests on one connection until its peer hangs up.
@@ -256,13 +260,13 @@ fn submit_session_command(
         ),
         command,
     );
-    let submit_request = IpcRequest {
-        request_id: 2,
-        request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
-    };
-    connection
-        .send(&submit_request)
-        .expect("the server reads the command");
+    send_committed_request(
+        connection,
+        IpcRequest {
+            request_id: 2,
+            request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
+        },
+    );
     let ipc_response: IpcResponse = connection.recv().expect("the server answers the command");
     assert_eq!(ipc_response.request_id, Some(2));
     match ipc_response.answer_result {
@@ -271,13 +275,12 @@ fn submit_session_command(
     }
 }
 
-/// Attach once more over the control socket and hand back only the structure
-/// the reply carried, with the connection closed again.
+/// Attach once more over the control socket, as a `Prepare` and its `Commit`,
+/// and hand back only the structure the reply carried, with the connection
+/// closed again.
 fn get_reattached_structure(session: &RunningSession) -> AttachedSessionStructureSnapshot {
     let mut connection = open_session_connection(&session.load_session_endpoint());
-    connection
-        .send(&build_attach_request())
-        .expect("the server reads the attach");
+    send_committed_request(&mut connection, build_attach_request());
     let ipc_response: IpcResponse = connection.recv().expect("the server answers the attach");
     let IpcResult::Attached {
         session_structure, ..

@@ -252,6 +252,19 @@ fn a_quit_refused_by_a_server_of_koshi_0_4_0_reads_as_the_format_sentence_alone(
 }
 
 #[test]
+fn a_quit_the_session_took_and_did_not_answer_reads_without_the_advice_to_check_first() {
+    let quit_error = CliError::CommittedRequestUnanswered {
+        detail: "ipc peer disconnected".to_string(),
+    };
+
+    assert_eq!(
+        format_quit_failure(&quit_error),
+        "IPC unavailable: the session took the request and gave no answer (ipc peer \
+         disconnected)"
+    );
+}
+
+#[test]
 fn any_other_quit_failure_reads_as_the_errors_own_sentence() {
     assert_eq!(
         format_quit_failure(&CliError::SessionAnswerTimedOut),
