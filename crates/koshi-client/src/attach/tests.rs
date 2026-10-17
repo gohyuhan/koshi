@@ -58,7 +58,8 @@ use koshi_ipc::endpoint::{compute_socket_address, EndpointFile};
 use koshi_ipc::frame::{FrameClient, FrameSession, FrameSlot, FrameTab, PaintedFrame};
 use koshi_ipc::placement::PanePlacementPaneSnapshot;
 use koshi_ipc::protocol::{
-    ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcResponse, IpcResult, PROTOCOL_VERSION,
+    ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcResponse, IpcResult, ProcessImageId,
+    PROTOCOL_VERSION,
 };
 use koshi_ipc::remote_servers::SavedServer;
 use koshi_ipc::remote_wire::RemoteClientFrame;
@@ -363,6 +364,7 @@ fn build_recording_router(runtime_directory: &Path) -> Arc<Mutex<Vec<&'static st
                 RouterRequestKind::Hello { .. } => RouterResult::Hello {
                     protocol_version: ROUTER_PROTOCOL_VERSION,
                     build_version: String::new(),
+                    process_image_id: Some(ProcessImageId::get_own()),
                 },
                 _ => RouterResult::Error(IpcErrorPayload {
                     code: IpcErrorCode::BadToken,
@@ -1044,6 +1046,7 @@ fn spawn_restarted_session(
                     None => IpcResult::Hello {
                         protocol_version: PROTOCOL_VERSION,
                         build_version: String::from("0.0.0"),
+                        process_image_id: ProcessImageId::get_own(),
                     },
                 },
                 IpcRequestKind::Prepare(prepared_kind)
@@ -1190,6 +1193,7 @@ fn encode_remote_join_answers(client_id: ClientId, session_id: SessionId) -> Vec
             answer_result: IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 build_version: String::from("0.0.0"),
+                process_image_id: ProcessImageId::get_own(),
             },
         })
         .expect("the Hello answer is encoded");
@@ -1384,6 +1388,7 @@ fn a_remote_join_pings_every_third_of_the_link_timeout_until_the_prepare_and_the
             answer_result: IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 build_version: String::from("0.0.0"),
+                process_image_id: ProcessImageId::get_own(),
             },
         })
         .expect("the Hello answer is written");

@@ -8,7 +8,7 @@ use super::*;
 
 use koshi_core::compat::{CONTROL_PROTOCOL, SESSION_PROTOCOL};
 use koshi_core::event::RejectReason;
-use koshi_ipc::protocol::{IpcErrorCode, IpcResult};
+use koshi_ipc::protocol::{IpcErrorCode, IpcResult, ProcessImageId};
 
 /// The sentence a failure carries, for asserting on it exactly. Panics on any
 /// [`CliError`] variant other than [`CliError::IpcUnavailable`].
@@ -383,28 +383,38 @@ fn build_router_response(router_result: RouterResult) -> IncomingRouterResponse 
 }
 
 #[test]
-fn a_session_hello_hands_back_the_build_the_session_named() {
+fn a_session_hello_hands_back_the_build_and_the_process_image_the_session_named() {
+    let process_image_id = ProcessImageId::generate();
     let incoming_response = build_session_response(IpcResult::Hello {
         protocol_version: SESSION_PROTOCOL.maximum_version,
         build_version: "0.9.9".to_string(),
+        process_image_id,
     });
 
     assert_eq!(
-        parse_session_hello_version(incoming_response).expect("a version inside the range opens"),
-        (SESSION_PROTOCOL.maximum_version, "0.9.9".to_string())
+        parse_session_hello_answer(incoming_response).expect("a version inside the range opens"),
+        SessionHelloAnswer {
+            build_version: "0.9.9".to_string(),
+            process_image_id,
+        }
     );
 }
 
 #[test]
 fn a_session_hello_with_an_empty_build_version_hands_back_an_empty_string() {
+    let process_image_id = ProcessImageId::generate();
     let incoming_response = build_session_response(IpcResult::Hello {
         protocol_version: SESSION_PROTOCOL.maximum_version,
         build_version: String::new(),
+        process_image_id,
     });
 
     assert_eq!(
-        parse_session_hello_version(incoming_response).expect("an empty build version still opens"),
-        (SESSION_PROTOCOL.maximum_version, String::new())
+        parse_session_hello_answer(incoming_response).expect("an empty build version still opens"),
+        SessionHelloAnswer {
+            build_version: String::new(),
+            process_image_id,
+        }
     );
 }
 
@@ -413,9 +423,10 @@ fn a_session_hello_naming_a_version_outside_the_range_stops_the_exchange() {
     let incoming_response = build_session_response(IpcResult::Hello {
         protocol_version: SESSION_PROTOCOL.maximum_version + 1,
         build_version: "0.9.9".to_string(),
+        process_image_id: ProcessImageId::generate(),
     });
 
-    let refusal = parse_session_hello_version(incoming_response)
+    let refusal = parse_session_hello_answer(incoming_response)
         .expect_err("a version above the range is refused");
 
     assert_eq!(
@@ -432,7 +443,7 @@ fn a_session_refusing_the_hello_stops_the_exchange_with_its_own_sentence() {
     }));
 
     let refusal =
-        parse_session_hello_version(incoming_response).expect_err("a refused Hello opens nothing");
+        parse_session_hello_answer(incoming_response).expect_err("a refused Hello opens nothing");
 
     assert_eq!(
         extract_connection_token_refused_detail(refusal),
@@ -445,7 +456,7 @@ fn a_session_answering_no_hello_at_all_names_the_reply_that_arrived() {
     let incoming_response = build_session_response(IpcResult::Restarting);
 
     let refusal =
-        parse_session_hello_version(incoming_response).expect_err("a Restarting is not a Hello");
+        parse_session_hello_answer(incoming_response).expect_err("a Restarting is not a Hello");
 
     assert_eq!(
         extract_ipc_unavailable_detail(refusal),
@@ -462,7 +473,7 @@ fn a_hello_answer_this_build_cannot_name_stops_the_exchange() {
         },
     };
 
-    let refusal = parse_session_hello_version(incoming_response)
+    let refusal = parse_session_hello_answer(incoming_response)
         .expect_err("this build has no Rehomed variant");
 
     assert_eq!(
@@ -472,15 +483,37 @@ fn a_hello_answer_this_build_cannot_name_stops_the_exchange() {
 }
 
 #[test]
-fn a_router_hello_hands_back_the_build_the_router_named() {
+fn a_router_hello_hands_back_the_build_and_the_process_image_the_router_named() {
+    let router_process_image_id = ProcessImageId::generate();
     let incoming_response = build_router_response(RouterResult::Hello {
         protocol_version: CONTROL_PROTOCOL.maximum_version,
         build_version: "0.9.9".to_string(),
+        process_image_id: Some(router_process_image_id),
     });
 
     assert_eq!(
-        parse_router_hello_version(incoming_response).expect("a version inside the range opens"),
-        "0.9.9"
+        parse_router_hello_answer(incoming_response).expect("a version inside the range opens"),
+        RouterHelloAnswer {
+            build_version: "0.9.9".to_string(),
+            process_image_id: Some(router_process_image_id),
+        }
+    );
+}
+
+#[test]
+fn a_koshi_0_5_0_router_hello_hands_back_no_process_image() {
+    let incoming_response = build_router_response(RouterResult::Hello {
+        protocol_version: CONTROL_PROTOCOL.maximum_version,
+        build_version: "0.5.0".to_string(),
+        process_image_id: None,
+    });
+
+    assert_eq!(
+        parse_router_hello_answer(incoming_response).expect("a version inside the range opens"),
+        RouterHelloAnswer {
+            build_version: "0.5.0".to_string(),
+            process_image_id: None,
+        }
     );
 }
 
@@ -489,10 +522,13 @@ fn a_router_hello_build_loses_its_control_characters() {
     let incoming_response = build_router_response(RouterResult::Hello {
         protocol_version: CONTROL_PROTOCOL.maximum_version,
         build_version: "0.9.9\u{1b}]0;title\u{7}".to_string(),
+        process_image_id: None,
     });
 
     assert_eq!(
-        parse_router_hello_version(incoming_response).expect("a version inside the range opens"),
+        parse_router_hello_answer(incoming_response)
+            .expect("a version inside the range opens")
+            .build_version,
         "0.9.9]0;title"
     );
 }
@@ -502,9 +538,10 @@ fn a_router_hello_naming_a_version_outside_the_range_stops_the_exchange() {
     let incoming_response = build_router_response(RouterResult::Hello {
         protocol_version: CONTROL_PROTOCOL.maximum_version + 1,
         build_version: "0.9.9".to_string(),
+        process_image_id: None,
     });
 
-    let refusal = parse_router_hello_version(incoming_response)
+    let refusal = parse_router_hello_answer(incoming_response)
         .expect_err("a version above the range is refused");
 
     assert_eq!(
@@ -521,7 +558,7 @@ fn a_router_refusing_the_hello_stops_the_exchange_with_its_own_sentence() {
     }));
 
     let refusal =
-        parse_router_hello_version(incoming_response).expect_err("a refused Hello opens nothing");
+        parse_router_hello_answer(incoming_response).expect_err("a refused Hello opens nothing");
 
     assert_eq!(
         extract_connection_token_refused_detail(refusal),
@@ -534,7 +571,7 @@ fn a_router_answering_no_hello_at_all_names_the_reply_that_arrived() {
     let incoming_response = build_router_response(RouterResult::Restarting);
 
     let refusal =
-        parse_router_hello_version(incoming_response).expect_err("a Restarting is not a Hello");
+        parse_router_hello_answer(incoming_response).expect_err("a Restarting is not a Hello");
 
     assert_eq!(
         extract_ipc_unavailable_detail(refusal),
@@ -604,17 +641,19 @@ fn a_rejections_hint_is_filtered_and_an_applied_result_is_left_alone() {
 #[test]
 fn a_session_hello_filters_the_build_it_named() {
     // The control characters of the build version are dropped.
+    let process_image_id = ProcessImageId::generate();
     let incoming_response = build_session_response(IpcResult::Hello {
         protocol_version: SESSION_PROTOCOL.maximum_version,
         build_version: "\u{1b}]0;pwned\u{7}0.9.9".to_string(),
+        process_image_id,
     });
 
     assert_eq!(
-        parse_session_hello_version(incoming_response).expect("a version inside the range opens"),
-        (
-            SESSION_PROTOCOL.maximum_version,
-            "]0;pwned0.9.9".to_string()
-        )
+        parse_session_hello_answer(incoming_response).expect("a version inside the range opens"),
+        SessionHelloAnswer {
+            build_version: "]0;pwned0.9.9".to_string(),
+            process_image_id,
+        }
     );
 }
 

@@ -33,7 +33,7 @@ use std::thread::JoinHandle;
 use koshi_ipc::endpoint::{compute_socket_address, is_update_restarting_servers, EndpointFile};
 use koshi_ipc::protocol::{
     ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
-    IpcResult, PROTOCOL_VERSION,
+    IpcResult, ProcessImageId, PROTOCOL_VERSION,
 };
 use koshi_ipc::router::{
     compute_router_socket_address, resolve_router_endpoint_path, RouterHandshake, RouterRequest,
@@ -54,7 +54,6 @@ use koshi_test_support::fixtures::{
 use crate::session_end::tests::{
     end_stand_in_session, format_stand_in_file_name, start_stand_in_session,
 };
-use serde::de::DeserializeOwned;
 
 /// Bind the router's address in `runtime_directory` and write the endpoint
 /// file advertising it, as a router would. Hands back the listener and the
@@ -74,12 +73,14 @@ fn bind_advertised_router(runtime_directory: &Path) -> (Listener, ConnectionToke
 }
 
 /// Read one Hello on `connection` and answer it as a router on
-/// `reported_build_version` would: a Hello reply when the Hello presents
-/// `connection_token`, and the handshake's refusal otherwise.
+/// `reported_build_version` in the process image `process_image_id` would: a
+/// Hello reply when the Hello presents `connection_token`, and the handshake's
+/// refusal otherwise.
 fn answer_router_hello(
     connection: &mut Connection,
     connection_token: &ConnectionToken,
     reported_build_version: &str,
+    process_image_id: Option<ProcessImageId>,
 ) {
     let mut router_handshake = RouterHandshake::from_connection_token(connection_token.clone());
     let hello_request: RouterRequest = connection.recv().expect("read the hello");
@@ -88,6 +89,7 @@ fn answer_router_hello(
         Ok(()) => RouterResult::Hello {
             protocol_version: ROUTER_PROTOCOL_VERSION,
             build_version: reported_build_version.to_string(),
+            process_image_id,
         },
         Err(error_response) => RouterResult::Error(error_response),
     };
@@ -110,37 +112,53 @@ fn send_router_response(
 
 /// Serve one Hello-only connection as a router would: bind the router's
 /// address, write the endpoint file advertising it, accept one caller, and
-/// answer its Hello with `reported_build_version`.
+/// answer its Hello with `reported_build_version` and `process_image_id`.
 fn spawn_fake_router_reporting(
     runtime_directory: &Path,
     reported_build_version: &str,
+    process_image_id: Option<ProcessImageId>,
 ) -> JoinHandle<()> {
     let (listener, connection_token) = bind_advertised_router(runtime_directory);
     let reported_build_version = reported_build_version.to_string();
     std::thread::spawn(move || {
         let mut connection = listener.accept().expect("accept the caller");
-        answer_router_hello(&mut connection, &connection_token, &reported_build_version);
+        answer_router_hello(
+            &mut connection,
+            &connection_token,
+            &reported_build_version,
+            process_image_id,
+        );
     })
 }
 
-/// Serve a router that restarts: bind and advertise the router's address,
+/// Serve a router asked to restart: bind and advertise the router's address,
 /// answer the first caller's Hello with `previous_build_version` and its
 /// Restart with [`RouterResult::Restarting`], then answer the second caller's
-/// Hello with `restarted_build_version`.
+/// Hello with `restarted_build_version`. With `is_restarting_into_new_image`,
+/// the second Hello answer names another process image than the first, and
+/// otherwise the same one.
 fn spawn_fake_router_restarting(
     runtime_directory: &Path,
     previous_build_version: &str,
     restarted_build_version: &str,
+    is_restarting_into_new_image: bool,
 ) -> JoinHandle<()> {
     let (listener, connection_token) = bind_advertised_router(runtime_directory);
     let previous_build_version = previous_build_version.to_string();
     let restarted_build_version = restarted_build_version.to_string();
+    let asked_process_image_id = ProcessImageId::generate();
+    let restarted_process_image_id = if is_restarting_into_new_image {
+        ProcessImageId::generate()
+    } else {
+        asked_process_image_id
+    };
     std::thread::spawn(move || {
         let mut restart_connection = listener.accept().expect("accept the restart caller");
         answer_router_hello(
             &mut restart_connection,
             &connection_token,
             &previous_build_version,
+            Some(asked_process_image_id),
         );
         let restart_request: RouterRequest = restart_connection.recv().expect("read the restart");
         assert_eq!(
@@ -158,6 +176,7 @@ fn spawn_fake_router_restarting(
             &mut probe_connection,
             &connection_token,
             &restarted_build_version,
+            Some(restarted_process_image_id),
         );
     })
 }
@@ -176,29 +195,59 @@ fn run_before_test_deadline<GuardedAnswer: Send + 'static>(
         .expect("the call ends once its wait runs out")
 }
 
-/// Accept one caller on `listener`, read its Hello and its Restart as
-/// `PeerRequest`, and answer neither. The connection stays open until
-/// `release_receiver` hears from the test or its sender drops.
-fn spawn_peer_that_never_answers<PeerRequest: DeserializeOwned + 'static>(
+/// Accept one caller on `listener`, read its Hello and the `Prepare` of its
+/// Restart, and answer neither, as a session that never answers would. The
+/// connection stays open until `release_receiver` hears from the test or its
+/// sender drops.
+fn spawn_session_that_never_answers(
     listener: Listener,
     release_receiver: mpsc::Receiver<()>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let mut connection = listener.accept().expect("accept the caller");
-        let _hello_request: PeerRequest = connection.recv().expect("read the hello");
-        let _restart_request: PeerRequest = connection.recv().expect("read the restart");
+        let _hello_request: IpcRequest = connection.recv().expect("read the hello");
+        let _restart_prepare_request: IpcRequest = connection.recv().expect("read the restart");
+        let _ = release_receiver.recv();
+    })
+}
+
+/// Accept one caller on `listener`, presenting `connection_token`, answer its
+/// Hello as a router on `9.9.9` would, read its Restart, and answer nothing
+/// more. The connection stays open until `release_receiver` hears from the
+/// test or its sender drops.
+fn spawn_router_that_never_answers_its_restart(
+    listener: Listener,
+    connection_token: ConnectionToken,
+    release_receiver: mpsc::Receiver<()>,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut connection = listener.accept().expect("accept the caller");
+        answer_router_hello(
+            &mut connection,
+            &connection_token,
+            "9.9.9",
+            Some(ProcessImageId::generate()),
+        );
+        let restart_request: RouterRequest = connection.recv().expect("read the restart");
+        assert_eq!(restart_request.request_kind, RouterRequestKind::Restart);
         let _ = release_receiver.recv();
     })
 }
 
 #[test]
-fn a_router_reporting_the_installed_version_confirms_the_restart() {
+fn a_router_naming_a_new_process_image_and_the_installed_version_confirms_the_restart() {
     let runtime_directory = build_test_runtime_directory();
-    let router_thread = spawn_fake_router_reporting(runtime_directory.path(), "3.3.3");
+    let router_thread = spawn_fake_router_reporting(
+        runtime_directory.path(),
+        "3.3.3",
+        Some(ProcessImageId::generate()),
+    );
+    let asked_process_image_id = Some(ProcessImageId::generate());
 
-    let version_probe_outcome = wait_for_version("3.3.3", Duration::from_secs(5), || {
-        probe_router_version(runtime_directory.path())
-    });
+    let version_probe_outcome =
+        wait_for_restart_into_version("3.3.3", Duration::from_secs(5), || {
+            probe_restarted_router(runtime_directory.path(), asked_process_image_id)
+        });
 
     assert_eq!(version_probe_outcome, VersionProbeOutcome::Installed);
     router_thread
@@ -207,17 +256,44 @@ fn a_router_reporting_the_installed_version_confirms_the_restart() {
 }
 
 #[test]
-fn a_router_still_on_another_version_is_reported_after_the_wait() {
+fn a_router_still_naming_the_process_image_asked_to_restart_is_not_confirmed() {
     let runtime_directory = build_test_runtime_directory();
-    let router_thread = spawn_fake_router_reporting(runtime_directory.path(), "1.0.0");
+    let asked_process_image_id = Some(ProcessImageId::generate());
+    let router_thread =
+        spawn_fake_router_reporting(runtime_directory.path(), "3.3.3", asked_process_image_id);
 
-    let version_probe_outcome = wait_for_version("2.0.0", Duration::from_millis(250), || {
-        probe_router_version(runtime_directory.path())
-    });
+    let version_probe_outcome =
+        wait_for_restart_into_version("3.3.3", Duration::from_millis(250), || {
+            probe_restarted_router(runtime_directory.path(), asked_process_image_id)
+        });
 
     assert_eq!(
         version_probe_outcome,
-        VersionProbeOutcome::OtherVersion("1.0.0".to_string())
+        VersionProbeOutcome::NotInstalled("3.3.3".to_string())
+    );
+    router_thread
+        .join()
+        .expect("the stand-in served its connection");
+}
+
+#[test]
+fn a_router_still_on_another_version_is_reported_after_the_wait() {
+    let runtime_directory = build_test_runtime_directory();
+    let router_thread = spawn_fake_router_reporting(
+        runtime_directory.path(),
+        "1.0.0",
+        Some(ProcessImageId::generate()),
+    );
+    let asked_process_image_id = Some(ProcessImageId::generate());
+
+    let version_probe_outcome =
+        wait_for_restart_into_version("2.0.0", Duration::from_millis(250), || {
+            probe_restarted_router(runtime_directory.path(), asked_process_image_id)
+        });
+
+    assert_eq!(
+        version_probe_outcome,
+        VersionProbeOutcome::NotInstalled("1.0.0".to_string())
     );
     router_thread
         .join()
@@ -228,23 +304,84 @@ fn a_router_still_on_another_version_is_reported_after_the_wait() {
 fn no_router_answering_reports_no_version_after_the_wait() {
     let runtime_directory = build_test_runtime_directory();
     assert_eq!(
-        wait_for_version("2.0.0", Duration::from_millis(50), || probe_router_version(
-            runtime_directory.path()
-        )),
+        wait_for_restart_into_version("2.0.0", Duration::from_millis(50), || {
+            probe_restarted_router(runtime_directory.path(), None)
+        }),
         VersionProbeOutcome::Silent
     );
 }
 
 #[test]
+fn a_router_naming_a_process_image_is_new_to_a_restart_asked_of_koshi_0_5_0() {
+    let runtime_directory = build_test_runtime_directory();
+    let router_thread = spawn_fake_router_reporting(
+        runtime_directory.path(),
+        "3.3.3",
+        Some(ProcessImageId::generate()),
+    );
+
+    assert_eq!(
+        probe_restarted_router(runtime_directory.path(), None),
+        Some(RestartProbeAnswer {
+            reported_version: "3.3.3".to_string(),
+            is_new_image: true,
+        })
+    );
+    router_thread
+        .join()
+        .expect("the stand-in served its connection");
+}
+
+#[test]
+fn a_router_naming_no_process_image_is_not_new_to_a_restart_asked_of_koshi_0_5_0() {
+    let runtime_directory = build_test_runtime_directory();
+    let router_thread = spawn_fake_router_reporting(runtime_directory.path(), "0.5.0", None);
+
+    assert_eq!(
+        probe_restarted_router(runtime_directory.path(), None),
+        Some(RestartProbeAnswer {
+            reported_version: "0.5.0".to_string(),
+            is_new_image: false,
+        })
+    );
+    router_thread
+        .join()
+        .expect("the stand-in served its connection");
+}
+
+#[test]
 fn asking_the_router_to_restart_confirms_it_once_its_hello_reports_the_installed_version() {
     let runtime_directory = build_test_runtime_directory();
-    let router_thread = spawn_fake_router_restarting(runtime_directory.path(), "2.0.0", "3.3.3");
+    let router_thread =
+        spawn_fake_router_restarting(runtime_directory.path(), "2.0.0", "3.3.3", true);
 
     let router_outcome =
         restart_advertised_router(runtime_directory.path(), "3.3.3", Duration::from_secs(5))
             .expect("the router takes the restart");
 
     assert_eq!(router_outcome, Some(VersionProbeOutcome::Installed));
+    router_thread
+        .join()
+        .expect("the stand-in served its connections");
+}
+
+#[test]
+fn a_router_that_answers_restarting_and_keeps_its_process_image_is_not_confirmed() {
+    let runtime_directory = build_test_runtime_directory();
+    let router_thread =
+        spawn_fake_router_restarting(runtime_directory.path(), "3.3.3", "3.3.3", false);
+
+    let router_outcome = restart_advertised_router(
+        runtime_directory.path(),
+        "3.3.3",
+        Duration::from_millis(500),
+    )
+    .expect("the router takes the restart");
+
+    assert_eq!(
+        router_outcome,
+        Some(VersionProbeOutcome::NotInstalled("3.3.3".to_string()))
+    );
     router_thread
         .join()
         .expect("the stand-in served its connections");
@@ -264,9 +401,10 @@ fn asking_no_running_router_to_restart_restarts_nothing() {
 #[test]
 fn a_router_that_never_answers_its_restart_request_is_reported_silent_after_the_wait() {
     let runtime_directory = build_test_runtime_directory();
-    let (listener, _connection_token) = bind_advertised_router(runtime_directory.path());
+    let (listener, connection_token) = bind_advertised_router(runtime_directory.path());
     let (release_sender, release_receiver) = mpsc::channel();
-    let router_thread = spawn_peer_that_never_answers::<RouterRequest>(listener, release_receiver);
+    let router_thread =
+        spawn_router_that_never_answers_its_restart(listener, connection_token, release_receiver);
 
     let router_runtime_directory = runtime_directory.path().to_path_buf();
     let router_outcome = run_before_test_deadline(move || {
@@ -430,6 +568,7 @@ fn spawn_router_replaced_after_its_first_hello(
             RouterResult::Hello {
                 protocol_version: ROUTER_PROTOCOL_VERSION,
                 build_version: "3.3.3".to_string(),
+                process_image_id: Some(ProcessImageId::generate()),
             },
         );
     })
@@ -651,8 +790,11 @@ fn a_router_refusing_this_builds_protocol_version_reports_the_version_its_progra
     let router_thread = spawn_router_refusing_this_builds_protocol_version(listener);
 
     assert_eq!(
-        probe_router_version(runtime_directory.path()),
-        Some("3.3.3".to_string())
+        probe_restarted_router(runtime_directory.path(), Some(ProcessImageId::generate())),
+        Some(RestartProbeAnswer {
+            reported_version: "3.3.3".to_string(),
+            is_new_image: true,
+        })
     );
     router_thread
         .join()
@@ -668,6 +810,10 @@ struct SessionRestartScript {
     restart_answer: Option<IpcResult>,
     /// The build version every Hello answer of this session carries.
     reported_build_version: String,
+    /// Whether the session replaces its process image once the first caller
+    /// is served. Every caller after the first is then answered by the next
+    /// image, and otherwise by the image the first caller asked.
+    is_restarting_into_new_image: bool,
 }
 
 /// Bind `session_id`'s address in `runtime_directory` and write the endpoint
@@ -697,13 +843,14 @@ fn bind_advertised_session(
 /// write the endpoint file advertising it, then answer that many callers.
 ///
 /// The first caller writes a Hello and a `Prepare` of a Restart back to back.
-/// Its Hello is answered with the script's build version and its `Prepare`
-/// with `Prepared`, and the `Commit` it writes next is answered per
-/// `session_script`. The connection ends once that is done. Every caller
-/// after the first writes a Hello alone and is answered with the script's
-/// build version. A caller arriving once `connection_count` are served finds
-/// nothing listening, which is what a session that is replacing its own image
-/// looks like.
+/// Its Hello is answered with the script's build version and the session's
+/// first process image, and its `Prepare` with `Prepared`. The `Commit` it
+/// writes next is answered per `session_script`. The connection ends once that
+/// is done. Every caller after the first writes a Hello alone and is answered
+/// with the script's build version, from the process image
+/// `session_script.is_restarting_into_new_image` selects. A caller arriving
+/// once `connection_count` are served finds nothing listening, which is what a
+/// session that is replacing its own image looks like.
 fn spawn_fake_session(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -716,7 +863,14 @@ fn spawn_fake_session(
         let SessionRestartScript {
             restart_answer,
             reported_build_version,
+            is_restarting_into_new_image,
         } = session_script;
+        let asked_process_image_id = ProcessImageId::generate();
+        let restarted_process_image_id = if is_restarting_into_new_image {
+            ProcessImageId::generate()
+        } else {
+            asked_process_image_id
+        };
         for connection_index in 0..connection_count {
             let mut connection = listener.accept().expect("accept the caller");
             let hello_request: IpcRequest = connection.recv().expect("read the hello");
@@ -746,6 +900,7 @@ fn spawn_fake_session(
                     IpcResult::Hello {
                         protocol_version: PROTOCOL_VERSION,
                         build_version: reported_build_version.clone(),
+                        process_image_id: asked_process_image_id,
                     },
                 );
                 send_ipc_response(
@@ -770,6 +925,7 @@ fn spawn_fake_session(
                     IpcResult::Hello {
                         protocol_version: PROTOCOL_VERSION,
                         build_version: reported_build_version.clone(),
+                        process_image_id: restarted_process_image_id,
                     },
                 );
             }
@@ -854,6 +1010,7 @@ fn a_session_reporting_the_installed_version_confirms_its_restart() {
         SessionRestartScript {
             restart_answer: Some(IpcResult::Restarting),
             reported_build_version: "3.3.3".to_string(),
+            is_restarting_into_new_image: true,
         },
         2,
     );
@@ -875,6 +1032,41 @@ fn a_session_reporting_the_installed_version_confirms_its_restart() {
         .expect("the stand-in served its connections");
 }
 
+#[test]
+fn a_session_that_answers_restarting_and_keeps_its_process_image_is_not_confirmed() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let session_thread = spawn_fake_session(
+        runtime_directory.path(),
+        session_id,
+        SessionRestartScript {
+            restart_answer: Some(IpcResult::Restarting),
+            reported_build_version: "3.3.3".to_string(),
+            is_restarting_into_new_image: false,
+        },
+        2,
+    );
+
+    let session_outcomes = restart_advertised_sessions(
+        runtime_directory.path(),
+        "3.3.3",
+        RestartScope::EveryServer,
+        Duration::from_millis(500),
+    )
+    .expect("read the runtime directory");
+
+    assert_eq!(
+        session_outcomes,
+        vec![(
+            session_id,
+            SessionOutcome::StillOnVersion("3.3.3".to_string())
+        )]
+    );
+    session_thread
+        .join()
+        .expect("the stand-in served its connections");
+}
+
 /// The Hello answer of this build's envelope from a session on
 /// `build_version`, as its JSON text.
 fn format_current_session_hello_answer_text(build_version: &str) -> String {
@@ -883,6 +1075,7 @@ fn format_current_session_hello_answer_text(build_version: &str) -> String {
         answer_result: IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
             build_version: build_version.to_string(),
+            process_image_id: ProcessImageId::generate(),
         },
     })
     .expect("the answer serializes")
@@ -1028,6 +1221,7 @@ fn a_session_still_on_the_old_version_is_reported_after_the_wait() {
         SessionRestartScript {
             restart_answer: Some(IpcResult::Restarting),
             reported_build_version: "1.0.0".to_string(),
+            is_restarting_into_new_image: true,
         },
         2,
     );
@@ -1063,6 +1257,7 @@ fn a_session_that_took_the_restart_and_gave_no_answer_is_confirmed_once_it_repor
         SessionRestartScript {
             restart_answer: None,
             reported_build_version: "3.3.3".to_string(),
+            is_restarting_into_new_image: true,
         },
         2,
     );
@@ -1094,6 +1289,7 @@ fn a_session_that_took_the_restart_and_gave_no_answer_and_kept_its_version_may_s
         SessionRestartScript {
             restart_answer: None,
             reported_build_version: "1.0.0".to_string(),
+            is_restarting_into_new_image: true,
         },
         2,
     );
@@ -1133,6 +1329,7 @@ fn a_session_refusing_with_the_malformed_request_code_is_reported_failed_with_it
                     .to_string(),
             })),
             reported_build_version: "1.0.0".to_string(),
+            is_restarting_into_new_image: true,
         },
         1,
     );
@@ -1205,6 +1402,7 @@ fn one_session_refusing_still_leaves_every_other_session_asked() {
             SessionRestartScript {
                 restart_answer: Some(IpcResult::Restarting),
                 reported_build_version: "3.3.3".to_string(),
+                is_restarting_into_new_image: true,
             },
             2,
         ),
@@ -1217,6 +1415,7 @@ fn one_session_refusing_still_leaves_every_other_session_asked() {
                     message: "a pane is mid-write".to_string(),
                 })),
                 reported_build_version: "3.3.3".to_string(),
+                is_restarting_into_new_image: true,
             },
             1,
         ),
@@ -1226,6 +1425,7 @@ fn one_session_refusing_still_leaves_every_other_session_asked() {
             SessionRestartScript {
                 restart_answer: Some(IpcResult::Restarting),
                 reported_build_version: "3.3.3".to_string(),
+                is_restarting_into_new_image: true,
             },
             2,
         ),
@@ -1260,7 +1460,12 @@ fn one_session_refusing_still_leaves_every_other_session_asked() {
 #[test]
 fn no_running_session_leaves_the_router_confirmation_unchanged() {
     let runtime_directory = build_test_runtime_directory();
-    let router_thread = spawn_fake_router_reporting(runtime_directory.path(), "3.3.3");
+    let router_thread = spawn_fake_router_reporting(
+        runtime_directory.path(),
+        "3.3.3",
+        Some(ProcessImageId::generate()),
+    );
+    let asked_process_image_id = Some(ProcessImageId::generate());
 
     let session_outcomes = restart_advertised_sessions(
         runtime_directory.path(),
@@ -1272,9 +1477,9 @@ fn no_running_session_leaves_the_router_confirmation_unchanged() {
 
     assert_eq!(session_outcomes, Vec::new());
     assert_eq!(
-        wait_for_version("3.3.3", Duration::from_secs(5), || probe_router_version(
-            runtime_directory.path()
-        )),
+        wait_for_restart_into_version("3.3.3", Duration::from_secs(5), || {
+            probe_restarted_router(runtime_directory.path(), asked_process_image_id)
+        }),
         VersionProbeOutcome::Installed
     );
     router_thread
@@ -1289,7 +1494,7 @@ fn a_session_that_never_answers_its_restart_request_is_reported_unconfirmed_afte
     let (listener, _connection_token) =
         bind_advertised_session(runtime_directory.path(), session_id);
     let (release_sender, release_receiver) = mpsc::channel();
-    let session_thread = spawn_peer_that_never_answers::<IpcRequest>(listener, release_receiver);
+    let session_thread = spawn_session_that_never_answers(listener, release_receiver);
 
     let walk_runtime_directory = runtime_directory.path().to_path_buf();
     let session_outcomes = run_before_test_deadline(move || {
@@ -1383,6 +1588,7 @@ fn a_release_update_asks_a_session_on_this_program_file_and_an_older_version() {
         SessionRestartScript {
             restart_answer: Some(IpcResult::Restarting),
             reported_build_version: "3.3.3".to_string(),
+            is_restarting_into_new_image: true,
         },
         2,
     );
@@ -1418,6 +1624,7 @@ fn restarting_every_server_asks_a_session_already_on_the_installed_version() {
         SessionRestartScript {
             restart_answer: Some(IpcResult::Restarting),
             reported_build_version: "3.3.3".to_string(),
+            is_restarting_into_new_image: true,
         },
         2,
     );
@@ -1528,8 +1735,15 @@ fn a_session_refusing_this_builds_protocol_version_reports_the_version_its_progr
     let session_thread = spawn_session_refusing_this_builds_protocol_version(listener);
 
     assert_eq!(
-        probe_session_version(runtime_directory.path(), session_id),
-        Some("3.3.3".to_string())
+        probe_restarted_session(
+            runtime_directory.path(),
+            session_id,
+            Some(ProcessImageId::generate())
+        ),
+        Some(RestartProbeAnswer {
+            reported_version: "3.3.3".to_string(),
+            is_new_image: true,
+        })
     );
     session_thread
         .join()

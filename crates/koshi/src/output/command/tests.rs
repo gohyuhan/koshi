@@ -2,13 +2,9 @@
 
 use koshi_core::event::{Event, PaneCreated, QuitCause, TabCreated};
 use koshi_core::ids::{PaneId, TabId};
-use uuid::Uuid;
 
 use super::*;
-
-fn build_fixed_test_uuid() -> Uuid {
-    Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")
-}
+use crate::output::tests::build_fixed_test_uuid;
 
 #[test]
 fn a_new_pane_prints_one_pane_id_line() {

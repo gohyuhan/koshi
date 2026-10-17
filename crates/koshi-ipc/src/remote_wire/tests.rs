@@ -18,6 +18,7 @@ use koshi_core::ids::SessionId;
 
 use super::*;
 use crate::error::IpcError;
+use crate::protocol::tests::build_fixed_test_uuid;
 use crate::protocol::{MIN_PROTOCOL_VERSION, PROTOCOL_VERSION};
 use crate::transport::{read_message, MAX_FRAME_BYTE_COUNT};
 
@@ -78,11 +79,6 @@ fn build_length_prefixed_payload(frame_payload_bytes: &[u8]) -> Vec<u8> {
     let mut framed_payload_bytes = frame_payload_byte_count.to_be_bytes().to_vec();
     framed_payload_bytes.extend_from_slice(frame_payload_bytes);
     framed_payload_bytes
-}
-
-/// The one UUID every fixed id below uses.
-fn build_fixed_test_uuid() -> uuid::Uuid {
-    uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")
 }
 
 /// Returns the malformed-frame detail from `frame_read_result`. Panics on any other result.

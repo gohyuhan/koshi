@@ -32,8 +32,9 @@ use crate::cli::OutputFormat;
 use crate::keymap::tests::build_partial_keybindings_config_with_binding;
 use crate::keymap::{build_keymap_view_from_partial, KeymapValidationOutcome, KeymapView};
 
-/// The fixed UUID every fake id uses: `00000000-0000-0000-0000-000000000001`.
-fn build_fixed_test_uuid() -> Uuid {
+/// The fixed UUID every fake id of the output tests uses:
+/// `00000000-0000-0000-0000-000000000001`.
+pub(crate) fn build_fixed_test_uuid() -> Uuid {
     Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")
 }
 

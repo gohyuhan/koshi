@@ -12,7 +12,7 @@ use std::thread::JoinHandle;
 
 use koshi_core::ids::SessionId;
 use koshi_ipc::endpoint::ServerProgramFile;
-use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
+use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload, ProcessImageId};
 use koshi_ipc::router::{
     compute_router_socket_address, resolve_router_endpoint_path, RouterHandshake, RouterResponse,
     SessionAddress, SessionSelector,
@@ -32,11 +32,13 @@ fn build_test_answer_deadline() -> Instant {
 
 /// Bind the router's address in `runtime_directory`, write the endpoint file
 /// advertising it, and accept one caller on a thread of its own. The stand-in
-/// answers nothing, reads every request until the caller closes the
-/// connection, and hands back the kind of each request it read. Also hands
-/// back the token the endpoint file carries.
-fn spawn_router_answering_nothing(
+/// answers each Hello with `hello_result` when one is given, answers nothing
+/// else, reads every request until the caller closes the connection, and
+/// hands back the kind of each request it read. Also hands back the token the
+/// endpoint file carries.
+fn spawn_router_answering_no_request(
     runtime_directory: &Path,
+    hello_result: Option<RouterResult>,
 ) -> (JoinHandle<Vec<RouterRequestKind>>, ConnectionToken) {
     let router_socket_address = compute_router_socket_address(runtime_directory);
     let router_listener = Listener::bind(&router_socket_address).expect("bind the stand-in router");
@@ -52,6 +54,16 @@ fn spawn_router_answering_nothing(
         let mut router_connection = router_listener.accept().expect("accept the caller");
         let mut request_kinds = Vec::new();
         while let Ok(router_request) = router_connection.recv::<RouterRequest>() {
+            if let (RouterRequestKind::Hello { .. }, Some(hello_result)) =
+                (&router_request.request_kind, &hello_result)
+            {
+                router_connection
+                    .send(&RouterResponse {
+                        request_id: Some(router_request.request_id),
+                        answer_result: hello_result.clone(),
+                    })
+                    .expect("send the hello reply");
+            }
             request_kinds.push(router_request.request_kind);
         }
         request_kinds
@@ -76,12 +88,13 @@ enum RouterScript {
 
 /// Serve one connection per entry of `router_scripts`, in order, as a router
 /// would: bind the router's address, write the endpoint file advertising it,
-/// accept one caller, answer the Hello and the request pipelined behind it per
-/// the entry, and close the connection once the caller hung up. Before each
-/// connection after the first, the router restarts on the address it already
-/// holds: it writes the endpoint file again under a new token. The thread
-/// hands back the kind of the request behind the Hello on the last
-/// connection.
+/// accept one caller, answer the Hello, then read the request behind it and
+/// answer it per the entry, and close the connection once the caller hung up.
+/// An accepted Hello names [`ProcessImageId::get_own`] as the router's process
+/// image. Before each connection after the first, the router restarts on the
+/// address it already holds: it writes the endpoint file again under a new
+/// token. The thread hands back the kind of the request behind the Hello on
+/// the last connection.
 ///
 /// The bind and the first endpoint file are both done before this returns.
 fn spawn_fake_router(
@@ -129,10 +142,11 @@ fn spawn_fake_router(
     })
 }
 
-/// Accept one caller on `router_listener`, answer the Hello and the request
-/// pipelined behind it per `router_script`, with `router_connection_token` as
-/// the router's own token, and close the connection once the caller hung up.
-/// Hands back the kind of the request behind the Hello.
+/// Accept one caller on `router_listener`, answer the Hello, then read the
+/// request behind it and answer it per `router_script`, with
+/// `router_connection_token` as the router's own token, and close the
+/// connection once the caller hung up. Hands back the kind of the request
+/// behind the Hello.
 fn answer_router_connection(
     router_listener: &Listener,
     router_connection_token: ConnectionToken,
@@ -147,7 +161,6 @@ fn answer_router_connection(
     let mut router_connection = router_listener.accept().expect("accept the caller");
     let mut router_handshake = RouterHandshake::from_connection_token(router_connection_token);
     let hello_request: RouterRequest = router_connection.recv().expect("read the hello");
-    let router_request: RouterRequest = router_connection.recv().expect("read the request");
 
     let hello_result = match &router_script {
         RouterScript::RefuseVersion => RouterResult::Error(IpcErrorPayload {
@@ -158,10 +171,7 @@ fn answer_router_connection(
         | RouterScript::AcceptAndAnswerAs(..)
         | RouterScript::RefuseHello => {
             match router_handshake.validate_request_kind(&hello_request.request_kind) {
-                Ok(()) => RouterResult::Hello {
-                    protocol_version: ROUTER_PROTOCOL_VERSION,
-                    build_version: reported_version,
-                },
+                Ok(()) => build_hello_result(&reported_version),
                 Err(refusal) => RouterResult::Error(refusal),
             }
         }
@@ -172,6 +182,7 @@ fn answer_router_connection(
             answer_result: hello_result,
         })
         .expect("send the hello reply");
+    let router_request: RouterRequest = router_connection.recv().expect("read the request");
 
     match (
         router_handshake.validate_request_kind(&router_request.request_kind),
@@ -315,7 +326,6 @@ fn a_token_retry_hands_back_the_endpoint_file_its_second_run_used() {
                 connection,
                 router_endpoint,
                 &RouterRequestKind::RemoteStatus,
-                None,
             )
         },
     )
@@ -350,7 +360,7 @@ fn a_restart_with_no_router_running_restarts_nothing() {
 }
 
 #[test]
-fn a_restarting_reply_reports_the_router_restarted() {
+fn a_restarting_reply_carries_the_process_image_the_hello_answer_named() {
     let runtime_directory = build_test_runtime_directory();
     let router = spawn_fake_router(
         runtime_directory.path(),
@@ -361,16 +371,26 @@ fn a_restarting_reply_reports_the_router_restarted() {
         restart_running_router(runtime_directory.path(), build_test_answer_deadline())
             .expect("the exchange succeeds");
 
-    assert_eq!(router_restart, RouterRestart::Restarting);
-    router.join().expect("the stand-in router exits");
+    assert_eq!(
+        router_restart,
+        RouterRestart::Restarting {
+            asked_process_image_id: Some(ProcessImageId::get_own()),
+        }
+    );
+    assert_eq!(
+        router.join().expect("the stand-in router exits"),
+        RouterRequestKind::Restart
+    );
 }
 
 #[test]
 fn a_restart_the_router_answers_nothing_to_by_the_deadline_is_unanswered_and_closes_the_connection()
 {
     let runtime_directory = build_test_runtime_directory();
-    let (router, router_connection_token) =
-        spawn_router_answering_nothing(runtime_directory.path());
+    let (router, router_connection_token) = spawn_router_answering_no_request(
+        runtime_directory.path(),
+        Some(build_hello_result("9.9.9")),
+    );
 
     let router_restart = restart_running_router(
         runtime_directory.path(),
@@ -378,7 +398,12 @@ fn a_restart_the_router_answers_nothing_to_by_the_deadline_is_unanswered_and_clo
     )
     .expect("the router takes the connection");
 
-    assert_eq!(router_restart, RouterRestart::Unanswered);
+    assert_eq!(
+        router_restart,
+        RouterRestart::Unanswered {
+            asked_process_image_id: Some(ProcessImageId::get_own()),
+        }
+    );
     assert_eq!(
         router.join().expect("the stand-in router exits"),
         vec![
@@ -389,10 +414,33 @@ fn a_restart_the_router_answers_nothing_to_by_the_deadline_is_unanswered_and_clo
 }
 
 #[test]
+fn a_restart_whose_hello_gets_no_answer_by_the_deadline_writes_no_restart() {
+    let runtime_directory = build_test_runtime_directory();
+    let (router, router_connection_token) =
+        spawn_router_answering_no_request(runtime_directory.path(), None);
+
+    let router_restart_error = restart_running_router(
+        runtime_directory.path(),
+        Instant::now() + Duration::from_millis(300),
+    )
+    .expect_err("the router answers no Hello");
+
+    let CliError::RouterAnswerTimedOut = router_restart_error else {
+        panic!("expected RouterAnswerTimedOut, got {router_restart_error:?}");
+    };
+    assert_eq!(
+        router.join().expect("the stand-in router exits"),
+        vec![RouterRequestKind::build_hello_request(
+            router_connection_token
+        )]
+    );
+}
+
+#[test]
 fn a_router_version_read_with_no_answer_by_the_deadline_is_a_router_answer_timeout() {
     let runtime_directory = build_test_runtime_directory();
     let (router, router_connection_token) =
-        spawn_router_answering_nothing(runtime_directory.path());
+        spawn_router_answering_no_request(runtime_directory.path(), None);
 
     let router_version_error = find_running_router_version(
         runtime_directory.path(),
@@ -729,11 +777,13 @@ fn a_router_that_hangs_up_and_leaves_no_endpoint_file_reports_no_process_id() {
 }
 
 /// The Hello answer a stand-in router sends: this build's control-plane
-/// version, and `reported_version` as the build it reports.
+/// version, `reported_version` as the build it reports, and
+/// [`ProcessImageId::get_own`] as its process image.
 fn build_hello_result(reported_version: &str) -> RouterResult {
     RouterResult::Hello {
         protocol_version: ROUTER_PROTOCOL_VERSION,
         build_version: reported_version.to_string(),
+        process_image_id: Some(ProcessImageId::get_own()),
     }
 }
 
@@ -864,6 +914,7 @@ fn a_router_settling_outside_the_control_plane_range_stops_the_exchange() {
         RouterResult::Hello {
             protocol_version: 4,
             build_version: "9.9.9".to_string(),
+            process_image_id: Some(ProcessImageId::get_own()),
         },
     );
 

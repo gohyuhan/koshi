@@ -48,6 +48,7 @@ use koshi_core::ids::SessionId;
 use koshi_host::process_tree;
 use koshi_ipc::endpoint::{resolve_update_lock_path, EndpointFile, ServerProgramFile};
 use koshi_ipc::error::IpcError;
+use koshi_ipc::protocol::ProcessImageId;
 use koshi_ipc::router::{resolve_router_endpoint_path, resolve_router_program_file_path};
 use koshi_runtime::executable_watch::read_installed_version;
 use semver::Version;
@@ -61,11 +62,11 @@ use koshi_core::text::sanitize_reported_text;
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client::{
-    self, find_previous_release_session_version, find_running_session_version,
+    self, find_previous_release_session_version, find_running_session_hello_answer,
     restart_running_session, SessionRestart, UnreadPath,
 };
 use koshi_link::router_client::{
-    find_running_router_version, restart_running_router, start_router, RouterRestart,
+    find_running_router_hello_answer, restart_running_router, start_router, RouterRestart,
 };
 use koshi_link::server_build::{
     compare_program_files, find_advertised_server_program_file, find_server_program_file,
@@ -499,14 +500,15 @@ fn open_lock_file(lock_path: &Path) -> io::Result<fs::File> {
 /// [`RestartScope::ServersNotOnVersion`], a router whose program file says it
 /// runs `expected_version` is not asked, and prints `the running router
 /// already runs koshi <version>; every session keeps running`. Success is
-/// printed only after the router's Hello reports `expected_version`. A router
+/// printed only after the router's next process image reports
+/// `expected_version`, as [`restart_advertised_router`] states. A router
 /// that refuses this build's protocol version, and a router that answers in
 /// the envelope of koshi 0.1.0 to 0.4.0, go to [`stop_incompatible_router`].
 /// Once that router's process ended, a router of the program this process runs
 /// starts at once, through [`start_router`], and [`report_started_router`]
-/// says what it reports. Any other refusal, a router still on another build,
-/// or no answer within [`RESTART_CONFIRM_WAIT_DURATION`] prints a note on
-/// standard error.
+/// says what it reports. Any other refusal, a router that did not restart into
+/// `expected_version`, or no answer within [`RESTART_CONFIRM_WAIT_DURATION`]
+/// prints a note on standard error.
 ///
 /// `true` when no router runs, when the router runs `expected_version`, when
 /// [`stop_incompatible_router`] gives
@@ -543,7 +545,7 @@ fn restart_router_into_version(
             );
             true
         }
-        Ok(Some(VersionProbeOutcome::OtherVersion(reported_version))) => {
+        Ok(Some(VersionProbeOutcome::NotInstalled(reported_version))) => {
             eprintln!(
                 "koshi: the running router still reports {reported_version} after the restart request; \
                  it keeps serving that build; every session keeps running"
@@ -734,14 +736,19 @@ fn report_started_router(
 }
 
 /// Ask the router `runtime_directory` advertises to restart, with
-/// `wait_duration` to answer, then wait up to `wait_duration` more for its
-/// Hello to report `installed_version`.
+/// `wait_duration` to answer, then wait up to `wait_duration` more for the
+/// router's next process image to report `installed_version`.
+///
+/// The next image is the one whose Hello answer names another process image
+/// than the router named before the Restart went out. Example: a router that
+/// answered `Restarting` and still names the same process image, reporting
+/// `installed_version`, has not restarted yet, and the wait goes on.
 ///
 /// `Ok(None)` means no router is running, and nothing restarted. A router that
 /// answers `Restarting` and a router that gives no answer in time
 /// ([`RouterRestart::Unanswered`]) are both waited for with
-/// [`wait_for_version`]. A router whose Hello answers nothing during that wait
-/// gives [`VersionProbeOutcome::Silent`].
+/// [`wait_for_restart_into_version`]. A router whose Hello answers nothing
+/// during that wait gives [`VersionProbeOutcome::Silent`].
 ///
 /// # Errors
 /// The [`CliError`] [`restart_running_router`] gives: a router that refuses the
@@ -753,10 +760,15 @@ fn restart_advertised_router(
 ) -> Result<Option<VersionProbeOutcome>, CliError> {
     match restart_running_router(runtime_directory, Instant::now() + wait_duration)? {
         RouterRestart::NotRunning => Ok(None),
-        RouterRestart::Restarting | RouterRestart::Unanswered => Ok(Some(wait_for_version(
+        RouterRestart::Restarting {
+            asked_process_image_id,
+        }
+        | RouterRestart::Unanswered {
+            asked_process_image_id,
+        } => Ok(Some(wait_for_restart_into_version(
             installed_version,
             wait_duration,
-            || probe_router_version(runtime_directory),
+            || probe_restarted_router(runtime_directory, asked_process_image_id),
         ))),
     }
 }
@@ -764,82 +776,150 @@ fn restart_advertised_router(
 /// How the wait for a restarted router or session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum VersionProbeOutcome {
-    /// It answered with the version the wait was for.
+    /// A process image other than the one asked to restart answered with the
+    /// version the wait was for.
     Installed,
-    /// The last version it answered with, which was another one.
-    OtherVersion(String),
-    /// It answered nothing before the wait ran out.
+    /// No such answer came before the wait ran out. Carries the version the
+    /// last answer reported: the image asked to restart still answered, or
+    /// another image answered with another version.
+    NotInstalled(String),
+    /// Nothing answered before the wait ran out.
     Silent,
 }
 
-/// Poll `version_probe` until it reports `expected_version`, for up to
-/// `wait_duration`.
+/// What one probe of a server asked to restart read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RestartProbeAnswer {
+    /// The build version the server reported.
+    reported_version: String,
+    /// Whether the answer came from another process image than the one asked
+    /// to restart.
+    is_new_image: bool,
+}
+
+/// Poll `restart_probe` until a process image other than the one asked to
+/// restart reports `expected_version`, for up to `wait_duration`.
 ///
-/// A probe that gives no answer reports no version, and the poll continues.
-fn wait_for_version(
+/// A probe that gives no answer reports nothing, and the poll continues. An
+/// answer from the image asked to restart never ends the wait, whatever
+/// version it reports: that image has not restarted yet, or its restart
+/// failed.
+fn wait_for_restart_into_version(
     expected_version: &str,
     wait_duration: Duration,
-    version_probe: impl Fn() -> Option<String>,
+    restart_probe: impl Fn() -> Option<RestartProbeAnswer>,
 ) -> VersionProbeOutcome {
     let wait_deadline = Instant::now() + wait_duration;
     let mut last_reported_version = None;
     loop {
-        match version_probe() {
-            Some(reported_version) if reported_version == expected_version => {
+        match restart_probe() {
+            Some(restart_probe_answer)
+                if restart_probe_answer.is_new_image
+                    && restart_probe_answer.reported_version == expected_version =>
+            {
                 return VersionProbeOutcome::Installed;
             }
-            Some(reported_version) => last_reported_version = Some(reported_version),
+            Some(restart_probe_answer) => {
+                last_reported_version = Some(restart_probe_answer.reported_version);
+            }
             None => {}
         }
         if Instant::now() >= wait_deadline {
             return last_reported_version.map_or(
                 VersionProbeOutcome::Silent,
-                VersionProbeOutcome::OtherVersion,
+                VersionProbeOutcome::NotInstalled,
             );
         }
         std::thread::sleep(RESTART_CONFIRM_POLL_INTERVAL_DURATION);
     }
 }
 
-/// One probe of the running router's version, which ends
-/// [`RESTART_PROBE_TIMEOUT_DURATION`] after it starts. A probe that runs past
-/// that reads as no answer. A router that refuses this build's protocol
-/// version reports the version its program file holds, as
-/// [`find_advertised_server_program_file`] reads it.
-fn probe_router_version(runtime_directory: &Path) -> Option<String> {
+/// One probe of the running router, asked to restart in the process image
+/// `asked_process_image_id`, which ends [`RESTART_PROBE_TIMEOUT_DURATION`]
+/// after it starts. A probe that runs past that reads as no answer.
+///
+/// - A router that answers the Hello reports the version it names, and is a
+///   new image when it names another process image than
+///   `asked_process_image_id`. With `None`, the image asked was one of koshi
+///   0.5.0, and every router that names a process image is new.
+/// - A router that refuses this build's protocol version reports the version
+///   its program file holds, as [`find_advertised_server_program_file`] reads
+///   it, and is a new image: the image asked answered this build's Hello.
+fn probe_restarted_router(
+    runtime_directory: &Path,
+    asked_process_image_id: Option<ProcessImageId>,
+) -> Option<RestartProbeAnswer> {
     let probe_deadline = Instant::now() + RESTART_PROBE_TIMEOUT_DURATION;
-    match find_running_router_version(runtime_directory, Some(probe_deadline)) {
-        Ok(reported_version) => reported_version,
+    match find_running_router_hello_answer(runtime_directory, Some(probe_deadline)) {
+        Ok(router_hello_answer) => {
+            router_hello_answer.map(|router_hello_answer| RestartProbeAnswer {
+                is_new_image: router_hello_answer.process_image_id != asked_process_image_id,
+                reported_version: router_hello_answer.build_version,
+            })
+        }
         Err(CliError::ProtocolVersionRefused { .. }) => find_advertised_server_program_file(
             &resolve_router_program_file_path(runtime_directory),
             &resolve_router_endpoint_path(runtime_directory),
         )
-        .map(|router_program_file| router_program_file.build_version),
+        .map(|router_program_file| RestartProbeAnswer {
+            reported_version: router_program_file.build_version,
+            is_new_image: true,
+        }),
         Err(_) => None,
     }
 }
 
-/// One probe of the running session `session_id`'s version, which ends
+/// One probe of the running session `session_id`, asked to restart in the
+/// process image `asked_process_image_id`, which ends
 /// [`RESTART_PROBE_TIMEOUT_DURATION`] after it starts. A probe that runs past
-/// that reads as no answer. A session that refuses this build's protocol
-/// version reports the version its program file holds, as
-/// [`find_advertised_server_program_file`] reads it. A session that answers in
-/// the envelope of koshi 0.1.0 to 0.4.0 reports the build it names in the
-/// Hello of that envelope, as [`find_previous_release_session_version`] reads
-/// it: `0.4.0` from a koshi 0.4.0 session whose restart did not start.
-fn probe_session_version(runtime_directory: &Path, session_id: SessionId) -> Option<String> {
+/// that reads as no answer.
+///
+/// - A session that answers the Hello reports the version it names, and is a
+///   new image when it names another process image than
+///   `asked_process_image_id`. With `None`, the image asked was one of koshi
+///   0.3.0 or 0.4.0, and every image that answers this build's Hello is new.
+/// - A session that refuses this build's protocol version reports the version
+///   its program file holds, as [`find_advertised_server_program_file`] reads
+///   it, and is a new image: the image asked answered this build's Hello.
+/// - A session that answers in the envelope of koshi 0.1.0 to 0.4.0 reports the
+///   build it names in the Hello of that envelope, as
+///   [`find_previous_release_session_version`] reads it: `0.4.0` from a koshi
+///   0.4.0 session whose restart did not start. It is a new image only when
+///   the image asked answered this build's Hello.
+fn probe_restarted_session(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    asked_process_image_id: Option<ProcessImageId>,
+) -> Option<RestartProbeAnswer> {
     let probe_deadline = Instant::now() + RESTART_PROBE_TIMEOUT_DURATION;
-    match find_running_session_version(runtime_directory, None, session_id, Some(probe_deadline)) {
-        Ok(reported_version) => reported_version,
+    match find_running_session_hello_answer(
+        runtime_directory,
+        None,
+        session_id,
+        Some(probe_deadline),
+    ) {
+        Ok(session_hello_answer) => {
+            session_hello_answer.map(|session_hello_answer| RestartProbeAnswer {
+                is_new_image: Some(session_hello_answer.process_image_id) != asked_process_image_id,
+                reported_version: session_hello_answer.build_version,
+            })
+        }
         Err(CliError::ProtocolVersionRefused { .. }) => find_advertised_server_program_file(
             &ServerProgramFile::resolve_session_program_file_path(runtime_directory, session_id),
             &EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id),
         )
-        .map(|session_program_file| session_program_file.build_version),
+        .map(|session_program_file| RestartProbeAnswer {
+            reported_version: session_program_file.build_version,
+            is_new_image: true,
+        }),
         Err(CliError::PreviousReleaseServer { .. }) => {
             find_previous_release_session_version(runtime_directory, session_id, probe_deadline)
                 .ok()
                 .flatten()
+                .map(|reported_version| RestartProbeAnswer {
+                    reported_version,
+                    is_new_image: asked_process_image_id.is_some(),
+                })
         }
         Err(_) => None,
     }
@@ -848,9 +928,11 @@ fn probe_session_version(runtime_directory: &Path, session_id: SessionId) -> Opt
 /// The result of asking one running session to restart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionOutcome {
-    /// The session restarted and now reports the installed version.
+    /// The session restarted, and its next process image reports the installed
+    /// version.
     Confirmed,
-    /// The session restarted and still reports the version named here.
+    /// No next process image of the session reported the installed version
+    /// within the wait. Carries the version the last answer reported.
     StillOnVersion(String),
     /// The session answered nothing within the wait: not the Restart request,
     /// or not one Hello after it.
@@ -886,7 +968,8 @@ enum SessionOutcome {
 /// gives them.
 ///
 /// Prints nothing for a session that is no longer listening. Success is printed
-/// only after that session's Hello reports `expected_version`. A session
+/// only after that session's next process image reports `expected_version`, as
+/// [`restart_advertised_sessions`] states. A session
 /// already on `expected_version` prints `<session id> already runs koshi
 /// <version>; its panes keep running`. Every other result prints a note on
 /// standard error. A session that refused this build's protocol version, and
@@ -1249,8 +1332,11 @@ pub fn format_koshi_0_1_0_window_note(
 }
 
 /// Ask every session `runtime_directory` advertises to restart, waiting up to
-/// `wait_duration` on each for a Hello reporting `installed_version`, and hand
-/// back each result.
+/// `wait_duration` on each for a Hello reporting `installed_version` from
+/// another process image than the one that took the Restart, and hand back
+/// each result. Example: a session that answered `Restarting` and still
+/// answers its Hello from the same image, reporting `installed_version`, has
+/// not restarted yet, and the wait goes on.
 ///
 /// With [`RestartScope::ServersNotOnVersion`], a session is not asked when
 /// its program file, as [`find_advertised_server_program_file`] reads it,
@@ -1262,9 +1348,10 @@ pub fn format_koshi_0_1_0_window_note(
 /// `Prepare` of the Restart gets no answer within `wait_duration` gives
 /// [`SessionOutcome::Unconfirmed`], and runs no Restart. A session that took
 /// the Restart and gave no answer ([`SessionRestart::Unanswered`]) is waited
-/// for as one that answered `Restarting`: its Hello reporting
-/// `installed_version` gives [`SessionOutcome::Confirmed`], and anything else
-/// gives [`SessionOutcome::Unanswered`]. A session that refuses this build's
+/// for as one that answered `Restarting`: a Hello reporting
+/// `installed_version` from another process image gives
+/// [`SessionOutcome::Confirmed`], and anything else gives
+/// [`SessionOutcome::Unanswered`]. A session that refuses this build's
 /// protocol version gives [`SessionOutcome::AlreadyOnVersion`] when its
 /// program file says it runs `installed_version` and that version is newer
 /// than this build, and [`SessionOutcome::Incompatible`] otherwise. A session
@@ -1310,9 +1397,9 @@ fn restart_advertised_sessions(
             session_outcomes.push((session_id, left_running_outcome));
             continue;
         }
-        let wait_for_installed_version = || {
-            wait_for_version(installed_version, wait_duration, || {
-                probe_session_version(runtime_directory, session_id)
+        let wait_for_installed_version = |asked_process_image_id: Option<ProcessImageId>| {
+            wait_for_restart_into_version(installed_version, wait_duration, || {
+                probe_restarted_session(runtime_directory, session_id, asked_process_image_id)
             })
         };
         let session_restart = restart_running_session(
@@ -1324,21 +1411,24 @@ fn restart_advertised_sessions(
         let session_outcome = match session_restart {
             Ok(SessionRestart::NotRunning) => continue,
             Ok(SessionRestart::WithoutRestartRequest) => SessionOutcome::WithoutRestartRequest,
-            Ok(SessionRestart::Restarting) => match wait_for_installed_version() {
+            Ok(SessionRestart::Restarting {
+                asked_process_image_id,
+            }) => match wait_for_installed_version(asked_process_image_id) {
                 VersionProbeOutcome::Installed => SessionOutcome::Confirmed,
-                VersionProbeOutcome::OtherVersion(reported_version) => {
+                VersionProbeOutcome::NotInstalled(reported_version) => {
                     SessionOutcome::StillOnVersion(reported_version)
                 }
                 VersionProbeOutcome::Silent => SessionOutcome::Unconfirmed,
             },
-            Ok(SessionRestart::Unanswered(unanswered_detail)) => {
-                match wait_for_installed_version() {
-                    VersionProbeOutcome::Installed => SessionOutcome::Confirmed,
-                    VersionProbeOutcome::OtherVersion(_) | VersionProbeOutcome::Silent => {
-                        SessionOutcome::Unanswered(unanswered_detail)
-                    }
+            Ok(SessionRestart::Unanswered {
+                failure_detail,
+                asked_process_image_id,
+            }) => match wait_for_installed_version(asked_process_image_id) {
+                VersionProbeOutcome::Installed => SessionOutcome::Confirmed,
+                VersionProbeOutcome::NotInstalled(_) | VersionProbeOutcome::Silent => {
+                    SessionOutcome::Unanswered(failure_detail)
                 }
-            }
+            },
             Err(CliError::ProtocolVersionRefused { .. })
                 if is_release_newer(installed_version)
                     && find_advertised_server_program_file(
@@ -1688,9 +1778,14 @@ fn extract_zip_archive(archive_path: &Path) -> Result<TempPath, String> {
         let mut archive_entry = zip_archive
             .by_index(archive_entry_index)
             .map_err(|archive_entry_error| archive_entry_error.to_string())?;
-        let is_koshi_binary = Path::new(archive_entry.name())
-            .file_name()
-            .map(|file_name| file_name == get_binary_file_name())
+        let is_koshi_binary = archive_entry
+            .name()
+            .ok()
+            .and_then(|entry_name| {
+                Path::new(entry_name.as_ref())
+                    .file_name()
+                    .map(|file_name| file_name == get_binary_file_name())
+            })
             .unwrap_or(false);
         if is_koshi_binary {
             return save_extracted_binary(&mut archive_entry);

@@ -56,7 +56,7 @@ use koshi_ipc::previous_release::{
     PreviousReleaseRequestKind, PreviousReleaseResult,
 };
 use koshi_ipc::protocol::{
-    ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult,
+    ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult, ProcessImageId,
 };
 use koshi_ipc::transport::{
     compute_time_left_until, Connection, FrameReader, FrameWriter, CONNECT_WAIT_DURATION,
@@ -66,7 +66,9 @@ use uuid::Uuid;
 use crate::error::CliError;
 use crate::in_session::InSessionContext;
 use crate::server_build::{find_refusing_server_build, RefusingServerBuild};
-use crate::talk::{self, build_ipc_unavailable_error, build_peer_refusal_error};
+use crate::talk::{
+    self, build_ipc_unavailable_error, build_peer_refusal_error, SessionHelloAnswer,
+};
 
 /// How long a session has to answer once it is asked: a session another
 /// local user started that `koshi list-sessions` asks to describe itself, any
@@ -295,7 +297,7 @@ pub fn open_clipboard_copy_exchange(
 ) -> Result<(ClipboardCopyExchange, ClipboardCopyAnswer), CliError> {
     let answer_deadline = Instant::now() + answer_timeout;
     let first_request_id = 2;
-    let (mut response_reader, mut request_writer, first_copy_result) =
+    let (mut response_reader, mut request_writer, _, first_copy_result) =
         run_session_exchange_with_restart_wait(
             runtime_directory,
             None,
@@ -502,12 +504,13 @@ fn submit_command_envelope(
         command_with_working_directory,
     );
     let submit_command_kind = IpcRequestKind::SubmitCommand(Box::new(command_envelope));
-    match exchange_prepared_session_request(
+    let prepared_submit = exchange_prepared_session_request(
         endpoint,
         session_id,
         submit_command_kind,
         answer_deadline,
-    )? {
+    )?;
+    match prepared_submit.request_result? {
         IpcResult::CommandResult(command_result) => Ok(talk::filter_rejection_hint(command_result)),
         IpcResult::Error(refusal) => Err(build_peer_refusal_error(&refusal)),
         unexpected_result => {
@@ -662,7 +665,12 @@ pub fn fetch_recent_events(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionRestart {
     /// The session answered that it is replacing its own process image.
-    Restarting,
+    Restarting {
+        /// The process image that took the Restart, as its Hello named it.
+        /// `None` for a session of koshi 0.3.0 or 0.4.0, whose Hello names no
+        /// process image.
+        asked_process_image_id: Option<ProcessImageId>,
+    },
     /// Nothing advertises that session, or nothing listens behind the address
     /// it advertises. Nothing restarted.
     NotRunning,
@@ -670,10 +678,16 @@ pub enum SessionRestart {
     /// restart request. Nothing restarted.
     WithoutRestartRequest,
     /// The session took the Restart and gave no answer: the write that handed
-    /// it over, or the read of its answer, failed or ran out of time. Carries
-    /// that failure, filtered by [`sanitize_reported_text`]. The session may
-    /// restart, or may have restarted.
-    Unanswered(String),
+    /// it over, or the read of its answer, failed or ran out of time. The
+    /// session may restart, or may have restarted.
+    Unanswered {
+        /// That failure, filtered by [`sanitize_reported_text`].
+        failure_detail: String,
+        /// The process image that took the Restart, as its Hello named it.
+        /// `None` for a session of koshi 0.3.0 or 0.4.0, whose Hello names no
+        /// process image.
+        asked_process_image_id: Option<ProcessImageId>,
+    },
 }
 
 /// Ask the running session `session_id` to restart into the binary on disk.
@@ -719,7 +733,7 @@ pub fn restart_running_session(
     session_id: SessionId,
     answer_deadline: Instant,
 ) -> Result<SessionRestart, CliError> {
-    let restart_result = run_session_exchange_with_restart_wait(
+    let restart_exchange = run_session_exchange_with_restart_wait(
         runtime_directory,
         shared_sessions_base_directory,
         session_id,
@@ -733,22 +747,32 @@ pub fn restart_running_session(
             )
         },
     );
-    match restart_result {
-        Ok(IpcResult::Restarting) => Ok(SessionRestart::Restarting),
+    let prepared_restart = match restart_exchange {
+        Ok(prepared_restart) => prepared_restart,
+        Err(CliError::SessionNotFound { .. }) => return Ok(SessionRestart::NotRunning),
+        Err(CliError::PreviousReleaseServer { .. }) => {
+            return restart_previous_release_session(
+                runtime_directory,
+                shared_sessions_base_directory,
+                session_id,
+                answer_deadline,
+            )
+        }
+        Err(ipc_error) => return Err(ipc_error),
+    };
+    let asked_process_image_id = Some(prepared_restart.hello_answer.process_image_id);
+    match prepared_restart.request_result {
+        Ok(IpcResult::Restarting) => Ok(SessionRestart::Restarting {
+            asked_process_image_id,
+        }),
         Ok(IpcResult::Error(refusal)) => Err(build_peer_refusal_error(&refusal)),
         Ok(unexpected_result) => {
             Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))
         }
-        Err(CliError::SessionNotFound { .. }) => Ok(SessionRestart::NotRunning),
-        Err(CliError::CommittedRequestUnanswered { detail }) => {
-            Ok(SessionRestart::Unanswered(detail))
-        }
-        Err(CliError::PreviousReleaseServer { .. }) => restart_previous_release_session(
-            runtime_directory,
-            shared_sessions_base_directory,
-            session_id,
-            answer_deadline,
-        ),
+        Err(CliError::CommittedRequestUnanswered { detail }) => Ok(SessionRestart::Unanswered {
+            failure_detail: detail,
+            asked_process_image_id,
+        }),
         Err(ipc_error) => Err(ipc_error),
     }
 }
@@ -802,8 +826,9 @@ fn restart_previous_release_session(
         PreviousReleaseRequestKind::build_hello_request(connection_token),
     )
     .map_err(|ipc_error| build_session_exchange_error(ipc_error, Some(answer_deadline)))?;
-    let build_unanswered_restart = |ipc_error: IpcError| {
-        SessionRestart::Unanswered(sanitize_reported_text(&ipc_error.to_string()))
+    let build_unanswered_restart = |ipc_error: IpcError| SessionRestart::Unanswered {
+        failure_detail: sanitize_reported_text(&ipc_error.to_string()),
+        asked_process_image_id: None,
     };
     if let Err(restart_write_error) =
         send_previous_release_request(&mut request_writer, 2, PreviousReleaseRequestKind::Restart)
@@ -824,7 +849,9 @@ fn restart_previous_release_session(
         hello_answer => return Err(build_previous_release_answer_error(hello_answer)),
     }
     match read_previous_release_result(&mut response_reader) {
-        Ok(PreviousReleaseResult::Restarting) => Ok(SessionRestart::Restarting),
+        Ok(PreviousReleaseResult::Restarting) => Ok(SessionRestart::Restarting {
+            asked_process_image_id: None,
+        }),
         Ok(PreviousReleaseResult::Error(refusal))
             if refusal.code == PreviousReleaseErrorCode::UnsupportedKind =>
         {
@@ -960,7 +987,27 @@ fn build_previous_release_answer_error(previous_release_result: PreviousReleaseR
 }
 
 /// The build version the running session `session_id` reports in its Hello
-/// answer.
+/// answer, as [`find_running_session_hello_answer`] reads it.
+///
+/// # Errors
+/// What [`find_running_session_hello_answer`] gives.
+pub fn find_running_session_version(
+    runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
+    session_id: SessionId,
+    answer_deadline: Option<Instant>,
+) -> Result<Option<String>, CliError> {
+    let session_hello_answer = find_running_session_hello_answer(
+        runtime_directory,
+        shared_sessions_base_directory,
+        session_id,
+        answer_deadline,
+    )?;
+    Ok(session_hello_answer.map(|session_hello_answer| session_hello_answer.build_version))
+}
+
+/// The build and the process image the running session `session_id` names in
+/// its Hello answer.
 ///
 /// `Ok(None)` means no session is running under that id. Sends nothing besides
 /// the Hello. With `answer_deadline`, the connect, the write and the read end
@@ -971,32 +1018,36 @@ fn build_previous_release_answer_error(previous_release_result: PreviousReleaseR
 /// `runtime_directory` holds no endpoint file for it, through
 /// [`load_session_endpoint`]. A session that refuses the connection token is
 /// asked once more, as [`run_session_exchange_with_token_wait`] states.
-pub fn find_running_session_version(
+///
+/// # Errors
+/// The failure of the endpoint file read, a refused Hello, as
+/// [`talk::parse_session_hello_answer`] states, and every failure to talk.
+pub fn find_running_session_hello_answer(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
     session_id: SessionId,
     answer_deadline: Option<Instant>,
-) -> Result<Option<String>, CliError> {
+) -> Result<Option<SessionHelloAnswer>, CliError> {
     match load_session_endpoint(
         runtime_directory,
         shared_sessions_base_directory,
         session_id,
     ) {
         Ok(session_endpoint) => {
-            let (_, session_version_result) = run_session_exchange_with_token_wait(
+            let (_, session_hello_result) = run_session_exchange_with_token_wait(
                 runtime_directory,
                 session_id,
                 session_endpoint,
                 answer_deadline,
                 |session_endpoint| {
-                    find_session_version_from_endpoint(
+                    find_session_hello_answer_from_endpoint(
                         session_endpoint,
                         session_id,
                         answer_deadline,
                     )
                 },
             );
-            session_version_result
+            session_hello_result
         }
         Err(CliError::SessionNotFound { .. }) => Ok(None),
         Err(ipc_error) => Err(ipc_error),
@@ -1013,22 +1064,23 @@ pub fn find_foreign_session_version(
     socket_address: &str,
     answer_deadline: Instant,
 ) -> Result<Option<String>, CliError> {
-    find_session_version_from_endpoint(
+    let session_hello_answer = find_session_hello_answer_from_endpoint(
         &build_foreign_session_endpoint(socket_address.to_string()),
         session_id,
         Some(answer_deadline),
-    )
+    )?;
+    Ok(session_hello_answer.map(|session_hello_answer| session_hello_answer.build_version))
 }
 
-/// The build version the session `session_id` at `session_endpoint` reports
-/// in its Hello answer, or `Ok(None)` when nothing listens there. Sends nothing
-/// besides the Hello, and `answer_deadline` bounds the connect, the write and
-/// the read as [`find_running_session_version`] states.
-fn find_session_version_from_endpoint(
+/// What the session `session_id` at `session_endpoint` names in its Hello
+/// answer, or `Ok(None)` when nothing listens there. Sends nothing besides the
+/// Hello, and `answer_deadline` bounds the connect, the write and the read as
+/// [`find_running_session_hello_answer`] states.
+fn find_session_hello_answer_from_endpoint(
     session_endpoint: &EndpointFile,
     session_id: SessionId,
     answer_deadline: Option<Instant>,
-) -> Result<Option<String>, CliError> {
+) -> Result<Option<SessionHelloAnswer>, CliError> {
     let (mut response_reader, mut request_writer) =
         match connect_to_session(session_endpoint, session_id, answer_deadline) {
             Ok(connection) => connection.split(),
@@ -1052,7 +1104,7 @@ fn find_session_version_from_endpoint(
     let hello_response: IncomingResponse = response_reader
         .recv_answer()
         .map_err(build_exchange_error)?;
-    talk::parse_session_hello_version(hello_response).map(|(_, version)| Some(version))
+    talk::parse_session_hello_answer(hello_response).map(Some)
 }
 
 /// What `ask_session` answers for each of `session_asks`, in the order of
@@ -2200,14 +2252,25 @@ fn exchange_session_request(
     ipc_request: IpcRequest,
     answer_deadline: Option<Instant>,
 ) -> Result<IpcResult, CliError> {
-    let (_, _, ipc_result) =
+    let (_, _, _, ipc_result) =
         open_session_exchange(endpoint, session_id, ipc_request, answer_deadline)?;
     Ok(ipc_result)
 }
 
-/// What the session at `endpoint` answers to `prepared_request_kind`, a
-/// request that changes the session, handed over with `Prepare` and run with
-/// `Commit` on one connection.
+/// What [`exchange_prepared_session_request`] gives once the session answered
+/// the Hello and the `Prepare`.
+struct PreparedRequestExchange {
+    /// The session's answer to the Hello.
+    hello_answer: SessionHelloAnswer,
+    /// What [`commit_after_prepare_answer`] gives for the `Prepare`'s answer:
+    /// the answer to the request the `Prepare` handed over, or the failure
+    /// that ended the exchange after the `Prepare` was answered.
+    request_result: Result<IpcResult, CliError>,
+}
+
+/// What the session at `endpoint` answers to the Hello and to
+/// `prepared_request_kind`, a request that changes the session, handed over
+/// with `Prepare` and run with `Commit` on one connection.
 ///
 /// The Hello and the `Prepare`, numbered 2, go out back to back through
 /// [`open_session_exchange`], which `answer_deadline` bounds. Then
@@ -2221,27 +2284,32 @@ fn exchange_session_request(
 /// request never runs.
 ///
 /// # Errors
-/// What [`open_session_exchange`] gives, and the request never runs. Then what
-/// [`commit_after_prepare_answer`] gives.
+/// What [`open_session_exchange`] gives, and the request never runs. What
+/// [`commit_after_prepare_answer`] gives after that is
+/// [`PreparedRequestExchange::request_result`].
 fn exchange_prepared_session_request(
     endpoint: &EndpointFile,
     session_id: SessionId,
     prepared_request_kind: IpcRequestKind,
     answer_deadline: Option<Instant>,
-) -> Result<IpcResult, CliError> {
+) -> Result<PreparedRequestExchange, CliError> {
     let prepare_request = IpcRequest {
         request_id: 2,
         request_kind: IpcRequestKind::Prepare(Box::new(prepared_request_kind)),
     };
-    let (mut response_reader, mut request_writer, prepare_result) =
+    let (mut response_reader, mut request_writer, hello_answer, prepare_result) =
         open_session_exchange(endpoint, session_id, prepare_request, answer_deadline)?;
     let commit_timeout = answer_deadline.map(|_| SESSION_ANSWER_TIMEOUT_DURATION);
-    commit_after_prepare_answer(
+    let request_result = commit_after_prepare_answer(
         prepare_result,
         &mut response_reader,
         &mut request_writer,
         commit_timeout,
-    )
+    );
+    Ok(PreparedRequestExchange {
+        hello_answer,
+        request_result,
+    })
 }
 
 /// The answer of the request that a `Prepare` handed the session, given
@@ -2311,8 +2379,8 @@ pub fn commit_prepared_request(
 
 /// Connect to `endpoint`, open with the Hello, and run `ipc_request` on the same
 /// connection. Returns the reading half and the writing half of the
-/// connection, which stay open, and `ipc_request`'s result; a failed Hello is
-/// an error.
+/// connection, which stay open, the session's answer to the Hello, and
+/// `ipc_request`'s result; a failed Hello is an error.
 ///
 /// The Hello and `ipc_request` go out back to back before either reply is read,
 /// and the server answers every request in order: the exchange costs one
@@ -2328,7 +2396,7 @@ fn open_session_exchange(
     session_id: SessionId,
     ipc_request: IpcRequest,
     answer_deadline: Option<Instant>,
-) -> Result<(FrameReader, FrameWriter, IpcResult), CliError> {
+) -> Result<(FrameReader, FrameWriter, SessionHelloAnswer, IpcResult), CliError> {
     let (mut response_reader, mut request_writer) =
         connect_to_session(endpoint, session_id, answer_deadline)?.split();
     response_reader.set_deadline(answer_deadline);
@@ -2349,13 +2417,13 @@ fn open_session_exchange(
     let hello_response: IncomingResponse = response_reader
         .recv_answer()
         .map_err(build_exchange_error)?;
-    talk::parse_session_hello_version(hello_response)?;
+    let hello_answer = talk::parse_session_hello_answer(hello_response)?;
 
     let ipc_response: IncomingResponse = response_reader
         .recv_answer()
         .map_err(build_exchange_error)?;
     let ipc_result = talk::SESSION_PEER_WORDS.take_response_result(ipc_response)?;
-    Ok((response_reader, request_writer, ipc_result))
+    Ok((response_reader, request_writer, hello_answer, ipc_result))
 }
 
 /// The request that carries `copy_part` of a stand-in clipboard tool's copy

@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use super::*;
 use crate::protocol::{
-    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION,
-    PROTOCOL_VERSION,
+    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, ProcessImageId,
+    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 
 /// A socket address unique to this test: a temporary-directory file path on Unix, a pipe
@@ -286,6 +286,7 @@ fn an_answer_in_this_builds_envelope_parses_to_the_answer_sent() {
         answer_result: IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
             build_version: "0.6.0".to_string(),
+            process_image_id: ProcessImageId::get_own(),
         },
     };
     let answer_bytes = serde_json::to_vec(&hello_answer).expect("the answer serializes");
@@ -654,11 +655,16 @@ fn a_windows_address_holding_a_nul_character_is_refused() {
 
 /// The pipe a listener binds is owned by this process's user, and its access
 /// list grants every right to that user and nothing to anyone else.
+///
+/// The pipe's descriptor and the expected descriptor both convert to the
+/// security descriptor string format before the compare. That format writes a
+/// well-known account by its alias: the built-in Administrator is `LA`, and
+/// `LocalSystem` is `SY`.
 #[cfg(windows)]
 #[test]
 fn a_bound_pipe_grants_access_to_this_user_alone() {
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
+    use interprocess::os::windows::security_descriptor::{
+        AsSecurityDescriptorExt, BorrowedSecurityDescriptor,
     };
     use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
 
@@ -681,25 +687,21 @@ fn a_bound_pipe_grants_access_to_this_user_alone() {
     };
     assert_eq!(lookup_status, ERROR_SUCCESS);
     let _pipe_security_descriptor_allocation = LocalAllocation(pipe_security_descriptor);
-    let mut access_text_pointer: *mut u16 = std::ptr::null_mut();
-    let is_converted = unsafe {
-        ConvertSecurityDescriptorToStringSecurityDescriptorW(
-            pipe_security_descriptor,
-            SDDL_REVISION_1,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            &mut access_text_pointer,
-            std::ptr::null_mut(),
-        )
-    };
-    assert_ne!(is_converted, 0, "the security descriptor converts to text");
-    let _access_text_allocation = LocalAllocation(access_text_pointer.cast());
-    let access_text = unsafe { U16CStr::from_ptr_str(access_text_pointer) }.to_string_lossy();
+    let access_selector = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let pipe_access_text =
+        unsafe { BorrowedSecurityDescriptor::from_ptr(pipe_security_descriptor) }
+            .serialize(access_selector, U16CStr::to_string_lossy)
+            .expect("the pipe's security descriptor converts to text");
     let own_user_sid = format_own_user_sid().expect("read this process's user");
+    let expected_access_source =
+        U16CString::from_str(format!("O:{own_user_sid}D:(A;;FA;;;{own_user_sid})"))
+            .expect("a SID holds no NUL character");
+    let expected_access_text = SecurityDescriptor::deserialize(&expected_access_source)
+        .expect("the expected security descriptor parses")
+        .serialize(access_selector, U16CStr::to_string_lossy)
+        .expect("the expected security descriptor converts to text");
 
-    assert_eq!(
-        access_text,
-        format!("O:{own_user_sid}D:(A;;FA;;;{own_user_sid})")
-    );
+    assert_eq!(pipe_access_text, expected_access_text);
     drop(pipe_handle);
     drop(listener);
 }
@@ -776,6 +778,7 @@ fn request_and_response_cross_a_real_socket() {
                 answer_result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_version: env!("CARGO_PKG_VERSION").to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
             })
             .expect("server send");
@@ -796,6 +799,7 @@ fn request_and_response_cross_a_real_socket() {
             answer_result: IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 build_version: env!("CARGO_PKG_VERSION").to_string(),
+                process_image_id: ProcessImageId::get_own(),
             },
         }
     );
@@ -902,6 +906,7 @@ fn a_bind_serves_one_caller_after_another() {
                     answer_result: IpcResult::Hello {
                         protocol_version: PROTOCOL_VERSION,
                         build_version: env!("CARGO_PKG_VERSION").to_string(),
+                        process_image_id: ProcessImageId::get_own(),
                     },
                 })
                 .expect("server send");
@@ -921,6 +926,7 @@ fn a_bind_serves_one_caller_after_another() {
                 answer_result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_version: env!("CARGO_PKG_VERSION").to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
             }
         );
@@ -992,6 +998,7 @@ fn split_halves_carry_frames_both_ways_from_two_threads() {
                     answer_result: IpcResult::Hello {
                         protocol_version: PROTOCOL_VERSION,
                         build_version: env!("CARGO_PKG_VERSION").to_string(),
+                        process_image_id: ProcessImageId::get_own(),
                     },
                 })
                 .expect("server send");
@@ -1100,6 +1107,7 @@ fn a_frame_the_peer_sent_before_hanging_up_is_read_under_a_deadline() {
         answer_result: IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
             build_version: env!("CARGO_PKG_VERSION").to_string(),
+            process_image_id: ProcessImageId::get_own(),
         },
     };
     answering_peer.send(&sent_response).expect("peer send");
@@ -1653,6 +1661,7 @@ fn a_closed_read_direction_leaves_the_writing_direction_open() {
         answer_result: IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
             build_version: env!("CARGO_PKG_VERSION").to_string(),
+            process_image_id: ProcessImageId::get_own(),
         },
     };
     let response_to_send = expected_response.clone();

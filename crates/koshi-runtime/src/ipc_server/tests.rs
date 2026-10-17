@@ -21,7 +21,8 @@ use koshi_core::mouse::MouseTracking;
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{
-    GraphicsCapabilities, IpcRequest, WireMouseAction, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    GraphicsCapabilities, IpcRequest, ProcessImageId, WireMouseAction, MIN_PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
 };
 use koshi_layout::mode::LayoutMode;
 use koshi_renderer::snapshot::{
@@ -1780,12 +1781,13 @@ fn build_hello_request(runtime_directory: &Path, session_id: SessionId) -> IpcRe
     }
 }
 
-/// The answer an accepted Hello earns: [`PROTOCOL_VERSION`], and the version
-/// of the build the session runs.
+/// The answer an accepted Hello earns: [`PROTOCOL_VERSION`], the version of
+/// the build the session runs, and the session's own process image.
 fn build_accepted_hello_result() -> IpcResult {
     IpcResult::Hello {
         protocol_version: PROTOCOL_VERSION,
         build_version: env!("CARGO_PKG_VERSION").to_string(),
+        process_image_id: ProcessImageId::get_own(),
     }
 }
 
@@ -2128,10 +2130,7 @@ fn a_caller_speaking_a_wider_range_settles_on_this_builds_highest() {
     let ipc_response: IpcResponse = connection.recv().expect("hello reply");
     assert_eq!(
         ipc_response.answer_result,
-        IpcResult::Hello {
-            protocol_version: PROTOCOL_VERSION,
-            build_version: env!("CARGO_PKG_VERSION").to_string(),
-        },
+        build_accepted_hello_result(),
         "the answer names the highest version both sides speak"
     );
 

@@ -20,7 +20,9 @@ use koshi_core::command::CommandResult;
 use koshi_core::compat::Surface;
 use koshi_core::text::sanitize_reported_text;
 use koshi_ipc::error::IpcError;
-use koshi_ipc::protocol::{IncomingResponse, IpcErrorCode, IpcErrorPayload, IpcResult};
+use koshi_ipc::protocol::{
+    IncomingResponse, IpcErrorCode, IpcErrorPayload, IpcResult, ProcessImageId,
+};
 use koshi_ipc::router::{IncomingRouterResponse, RouterResult};
 use koshi_ipc::wire::{Answer, MaybeKnown, WireName};
 
@@ -194,8 +196,17 @@ pub fn build_hello_refusal_error(refusal: &IpcErrorPayload) -> CliError {
     build_peer_refusal_error(refusal)
 }
 
-/// The version a session settled on and the build it named in its Hello
-/// answer, once the version is checked against the range this build sent.
+/// What a session named in the Hello answer that opened a connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionHelloAnswer {
+    /// The build the session named, filtered by [`sanitize_reported_text`].
+    pub build_version: String,
+    /// The process image of the session that answered.
+    pub process_image_id: ProcessImageId,
+}
+
+/// The build and the process image a session named in its Hello answer, once
+/// the version it settled on is checked against the range this build sent.
 ///
 /// The build string is written by the session that answered, which is another
 /// user's process for a session reached through the shared directory and
@@ -210,16 +221,20 @@ pub fn build_hello_refusal_error(refusal: &IpcErrorPayload) -> CliError {
 ///   [`CliError::IpcUnavailable`] for every other refusal.
 /// - [`CliError::IpcUnavailable`] when the session settled on a version outside
 ///   the range this build asked for, or answered anything other than a Hello.
-pub fn parse_session_hello_version(
+pub fn parse_session_hello_answer(
     incoming_response: IncomingResponse,
-) -> Result<(u32, String), CliError> {
+) -> Result<SessionHelloAnswer, CliError> {
     match SESSION_PEER_WORDS.take_response_result(incoming_response)? {
         IpcResult::Hello {
             protocol_version,
             build_version,
+            process_image_id,
         } => {
             SESSION_PEER_WORDS.validate_settled_protocol_version(protocol_version)?;
-            Ok((protocol_version, sanitize_reported_text(&build_version)))
+            Ok(SessionHelloAnswer {
+                build_version: sanitize_reported_text(&build_version),
+                process_image_id,
+            })
         }
         IpcResult::Error(refusal) => Err(build_hello_refusal_error(&refusal)),
         unexpected_result => {
@@ -228,8 +243,19 @@ pub fn parse_session_hello_version(
     }
 }
 
-/// The build the router named in its Hello answer, filtered by
-/// [`sanitize_reported_text`], once the version it settled on is checked.
+/// What a router named in the Hello answer that opened a connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouterHelloAnswer {
+    /// The build the router named, filtered by [`sanitize_reported_text`].
+    pub build_version: String,
+    /// The process image of the router that answered, or `None` from a koshi
+    /// 0.5.0 router, which names none.
+    pub process_image_id: Option<ProcessImageId>,
+}
+
+/// The build and the process image a router named in its Hello answer, once
+/// the version it settled on is checked. The build is filtered by
+/// [`sanitize_reported_text`].
 ///
 /// # Errors
 /// - A refused Hello: what [`build_hello_refusal_error`] gives, which is
@@ -238,16 +264,20 @@ pub fn parse_session_hello_version(
 ///   [`CliError::IpcUnavailable`] for every other refusal.
 /// - [`CliError::IpcUnavailable`] when the router settled on a version outside
 ///   the range this build asked for, or answered anything other than a Hello.
-pub(crate) fn parse_router_hello_version(
+pub(crate) fn parse_router_hello_answer(
     incoming_response: IncomingRouterResponse,
-) -> Result<String, CliError> {
+) -> Result<RouterHelloAnswer, CliError> {
     match ROUTER_PEER_WORDS.take_response_result(incoming_response)? {
         RouterResult::Hello {
             protocol_version,
             build_version,
+            process_image_id,
         } => {
             ROUTER_PEER_WORDS.validate_settled_protocol_version(protocol_version)?;
-            Ok(sanitize_reported_text(&build_version))
+            Ok(RouterHelloAnswer {
+                build_version: sanitize_reported_text(&build_version),
+                process_image_id,
+            })
         }
         RouterResult::Error(refusal) => Err(build_hello_refusal_error(&refusal)),
         unexpected_result => {

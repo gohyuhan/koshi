@@ -282,7 +282,7 @@ impl<InputReader: Read> CopyInput<InputReader> {
     /// `should_trim_last_newline`, and it is the last part.
     ///
     /// Example: the input `hi\n` with `should_trim_last_newline` gives the
-    /// last part `hi`. An input of 12582784 bytes gives a part of 12582783
+    /// last part `hi`. An input of 12582775 bytes gives a part of 12582774
     /// bytes, then a last part of 1 byte.
     ///
     /// `Ok(None)` when the bytes read are not UTF-8: a byte that starts or

@@ -5,8 +5,9 @@
 //! connection opens. A session on this machine is joined over its control
 //! socket: the router turns the value after `koshi attach` into that session's
 //! address, starting a router first when none runs, and the session's endpoint
-//! file holds the token the Hello presents. The Hello and the Attach are
-//! written back to back, so joining costs one round trip.
+//! file holds the token the Hello presents. The Hello and a `Prepare` carrying
+//! the Attach are written back to back, and a `Commit` runs the Attach once
+//! the session answers `Prepared`, so joining costs two round trips.
 //!
 //! A session on another machine is joined over TLS through the server serving
 //! it: `koshi attach --remote <server> [session]` presents the secret that
@@ -2964,7 +2965,9 @@ fn dial_session(
 /// Dial `server`, ask it for the session `session_selector` names, and join that session
 /// as a client: open the connection, then [`join_remote_session`] over it. The
 /// join runs under a deadline of [`remote_client::JOIN_TIMEOUT_DURATION`] after
-/// the connection opens.
+/// the connection opens until the session answers `Prepared`. The `Commit` and
+/// its answer then run under a deadline of the same length after the `Commit`
+/// starts to be written.
 ///
 /// # Errors
 /// [`DialError::Unreachable`] when the connection could not be opened.
@@ -3053,7 +3056,7 @@ fn join_remote_session(
         remote_client::attach_remote_session(remote_link, session_selector.clone(), link_timeout)
             .map_err(DialError::Unreachable)?;
     let hello_response = remote_client::read_forwarded_hello_answer(&mut reader, session_selector)?;
-    talk::parse_session_hello_version(hello_response).map_err(DialError::Refused)?;
+    talk::parse_session_hello_answer(hello_response).map_err(DialError::Refused)?;
     writer
         .send(&build_attach_prepare_request(
             resume_client_id,
@@ -4168,7 +4171,7 @@ fn join_session(
         ))
         .map_err(build_link_failure)?;
 
-    talk::parse_session_hello_version(reader.recv_answer().map_err(build_link_failure)?)
+    talk::parse_session_hello_answer(reader.recv_answer().map_err(build_link_failure)?)
         .map_err(DialError::Refused)?;
     validate_attach_prepare_answer(reader.recv_answer().map_err(build_link_failure)?)?;
     let attach_result = ipc_client::commit_prepared_request(reader, writer, 3, commit_timeout)

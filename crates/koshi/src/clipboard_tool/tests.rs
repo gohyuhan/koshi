@@ -710,7 +710,7 @@ fn an_input_one_byte_past_a_part_gives_a_part_then_a_last_part_of_one_byte() {
         .expect("the input is UTF-8");
     assert!(
         first_copy_part == &input_bytes[..MAX_CLIPBOARD_COPY_PART_BYTE_COUNT],
-        "the first part holds the first 12582783 bytes"
+        "the first part holds the first 12582774 bytes"
     );
     assert!(!is_first_part_last);
     assert_eq!(

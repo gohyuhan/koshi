@@ -4,7 +4,8 @@
 //! The router's endpoint file in the private runtime directory advertises its
 //! socket address and connection token; reading it is the same-user proof the
 //! Hello presents. The Hello and the request are written back to back before
-//! either reply is read, so an exchange costs one round trip.
+//! either reply is read, so an exchange costs one round trip. A Restart is
+//! written once the Hello answer is read, so it costs two.
 //!
 //! No endpoint file, or nothing listening at the address one names, means no
 //! router is running. Then this starts one detached and retries the exchange
@@ -28,12 +29,14 @@ use koshi_core::ids::SessionId;
 use koshi_core::text::sanitize_reported_text;
 use koshi_ipc::endpoint::{is_update_restarting_servers, EndpointFile, RESTART_WINDOW_DURATION};
 use koshi_ipc::error::IpcError;
-use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
+use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload, ProcessImageId};
 use koshi_ipc::router::{
     resolve_router_endpoint_path, resolve_router_program_file_path, IncomingRouterResponse,
     RouterRequest, RouterRequestKind, RouterResult, ROUTER_RESTARTING_MESSAGE,
 };
-use koshi_ipc::transport::{compute_time_left_until, Connection, CONNECT_WAIT_DURATION};
+use koshi_ipc::transport::{
+    compute_time_left_until, Connection, FrameReader, FrameWriter, CONNECT_WAIT_DURATION,
+};
 
 use crate::error::CliError;
 use crate::ipc_client::{
@@ -42,7 +45,7 @@ use crate::ipc_client::{
     RESTART_POLL_INTERVAL_DURATION,
 };
 use crate::server_build::{find_refusing_server_build, RefusingServerBuild};
-use crate::talk::{self, build_ipc_unavailable_error};
+use crate::talk::{self, build_ipc_unavailable_error, RouterHelloAnswer};
 
 #[cfg(test)]
 mod tests;
@@ -113,7 +116,7 @@ pub fn submit_router_request(
 ) -> Result<RouterResult, CliError> {
     let first_router_exchange =
         run_router_exchange(runtime_directory, None, |connection, router_endpoint| {
-            exchange_router_request_on_connection(connection, router_endpoint, &request_kind, None)
+            exchange_router_request_on_connection(connection, router_endpoint, &request_kind)
         })?;
     let first_router_result = match first_router_exchange {
         None => None,
@@ -224,35 +227,44 @@ fn start_router_and_exchange<RouterAnswer>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouterRestart {
     /// The router answered that it is replacing its own process image.
-    Restarting,
+    Restarting {
+        /// The process image the router named in its Hello answer, before the
+        /// Restart went out. `None` from a koshi 0.5.0 router.
+        asked_process_image_id: Option<ProcessImageId>,
+    },
     /// The last connect found no router running. No router ran the Restart.
     NotRunning,
-    /// The Hello and the Restart went out, and their answers did not come by
-    /// the deadline. The connection is closed when this is handed back. The
-    /// router restarts only when it wrote its `Restarting` answer before that
-    /// close.
-    Unanswered,
+    /// The Restart went out, and its answer did not come by the deadline. The
+    /// connection is closed when this is handed back. The router restarts
+    /// only when it wrote its `Restarting` answer before that close.
+    Unanswered {
+        /// The process image the router named in its Hello answer, before the
+        /// Restart went out. `None` from a koshi 0.5.0 router.
+        asked_process_image_id: Option<ProcessImageId>,
+    },
 }
 
 /// Ask the router that is already running to restart into the binary on disk.
 ///
-/// Sends one Restart exchange. After a Hello refused for its connection token,
-/// it sends one more when the endpoint file carries another token or cannot be
-/// read, or after [`REFUSED_TOKEN_ADVERTISE_WAIT_DURATION`], when 1 ms or more
-/// is left until `answer_deadline`. A router refuses the Restart behind a
-/// refused Hello. Never starts a router. The connects, the wait, the writes
-/// and the reads all end by `answer_deadline`, and an exchange that runs past
-/// it gives [`RouterRestart::Unanswered`].
+/// Writes the Hello, reads its answer, then writes the Restart and reads its
+/// answer. After a Hello refused for its connection token, it connects once
+/// more when the endpoint file carries another token or cannot be read, or
+/// after [`REFUSED_TOKEN_ADVERTISE_WAIT_DURATION`], when 1 ms or more is left
+/// until `answer_deadline`. Never starts a router. The connects, the wait, the
+/// writes and the reads all end by `answer_deadline`. A Restart write or read
+/// that runs past it gives [`RouterRestart::Unanswered`].
 ///
 /// # Errors
-/// A router that refuses the request is [`CliError::IpcUnavailable`] carrying
+/// A router that refuses the Restart is [`CliError::IpcUnavailable`] carrying
 /// the sentence the router sent, filtered by [`sanitize_reported_text`]. A
 /// router whose build has no Restart kind refuses it, and that sentence names
-/// both builds. An endpoint file that exists and cannot be read, and a connect
-/// that fails for a reason other than nothing listening, are their failures.
-/// A write or a read that fails is [`CliError::RouterAnswerTimedOut`] once
-/// `answer_deadline` is reached, and what
-/// [`build_ipc_unavailable_error`] gives otherwise.
+/// both builds. A refused Hello is what [`talk::build_hello_refusal_error`]
+/// gives, and no Restart goes out behind it. An endpoint file that exists and
+/// cannot be read, and a connect that fails for a reason other than nothing
+/// listening, are their failures. A Hello write or read that fails is
+/// [`CliError::RouterAnswerTimedOut`] once `answer_deadline` is reached, and no
+/// Restart goes out. Every other write or read that fails is what
+/// [`build_ipc_unavailable_error`] gives.
 pub fn restart_running_router(
     runtime_directory: &Path,
     answer_deadline: Instant,
@@ -261,27 +273,12 @@ pub fn restart_running_router(
         runtime_directory,
         Some(answer_deadline),
         |connection, router_endpoint| {
-            exchange_router_request_on_connection(
-                connection,
-                router_endpoint,
-                &RouterRequestKind::Restart,
-                Some(answer_deadline),
-            )
+            exchange_router_restart_on_connection(connection, router_endpoint, answer_deadline)
         },
     )?;
-    let Some((_, restart_result)) = restart_exchange else {
-        return Ok(RouterRestart::NotRunning);
-    };
-    match restart_result {
-        Ok(RouterResult::Restarting) => Ok(RouterRestart::Restarting),
-        Ok(RouterResult::Error(refusal)) => Err(CliError::IpcUnavailable {
-            detail: refusal.message,
-        }),
-        Ok(unexpected_router_result) => {
-            Err(talk::ROUTER_PEER_WORDS.build_unexpected_reply_error(&unexpected_router_result))
-        }
-        Err(CliError::RouterAnswerTimedOut) => Ok(RouterRestart::Unanswered),
-        Err(restart_exchange_error) => Err(restart_exchange_error),
+    match restart_exchange {
+        None => Ok(RouterRestart::NotRunning),
+        Some((_, router_restart)) => router_restart,
     }
 }
 
@@ -359,7 +356,21 @@ pub fn query_running_router_remote_connections(runtime_directory: &Path) -> Remo
     }
 }
 
-/// The build version the running router reports in its Hello answer.
+/// The build version the running router reports in its Hello answer, as
+/// [`find_running_router_hello_answer`] reads it.
+///
+/// # Errors
+/// What [`find_running_router_hello_answer`] gives.
+pub fn find_running_router_version(
+    runtime_directory: &Path,
+    answer_deadline: Option<Instant>,
+) -> Result<Option<String>, CliError> {
+    let router_hello_answer = find_running_router_hello_answer(runtime_directory, answer_deadline)?;
+    Ok(router_hello_answer.map(|router_hello_answer| router_hello_answer.build_version))
+}
+
+/// The build and the process image the running router names in its Hello
+/// answer.
 ///
 /// `Ok(None)` means no router is running. Sends nothing besides the Hello;
 /// never starts a router. A router that refuses the connection token its
@@ -368,36 +379,43 @@ pub fn query_running_router_remote_connections(runtime_directory: &Path) -> Remo
 /// With `answer_deadline`, the connects, the wait, the write and the read all
 /// end by that moment, as [`restart_running_router`] states, and a read that
 /// runs past it is [`CliError::RouterAnswerTimedOut`].
-pub fn find_running_router_version(
+///
+/// # Errors
+/// A refused Hello, as [`talk::build_hello_refusal_error`] gives it, a Hello
+/// answer naming a version outside the range this build sent or of another
+/// kind, which is [`CliError::IpcUnavailable`], and every failure to talk.
+pub fn find_running_router_hello_answer(
     runtime_directory: &Path,
     answer_deadline: Option<Instant>,
-) -> Result<Option<String>, CliError> {
+) -> Result<Option<RouterHelloAnswer>, CliError> {
     match run_router_exchange(
         runtime_directory,
         answer_deadline,
         |connection, router_endpoint| {
-            exchange_router_hello(connection, router_endpoint, answer_deadline)
+            let (mut response_reader, _request_writer) =
+                send_router_hello(connection, router_endpoint, answer_deadline)?;
+            receive_router_hello_answer(&mut response_reader, answer_deadline)
         },
     )? {
         None => Ok(None),
-        Some((_, router_version_result)) => router_version_result.map(Some),
+        Some((_, router_hello_answer)) => router_hello_answer.map(Some),
     }
 }
 
-/// Send the Hello alone on `connection`, opened to the router
-/// `router_endpoint` names, and give the build the router names in its
-/// answer, as [`talk::parse_router_hello_version`] reads it. The write and the
-/// read end by `answer_deadline`, as [`build_router_exchange_error`] states.
-fn exchange_router_hello(
+/// Split `connection`, opened to the router `router_endpoint` names, set
+/// `answer_deadline` on both halves, and write the Hello with request id `1`,
+/// presenting the token `router_endpoint` carries.
+///
+/// # Errors
+/// A write that fails, as [`build_router_exchange_error`] states.
+fn send_router_hello(
     connection: Connection,
     router_endpoint: &EndpointFile,
     answer_deadline: Option<Instant>,
-) -> Result<String, CliError> {
+) -> Result<(FrameReader, FrameWriter), CliError> {
     let (mut response_reader, mut request_writer) = connection.split();
     response_reader.set_deadline(answer_deadline);
     request_writer.set_deadline(answer_deadline);
-    let build_exchange_error =
-        |ipc_error: IpcError| build_router_exchange_error(ipc_error, answer_deadline);
     let hello_request = RouterRequest {
         request_id: 1,
         request_kind: RouterRequestKind::build_hello_request(
@@ -406,11 +424,118 @@ fn exchange_router_hello(
     };
     request_writer
         .send(&hello_request)
-        .map_err(build_exchange_error)?;
+        .map_err(|ipc_error| build_router_exchange_error(ipc_error, answer_deadline))?;
+    Ok((response_reader, request_writer))
+}
+
+/// Read the answer to the Hello [`send_router_hello`] wrote, as
+/// [`talk::parse_router_hello_answer`] reads it.
+///
+/// # Errors
+/// A read that fails, as [`build_router_exchange_error`] states, and what
+/// [`talk::parse_router_hello_answer`] gives.
+fn receive_router_hello_answer(
+    response_reader: &mut FrameReader,
+    answer_deadline: Option<Instant>,
+) -> Result<RouterHelloAnswer, CliError> {
     let hello_response: IncomingRouterResponse = response_reader
         .recv_answer()
-        .map_err(build_exchange_error)?;
-    talk::parse_router_hello_version(hello_response)
+        .map_err(|ipc_error| build_router_exchange_error(ipc_error, answer_deadline))?;
+    talk::parse_router_hello_answer(hello_response)
+}
+
+/// Write `request_kind` with request id `2`, the request that follows the
+/// Hello.
+///
+/// # Errors
+/// A write that fails, as [`build_router_exchange_error`] states.
+fn send_router_request(
+    request_writer: &mut FrameWriter,
+    request_kind: &RouterRequestKind,
+    answer_deadline: Option<Instant>,
+) -> Result<(), CliError> {
+    let router_request = RouterRequest {
+        request_id: 2,
+        request_kind: request_kind.clone(),
+    };
+    request_writer
+        .send(&router_request)
+        .map_err(|ipc_error| build_router_exchange_error(ipc_error, answer_deadline))
+}
+
+/// Read the answer to the request [`send_router_request`] wrote, from a router
+/// that named `router_build_version` in its Hello answer.
+///
+/// A [`RouterResult::Error`] comes back through
+/// [`rewrite_router_result_for_build`], so its message is filtered before any
+/// caller reports it.
+///
+/// # Errors
+/// A read that fails, as [`build_router_exchange_error`] states, and an answer
+/// that [`talk::ROUTER_PEER_WORDS`] does not take.
+fn receive_router_result(
+    response_reader: &mut FrameReader,
+    router_build_version: &str,
+    answer_deadline: Option<Instant>,
+) -> Result<RouterResult, CliError> {
+    let router_response: IncomingRouterResponse = response_reader
+        .recv_answer()
+        .map_err(|ipc_error| build_router_exchange_error(ipc_error, answer_deadline))?;
+    talk::ROUTER_PEER_WORDS
+        .take_response_result(router_response)
+        .map(|router_result| rewrite_router_result_for_build(router_result, router_build_version))
+}
+
+/// Write the Hello on `connection`, opened to the router `router_endpoint`
+/// names, read its answer, then write the Restart and read its answer. The
+/// writes and the reads end by `answer_deadline`.
+///
+/// - `Restarting` gives [`RouterRestart::Restarting`] carrying the process
+///   image the Hello answer named.
+/// - A Restart write or read that runs past `answer_deadline` gives
+///   [`RouterRestart::Unanswered`] carrying that process image.
+///
+/// # Errors
+/// What [`send_router_hello`] and [`receive_router_hello_answer`] give, with no
+/// Restart written. A refused Restart, an answer of another kind, and every
+/// other failure to talk, as [`restart_running_router`] states.
+fn exchange_router_restart_on_connection(
+    connection: Connection,
+    router_endpoint: &EndpointFile,
+    answer_deadline: Instant,
+) -> Result<RouterRestart, CliError> {
+    let (mut response_reader, mut request_writer) =
+        send_router_hello(connection, router_endpoint, Some(answer_deadline))?;
+    let router_hello_answer =
+        receive_router_hello_answer(&mut response_reader, Some(answer_deadline))?;
+    let asked_process_image_id = router_hello_answer.process_image_id;
+    let restart_result = send_router_request(
+        &mut request_writer,
+        &RouterRequestKind::Restart,
+        Some(answer_deadline),
+    )
+    .and_then(|()| {
+        receive_router_result(
+            &mut response_reader,
+            &router_hello_answer.build_version,
+            Some(answer_deadline),
+        )
+    });
+    match restart_result {
+        Ok(RouterResult::Restarting) => Ok(RouterRestart::Restarting {
+            asked_process_image_id,
+        }),
+        Ok(RouterResult::Error(refusal)) => Err(CliError::IpcUnavailable {
+            detail: refusal.message,
+        }),
+        Ok(unexpected_router_result) => {
+            Err(talk::ROUTER_PEER_WORDS.build_unexpected_reply_error(&unexpected_router_result))
+        }
+        Err(CliError::RouterAnswerTimedOut) => Ok(RouterRestart::Unanswered {
+            asked_process_image_id,
+        }),
+        Err(restart_exchange_error) => Err(restart_exchange_error),
+    }
 }
 
 /// The failure for `ipc_error`, which a write or a read of a router exchange
@@ -600,7 +725,7 @@ fn exchange_router_request(
     request_kind: &RouterRequestKind,
 ) -> Result<Option<RouterResult>, CliError> {
     match run_router_exchange(runtime_directory, None, |connection, router_endpoint| {
-        exchange_router_request_on_connection(connection, router_endpoint, request_kind, None)
+        exchange_router_request_on_connection(connection, router_endpoint, request_kind)
     })? {
         None => Ok(None),
         Some((_, router_result)) => router_result.map(Some),
@@ -608,50 +733,21 @@ fn exchange_router_request(
 }
 
 /// Pipeline the Hello and `request_kind` back to back on `connection`, opened
-/// to the router `endpoint` names, and read both replies in order. The writes
-/// and the reads end by `answer_deadline`, as [`build_router_exchange_error`]
-/// states.
-///
-/// A [`RouterResult::Error`] comes back through
-/// [`rewrite_router_result_for_build`], so its
-/// message is filtered before any caller reports it.
+/// to the router `endpoint` names, and read both replies in order, with no
+/// deadline. The answer comes back as [`receive_router_result`] states.
 fn exchange_router_request_on_connection(
     connection: Connection,
     endpoint: &EndpointFile,
     request_kind: &RouterRequestKind,
-    answer_deadline: Option<Instant>,
 ) -> Result<RouterResult, CliError> {
-    let (mut response_reader, mut request_writer) = connection.split();
-    response_reader.set_deadline(answer_deadline);
-    request_writer.set_deadline(answer_deadline);
-    let build_exchange_error =
-        |ipc_error: IpcError| build_router_exchange_error(ipc_error, answer_deadline);
-    let hello_request = RouterRequest {
-        request_id: 1,
-        request_kind: RouterRequestKind::build_hello_request(endpoint.connection_token.clone()),
-    };
-    let router_request = RouterRequest {
-        request_id: 2,
-        request_kind: request_kind.clone(),
-    };
-    request_writer
-        .send(&hello_request)
-        .map_err(build_exchange_error)?;
-    request_writer
-        .send(&router_request)
-        .map_err(build_exchange_error)?;
-
-    let hello_response: IncomingRouterResponse = response_reader
-        .recv_answer()
-        .map_err(build_exchange_error)?;
-    let router_version = talk::parse_router_hello_version(hello_response)?;
-
-    let router_response: IncomingRouterResponse = response_reader
-        .recv_answer()
-        .map_err(build_exchange_error)?;
-    talk::ROUTER_PEER_WORDS
-        .take_response_result(router_response)
-        .map(|router_result| rewrite_router_result_for_build(router_result, &router_version))
+    let (mut response_reader, mut request_writer) = send_router_hello(connection, endpoint, None)?;
+    send_router_request(&mut request_writer, request_kind, None)?;
+    let router_hello_answer = receive_router_hello_answer(&mut response_reader, None)?;
+    receive_router_result(
+        &mut response_reader,
+        &router_hello_answer.build_version,
+        None,
+    )
 }
 
 /// A refusal filtered by [`sanitize_reported_text`], and — for a request kind

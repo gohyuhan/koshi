@@ -33,7 +33,7 @@ use koshi_core::command::CliExitCode;
 use koshi_core::ids::SessionId;
 use koshi_ipc::endpoint::EndpointFile;
 #[cfg(windows)]
-use koshi_ipc::protocol::{IpcResponse, IpcResult, PROTOCOL_VERSION};
+use koshi_ipc::protocol::{IpcResponse, IpcResult, ProcessImageId, PROTOCOL_VERSION};
 #[cfg(windows)]
 use koshi_ipc::transport::Connection;
 #[cfg(unix)]
@@ -518,7 +518,9 @@ fn start_session_server_with_the_switch_forced(
 }
 
 /// Open a connection to the session at `endpoint_file` and complete the Hello,
-/// presenting the token the endpoint file carries.
+/// presenting the token the endpoint file carries. The Hello answer names
+/// [`PROTOCOL_VERSION`], this build, and the session server's own process
+/// image, which is not this test process's image.
 #[cfg(windows)]
 fn open_windows_session_connection(endpoint_file: &EndpointFile) -> Connection {
     let mut connection = Connection::connect(&endpoint_file.socket_address)
@@ -528,13 +530,18 @@ fn open_windows_session_connection(endpoint_file: &EndpointFile) -> Connection {
         .expect("the server reads the Hello");
     let ipc_response: IpcResponse = connection.recv().expect("the server answers the Hello");
     assert_eq!(ipc_response.request_id, Some(1));
-    assert_eq!(
-        ipc_response.answer_result,
+    match ipc_response.answer_result {
         IpcResult::Hello {
-            protocol_version: PROTOCOL_VERSION,
-            build_version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version,
+            build_version,
+            process_image_id,
+        } => {
+            assert_eq!(protocol_version, PROTOCOL_VERSION);
+            assert_eq!(build_version, env!("CARGO_PKG_VERSION"));
+            assert_ne!(process_image_id, ProcessImageId::get_own());
         }
-    );
+        unexpected_result => panic!("the Hello was answered with {unexpected_result:?}"),
+    }
     connection
 }
 

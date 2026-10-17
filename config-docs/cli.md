@@ -108,10 +108,15 @@ koshi 0.5.0`. A koshi built from source restarts every running server into the
 koshi at its path. Each one has 20 seconds to answer the restart request and 20
 seconds to come back on the new release. A session that takes the request has 5
 seconds more to answer it. One that does not come back is reported as not
-confirmed, and the update goes on. A router that gives no answer in time does
-not restart, and neither does a session that does not take the request in
-time. A session that took the request and gave no answer may still restart, and
-its line says so. A session keeps its panes, the programs
+confirmed, and the update goes on. A server comes back when a new process
+answers with the new release. An answer from the process that took the request
+does not count, even when it names the new release. A session that does not
+take the request in time does not restart. A session that took the request and
+gave no answer may still restart, and its line says so. A router that does not
+answer its first message in time is not asked to restart, and its line says so.
+A router that took the request and gave no answer may still restart, and the
+update waits 20 seconds for it to come back on the new release, as for a router
+that answered. A session keeps its panes, the programs
 running in them and their scrollback. A client from the installed build can
 reattach to that session. The installed build migrates `version 1` KDL files to
 `version 2` when a running session asks it which resume formats it reads, before

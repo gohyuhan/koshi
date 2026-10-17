@@ -988,6 +988,7 @@ fn sample_router_results() -> Vec<RouterResult> {
         RouterResult::Hello {
             protocol_version: 1,
             build_version: String::new(),
+            process_image_id: None,
         },
         RouterResult::Created(session_address.clone()),
         RouterResult::Found(session_address),

@@ -9,7 +9,9 @@ use super::*;
 use std::thread::JoinHandle;
 
 use koshi_ipc::endpoint::{compute_socket_address, resolve_resume_file_path, EndpointFile};
-use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcResponse, IpcResult, PROTOCOL_VERSION};
+use koshi_ipc::protocol::{
+    ConnectionToken, IpcRequest, IpcResponse, IpcResult, ProcessImageId, PROTOCOL_VERSION,
+};
 use koshi_ipc::router::{
     compute_router_socket_address, resolve_router_endpoint_path, RouterRequest, RouterResponse,
     RouterResult, ROUTER_PROTOCOL_VERSION,
@@ -42,6 +44,7 @@ fn spawn_fake_router(runtime_directory: &Path, build_version_text: &str) -> Join
                 answer_result: RouterResult::Hello {
                     protocol_version: ROUTER_PROTOCOL_VERSION,
                     build_version: build_version_text,
+                    process_image_id: Some(ProcessImageId::get_own()),
                 },
             })
             .expect("send the hello reply");
@@ -79,6 +82,7 @@ fn spawn_fake_session(
                 answer_result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_version: build_version_text,
+                    process_image_id: ProcessImageId::get_own(),
                 },
             })
             .expect("send the hello reply");

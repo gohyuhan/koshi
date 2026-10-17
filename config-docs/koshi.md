@@ -192,7 +192,7 @@ The real tool runs alone, as it does outside koshi, for these calls:
   `xclip -o`, `wl-copy --clear` or `xclip -target image/png`;
 - a copy longer than `max-copy-bytes`, and a copy that is not UTF-8 text;
 - a copy that the session does not take within 5 seconds. A copy goes to
-  the session in parts of up to 12582783 bytes as the stand-in reads it, and
+  the session in parts of up to 12582774 bytes as the stand-in reads it, and
   the session has 5 seconds to take each part.
 
 When the session took the whole copy and gives no answer within 5 seconds
@@ -200,7 +200,7 @@ more, the stand-in prints that failure and exits with code 1. The real tool
 does not run, and the copy may still reach the terminal on the other machine.
 
 The stand-in keeps every byte of input it read until the copy ends, at most
-`max-copy-bytes` plus 12582784 bytes. When the real tool runs, it reads those
+`max-copy-bytes` plus 12582775 bytes. When the real tool runs, it reads those
 bytes, then the rest of the input.
 
 No stand-in sees these copies:

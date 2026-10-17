@@ -9,7 +9,8 @@ use koshi_core::discovery::{SessionDiscovery, SessionOverview};
 use koshi_core::event::{Event, QuitCause, RejectReason};
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::protocol::{
-    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, PROTOCOL_VERSION,
+    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, ProcessImageId,
+    PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::{Connection, Listener};
 use uuid::Uuid;
@@ -21,6 +22,7 @@ fn build_hello_accepted() -> IpcResult {
     IpcResult::Hello {
         protocol_version: PROTOCOL_VERSION,
         build_version: env!("CARGO_PKG_VERSION").to_string(),
+        process_image_id: ProcessImageId::get_own(),
     }
 }
 

@@ -16,6 +16,7 @@
 //! transport layer. The Hello checks belong to [`handshake`](crate::handshake).
 
 use std::fmt;
+use std::sync::OnceLock;
 
 use koshi_core::command::{Command, CommandEnvelope, CommandResult, MoveFloatingPaneArgs};
 use koshi_core::compat::SESSION_PROTOCOL;
@@ -29,6 +30,7 @@ use koshi_core::redact::REDACTED;
 use serde::de::{self, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use subtle::ConstantTimeEq;
+use uuid::Uuid;
 
 use crate::attach::AttachedSessionStructureSnapshot;
 use crate::layout::SessionLayout;
@@ -149,6 +151,32 @@ impl fmt::Debug for ConnectionToken {
 impl fmt::Display for ConnectionToken {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(REDACTED)
+    }
+}
+
+/// Identifies one process image of a session server or a router: the program a
+/// process runs from its start, or from its last `exec`. A server that
+/// replaces its image answers its next Hello with another id. A server that
+/// keeps its image keeps its id, also when it rotates its connection token.
+/// The wire form is the bare uuid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProcessImageId(Uuid);
+
+impl ProcessImageId {
+    /// Generate a fresh id, a `UUIDv7`.
+    #[must_use]
+    pub fn generate() -> Self {
+        ProcessImageId(Uuid::now_v7())
+    }
+
+    /// The id of the process image this code runs in. The first call
+    /// generates it, and every call after it in the same image returns that
+    /// id.
+    #[must_use]
+    pub fn get_own() -> Self {
+        static OWN_PROCESS_IMAGE_ID: OnceLock<ProcessImageId> = OnceLock::new();
+        *OWN_PROCESS_IMAGE_ID.get_or_init(ProcessImageId::generate)
     }
 }
 
@@ -618,15 +646,16 @@ pub enum IpcRequestKind {
 }
 
 /// The most `copied_bytes` one [`IpcRequestKind::ClipboardCopy`] or
-/// [`IpcRequestKind::ClipboardCopyPart`] carries: 12582783.
+/// [`IpcRequestKind::ClipboardCopyPart`] carries: 12582774.
 ///
-/// A `ClipboardCopy` with an empty copy, the request id 18446744073709551615
-/// and 12 target bytes encodes to a frame of 172 bytes. A pane id always
-/// encodes to 36 characters. Base64 writes each 3 bytes as 4 characters, so
-/// (16777216 - 172) / 4 * 3 = 12582783 bytes fit in one
+/// A [`Prepare`](IpcRequestKind::Prepare) carrying a `ClipboardCopy` with an
+/// empty copy, the request id 18446744073709551615 and 12 target bytes
+/// encodes to a frame of 184 bytes. A pane id always encodes to 36
+/// characters. Base64 writes each 3 bytes as 4 characters, so
+/// (16777216 - 184) / 4 * 3 = 12582774 bytes fit in one
 /// [`MAX_FRAME_BYTE_COUNT`](crate::transport::MAX_FRAME_BYTE_COUNT) frame,
 /// and 3 bytes more do not.
-pub const MAX_CLIPBOARD_COPY_PART_BYTE_COUNT: usize = 12_582_783;
+pub const MAX_CLIPBOARD_COPY_PART_BYTE_COUNT: usize = 12_582_774;
 
 impl IpcRequestKind {
     /// The Hello this build opens a connection with: the versions it speaks,
@@ -772,6 +801,9 @@ pub enum IpcResult {
         protocol_version: u32,
         /// The build version of the answering session server, e.g. `0.3.0`.
         build_version: String,
+        /// The process image of the answering session server, as
+        /// [`ProcessImageId::get_own`] gives it.
+        process_image_id: ProcessImageId,
     },
     /// Answers [`IpcRequestKind::Attach`]: the client is registered and its
     /// event subscription is live. Every field is the server's own answer, and
@@ -894,6 +926,7 @@ impl crate::plane::Plane for SessionPlane {
         IpcResult::Hello {
             protocol_version: agreed_protocol_version,
             build_version: build_version.to_string(),
+            process_image_id: ProcessImageId::get_own(),
         }
     }
 }

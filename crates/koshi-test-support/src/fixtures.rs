@@ -17,7 +17,7 @@ use koshi_ipc::endpoint::{
 use koshi_ipc::handshake::{Handshake, Peer};
 use koshi_ipc::protocol::{
     ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
-    IpcResult,
+    IpcResult, ProcessImageId,
 };
 use koshi_ipc::router::{compute_router_socket_address, resolve_router_endpoint_path};
 use koshi_ipc::transport::{Connection, FrameReader, FrameWriter, Listener};
@@ -429,11 +429,12 @@ pub fn spawn_session_listening_before_it_advertises(
 /// Accept one caller on `session_listener` and answer each request it sends
 /// until it hangs up, behind the gate a session holding
 /// `session_connection_token` keeps for a caller of its own user. An accepted
-/// Hello gets build `9.9.9`, and a refused request gets the gate's refusal. A
-/// `Prepare` is answered `Prepared` and its request is held. A `Commit` gets
-/// what `answer_request` gives for the held request's kind, and a
-/// `RequestFailed` refusal when nothing is held. Every other request gets what
-/// `answer_request` gives for its kind.
+/// Hello gets build `9.9.9` and this process's image, as
+/// [`ProcessImageId::get_own`] gives it, and a refused request gets the gate's
+/// refusal. A `Prepare` is answered `Prepared` and its request is held. A
+/// `Commit` gets what `answer_request` gives for the held request's kind, and
+/// a `RequestFailed` refusal when nothing is held. Every other request gets
+/// what `answer_request` gives for its kind.
 fn answer_session_requests(
     session_listener: &Listener,
     session_connection_token: ConnectionToken,
@@ -458,6 +459,7 @@ fn answer_session_requests(
                         .get_agreed_protocol_version()
                         .expect("an accepted Hello settles a version"),
                     build_version: "9.9.9".to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
                 IpcRequestKind::Prepare(held_request_kind) => {
                     prepared_request_kind = Some(*held_request_kind);

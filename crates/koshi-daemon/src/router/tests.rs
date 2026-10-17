@@ -27,7 +27,8 @@ use std::time::UNIX_EPOCH;
 use koshi_core::discovery::{SessionDiscovery, SessionOverview};
 use koshi_ipc::endpoint::RESTART_WINDOW_DURATION;
 use koshi_ipc::protocol::{
-    IncomingResponse, IpcRequest, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    IncomingResponse, IpcRequest, IpcResponse, IpcResult, ProcessImageId, MIN_PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
 };
 use koshi_ipc::remote_tokens::{
     hash_connection_token, TokenEntry, TokenRecord, TOKEN_STORE_FORMAT,
@@ -1452,6 +1453,7 @@ fn spawn_session_server_answering_once_released(
                 answer_result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_version: env!("CARGO_PKG_VERSION").to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
             },
             IpcResponse {
@@ -2188,6 +2190,7 @@ fn spawn_version_mismatched_session_server(socket_address: &str) -> JoinHandle<(
             answer_result: IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION + 1,
                 build_version: env!("CARGO_PKG_VERSION").to_string(),
+                process_image_id: ProcessImageId::get_own(),
             },
         });
     })
@@ -6645,6 +6648,7 @@ fn the_accept_loop_serves_a_connection_this_user_opened() {
             answer_result: RouterResult::Hello {
                 protocol_version: ROUTER_PROTOCOL_VERSION,
                 build_version: BUILD_VERSION.to_string(),
+                process_image_id: Some(ProcessImageId::get_own()),
             },
         }
     );
@@ -7404,6 +7408,7 @@ fn spawn_bridged_session_server(
                 answer_result: IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_version: env!("CARGO_PKG_VERSION").to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
             })
             .expect("answer the hello");

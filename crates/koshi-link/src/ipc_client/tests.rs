@@ -166,6 +166,7 @@ fn answer_scripted_connection(
                 IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_version: env!("CARGO_PKG_VERSION").to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
             );
             let commit_request_id =
@@ -222,6 +223,7 @@ fn answer_scripted_connection(
                 IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_version: env!("CARGO_PKG_VERSION").to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
             );
             let commit_request_id =
@@ -243,6 +245,7 @@ fn answer_scripted_connection(
                 IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_version: env!("CARGO_PKG_VERSION").to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
             );
             let next_request = session_connection.recv::<IpcRequest>();
@@ -257,6 +260,7 @@ fn answer_scripted_connection(
                 IpcResult::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_version: env!("CARGO_PKG_VERSION").to_string(),
+                    process_image_id: ProcessImageId::get_own(),
                 },
             );
             send_ipc_result(
@@ -678,6 +682,7 @@ fn spawn_answering_session(
             IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 build_version: env!("CARGO_PKG_VERSION").to_string(),
+                process_image_id: ProcessImageId::get_own(),
             },
         );
         let answered_request_id = if is_prepare_request {
@@ -962,6 +967,7 @@ fn a_layout_request_answered_with_another_reply_kind_names_that_kind() {
         IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
             build_version: env!("CARGO_PKG_VERSION").to_string(),
+            process_image_id: ProcessImageId::get_own(),
         },
     );
 
@@ -1174,6 +1180,7 @@ fn a_restart_whose_commit_gets_no_answer_is_unanswered() {
             IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 build_version: env!("CARGO_PKG_VERSION").to_string(),
+                process_image_id: ProcessImageId::get_own(),
             },
         );
         let commit_request_id =
@@ -1197,7 +1204,10 @@ fn a_restart_whose_commit_gets_no_answer_is_unanswered() {
     );
     assert_eq!(
         session_restart,
-        SessionRestart::Unanswered("ipc peer disconnected".to_string())
+        SessionRestart::Unanswered {
+            failure_detail: "ipc peer disconnected".to_string(),
+            asked_process_image_id: Some(ProcessImageId::get_own()),
+        }
     );
 }
 
@@ -1216,7 +1226,9 @@ fn a_restarting_reply_reports_the_session_restarting_and_asked_for_a_restart() {
             Instant::now() + TEST_RESTART_ANSWER_TIMEOUT_DURATION,
         )
         .expect("the exchange succeeds"),
-        SessionRestart::Restarting
+        SessionRestart::Restarting {
+            asked_process_image_id: Some(ProcessImageId::get_own()),
+        }
     );
     assert_eq!(
         asked_requests.recv().expect("the session read one request"),
@@ -1726,6 +1738,7 @@ fn spawn_foreign_session(
             IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 build_version: env!("CARGO_PKG_VERSION").to_string(),
+                process_image_id: ProcessImageId::get_own(),
             },
         );
         send_ipc_result(
@@ -2738,6 +2751,7 @@ fn spawn_settled_session(
         let hello_result = IpcResult::Hello {
             protocol_version,
             build_version: env!("CARGO_PKG_VERSION").to_string(),
+            process_image_id: ProcessImageId::get_own(),
         };
         if matches!(timing, HelloTiming::AtOnce) {
             send_ipc_result(
@@ -2876,9 +2890,9 @@ fn take_prepared_command_envelope(prepare_request_kind: IpcRequestKind) -> Comma
     *command_envelope
 }
 
-/// A command naming a target client costs one round trip, the same as every
-/// other command: the session reads the command before it answers the Hello,
-/// and still answers both in order.
+/// A command naming a target client costs two round trips, the same as every
+/// other command: the session reads the `Prepare` before it answers the Hello,
+/// answers both in order, then reads the `Commit`.
 #[test]
 fn a_named_client_command_reaches_a_session_that_answers_the_hello_last() {
     let runtime_directory = build_test_runtime_directory();
@@ -2993,7 +3007,7 @@ fn a_named_client_reaches_a_session_that_speaks_this_builds_protocol() {
 }
 
 #[test]
-fn no_named_client_still_costs_one_round_trip() {
+fn no_named_client_still_costs_two_round_trips() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let (session_thread, received_requests) = spawn_settled_session(
@@ -3817,7 +3831,9 @@ fn a_session_of_koshi_0_4_0_is_asked_again_in_its_own_envelope_and_restarts() {
 
     assert_eq!(
         session_restart.expect("the session restarts"),
-        SessionRestart::Restarting
+        SessionRestart::Restarting {
+            asked_process_image_id: None,
+        }
     );
     assert_eq!(
         previous_release_request_texts,
@@ -3925,7 +3941,10 @@ fn a_session_of_koshi_0_4_0_that_does_not_answer_its_restart_by_the_deadline_may
 
     assert_eq!(
         session_restart.expect("a Restart with no answer is no failure"),
-        SessionRestart::Unanswered("ipc transport error: this step ran out of time".to_string())
+        SessionRestart::Unanswered {
+            failure_detail: "ipc transport error: this step ran out of time".to_string(),
+            asked_process_image_id: None,
+        }
     );
     assert_eq!(
         previous_release_request_texts,
@@ -4411,6 +4430,7 @@ fn build_accepting_copy_script(copy_results: Vec<IpcResult>) -> CopyConnectionSc
         hello_result: IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
             build_version: env!("CARGO_PKG_VERSION").to_string(),
+            process_image_id: ProcessImageId::get_own(),
         },
         copy_results,
     }
@@ -4776,6 +4796,7 @@ fn a_later_part_the_session_never_answers_ends_at_its_answer_timeout() {
             IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 build_version: env!("CARGO_PKG_VERSION").to_string(),
+                process_image_id: ProcessImageId::get_own(),
             },
         );
         send_ipc_result_best_effort(
@@ -5150,6 +5171,7 @@ fn a_copy_whose_commit_gets_no_answer_reports_it_may_still_be_routed() {
             IpcResult::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 build_version: env!("CARGO_PKG_VERSION").to_string(),
+                process_image_id: ProcessImageId::get_own(),
             },
         );
         let commit_request_id =

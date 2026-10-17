@@ -29,7 +29,8 @@ use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::frame::PaintedFrame;
 use koshi_ipc::protocol::{
-    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, ProcessImageId, MIN_PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
 use koshi_pty::backend::state::PtyBackend;
@@ -249,6 +250,7 @@ pub fn open_session_connection(runtime_directory: &Path, session_id: SessionId) 
         IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
             build_version: env!("CARGO_PKG_VERSION").to_string(),
+            process_image_id: ProcessImageId::get_own(),
         }
     );
     ipc_connection

@@ -76,9 +76,11 @@ pub const DIAL_TIMEOUT_DURATION: Duration = Duration::from_secs(10);
 /// dial runs the whole admission — TLS, the secret, and the scope check.
 pub const REMOTE_RESTART_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(250);
 
-/// How long the frames that join a client to a session on another machine have
-/// to arrive: the Attach, the session's Hello carried back through the bridge,
-/// and the answer that names the client.
+/// How long each of the two parts of a join of a client to a session on
+/// another machine has to finish. The first part runs from the open connection
+/// to the session's `Prepared`: the Attach, the session's Hello carried back
+/// through the bridge, and the answer to the `Prepare`. The second part runs
+/// from the `Commit` to the answer that names the client.
 ///
 /// The deadline is taken off once the client is joined.
 pub const JOIN_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
@@ -1267,7 +1269,7 @@ fn send_remote_ipc_request(
             let hello_response = read_forwarded_hello_answer(&mut frame_reader, &session_selector)?;
             Ok((frame_reader, frame_writer, hello_response))
         })?;
-    talk::parse_session_hello_version(hello_response)?;
+    talk::parse_session_hello_answer(hello_response)?;
 
     frame_writer
         .send(&ipc_request)
