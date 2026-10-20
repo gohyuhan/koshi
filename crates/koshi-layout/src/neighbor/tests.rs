@@ -1,4 +1,4 @@
-//! Tests for span overlap and directional neighbour selection.
+//! Tests for span overlap and directional neighbor selection.
 //!
 //! The fixture is the four-pane screen `A | B B` above `A | C D` over 120 by
 //! 40 cells: A `(0, 0, 40, 40)`, B `(40, 0, 80, 20)`, C `(40, 20, 40, 20)`,

@@ -45,6 +45,66 @@ fn list_json_paths_lost_by_decoding(
     }
 }
 
+/// `decoded_pane_json` with its grids and history written back in the shape
+/// resume format 4 stores them: each grid as `rows` of JSON cells beside a
+/// `row_metadata` list, the alternate screen as its grid (one with no grid as
+/// its blank grid at the primary screen's size), and each history line as a
+/// pair of its JSON cells and its metadata. A hard-ended history line leaves
+/// out its trailing default blanks.
+fn write_stored_rows_as_format_four_cells(decoded_pane_json: &mut Value) {
+    use koshi_terminal::grid::row_snapshot::RowSnapshot;
+    use koshi_terminal::grid::state::{Cell, Grid, RowEnd};
+    use koshi_terminal::style::Style;
+
+    let terminal_state_json = &mut decoded_pane_json["terminal_state"];
+    let alternate_json = terminal_state_json["alternate"].take();
+    terminal_state_json["alternate"] = match alternate_json.get("Blank") {
+        Some(blank_json) => {
+            let fill_style: Style = serde_json::from_value(blank_json["fill_style"].clone())
+                .expect("read the blank alternate style");
+            let primary_grid: Grid = serde_json::from_value(terminal_state_json["primary"].clone())
+                .expect("read the primary grid");
+            let (row_count, column_count) = primary_grid.get_grid_dimensions();
+            serde_json::to_value(Grid::build_blank(row_count, column_count, fill_style))
+                .expect("encode the blank alternate grid")
+        }
+        None => alternate_json["Allocated"].clone(),
+    };
+    for grid_name in ["primary", "alternate"] {
+        let stored_rows: Vec<RowSnapshot> =
+            serde_json::from_value(terminal_state_json[grid_name]["rows"].take())
+                .expect("read the stored grid rows");
+        terminal_state_json[grid_name] = serde_json::json!({
+            "rows": stored_rows
+                .iter()
+                .map(RowSnapshot::decode_row_cells)
+                .collect::<Vec<Vec<Cell>>>(),
+            "row_metadata": stored_rows
+                .iter()
+                .map(RowSnapshot::get_row_metadata)
+                .collect::<Vec<_>>(),
+        });
+    }
+    let stored_lines: Vec<RowSnapshot> =
+        serde_json::from_value(terminal_state_json["scrollback"]["retained_lines"].take())
+            .expect("read the stored history lines");
+    terminal_state_json["scrollback"]["retained_lines"] = serde_json::to_value(
+        stored_lines
+            .iter()
+            .map(|row_snapshot| {
+                let mut line_cells = row_snapshot.decode_row_cells();
+                if row_snapshot.get_row_metadata().row_end == RowEnd::Hard {
+                    while line_cells.last() == Some(&Cell::build_blank()) {
+                        line_cells.pop();
+                    }
+                }
+                (line_cells, row_snapshot.get_row_metadata())
+            })
+            .collect::<Vec<_>>(),
+    )
+    .expect("encode the history lines");
+}
+
 #[test]
 fn every_migrated_field_of_each_released_fixture_survives_decoding() {
     let mut lost_json_paths = Vec::new();
@@ -94,7 +154,7 @@ fn every_migrated_field_of_each_released_fixture_survives_decoding() {
         .expect("read the pane states");
         for (pane_key, raw_pane_state) in pane_states {
             let migrated_pane_bytes =
-                if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_PANE_STATE {
+                if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_PANE_FIELDS {
                     raw_pane_state.get().as_bytes().to_vec()
                 } else {
                     migrate_previous_pane_json(
@@ -107,11 +167,16 @@ fn every_migrated_field_of_each_released_fixture_survives_decoding() {
                 };
             let migrated_pane: Value =
                 serde_json::from_slice(&migrated_pane_bytes).expect("read the migrated pane");
-            let decoded_pane: CarriedPaneState =
-                serde_json::from_slice(&migrated_pane_bytes).expect("decode the migrated pane");
+            let decoded_pane =
+                serde_json::from_slice::<ResumeFormat4CarriedPaneState>(&migrated_pane_bytes)
+                    .expect("decode the migrated pane")
+                    .into_carried_pane_state();
+            let mut decoded_pane_json =
+                serde_json::to_value(&decoded_pane).expect("encode the decoded pane");
+            write_stored_rows_as_format_four_cells(&mut decoded_pane_json);
             lost_json_paths.extend(list_json_paths_lost_by_decoding(
                 &migrated_pane,
-                &serde_json::to_value(&decoded_pane).expect("encode the decoded pane"),
+                &decoded_pane_json,
                 &format!("format {source_resume_format} pane"),
             ));
         }
@@ -558,11 +623,13 @@ fn step_four_adds_the_missing_floating_fields_and_keeps_the_ones_present() {
                 "clients": {"client_by_id": {
                     "fresh": {"label": "C-fresh"},
                     "kept": {"label": "C-kept", "floating_pane_focus_order": ["kept-pane"]}
-                }}
+                }},
+                "panes": {"pane_record_by_id": {}}
             },
             "second": {
                 "floating_set": {"members": ["kept-member"]},
-                "clients": {"client_by_id": {}}
+                "clients": {"client_by_id": {}},
+                "panes": {"pane_record_by_id": {}}
             }
         },
         "carried_pane_state_by_pane_id": {}
@@ -590,15 +657,62 @@ fn step_four_adds_the_missing_floating_fields_and_keeps_the_ones_present() {
                             "floating_pane_focus_order": ["kept-pane"],
                             "focused_floating_pane_id": null
                         }
-                    }}
+                    }},
+                    "panes": {"pane_record_by_id": {}}
                 },
                 "second": {
                     "floating_set": {"members": ["kept-member"]},
-                    "clients": {"client_by_id": {}}
+                    "clients": {"client_by_id": {}},
+                    "panes": {"pane_record_by_id": {}}
                 }
             },
             "carried_pane_state_by_pane_id": {}
         })
+    );
+}
+
+#[test]
+fn step_four_removes_the_lifecycle_and_close_policy_of_each_pane_record() {
+    let mut resume_body = serde_json::json!({
+        "session_by_id": {
+            "first": {
+                "floating_set": {"members": []},
+                "clients": {"client_by_id": {}},
+                "panes": {"pane_record_by_id": {
+                    "running": {
+                        "pane_id": "running",
+                        "spawn_spec": null,
+                        "working_directory": "/home/user/project",
+                        "close_policy": {"Graceful": {"timeout_duration": 3}},
+                        "lifecycle": "Running"
+                    },
+                    "plain": {
+                        "pane_id": "plain",
+                        "spawn_spec": null,
+                        "working_directory": null
+                    }
+                }}
+            }
+        },
+        "carried_pane_state_by_pane_id": {}
+    });
+
+    migrate_resume_four_to_five(&mut resume_body).expect("step 4 converts the body");
+
+    assert_eq!(
+        resume_body["session_by_id"]["first"]["panes"],
+        serde_json::json!({"pane_record_by_id": {
+            "running": {
+                "pane_id": "running",
+                "spawn_spec": null,
+                "working_directory": "/home/user/project"
+            },
+            "plain": {
+                "pane_id": "plain",
+                "spawn_spec": null,
+                "working_directory": null
+            }
+        }})
     );
 }
 
@@ -629,6 +743,38 @@ fn step_four_names_the_missing_or_misshapen_field() {
         (
             serde_json::json!({"session_by_id": {"S": {"clients": {"client_by_id": {"C": 7}}}}}),
             "session.clients.client_by_id.C must be an object",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {"clients": {"client_by_id": {}}}}}),
+            "body.session_by_id.S.panes is missing",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {
+                "clients": {"client_by_id": {}},
+                "panes": 7
+            }}}),
+            "session.panes must be an object",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {
+                "clients": {"client_by_id": {}},
+                "panes": {}
+            }}}),
+            "session.panes.pane_record_by_id is missing",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {
+                "clients": {"client_by_id": {}},
+                "panes": {"pane_record_by_id": 7}
+            }}}),
+            "session.panes.pane_record_by_id must be an object",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {
+                "clients": {"client_by_id": {}},
+                "panes": {"pane_record_by_id": {"P": 7}}
+            }}}),
+            "session.panes.pane_record_by_id.P must be an object",
         ),
     ] {
         let mut resume_body = resume_body;

@@ -14,9 +14,11 @@ use std::sync::mpsc;
 
 use common::{
     count_attached_clients, get_last_painted_frame, get_session_overview, open_session_connection,
-    read_session_frames_to_detached, read_session_frames_until, serve_test_session,
-    submit_test_command, submit_test_command_for_client, wait_for_client_count, TEST_SESSION_NAME,
-    TEST_VIEWPORT_SIZE, TEST_WAIT_TIMEOUT_DURATION,
+    read_session_frames_to_detached, read_session_frames_to_mouse_answer,
+    read_session_frames_until, read_session_frames_until_painted_frame, serve_test_session,
+    submit_test_command, submit_test_command_for_client, wait_for_client_count,
+    wait_for_mouse_tracking, ViewerConnection, TEST_SESSION_NAME, TEST_VIEWPORT_SIZE,
+    TEST_WAIT_TIMEOUT_DURATION,
 };
 
 use koshi_core::command::{
@@ -24,21 +26,22 @@ use koshi_core::command::{
     FocusTarget, LockModeArgs, MoveFloatingPaneArgs, NewPaneArgs, NewPanePlacement, NewTabArgs,
     PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, PlacementRevision, TabTarget,
 };
-use koshi_core::event::Event;
+use koshi_core::event::{Event, QuitCause};
 use koshi_core::geometry::{Direction, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord};
 use koshi_core::lock::LockMode;
-use koshi_core::mouse::{MouseAnswer, MouseButton, MouseKind, MouseTracking};
+use koshi_core::mouse::{MouseAnswer, MouseButton, MouseKind};
 use koshi_core::process::{ExitStatus, PtySize};
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{
     ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, WireMouseAction,
 };
-use koshi_ipc::transport::Connection;
+use koshi_ipc::transport::{Connection, ReceivedFrame};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::LayoutNode;
+use koshi_runtime::runtime::painted_update::SessionFrame;
 use koshi_session::client::{compute_default_pane_area_size, Client, ClientOrigin};
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::{
@@ -100,6 +103,7 @@ fn attach_test_client_with_resume_token(
                 graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
                 link_timeout_ms: None,
+                max_frames_per_second: 60,
             },
         },
     );
@@ -263,25 +267,27 @@ fn the_frame_that_shows_a_viewers_lock_names_the_lock_command_it_sent() {
                         )),
                     })
                     .expect("send the lock command");
-                let (viewer_connection, session_events) =
-                    read_session_frames_until(viewer_connection, |session_event| {
-                        matches!(
-                            session_event,
-                            SessionEvent::Painted { frame: painted_frame }
-                                if painted_frame.client_snapshot.lock_mode == LockMode::Locked
-                        )
-                    });
-                let frames_client_snapshots: Vec<_> = session_events
+                let (viewer_connection, session_frames) = read_session_frames_until_painted_frame(
+                    viewer_connection,
+                    |received_painted_frame| {
+                        received_painted_frame
+                            .painted_frame
+                            .client_snapshot
+                            .lock_mode
+                            == LockMode::Locked
+                    },
+                );
+                let frames_client_snapshots: Vec<_> = session_frames
                     .iter()
-                    .filter_map(|session_event| match session_event {
-                        SessionEvent::Painted {
-                            frame: painted_frame,
-                        } => Some(painted_frame.client_snapshot.clone()),
-                        _ => None,
+                    .filter_map(|session_frame| match session_frame {
+                        SessionFrame::Painted(received_painted_frame) => {
+                            Some(received_painted_frame.painted_frame.client_snapshot.clone())
+                        }
+                        SessionFrame::Event(_) | SessionFrame::ImageChunk(_) => None,
                     })
                     .collect();
                 (
-                    vec![viewer_connection],
+                    vec![viewer_connection.ipc_connection],
                     (lock_command_id, frames_client_snapshots),
                 )
             },
@@ -317,6 +323,7 @@ fn nothing_in_the_request_can_raise_the_clients_authority() {
                         "Prepare": {
                             "Attach": {
                                 "viewport_size": { "column_count": 80, "row_count": 24 },
+                                "max_frames_per_second": 60,
                                 "tier": "admin"
                             }
                         }
@@ -394,8 +401,11 @@ fn the_structure_reply_is_written_before_the_first_event_frame() {
 
             let (created_tab_id_sender, created_tab_id_receiver) = mpsc::channel();
             std::thread::spawn(move || loop {
-                let session_event: SessionEvent = viewer_connection.recv().expect("an event frame");
-                if let SessionEvent::TabCreated { tab_id } = session_event {
+                let received_frame = viewer_connection
+                    .recv_message_or_binary::<SessionEvent>()
+                    .expect("an event frame");
+                if let ReceivedFrame::Message(SessionEvent::TabCreated { tab_id }) = received_frame
+                {
                     let _ = created_tab_id_sender.send(tab_id);
                     return;
                 }
@@ -494,10 +504,12 @@ fn close_last_tab(
         should_kill_process_tree: false,
     });
     let emitted_events = submit_test_command(ipc_connection, session_id, command, request_id);
-    assert!(
-        emitted_events
-            .iter()
-            .any(|emitted_event| matches!(emitted_event, Event::Quit(_))),
+    assert_eq!(
+        emitted_events.last(),
+        Some(&Event::Quit(QuitCause::LastTabClosed {
+            tab_id,
+            pane_exit: None,
+        })),
         "closing the last tab quits the session",
     );
 }
@@ -516,11 +528,14 @@ fn the_event_stream_ends_with_the_quit_frame() {
             close_last_tab(&mut caller_connection, session_id, only_tab_id, 4);
 
             // The quit frame is the last one the viewer's stream carries.
-            let (viewer_connection, session_events) =
-                read_session_frames_until(viewer_connection, |session_event| {
-                    *session_event == SessionEvent::Quit
+            let (viewer_connection, session_frames) =
+                read_session_frames_until(viewer_connection, |session_frame| {
+                    *session_frame == SessionFrame::Event(SessionEvent::Quit)
                 });
-            assert_eq!(session_events.last(), Some(&SessionEvent::Quit));
+            assert_eq!(
+                session_frames.last(),
+                Some(&SessionFrame::Event(SessionEvent::Quit))
+            );
 
             // The quit frame ends the stream. The viewer closes its connection
             // once it reads that frame, and the record goes with it.
@@ -563,24 +578,24 @@ fn the_stream_carries_a_pane_exit_while_the_session_keeps_serving() {
                 .trigger_child_exit(new_pane_id, ExitStatus::ExitCode(0))
                 .expect("the second pane's program exits");
 
-            let (viewer_connection, session_events) =
-                read_session_frames_until(viewer_connection, move |session_event| {
+            let (viewer_connection, session_frames) =
+                read_session_frames_until(viewer_connection, move |session_frame| {
                     matches!(
-                        session_event,
-                        SessionEvent::PaneProcessExited { pane_id, .. }
+                        session_frame,
+                        SessionFrame::Event(SessionEvent::PaneProcessExited { pane_id, .. })
                             if *pane_id == new_pane_id
                     )
                 });
             assert_eq!(
-                session_events.last(),
-                Some(&SessionEvent::PaneProcessExited {
+                session_frames.last(),
+                Some(&SessionFrame::Event(SessionEvent::PaneProcessExited {
                     pane_id: new_pane_id,
                     exit_code: Some(0),
                     signal: None,
-                }),
+                })),
             );
             (
-                vec![viewer_connection, caller_connection],
+                vec![viewer_connection.ipc_connection, caller_connection],
                 (session_id, new_pane_id),
             )
         },
@@ -618,12 +633,15 @@ fn the_event_stream_ends_with_the_quit_frame_when_the_only_program_exits() {
             // The exit and the quit the session ends on are published in one pass,
             // and the raised ending drops whatever is still queued for a client.
             // The quit frame is the one frame this stream is promised.
-            let (viewer_connection, session_events) =
-                read_session_frames_until(viewer_connection, |session_event| {
-                    *session_event == SessionEvent::Quit
+            let (viewer_connection, session_frames) =
+                read_session_frames_until(viewer_connection, |session_frame| {
+                    *session_frame == SessionFrame::Event(SessionEvent::Quit)
                 });
-            assert_eq!(session_events.last(), Some(&SessionEvent::Quit));
-            (vec![viewer_connection], session_id)
+            assert_eq!(
+                session_frames.last(),
+                Some(&SessionFrame::Event(SessionEvent::Quit))
+            );
+            (vec![viewer_connection.ipc_connection], session_id)
         },
     );
 
@@ -738,15 +756,20 @@ fn a_frame_this_build_cannot_read_costs_one_request_not_the_stream() {
                     ))),
                 })
                 .expect("send the next request");
-            let (viewer_connection, session_events) =
-                read_session_frames_until(viewer_connection, |session_event| {
-                    matches!(session_event, SessionEvent::TabCreated { .. })
+            let (viewer_connection, session_frames) =
+                read_session_frames_until(viewer_connection, |session_frame| {
+                    matches!(
+                        session_frame,
+                        SessionFrame::Event(SessionEvent::TabCreated { .. })
+                    )
                 });
-            let added_tab_id = session_events
+            let added_tab_id = session_frames
                 .iter()
-                .find_map(|session_event| match session_event {
-                    SessionEvent::TabCreated { tab_id } => Some(*tab_id),
-                    _ => None,
+                .find_map(|session_frame| match session_frame {
+                    SessionFrame::Event(SessionEvent::TabCreated { tab_id }) => Some(*tab_id),
+                    SessionFrame::Event(_)
+                    | SessionFrame::Painted(_)
+                    | SessionFrame::ImageChunk(_) => None,
                 })
                 .expect("the new tab reaches the stream");
 
@@ -756,7 +779,7 @@ fn a_frame_this_build_cannot_read_costs_one_request_not_the_stream() {
                 "the client that sent the unreadable frame is still attached"
             );
             (
-                vec![viewer_connection, caller_connection],
+                vec![viewer_connection.ipc_connection, caller_connection],
                 (session_id, client_id, added_tab_id),
             )
         },
@@ -812,11 +835,11 @@ fn detaching_one_client_leaves_every_other_stream_running() {
             assert_eq!(emitted_events, Vec::new());
 
             // The detached frame is the last one the departing viewer's stream carries.
-            let (detached_connection, detached_session_events) =
+            let (detached_connection, detached_session_frames) =
                 read_session_frames_to_detached(detaching_connection);
             assert_eq!(
-                detached_session_events.last(),
-                Some(&SessionEvent::Detached)
+                detached_session_frames.last(),
+                Some(&SessionFrame::Event(SessionEvent::Detached))
             );
             wait_for_client_count(&mut caller_connection, 1, 5);
 
@@ -825,9 +848,11 @@ fn detaching_one_client_leaves_every_other_stream_running() {
             let added_tab_id = create_test_tab(&mut caller_connection, session_id, 100);
             let (tab_event_sender, tab_event_receiver) = mpsc::channel();
             std::thread::spawn(move || loop {
-                let session_event: SessionEvent =
-                    remaining_connection.recv().expect("an event frame");
-                if let SessionEvent::TabCreated { tab_id } = session_event {
+                let received_frame = remaining_connection
+                    .recv_message_or_binary::<SessionEvent>()
+                    .expect("an event frame");
+                if let ReceivedFrame::Message(SessionEvent::TabCreated { tab_id }) = received_frame
+                {
                     let _ = tab_event_sender.send((remaining_connection, tab_id));
                     return;
                 }
@@ -840,7 +865,7 @@ fn detaching_one_client_leaves_every_other_stream_running() {
             (
                 vec![
                     caller_connection,
-                    detached_connection,
+                    detached_connection.ipc_connection,
                     remaining_connection_after_event,
                 ],
                 (
@@ -898,17 +923,17 @@ fn detach_all_takes_every_client_and_leaves_the_session_whole() {
             assert_eq!(emitted_events, Vec::new());
 
             // Every attached client's stream ends with the same detached frame.
-            let (detached_first_connection, first_detached_session_events) =
+            let (detached_first_connection, first_detached_session_frames) =
                 read_session_frames_to_detached(first_attached_connection);
-            let (detached_second_connection, second_detached_session_events) =
+            let (detached_second_connection, second_detached_session_frames) =
                 read_session_frames_to_detached(second_attached_connection);
             assert_eq!(
-                first_detached_session_events.last(),
-                Some(&SessionEvent::Detached)
+                first_detached_session_frames.last(),
+                Some(&SessionFrame::Event(SessionEvent::Detached))
             );
             assert_eq!(
-                second_detached_session_events.last(),
-                Some(&SessionEvent::Detached)
+                second_detached_session_frames.last(),
+                Some(&SessionFrame::Event(SessionEvent::Detached))
             );
             wait_for_client_count(&mut caller_connection, 0, 5);
 
@@ -935,8 +960,8 @@ fn detach_all_takes_every_client_and_leaves_the_session_whole() {
             (
                 vec![
                     caller_connection,
-                    detached_first_connection,
-                    detached_second_connection,
+                    detached_first_connection.ipc_connection,
+                    detached_second_connection.ipc_connection,
                 ],
                 (
                     session_id,
@@ -1010,15 +1035,18 @@ fn detaching_the_smaller_client_grows_the_tabs_pty_back() {
                 }),
                 4,
             );
-            let (narrow_client_connection, session_events) =
+            let (narrow_client_connection, session_frames) =
                 read_session_frames_to_detached(narrow_client_connection);
-            assert_eq!(session_events.last(), Some(&SessionEvent::Detached));
+            assert_eq!(
+                session_frames.last(),
+                Some(&SessionFrame::Event(SessionEvent::Detached))
+            );
             wait_for_client_count(&mut caller_connection, 1, 5);
 
             (
                 vec![
                     caller_connection,
-                    narrow_client_connection,
+                    narrow_client_connection.ipc_connection,
                     wide_client_connection,
                 ],
                 pane_id,
@@ -1147,11 +1175,11 @@ fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
 
             // The first frame the session composes for this client, drawn at the
             // size the attach reported.
-            let (mut viewer_connection, session_events) =
-                read_session_frames_until(viewer_connection, |session_event| {
-                    matches!(session_event, SessionEvent::Painted { .. })
+            let (mut viewer_connection, session_frames) =
+                read_session_frames_until(viewer_connection, |session_frame| {
+                    matches!(session_frame, SessionFrame::Painted(_))
                 });
-            let first_painted_frame = get_last_painted_frame(&session_events);
+            let first_painted_frame = &get_last_painted_frame(&session_frames).painted_frame;
             assert_eq!(first_painted_frame.client_snapshot.client_id, client_id);
             assert_eq!(first_painted_frame.session_snapshot.session_id, session_id);
             assert_eq!(
@@ -1175,6 +1203,7 @@ fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
             // reads them in this order: the press has reached the pane by the time
             // the resized frame is composed.
             viewer_connection
+                .ipc_connection
                 .send(&IpcRequest {
                     request_id: 4,
                     request_kind: IpcRequestKind::Keyboard {
@@ -1183,6 +1212,7 @@ fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
                 })
                 .expect("send key press");
             viewer_connection
+                .ipc_connection
                 .send(&IpcRequest {
                     request_id: 5,
                     request_kind: IpcRequestKind::Resize {
@@ -1193,27 +1223,30 @@ fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
                 })
                 .expect("send resize");
 
-            let (viewer_connection, session_events) =
-                read_session_frames_until(viewer_connection, |session_event| {
-                    matches!(
-                        session_event,
-                        SessionEvent::Painted { frame: painted_frame }
-                            if painted_frame.client_snapshot.viewport_size == RESIZED_VIEWPORT_SIZE
-                    )
-                });
+            let (viewer_connection, session_frames) = read_session_frames_until_painted_frame(
+                viewer_connection,
+                |received_painted_frame| {
+                    received_painted_frame
+                        .painted_frame
+                        .client_snapshot
+                        .viewport_size
+                        == RESIZED_VIEWPORT_SIZE
+                },
+            );
             // Nothing between the two frames drew at a third size.
-            for earlier_session_event in &session_events[..session_events.len() - 1] {
-                if let SessionEvent::Painted {
-                    frame: earlier_painted_frame,
-                } = earlier_session_event
+            for earlier_session_frame in &session_frames[..session_frames.len() - 1] {
+                if let SessionFrame::Painted(earlier_received_painted_frame) = earlier_session_frame
                 {
                     assert_eq!(
-                        earlier_painted_frame.client_snapshot.viewport_size,
+                        earlier_received_painted_frame
+                            .painted_frame
+                            .client_snapshot
+                            .viewport_size,
                         TEST_VIEWPORT_SIZE
                     );
                 }
             }
-            let resized_painted_frame = get_last_painted_frame(&session_events);
+            let resized_painted_frame = &get_last_painted_frame(&session_frames).painted_frame;
             assert_eq!(resized_painted_frame.client_snapshot.client_id, client_id);
             assert_eq!(
                 resized_painted_frame.client_snapshot.viewport_size,
@@ -1236,18 +1269,25 @@ fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
                 }),
                 6,
             );
-            let (viewer_connection, session_events) =
+            let (viewer_connection, session_frames) =
                 read_session_frames_to_detached(viewer_connection);
-            assert_eq!(session_events.last(), Some(&SessionEvent::Detached));
             assert_eq!(
-                session_events
+                session_frames.last(),
+                Some(&SessionFrame::Event(SessionEvent::Detached))
+            );
+            assert_eq!(
+                session_frames
                     .iter()
-                    .filter(|session_event| **session_event == SessionEvent::Detached)
+                    .filter(|session_frame| **session_frame
+                        == SessionFrame::Event(SessionEvent::Detached))
                     .count(),
                 1,
             );
 
-            (vec![caller_connection, viewer_connection], pane_id)
+            (
+                vec![caller_connection, viewer_connection.ipc_connection],
+                pane_id,
+            )
         },
     );
 
@@ -1282,29 +1322,11 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
                 3,
             );
 
-            let (mut viewer_connection, initial_session_events) = read_session_frames_until(
-                viewer_connection,
-                move |session_event| {
-                    matches!(
-                        session_event,
-                        SessionEvent::Painted { frame: painted_frame }
-                            if painted_frame.client_snapshot.client_id == client_id
-                                && painted_frame.session_snapshot.active_tab_snapshot.pane_slots.len() == 2
-                    )
-                },
-            );
-            let (observer_connection, observer_initial_session_events) = read_session_frames_until(
-                observer_connection,
-                move |session_event| {
-                    matches!(
-                        session_event,
-                        SessionEvent::Painted { frame: painted_frame }
-                            if painted_frame.client_snapshot.client_id == observer_client_id
-                                && painted_frame.session_snapshot.active_tab_snapshot.pane_slots.len() == 2
-                    )
-                },
-            );
-            let initial_frame = get_last_painted_frame(&initial_session_events);
+            let (mut viewer_connection, initial_session_frames) =
+                read_session_frames_until_two_panes_show(viewer_connection, client_id);
+            let (observer_connection, observer_initial_session_frames) =
+                read_session_frames_until_two_panes_show(observer_connection, observer_client_id);
+            let initial_frame = &get_last_painted_frame(&initial_session_frames).painted_frame;
             let active_tab_id = initial_frame.client_snapshot.active_tab_id;
             let source_rect_before = initial_frame
                 .session_snapshot
@@ -1333,6 +1355,7 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
             let placement_command_id = CommandId::new();
 
             viewer_connection
+                .ipc_connection
                 .send(&IpcRequest {
                     request_id: 3,
                     request_kind: IpcRequestKind::SubmitCommand(Box::new(
@@ -1352,61 +1375,56 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
                 })
                 .expect("send the checked pane swap");
 
-            let (viewer_connection, committed_session_events) = read_session_frames_until(
-                viewer_connection,
-                move |session_event| {
-                    matches!(
-                        session_event,
-                        SessionEvent::Painted { frame: painted_frame }
-                            if painted_frame.session_snapshot.session_revision == session_revision_before + 1
-                    )
-                },
-            );
-            let (observer_connection, observer_committed_session_events) =
-                read_session_frames_until(observer_connection, move |session_event| {
-                    matches!(
-                        session_event,
-                        SessionEvent::Painted { frame: painted_frame }
-                            if painted_frame.client_snapshot.client_id == observer_client_id
-                                && painted_frame.session_snapshot.session_revision == session_revision_before + 1
-                    )
-                });
-            let committed_frame = get_last_painted_frame(&committed_session_events);
-            let expected_commit_event = SessionEvent::PanePlacementCommitted {
+            let (viewer_connection, committed_session_frames) =
+                read_session_frames_until_painted_frame(
+                    viewer_connection,
+                    move |received_painted_frame| {
+                        received_painted_frame
+                            .painted_frame
+                            .session_snapshot
+                            .session_revision
+                            == session_revision_before + 1
+                    },
+                );
+            let (observer_connection, observer_committed_session_frames) =
+                read_session_frames_until_painted_frame(
+                    observer_connection,
+                    move |received_painted_frame| {
+                        let painted_frame = &received_painted_frame.painted_frame;
+                        painted_frame.client_snapshot.client_id == observer_client_id
+                            && painted_frame.session_snapshot.session_revision
+                                == session_revision_before + 1
+                    },
+                );
+            let committed_frame = &get_last_painted_frame(&committed_session_frames).painted_frame;
+            // Each read above ends at its committed frame and returns every
+            // frame that arrived before it.
+            let expected_commit_frame = SessionFrame::Event(SessionEvent::PanePlacementCommitted {
                 command_id: placement_command_id,
                 source_pane_id,
                 source_tab_id: Some(active_tab_id),
                 destination_tab_id: Some(active_tab_id),
                 placement_target: PanePlacementTarget::Swap { target_pane_id },
-            };
-            for committed_client_events in [
-                &committed_session_events,
-                &observer_committed_session_events,
+            });
+            for committed_client_frames in [
+                &committed_session_frames,
+                &observer_committed_session_frames,
             ] {
-                let commit_event_index = committed_client_events
-                    .iter()
-                    .position(|session_event| session_event == &expected_commit_event)
-                    .expect("the server broadcasts the exact placement commit to each viewer");
-                let committed_painted_frame_index = committed_client_events
-                    .iter()
-                    .position(|session_event| {
-                        matches!(
-                            session_event,
-                            SessionEvent::Painted { frame: painted_frame }
-                                if painted_frame.session_snapshot.session_revision == session_revision_before + 1
-                        )
-                    })
-                    .expect("each viewer receives the committed frame");
                 assert!(
-                    commit_event_index < committed_painted_frame_index,
-                    "the placement identity arrives before its authoritative frame"
+                    committed_client_frames.contains(&expected_commit_frame),
+                    "each viewer receives the exact placement commit before the committed frame"
                 );
             }
             assert_eq!(
-                observer_initial_session_events
-                    .last()
-                    .map(SessionEvent::get_event_name),
-                Some("Painted"),
+                get_last_painted_frame(&observer_initial_session_frames)
+                    .painted_frame
+                    .session_snapshot
+                    .active_tab_snapshot
+                    .pane_slots,
+                initial_frame
+                    .session_snapshot
+                    .active_tab_snapshot
+                    .pane_slots,
                 "the observer starts from the same committed layout"
             );
             let source_rect_after = committed_frame
@@ -1452,7 +1470,11 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
             );
 
             (
-                vec![caller_connection, viewer_connection, observer_connection],
+                vec![
+                    caller_connection,
+                    viewer_connection.ipc_connection,
+                    observer_connection.ipc_connection,
+                ],
                 (),
             )
         },
@@ -1481,18 +1503,9 @@ fn a_pane_swap_confirmed_before_another_viewers_new_pane_is_rejected_to_its_view
                 client_id,
                 3,
             );
-            let (viewer_connection, initial_session_events) = read_session_frames_until(
-                viewer_connection,
-                move |session_event| {
-                    matches!(
-                        session_event,
-                        SessionEvent::Painted { frame: painted_frame }
-                            if painted_frame.client_snapshot.client_id == client_id
-                                && painted_frame.session_snapshot.active_tab_snapshot.pane_slots.len() == 2
-                    )
-                },
-            );
-            let initial_frame = get_last_painted_frame(&initial_session_events);
+            let (viewer_connection, initial_session_frames) =
+                read_session_frames_until_two_panes_show(viewer_connection, client_id);
+            let initial_frame = &get_last_painted_frame(&initial_session_frames).painted_frame;
             let session_revision_before = initial_frame.session_snapshot.session_revision;
             let client_revision_before = initial_frame.client_snapshot.client_revision;
 
@@ -1503,18 +1516,19 @@ fn a_pane_swap_confirmed_before_another_viewers_new_pane_is_rejected_to_its_view
                 other_client_id,
                 4,
             );
-            let (mut viewer_connection, _) = read_session_frames_until(
+            let (mut viewer_connection, _) = read_session_frames_until_painted_frame(
                 viewer_connection,
-                move |session_event| {
-                    matches!(
-                        session_event,
-                        SessionEvent::Painted { frame: painted_frame }
-                            if painted_frame.session_snapshot.session_revision > session_revision_before
-                    )
+                move |received_painted_frame| {
+                    received_painted_frame
+                        .painted_frame
+                        .session_snapshot
+                        .session_revision
+                        > session_revision_before
                 },
             );
             let placement_command_id = CommandId::new();
             viewer_connection
+                .ipc_connection
                 .send(&IpcRequest {
                     request_id: 3,
                     request_kind: IpcRequestKind::SubmitCommand(Box::new(
@@ -1538,13 +1552,13 @@ fn a_pane_swap_confirmed_before_another_viewers_new_pane_is_rejected_to_its_view
                 command_id: placement_command_id,
             };
             let (viewer_connection, answer_events) =
-                read_session_frames_until(viewer_connection, move |session_event| {
-                    *session_event == expected_rejection
+                read_session_frames_until(viewer_connection, move |session_frame| {
+                    *session_frame == SessionFrame::Event(expected_rejection.clone())
                 });
             assert!(
-                !answer_events.iter().any(|session_event| matches!(
-                    session_event,
-                    SessionEvent::PanePlacementCommitted { command_id, .. }
+                !answer_events.iter().any(|session_frame| matches!(
+                    session_frame,
+                    SessionFrame::Event(SessionEvent::PanePlacementCommitted { command_id, .. })
                         if *command_id == placement_command_id
                 )),
                 "the session commits nothing for the stale swap"
@@ -1553,7 +1567,7 @@ fn a_pane_swap_confirmed_before_another_viewers_new_pane_is_rejected_to_its_view
             (
                 vec![
                     caller_connection,
-                    viewer_connection,
+                    viewer_connection.ipc_connection,
                     other_viewer_connection,
                 ],
                 (),
@@ -1594,11 +1608,11 @@ fn a_refused_floating_pane_move_from_a_key_binding_is_rejected_to_its_viewer() {
                 command_id: move_command_id,
             };
             let (viewer_connection, _) =
-                read_session_frames_until(viewer_connection, move |session_event| {
-                    *session_event == expected_rejection
+                read_session_frames_until(viewer_connection, move |session_frame| {
+                    *session_frame == SessionFrame::Event(expected_rejection.clone())
                 });
 
-            (vec![viewer_connection], ())
+            (vec![viewer_connection.ipc_connection], ())
         },
     );
 }
@@ -1623,18 +1637,9 @@ fn an_accepted_pane_insertion_delivers_its_frame_without_a_resize() {
                 3,
             );
 
-            let (mut viewer_connection, initial_session_events) = read_session_frames_until(
-                viewer_connection,
-                move |session_event| {
-                    matches!(
-                        session_event,
-                        SessionEvent::Painted { frame: painted_frame }
-                            if painted_frame.client_snapshot.client_id == client_id
-                                && painted_frame.session_snapshot.active_tab_snapshot.pane_slots.len() == 2
-                    )
-                },
-            );
-            let initial_frame = get_last_painted_frame(&initial_session_events);
+            let (mut viewer_connection, initial_session_frames) =
+                read_session_frames_until_two_panes_show(viewer_connection, client_id);
+            let initial_frame = &get_last_painted_frame(&initial_session_frames).painted_frame;
             let active_tab_id = initial_frame.session_snapshot.active_tab_snapshot.tab_id;
             let target_rect_before = initial_frame
                 .session_snapshot
@@ -1648,6 +1653,7 @@ fn an_accepted_pane_insertion_delivers_its_frame_without_a_resize() {
             let client_revision_before = initial_frame.client_snapshot.client_revision;
 
             viewer_connection
+                .ipc_connection
                 .send(&IpcRequest {
                     request_id: 3,
                     request_kind: IpcRequestKind::SubmitCommand(Box::new(
@@ -1671,17 +1677,18 @@ fn an_accepted_pane_insertion_delivers_its_frame_without_a_resize() {
                 })
                 .expect("send the checked pane insertion");
 
-            let (viewer_connection, committed_session_events) = read_session_frames_until(
-                viewer_connection,
-                move |session_event| {
-                    matches!(
-                        session_event,
-                        SessionEvent::Painted { frame: painted_frame }
-                            if painted_frame.session_snapshot.session_revision == session_revision_before + 1
-                    )
-                },
-            );
-            let committed_frame = get_last_painted_frame(&committed_session_events);
+            let (viewer_connection, committed_session_frames) =
+                read_session_frames_until_painted_frame(
+                    viewer_connection,
+                    move |received_painted_frame| {
+                        received_painted_frame
+                            .painted_frame
+                            .session_snapshot
+                            .session_revision
+                            == session_revision_before + 1
+                    },
+                );
+            let committed_frame = &get_last_painted_frame(&committed_session_frames).painted_frame;
             let source_rect_after = committed_frame
                 .session_snapshot
                 .active_tab_snapshot
@@ -1731,68 +1738,52 @@ fn an_accepted_pane_insertion_delivers_its_frame_without_a_resize() {
                 }
             );
 
-            (vec![caller_connection, viewer_connection], ())
+            (
+                vec![caller_connection, viewer_connection.ipc_connection],
+                (),
+            )
         },
     );
 }
 
-/// [`read_session_frames_until`] stopping at the answer to mouse round `request_id`.
-fn read_to_mouse_answer(
-    ipc_connection: Connection,
-    request_id: u64,
-) -> (Connection, Vec<SessionEvent>) {
-    read_session_frames_until(ipc_connection, move |session_event| match session_event {
-        SessionEvent::MouseAnswer {
-            request_id: answered_request_id,
-            mouse_answers: _,
-        } => *answered_request_id == request_id,
-        _ => false,
+/// [`read_session_frames_until_painted_frame`] stopping at the first frame
+/// drawn for `client_id` whose active tab shows two panes.
+fn read_session_frames_until_two_panes_show(
+    viewer_connection: impl Into<ViewerConnection>,
+    client_id: ClientId,
+) -> (ViewerConnection, Vec<SessionFrame<SessionEvent>>) {
+    read_session_frames_until_painted_frame(viewer_connection, move |received_painted_frame| {
+        let painted_frame = &received_painted_frame.painted_frame;
+        painted_frame.client_snapshot.client_id == client_id
+            && painted_frame
+                .session_snapshot
+                .active_tab_snapshot
+                .pane_slots
+                .len()
+                == 2
     })
 }
 
-/// Every mouse-round answer in `session_events`, in the order they arrived: the
+/// Every mouse-round answer in `session_frames`, in the order they arrived: the
 /// round each one answers, and what that answer carried.
-fn list_mouse_answers(session_events: &[SessionEvent]) -> Vec<(u64, Vec<MouseAnswer>)> {
-    session_events
+fn list_mouse_answers(
+    session_frames: &[SessionFrame<SessionEvent>],
+) -> Vec<(u64, Vec<MouseAnswer>)> {
+    session_frames
         .iter()
-        .filter_map(|session_event| match session_event {
-            SessionEvent::MouseAnswer {
+        .filter_map(|session_frame| match session_frame {
+            SessionFrame::Event(SessionEvent::MouseAnswer {
                 request_id,
                 mouse_answers,
-            } => Some((*request_id, mouse_answers.clone())),
-            _ => None,
+            }) => Some((*request_id, mouse_answers.clone())),
+            SessionFrame::Event(_) | SessionFrame::Painted(_) | SessionFrame::ImageChunk(_) => None,
         })
         .collect()
 }
 
-/// Turn normal mouse tracking with SGR encoding on in `pane_id`, the way the
-/// program running there does, and read `ipc_connection`'s stream until a
-/// painted frame shows the pane asking for reports. From that frame on, a
-/// forwarded event is written to the pane.
-fn wait_for_mouse_tracking(
-    fake_pty_backend: &FakePtyBackend,
-    pane_id: PaneId,
-    ipc_connection: Connection,
-) -> Connection {
-    fake_pty_backend
-        .push_output(pane_id, b"\x1b[?1000h\x1b[?1006h".to_vec())
-        .expect("the pane was spawned");
-    let (ipc_connection, _) =
-        read_session_frames_until(ipc_connection, move |session_event| match session_event {
-            SessionEvent::Painted {
-                frame: painted_frame,
-            } => painted_frame.pane_snapshots.iter().any(|pane_snapshot| {
-                pane_snapshot.pane_id == pane_id
-                    && pane_snapshot.mouse_tracking == MouseTracking::Normal
-            }),
-            _ => false,
-        });
-    ipc_connection
-}
-
 /// Print enough lines in `pane_id` to push at least `retained_line_count` of
-/// them into its scrollback, and read `ipc_connection`'s stream until a painted
-/// frame holds them.
+/// them into its scrollback, and read `viewer_connection`'s stream until a
+/// painted frame holds them.
 ///
 /// Returns the line that frame shows on the pane's top row. A scroll up from
 /// here counts back from that line.
@@ -1800,29 +1791,25 @@ fn fill_pane_scrollback(
     fake_pty_backend: &FakePtyBackend,
     pane_id: PaneId,
     retained_line_count: usize,
-    ipc_connection: Connection,
-) -> (Connection, u64) {
+    viewer_connection: impl Into<ViewerConnection>,
+) -> (ViewerConnection, u64) {
     let printed_line_count = retained_line_count + usize::from(TEST_VIEWPORT_SIZE.row_count);
     fake_pty_backend
         .push_output(pane_id, b"x\r\n".repeat(printed_line_count))
         .expect("the pane was spawned");
-    let (ipc_connection, session_events) =
-        read_session_frames_until(ipc_connection, move |session_event| match session_event {
-            SessionEvent::Painted {
-                frame: painted_frame,
-            } => painted_frame.pane_snapshots.iter().any(|pane_snapshot| {
-                pane_snapshot.pane_id == pane_id
-                    && pane_snapshot.scrollback_metadata.retained_line_count >= retained_line_count
-            }),
-            _ => false,
+    let (viewer_connection, session_frames) =
+        read_session_frames_until_painted_frame(viewer_connection, move |received_painted_frame| {
+            received_painted_frame.pane_views.iter().any(|pane_view| {
+                pane_view.pane_id == pane_id && pane_view.retained_line_count >= retained_line_count
+            })
         });
-    let top_row_index = get_last_painted_frame(&session_events)
-        .pane_snapshots
+    let top_row_index = get_last_painted_frame(&session_frames)
+        .pane_views
         .iter()
-        .find(|pane_snapshot| pane_snapshot.pane_id == pane_id)
+        .find(|pane_view| pane_view.pane_id == pane_id)
         .expect("the pane this client views")
         .view_top_row_index;
-    (ipc_connection, top_row_index)
+    (viewer_connection, top_row_index)
 }
 
 /// The forward of one left press with nothing held, at the pane's top-left
@@ -1857,6 +1844,7 @@ fn an_attached_client_forwards_a_mouse_press_into_its_pane() {
             let mut viewer_connection =
                 wait_for_mouse_tracking(&fake_pty_backend, pane_id, viewer_connection);
             viewer_connection
+                .ipc_connection
                 .send(&IpcRequest {
                     request_id: 4,
                     request_kind: IpcRequestKind::Mouse(vec![build_left_mouse_press_forward(
@@ -1866,9 +1854,9 @@ fn an_attached_client_forwards_a_mouse_press_into_its_pane() {
                 .expect("send mouse round");
 
             // The answer arrives after the round ran and its write happened.
-            let (viewer_connection, _) = read_to_mouse_answer(viewer_connection, 4);
+            let (viewer_connection, _) = read_session_frames_to_mouse_answer(viewer_connection, 4);
 
-            (vec![viewer_connection], pane_id)
+            (vec![viewer_connection.ipc_connection], pane_id)
         },
     );
 
@@ -1895,6 +1883,7 @@ fn the_answer_to_a_round_that_reports_nothing_still_reaches_the_viewer() {
             let mut viewer_connection =
                 wait_for_mouse_tracking(&fake_pty_backend, pane_id, viewer_connection);
             viewer_connection
+                .ipc_connection
                 .send(&IpcRequest {
                     request_id: 4,
                     request_kind: IpcRequestKind::Mouse(vec![build_left_mouse_press_forward(
@@ -1904,10 +1893,11 @@ fn the_answer_to_a_round_that_reports_nothing_still_reaches_the_viewer() {
                 .expect("send mouse round");
 
             // A forward has nothing to report, and the round is answered anyway.
-            let (viewer_connection, session_events) = read_to_mouse_answer(viewer_connection, 4);
-            assert_eq!(list_mouse_answers(&session_events), vec![(4, Vec::new())]);
+            let (viewer_connection, session_frames) =
+                read_session_frames_to_mouse_answer(viewer_connection, 4);
+            assert_eq!(list_mouse_answers(&session_frames), vec![(4, Vec::new())]);
 
-            (vec![viewer_connection], ())
+            (vec![viewer_connection.ipc_connection], ())
         },
     );
 }
@@ -1932,6 +1922,7 @@ fn a_scroll_round_answers_with_the_pane_and_the_line_its_view_landed_on() {
                 viewer_connection,
             );
             viewer_connection
+                .ipc_connection
                 .send(&IpcRequest {
                     request_id: 4,
                     request_kind: IpcRequestKind::Mouse(vec![WireMouseAction::Scroll {
@@ -1943,9 +1934,10 @@ fn a_scroll_round_answers_with_the_pane_and_the_line_its_view_landed_on() {
                 .expect("send mouse round");
 
             // The view landed five lines above the line it was showing.
-            let (viewer_connection, session_events) = read_to_mouse_answer(viewer_connection, 4);
+            let (viewer_connection, session_frames) =
+                read_session_frames_to_mouse_answer(viewer_connection, 4);
             assert_eq!(
-                list_mouse_answers(&session_events),
+                list_mouse_answers(&session_frames),
                 vec![(
                     4,
                     vec![MouseAnswer::Scrolled {
@@ -1955,15 +1947,15 @@ fn a_scroll_round_answers_with_the_pane_and_the_line_its_view_landed_on() {
                 )],
             );
 
-            (vec![viewer_connection], ())
+            (vec![viewer_connection.ipc_connection], ())
         },
     );
 }
 
 #[test]
 fn a_border_move_round_answers_with_the_cells_it_applied() {
-    // The request asks for far more cells than the neighbour pane can give. The
-    // neighbour holds 40 of the tab's 80 columns. A pane's box keeps a 2-column
+    // The request asks for far more cells than the neighbor pane can give. The
+    // neighbor holds 40 of the tab's 80 columns. A pane's box keeps a 2-column
     // content minimum inside a 1-cell border, which is 4 columns, and the border
     // move takes the 36 columns above that minimum.
     const REQUESTED_CELL_COUNT: u16 = 200;
@@ -1977,7 +1969,7 @@ fn a_border_move_round_answers_with_the_cells_it_applied() {
                 attach_test_client(&mut viewer_connection, 2);
             let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
 
-            // The neighbour whose room the border move takes, split off the
+            // The neighbor whose room the border move takes, split off the
             // client's own pane over a second connection, which never attaches.
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
             create_right_split_pane(&mut caller_connection, session_id, pane_id, client_id, 3);
@@ -1994,9 +1986,10 @@ fn a_border_move_round_answers_with_the_cells_it_applied() {
                 })
                 .expect("send mouse round");
 
-            let (viewer_connection, session_events) = read_to_mouse_answer(viewer_connection, 4);
+            let (viewer_connection, session_frames) =
+                read_session_frames_to_mouse_answer(viewer_connection, 4);
             assert_eq!(
-                list_mouse_answers(&session_events),
+                list_mouse_answers(&session_frames),
                 vec![(
                     4,
                     vec![MouseAnswer::Resized {
@@ -2008,7 +2001,10 @@ fn a_border_move_round_answers_with_the_cells_it_applied() {
                 )],
             );
 
-            (vec![caller_connection, viewer_connection], ())
+            (
+                vec![caller_connection, viewer_connection.ipc_connection],
+                (),
+            )
         },
     );
 }
@@ -2045,6 +2041,7 @@ fn one_round_runs_every_action_it_holds_and_is_answered_once() {
             );
 
             viewer_connection
+                .ipc_connection
                 .send(&IpcRequest {
                     request_id: 4,
                     request_kind: IpcRequestKind::Mouse(vec![
@@ -2061,26 +2058,27 @@ fn one_round_runs_every_action_it_holds_and_is_answered_once() {
                     ]),
                 })
                 .expect("send mouse round");
-            let (mut viewer_connection, mut session_events) =
-                read_to_mouse_answer(viewer_connection, 4);
+            let (mut viewer_connection, mut session_frames) =
+                read_session_frames_to_mouse_answer(viewer_connection, 4);
 
             // A second round, sent once the first was answered. Its own answer
             // is the frame after which no further answer to the first round can
             // still be in flight.
             viewer_connection
+                .ipc_connection
                 .send(&IpcRequest {
                     request_id: 5,
                     request_kind: IpcRequestKind::Mouse(Vec::new()),
                 })
                 .expect("send empty mouse round");
-            let (viewer_connection, second_round_session_events) =
-                read_to_mouse_answer(viewer_connection, 5);
-            session_events.extend(second_round_session_events);
+            let (viewer_connection, second_round_session_frames) =
+                read_session_frames_to_mouse_answer(viewer_connection, 5);
+            session_frames.extend(second_round_session_frames);
 
             // One answer for the round, holding the scroll alone: the focus
             // command and the forward each report nothing.
             assert_eq!(
-                list_mouse_answers(&session_events),
+                list_mouse_answers(&session_frames),
                 vec![
                     (
                         4,
@@ -2094,7 +2092,7 @@ fn one_round_runs_every_action_it_holds_and_is_answered_once() {
             );
 
             (
-                vec![caller_connection, viewer_connection],
+                vec![caller_connection, viewer_connection.ipc_connection],
                 (session_id, client_id, tab_id, pane_id),
             )
         },
@@ -2145,6 +2143,7 @@ fn two_rounds_sent_back_to_back_are_answered_in_the_order_they_were_sent() {
                 [(4, FIRST_SCROLL_LINE_COUNT), (5, SECOND_SCROLL_LINE_COUNT)]
             {
                 viewer_connection
+                    .ipc_connection
                     .send(&IpcRequest {
                         request_id,
                         request_kind: IpcRequestKind::Mouse(vec![WireMouseAction::Scroll {
@@ -2158,9 +2157,10 @@ fn two_rounds_sent_back_to_back_are_answered_in_the_order_they_were_sent() {
 
             // Both rounds moved the same view, so the lines they answer with name
             // the order they ran in: two lines up, then three more.
-            let (viewer_connection, session_events) = read_to_mouse_answer(viewer_connection, 5);
+            let (viewer_connection, session_frames) =
+                read_session_frames_to_mouse_answer(viewer_connection, 5);
             assert_eq!(
-                list_mouse_answers(&session_events),
+                list_mouse_answers(&session_frames),
                 vec![
                     (
                         4,
@@ -2182,7 +2182,7 @@ fn two_rounds_sent_back_to_back_are_answered_in_the_order_they_were_sent() {
                 ],
             );
 
-            (vec![viewer_connection], ())
+            (vec![viewer_connection.ipc_connection], ())
         },
     );
 }
@@ -2226,6 +2226,7 @@ fn attaching_again_with_the_token_brings_back_the_tab_focus_zoom_and_scroll() {
                 viewer_connection,
             );
             viewer_connection
+                .ipc_connection
                 .send(&IpcRequest {
                     request_id: 4,
                     request_kind: IpcRequestKind::Mouse(vec![WireMouseAction::Scroll {
@@ -2235,7 +2236,7 @@ fn attaching_again_with_the_token_brings_back_the_tab_focus_zoom_and_scroll() {
                     }]),
                 })
                 .expect("send mouse round");
-            let (viewer_connection, _) = read_to_mouse_answer(viewer_connection, 4);
+            let (viewer_connection, _) = read_session_frames_to_mouse_answer(viewer_connection, 4);
             submit_test_command_for_client(
                 &mut caller_connection,
                 session_id,

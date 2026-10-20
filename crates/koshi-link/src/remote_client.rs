@@ -58,6 +58,7 @@ use koshi_ipc::remote_wire::{
 };
 use koshi_ipc::router::{SessionSelector, ROUTER_RESTARTING_MESSAGE};
 use koshi_ipc::transport::{parse_answer, FrameReader, FrameWriter};
+use koshi_ipc::wire::WireName;
 use serde_json::value::RawValue;
 
 use crate::error::CliError;
@@ -101,14 +102,19 @@ const MAX_CONCURRENT_REACH_COUNT: usize = 16;
 /// over the whole sweep.
 const REACH_TIMEOUT_DURATION: Duration = Duration::from_secs(2);
 
-/// How long a change to the saved-server store waits for another koshi to
-/// finish its own change before it gives up. The operating system releases the
-/// lock if that koshi dies.
-const STORE_LOCK_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
+/// How long a change to a store under `remote/` — the saved servers or the
+/// remote access tokens — waits for another koshi to finish its own change
+/// before it gives up. The operating system releases the lock if that koshi
+/// dies.
+pub const STORE_LOCK_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 
-/// How long the wait for the saved-server store pauses between attempts on the
-/// lock.
+/// How long the wait for a store lock pauses between attempts on the lock.
 const STORE_LOCK_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(20);
+
+/// The error detail of a saved-server store lock that another koshi still held
+/// at the deadline.
+const SAVED_SERVER_STORE_HELD_DETAIL: &str =
+    "another koshi is changing the saved servers; try again";
 
 /// Which server an invocation talks to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,11 +184,29 @@ pub enum DialError {
     /// The path to the server failed, and dialling again can succeed.
     Unreachable(CliError),
     /// The server's router answered that it is restarting into a new build,
-    /// and a dial after the restart can succeed.
+    /// or the session refused the request with `Restarting` while it replaces
+    /// its process image, and a dial after the restart can succeed.
     Restarting(CliError),
     /// The server — or the certificate check — answered, and every
     /// identical dial after it gets the same answer.
     Refused(CliError),
+}
+
+impl DialError {
+    /// The [`DialError`] for `session_refusal`, an answer of the session that
+    /// ends a dial: [`DialError::Restarting`] for
+    /// [`CliError::SessionRestarting`], which the session answers while it
+    /// replaces its process image, and [`DialError::Refused`] for every other
+    /// answer.
+    #[must_use]
+    pub fn from_session_refusal(session_refusal: CliError) -> DialError {
+        match session_refusal {
+            session_restarting @ CliError::SessionRestarting { .. } => {
+                DialError::Restarting(session_restarting)
+            }
+            session_refusal => DialError::Refused(session_refusal),
+        }
+    }
 }
 
 /// The [`CliError`] the variant carries, unchanged.
@@ -247,10 +271,7 @@ enum Reach {
 pub fn load_saved_server_store() -> Result<(PathBuf, ServerStore), CliError> {
     let private_data_directory = resolve_private_data_directory()?;
     let saved_server_store_path = resolve_server_store_path(&private_data_directory);
-    let store_lock_file = acquire_store_lock(
-        &resolve_server_store_lock_path(&private_data_directory),
-        STORE_LOCK_TIMEOUT_DURATION,
-    )?;
+    let store_lock_file = acquire_saved_server_store_lock(&private_data_directory)?;
     migrate_saved_server_file(&saved_server_store_path).map_err(build_saved_server_store_error)?;
     let saved_server_store = ServerStore::load_server_store_from_path(&saved_server_store_path)
         .map_err(build_saved_server_store_error)?;
@@ -292,10 +313,7 @@ pub fn update_saved_server_store<UpdateOutcome>(
 ) -> Result<UpdateOutcome, CliError> {
     let private_data_directory = resolve_private_data_directory()?;
     let saved_server_store_path = resolve_server_store_path(&private_data_directory);
-    let store_lock_file = acquire_store_lock(
-        &resolve_server_store_lock_path(&private_data_directory),
-        STORE_LOCK_TIMEOUT_DURATION,
-    )?;
+    let store_lock_file = acquire_saved_server_store_lock(&private_data_directory)?;
     migrate_saved_server_file(&saved_server_store_path).map_err(build_saved_server_store_error)?;
     let mut saved_server_store = ServerStore::load_server_store_from_path(&saved_server_store_path)
         .map_err(build_saved_server_store_error)?;
@@ -315,37 +333,36 @@ pub fn update_saved_server_store<UpdateOutcome>(
 /// file this call creates. On Windows both take the data directory's
 /// owner-scoped ACLs.
 ///
-/// The attempt is repeated every [`STORE_LOCK_POLL_INTERVAL_DURATION`] for up
-/// to `lock_wait_duration`. Dropping the returned file releases the lock, and
-/// so does the operating system when the process holding it dies.
+/// The attempt is repeated every 20 ms for up to `lock_wait_duration`. Dropping
+/// the returned file releases the lock, and so does the operating system when
+/// the process holding it dies.
 ///
 /// # Errors
-/// [`CliError::IpcUnavailable`] when the directory or the file could not be
-/// made, when the lock could not be attempted, and when another koshi still
-/// held it at the deadline.
-fn acquire_store_lock(
+/// The error detail: `held_lock_detail` when another process still held the
+/// lock at the deadline, else the path and the operating system error of the
+/// step that failed — making the directory, making it private, opening the
+/// file, or attempting the lock.
+pub fn acquire_store_lock(
     lock_file_path: &Path,
     lock_wait_duration: Duration,
-) -> Result<File, CliError> {
-    let build_unavailable_error = |error_detail: String| CliError::IpcUnavailable {
-        detail: error_detail,
-    };
+    held_lock_detail: &str,
+) -> Result<File, String> {
     if let Some(parent_directory) = lock_file_path.parent() {
         std::fs::create_dir_all(parent_directory).map_err(|io_error| {
-            build_unavailable_error(format!(
+            format!(
                 "{} could not be made: {io_error}",
                 parent_directory.display()
-            ))
+            )
         })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(parent_directory, std::fs::Permissions::from_mode(0o700))
                 .map_err(|io_error| {
-                    build_unavailable_error(format!(
+                    format!(
                         "{} could not be made private: {io_error}",
                         parent_directory.display()
-                    ))
+                    )
                 })?;
         }
     }
@@ -361,10 +378,10 @@ fn acquire_store_lock(
         lock_file_options.mode(0o600);
     }
     let lock_file = lock_file_options.open(lock_file_path).map_err(|io_error| {
-        build_unavailable_error(format!(
+        format!(
             "{} could not be opened: {io_error}",
             lock_file_path.display()
-        ))
+        )
     })?;
     let lock_deadline = Instant::now() + lock_wait_duration;
     loop {
@@ -372,20 +389,36 @@ fn acquire_store_lock(
             Ok(()) => return Ok(lock_file),
             Err(TryLockError::WouldBlock) => {
                 if Instant::now() >= lock_deadline {
-                    return Err(build_unavailable_error(
-                        "another koshi is changing the saved servers; try again".to_string(),
-                    ));
+                    return Err(held_lock_detail.to_string());
                 }
                 std::thread::sleep(STORE_LOCK_POLL_INTERVAL_DURATION);
             }
             Err(TryLockError::Error(io_error)) => {
-                return Err(build_unavailable_error(format!(
+                return Err(format!(
                     "{} could not be locked: {io_error}",
                     lock_file_path.display()
-                )))
+                ))
             }
         }
     }
+}
+
+/// The saved-server store lock under `private_data_directory`, taken through
+/// [`acquire_store_lock`] with [`STORE_LOCK_TIMEOUT_DURATION`].
+///
+/// # Errors
+/// [`CliError::IpcUnavailable`] carrying the detail [`acquire_store_lock`]
+/// reports; a lock still held at the deadline reads
+/// `another koshi is changing the saved servers; try again`.
+fn acquire_saved_server_store_lock(private_data_directory: &Path) -> Result<File, CliError> {
+    acquire_store_lock(
+        &resolve_server_store_lock_path(private_data_directory),
+        STORE_LOCK_TIMEOUT_DURATION,
+        SAVED_SERVER_STORE_HELD_DETAIL,
+    )
+    .map_err(|error_detail| CliError::IpcUnavailable {
+        detail: error_detail,
+    })
 }
 
 /// A saved-server store that could not be read or written.
@@ -497,7 +530,7 @@ fn resolve_server_reference(
 /// not an address. The port is digits alone: no sign and no spaces.
 ///
 /// Example — `laptop.local:7654` and `[::1]:22` are addresses; `work`,
-/// `laptop.local`, `laptop.local:door`, `fe80::1` and `desk.local:+7654` are
+/// `laptop.local`, `laptop.local:door`, `2001:db8::1` and `desk.local:+7654` are
 /// not.
 #[must_use]
 pub fn is_server_address(server_selector_text: &str) -> bool {
@@ -900,22 +933,7 @@ pub fn connect_saved_server(
                     ),
                 }));
             }
-            let Some(saved_certificate_fingerprint) =
-                saved_server_record.certificate_fingerprint.as_deref()
-            else {
-                return Err(DialError::Refused(CliError::InvalidArgs {
-                    detail: format_missing_fingerprint_refusal(&format_saved_server_label(
-                        saved_server_record,
-                    )),
-                }));
-            };
-            let remote_link = connect_remote_server(
-                &saved_server_record.server_address,
-                &saved_server_record.connection_token,
-                saved_certificate_fingerprint,
-                DIAL_TIMEOUT_DURATION,
-                reply_timeout,
-            )?;
+            let remote_link = dial_saved_server(saved_server_record, reply_timeout)?;
             let connection_opened_at = SystemTime::now();
             let store_update_result = update_saved_server_store(|saved_server_store| {
                 saved_server_store
@@ -965,6 +983,38 @@ pub fn connect_saved_server(
             Ok((remote_link, new_saved_server))
         }
     }
+}
+
+/// Open a connection to the saved server `saved_server_record` names,
+/// presenting the secret its record holds and expecting the fingerprint its
+/// record holds, as [`connect_remote_server`] does with
+/// [`DIAL_TIMEOUT_DURATION`] and `reply_timeout`. The saved-server store is
+/// not read or written.
+///
+/// # Errors
+/// [`DialError::Refused`] carrying [`CliError::InvalidArgs`] when the record
+/// holds no fingerprint, and nothing is dialled. Whatever
+/// [`connect_remote_server`] reports.
+fn dial_saved_server(
+    saved_server_record: &SavedServer,
+    reply_timeout: Option<Duration>,
+) -> Result<RemoteLink, DialError> {
+    let Some(saved_certificate_fingerprint) =
+        saved_server_record.certificate_fingerprint.as_deref()
+    else {
+        return Err(DialError::Refused(CliError::InvalidArgs {
+            detail: format_missing_fingerprint_refusal(&format_saved_server_label(
+                saved_server_record,
+            )),
+        }));
+    };
+    connect_remote_server(
+        &saved_server_record.server_address,
+        &saved_server_record.connection_token,
+        saved_certificate_fingerprint,
+        DIAL_TIMEOUT_DURATION,
+        reply_timeout,
+    )
 }
 
 /// The sessions this connection's secret reaches, in the order the server
@@ -1112,7 +1162,8 @@ fn format_session_selector_name(session_selector: &SessionSelector) -> String {
     }
 }
 
-/// Run `dial_connection`, and dial again while the server's router restarts.
+/// Run `dial_connection`, and dial again while the server's router or the
+/// session restarts.
 ///
 /// A first dial that is not [`DialError::Restarting`] is the answer. After
 /// one, the pause of [`REMOTE_RESTART_POLL_INTERVAL_DURATION`] comes before
@@ -1147,8 +1198,8 @@ pub fn dial_through_router_restart<Joined>(
     }
 }
 
-/// Submit `command` to the session `session_id` on the server argument, and
-/// hand back the dispatcher's result.
+/// Submit `command` to the session `session_id` on the saved server
+/// `saved_server_record` names, and hand back the dispatcher's result.
 ///
 /// The command's source is [`CommandSource::ExternalCli`] carrying `session_id`
 /// and `client_id`. A pane-creating command carrying no working directory
@@ -1164,14 +1215,23 @@ pub fn dial_through_router_restart<Joined>(
 /// busy past the reply timeout never runs the command, and this gives
 /// [`CliError::IpcUnavailable`].
 ///
+/// A session that refuses the `Prepare` or the `Commit` with `Restarting`
+/// did not run the command, and is dialled again through
+/// [`dial_through_router_restart`] until
+/// [`RESTART_WINDOW_DURATION`](koshi_ipc::endpoint::RESTART_WINDOW_DURATION)
+/// has passed.
+///
 /// # Errors
-/// Whatever [`connect_saved_server`] reports, and [`CliError::IpcUnavailable`] when
-/// the exchange failed before the `Commit`, or the `Prepare` got an answer
-/// that is neither `Prepared` nor a refusal: the command never runs.
-/// [`CliError::CommittedRequestUnanswered`] when the `Commit` got no answer:
-/// the command may run.
+/// [`CliError::InvalidArgs`] when the saved record holds no fingerprint, and
+/// nothing is dialled. The error inside what [`connect_remote_server`] reports,
+/// and [`CliError::IpcUnavailable`] when the exchange failed before the
+/// `Commit`, or the `Prepare` got an answer that is neither `Prepared` nor a
+/// refusal: the command never runs. [`CliError::CommittedRequestUnanswered`]
+/// when the `Commit` got no answer, or an answer that is not the command's
+/// result: the command may run. [`CliError::SessionRestarting`] when the
+/// session still refuses once the restart window has passed.
 pub fn submit_remote_command(
-    server_reference: &ServerReference,
+    saved_server_record: &SavedServer,
     session_id: SessionId,
     client_id: Option<ClientId>,
     command: Command,
@@ -1187,25 +1247,35 @@ pub fn submit_remote_command(
             command_envelope,
         )))),
     };
-    let (mut frame_reader, mut frame_writer, prepare_result) =
-        send_remote_ipc_request(server_reference, session_id, prepare_request)?;
-    let command_ipc_result = ipc_client::commit_after_prepare_answer(
-        prepare_result,
-        &mut frame_reader,
-        &mut frame_writer,
-        Some(REPLY_TIMEOUT_DURATION),
-    )?;
-    match command_ipc_result {
-        IpcResult::CommandResult(command_result) => Ok(talk::filter_rejection_hint(command_result)),
-        IpcResult::Error(ipc_error_payload) => Err(build_peer_refusal_error(&ipc_error_payload)),
-        unexpected_ipc_result => {
-            Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_ipc_result))
-        }
-    }
+    run_remote_session_exchange(
+        saved_server_record,
+        session_id,
+        &prepare_request,
+        |frame_reader, frame_writer, prepare_result| {
+            let command_ipc_result = ipc_client::commit_after_prepare_answer(
+                prepare_result,
+                frame_reader,
+                frame_writer,
+                Some(REPLY_TIMEOUT_DURATION),
+            )?;
+            match command_ipc_result {
+                IpcResult::CommandResult(command_result) => {
+                    Ok(talk::filter_rejection_hint(command_result))
+                }
+                IpcResult::Error(ipc_error_payload) => {
+                    Err(build_peer_refusal_error(&ipc_error_payload))
+                }
+                unexpected_ipc_result => Err(CliError::CommittedRequestUnanswered {
+                    detail: talk::SESSION_PEER_WORDS
+                        .format_unexpected_reply_detail(unexpected_ipc_result.get_wire_name()),
+                }),
+            }
+        },
+    )
 }
 
-/// Ask the session `session_id` on the server argument to describe itself in
-/// full: tabs, panes, and attached clients.
+/// Ask the session `session_id` on the saved server `saved_server_record`
+/// names to describe itself in full: tabs, panes, and attached clients.
 ///
 /// Sends [`IpcRequestKind::Discovery`] over one remote connection of its own.
 /// The answer passes through
@@ -1213,72 +1283,97 @@ pub fn submit_remote_command(
 /// is handed back: the session name, the tab names, and each pane's title,
 /// working directory and argv are filtered.
 ///
+/// A session that refuses the request with `Restarting` is dialled again
+/// through [`dial_through_router_restart`] until
+/// [`RESTART_WINDOW_DURATION`](koshi_ipc::endpoint::RESTART_WINDOW_DURATION)
+/// has passed.
+///
 /// # Errors
-/// Whatever [`connect_saved_server`] reports, and [`CliError::IpcUnavailable`] when
-/// the exchange failed.
+/// [`CliError::InvalidArgs`] when the saved record holds no fingerprint, and
+/// nothing is dialled. The error inside what [`connect_remote_server`] reports,
+/// and [`CliError::IpcUnavailable`] when the exchange failed.
+/// [`CliError::SessionRestarting`] when the session still refuses once the
+/// restart window has passed.
 pub fn fetch_remote_overview(
-    server_reference: &ServerReference,
+    saved_server_record: &SavedServer,
     session_id: SessionId,
 ) -> Result<SessionOverview, CliError> {
     let discovery_request = IpcRequest {
         request_id: 2,
         request_kind: IpcRequestKind::Discovery,
     };
-    let (_, _, discovery_result) =
-        send_remote_ipc_request(server_reference, session_id, discovery_request)?;
-    match discovery_result {
-        IpcResult::Overview(mut session_overview) => {
-            crate::discovery::filter_session_overview_text(&mut session_overview);
-            Ok(session_overview)
-        }
-        IpcResult::Error(ipc_error_payload) => Err(build_peer_refusal_error(&ipc_error_payload)),
-        unexpected_ipc_result => {
-            Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_ipc_result))
-        }
-    }
+    run_remote_session_exchange(
+        saved_server_record,
+        session_id,
+        &discovery_request,
+        |_, _, discovery_result| match discovery_result {
+            IpcResult::Overview(mut session_overview) => {
+                crate::discovery::filter_session_overview_text(&mut session_overview);
+                Ok(session_overview)
+            }
+            IpcResult::Error(ipc_error_payload) => {
+                Err(build_peer_refusal_error(&ipc_error_payload))
+            }
+            unexpected_ipc_result => {
+                Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_ipc_result))
+            }
+        },
+    )
 }
 
-/// One request against one remote session: dial, attach, settle the version
-/// from the Hello answer the server sent on this caller's behalf, then send
-/// the IPC request and read its answer. Hands back both halves of the link,
-/// which stay open, with the answer.
+/// One request against one remote session on the saved server
+/// `saved_server_record` names: dial as [`dial_saved_server`] states, attach,
+/// settle the version from the Hello answer the server sent on this caller's
+/// behalf, send `ipc_request`, read its result, and hand both halves of the
+/// link, which stay open, and that result to `finish_exchange`. Gives what
+/// `finish_exchange` gives.
 ///
 /// The Attach names [`REPLY_TIMEOUT_DURATION`] as its link timeout.
 ///
-/// The dial, the Attach and the Hello answer run through
-/// [`dial_through_router_restart`] with
+/// Each dial runs through [`dial_through_router_restart`] with
 /// [`RESTART_WINDOW_DURATION`](koshi_ipc::endpoint::RESTART_WINDOW_DURATION):
-/// a server whose router is restarting is dialed again until it has
-/// restarted or the window has passed.
-fn send_remote_ipc_request(
-    server_reference: &ServerReference,
+/// a server whose router is restarting, and a `finish_exchange` that gives
+/// [`CliError::SessionRestarting`] for a session that refused the request
+/// while it replaced its process image, are dialed again until the window has
+/// passed. A request refused that way did not run.
+///
+/// # Errors
+/// What the last dial gives: what [`dial_saved_server`] reports,
+/// [`CliError::IpcUnavailable`] for a write or read that failed before
+/// `finish_exchange` ran, and what `finish_exchange` gives.
+fn run_remote_session_exchange<ExchangeAnswer>(
+    saved_server_record: &SavedServer,
     session_id: SessionId,
-    ipc_request: IpcRequest,
-) -> Result<(FrameReader, FrameWriter, IpcResult), CliError> {
+    ipc_request: &IpcRequest,
+    mut finish_exchange: impl FnMut(
+        &mut FrameReader,
+        &mut FrameWriter,
+        IpcResult,
+    ) -> Result<ExchangeAnswer, CliError>,
+) -> Result<ExchangeAnswer, CliError> {
     let session_selector = SessionSelector::SessionId(session_id);
-    let (mut frame_reader, mut frame_writer, hello_response) =
-        dial_through_router_restart(koshi_ipc::endpoint::RESTART_WINDOW_DURATION, || {
-            let (remote_link, _) =
-                connect_saved_server(server_reference, None, Some(REPLY_TIMEOUT_DURATION))?;
-            let (mut frame_reader, frame_writer) = attach_remote_session(
-                remote_link,
-                session_selector.clone(),
-                REPLY_TIMEOUT_DURATION,
-            )
-            .map_err(DialError::Unreachable)?;
-            let hello_response = read_forwarded_hello_answer(&mut frame_reader, &session_selector)?;
-            Ok((frame_reader, frame_writer, hello_response))
-        })?;
-    talk::parse_session_hello_answer(hello_response)?;
-
-    frame_writer
-        .send(&ipc_request)
-        .map_err(build_ipc_unavailable_error)?;
-    let incoming_response: IncomingResponse = frame_reader
-        .recv_answer()
-        .map_err(build_ipc_unavailable_error)?;
-    let ipc_result = talk::SESSION_PEER_WORDS.take_response_result(incoming_response)?;
-    Ok((frame_reader, frame_writer, ipc_result))
+    let build_link_failure =
+        |ipc_error| DialError::Unreachable(build_ipc_unavailable_error(ipc_error));
+    dial_through_router_restart(koshi_ipc::endpoint::RESTART_WINDOW_DURATION, || {
+        let remote_link = dial_saved_server(saved_server_record, Some(REPLY_TIMEOUT_DURATION))?;
+        let (mut frame_reader, mut frame_writer) = attach_remote_session(
+            remote_link,
+            session_selector.clone(),
+            REPLY_TIMEOUT_DURATION,
+        )
+        .map_err(DialError::Unreachable)?;
+        let hello_response = read_forwarded_hello_answer(&mut frame_reader, &session_selector)?;
+        talk::parse_session_hello_answer(hello_response).map_err(DialError::Refused)?;
+        frame_writer.send(ipc_request).map_err(build_link_failure)?;
+        let incoming_response: IncomingResponse =
+            frame_reader.recv_answer().map_err(build_link_failure)?;
+        let ipc_result = talk::SESSION_PEER_WORDS
+            .take_response_result(incoming_response)
+            .map_err(DialError::Refused)?;
+        finish_exchange(&mut frame_reader, &mut frame_writer, ipc_result)
+            .map_err(DialError::from_session_refusal)
+    })
+    .map_err(CliError::from)
 }
 
 /// The sessions on every saved server that answered within 2 seconds, each

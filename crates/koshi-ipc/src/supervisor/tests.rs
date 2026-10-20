@@ -161,7 +161,7 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
                 },
             }
         )),
-        r#"{"Response":{"request_id":1,"answer_result":{"Hello":{"protocol_version":2}}}}"#
+        r#"{"Response":{"request_id":1,"answer_result":{"Hello":{"protocol_version":3}}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&SupervisorMessage::<_, SupervisorEvent>::Response(
@@ -255,6 +255,56 @@ fn the_output_hold_requests_travel_as_bare_names() {
 }
 
 #[test]
+fn an_output_grant_travels_with_its_pane_and_byte_count() {
+    assert_eq!(
+        serialize_test_wire_message(&SupervisorRequest {
+            request_id: 11,
+            request_kind: SupervisorRequestKind::GrantPaneOutput {
+                pane_id: build_test_pane_id(),
+                granted_byte_count: 65536,
+            },
+        }),
+        r#"{"request_id":11,"request_kind":{"GrantPaneOutput":{"pane_id":"00000000-0000-0000-0000-000000000001","granted_byte_count":65536}}}"#
+    );
+}
+
+#[test]
+fn a_pane_output_frame_is_the_pane_id_bytes_then_the_output_and_decodes_back() {
+    let frame_head = build_pane_output_frame_head(build_test_pane_id());
+    let mut frame_bytes = frame_head.to_vec();
+    frame_bytes.extend_from_slice(b"hi");
+
+    assert_eq!(frame_head, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    assert_eq!(
+        decode_pane_output_frame(frame_bytes).expect("the frame decodes"),
+        (build_test_pane_id(), b"hi".to_vec())
+    );
+}
+
+#[test]
+fn a_pane_output_frame_with_no_output_decodes_to_an_empty_chunk() {
+    assert_eq!(
+        decode_pane_output_frame(build_pane_output_frame_head(build_test_pane_id()).to_vec())
+            .expect("the frame decodes"),
+        (build_test_pane_id(), Vec::new())
+    );
+}
+
+#[test]
+fn a_pane_output_frame_shorter_than_a_pane_id_does_not_decode() {
+    let decode_error =
+        decode_pane_output_frame(vec![0; 15]).expect_err("a 15-byte frame holds no pane id");
+
+    let IpcError::MalformedFrame { error_detail } = decode_error else {
+        panic!("a short frame is malformed, and this is {decode_error:?}");
+    };
+    assert_eq!(
+        error_detail,
+        "a pane output frame of 15 bytes holds no 16-byte pane id"
+    );
+}
+
+#[test]
 fn a_cwd_the_operating_system_cannot_answer_travels_as_null() {
     assert_eq!(
         serialize_test_wire_message(&SupervisorMessage::<_, SupervisorEvent>::Response(
@@ -333,16 +383,17 @@ fn a_hello_built_here_names_this_builds_range() {
         SupervisorRequestKind::build_hello_request(build_test_connection_token()),
         SupervisorRequestKind::Hello {
             minimum_protocol_version: 2,
-            maximum_protocol_version: 2,
+            maximum_protocol_version: 3,
             connection_token: build_test_connection_token(),
         }
     );
 }
 
 #[test]
-fn this_build_speaks_supervisor_link_version_two_only() {
-    assert_eq!(SUPERVISOR_PROTOCOL_VERSION, 2);
+fn this_build_speaks_supervisor_link_versions_two_and_three() {
+    assert_eq!(SUPERVISOR_PROTOCOL_VERSION, 3);
     assert_eq!(MIN_SUPERVISOR_PROTOCOL_VERSION, 2);
+    assert_eq!(OUTPUT_WINDOW_PROTOCOL_VERSION, 3);
 }
 
 #[test]
@@ -412,6 +463,14 @@ fn every_request_kind_names_itself_without_its_payload() {
         SupervisorRequestKind::Shutdown.get_request_kind_name(),
         "Shutdown"
     );
+    assert_eq!(
+        SupervisorRequestKind::GrantPaneOutput {
+            pane_id: build_test_pane_id(),
+            granted_byte_count: 65536,
+        }
+        .get_request_kind_name(),
+        "GrantPaneOutput"
+    );
 }
 
 #[test]
@@ -449,6 +508,7 @@ fn every_request_kind_and_answer_is_listed_as_a_name_this_build_has() {
             "PauseOutput",
             "ResumeOutput",
             "Shutdown",
+            "GrantPaneOutput",
         ]
     );
     assert_eq!(
@@ -518,6 +578,10 @@ fn every_request_kind_and_event_travels_under_the_name_it_reports() {
         SupervisorRequestKind::PauseOutput,
         SupervisorRequestKind::ResumeOutput,
         SupervisorRequestKind::Shutdown,
+        SupervisorRequestKind::GrantPaneOutput {
+            pane_id: build_test_pane_id(),
+            granted_byte_count: 65536,
+        },
     ];
     let supervisor_events = [
         SupervisorEvent::Output {
@@ -883,7 +947,7 @@ fn a_hello_whose_lowest_version_is_above_its_highest_is_refused_naming_both_rang
 }
 
 #[test]
-fn a_hello_with_a_wrong_token_is_refused_as_bad_build_test_connection_token() {
+fn a_hello_with_a_wrong_token_is_refused_as_bad_token() {
     let mut gate = SupervisorHandshake::from_connection_token(build_test_connection_token());
 
     assert_eq!(

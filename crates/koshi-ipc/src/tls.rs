@@ -24,7 +24,8 @@
 
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -35,7 +36,7 @@ use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureSch
 use sha2::{Digest, Sha256};
 
 use crate::error::IpcError;
-use crate::transport::{compute_step_deadline, compute_time_left_until, is_io_timeout};
+use crate::transport::{compute_remaining_duration_until, compute_step_deadline, is_io_timeout};
 
 /// How many raw bytes [`TlsReader`] takes off the socket in one read.
 const TLS_READ_BUFFER_BYTE_COUNT: usize = 16 * 1024;
@@ -59,7 +60,7 @@ fn set_socket_timeout_until(
     let Some(deadline) = deadline else {
         return Ok(());
     };
-    set_socket_timeout(socket, Some(compute_time_left_until(deadline)?))
+    set_socket_timeout(socket, Some(compute_remaining_duration_until(deadline)?))
 }
 
 /// Decrypt the bytes `tls_connection` has taken and queue whatever it answers with.
@@ -616,12 +617,155 @@ impl ServerCertVerifier for FingerprintVerifier {
     }
 }
 
+/// How long a dial waits on one address before it also dials the next one:
+/// 250 ms, the connection attempt delay RFC 8305 section 5 recommends.
+const CONNECTION_ATTEMPT_DELAY_DURATION: Duration = Duration::from_millis(250);
+
+/// Connect to the first of `resolved_server_addresses` that accepts before
+/// `deadline`, and hand back that socket with the address it reached.
+///
+/// The addresses are dialled in the order [`order_addresses_by_family`] gives,
+/// each on its own thread. The next dial starts when the one before it fails,
+/// or [`CONNECTION_ATTEMPT_DELAY_DURATION`] after it started, whichever comes
+/// first, and every dial already started keeps running. The first socket that
+/// connects is handed back. A socket that connects after it is closed.
+///
+/// Example: `laptop.example:7654` gives `[2001:db8::20]:7654` and
+/// `192.0.2.20:7654`, and nothing answers on IPv6. The IPv4 dial starts
+/// 250 ms in and connects, while the IPv6 dial still waits.
+///
+/// `server_address` names the target in the errors.
+/// `resolved_server_addresses` holds at least one address.
+///
+/// # Errors
+/// [`IpcError::ConnectTimedOut`] when no time is left before the first dial,
+/// or when no dial connected by `deadline`. When every dial failed before
+/// `deadline`, the failure of the dial to the first address:
+/// [`IpcError::ConnectRefused`] for a refused connection,
+/// [`IpcError::ConnectTimedOut`] for a connect the operating system timed out,
+/// and [`IpcError::Transport`] naming any other failure.
+fn connect_first_reachable_address(
+    server_address: &str,
+    resolved_server_addresses: Vec<SocketAddr>,
+    deadline: Instant,
+) -> Result<(TcpStream, SocketAddr), IpcError> {
+    let dial_addresses = order_addresses_by_family(resolved_server_addresses);
+    let (dial_result_sender, dial_result_receiver) = mpsc::channel();
+    let mut next_dial_index = 0;
+    let mut running_dial_count = 0;
+    let mut next_dial_at = Instant::now();
+    let mut first_address_failure: Option<io::Error> = None;
+    loop {
+        let current_time = Instant::now();
+        let remaining_duration = deadline.saturating_duration_since(current_time);
+        if remaining_duration.is_zero() {
+            return Err(IpcError::ConnectTimedOut {
+                server_address: server_address.to_string(),
+            });
+        }
+        if next_dial_index < dial_addresses.len() && current_time >= next_dial_at {
+            let dial_address = dial_addresses[next_dial_index];
+            let dial_index = next_dial_index;
+            let thread_dial_result_sender = dial_result_sender.clone();
+            let dial_thread = std::thread::Builder::new()
+                .name("koshi-dial".to_string())
+                .spawn(move || {
+                    let dial_result = TcpStream::connect_timeout(&dial_address, remaining_duration);
+                    let _ = thread_dial_result_sender.send((dial_index, dial_address, dial_result));
+                });
+            if let Err(thread_start_error) = dial_thread {
+                let _ =
+                    dial_result_sender.send((dial_index, dial_address, Err(thread_start_error)));
+            }
+            running_dial_count += 1;
+            next_dial_index += 1;
+            next_dial_at = current_time + CONNECTION_ATTEMPT_DELAY_DURATION;
+            continue;
+        }
+        if running_dial_count == 0 {
+            let first_address_error =
+                first_address_failure.expect("the dial to the first address failed");
+            return Err(convert_dial_error(server_address, &first_address_error));
+        }
+        let wait_until = if next_dial_index < dial_addresses.len() {
+            next_dial_at.min(deadline)
+        } else {
+            deadline
+        };
+        match dial_result_receiver.recv_timeout(wait_until.saturating_duration_since(current_time))
+        {
+            Ok((_, dial_address, Ok(socket))) => return Ok((socket, dial_address)),
+            Ok((dial_index, _, Err(dial_error))) => {
+                running_dial_count -= 1;
+                next_dial_at = Instant::now();
+                if dial_index == 0 {
+                    first_address_failure = Some(dial_error);
+                }
+            }
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {}
+        }
+    }
+}
+
+/// The error a failed dial to `server_address` gives, from `dial_error`:
+/// [`IpcError::ConnectRefused`] for a refused connection,
+/// [`IpcError::ConnectTimedOut`] for a connect the operating system timed out,
+/// and [`IpcError::Transport`] naming any other failure.
+fn convert_dial_error(server_address: &str, dial_error: &io::Error) -> IpcError {
+    match dial_error.kind() {
+        io::ErrorKind::ConnectionRefused => IpcError::ConnectRefused {
+            server_address: server_address.to_string(),
+        },
+        io::ErrorKind::TimedOut => IpcError::ConnectTimedOut {
+            server_address: server_address.to_string(),
+        },
+        _ => build_transport_error(format!(
+            "{server_address} could not be reached: {dial_error}"
+        )),
+    }
+}
+
+/// `resolved_server_addresses` in the order a dial tries them, as RFC 8305
+/// section 4 orders them: the family of the first address first, then the two
+/// families taking turns, each family in the order the lookup gave.
+///
+/// Example: `[2001:db8::1, 2001:db8::2, 192.0.2.1, 192.0.2.2]` (each with
+/// its port) gives `[2001:db8::1, 192.0.2.1, 2001:db8::2, 192.0.2.2]`.
+fn order_addresses_by_family(resolved_server_addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let Some(first_address) = resolved_server_addresses.first() else {
+        return Vec::new();
+    };
+    let is_first_family_ipv6 = first_address.is_ipv6();
+    let (first_family_addresses, other_family_addresses): (Vec<SocketAddr>, Vec<SocketAddr>) =
+        resolved_server_addresses
+            .into_iter()
+            .partition(|resolved_server_address| {
+                resolved_server_address.is_ipv6() == is_first_family_ipv6
+            });
+    let mut first_family_iterator = first_family_addresses.into_iter();
+    let mut other_family_iterator = other_family_addresses.into_iter();
+    let mut ordered_addresses = Vec::new();
+    loop {
+        let first_family_address = first_family_iterator.next();
+        let other_family_address = other_family_iterator.next();
+        if first_family_address.is_none() && other_family_address.is_none() {
+            return ordered_addresses;
+        }
+        ordered_addresses.extend(first_family_address);
+        ordered_addresses.extend(other_family_address);
+    }
+}
+
 /// Open a TLS 1.3 stream to `server_address`, refusing a certificate whose
 /// fingerprint is not `expected_certificate_fingerprint`.
 ///
-/// `server_address` is `host:port`. The lookup is the operating system's own, and
-/// the first address it returns is the one dialled. Returns the two halves of
-/// the stream.
+/// `server_address` is `host:port`. The lookup is the operating system's own.
+/// The addresses it returns are dialled with the two address families taking
+/// turns, starting with the family of the first address, each dial on its own
+/// thread. The next dial starts when the one before it fails, or 250 ms after
+/// it started, whichever comes first. Returns the two halves of the stream to
+/// the address that connected first, and closes every socket that connects
+/// after it.
 ///
 /// `connection_timeout` bounds everything after the name lookup: the connect and the
 /// whole handshake share one deadline, and both halves come back holding
@@ -630,17 +774,18 @@ impl ServerCertVerifier for FingerprintVerifier {
 /// end the window once the caller is past that exchange.
 ///
 /// # Errors
-/// [`IpcError::ConnectRefused`] when nothing accepts the connection,
-/// [`IpcError::ConnectTimedOut`] when `connection_timeout` names an instant the clock
-/// cannot reach, when no time is left after the lookup, or when the connect is
-/// unanswered at the deadline, and
-/// [`IpcError::TlsHandshakeFailed`] when the handshake on an open connection
-/// does not finish, carrying [`run_tls_handshake`]'s own words. A certificate
-/// whose fingerprint is not `expected_certificate_fingerprint` is
-/// [`IpcError::CertificateMismatch`].
-/// [`IpcError::Transport`] names the rest: the lookup (`<address> could not
-/// be looked up: invalid socket address` for an address with no port), a
-/// connect that failed for another reason, and a stream that did not split.
+/// [`IpcError::ConnectRefused`] when nothing accepts the connection at the
+/// first address the lookup returns and no other address connects,
+/// [`IpcError::ConnectTimedOut`] when `connection_timeout` names an instant the
+/// clock cannot reach, when no time is left after the lookup, or when no
+/// address connects by the deadline, and [`IpcError::TlsHandshakeFailed`] when
+/// the handshake on an open connection does not finish, carrying
+/// [`run_tls_handshake`]'s own words. A certificate whose fingerprint is not
+/// `expected_certificate_fingerprint` is [`IpcError::CertificateMismatch`].
+/// [`IpcError::Transport`] names the rest: a connect that failed for another
+/// reason, a stream that did not split, and the lookup, which reads
+/// `<address> could not be looked up: invalid socket address` for an address
+/// with no port.
 pub fn connect_tls_stream(
     server_address: &str,
     expected_certificate_fingerprint: &str,
@@ -651,34 +796,21 @@ pub fn connect_tls_stream(
         .ok_or_else(|| IpcError::ConnectTimedOut {
             server_address: server_address.to_string(),
         })?;
-    let resolved_server_address = server_address
+    let resolved_server_addresses: Vec<SocketAddr> = server_address
         .to_socket_addrs()
         .map_err(|io_error| {
             build_transport_error(format!(
                 "{server_address} could not be looked up: {io_error}"
             ))
         })?
-        .next()
-        .ok_or_else(|| build_transport_error(format!("{server_address} names no address")))?;
-    let remaining_connection_duration = deadline.saturating_duration_since(Instant::now());
-    if remaining_connection_duration.is_zero() {
-        return Err(IpcError::ConnectTimedOut {
-            server_address: server_address.to_string(),
-        });
+        .collect();
+    if resolved_server_addresses.is_empty() {
+        return Err(build_transport_error(format!(
+            "{server_address} names no address"
+        )));
     }
-    let mut socket =
-        TcpStream::connect_timeout(&resolved_server_address, remaining_connection_duration)
-            .map_err(|io_error| match io_error.kind() {
-                io::ErrorKind::ConnectionRefused => IpcError::ConnectRefused {
-                    server_address: server_address.to_string(),
-                },
-                io::ErrorKind::TimedOut => IpcError::ConnectTimedOut {
-                    server_address: server_address.to_string(),
-                },
-                _ => build_transport_error(format!(
-                    "{server_address} could not be reached: {io_error}"
-                )),
-            })?;
+    let (mut socket, resolved_server_address) =
+        connect_first_reachable_address(server_address, resolved_server_addresses, deadline)?;
 
     let certificate_verifier =
         Arc::new(FingerprintVerifier::from_expected_certificate_fingerprint(

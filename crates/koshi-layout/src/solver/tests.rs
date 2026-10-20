@@ -13,7 +13,7 @@ use crate::tree::LayoutNode;
 
 /// The default content floor with the given gap between kept children of a
 /// directional split.
-fn build_pane_sizing(gap_cell_count: u16) -> PaneSizing {
+pub(crate) fn build_pane_sizing(gap_cell_count: u16) -> PaneSizing {
     PaneSizing {
         minimum_size: MIN_PANE_SIZE,
         gap_cell_count,
@@ -698,7 +698,8 @@ fn fits_rejects_a_layout_whose_floors_exceed_the_rect() {
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
     let layout_tree =
         build_equal_split_node(SplitDirection::Horizontal, &[first_pane_id, second_pane_id]);
-    // Two panes at two columns each need four; three is one short.
+    // Two bordered panes need four columns each, eight in all; three columns
+    // do not fit them.
     assert!(!is_layout_within_rect(
         &layout_tree,
         build_cell_rect(0, 0, 3, 24),
@@ -924,7 +925,7 @@ fn a_tab_grown_shrunk_to_nothing_then_regrown_returns_the_exact_first_solve() {
         [left_pane_id, top_pane_id, bottom_pane_id]
     );
 
-    // Grow back to the original header_rect: identical placement.
+    // Grow back to the original rect: identical placement.
     let regrown_layout_solution = solve_layout(&layout_tree, original_layout_rect);
     assert_eq!(regrown_layout_solution, large_layout_solution);
     assert_tiles_exactly(&regrown_layout_solution, original_layout_rect);
@@ -1156,7 +1157,7 @@ fn a_stack_too_small_for_its_active_child_suppresses_as_one_unit() {
 #[test]
 fn an_out_of_bounds_active_index_still_suppresses_as_one_unit() {
     let pane_ids: Vec<PaneId> = (0..3).map(|_| PaneId::new()).collect();
-    // Hand-built: the constructors and edits clamp `active`, but a
+    // Hand-built: the constructors and edits clamp `active_child_index`, but a
     // deserialized stack may carry an out-of-range index. The min-size
     // check counts the clamped active member (the last one), and a rect too
     // short for the headers plus that member suppresses the whole stack.
@@ -2376,8 +2377,8 @@ fn a_suppressed_trailing_pane_gives_its_leading_gap_back() {
     );
 
     // Twelve columns hold two floors of four plus one gap of two, but not
-    // the third floor and its gap: c suppresses and the ten remaining cells
-    // are shared by a and b.
+    // the third floor and its gap: the third pane suppresses and the first two
+    // panes share the ten remaining cells.
     let two_pane_layout = solve_layout_with_sizing(
         &layout_tree,
         build_cell_rect(0, 0, 12, 24),
@@ -2394,8 +2395,8 @@ fn a_suppressed_trailing_pane_gives_its_leading_gap_back() {
     assert_eq!(two_pane_layout.suppressed_pane_ids, [suppressed_pane_id]);
     assert!(!two_pane_layout.is_every_pane_suppressed);
 
-    // Nine columns hold one floor but not a second floor plus its gap, so a
-    // alone survives and takes the whole axis with no gap reserved.
+    // Nine columns hold one floor but not a second floor plus its gap, so the
+    // first pane alone survives and takes the whole axis with no gap reserved.
     let one_pane_layout = solve_layout_with_sizing(
         &layout_tree,
         build_cell_rect(0, 0, 9, 24),
@@ -2478,7 +2479,7 @@ fn a_gap_wider_than_the_axis_keeps_only_the_first_pane() {
         build_equal_split_node(SplitDirection::Horizontal, &[first_pane_id, second_pane_id]);
 
     // The first floor of four fits eight columns; the second needs its
-    // leading gap first, which alone is wider than the axis, so b suppresses
+    // leading gap first, which alone is wider than the axis, so the second pane suppresses
     // and no gap is reserved for it.
     let layout_result = solve_layout_with_sizing(
         &layout_tree,
@@ -2716,7 +2717,7 @@ fn a_preferred_target_below_the_border_floor_settles_at_the_floor() {
     let layout_area = build_cell_rect(0, 0, 100, 24);
 
     // The preferred pane starts at 50 with a target of 2, below its four-column border
-    // floor: the 46 columns above the floor go to b.
+    // floor: the 46 columns above the floor go to the flexible pane.
     let layout_result = solve_layout(&layout_tree, layout_area);
     let column_widths: Vec<u16> = layout_result
         .pane_rects
@@ -2818,16 +2819,6 @@ fn min_size_of_a_stack_counts_one_header_row_per_collapsed_member() {
 }
 
 #[test]
-fn cell_area_multiplies_columns_by_rows_without_overflow() {
-    assert_eq!(compute_cell_area(build_cell_rect(0, 0, 40, 24)), 960);
-    assert_eq!(compute_cell_area(Rect::build_empty_at_origin()), 0);
-    assert_eq!(
-        compute_cell_area(build_cell_rect(0, 0, u16::MAX, u16::MAX)),
-        4_294_836_225
-    );
-}
-
-#[test]
 fn slot_floor_is_the_larger_of_the_subtree_minimum_and_the_declared_floor() {
     let (declared_minimum_pane_id, default_pane_id) = (PaneId::new(), PaneId::new());
     let mut split_node = SplitNode::with_equal_weights(
@@ -2857,8 +2848,8 @@ fn slot_floor_is_the_larger_of_the_subtree_minimum_and_the_declared_floor() {
         compute_slot_floor(&split_node, 2, true, build_pane_sizing(0)),
         0
     );
-    // Along the row_count: a's declared 20 still wins, b keeps its three-row
-    // border minimum.
+    // Along the rows: the first pane's declared 20 still wins, and the second
+    // pane keeps its three-row border minimum.
     assert_eq!(
         compute_slot_floor(&split_node, 0, false, build_pane_sizing(0)),
         20

@@ -120,26 +120,14 @@ fn valid_utf8_working_directory_serializes_as_its_plain_string() {
 }
 
 #[test]
-fn pane_lifecycle_serializes_with_declared_variant_names() {
-    assert_eq!(
-        serde_json::to_value(PaneLifecycle::Spawning).expect("serializes"),
-        json!("Spawning")
-    );
+fn pane_lifecycle_serializes_and_decodes_as_its_variant_name() {
     assert_eq!(
         serde_json::to_value(PaneLifecycle::Running).expect("serializes"),
         json!("Running")
     );
     assert_eq!(
-        serde_json::to_value(PaneLifecycle::Closing).expect("serializes"),
-        json!("Closing")
-    );
-    assert_eq!(
-        serde_json::to_value(PaneLifecycle::Exited { exit_code: Some(1) }).expect("serializes"),
-        json!({"Exited": {"exit_code": 1}})
-    );
-    assert_eq!(
-        serde_json::to_value(PaneLifecycle::Exited { exit_code: None }).expect("serializes"),
-        json!({"Exited": {"exit_code": null}})
+        serde_json::from_value::<PaneLifecycle>(json!("Running")).expect("deserializes"),
+        PaneLifecycle::Running
     );
 }
 
@@ -216,27 +204,6 @@ fn a_client_row_stating_its_origin_keeps_that_answer() {
 }
 
 #[test]
-fn pane_lifecycle_round_trips_through_json_for_every_variant() {
-    for pane_lifecycle in [
-        PaneLifecycle::Spawning,
-        PaneLifecycle::Running,
-        PaneLifecycle::Closing,
-        PaneLifecycle::Exited {
-            exit_code: Some(137),
-        },
-        PaneLifecycle::Exited { exit_code: None },
-    ] {
-        let pane_lifecycle_json = serde_json::to_string(&pane_lifecycle).expect("serialize");
-        let decoded_pane_lifecycle: PaneLifecycle =
-            serde_json::from_str(&pane_lifecycle_json).expect("deserialize");
-        assert_eq!(
-            pane_lifecycle, decoded_pane_lifecycle,
-            "{pane_lifecycle_json}"
-        );
-    }
-}
-
-#[test]
 fn a_non_utf8_working_directory_decodes_as_its_lossy_path() {
     let pane_discovery_json =
         serde_json::to_value(build_pane_discovery(Some(build_non_utf8_path())))
@@ -256,7 +223,7 @@ fn pane_discovery_round_trips_with_every_optional_field_set() {
     let pane_discovery = PaneDiscovery {
         pane_title: Some("vim".to_string()),
         command_argv: Some(vec!["htop".to_string(), "-d".to_string()]),
-        lifecycle: PaneLifecycle::Exited { exit_code: Some(0) },
+        lifecycle: PaneLifecycle::Running,
         focused_by_client_ids: vec![ClientId::from_uuid(build_fixed_uuid())],
         ..build_pane_discovery(Some(PathBuf::from("/home/user/project")))
     };
@@ -370,18 +337,7 @@ fn an_unknown_pane_lifecycle_variant_is_rejected() {
 
     assert_eq!(
         pane_lifecycle_parse_error.to_string(),
-        "unknown variant `sleeping`, expected one of `Spawning`, `Running`, `Exited`, `Closing`"
-    );
-}
-
-#[test]
-fn an_exited_pane_without_an_exit_code_decodes_with_no_code() {
-    let decoded_pane_lifecycle: PaneLifecycle =
-        serde_json::from_value(json!({"Exited": {}})).expect("deserializes");
-
-    assert_eq!(
-        decoded_pane_lifecycle,
-        PaneLifecycle::Exited { exit_code: None }
+        "unknown variant `sleeping`, expected `Running`"
     );
 }
 

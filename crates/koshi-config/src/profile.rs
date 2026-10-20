@@ -19,6 +19,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use kdl::{KdlDocument, KdlNode};
 use koshi_core::geometry::SplitDirection;
@@ -29,8 +30,8 @@ use koshi_layout::template::{
 use miette::{Diagnostic, NamedSource, SourceSpan};
 use thiserror::Error;
 
-use crate::error::{validate_config_schema_version, ConfigParseDiagnostic};
-use crate::parser::{format_unknown_key, parse_kdl, parse_version_argument};
+use crate::error::ConfigParseDiagnostic;
+use crate::parser::{find_version_node_problem, format_unknown_key, parse_kdl};
 
 #[cfg(test)]
 mod tests;
@@ -65,10 +66,10 @@ pub struct ProfileDiagnostic {
     diagnostic_message: String,
     /// The profile file text, named by its path.
     #[source_code]
-    profile_source: NamedSource<String>,
+    profile_source: NamedSource<Arc<str>>,
     /// Where in the file the problem sits.
     #[label]
-    span: SourceSpan,
+    diagnostic_span: SourceSpan,
 }
 
 impl ProfileDiagnostic {
@@ -81,7 +82,7 @@ impl ProfileDiagnostic {
     /// Where in the file the problem sits, as the caret label's span.
     #[must_use]
     pub fn get_source_span(&self) -> SourceSpan {
-        self.span
+        self.diagnostic_span
     }
 }
 
@@ -98,8 +99,10 @@ pub fn parse_profile(
 ) -> Result<ProfileTemplate, ProfileError> {
     let profile_document = parse_kdl(profile_path, profile_source_text)?;
     let mut profile_walker = ProfileDocumentWalker {
-        profile_path,
-        profile_source_text,
+        profile_source: NamedSource::new(
+            profile_path.display().to_string(),
+            Arc::from(profile_source_text),
+        ),
         profile_diagnostics: Vec::new(),
         tab_leaf_count: 0,
         focused_tab_leaf_spans: Vec::new(),
@@ -180,11 +183,10 @@ struct ProfileSlot {
 /// diagnostic instead of stopping at the first; every method that gives up
 /// on a value (`None`, or a placeholder slot) records at least one
 /// diagnostic explaining it first.
-struct ProfileDocumentWalker<'a> {
-    /// Profile file path, stamped onto every diagnostic.
-    profile_path: &'a Path,
-    /// Profile file text, stamped onto every diagnostic for span rendering.
-    profile_source_text: &'a str,
+struct ProfileDocumentWalker {
+    /// The profile file text named by its path. Every diagnostic holds a
+    /// clone that shares the one text buffer.
+    profile_source: NamedSource<Arc<str>>,
     /// Every schema violation found so far.
     profile_diagnostics: Vec<ProfileDiagnostic>,
     /// Leaves assigned so far in the current tab, in layout order; the next
@@ -194,7 +196,7 @@ struct ProfileDocumentWalker<'a> {
     focused_tab_leaf_spans: Vec<(usize, SourceSpan)>,
 }
 
-impl ProfileDocumentWalker<'_> {
+impl ProfileDocumentWalker {
     /// Records a schema violation at `diagnostic_span`.
     fn record_diagnostic(
         &mut self,
@@ -203,11 +205,8 @@ impl ProfileDocumentWalker<'_> {
     ) {
         self.profile_diagnostics.push(ProfileDiagnostic {
             diagnostic_message: diagnostic_message.into(),
-            profile_source: NamedSource::new(
-                self.profile_path.display().to_string(),
-                self.profile_source_text.to_string(),
-            ),
-            span: diagnostic_span,
+            profile_source: self.profile_source.clone(),
+            diagnostic_span,
         });
     }
 
@@ -233,7 +232,11 @@ impl ProfileDocumentWalker<'_> {
                         );
                     } else {
                         has_version_node = true;
-                        self.parse_version_node(kdl_node);
+                        if let Some((version_error_span, version_error_detail)) =
+                            find_version_node_problem(kdl_node)
+                        {
+                            self.record_diagnostic(version_error_span, version_error_detail);
+                        }
                     }
                 }
                 "tab" => {
@@ -288,21 +291,6 @@ impl ProfileDocumentWalker<'_> {
             focused_tab_index: focused_tab_index.unwrap_or(0),
             is_locked: should_start_locked,
         })
-    }
-
-    /// Validates the `version` node: one integer at least one, nothing else,
-    /// no newer than this build's schema.
-    fn parse_version_node(&mut self, version_node: &KdlNode) {
-        match parse_version_argument(version_node) {
-            Ok(schema_version) => {
-                if let Err(version_error) = validate_config_schema_version(schema_version) {
-                    self.record_diagnostic(version_node.span(), version_error.to_string());
-                }
-            }
-            Err((diagnostic_span, diagnostic_message)) => {
-                self.record_diagnostic(diagnostic_span, diagnostic_message);
-            }
-        }
     }
 
     /// Parses one `tab`: exactly one structural root plus an optional bare
@@ -863,30 +851,25 @@ impl ProfileDocumentWalker<'_> {
                 }
             };
         }
-        if let Some(percentage_text) = size_argument.value().as_string() {
-            let Some(percentage) = percentage_text
-                .strip_suffix('%')
-                .and_then(|percentage_digits| percentage_digits.parse::<u8>().ok())
-            else {
-                self.record_diagnostic(
-                    size_argument.span(),
-                    "`size` is a cell count like `size 30` or a percentage like `size \"60%\"`",
-                );
-                return None;
-            };
-            return match SizeConstraint::from_percent(percentage) {
-                Ok(size_constraint) => Some(size_constraint),
-                Err(size_error) => {
-                    self.record_diagnostic(size_argument.span(), size_error.to_string());
-                    None
-                }
-            };
+        let Some(percentage) = size_argument
+            .value()
+            .as_string()
+            .and_then(|percentage_text| percentage_text.strip_suffix('%'))
+            .and_then(|percentage_digits| percentage_digits.parse::<u8>().ok())
+        else {
+            self.record_diagnostic(
+                size_argument.span(),
+                "`size` is a cell count like `size 30` or a percentage like `size \"60%\"`",
+            );
+            return None;
+        };
+        match SizeConstraint::from_percent(percentage) {
+            Ok(size_constraint) => Some(size_constraint),
+            Err(size_error) => {
+                self.record_diagnostic(size_argument.span(), size_error.to_string());
+                None
+            }
         }
-        self.record_diagnostic(
-            size_argument.span(),
-            "`size` is a cell count like `size 30` or a percentage like `size \"60%\"`",
-        );
-        None
     }
 
     /// Parses a `min`/`preferred` value: one positive cell count.

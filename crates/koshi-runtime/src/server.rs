@@ -10,7 +10,7 @@
 //! reads client view state and a client never mutates session or pane data.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::Path,
     sync::{mpsc::Receiver, Arc},
     thread::JoinHandle,
@@ -20,6 +20,7 @@ use std::{
 use koshi_config::layer::PartialKoshiConfig;
 use koshi_config::types::{ClientConfig, ServerConfig};
 use koshi_core::command::{CommandEnvelope, CommandResult};
+use koshi_core::constant::compute_frame_interval;
 use koshi_core::event::{Event, QuitCause};
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
@@ -27,8 +28,8 @@ use koshi_core::process::{ExitStatus, KillPolicy, PtySize};
 use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
 use koshi_observability::logging::event_log::log_event;
 use koshi_observability::logging::recent_events;
+use koshi_observability::repeated_warning::WarningRateLimiter;
 use koshi_pty::backend::state::{CarriedPtyPane, PtyBackend, UNOBSERVED_EXIT};
-use koshi_renderer::snapshot::Delivery;
 use koshi_session::client::Client;
 use koshi_session::session::state::Session;
 use koshi_terminal::engine::TerminalEngine;
@@ -41,13 +42,28 @@ use crate::{
     },
     runtime::{
         bus::{EventBus, HostWrite, WriterHandoff},
+        delivery_queue::DeliveryReceiver,
         event::RuntimeEvent,
         mouse::HeldMouseButton,
+        pty_inbox::PaneOutputQueue,
         reload::{merge_app_layer_into_client_config, merge_app_layer_into_server_config},
-        render_schedule::RenderScheduler,
+        render_schedule::{FramePace, PaneRenderDeadlines},
         saved_view::SavedViewStore,
     },
 };
+
+/// One bus subscriber, the client it views as, and the pace of that client's
+/// frames on its queue.
+#[derive(Debug)]
+pub(crate) struct FrameSubscription {
+    /// The subscriber whose queue the frames go on.
+    pub(crate) subscriber_id: SubscriberId,
+    /// The client whose view each frame shows.
+    pub(crate) client_id: ClientId,
+    /// Whether the client's view changed since its last frame, and when its
+    /// next frame may go.
+    pub(crate) frame_pace: FramePace,
+}
 
 /// How long an announcement waits for every attached client's writing thread to
 /// put the session's last frame on that client's socket.
@@ -57,19 +73,17 @@ use crate::{
 /// stops here and the session goes on without it.
 const CLIENT_NOTIFICATION_TIMEOUT_DURATION: Duration = Duration::from_secs(1);
 
-/// How long the wait for the client writing threads pauses between reads of
-/// how many are still running.
-const CLIENT_NOTIFICATION_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(2);
-
 /// What a restart request must be able to promise before the session accepts
 /// it. `Err` carries the [`RestartRefusal`] the caller is refused with.
 ///
-/// Installed by the session server, which holds the path of the binary a swap
-/// would run and the concrete PTY backend the pane records come from. It builds
-/// the check out of [`is_binary_runnable`], [`can_carry_panes`], a wait for
-/// every pane's writer to settle, and a run of the new binary to read which
-/// resume formats it takes back. A process with no check installed refuses every
-/// restart.
+/// Built by the session server, which holds the path of the binary a swap
+/// would run and the concrete PTY backend the pane records come from, and
+/// handed to [`IpcServer::start`](crate::ipc_server::IpcServer::start) inside
+/// an [`ImageReplacement`](crate::ipc_server::ImageReplacement). It is made of
+/// [`is_binary_runnable`], [`can_carry_panes`], a wait for every pane's writer
+/// to settle, and a run of the new binary to read which resume formats it
+/// takes back. It runs on the thread that asks for the restart, never on the
+/// dispatcher.
 pub type RestartCheck = Arc<dyn Fn() -> Result<(), RestartRefusal> + Send + Sync>;
 
 /// Why a session refused to restart into its program file.
@@ -198,9 +212,17 @@ pub struct Server {
     /// PTY is, and removed when the pane closes — engines exist exactly for
     /// live panes.
     pub(crate) terminal_engine_by_pane_id: HashMap<PaneId, TerminalEngine>,
-    /// Every pane whose child the backend drives. The backend's sink pushes
-    /// each one's child output and exit into the inbox.
+    /// Every pane whose child the backend drives. The backend's sink queues
+    /// each one's child output and exit on that pane's [`PaneOutputQueue`].
     pub(crate) live_pane_ids: HashSet<PaneId>,
+    /// The output queue of each live pane whose queue woke the dispatcher, by
+    /// pane. Removing a pane closes and drops its queue.
+    pub(crate) pane_output_queue_by_pane_id: HashMap<PaneId, Arc<PaneOutputQueue>>,
+    /// The turn rotation: the panes whose turns come, in order. Each pane
+    /// appears at most once. A live pane here holds output or an exit in its
+    /// queue. A removed pane stays here until its turn, which
+    /// [`Server::serve_output_turn`] passes over.
+    pub(crate) ready_output_pane_ids: VecDeque<PaneId>,
     /// The threads killing the children of panes that left the session, one
     /// per pane, each running [`PtyBackend::kill_pane`] under that pane's kill
     /// policy. [`Server::wait_for_pane_kills`] joins them.
@@ -213,12 +235,13 @@ pub struct Server {
     /// Event fan-out hub: every emitted [`Event`] is delivered to each
     /// subscriber over its own bounded queue.
     pub(crate) event_bus: EventBus,
-    /// Which client each bus subscriber views as, in subscription order. Every
-    /// due render puts the frame of the client named here on the subscriber's
-    /// queue, a subscriber paused by a dropped event is resynced from
-    /// that same frame, and a mouse round's answer goes to the subscriber that
-    /// views the client whose viewer sent the round.
-    pub(crate) subscriptions: Vec<(SubscriberId, ClientId)>,
+    /// Which client each bus subscriber views as, and the pace of its frames,
+    /// in subscription order. Each frame that is due puts the frame of the
+    /// client named here on the subscriber's queue, a subscriber paused by a
+    /// dropped event is resynced from that same frame, and a mouse round's
+    /// answer goes to the subscriber that views the client whose viewer sent
+    /// the round.
+    pub(crate) subscriptions: Vec<FrameSubscription>,
     /// Every mouse button whose press the session wrote to a pane's program
     /// and whose release it has not written, in the order the presses were
     /// written. [`forward_mouse_to_pane`](Self::forward_mouse_to_pane) adds and
@@ -243,9 +266,13 @@ pub struct Server {
     /// one backs the session-side handling of `scrollback.should_scroll_to_input`.
     /// Recomputed by every `koshi.kdl` reload.
     pub(crate) client_config: ClientConfig,
-    /// Decides when the dispatcher repaints: event handlers mark invalidation
-    /// reasons on it, the event loop polls it for render timing.
-    pub(crate) render_scheduler: RenderScheduler,
+    /// Each pane's next image animation frame, updated for one pane each time
+    /// that pane's engine reads output, is inserted, or is advanced at its
+    /// deadline.
+    pub(crate) pane_animation_deadlines: PaneRenderDeadlines,
+    /// Each pane's synchronized-output end, updated as
+    /// `pane_animation_deadlines` is.
+    pub(crate) pane_synchronized_output_deadlines: PaneRenderDeadlines,
     /// Receiving end of the single runtime event inbox; the loop drains it.
     inbox_receiver: Receiver<RuntimeEvent>,
     /// True when a quit asked for zero-grace process teardown, in this process
@@ -257,19 +284,17 @@ pub struct Server {
     /// [`is_awaiting_client`](Self::is_awaiting_client) is false; the flag never
     /// resets.
     pub(crate) is_quit_requested: bool,
-    /// True once a restart request passed [`restart_check`](Self::restart_check)
-    /// and was accepted. The event loop polls it after each event batch and
-    /// exits into the swap. [`cancel_restart`](Self::cancel_restart) puts it
-    /// back to false when the swap is abandoned and the session keeps serving in
-    /// this process.
+    /// True once the dispatcher took a
+    /// [`RuntimeEvent::IpcRestart`](crate::runtime::event::RuntimeEvent::IpcRestart),
+    /// which a restart request sends once its restart check passed. The event
+    /// loop polls it after each event batch and exits into the swap.
+    /// [`cancel_restart`](Self::cancel_restart) puts it back to false when the
+    /// swap is abandoned and the session keeps serving in this process.
     pub(crate) is_restart_requested: bool,
-    /// What a restart must promise before it is accepted, installed by the
-    /// session server. `None` refuses every restart.
-    restart_check: Option<RestartCheck>,
     /// The clients whose records came across an image swap and have not
     /// attached again yet. Filled by [`resume`](Self::resume) from the carried
-    /// sessions, emptied one id at a time as those clients attach again, and
-    /// read by
+    /// sessions, emptied one id at a time as those clients attach again or an
+    /// attach presenting a record's token takes that record over, and read by
     /// [`handle_drop_unclaimed_clients`](Self::handle_drop_unclaimed_clients)
     /// when the grace window closes.
     pub(crate) client_ids_awaiting_reconnect: HashSet<ClientId>,
@@ -277,14 +302,19 @@ pub struct Server {
     /// ([`SavedView`](crate::runtime::saved_view::SavedView)), keyed by the
     /// sha256 of the token that client's attach minted. Every attach mints one
     /// token and files its hash here; presenting that token on the next attach
-    /// hands the view back once. The store lives only in memory: nothing in it
-    /// is written to disk, sent over a socket, or carried across an image swap.
+    /// hands the view back once. An image swap carries the store to the next
+    /// image ([`carry_out`](Self::carry_out), [`resume`](Self::resume)); nothing
+    /// in it is sent over a socket.
     pub(crate) saved_view_store: SavedViewStore,
+    /// When a pane's answer to a device query last failed to be written and
+    /// was logged: one such failure is logged per
+    /// [`LOG_WINDOW_DURATION`](koshi_observability::repeated_warning::LOG_WINDOW_DURATION).
+    pub(crate) device_reply_failure_warning: WarningRateLimiter,
 }
 
 impl Server {
     /// Build a server with no sessions, no terminal engines, no subscribers and
-    /// a fresh render scheduler, holding the given PTY backend and event inbox.
+    /// no timed renders, holding the given PTY backend and event inbox.
     /// Both effective configs start at the built-in defaults, over an
     /// empty app layer that [`load_startup_config`](Self::load_startup_config)
     /// and every `koshi.kdl` reload replace.
@@ -300,20 +330,23 @@ impl Server {
             pty_backend,
             terminal_engine_by_pane_id: HashMap::new(),
             live_pane_ids: HashSet::new(),
+            pane_output_queue_by_pane_id: HashMap::new(),
+            ready_output_pane_ids: VecDeque::new(),
             pane_kill_threads: Vec::new(),
             pty_size_by_pane_id: HashMap::new(),
             event_bus: EventBus::new(),
             subscriptions: Vec::new(),
             held_mouse_buttons: Vec::new(),
             ipc_server: None,
-            render_scheduler: RenderScheduler::new(),
+            pane_animation_deadlines: PaneRenderDeadlines::default(),
+            pane_synchronized_output_deadlines: PaneRenderDeadlines::default(),
             inbox_receiver,
             should_shutdown_immediately: false,
             is_quit_requested: false,
             is_restart_requested: false,
-            restart_check: None,
             client_ids_awaiting_reconnect: HashSet::new(),
             saved_view_store: SavedViewStore::default(),
+            device_reply_failure_warning: WarningRateLimiter::new(),
             app_layer,
             config,
             client_config,
@@ -330,13 +363,13 @@ impl Server {
             .get_mut(&session_id)
             .expect("the recovered session was seeded")
             .is_recovery_notice_visible = true;
-        self.render_scheduler.invalidate();
+        self.mark_every_view_changed();
     }
 
     /// Rebuild a server from the state a previous process image carried out,
     /// over panes that are already running.
     ///
-    /// The event bus, the render scheduler and the subscribers are built fresh here, and no
+    /// The event bus and the subscribers are built fresh here, and no
     /// control socket is attached: the caller attaches one with
     /// [`attach_ipc_server`](Self::attach_ipc_server). What comes from the swap is what
     /// [`ResumeBody`] carries, over the panes `pty_size_by_pane_id` names, plus the records of the
@@ -368,8 +401,12 @@ impl Server {
     ///
     /// No connection survives the swap, so every client the carried sessions
     /// hold starts out awaiting its own re-attach. Each one that attaches again
-    /// naming its id leaves that set, and whoever is left is detached when the
-    /// grace window closes.
+    /// naming its id and presenting its resume token leaves that set, and
+    /// whoever is left is detached when the grace window closes. The body's
+    /// saved-view store becomes this server's: the views filed before the swap
+    /// and the hash minted for each carried client. A carried client with no
+    /// hash in it, as every client of a body converted from format 4 or older,
+    /// is not handed back by its id and waits for the grace window.
     pub fn resume(
         pty_backend: Arc<dyn PtyBackend>,
         inbox_receiver: Receiver<RuntimeEvent>,
@@ -386,6 +423,7 @@ impl Server {
             .flat_map(|session| session.clients.list_attached_clients())
             .map(|client| client.get_client_id())
             .collect();
+        server.saved_view_store = body.saved_view_store;
         server.session_by_id = body.session_by_id;
         // A quit applied before the swap comes back with its kind. The serve
         // loop leaves it alone while any carried client is still expected, so
@@ -471,8 +509,12 @@ impl Server {
     /// The header's `session_id` and `session_name` are read from the same
     /// session the body carries, so the two halves name one session.
     ///
-    /// The state moves out of the server, which is left with no sessions and no
-    /// terminal engines, so no pane's grid or scrollback is copied on the way.
+    /// The state moves out of the server, which is left with no sessions, no
+    /// terminal engines and an empty saved-view store. No pane's grid or
+    /// scrollback is copied on the way.
+    ///
+    /// The body's `left_running_child_process_ids` is empty: the PTY backend
+    /// holds those, and the caller sets them.
     ///
     /// The parser itself is dropped, so each engine hands over the bytes that
     /// reproduce its position.
@@ -480,8 +522,9 @@ impl Server {
     /// `panes` is what the concrete PTY backend reports as live. A pane's size
     /// in the header is this server's own record of it; a pane this server has
     /// no size for takes the size the backend reports. On Unix each record also
-    /// names the terminal its descriptor is the master of. A pane whose child
-    /// the backend already reaped carries that child's exit status.
+    /// names the terminal its descriptor is the master of. A pane carries the
+    /// exit status the backend reports for it
+    /// ([`CarriedPtyPane::exit_status`]).
     pub fn carry_out(&mut self, panes: &[CarriedPtyPane]) -> Option<(ResumeHeader, ResumeBody)> {
         let session = self.get_sole_session()?;
         let session_id = session.session_id;
@@ -544,6 +587,8 @@ impl Server {
                 } else {
                     CarriedQuit::Graceful
                 }),
+            saved_view_store: std::mem::take(&mut self.saved_view_store),
+            left_running_child_process_ids: Vec::new(),
         };
         Some((header, resume_body))
     }
@@ -563,12 +608,25 @@ impl Server {
     /// subscription.
     ///
     /// `client_id` is the client the subscriber views as: the one whose frame
-    /// [`push_frames`](Self::push_frames) queues each due render, and the one
-    /// [`resync_lagged`](Self::resync_lagged) builds when an event does
-    /// not fit the queue.
-    pub fn subscribe(&mut self, client_id: ClientId) -> (Receiver<Delivery>, Arc<WriterHandoff>) {
+    /// [`push_frames`](Self::push_frames) queues each frame that is due, and
+    /// the one [`resync_lagged`](Self::resync_lagged) builds when an event
+    /// does not fit the queue. The subscriber gets a frame at most once per
+    /// [`compute_frame_interval`] of `max_frames_per_second`, and its first
+    /// frame is due at once.
+    ///
+    /// # Panics
+    /// When `max_frames_per_second` is `0`.
+    pub fn subscribe(
+        &mut self,
+        client_id: ClientId,
+        max_frames_per_second: u16,
+    ) -> (DeliveryReceiver, Arc<WriterHandoff>) {
         let (subscriber_id, delivery_receiver, writer_handoff) = self.event_bus.subscribe();
-        self.subscriptions.push((subscriber_id, client_id));
+        self.subscriptions.push(FrameSubscription {
+            subscriber_id,
+            client_id,
+            frame_pace: FramePace::new(compute_frame_interval(max_frames_per_second)),
+        });
         (delivery_receiver, writer_handoff)
     }
 
@@ -582,25 +640,26 @@ impl Server {
     /// that writes the client's connection, and nothing adds to them.
     pub(crate) fn unsubscribe_client(&mut self, client_id: ClientId) {
         let bus = &mut self.event_bus;
-        self.subscriptions
-            .retain(|&(subscriber_id, viewed_client_id)| {
-                if viewed_client_id == client_id {
-                    bus.unsubscribe(subscriber_id);
-                    return false;
-                }
-                true
-            });
+        self.subscriptions.retain(|frame_subscription| {
+            if frame_subscription.client_id == client_id {
+                bus.unsubscribe(frame_subscription.subscriber_id);
+                return false;
+            }
+            true
+        });
     }
 
     /// Put a fresh frame on the queue of every subscriber paused by a dropped
     /// event, returning it to live delivery. Called once per pass of the
-    /// event loop, before the frame the loop paints
+    /// event loop, before the frames the loop pushes
     /// ([`push_due_frames`](Self::push_due_frames)).
     ///
     /// The frame is this subscriber's viewing client's, built by
-    /// [`build_snapshot`](Self::build_snapshot). A subscriber that views no
-    /// client, or whose client is no longer attached, can never be resynced, so
-    /// its subscription is dropped.
+    /// [`build_snapshot`](Self::build_snapshot), and goes regardless of the
+    /// subscriber's frame pace. A queued frame counts as the subscriber's
+    /// frame at `current_time` (`FramePace::record_frame_sent`). A subscriber
+    /// that views no client, or whose client is no longer attached, has its
+    /// subscription dropped.
     ///
     /// A paused subscriber owed a frame is skipped, and no frame is built for
     /// it: a frame or resync snapshot found its queue full, and its writing
@@ -608,7 +667,7 @@ impl Server {
     /// ([`WriterHandoff::take_owed_frame_mark`]). The
     /// [`RuntimeEvent::QueueRoomFreed`] that thread sends after it takes the
     /// mark starts the pass that resyncs the subscriber.
-    pub fn resync_lagged(&mut self) {
+    pub fn resync_lagged(&mut self, current_time: Instant) {
         if !self.event_bus.has_desynced_subscribers() {
             return;
         }
@@ -616,11 +675,10 @@ impl Server {
             if self.event_bus.is_frame_owed(desynced_subscriber_id) {
                 continue;
             }
-            let Some(client_id) = self
-                .subscriptions
-                .iter()
-                .find(|&&(subscriber_id, _)| subscriber_id == desynced_subscriber_id)
-                .map(|&(_, client_id)| client_id)
+            let Some(subscription_index) =
+                self.subscriptions.iter().position(|frame_subscription| {
+                    frame_subscription.subscriber_id == desynced_subscriber_id
+                })
             else {
                 tracing::warn!(
                     subscriber_id = %desynced_subscriber_id,
@@ -629,6 +687,7 @@ impl Server {
                 self.event_bus.unsubscribe(desynced_subscriber_id);
                 continue;
             };
+            let client_id = self.subscriptions[subscription_index].client_id;
             let Some(snapshot) = self.build_snapshot(client_id) else {
                 tracing::warn!(
                     subscriber_id = %desynced_subscriber_id,
@@ -638,69 +697,127 @@ impl Server {
                 self.event_bus.unsubscribe(desynced_subscriber_id);
                 continue;
             };
-            self.event_bus
-                .try_resync(desynced_subscriber_id, Box::new(snapshot));
+            if self
+                .event_bus
+                .try_resync(desynced_subscriber_id, Box::new(snapshot))
+            {
+                self.subscriptions[subscription_index]
+                    .frame_pace
+                    .record_frame_sent(current_time);
+            }
         }
         self.remove_ended_subscriptions();
     }
 
-    /// Put each client's current frame on its queue. Called once per due
-    /// render, after [`resync_lagged`](Self::resync_lagged).
+    /// Put the current frame of each client whose frame is due at
+    /// `current_time` on its subscriber's queue. Called once per pass, after
+    /// [`resync_lagged`](Self::resync_lagged).
     ///
-    /// The frame is the subscriber's viewing client's, built by
-    /// [`build_snapshot`](Self::build_snapshot). A subscriber that is paused,
-    /// or owed a frame as [`resync_lagged`](Self::resync_lagged) states, is
-    /// skipped, and no frame is built for it.
+    /// A frame is due when the client's view changed since its last frame and
+    /// its pace lets a frame go (`FramePace::compute_frame_wait` is
+    /// `Some(Duration::ZERO)`). The frame is the subscriber's viewing
+    /// client's, built by [`build_snapshot`](Self::build_snapshot). A
+    /// subscriber that is paused, or owed a frame as
+    /// [`resync_lagged`](Self::resync_lagged) states, is skipped, and no frame
+    /// is built for it.
     ///
-    /// A frame that does not fit the queue is dropped and marks the
-    /// subscriber owed a frame, which [`RuntimeEvent::QueueRoomFreed`] answers
-    /// with a newer one for that subscriber alone. A subscriber the send
-    /// removed — its receiver is gone — takes its `subscriptions` entry with
-    /// it.
-    pub fn push_frames(&mut self) {
-        // The list is taken out for the walk and put back after it. Nothing in
-        // the loop touches `subscriptions` itself.
-        let subscriptions = std::mem::take(&mut self.subscriptions);
-        for &(subscriber_id, client_id) in &subscriptions {
-            if !self.event_bus.can_take_frame(subscriber_id) {
+    /// A queued frame counts as the subscriber's frame at `current_time`
+    /// (`FramePace::record_frame_sent`). A frame that does not fit the queue
+    /// is dropped, marks the subscriber owed a frame, and leaves its view
+    /// change in place: the pass that [`RuntimeEvent::QueueRoomFreed`] starts
+    /// sends a newer one. A client the session no longer shows a frame for
+    /// has its view change cleared. A subscriber the send removed — its
+    /// receiver is gone — takes its `subscriptions` entry with it.
+    pub fn push_frames(&mut self, current_time: Instant) {
+        for subscription_index in 0..self.subscriptions.len() {
+            let frame_subscription = &self.subscriptions[subscription_index];
+            let subscriber_id = frame_subscription.subscriber_id;
+            let client_id = frame_subscription.client_id;
+            let is_frame_due = frame_subscription
+                .frame_pace
+                .compute_frame_wait(current_time)
+                == Some(Duration::ZERO);
+            if !is_frame_due || !self.event_bus.can_take_frame(subscriber_id) {
                 continue;
             }
             let Some(snapshot) = self.build_snapshot(client_id) else {
+                self.subscriptions[subscription_index]
+                    .frame_pace
+                    .clear_view_change();
                 continue;
             };
-            self.event_bus
-                .try_send_frame(subscriber_id, Box::new(snapshot));
+            if self
+                .event_bus
+                .try_send_frame(subscriber_id, Box::new(snapshot))
+            {
+                self.subscriptions[subscription_index]
+                    .frame_pace
+                    .record_frame_sent(current_time);
+            }
         }
-        self.subscriptions = subscriptions;
         self.remove_ended_subscriptions();
     }
 
-    /// Put `client_id`'s current frame on the queue of the subscriber that
-    /// views `client_id`, and on no other queue. Called for
-    /// [`RuntimeEvent::QueueRoomFreed`].
-    ///
-    /// Queues nothing, and builds no frame, when no subscriber views
-    /// `client_id`, or when the subscriber is paused or owed a frame
-    /// ([`EventBus::can_take_frame`](crate::runtime::bus::EventBus::can_take_frame)):
-    /// a paused subscriber takes its resync snapshot from
-    /// [`resync_lagged`](Self::resync_lagged). Queues nothing when the session
-    /// no longer holds the client. A frame that does not fit the queue is
-    /// dropped and marks the subscriber owed a frame. A subscriber the send
-    /// removed — its receiver is gone — takes its `subscriptions` entry with
-    /// it.
-    pub(crate) fn push_client_frame(&mut self, client_id: ClientId) {
-        let Some(subscriber_id) = self.find_subscriber_id_by_client_id(client_id) else {
-            return;
-        };
-        if !self.event_bus.can_take_frame(subscriber_id) {
-            return;
+    /// Mark the view of every subscriber changed
+    /// ([`FramePace::mark_view_changed`]). Called for each command, attach,
+    /// detach, resize and session-wide change.
+    pub(crate) fn mark_every_view_changed(&mut self) {
+        for frame_subscription in &mut self.subscriptions {
+            frame_subscription.frame_pace.mark_view_changed();
         }
-        let Some(snapshot) = self.build_snapshot(client_id) else {
-            return;
+    }
+
+    /// Mark the view changed of every subscriber that views `client_id`.
+    pub(crate) fn mark_client_view_changed(&mut self, client_id: ClientId) {
+        for frame_subscription in &mut self.subscriptions {
+            if frame_subscription.client_id == client_id {
+                frame_subscription.frame_pace.mark_view_changed();
+            }
+        }
+    }
+
+    /// Mark the view changed of every subscriber whose client shows `pane_id`
+    /// ([`is_pane_shown_to_client`](Self::is_pane_shown_to_client)). A pane in
+    /// no session marks nothing.
+    pub(crate) fn mark_views_showing_pane(&mut self, pane_id: PaneId) {
+        for subscription_index in 0..self.subscriptions.len() {
+            let client_id = self.subscriptions[subscription_index].client_id;
+            if self.is_pane_shown_to_client(client_id, pane_id) {
+                self.subscriptions[subscription_index]
+                    .frame_pace
+                    .mark_view_changed();
+            }
+        }
+    }
+
+    /// Let the next frame of every subscriber that views `client_id` go
+    /// without waiting for its pace ([`FramePace::allow_next_frame_now`]).
+    /// Called for the client's own key, paste and mouse events.
+    pub(crate) fn allow_client_frame_now(&mut self, client_id: ClientId) {
+        for frame_subscription in &mut self.subscriptions {
+            if frame_subscription.client_id == client_id {
+                frame_subscription.frame_pace.allow_next_frame_now();
+            }
+        }
+    }
+
+    /// Whether a frame of `client_id` can show `pane_id`: the pane is a leaf
+    /// of the client's active tab, or a floating pane of the client's session.
+    /// `false` when the client or the pane is in no session, or they are in
+    /// different sessions.
+    pub(crate) fn is_pane_shown_to_client(&self, client_id: ClientId, pane_id: PaneId) -> bool {
+        let Some(session) = self.get_session_for_client(client_id) else {
+            return false;
         };
-        self.event_bus
-            .try_send_frame(subscriber_id, Box::new(snapshot));
-        self.remove_ended_subscriptions();
+        let Some(client) = session.clients.get_client_by_id(client_id) else {
+            return false;
+        };
+        if session.floating_set.has_pane(pane_id) {
+            return true;
+        }
+        session
+            .find_tab_by_pane_id(pane_id)
+            .is_some_and(|tab| tab.get_tab_id() == client.get_active_tab_id())
     }
 
     /// Drop every `subscriptions` entry whose subscriber the bus no longer
@@ -708,23 +825,34 @@ impl Server {
     fn remove_ended_subscriptions(&mut self) {
         let bus = &self.event_bus;
         self.subscriptions
-            .retain(|&(subscriber_id, _)| bus.has_subscriber(subscriber_id));
+            .retain(|frame_subscription| bus.has_subscriber(frame_subscription.subscriber_id));
     }
 
     /// Put the session `client_id` moves to on the queue of every subscriber
     /// that views that client, after the bytes waiting for the client's own
-    /// terminal, as
+    /// terminal. `owner_user_id` is the user id whose folder of the shared
+    /// directory advertises `session_id`, or `None` for a lookup by id alone.
+    /// The move is queued as
     /// [`EventBus::try_send_switch`](crate::runtime::bus::EventBus::try_send_switch)
     /// states.
     ///
     /// `true` when at least one subscriber holds the move. `false` when the
     /// client has no subscriber, or every queue was full: a full queue drops
     /// the move and desyncs that subscriber, and the move is never replayed.
-    pub(crate) fn send_switch(&mut self, client_id: ClientId, session_id: SessionId) -> bool {
+    pub(crate) fn send_switch(
+        &mut self,
+        client_id: ClientId,
+        session_id: SessionId,
+        owner_user_id: Option<u32>,
+    ) -> bool {
         let mut has_sent_switch = false;
-        for &(subscriber_id, viewed_client_id) in &self.subscriptions {
-            if viewed_client_id == client_id {
-                has_sent_switch |= self.event_bus.try_send_switch(subscriber_id, session_id);
+        for frame_subscription in &self.subscriptions {
+            if frame_subscription.client_id == client_id {
+                has_sent_switch |= self.event_bus.try_send_switch(
+                    frame_subscription.subscriber_id,
+                    session_id,
+                    owner_user_id,
+                );
             }
         }
         has_sent_switch
@@ -738,8 +866,8 @@ impl Server {
     ) -> Option<SubscriberId> {
         self.subscriptions
             .iter()
-            .find(|&&(_, viewed_client_id)| viewed_client_id == client_id)
-            .map(|&(subscriber_id, _)| subscriber_id)
+            .find(|frame_subscription| frame_subscription.client_id == client_id)
+            .map(|frame_subscription| frame_subscription.subscriber_id)
     }
 
     /// Build and queue one read-only placement preview for `client_id`.
@@ -797,8 +925,9 @@ impl Server {
             recent_events::record_event(event);
             let removed_subscriber_ids = self.event_bus.publish(event);
             if !removed_subscriber_ids.is_empty() {
-                self.subscriptions
-                    .retain(|(subscriber_id, _)| !removed_subscriber_ids.contains(subscriber_id));
+                self.subscriptions.retain(|frame_subscription| {
+                    !removed_subscriber_ids.contains(&frame_subscription.subscriber_id)
+                });
             }
         }
     }
@@ -837,14 +966,6 @@ impl Server {
         self.is_restart_requested
     }
 
-    /// Install what a restart request must promise before it is accepted.
-    /// Called by the session server before the event loop starts, and again on
-    /// the server it keeps after a swap that did not start, which then answers
-    /// the next restart too.
-    pub fn set_restart_check(&mut self, check: RestartCheck) {
-        self.restart_check = Some(check);
-    }
-
     /// Take the accepted restart back, so the event loop stops asking for the
     /// swap. Called when the swap was abandoned before anything irreversible
     /// happened and the session keeps serving in this process.
@@ -881,9 +1002,9 @@ impl Server {
         self.wait_for_clients_told();
     }
 
-    /// Tell every attached client that this session ended, so each one says so
-    /// rather than reporting a session that died, and return once every one of
-    /// them holds that frame.
+    /// Tell every attached client that this session ended, and return once
+    /// every one of them holds that frame. Each client then says the session
+    /// ended.
     ///
     /// [`Event::Quit`] is the stream's last frame for the clients that receive
     /// it. Publishing it raises the shared
@@ -922,15 +1043,15 @@ impl Server {
     /// [`CLIENT_NOTIFICATION_TIMEOUT_DURATION`] and says so.
     fn wait_for_clients_told(&self) {
         let deadline = Instant::now() + CLIENT_NOTIFICATION_TIMEOUT_DURATION;
-        while self.event_bus.get_ending_notice().count_running_writers() > 0 {
-            if Instant::now() >= deadline {
-                tracing::warn!(
-                    clients = self.event_bus.get_ending_notice().count_running_writers(),
-                    "a client did not take the last frame within the wait"
-                );
-                return;
-            }
-            std::thread::sleep(CLIENT_NOTIFICATION_POLL_INTERVAL_DURATION);
+        let running_writer_count = self
+            .event_bus
+            .get_ending_notice()
+            .wait_until_writers_end(deadline);
+        if running_writer_count > 0 {
+            tracing::warn!(
+                clients = running_writer_count,
+                "a client did not take the last frame within the wait"
+            );
         }
     }
 
@@ -942,27 +1063,6 @@ impl Server {
     #[must_use]
     pub fn into_inbox_receiver(self) -> Receiver<RuntimeEvent> {
         self.inbox_receiver
-    }
-
-    /// Serve one restart request: run the installed check, and accept the
-    /// restart only when it passes.
-    ///
-    /// An accepted restart sets
-    /// [`is_restart_requested`](Self::is_restart_requested) and changes nothing
-    /// else, so the swap runs after the reply is written. A
-    /// refused one changes nothing at all and the session keeps serving.
-    ///
-    /// # Errors
-    /// Returns the refusal the installed check gave, or
-    /// [`RestartRefusal::ImageReplacementUnsupported`] when no check is
-    /// installed.
-    pub(crate) fn handle_ipc_restart(&mut self) -> Result<(), RestartRefusal> {
-        let Some(check) = self.restart_check.clone() else {
-            return Err(RestartRefusal::ImageReplacementUnsupported);
-        };
-        check()?;
-        self.is_restart_requested = true;
-        Ok(())
     }
 
     /// Borrow the session map.

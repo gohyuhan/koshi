@@ -13,3 +13,6 @@ thiserror.workspace = true
 koshi-test-support.workspace = true
 proptest.workspace = true
 serde_json.workspace = true
+
+[lints]
+workspace = true

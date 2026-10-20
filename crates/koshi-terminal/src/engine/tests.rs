@@ -1,7 +1,10 @@
 //! Tests for the per-pane terminal engine: construction, chunked byte
-//! decoding across `advance` calls, device-reply return, resize delegation,
-//! taking the state apart and rebuilding it, and carrying a half-received
-//! escape sequence to the next parser.
+//! decoding across `advance` calls, device replies and shell-integration
+//! facts, eight-bit controls, image events and their queue limits,
+//! synchronized output, resize delegation, taking the state apart and
+//! rebuilding it, carrying a half-received escape sequence to the next
+//! parser, clipboard copies, printed runs that leave the same state as
+//! single-character prints, and the start of the `plain` output workload.
 
 use std::path::Path;
 use std::time::Instant;
@@ -9,12 +12,18 @@ use std::time::Instant;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use koshi_core::geometry::PixelCellSize;
 use koshi_core::process::PtySize;
+use koshi_test_support::output_workloads::{
+    build_workload_bytes, OutputWorkload, DEFAULT_WORKLOAD_SEED,
+};
 
 use crate::graphics::{DecodedGraphics, DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay};
+use crate::grid::state::{Cell, RowEnd};
 use crate::state::{ImagePlacementError, Screen, ShellIntegrationFact, TerminalState};
 use crate::style::{Color, Style};
 
 use super::*;
+use crate::graphics::tests::build_red_png_bytes;
+use crate::state::tests::process_terminal_bytes;
 
 impl SynchronizedOutputTransport {
     /// The wall-clock deadline for releasing the open update.
@@ -234,8 +243,7 @@ fn pending_shell_facts_survive_a_state_round_trip() {
         column_count: 8,
         row_count: 3,
     });
-    let mut parser = vte::Parser::<OSC_BUFFER_BYTE_CAPACITY>::new_with_size();
-    parser.advance(&mut terminal_state, b"\x1b]133;C\x07");
+    process_terminal_bytes(&mut terminal_state, b"\x1b]133;C\x07");
 
     let serialized_terminal_state =
         serde_json::to_string(&terminal_state).expect("state serializes");
@@ -264,7 +272,7 @@ fn prompt_marks_survive_scrollback_and_eviction() {
             .get_terminal_state()
             .get_scrollback()
             .list_retained_lines()[0]
-            .1
+            .get_row_metadata()
             .has_prompt_mark
     );
 
@@ -283,7 +291,7 @@ fn prompt_marks_survive_scrollback_and_eviction() {
             .get_terminal_state()
             .get_scrollback()
             .list_retained_lines()[0]
-            .1
+            .get_row_metadata()
             .has_prompt_mark
     );
 }
@@ -688,16 +696,6 @@ fn c1_string_openers_inside_osc_remain_osc_data() {
         engine.get_terminal_state().get_active_cursor_position(),
         (0, 0)
     );
-}
-
-fn build_red_png_bytes() -> Vec<u8> {
-    use image::ImageEncoder;
-
-    let mut png_bytes = Vec::new();
-    image::codecs::png::PngEncoder::new(&mut png_bytes)
-        .write_image(&[255, 0, 0, 255], 1, 1, image::ColorType::Rgba8.into())
-        .expect("the one-pixel image encodes");
-    png_bytes
 }
 
 fn build_graphics_control(protocol: GraphicsProtocol, is_c1_encoded: bool) -> Vec<u8> {
@@ -1624,6 +1622,75 @@ fn a_sequence_split_at_every_byte_boundary_matches_the_whole_feed() {
     );
 }
 
+/// Streams whose control sequences meet an open code point, an eight-bit
+/// control, a CAN or a second `ESC` give the same screen, title and images fed
+/// whole as fed one byte at a time.
+#[test]
+fn control_sequences_beside_open_code_points_and_eight_bit_controls_match_one_byte_feeds() {
+    let terminal_input_streams: [&[u8]; 5] = [
+        b"\xe2\x1b[\x9fGf=32,s=1,v=1;/wAA/w==\x9c",
+        b"\xe2\x1b[m\x9d0;title\x07",
+        b"\x1b[1\x1b[?2026hX\x1b[?2026lY",
+        b"\x9d0;t\x07\x1b[1mX",
+        b"\x1b[1\x18X\x1b[?2026h",
+    ];
+    for terminal_input_stream in terminal_input_streams {
+        let mut whole_input_engine = build_test_terminal_engine();
+        let _ = whole_input_engine.process_pty_output(terminal_input_stream);
+        let mut split_input_engine = build_test_terminal_engine();
+        for terminal_input_byte in terminal_input_stream {
+            let _ = split_input_engine.process_pty_output(&[*terminal_input_byte]);
+        }
+
+        assert!(
+            whole_input_engine.get_terminal_state() == split_input_engine.get_terminal_state(),
+            "{terminal_input_stream:?}"
+        );
+        assert_eq!(
+            whole_input_engine.take_graphics_events(),
+            split_input_engine.take_graphics_events(),
+            "{terminal_input_stream:?}"
+        );
+    }
+}
+
+#[test]
+fn an_eight_bit_control_after_a_control_sequence_that_cut_a_code_point_is_a_control() {
+    let mut engine = build_test_terminal_engine();
+
+    let _ = engine.process_pty_output(b"\xe2\x1b[m\x9d0;title\x07");
+
+    assert_eq!(engine.get_terminal_state().get_title(), Some("title"));
+}
+
+#[test]
+fn a_control_sequence_after_an_eight_bit_control_in_one_chunk_applies() {
+    let mut engine = build_test_terminal_engine();
+
+    let _ = engine.process_pty_output(b"\x9d0;t\x07\x1b[1mX");
+
+    let mut bold_style = Style::default();
+    bold_style.set_bold(true);
+    let cell = engine
+        .get_terminal_state()
+        .get_active_grid()
+        .get_cell(0, 0)
+        .expect("cell in bounds");
+    assert_eq!(cell.get_character(), 'X');
+    assert_eq!(cell.get_style(), bold_style);
+}
+
+#[test]
+fn a_synchronized_update_that_interrupts_a_control_sequence_holds_the_text_after_it() {
+    let mut engine = build_test_terminal_engine();
+
+    let _ = engine.process_pty_output(b"\x1b[1\x1b[?2026hX");
+
+    assert_eq!(get_terminal_cell_character(&engine, 0, 0), ' ');
+    let _ = engine.process_pty_output(b"\x1b[?2026l");
+    assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'X');
+}
+
 #[test]
 fn a_three_byte_wide_char_split_across_chunks_decodes_once() {
     let mut engine = build_test_terminal_engine();
@@ -2163,7 +2230,7 @@ fn a_large_clipboard_write_keeps_bounded_carry_and_terminal_state() {
         (0, 0)
     );
 
-    // koshi handles no clipboard write: the terminator only closes the
+    // This engine reads no clipboard copy: the terminator only closes the
     // sequence, and the `Z` after it prints.
     let _ = engine.process_pty_output(b"\x07Z");
 
@@ -2995,7 +3062,7 @@ fn an_image_scrolled_into_history_shares_its_pixels_with_a_subsequent_transfer()
 }
 
 /// A copy of `copied_bytes` for `clipboard_targets`.
-fn build_clipboard_copy(clipboard_targets: &str, copied_bytes: &[u8]) -> ClipboardCopy {
+pub(crate) fn build_clipboard_copy(clipboard_targets: &str, copied_bytes: &[u8]) -> ClipboardCopy {
     ClipboardCopy {
         clipboard_targets: clipboard_targets.to_string(),
         copied_bytes: copied_bytes.to_vec(),
@@ -3089,4 +3156,263 @@ fn an_eight_bit_clipboard_copy_reads_as_its_seven_bit_form() {
         engine.take_clipboard_copies(),
         vec![build_clipboard_copy("c", b"hi")]
     );
+}
+
+#[test]
+fn the_first_three_plain_workload_lines_parse_to_three_hard_rows_of_their_text() {
+    let expected_line_texts = [
+        concat!(
+            "G!F 2/bc=Zo)/+,:p{6fv@6VU?4p]GBp`bPCg=T\\znhC5)TT!swHDfYJ!Gb(&Vo \\AqR{&^b s^b(Yjux-rC$?1Q5[P?G^v",
+            "{aS$ftkPZsX1Uy0UQQNnn+/76qFFoM*U>]R'`Tc{w-)t1_f]lr^Awn$b|Zf$y_<JkQ]T tRCb;9nEtrPW5AKBaHXg VYpux"
+        ),
+        concat!(
+            "If1$B8f,<|5R3ezR(ws=]V5h_]g;Q,K\"EX<ON) uHqPyVvM\"dM8J .o$;w! ?tg9~&B07^{m}I5m!A_5>G@4uwQ+E<#m$ek",
+            ":rG).+[+<IUtUq\\'wC|Bpy0.Xsy&'{$@1hXl{\\2)^CiPBY[7%kbUhbyAGSFCXSCH,]Yh;l/{7e2=\\Srl2*Wqd[\"F1ELARP~"
+        ),
+        concat!(
+            "b.q> R@I)a>(I+enh#I*rJ`!LafHN1Cm{:16_mPj!qn_`KomM%X~X;EYP3ff7cA;BLvZt@+x{uR-,.7#;md}7p#1HUWXX%X",
+            "'5<SG,zOWm1'Dx_x!VOT[4)[QLPbS)d~h//w~sPYK#Duc1!];<hID|Vyu|IXFjlE(kuPd|z216_7lB1-q3qT:8/0G e?0R{"
+        ),
+    ];
+    let workload_bytes = build_workload_bytes(OutputWorkload::Plain, 576, DEFAULT_WORKLOAD_SEED);
+    let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
+        column_count: 200,
+        row_count: 4,
+    });
+
+    let _ = terminal_engine.process_pty_output(&workload_bytes);
+
+    let terminal_state = terminal_engine.get_terminal_state();
+    let active_grid = terminal_state.get_active_grid();
+    assert_eq!(workload_bytes.len(), 576);
+    for (row_index, expected_line_text) in expected_line_texts.iter().enumerate() {
+        let mut expected_row_cells: Vec<Cell> = expected_line_text
+            .chars()
+            .map(|line_character| Cell::from_character(line_character, 1, Style::default()))
+            .collect();
+        expected_row_cells.resize(200, Cell::build_blank());
+        let row_index = row_index as u16;
+        assert_eq!(
+            active_grid.get_row_cells(row_index),
+            Some(expected_row_cells.as_slice()),
+            "row {row_index}"
+        );
+        assert_eq!(
+            active_grid.get_row_end(row_index),
+            RowEnd::Hard,
+            "row {row_index}"
+        );
+    }
+    assert_eq!(
+        active_grid.get_row_cells(3),
+        Some(vec![Cell::build_blank(); 200].as_slice())
+    );
+    assert_eq!(terminal_state.get_active_cursor_position(), (3, 0));
+    assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 0);
+}
+
+/// The terminal state a parser leaves when it hands each printed character
+/// to `TerminalState::print` on its own, with no engine around the state.
+fn print_one_character_at_a_time(pty_size: PtySize, terminal_bytes: &[u8]) -> TerminalState {
+    let mut terminal_state = TerminalState::from_pty_size(pty_size);
+    process_terminal_bytes(&mut terminal_state, terminal_bytes);
+    terminal_state
+}
+
+/// Assert that a new engine of `pty_size` fed `terminal_bytes` in one chunk
+/// holds the terminal state [`print_one_character_at_a_time`] leaves.
+fn assert_printed_runs_match_single_character_prints(pty_size: PtySize, terminal_bytes: &[u8]) {
+    let mut terminal_engine = TerminalEngine::from_pty_size(pty_size);
+    let _ = terminal_engine.process_pty_output(terminal_bytes);
+    assert!(
+        terminal_engine.get_terminal_state()
+            == &print_one_character_at_a_time(pty_size, terminal_bytes),
+        "the engine's state differs for {:?}",
+        String::from_utf8_lossy(terminal_bytes)
+    );
+}
+
+#[test]
+fn printed_runs_leave_the_state_single_character_prints_leave() {
+    let small_pty_size = PtySize {
+        column_count: 10,
+        row_count: 4,
+    };
+    let scrolled_lines = "abcdefghij\r\n".repeat(12) + "tail";
+    let printed_streams: [&[u8]; 19] = [
+        scrolled_lines.as_bytes(),
+        b"abcdefghijklmnopqrstuvwxy",
+        b"\x1b[?7labcdefghijklmno",
+        b"abcdefghij",
+        b"abcdefghijk",
+        "中文字\ra\x1b[1;4Hbc".as_bytes(),
+        "abcdefghi中".as_bytes(),
+        b"\x1b[?69h\x1b[3;7s\x1b[1;3Habcdefghijkl\x1b[1;9Hxyz",
+        b"\x1b[?69h\x1b[5;5s\x1b[1;5Habc",
+        b"\x1b(0lqqk\x1b(Blqk\x1b)0\x0elqk\x0fabc",
+        "abc\u{301}de\u{301}\u{302}f".as_bytes(),
+        "\u{600}ab\u{1f44d}\u{1f3fd}xa\u{200d}b".as_bytes(),
+        b"ab\x1b[31mcd\x1b[44mef\x1b[0m\x1b[K\r\n",
+        b"a\tb\x08c\r\nde",
+        b"\x1b[2;3r\x1b[3;1Hline1\r\nline2\r\nline3\r\n",
+        b"abcdef\x1b[1;2H\x1b[4hXYZ\x1b[4lQ",
+        b"\x1b[?1049habc\x1b[2;2Hde\x1b[?1049lfg",
+        "e\u{301}\u{301}ab".as_bytes(),
+        b"abcdefghijklm\x1b[1;5H123456",
+    ];
+    for printed_stream in printed_streams {
+        assert_printed_runs_match_single_character_prints(small_pty_size, printed_stream);
+    }
+}
+
+#[test]
+fn each_output_workload_leaves_the_state_single_character_prints_leave() {
+    let workload_pty_size = PtySize {
+        column_count: 200,
+        row_count: 50,
+    };
+    for output_workload in OutputWorkload::ALL {
+        let workload_bytes =
+            build_workload_bytes(output_workload, 64 * 1024, DEFAULT_WORKLOAD_SEED);
+        assert_printed_runs_match_single_character_prints(workload_pty_size, &workload_bytes);
+    }
+}
+
+/// Text with a control sequence, two- to four-byte UTF-8 code points and a
+/// visible kitty graphics transfer between its printed runs.
+fn build_mixed_terminal_bytes() -> Vec<u8> {
+    let mut mixed_terminal_bytes = "ab\x1b[1;31mcd\u{e9}\u{4e2d}\u{1f600}\x1b[0m\r\n"
+        .as_bytes()
+        .to_vec();
+    mixed_terminal_bytes
+        .extend_from_slice(&build_visible_graphics_control(GraphicsProtocol::Kitty));
+    mixed_terminal_bytes.extend_from_slice("xy\u{301}z\x1b]2;title\x07end".as_bytes());
+    mixed_terminal_bytes
+}
+
+#[test]
+fn a_chunk_split_at_every_byte_offset_leaves_the_state_of_the_whole_chunk() {
+    let pty_size = PtySize {
+        column_count: 10,
+        row_count: 4,
+    };
+    let mixed_terminal_bytes = build_mixed_terminal_bytes();
+    let mut whole_chunk_engine = TerminalEngine::from_pty_size(pty_size);
+    let _ = whole_chunk_engine.process_pty_output(&mixed_terminal_bytes);
+    assert_eq!(whole_chunk_engine.list_graphics_events().count(), 1);
+    assert_eq!(
+        whole_chunk_engine.get_terminal_state().get_title(),
+        Some("title")
+    );
+
+    for split_byte_index in 0..=mixed_terminal_bytes.len() {
+        let mut split_chunk_engine = TerminalEngine::from_pty_size(pty_size);
+        let _ = split_chunk_engine.process_pty_output(&mixed_terminal_bytes[..split_byte_index]);
+        let _ = split_chunk_engine.process_pty_output(&mixed_terminal_bytes[split_byte_index..]);
+
+        assert!(
+            split_chunk_engine.get_terminal_state() == whole_chunk_engine.get_terminal_state(),
+            "split at byte {split_byte_index}"
+        );
+        assert_eq!(
+            split_chunk_engine.take_graphics_events(),
+            whole_chunk_engine
+                .list_graphics_events()
+                .cloned()
+                .collect::<Vec<_>>(),
+            "split at byte {split_byte_index}"
+        );
+    }
+}
+
+#[test]
+fn a_chunk_ending_inside_a_code_point_joins_the_next_chunk() {
+    let pty_size = PtySize {
+        column_count: 10,
+        row_count: 2,
+    };
+    let mut terminal_engine = TerminalEngine::from_pty_size(pty_size);
+
+    let _ = terminal_engine.process_pty_output(b"ab\xe2\x82");
+    let _ = terminal_engine.process_pty_output(b"\xaccd");
+
+    assert_eq!(
+        get_terminal_cell_character(&terminal_engine, 0, 2),
+        '\u{20ac}'
+    );
+    assert_eq!(get_terminal_cell_character(&terminal_engine, 0, 3), 'c');
+    assert_eq!(get_terminal_cell_character(&terminal_engine, 0, 4), 'd');
+    assert_eq!(
+        terminal_engine
+            .get_terminal_state()
+            .get_active_cursor_position(),
+        (0, 5)
+    );
+}
+
+#[test]
+fn a_chunk_with_no_escape_byte_inside_an_open_kitty_transfer_still_reaches_the_graphics_scan() {
+    let pty_size = PtySize {
+        column_count: 10,
+        row_count: 2,
+    };
+    let kitty_transfer_bytes = build_visible_graphics_control(GraphicsProtocol::Kitty);
+    let payload_start_index = kitty_transfer_bytes
+        .iter()
+        .position(|transfer_byte| *transfer_byte == b';')
+        .expect("the transfer has a payload")
+        + 1;
+    let terminator_start_index = kitty_transfer_bytes.len() - 2;
+    let mut whole_transfer_engine = TerminalEngine::from_pty_size(pty_size);
+    let _ = whole_transfer_engine.process_pty_output(&kitty_transfer_bytes);
+
+    let mut split_transfer_engine = TerminalEngine::from_pty_size(pty_size);
+    let _ = split_transfer_engine.process_pty_output(&kitty_transfer_bytes[..payload_start_index]);
+    let payload_bytes = &kitty_transfer_bytes[payload_start_index..terminator_start_index];
+    assert!(!payload_bytes.contains(&ESCAPE_BYTE));
+    let _ = split_transfer_engine.process_pty_output(payload_bytes);
+    let _ =
+        split_transfer_engine.process_pty_output(&kitty_transfer_bytes[terminator_start_index..]);
+
+    assert_eq!(split_transfer_engine.list_graphics_events().count(), 1);
+    assert_eq!(
+        split_transfer_engine.take_graphics_events(),
+        whole_transfer_engine.take_graphics_events()
+    );
+    assert!(
+        split_transfer_engine.get_terminal_state() == whole_transfer_engine.get_terminal_state()
+    );
+    assert_eq!(
+        split_transfer_engine
+            .get_terminal_state()
+            .get_active_grid()
+            .get_row_cells(0),
+        Some(vec![Cell::build_blank(); 10].as_slice())
+    );
+}
+
+#[test]
+fn every_control_sequence_final_byte_lets_a_following_eight_bit_csi_apply() {
+    let pty_size = PtySize {
+        column_count: 10,
+        row_count: 3,
+    };
+    for final_byte in 0x40..=0x7e_u8 {
+        let mut eight_bit_terminal_bytes = vec![ESCAPE_BYTE, b'[', final_byte, b'1'];
+        let mut seven_bit_terminal_bytes = eight_bit_terminal_bytes.clone();
+        eight_bit_terminal_bytes.extend_from_slice(b"\x9b2Jy");
+        seven_bit_terminal_bytes.extend_from_slice(b"\x1b[2Jy");
+        let mut eight_bit_engine = TerminalEngine::from_pty_size(pty_size);
+        let mut seven_bit_engine = TerminalEngine::from_pty_size(pty_size);
+
+        assert_eq!(
+            eight_bit_engine.process_pty_output(&eight_bit_terminal_bytes),
+            seven_bit_engine.process_pty_output(&seven_bit_terminal_bytes),
+            "final byte {final_byte:#04x}"
+        );
+        assert!(
+            eight_bit_engine.get_terminal_state() == seven_bit_engine.get_terminal_state(),
+            "final byte {final_byte:#04x}"
+        );
+    }
 }

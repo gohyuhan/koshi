@@ -5,7 +5,7 @@
 //! turns a tree plus a tab rectangle into pane rectangles, the structural
 //! edits (split, stack, remove), resize transactions, normalization after an
 //! edit, the fullscreen mode, focus candidates after a pane closes, the
-//! directional neighbour a pane sees on screen, pane placement (swap and
+//! directional neighbor a pane sees on screen, pane placement (swap and
 //! insertion as pure tree edits), per-pane content rectangles, and layout
 //! templates that describe an arrangement before any pane exists.
 

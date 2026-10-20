@@ -1,6 +1,7 @@
 //! Tests for the in-memory fake PTY backend.
 
 use super::*;
+use crate::fixtures::build_spawn_spec;
 use koshi_core::process::ShellKind;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -13,16 +14,6 @@ fn build_fake_pty_backend() -> (FakePtyBackend, Arc<PaneDeliveryRecorder>) {
     let pane_delivery_recorder = Arc::new(PaneDeliveryRecorder::default());
     let fake_pty_backend = FakePtyBackend::with_pty_sink(Arc::clone(&pane_delivery_recorder) as _);
     (fake_pty_backend, pane_delivery_recorder)
-}
-
-fn build_spawn_spec() -> SpawnSpec {
-    SpawnSpec {
-        program: PathBuf::from("/bin/zsh"),
-        arguments: Vec::new(),
-        working_directory: None,
-        environment_variables: BTreeMap::new(),
-        shell_kind: ShellKind::Zsh,
-    }
 }
 
 fn build_pty_size(column_count: u16, row_count: u16) -> PtySize {
@@ -128,6 +119,43 @@ fn a_killed_pane_id_can_be_spawned_again() {
     assert_eq!(
         fake_pty_backend.list_pane_write_bytes(pane_id).unwrap(),
         vec![b"second\n".to_vec()]
+    );
+}
+
+#[test]
+fn output_grants_are_recorded_in_order_and_start_over_on_a_new_spawn() {
+    let (fake_pty_backend, _) = build_fake_pty_backend();
+    let pane_id = PaneId::new();
+    let unknown_pane_id = PaneId::new();
+    fake_pty_backend
+        .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
+        .unwrap();
+
+    fake_pty_backend.grant_pane_output(pane_id, 5);
+    fake_pty_backend
+        .kill_pane(pane_id, KillPolicy::Force)
+        .unwrap();
+    fake_pty_backend.grant_pane_output(pane_id, 7);
+    fake_pty_backend.grant_pane_output(unknown_pane_id, 9);
+
+    // A killed pane still records grants; a never-spawned pane records none.
+    assert_eq!(
+        fake_pty_backend.list_pane_output_grant_byte_counts(pane_id),
+        Ok(vec![5, 7])
+    );
+    assert_eq!(
+        fake_pty_backend.list_pane_output_grant_byte_counts(unknown_pane_id),
+        Err(PtyError::UnknownPane {
+            pane_id: unknown_pane_id,
+        })
+    );
+
+    fake_pty_backend
+        .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
+        .unwrap();
+    assert_eq!(
+        fake_pty_backend.list_pane_output_grant_byte_counts(pane_id),
+        Ok(Vec::new())
     );
 }
 

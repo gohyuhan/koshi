@@ -19,10 +19,12 @@
 //! [`TOKEN_STORE_FORMAT`](crate::remote_tokens::TOKEN_STORE_FORMAT). The normal reader refuses
 //! another number; [`remote_migration`](crate::remote_migration) converts format 1 grants
 //! when the router starts. Writes go through [`koshi_storage::atomic::write_atomic`]: a reader
-//! finds the old content or the new, never a half-written middle.
+//! finds the old content or the new, never a half-written middle. A writer holds the lock at
+//! [`resolve_token_store_lock_path`](crate::remote_tokens::resolve_token_store_lock_path) from
+//! the read that starts its change to the write that ends it.
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -42,6 +44,11 @@ use crate::remote_state::{
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::TOKEN_STORE_FORMAT`].
 pub const TOKEN_STORE_FORMAT: u32 = koshi_core::compat::TOKEN_STORE_FORMAT.maximum_version;
+
+/// How long a grant stays in the store after it stopped working: 30 days.
+/// [`TokenStore::remove_ended_token_records`] drops a grant revoked, or run
+/// out, that long ago or longer.
+pub const TOKEN_RECORD_RETENTION_DURATION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// How far one grant reaches.
 ///
@@ -112,6 +119,19 @@ impl TokenRecord {
     /// either never expires or expires after `current_time`.
     fn is_active_at(&self, current_time: SystemTime) -> bool {
         is_token_active_at(self.revoked_at, self.expires_at, current_time)
+    }
+
+    /// When this record stopped working, as seen at `current_time`: the
+    /// earlier of its revoke time and an expiry at or before `current_time`,
+    /// or `None` while it still stands.
+    ///
+    /// Example — `revoked_at` 50 and `expires_at` 40, seen at 100, gives 40.
+    fn find_ended_at(&self, current_time: SystemTime) -> Option<SystemTime> {
+        let expired_at = self.expires_at.filter(|expiry| *expiry <= current_time);
+        match (self.revoked_at, expired_at) {
+            (Some(revoked_at), Some(expired_at)) => Some(revoked_at.min(expired_at)),
+            (revoked_at, expired_at) => revoked_at.or(expired_at),
+        }
     }
 
     /// This record without its hash.
@@ -306,32 +326,68 @@ impl TokenStore {
     /// length differs is unequal at once, with no byte compared. The walk runs
     /// to the end and reads no record out of a map. Returns the scope of the
     /// last record holding that hash that still stands at `current_time`, and
-    /// `None` when no record does. Admitting stamps that record's last-used
-    /// time with `current_time`. The store is not written; the caller does
-    /// that.
+    /// `None` when no record does. No record changes.
     ///
     /// The caller checks the scope against the session it wants with
     /// [`TokenScope::is_allowed_for_session`].
-    pub fn admit_token_scope(
-        &mut self,
+    #[must_use]
+    pub fn find_token_scope(
+        &self,
         connection_token: &ConnectionToken,
         current_time: SystemTime,
     ) -> Option<TokenScope> {
         let presented_token_hash = hash_connection_token(connection_token);
-        let mut matching_token_record_index = None;
-        for (token_record_index, token_record) in self.token_records.iter().enumerate() {
+        let mut matching_token_scope = None;
+        for token_record in &self.token_records {
             let is_token_hash_matching: bool = token_record
                 .token_hash
                 .as_bytes()
                 .ct_eq(presented_token_hash.as_bytes())
                 .into();
             if is_token_hash_matching && token_record.is_active_at(current_time) {
-                matching_token_record_index = Some(token_record_index);
+                matching_token_scope = Some(&token_record.scope);
             }
         }
-        let token_record_index = matching_token_record_index?;
-        self.token_records[token_record_index].last_used_at = Some(current_time);
-        Some(self.token_records[token_record_index].scope.clone())
+        matching_token_scope.cloned()
+    }
+
+    /// Stamp `used_at` as the last-used time of every record holding
+    /// `token_hash` whose last-used time is unset or earlier. Returns whether
+    /// a record changed.
+    ///
+    /// Example — a record last used at 300 keeps 300 for a `used_at` of 200,
+    /// and takes 400 for a `used_at` of 400.
+    pub fn update_token_last_used(&mut self, token_hash: &str, used_at: SystemTime) -> bool {
+        let mut has_changed = false;
+        for token_record in &mut self.token_records {
+            let is_newer_use = token_record
+                .last_used_at
+                .is_none_or(|last_used_at| last_used_at < used_at);
+            if token_record.token_hash == token_hash && is_newer_use {
+                token_record.last_used_at = Some(used_at);
+                has_changed = true;
+            }
+        }
+        has_changed
+    }
+
+    /// Drop every record that stopped working — revoked, or run out —
+    /// [`TOKEN_RECORD_RETENTION_DURATION`] or longer before `current_time`.
+    /// A record whose stop time lies after `current_time` stays.
+    ///
+    /// Example — with `current_time` at day 40, a grant revoked on day 5 is
+    /// dropped and one revoked on day 15 stays.
+    pub fn remove_ended_token_records(&mut self, current_time: SystemTime) {
+        self.token_records.retain(|token_record| {
+            let Some(ended_at) = token_record.find_ended_at(current_time) else {
+                return true;
+            };
+            current_time
+                .duration_since(ended_at)
+                .map_or(true, |ended_duration| {
+                    ended_duration < TOKEN_RECORD_RETENTION_DURATION
+                })
+        });
     }
 
     /// Every grant without its hash, narrowed to the grants that reach one
@@ -375,6 +431,18 @@ impl TokenStore {
 #[must_use]
 pub fn resolve_token_store_path(data_directory: &Path) -> PathBuf {
     data_directory.join("remote").join("tokens")
+}
+
+/// Where the lock that guards a change to the token store at
+/// `token_store_path` lives: `tokens.lock` in the same directory.
+///
+/// A writer holds this file's advisory lock from the read that starts its
+/// change to the write that ends it. [`TokenStore::write_token_store_to_path`]
+/// renames a new file over `token_store_path`, and leaves this path alone. The
+/// file stays empty.
+#[must_use]
+pub fn resolve_token_store_lock_path(token_store_path: &Path) -> PathBuf {
+    token_store_path.with_file_name("tokens.lock")
 }
 
 /// The sha256 of `connection_token`'s secret, as 64 lowercase hex characters.

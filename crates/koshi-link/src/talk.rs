@@ -113,12 +113,21 @@ impl PeerWords {
     /// `wire_name` `"\u{1b}[2JRehomed"` gives the same sentence.
     pub fn build_unexpected_wire_name_error(&self, wire_name: &str) -> CliError {
         CliError::IpcUnavailable {
-            detail: format!(
-                "the {} answered with an unexpected {} reply",
-                self.peer,
-                sanitize_reported_text(wire_name)
-            ),
+            detail: self.format_unexpected_reply_detail(wire_name),
         }
+    }
+
+    /// The sentence naming a reply of kind `wire_name`, filtered by
+    /// [`sanitize_reported_text`], that the request cannot produce.
+    ///
+    /// `SESSION_PEER_WORDS` with `wire_name` `"Rehomed"` gives `the session
+    /// answered with an unexpected Rehomed reply`.
+    pub fn format_unexpected_reply_detail(&self, wire_name: &str) -> String {
+        format!(
+            "the {} answered with an unexpected {} reply",
+            self.peer,
+            sanitize_reported_text(wire_name)
+        )
     }
 }
 
@@ -171,15 +180,15 @@ pub(crate) fn filter_rejection_hint(command_result: CommandResult) -> CommandRes
 
 /// A refusal the peer sent at the protocol level, carrying `refusal.message`
 /// filtered by [`sanitize_reported_text`]: [`CliError::ProtocolVersionRefused`]
-/// for [`IpcErrorCode::UnsupportedVersion`], and [`CliError::IpcUnavailable`]
-/// for every other code, such as a bad token or a request the peer could not
-/// read.
+/// for [`IpcErrorCode::UnsupportedVersion`], [`CliError::SessionRestarting`]
+/// for [`IpcErrorCode::Restarting`], and [`CliError::IpcUnavailable`] for every
+/// other code, such as a bad token or a request the peer could not read.
 pub fn build_peer_refusal_error(refusal: &IpcErrorPayload) -> CliError {
     let detail = sanitize_reported_text(&refusal.message);
-    if refusal.code == IpcErrorCode::UnsupportedVersion {
-        CliError::ProtocolVersionRefused { detail }
-    } else {
-        CliError::IpcUnavailable { detail }
+    match refusal.code {
+        IpcErrorCode::UnsupportedVersion => CliError::ProtocolVersionRefused { detail },
+        IpcErrorCode::Restarting => CliError::SessionRestarting { detail },
+        _ => CliError::IpcUnavailable { detail },
     }
 }
 

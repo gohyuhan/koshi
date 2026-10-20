@@ -15,11 +15,11 @@
 //! 2. The control client, attached straight to the control socket with no
 //!    throttle, whose reader thread drains everything the session writes.
 //!
-//! The session then gets a burst it cannot deliver: pane output, which is a
-//! lossy event class the bus may drop, and thousands of tab focus changes,
-//! which are the critical class it may not. The throttled client's queue fills,
-//! its lossy events are dropped, the first critical event that does not fit
-//! marks it desynced, and the serve loop's own render pass resyncs it with a
+//! The session then gets a burst it cannot deliver: pane output, which reaches
+//! each client in its painted frames, and thousands of tab focus changes, each
+//! one an event. The throttled client's queue fills. A frame that does not fit
+//! is dropped and leaves the client live. The first event that does not fit
+//! marks the client desynced, and the serve loop resyncs it with a
 //! [`SessionEvent::Resync`] naming how many events went missing. Nothing in
 //! this file reaches into the bus to make that happen. A focus change
 //! submitted after that resync must arrive on the throttled connection
@@ -75,19 +75,17 @@ const TO_SESSION_BYTE_COUNT_PER_SLICE: usize = 64 * 1024;
 /// below produces.
 const FROM_SESSION_BYTE_COUNT_PER_SLICE: usize = 1024;
 
-/// How many pane-output chunks the burst pushes. Each one becomes a lossy
-/// `PaneOutputUpdated` event.
-const LOSSY_CHUNK_COUNT: usize = 400;
+/// How many pane-output chunks the burst pushes.
+const PANE_OUTPUT_CHUNK_COUNT: usize = 400;
 
 /// One chunk of pane output: a row of 78 `k` characters, then a new line. A row
 /// of equal cells travels as one run in the picture the session composes.
 const PANE_OUTPUT_CHUNK_BYTES: &[u8] =
     b"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\r\n";
 
-/// How many tab focus changes the burst submits. Each one puts one critical
-/// event on every subscriber's queue: several times the 1024 entries one queue
-/// holds.
-const CRITICAL_COMMAND_COUNT: usize = 6000;
+/// How many tab focus changes the burst submits. Each one puts one event on
+/// every subscriber's queue: several times the 1024 entries one queue holds.
+const TAB_FOCUS_COMMAND_COUNT: usize = 6000;
 
 /// One loopback stream half, as a framed connection reads or writes it.
 ///
@@ -102,8 +100,8 @@ impl Read for LoopbackHalf {
 }
 
 impl Write for LoopbackHalf {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.write(bytes)
+    fn write(&mut self, source_bytes: &[u8]) -> io::Result<usize> {
+        self.0.write(source_bytes)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -173,7 +171,8 @@ struct ThrottledClient {
     /// hands it to [`forward_session_events`].
     session_frame_reader: FrameReader,
     /// The half this client's own frames go out on. The connection stays open
-    /// while this is held.
+    /// while this is held: here, then on the thread of
+    /// [`forward_session_events`].
     client_frame_writer: FrameWriter,
 }
 
@@ -340,7 +339,7 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
     let control_client = attach_test_client(&session);
 
     // A second tab: each focus change below moves focus between the two and
-    // emits one critical event.
+    // emits one event.
     let first_tab_id = session.fetch_session_overview().tabs[0].tab_id;
     let mut control_connection = open_session_connection(&session.load_session_endpoint());
     let create_tab_result = submit_session_command(
@@ -359,20 +358,20 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
     };
     assert_eq!(session.fetch_session_overview().tabs.len(), 2);
 
-    // The lossy half of the burst: pane output the bus may drop.
-    for _ in 0..LOSSY_CHUNK_COUNT {
+    // The first half of the burst: pane output, which reaches each client in
+    // its painted frames.
+    for _ in 0..PANE_OUTPUT_CHUNK_COUNT {
         session
             .fake_pty_backend
             .push_output(root_pane_id, PANE_OUTPUT_CHUNK_BYTES.to_vec())
             .expect("the fake backend takes the pane's output");
     }
 
-    // The critical half: tab focus changes, which the bus never drops
-    // silently. Nothing reads the throttled client's stream while this runs:
-    // its queue fills, then overflows. The control client is on the new tab:
-    // the first `Next` wraps back to the first tab, and every turn after it
-    // swaps the two.
-    for command_index in 0..CRITICAL_COMMAND_COUNT {
+    // The second half: tab focus changes. Nothing reads the throttled
+    // client's stream while this runs: its queue fills, then overflows. The
+    // control client is on the new tab: the first `Next` wraps back to the
+    // first tab, and every turn after it swaps the two.
+    for command_index in 0..TAB_FOCUS_COMMAND_COUNT {
         let focus_tab_result = submit_session_command(
             &mut control_connection,
             &session,
@@ -402,9 +401,10 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
 
     // Only now does the throttled client start reading. Its queue holds the
     // backlog, and the resync the serve loop owes it lands after that backlog.
-    let mut session_frame_reader = throttled_client.session_frame_reader;
-    let throttled_events =
-        forward_session_events(move || session_frame_reader.recv::<SessionEvent>());
+    let throttled_events = forward_session_events(
+        throttled_client.session_frame_reader,
+        throttled_client.client_frame_writer,
+    );
     let deadline = Instant::now() + THROTTLED_LINK_WAIT_DURATION;
     let mut received_event_count = 0;
     let dropped_event_count = loop {
@@ -512,8 +512,4 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
         }
     );
     assert_eq!(control_client.session_structure.tabs.len(), 1);
-
-    // Closes the throttled client's writing half. It is open through every
-    // assertion above.
-    drop(throttled_client.client_frame_writer);
 }

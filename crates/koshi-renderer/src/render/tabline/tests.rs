@@ -178,34 +178,34 @@ fn one_tab_that_fits_shows_whole_with_no_arrows() {
     // Session block ` s ` (3 cells) plus the version badge; right block
     // " BASE " = 6; the strip starts one cell past the session block, so the
     // tab " #1  a " (7 cells) sits just after the badge.
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false),
         build_tabline_area(20 + compute_version_badge_column_count()),
     );
     assert_eq!(
-        layout.session_block_width,
+        tabline_layout.session_block_width,
         3 + compute_version_badge_column_count()
     );
     assert_eq!(
-        layout.right_block_start_column,
+        tabline_layout.right_block_start_column,
         14 + compute_version_badge_column_count()
     );
-    assert_eq!(layout.first_visible_tab_index, 0);
+    assert_eq!(tabline_layout.first_visible_tab_index, 0);
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![build_visible_tab_span(
             0,
             4 + compute_version_badge_column_count(),
             7
         )]
     );
-    assert_eq!(layout.left_scroll_arrow_column, None);
-    assert_eq!(layout.right_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.left_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.right_scroll_arrow_column, None);
 }
 
 #[test]
 fn several_tabs_that_all_fit_pack_left_to_right_with_a_gap() {
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame(
             "s",
             &[("a", false), ("b", false), ("c", true)],
@@ -216,35 +216,35 @@ fn several_tabs_that_all_fit_pack_left_to_right_with_a_gap() {
         build_tabline_area(40 + compute_version_badge_column_count()),
     );
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![
             build_visible_tab_span(0, 4 + compute_version_badge_column_count(), 7),
             build_visible_tab_span(1, 12 + compute_version_badge_column_count(), 7),
             build_visible_tab_span(2, 20 + compute_version_badge_column_count(), 7),
         ]
     );
-    assert_eq!(layout.left_scroll_arrow_column, None);
-    assert_eq!(layout.right_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.left_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.right_scroll_arrow_column, None);
 }
 
 #[test]
 fn a_tab_that_exactly_fills_the_gap_is_kept() {
     // One cell wider than the tab needs: the tab's cells end exactly where the
     // right block starts, so it just fits and no scrolling begins.
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false),
         build_tabline_area(17 + compute_version_badge_column_count()),
     );
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![build_visible_tab_span(
             0,
             4 + compute_version_badge_column_count(),
             7
         )]
     );
-    assert_eq!(layout.left_scroll_arrow_column, None);
-    assert_eq!(layout.right_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.left_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.right_scroll_arrow_column, None);
 }
 
 #[test]
@@ -252,15 +252,15 @@ fn one_column_too_narrow_drops_the_tab_and_shows_a_right_arrow() {
     // One cell narrower than that: the tab no longer fits, so the strip
     // scrolls; nothing is visible yet and a right arrow marks the tab hidden
     // off the right edge.
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false),
         build_tabline_area(16 + compute_version_badge_column_count()),
     );
-    assert_eq!(layout.first_visible_tab_index, 0);
-    assert!(layout.visible_tab_spans.is_empty());
-    assert_eq!(layout.left_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.first_visible_tab_index, 0);
+    assert!(tabline_layout.visible_tab_spans.is_empty());
+    assert_eq!(tabline_layout.left_scroll_arrow_column, None);
     assert_eq!(
-        layout.right_scroll_arrow_column,
+        tabline_layout.right_scroll_arrow_column,
         Some(9 + compute_version_badge_column_count())
     );
 }
@@ -318,7 +318,7 @@ fn following_the_active_tab_scrolls_it_into_view() {
     // The strip holds one tab in the arrow-framed window; with the last tab
     // active and no peek offset, the window starts at it and only a left arrow
     // shows.
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame(
             "s",
             &[("a", false), ("b", false), ("c", true)],
@@ -328,9 +328,9 @@ fn following_the_active_tab_scrolls_it_into_view() {
         ),
         build_tabline_area(24 + compute_version_badge_column_count()),
     );
-    assert_eq!(layout.first_visible_tab_index, 2);
+    assert_eq!(tabline_layout.first_visible_tab_index, 2);
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![build_visible_tab_span(
             2,
             5 + compute_version_badge_column_count(),
@@ -338,10 +338,10 @@ fn following_the_active_tab_scrolls_it_into_view() {
         )]
     );
     assert_eq!(
-        layout.left_scroll_arrow_column,
+        tabline_layout.left_scroll_arrow_column,
         Some(4 + compute_version_badge_column_count())
     );
-    assert_eq!(layout.right_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.right_scroll_arrow_column, None);
 }
 
 #[test]
@@ -349,8 +349,8 @@ fn the_window_starts_at_the_smallest_index_that_still_shows_the_active_tab() {
     // The arrow-framed window is 16 cells, room for two 7-cell tabs and the gap
     // between them. With the last of four tabs active, the window starts at tab
     // 2 — not at tab 3 — so the active tab sits at the right edge with its
-    // neighbour beside it.
-    let layout = solve_tabline_layout(
+    // neighbor beside it.
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame(
             "s",
             &[("a", false), ("b", false), ("c", false), ("d", true)],
@@ -360,24 +360,24 @@ fn the_window_starts_at_the_smallest_index_that_still_shows_the_active_tab() {
         ),
         build_tabline_area(28 + compute_version_badge_column_count()),
     );
-    assert_eq!(layout.first_visible_tab_index, 2);
+    assert_eq!(tabline_layout.first_visible_tab_index, 2);
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![
             build_visible_tab_span(2, 5 + compute_version_badge_column_count(), 7),
             build_visible_tab_span(3, 13 + compute_version_badge_column_count(), 7),
         ]
     );
     assert_eq!(
-        layout.left_scroll_arrow_column,
+        tabline_layout.left_scroll_arrow_column,
         Some(4 + compute_version_badge_column_count())
     );
-    assert_eq!(layout.right_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.right_scroll_arrow_column, None);
 }
 
 #[test]
 fn a_peek_offset_windows_from_that_index_with_both_arrows() {
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame(
             "s",
             &[("a", true), ("b", false), ("c", false)],
@@ -387,9 +387,9 @@ fn a_peek_offset_windows_from_that_index_with_both_arrows() {
         ),
         build_tabline_area(24 + compute_version_badge_column_count()),
     );
-    assert_eq!(layout.first_visible_tab_index, 1);
+    assert_eq!(tabline_layout.first_visible_tab_index, 1);
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![build_visible_tab_span(
             1,
             5 + compute_version_badge_column_count(),
@@ -397,18 +397,18 @@ fn a_peek_offset_windows_from_that_index_with_both_arrows() {
         )]
     );
     assert_eq!(
-        layout.left_scroll_arrow_column,
+        tabline_layout.left_scroll_arrow_column,
         Some(4 + compute_version_badge_column_count())
     );
     assert_eq!(
-        layout.right_scroll_arrow_column,
+        tabline_layout.right_scroll_arrow_column,
         Some(17 + compute_version_badge_column_count())
     );
 }
 
 #[test]
 fn a_peek_offset_past_the_last_tab_clamps_to_it() {
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame(
             "s",
             &[("a", true), ("b", false), ("c", false)],
@@ -418,9 +418,9 @@ fn a_peek_offset_past_the_last_tab_clamps_to_it() {
         ),
         build_tabline_area(24 + compute_version_badge_column_count()),
     );
-    assert_eq!(layout.first_visible_tab_index, 2);
+    assert_eq!(tabline_layout.first_visible_tab_index, 2);
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![build_visible_tab_span(
             2,
             5 + compute_version_badge_column_count(),
@@ -428,17 +428,17 @@ fn a_peek_offset_past_the_last_tab_clamps_to_it() {
         )]
     );
     assert_eq!(
-        layout.left_scroll_arrow_column,
+        tabline_layout.left_scroll_arrow_column,
         Some(4 + compute_version_badge_column_count())
     );
-    assert_eq!(layout.right_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.right_scroll_arrow_column, None);
 }
 
 #[test]
 fn a_peek_offset_of_zero_holds_the_window_at_the_first_tab() {
     // The same fixture the active-tab case scrolls to index 2: an offset of 0
     // pins the window at the first tab instead, with only a right arrow.
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame(
             "s",
             &[("a", false), ("b", false), ("c", true)],
@@ -448,18 +448,18 @@ fn a_peek_offset_of_zero_holds_the_window_at_the_first_tab() {
         ),
         build_tabline_area(24 + compute_version_badge_column_count()),
     );
-    assert_eq!(layout.first_visible_tab_index, 0);
+    assert_eq!(tabline_layout.first_visible_tab_index, 0);
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![build_visible_tab_span(
             0,
             5 + compute_version_badge_column_count(),
             7
         )]
     );
-    assert_eq!(layout.left_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.left_scroll_arrow_column, None);
     assert_eq!(
-        layout.right_scroll_arrow_column,
+        tabline_layout.right_scroll_arrow_column,
         Some(17 + compute_version_badge_column_count())
     );
 }
@@ -468,7 +468,7 @@ fn a_peek_offset_of_zero_holds_the_window_at_the_first_tab() {
 fn a_peek_offset_is_ignored_while_every_tab_fits() {
     // The strip only scrolls once a tab is hidden. On a row wide enough for all
     // three, a peek at index 2 still shows them all from index 0.
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame(
             "s",
             &[("a", true), ("b", false), ("c", false)],
@@ -478,22 +478,22 @@ fn a_peek_offset_is_ignored_while_every_tab_fits() {
         ),
         build_tabline_area(40 + compute_version_badge_column_count()),
     );
-    assert_eq!(layout.first_visible_tab_index, 0);
+    assert_eq!(tabline_layout.first_visible_tab_index, 0);
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![
             build_visible_tab_span(0, 4 + compute_version_badge_column_count(), 7),
             build_visible_tab_span(1, 12 + compute_version_badge_column_count(), 7),
             build_visible_tab_span(2, 20 + compute_version_badge_column_count(), 7),
         ]
     );
-    assert_eq!(layout.left_scroll_arrow_column, None);
-    assert_eq!(layout.right_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.left_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.right_scroll_arrow_column, None);
 }
 
 #[test]
 fn no_active_tab_windows_from_the_first() {
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame(
             "s",
             &[("a", false), ("b", false), ("c", false)],
@@ -503,18 +503,18 @@ fn no_active_tab_windows_from_the_first() {
         ),
         build_tabline_area(24 + compute_version_badge_column_count()),
     );
-    assert_eq!(layout.first_visible_tab_index, 0);
+    assert_eq!(tabline_layout.first_visible_tab_index, 0);
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![build_visible_tab_span(
             0,
             5 + compute_version_badge_column_count(),
             7
         )]
     );
-    assert_eq!(layout.left_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.left_scroll_arrow_column, None);
     assert_eq!(
-        layout.right_scroll_arrow_column,
+        tabline_layout.right_scroll_arrow_column,
         Some(17 + compute_version_badge_column_count())
     );
 }
@@ -522,7 +522,7 @@ fn no_active_tab_windows_from_the_first() {
 #[test]
 fn the_first_active_tab_wins_when_several_are_marked() {
     // Tabs 0 and 2 both claim active; the window follows tab 0.
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame(
             "s",
             &[("a", true), ("b", false), ("c", true)],
@@ -532,18 +532,18 @@ fn the_first_active_tab_wins_when_several_are_marked() {
         ),
         build_tabline_area(24 + compute_version_badge_column_count()),
     );
-    assert_eq!(layout.first_visible_tab_index, 0);
+    assert_eq!(tabline_layout.first_visible_tab_index, 0);
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![build_visible_tab_span(
             0,
             5 + compute_version_badge_column_count(),
             7
         )]
     );
-    assert_eq!(layout.left_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.left_scroll_arrow_column, None);
     assert_eq!(
-        layout.right_scroll_arrow_column,
+        tabline_layout.right_scroll_arrow_column,
         Some(17 + compute_version_badge_column_count())
     );
 }
@@ -553,7 +553,7 @@ fn an_active_tab_wider_than_the_window_shows_no_tabs_between_both_arrows() {
     // The `verylongname` tab at index 1 is 18 cells wide and the arrow-framed
     // window is 12: the window starts at it, holds nothing, and both arrows
     // mark the hidden sides.
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame(
             "s",
             &[("a", false), ("verylongname", true), ("c", false)],
@@ -563,50 +563,50 @@ fn an_active_tab_wider_than_the_window_shows_no_tabs_between_both_arrows() {
         ),
         build_tabline_area(24 + compute_version_badge_column_count()),
     );
-    assert_eq!(layout.first_visible_tab_index, 1);
-    assert!(layout.visible_tab_spans.is_empty());
+    assert_eq!(tabline_layout.first_visible_tab_index, 1);
+    assert!(tabline_layout.visible_tab_spans.is_empty());
     assert_eq!(
-        layout.left_scroll_arrow_column,
+        tabline_layout.left_scroll_arrow_column,
         Some(4 + compute_version_badge_column_count())
     );
     assert_eq!(
-        layout.right_scroll_arrow_column,
+        tabline_layout.right_scroll_arrow_column,
         Some(17 + compute_version_badge_column_count())
     );
 }
 
 #[test]
 fn an_empty_tab_list_leaves_only_the_two_blocks() {
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &[], None, LockMode::Normal, false),
         build_tabline_area(20 + compute_version_badge_column_count()),
     );
     assert_eq!(
-        layout.session_block_width,
+        tabline_layout.session_block_width,
         3 + compute_version_badge_column_count()
     );
     assert_eq!(
-        layout.right_block_start_column,
+        tabline_layout.right_block_start_column,
         14 + compute_version_badge_column_count()
     );
-    assert_eq!(layout.first_visible_tab_index, 0);
-    assert!(layout.visible_tab_spans.is_empty());
-    assert_eq!(layout.left_scroll_arrow_column, None);
-    assert_eq!(layout.right_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.first_visible_tab_index, 0);
+    assert!(tabline_layout.visible_tab_spans.is_empty());
+    assert_eq!(tabline_layout.left_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.right_scroll_arrow_column, None);
 }
 
 #[test]
 fn a_zero_width_row_yields_no_blocks_and_no_tabs() {
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false),
         build_tabline_area(0),
     );
-    assert_eq!(layout.session_block_width, 0);
-    assert_eq!(layout.right_block_start_column, 0);
-    assert_eq!(layout.first_visible_tab_index, 0);
-    assert!(layout.visible_tab_spans.is_empty());
-    assert_eq!(layout.left_scroll_arrow_column, None);
-    assert_eq!(layout.right_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.session_block_width, 0);
+    assert_eq!(tabline_layout.right_block_start_column, 0);
+    assert_eq!(tabline_layout.first_visible_tab_index, 0);
+    assert!(tabline_layout.visible_tab_spans.is_empty());
+    assert_eq!(tabline_layout.left_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.right_scroll_arrow_column, None);
 }
 
 #[test]
@@ -620,35 +620,35 @@ fn a_row_offset_from_the_origin_places_every_block_from_its_x() {
         width: 20 + compute_version_badge_column_count(),
         height: 1,
     };
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false),
         tabline_area,
     );
     assert_eq!(
-        layout.session_block_width,
+        tabline_layout.session_block_width,
         3 + compute_version_badge_column_count()
     );
     assert_eq!(
-        layout.right_block_start_column,
+        tabline_layout.right_block_start_column,
         24 + compute_version_badge_column_count()
     );
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![build_visible_tab_span(
             0,
             14 + compute_version_badge_column_count(),
             7
         )]
     );
-    assert_eq!(layout.left_scroll_arrow_column, None);
-    assert_eq!(layout.right_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.left_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.right_scroll_arrow_column, None);
 }
 
 #[test]
 fn an_offset_row_narrower_than_the_mode_tag_anchors_the_right_block_at_its_x() {
     // A 3-cell row starting at column 10 has no room for the 6-cell " BASE "
     // block: the block starts at the row's own x, never left of it.
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false),
         RatatuiRect {
             x: 10,
@@ -657,25 +657,25 @@ fn an_offset_row_narrower_than_the_mode_tag_anchors_the_right_block_at_its_x() {
             height: 1,
         },
     );
-    assert_eq!(layout.right_block_start_column, 10);
-    assert_eq!(layout.session_block_width, 0);
-    assert!(layout.visible_tab_spans.is_empty());
-    assert_eq!(layout.left_scroll_arrow_column, None);
-    assert_eq!(layout.right_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.right_block_start_column, 10);
+    assert_eq!(tabline_layout.session_block_width, 0);
+    assert!(tabline_layout.visible_tab_spans.is_empty());
+    assert_eq!(tabline_layout.left_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.right_scroll_arrow_column, None);
 }
 
 #[test]
 fn no_room_between_the_blocks_yields_no_tabs() {
     // width 6 is exactly the right block, leaving no strip at all.
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false),
         build_tabline_area(6),
     );
-    assert_eq!(layout.session_block_width, 0);
-    assert_eq!(layout.right_block_start_column, 0);
-    assert!(layout.visible_tab_spans.is_empty());
-    assert_eq!(layout.left_scroll_arrow_column, None);
-    assert_eq!(layout.right_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.session_block_width, 0);
+    assert_eq!(tabline_layout.right_block_start_column, 0);
+    assert!(tabline_layout.visible_tab_spans.is_empty());
+    assert_eq!(tabline_layout.left_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.right_scroll_arrow_column, None);
 }
 
 // --- the mode tag drives the right block's width -----------------------------
@@ -684,12 +684,12 @@ fn no_room_between_the_blocks_yields_no_tabs() {
 fn the_select_mode_tag_widens_the_right_block() {
     // " SELECT " is 8 cells, so the right block starts 8 cells from the right
     // edge — two cells left of where the 6-cell " BASE " block starts.
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, true),
         build_tabline_area(20 + compute_version_badge_column_count()),
     );
     assert_eq!(
-        layout.right_block_start_column,
+        tabline_layout.right_block_start_column,
         12 + compute_version_badge_column_count()
     );
 }
@@ -697,12 +697,12 @@ fn the_select_mode_tag_widens_the_right_block() {
 #[test]
 fn a_lock_mode_tag_is_the_same_width_as_base() {
     // " LOCK " and " BASE " are both 6 cells.
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &[("a", true)], None, LockMode::Locked, false),
         build_tabline_area(20 + compute_version_badge_column_count()),
     );
     assert_eq!(
-        layout.right_block_start_column,
+        tabline_layout.right_block_start_column,
         14 + compute_version_badge_column_count()
     );
 }
@@ -743,7 +743,7 @@ fn a_composed_mode_tag_pushes_the_right_block_further_left() {
 
     let column_count = 30 + compute_version_badge_column_count();
     assert_eq!(
-        solve_tabline_layout(&tabline_test_frame, build_tabline_area(column_count),)
+        solve_tabline_layout(&tabline_test_frame, build_tabline_area(column_count))
             .right_block_start_column,
         column_count - 15
     );
@@ -760,12 +760,12 @@ fn a_composed_mode_tag_pushes_the_right_block_further_left() {
 #[test]
 fn a_wide_cjk_title_counts_two_cells_per_glyph() {
     // " 字 " is 1 + 2 + 1 = 4 cells, so the tab is " #1 "(4) + 4 = 8 wide.
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &[("字", true)], None, LockMode::Normal, false),
         build_tabline_area(60 + compute_version_badge_column_count()),
     );
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![build_visible_tab_span(
             0,
             4 + compute_version_badge_column_count(),
@@ -776,12 +776,12 @@ fn a_wide_cjk_title_counts_two_cells_per_glyph() {
 
 #[test]
 fn an_emoji_title_counts_two_cells() {
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &[("🎉", true)], None, LockMode::Normal, false),
         build_tabline_area(60 + compute_version_badge_column_count()),
     );
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![build_visible_tab_span(
             0,
             4 + compute_version_badge_column_count(),
@@ -793,12 +793,12 @@ fn an_emoji_title_counts_two_cells() {
 #[test]
 fn a_combining_mark_title_stays_one_cell() {
     // "e" + combining acute is one display cell: " é " is 3, tab is 4 + 3 = 7.
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &[("e\u{0301}", true)], None, LockMode::Normal, false),
         build_tabline_area(60 + compute_version_badge_column_count()),
     );
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![build_visible_tab_span(
             0,
             4 + compute_version_badge_column_count(),
@@ -811,16 +811,16 @@ fn a_combining_mark_title_stays_one_cell() {
 fn a_wide_session_name_widens_the_left_block() {
     // " 字 " is 1 + 2 + 1 = 4 cells, one more than " s ", so the strip and its
     // first tab start one cell further right.
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("字", &[("a", true)], None, LockMode::Normal, false),
         build_tabline_area(20 + compute_version_badge_column_count()),
     );
     assert_eq!(
-        layout.session_block_width,
+        tabline_layout.session_block_width,
         4 + compute_version_badge_column_count()
     );
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![build_visible_tab_span(
             0,
             5 + compute_version_badge_column_count(),
@@ -833,17 +833,17 @@ fn a_wide_session_name_widens_the_left_block() {
 fn empty_session_and_tab_names_keep_their_padding() {
     // An empty session name is still the 2-cell block "  ", and a tab with an
     // empty name is " #1 "(4) plus "  "(2) — a 6-cell ribbon.
-    let frame = build_tabline_frame("", &[("", true)], None, LockMode::Normal, false);
-    let layout = solve_tabline_layout(
-        &frame,
+    let tabline_frame = build_tabline_frame("", &[("", true)], None, LockMode::Normal, false);
+    let tabline_layout = solve_tabline_layout(
+        &tabline_frame,
         build_tabline_area(20 + compute_version_badge_column_count()),
     );
     assert_eq!(
-        layout.session_block_width,
+        tabline_layout.session_block_width,
         2 + compute_version_badge_column_count()
     );
     assert_eq!(
-        layout.visible_tab_spans,
+        tabline_layout.visible_tab_spans,
         vec![build_visible_tab_span(
             0,
             3 + compute_version_badge_column_count(),
@@ -851,7 +851,7 @@ fn empty_session_and_tab_names_keep_their_padding() {
         )]
     );
 
-    let render_buffer = render_tabline(&frame, 20 + compute_version_badge_column_count());
+    let render_buffer = render_tabline(&tabline_frame, 20 + compute_version_badge_column_count());
     let tab_start_column = 3 + compute_version_badge_column_count();
     let rendered_text: String = (tab_start_column..tab_start_column + 6)
         .map(|column_index| get_rendered_cell_symbol(&render_buffer, column_index))
@@ -864,13 +864,13 @@ fn a_two_digit_tab_number_widens_that_tab() {
     // Tab 9 shows "#10" — a wider `#N` block than the single-digit tabs.
     let tab_names_and_activity: Vec<(&str, bool)> =
         (0..10).map(|tab_index| ("a", tab_index == 0)).collect();
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &tab_names_and_activity, None, LockMode::Normal, false),
         build_tabline_area(200 + compute_version_badge_column_count()),
     );
-    assert_eq!(layout.visible_tab_spans.len(), 10);
-    assert_eq!(layout.visible_tab_spans[8].column_count, 7);
-    assert_eq!(layout.visible_tab_spans[9].column_count, 8);
+    assert_eq!(tabline_layout.visible_tab_spans.len(), 10);
+    assert_eq!(tabline_layout.visible_tab_spans[8].column_count, 7);
+    assert_eq!(tabline_layout.visible_tab_spans[9].column_count, 8);
 }
 
 // --- painting: exact cells and styles ----------------------------------------
@@ -1051,7 +1051,7 @@ fn an_inactive_tab_paints_the_dimmed_ramp_as_its_block_background() {
 fn a_row_below_the_buffer_leaves_every_cell_untouched() {
     // A resize can leave the committed tabline row past the buffer's last row.
     // Nothing is painted there and no cell of the buffer changes.
-    let frame = build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false);
+    let tabline_frame = build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false);
     let render_theme = Theme::default();
     let mut render_buffer = Buffer::empty(build_tabline_area(
         20 + compute_version_badge_column_count(),
@@ -1066,7 +1066,7 @@ fn a_row_below_the_buffer_leaves_every_cell_untouched() {
         height: 1,
     };
     draw_tabline(
-        build_tabline_inputs(&frame),
+        build_tabline_inputs(&tabline_frame),
         &render_theme,
         below_tabline_area,
         &mut render_buffer,
@@ -1098,10 +1098,10 @@ fn a_row_narrower_than_the_mode_tag_clips_the_tag_at_the_right_edge() {
     // keeps its first 3 cells, and the session block gets no room at all.
     let tabline_test_frame =
         build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false);
-    let layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(3));
-    assert_eq!(layout.session_block_width, 0);
-    assert_eq!(layout.right_block_start_column, 0);
-    assert!(layout.visible_tab_spans.is_empty());
+    let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(3));
+    assert_eq!(tabline_layout.session_block_width, 0);
+    assert_eq!(tabline_layout.right_block_start_column, 0);
+    assert!(tabline_layout.visible_tab_spans.is_empty());
 
     let render_buffer = render_tabline(&tabline_test_frame, 3);
     let rendered_row: String = (0..3)
@@ -1327,7 +1327,7 @@ fn an_absurdly_long_name_saturates_instead_of_wrapping() {
         LockMode::Normal,
         false,
     );
-    let layout = solve_tabline_layout(
+    let tabline_layout = solve_tabline_layout(
         &tabline_test_frame,
         RatatuiRect {
             x: 0,
@@ -1336,12 +1336,12 @@ fn an_absurdly_long_name_saturates_instead_of_wrapping() {
             height: 1,
         },
     );
-    assert_eq!(layout.session_block_width, 34);
-    assert_eq!(layout.right_block_start_column, 34);
-    assert_eq!(layout.first_visible_tab_index, 0);
-    assert!(layout.visible_tab_spans.is_empty());
-    assert_eq!(layout.left_scroll_arrow_column, None);
-    assert_eq!(layout.right_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.session_block_width, 34);
+    assert_eq!(tabline_layout.right_block_start_column, 34);
+    assert_eq!(tabline_layout.first_visible_tab_index, 0);
+    assert!(tabline_layout.visible_tab_spans.is_empty());
+    assert_eq!(tabline_layout.left_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.right_scroll_arrow_column, None);
 }
 
 #[test]

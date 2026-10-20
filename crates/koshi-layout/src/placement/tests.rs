@@ -433,12 +433,12 @@ fn inserting_d_above_c_collapses_the_emptied_split_and_merges_the_column() {
 }
 
 #[test]
-fn inserting_beside_a_group_that_collapses_to_the_source_neighbour_reproduces_the_layout() {
+fn inserting_beside_a_group_that_collapses_to_the_source_neighbor_reproduces_the_layout() {
     let pane_ids = build_sorted_pane_ids();
     let [_, _, pane_c, pane_d] = pane_ids;
     let fixture_tree = build_fixture_tree(pane_ids);
 
-    // Removing D leaves the group {C, D} as C alone; D left of it is where D
+    // Removing D leaves the group {C, D} as C alone; D right of it is where D
     // already was.
     let placed_tree = place_pane_within_tab(
         &fixture_tree,

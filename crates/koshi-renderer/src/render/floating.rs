@@ -5,7 +5,6 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as RatatuiRect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Widget};
 
 use koshi_core::constant::FLOATING_PANE_CHROME_SIZE;
 use koshi_core::geometry::{Rect, Size};
@@ -17,9 +16,9 @@ use crate::snapshot::{
 use crate::theme::Theme;
 
 use super::{
-    compute_pane_area, compute_pane_border_style, compute_symbol_display_width, draw_grid,
-    draw_pane_scroll_position, draw_placement_hover_tint, get_area_origin,
-    is_placement_handle_hovered, place_cell_rect, set_line_clipped,
+    clear_drawn_rows, compute_pane_area, compute_pane_border_style, compute_symbol_display_width,
+    draw_grid, draw_pane_border, draw_pane_scroll_position, draw_placement_hover_tint,
+    get_area_origin, is_placement_handle_hovered, place_cell_rect, set_line_clipped, DrawnRows,
 };
 
 /// The grab handle a floating pane draws in its titlebar.
@@ -114,15 +113,23 @@ pub(crate) fn list_placed_floating_panes(
 ///
 /// The chrome takes the border style. A pane with no content snapshot draws
 /// its chrome with no title, no cells and no scroll position.
+///
+/// Steps 1, 2, 4 and 5 run only over the rows `drawn_rows` draws. The
+/// separator, the titlebar and the scroll position are drawn only when
+/// `drawn_rows` draws their row. A box on no drawn row is not drawn.
 pub(super) fn draw_floating_pane(
     render_snapshot: &RenderSnapshot,
     placed_floating_pane: &PlacedFloatingPane,
     viewer_chrome: ViewerChrome,
     theme: &Theme,
+    drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
 ) {
     let floating_pane_slot = placed_floating_pane.floating_pane_slot;
     let outer_area = placed_floating_pane.outer_area;
+    if !drawn_rows.is_area_drawn(outer_area) {
+        return;
+    }
     let border_style = compute_pane_border_style(
         render_snapshot,
         floating_pane_slot.pane_id,
@@ -130,8 +137,8 @@ pub(super) fn draw_floating_pane(
         viewer_chrome,
         theme,
     );
-    Clear.render(outer_area, screen_buffer);
-    for row_index in outer_area.top()..outer_area.bottom() {
+    clear_drawn_rows(outer_area, drawn_rows, screen_buffer);
+    for row_index in drawn_rows.list_rows_between(outer_area.top(), outer_area.bottom()) {
         let mut column_index = screen_buffer.area.left();
         while column_index < outer_area.x {
             let Some(glyph_cell) = screen_buffer.cell_mut((column_index, row_index)) else {
@@ -144,13 +151,13 @@ pub(super) fn draw_floating_pane(
             column_index = column_index.saturating_add(glyph_width);
         }
     }
-    Block::new()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .render(outer_area, screen_buffer);
+    draw_pane_border(outer_area, border_style, drawn_rows, screen_buffer);
 
     let pane_snapshot = render_snapshot.find_pane_snapshot(floating_pane_slot.pane_id);
-    if outer_area.width >= 2 && outer_area.height >= FLOATING_PANE_CHROME_SIZE.row_count {
+    if outer_area.width >= 2
+        && outer_area.height >= FLOATING_PANE_CHROME_SIZE.row_count
+        && drawn_rows.is_row_drawn(outer_area.y.saturating_add(2))
+    {
         let separator_text = format!("├{}┤", "─".repeat(usize::from(outer_area.width - 2)));
         set_line_clipped(
             screen_buffer,
@@ -163,30 +170,39 @@ pub(super) fn draw_floating_pane(
     let pane_title = pane_snapshot
         .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
         .unwrap_or("");
-    draw_floating_pane_titlebar(
-        outer_area,
-        pane_title,
-        floating_pane_slot.is_pinned,
-        border_style,
-        screen_buffer,
-    );
+    if drawn_rows.is_row_drawn(outer_area.y.saturating_add(1)) {
+        draw_floating_pane_titlebar(
+            outer_area,
+            pane_title,
+            floating_pane_slot.is_pinned,
+            border_style,
+            screen_buffer,
+        );
+    }
 
     let Some(pane_snapshot) = pane_snapshot else {
         return;
     };
     if let Some(terminal_grid_view) = &pane_snapshot.terminal_grid_view {
         draw_grid(
-            &terminal_grid_view.grid,
+            terminal_grid_view,
             placed_floating_pane.visible_content_area,
             pane_snapshot.is_reverse_video,
             pane_snapshot.selection_spans.as_ref(),
+            drawn_rows,
             screen_buffer,
         );
     }
     if is_placement_handle_hovered(floating_pane_slot.pane_id, viewer_chrome) {
-        draw_placement_hover_tint(placed_floating_pane.visible_content_area, screen_buffer);
+        draw_placement_hover_tint(
+            placed_floating_pane.visible_content_area,
+            drawn_rows,
+            screen_buffer,
+        );
     }
-    draw_pane_scroll_position(pane_snapshot, outer_area, border_style, screen_buffer);
+    if drawn_rows.is_row_drawn(outer_area.bottom().saturating_sub(1)) {
+        draw_pane_scroll_position(pane_snapshot, outer_area, border_style, screen_buffer);
+    }
 }
 
 /// Write the titlebar parts of the floating pane whose box is `outer_area`,

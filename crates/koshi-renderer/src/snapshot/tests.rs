@@ -1,6 +1,6 @@
 //! Tests for the render-snapshot DTOs: build a full snapshot from fixture
 //! pieces, check exact field values, confirm it is `Send + Sync`, confirm
-//! cloning shares the grid by reference (no cell copy), confirm equality, and
+//! cloning shares every row by reference (no cell copy), confirm equality, and
 //! check the mouse-frame projection, the borrowed layout views, and the
 //! selection row lookup.
 
@@ -18,13 +18,13 @@ use koshi_core::geometry::Point;
 use koshi_terminal::grid::state::Cell;
 use koshi_terminal::style::Style;
 
-/// A 24-row × 80-column blank grid, shared for cheap cloning.
-fn build_render_snapshot_fixture_grid() -> Arc<Grid> {
-    Arc::new(Grid::build_blank(24, 80, Style::default()))
+/// A 24-row × 80-column blank grid.
+fn build_render_snapshot_fixture_grid() -> Grid {
+    Grid::build_blank(24, 80, Style::default())
 }
 
 /// A one-tab, one-terminal-pane, one-client snapshot built around `terminal_grid`.
-fn build_render_snapshot_fixture(terminal_grid: Arc<Grid>) -> RenderSnapshot {
+fn build_render_snapshot_fixture(terminal_grid: Grid) -> RenderSnapshot {
     let tab_id = TabId::new();
     let pane_id = PaneId::new();
 
@@ -87,10 +87,7 @@ fn build_render_snapshot_fixture(terminal_grid: Arc<Grid>) -> RenderSnapshot {
             is_blinking: false,
             shape: None,
         },
-        terminal_grid_view: Some(GridView {
-            grid: terminal_grid,
-            view_row_offset: 0,
-        }),
+        terminal_grid_view: Some(GridView::from_grid(&terminal_grid, 0)),
         image_placement_snapshots: Vec::new(),
         is_reverse_video: false,
         mouse_tracking: MouseTracking::Off,
@@ -212,7 +209,7 @@ fn render_snapshot_fixture_has_exact_field_values() {
         .as_ref()
         .expect("terminal pane has a grid");
     assert_eq!(terminal_grid_view.view_row_offset, 0);
-    assert_eq!(terminal_grid_view.grid.get_grid_dimensions(), (24, 80));
+    assert_eq!(terminal_grid_view.get_view_dimensions(), (24, 80));
 
     // Client projection.
     assert_eq!(
@@ -314,8 +311,7 @@ fn a_mouse_frame_keeps_one_entry_per_pane_in_frame_order() {
 #[test]
 fn a_mouse_frame_solves_its_regions_from_the_client_viewport() {
     let mut render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
-    // The client sees more than the tab was solved for, so a builder reading
-    // the tab size instead of the client viewport lands elsewhere.
+    // The client viewport is larger than the size the tab was solved for.
     render_snapshot.client_snapshot.viewport_size = Size {
         column_count: 100,
         row_count: 30,
@@ -375,8 +371,7 @@ fn a_mouse_frame_from_a_render_snapshot_without_panes_carries_no_mouse_panes() {
 #[test]
 fn mouse_frame_from_snapshot_keeps_the_supplied_region_solve_and_viewer_chrome() {
     let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
-    // A viewport and revision that differ from the client's own, so a builder
-    // that re-derived the solve instead of carrying it lands elsewhere.
+    // A viewport and revision that differ from the client's own.
     let committed_regions = CommittedRegions::build_core(
         Size {
             column_count: 40,
@@ -621,17 +616,11 @@ fn render_snapshot_is_send_and_sync() {
 }
 
 #[test]
-fn cloning_render_snapshot_shares_the_grid_by_reference() {
-    let terminal_grid = build_render_snapshot_fixture_grid();
-    assert_eq!(Arc::strong_count(&terminal_grid), 1);
+fn cloning_render_snapshot_shares_every_row_by_reference() {
+    let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
 
-    // The snapshot holds one shared reference to the grid.
-    let render_snapshot = build_render_snapshot_fixture(terminal_grid.clone());
-    assert_eq!(Arc::strong_count(&terminal_grid), 2);
-
-    // Cloning the snapshot bumps the refcount rather than copying the cells.
+    // Cloning the snapshot adds one reference to each row and copies no cell.
     let cloned_render_snapshot = render_snapshot.clone();
-    assert_eq!(Arc::strong_count(&terminal_grid), 3);
 
     let original_grid_view = render_snapshot.pane_snapshots[0]
         .terminal_grid_view
@@ -641,10 +630,19 @@ fn cloning_render_snapshot_shares_the_grid_by_reference() {
         .terminal_grid_view
         .as_ref()
         .unwrap();
-    assert!(Arc::ptr_eq(
-        &original_grid_view.grid,
-        &cloned_grid_view.grid
-    ));
+    assert_eq!(original_grid_view.row_snapshots.len(), 24);
+    assert!(original_grid_view
+        .row_snapshots
+        .iter()
+        .zip(&cloned_grid_view.row_snapshots)
+        .all(|(original_row_snapshot, cloned_row_snapshot)| Arc::ptr_eq(
+            original_row_snapshot,
+            cloned_row_snapshot
+        )));
+    assert!(original_grid_view
+        .row_snapshots
+        .iter()
+        .all(|row_snapshot| Arc::strong_count(row_snapshot) == 2));
 }
 
 #[test]
@@ -659,12 +657,12 @@ fn render_snapshots_with_different_grid_cells_are_not_equal() {
     // deep inside it must still make the two snapshots unequal, not just a
     // difference at the top-level fields.
     let first_terminal_grid = Grid::build_blank(24, 80, Style::default());
-    let first_render_snapshot = build_render_snapshot_fixture(Arc::new(first_terminal_grid));
+    let first_render_snapshot = build_render_snapshot_fixture(first_terminal_grid);
 
     let mut second_terminal_grid = Grid::build_blank(24, 80, Style::default());
     *second_terminal_grid.get_cell_mut(0, 0).unwrap() =
         Cell::from_character('x', 1, Style::default());
-    let second_render_snapshot = build_render_snapshot_fixture(Arc::new(second_terminal_grid));
+    let second_render_snapshot = build_render_snapshot_fixture(second_terminal_grid);
 
     assert_ne!(first_render_snapshot, second_render_snapshot);
 }

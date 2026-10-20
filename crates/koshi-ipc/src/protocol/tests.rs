@@ -307,6 +307,7 @@ pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
             link_timeout_ms: None,
+            max_frames_per_second: 60,
         },
         IpcRequestKind::Keyboard {
             key_input: build_control_c_key_input(),
@@ -338,6 +339,10 @@ pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
         IpcRequestKind::Restart,
         IpcRequestKind::Leaving { is_returning: true },
         IpcRequestKind::Ping,
+        IpcRequestKind::PaintedUpdate {
+            update_sequence: 7,
+            shown_placement_request_id: Some(3),
+        },
         IpcRequestKind::ClipboardCopyPart {
             copied_bytes: b"hel".to_vec(),
         },
@@ -764,6 +769,7 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
             link_timeout_ms: None,
+            max_frames_per_second: 60,
         },
     };
 
@@ -774,6 +780,7 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
             "request_kind": {
                 "Attach": {
                     "viewport_size": { "column_count": 80, "row_count": 24 },
+                    "max_frames_per_second": 60,
                     "resume_client_id": null,
                     "resume_token": null,
                     "pane_area": null
@@ -839,6 +846,7 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
             },
             cell_size: None,
             link_timeout_ms: None,
+            max_frames_per_second: 60,
         },
     };
     assert_eq!(
@@ -849,6 +857,7 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
             "request_kind": {
                 "Attach": {
                     "viewport_size": { "column_count": 80, "row_count": 24 },
+                    "max_frames_per_second": 60,
                     "resume_client_id": null,
                     "resume_token": null,
                     "pane_area": null,
@@ -863,6 +872,7 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
         "request_kind": {
             "Attach": {
                 "viewport_size": { "column_count": 80, "row_count": 24 },
+                "max_frames_per_second": 60,
                 "resume_client_id": null,
                 "resume_token": null,
                 "pane_area": null
@@ -889,6 +899,7 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
                 },
                 cell_size: None,
                 link_timeout_ms: None,
+                max_frames_per_second: 60,
             },
         }
     );
@@ -1074,6 +1085,7 @@ fn attach_request_round_trips() {
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
             link_timeout_ms: None,
+            max_frames_per_second: 60,
         },
     };
 
@@ -1097,6 +1109,7 @@ fn attach_and_resize_keep_cell_measurements_and_default_omitted_optional_fields(
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: Some(cell_size),
             link_timeout_ms: None,
+            max_frames_per_second: 60,
         },
     };
     let resize_request = IpcRequest {
@@ -1120,7 +1133,7 @@ fn attach_and_resize_keep_cell_measurements_and_default_omitted_optional_fields(
     );
     assert_eq!(
         serde_json::from_str::<IpcRequest>(
-            r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24}}}}"#,
+            r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"max_frames_per_second":60}}}"#,
         )
         .expect("an attach naming only its viewport decodes"),
         IpcRequest {
@@ -1133,6 +1146,7 @@ fn attach_and_resize_keep_cell_measurements_and_default_omitted_optional_fields(
                 graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
                 link_timeout_ms: None,
+                max_frames_per_second: 60,
             },
         }
     );
@@ -1170,6 +1184,7 @@ fn an_attach_request_naming_a_client_to_come_back_as_round_trips() {
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
             link_timeout_ms: None,
+            max_frames_per_second: 60,
         },
     };
 
@@ -1191,6 +1206,7 @@ fn an_attach_request_carrying_a_resume_token_keeps_the_secret_whole() {
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
             link_timeout_ms: None,
+            max_frames_per_second: 60,
         },
     };
 
@@ -1213,7 +1229,7 @@ fn an_attach_request_written_without_a_resume_token_beside_a_resume_decodes_as_n
     // An attach written with `resume_client_id` and without `resume_token` decodes with
     // `resume_token: None`.
     let decoded_wire_message: IpcRequest = serde_json::from_str(
-        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"resume_client_id":"00000000-0000-0000-0000-000000000001"}}}"#,
+        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"max_frames_per_second":60,"resume_client_id":"00000000-0000-0000-0000-000000000001"}}}"#,
     )
     .expect("an attach without the resume token field decodes");
 
@@ -1232,8 +1248,22 @@ fn an_attach_request_written_without_a_resume_token_beside_a_resume_decodes_as_n
                 graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
                 link_timeout_ms: None,
+                max_frames_per_second: 60,
             },
         }
+    );
+}
+
+#[test]
+fn an_attach_naming_no_frame_rate_is_refused() {
+    let decode_attempt: Result<IpcRequest, _> = serde_json::from_str(
+        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24}}}}"#,
+    );
+
+    let decode_error = decode_attempt.expect_err("an attach with no frame rate decoded");
+    assert_eq!(
+        decode_error.to_string(),
+        "missing field `max_frames_per_second` at line 1 column 93"
     );
 }
 
@@ -1268,6 +1298,7 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
             link_timeout_ms: None,
+            max_frames_per_second: 60,
         },
     };
 
@@ -1278,6 +1309,7 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
             "request_kind": {
                 "Attach": {
                     "viewport_size": { "column_count": 120, "row_count": 40 },
+                    "max_frames_per_second": 60,
                     "resume_client_id": null,
                     "resume_token": null,
                     "pane_area": { "Reported": { "column_count": 100, "row_count": 30 } }
@@ -1303,6 +1335,7 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
             link_timeout_ms: None,
+            max_frames_per_second: 60,
         },
     };
 
@@ -1313,6 +1346,7 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
             "request_kind": {
                 "Attach": {
                     "viewport_size": { "column_count": 120, "row_count": 40 },
+                    "max_frames_per_second": 60,
                     "resume_client_id": null,
                     "resume_token": null,
                     "pane_area": "Starving"
@@ -1464,7 +1498,7 @@ fn an_attach_naming_where_it_connected_from_carries_none_of_it() {
     // An `origin` inside the `Attach` payload is ignored. The decoded request
     // holds the viewport size and nothing of it.
     let attach_request_with_origin: IpcRequest = serde_json::from_str(
-        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"origin":"Remote"}}}"#,
+        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"max_frames_per_second":60,"origin":"Remote"}}}"#,
     )
     .expect("an attach carrying an extra field still decodes");
 
@@ -1483,6 +1517,7 @@ fn an_attach_naming_where_it_connected_from_carries_none_of_it() {
                 graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
                 link_timeout_ms: None,
+                max_frames_per_second: 60,
             },
         }
     );
@@ -1493,12 +1528,12 @@ fn an_attach_naming_its_own_authority_carries_none_of_it() {
     // A field inside the `Attach` payload that this build does not have is
     // ignored. The decoded request holds the viewport size and nothing of it.
     let attach_request_with_tier: IpcRequest = serde_json::from_str(
-        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"tier":"admin"}}}"#,
+        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"max_frames_per_second":60,"tier":"admin"}}}"#,
     )
     .expect("an attach carrying an extra field still decodes");
 
     let attach_request_without_tier: IpcRequest = serde_json::from_str(
-        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24}}}}"#,
+        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"max_frames_per_second":60}}}"#,
     )
     .expect("the same attach without the extra field decodes");
 
@@ -1515,6 +1550,7 @@ fn an_attach_naming_its_own_authority_carries_none_of_it() {
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
             link_timeout_ms: None,
+            max_frames_per_second: 60,
         },
     };
 
@@ -1825,6 +1861,7 @@ fn attach_carries_a_link_timeout_only_when_it_has_one() {
             graphics_capabilities: crate::protocol::GraphicsCapabilities::default(),
             cell_size: None,
             link_timeout_ms,
+            max_frames_per_second: 60,
         },
     };
     let attach_with_timeout = build_attach(Some(30_000));
@@ -2184,6 +2221,7 @@ fn every_refusal_code_encodes_to_its_own_wire_name() {
         IpcErrorCode::NotFound => "NotFound",
         IpcErrorCode::HelloRequired => "HelloRequired",
         IpcErrorCode::OtherUsersOff => "OtherUsersOff",
+        IpcErrorCode::Restarting => "Restarting",
         IpcErrorCode::ResourceLimit => "ResourceLimit",
         IpcErrorCode::Unknown => "Unknown",
     };
@@ -2197,6 +2235,7 @@ fn every_refusal_code_encodes_to_its_own_wire_name() {
         IpcErrorCode::NotFound,
         IpcErrorCode::HelloRequired,
         IpcErrorCode::OtherUsersOff,
+        IpcErrorCode::Restarting,
         IpcErrorCode::ResourceLimit,
         IpcErrorCode::Unknown,
     ] {
@@ -2697,5 +2736,49 @@ fn a_clipboard_copy_answer_names_whether_the_tool_runs() {
     assert_eq!(
         serde_json::to_value(IpcResult::ClipboardCopyPartTaken).expect("result encodes"),
         json!("ClipboardCopyPartTaken")
+    );
+}
+
+#[test]
+fn a_paint_report_that_holds_no_preview_names_none() {
+    let paint_report = IpcRequest {
+        request_id: 9,
+        request_kind: IpcRequestKind::PaintedUpdate {
+            update_sequence: 8,
+            shown_placement_request_id: None,
+        },
+    };
+
+    let encoded_json = serde_json::to_value(&paint_report).expect("the paint report encodes");
+
+    assert_eq!(
+        encoded_json,
+        json!({
+            "request_id": 9,
+            "request_kind": {"PaintedUpdate": {
+                "update_sequence": 8,
+                "shown_placement_request_id": null,
+            }},
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<IpcRequest>(encoded_json).expect("the paint report decodes"),
+        paint_report
+    );
+}
+
+#[test]
+fn a_paint_report_without_the_shown_placement_request_is_refused() {
+    let paint_report_without_preview_json = json!({
+        "request_id": 9,
+        "request_kind": {"PaintedUpdate": {"update_sequence": 7}},
+    });
+
+    let decode_error = serde_json::from_value::<IpcRequest>(paint_report_without_preview_json)
+        .expect_err("a paint report without the field is refused");
+
+    assert_eq!(
+        decode_error.to_string(),
+        "missing field `shown_placement_request_id`"
     );
 }

@@ -7,41 +7,40 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use koshi_core::action::ActionReference;
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey};
 use koshi_core::registry::ActionRegistry;
 
 use super::*;
+use crate::types::tests::build_bound_action;
+use crate::types::ModeBindings;
 
-fn build_character_chord(modifier_flags: BindingModifierFlags, key_character: char) -> KeyChord {
+/// The chord of `key_character` with `modifier_flags` held.
+pub(crate) fn build_character_chord(
+    modifier_flags: BindingModifierFlags,
+    key_character: char,
+) -> KeyChord {
     KeyChord::from_parts(modifier_flags, Key::Char(key_character))
 }
 
-fn build_single_chord_sequence(
+/// The one-chord sequence of `key_character` with `modifier_flags` held.
+pub(crate) fn build_single_chord_sequence(
     modifier_flags: BindingModifierFlags,
     key_character: char,
 ) -> KeySequence {
     KeySequence::from(build_character_chord(modifier_flags, key_character))
 }
 
-fn build_two_chord_sequence(first_chord: KeyChord, second_chord: KeyChord) -> KeySequence {
+/// The sequence `first_chord` then `second_chord`.
+pub(crate) fn build_two_chord_sequence(
+    first_chord: KeyChord,
+    second_chord: KeyChord,
+) -> KeySequence {
     KeySequence::from_first_and_rest(first_chord, vec![second_chord])
-}
-
-fn build_bound_action(action_name: &str) -> BoundAction {
-    BoundAction {
-        action_reference: ActionReference::from_core_action_name(action_name)
-            .expect("test action name satisfies the grammar"),
-    }
-}
-
-fn parse_mode_name(mode_name: &str) -> ModeName {
-    ModeName::from_text(mode_name)
 }
 
 /// A one-mode layer built from `(sequence, bound action)` entries plus the
 /// keys it removes.
-fn build_keymap_layer_with_removed_key_sequences(
+pub(crate) fn build_keymap_layer_with_removed_key_sequences(
     origin: LayerOrigin,
     mode_name: &str,
     binding_entries: Vec<(KeySequence, BoundAction)>,
@@ -50,8 +49,8 @@ fn build_keymap_layer_with_removed_key_sequences(
     KeymapLayer {
         origin,
         mode_bindings_by_name: BTreeMap::from([(
-            parse_mode_name(mode_name),
-            crate::types::ModeBindings {
+            ModeName::from_text(mode_name),
+            ModeBindings {
                 bound_action_by_key_sequence: binding_entries.into_iter().collect(),
                 removed_key_sequences: removed_key_sequences.into_iter().collect(),
             },
@@ -60,7 +59,7 @@ fn build_keymap_layer_with_removed_key_sequences(
 }
 
 /// A one-mode layer built from `(sequence, bound action)` binding entries.
-fn build_keymap_layer(
+pub(crate) fn build_keymap_layer(
     origin: LayerOrigin,
     mode_name: &str,
     binding_entries: Vec<(KeySequence, BoundAction)>,
@@ -69,7 +68,7 @@ fn build_keymap_layer(
 }
 
 /// The built-in default bindings as the lowest layer.
-fn build_default_keymap_layer() -> KeymapLayer {
+pub(crate) fn build_default_keymap_layer() -> KeymapLayer {
     KeymapLayer {
         origin: LayerOrigin::Defaults,
         mode_bindings_by_name: KeybindingsConfig::default().mode_bindings_by_name,
@@ -78,13 +77,13 @@ fn build_default_keymap_layer() -> KeymapLayer {
 
 /// The shipped default bindings of `mode_name`, keyed by sequence.
 fn list_default_bound_actions(mode_name: &str) -> BTreeMap<KeySequence, BoundAction> {
-    KeybindingsConfig::default().mode_bindings_by_name[&parse_mode_name(mode_name)]
+    KeybindingsConfig::default().mode_bindings_by_name[&ModeName::from_text(mode_name)]
         .bound_action_by_key_sequence
         .clone()
 }
 
-/// The chord-depth cap the tests merge under: 4, the shipped default.
-const TEST_MAXIMUM_CHORD_DEPTH: u8 = 4;
+/// The chord-depth cap the tests run under: 4, the shipped default.
+pub(crate) const TEST_MAXIMUM_CHORD_DEPTH: u8 = 4;
 
 /// Merges `keymap_layers` with no unlock alternative, the cap
 /// `TEST_MAXIMUM_CHORD_DEPTH`, and the core action registry.
@@ -112,12 +111,7 @@ fn a_built_in_mode_no_layer_binds_is_absent_from_the_merged_keymap() {
     // A built-in mode never seeds an entry of its own. The shipped defaults
     // bind `normal`, `locked`, `pane-placement`, `pane-move-choice` and
     // `floating-pane-move`; `resize` gets no entry.
-    let merged_keymap = merge_keymaps(
-        &[build_default_keymap_layer()],
-        None,
-        TEST_MAXIMUM_CHORD_DEPTH,
-        &ActionRegistry::new(),
-    );
+    let merged_keymap = merge_test_keymaps(&[build_default_keymap_layer()]);
     assert_eq!(
         merged_keymap
             .mode_keymap_by_name
@@ -125,11 +119,11 @@ fn a_built_in_mode_no_layer_binds_is_absent_from_the_merged_keymap() {
             .cloned()
             .collect::<Vec<_>>(),
         vec![
-            parse_mode_name("floating-pane-move"),
-            parse_mode_name("locked"),
-            parse_mode_name("normal"),
-            parse_mode_name("pane-move-choice"),
-            parse_mode_name("pane-placement"),
+            ModeName::from_text("floating-pane-move"),
+            ModeName::from_text("locked"),
+            ModeName::from_text("normal"),
+            ModeName::from_text("pane-move-choice"),
+            ModeName::from_text("pane-placement"),
         ]
     );
 }
@@ -147,10 +141,10 @@ fn a_mode_a_layer_names_with_no_entries_still_reaches_the_merged_keymap() {
             .keys()
             .cloned()
             .collect::<Vec<_>>(),
-        vec![parse_mode_name("normal")]
+        vec![ModeName::from_text("normal")]
     );
     assert_eq!(
-        merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")],
+        merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")],
         MergedModeKeymap::default()
     );
 }
@@ -166,11 +160,11 @@ fn a_zero_chord_depth_cap_leaves_every_map_empty() {
         &ActionRegistry::new(),
     );
     assert_eq!(
-        merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")],
+        merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")],
         MergedModeKeymap::default()
     );
     assert_eq!(
-        merged_keymap.mode_keymap_by_name[&parse_mode_name("locked")],
+        merged_keymap.mode_keymap_by_name[&ModeName::from_text("locked")],
         MergedModeKeymap::default()
     );
 }
@@ -178,50 +172,18 @@ fn a_zero_chord_depth_cap_leaves_every_map_empty() {
 #[test]
 fn defaults_alone_fill_the_defaults_map_and_nothing_else() {
     let merged_keymap = merge_test_keymaps(&[build_default_keymap_layer()]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
 
-    // Every shipped normal-mode default fires in this build.
-    assert_eq!(
-        normal_mode_keymap.default_bindings_by_key_sequence,
-        list_default_bound_actions("normal")
-    );
-    assert_eq!(
-        normal_mode_keymap.user_bindings_by_key_sequence,
-        BTreeMap::new()
-    );
-    assert_eq!(normal_mode_keymap.removed_key_sequences, BTreeSet::new());
-    assert_eq!(
-        normal_mode_keymap.unbound_default_bindings_by_key_sequence,
-        BTreeMap::new()
-    );
-
-    let locked_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("locked")];
-    assert_eq!(
-        locked_mode_keymap.default_bindings_by_key_sequence
-            [&KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK)],
-        build_bound_action("unlock")
-    );
-    assert_eq!(
-        locked_mode_keymap.default_bindings_by_key_sequence
-            [&build_single_chord_sequence(BindingModifierFlags::CTRL, 'q')],
-        build_bound_action("quit")
-    );
-    assert_eq!(
-        locked_mode_keymap.default_bindings_by_key_sequence[&KeySequence::from_first_and_rest(
-            KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
-            vec![KeyChord::from_parts(
-                BindingModifierFlags::NONE,
-                Key::Char('m')
-            )],
-        )],
-        build_bound_action("begin-pane-placement")
-    );
-    assert_eq!(
-        locked_mode_keymap.default_bindings_by_key_sequence
-            [&build_single_chord_sequence(BindingModifierFlags::CTRL, 'g')],
-        build_bound_action("mouse-select")
-    );
-    assert_eq!(locked_mode_keymap.default_bindings_by_key_sequence.len(), 4);
+    // Every shipped default fires in this build.
+    for mode_name in ["normal", "locked"] {
+        assert_eq!(
+            merged_keymap.mode_keymap_by_name[&ModeName::from_text(mode_name)],
+            MergedModeKeymap {
+                default_bindings_by_key_sequence: list_default_bound_actions(mode_name),
+                ..MergedModeKeymap::default()
+            },
+            "{mode_name}"
+        );
+    }
 }
 
 #[test]
@@ -229,31 +191,21 @@ fn dead_default_is_absent_not_unbound() {
     // `core:copy-selection` is not a registered action. A defaults-layer
     // binding to it enters neither `default_bindings_by_key_sequence` nor
     // `unbound_default_bindings_by_key_sequence`.
-    let unregistered_key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'c');
     let merged_keymap = merge_test_keymaps(&[
         build_default_keymap_layer(),
         build_keymap_layer(
             LayerOrigin::Defaults,
             "normal",
             vec![(
-                unregistered_key_sequence.clone(),
+                build_single_chord_sequence(BindingModifierFlags::ALT, 'c'),
                 build_bound_action("copy-selection"),
             )],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
 
     assert_eq!(
-        normal_mode_keymap
-            .default_bindings_by_key_sequence
-            .get(&unregistered_key_sequence),
-        None
-    );
-    assert_eq!(
-        normal_mode_keymap
-            .unbound_default_bindings_by_key_sequence
-            .get(&unregistered_key_sequence),
-        None
+        merged_keymap,
+        merge_test_keymaps(&[build_default_keymap_layer()])
     );
 }
 
@@ -268,7 +220,7 @@ fn user_binding_on_a_fresh_key_adds_without_touching_defaults() {
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(
         normal_mode_keymap.user_bindings_by_key_sequence[&key_sequence],
@@ -299,18 +251,20 @@ fn a_layout_layer_is_user_authored_and_carries_its_own_attribution() {
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
 
     assert_eq!(
-        normal_mode_keymap.user_bindings_by_key_sequence[&key_sequence],
-        MergedBinding {
-            bound_action: build_bound_action("lock"),
-            layer_origin: LayerOrigin::Layout,
+        merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")],
+        MergedModeKeymap {
+            user_bindings_by_key_sequence: BTreeMap::from([(
+                key_sequence,
+                MergedBinding {
+                    bound_action: build_bound_action("lock"),
+                    layer_origin: LayerOrigin::Layout,
+                },
+            )]),
+            default_bindings_by_key_sequence: list_default_bound_actions("normal"),
+            ..MergedModeKeymap::default()
         }
-    );
-    assert_eq!(
-        normal_mode_keymap.default_bindings_by_key_sequence,
-        list_default_bound_actions("normal")
     );
 }
 
@@ -332,16 +286,16 @@ fn one_key_bound_in_two_modes_merges_independently() {
     ]);
 
     assert_eq!(
-        merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")].user_bindings_by_key_sequence
-            [&key_sequence],
+        merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")]
+            .user_bindings_by_key_sequence[&key_sequence],
         MergedBinding {
             bound_action: build_bound_action("lock"),
             layer_origin: LayerOrigin::User,
         }
     );
     assert_eq!(
-        merged_keymap.mode_keymap_by_name[&parse_mode_name("locked")].user_bindings_by_key_sequence
-            [&key_sequence],
+        merged_keymap.mode_keymap_by_name[&ModeName::from_text("locked")]
+            .user_bindings_by_key_sequence[&key_sequence],
         MergedBinding {
             bound_action: build_bound_action("quit"),
             layer_origin: LayerOrigin::User,
@@ -360,7 +314,7 @@ fn user_binding_steals_a_defaulted_key() {
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(
         normal_mode_keymap.user_bindings_by_key_sequence[&key_sequence],
@@ -406,7 +360,7 @@ fn higher_precedence_user_layer_wins_the_key_and_its_attribution() {
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(
         normal_mode_keymap.user_bindings_by_key_sequence[&key_sequence],
@@ -429,7 +383,7 @@ fn remove_clears_a_default_and_records_both_sides() {
             vec![key_sequence.clone()],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(
         normal_mode_keymap
@@ -470,7 +424,7 @@ fn remove_then_rebind_moves_a_key_between_user_layers() {
             vec![key_sequence.clone()],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     // The session layer's bind survives its own remove. The user layer's
     // entry is dropped.
@@ -508,7 +462,7 @@ fn remove_below_does_not_void_a_higher_binding() {
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(
         normal_mode_keymap.user_bindings_by_key_sequence[&key_sequence],
@@ -542,7 +496,7 @@ fn remove_and_rebind_of_a_defaulted_key_in_one_layer_records_both_sides() {
             vec![key_sequence.clone()],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(
         normal_mode_keymap.user_bindings_by_key_sequence[&key_sequence],
@@ -588,7 +542,7 @@ fn removed_keys_accumulate_across_layers() {
     ]);
 
     assert_eq!(
-        merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")].removed_key_sequences,
+        merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")].removed_key_sequences,
         BTreeSet::from([user_removed_key_sequence, session_removed_key_sequence])
     );
 }
@@ -606,7 +560,7 @@ fn a_removal_from_the_defaults_layer_is_recorded_too() {
     )]);
 
     assert_eq!(
-        merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")].removed_key_sequences,
+        merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")].removed_key_sequences,
         BTreeSet::from([key_sequence])
     );
 }
@@ -627,11 +581,11 @@ fn a_removal_in_an_unregistered_mode_is_skipped() {
     assert_eq!(
         merged_keymap
             .mode_keymap_by_name
-            .get(&parse_mode_name("git")),
+            .get(&ModeName::from_text("git")),
         None
     );
     assert_eq!(
-        merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")].removed_key_sequences,
+        merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")].removed_key_sequences,
         BTreeSet::new()
     );
 }
@@ -648,7 +602,7 @@ fn remove_of_an_unheld_key_is_recorded_and_nothing_more() {
             vec![key_sequence.clone()],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(
         normal_mode_keymap.removed_key_sequences,
@@ -687,7 +641,7 @@ fn removed_user_binding_vanishes_silently() {
             vec![key_sequence.clone()],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(
         normal_mode_keymap
@@ -718,7 +672,7 @@ fn dead_user_binding_leaves_the_default_beneath_live() {
             vec![(key_sequence.clone(), build_bound_action("does-not-exist"))],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(
         normal_mode_keymap
@@ -755,7 +709,7 @@ fn a_dead_user_binding_above_a_live_one_leaves_the_lower_layer_winning() {
             vec![(key_sequence.clone(), build_bound_action("does-not-exist"))],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(
         normal_mode_keymap.user_bindings_by_key_sequence[&key_sequence],
@@ -781,7 +735,7 @@ fn a_higher_precedence_defaults_layer_replaces_a_lower_defaults_entry() {
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(
         normal_mode_keymap.default_bindings_by_key_sequence[&key_sequence],
@@ -802,8 +756,8 @@ fn one_layer_binding_two_modes_keeps_only_the_registered_one() {
         origin: LayerOrigin::User,
         mode_bindings_by_name: BTreeMap::from([
             (
-                parse_mode_name("normal"),
-                crate::types::ModeBindings {
+                ModeName::from_text("normal"),
+                ModeBindings {
                     bound_action_by_key_sequence: BTreeMap::from([(
                         normal_mode_key_sequence.clone(),
                         build_bound_action("lock"),
@@ -812,8 +766,8 @@ fn one_layer_binding_two_modes_keeps_only_the_registered_one() {
                 },
             ),
             (
-                parse_mode_name("git"),
-                crate::types::ModeBindings {
+                ModeName::from_text("git"),
+                ModeBindings {
                     bound_action_by_key_sequence: BTreeMap::from([(
                         git_mode_key_sequence,
                         build_bound_action("lock"),
@@ -831,11 +785,11 @@ fn one_layer_binding_two_modes_keeps_only_the_registered_one() {
             .keys()
             .cloned()
             .collect::<Vec<_>>(),
-        vec![parse_mode_name("normal")]
+        vec![ModeName::from_text("normal")]
     );
     assert_eq!(
-        merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")].user_bindings_by_key_sequence
-            [&normal_mode_key_sequence],
+        merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")]
+            .user_bindings_by_key_sequence[&normal_mode_key_sequence],
         MergedBinding {
             bound_action: build_bound_action("lock"),
             layer_origin: LayerOrigin::User,
@@ -849,7 +803,7 @@ fn reserved_unlock_locked_sequence_is_transparent() {
     // that opens with it does not fire and enters no map.
     let key_sequence = build_two_chord_sequence(
         KeybindingsConfig::RESERVED_UNLOCK,
-        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('x')),
+        build_character_chord(BindingModifierFlags::NONE, 'x'),
     );
     let merged_keymap = merge_test_keymaps(&[
         build_default_keymap_layer(),
@@ -859,7 +813,7 @@ fn reserved_unlock_locked_sequence_is_transparent() {
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
     ]);
-    let locked_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("locked")];
+    let locked_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("locked")];
 
     assert_eq!(
         locked_mode_keymap
@@ -880,7 +834,7 @@ fn a_locked_sequence_holding_the_reserved_unlock_subsequently_is_transparent_too
     // resolves at any position in the sequence: the sequence does not fire and
     // enters no map.
     let key_sequence = build_two_chord_sequence(
-        KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('x')),
+        build_character_chord(BindingModifierFlags::CTRL, 'x'),
         KeybindingsConfig::RESERVED_UNLOCK,
     );
     let merged_keymap = merge_test_keymaps(&[
@@ -891,7 +845,7 @@ fn a_locked_sequence_holding_the_reserved_unlock_subsequently_is_transparent_too
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
         ),
     ]);
-    let locked_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("locked")];
+    let locked_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("locked")];
 
     assert_eq!(
         locked_mode_keymap
@@ -918,7 +872,7 @@ fn a_reserved_unlock_sequence_outside_locked_mode_fires() {
     // two-chord sequence is an ordinary binding.
     let key_sequence = build_two_chord_sequence(
         KeybindingsConfig::RESERVED_UNLOCK,
-        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('x')),
+        build_character_chord(BindingModifierFlags::NONE, 'x'),
     );
     let merged_keymap = merge_test_keymaps(&[
         build_default_keymap_layer(),
@@ -928,7 +882,7 @@ fn a_reserved_unlock_sequence_outside_locked_mode_fires() {
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(
         normal_mode_keymap.user_bindings_by_key_sequence[&key_sequence],
@@ -948,14 +902,14 @@ fn unlock_alternative_moves_the_reserved_chord() {
     // A declared alternative `<C-u>` is the reserved chord. In locked mode a
     // sequence it opens enters no map, and a sequence opened by the default
     // `<C-l>` is an ordinary binding.
-    let unlock_alternative_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('u'));
+    let unlock_alternative_chord = build_character_chord(BindingModifierFlags::CTRL, 'u');
     let dead_key_sequence = build_two_chord_sequence(
         unlock_alternative_chord,
-        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('x')),
+        build_character_chord(BindingModifierFlags::NONE, 'x'),
     );
     let live_key_sequence = build_two_chord_sequence(
         KeybindingsConfig::RESERVED_UNLOCK,
-        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('x')),
+        build_character_chord(BindingModifierFlags::NONE, 'x'),
     );
     let merged_keymap = merge_keymaps(
         &[
@@ -973,7 +927,7 @@ fn unlock_alternative_moves_the_reserved_chord() {
         TEST_MAXIMUM_CHORD_DEPTH,
         &ActionRegistry::new(),
     );
-    let locked_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("locked")];
+    let locked_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("locked")];
 
     assert_eq!(
         locked_mode_keymap
@@ -1005,7 +959,7 @@ fn unregistered_mode_is_skipped() {
     assert_eq!(
         merged_keymap
             .mode_keymap_by_name
-            .get(&parse_mode_name("git")),
+            .get(&ModeName::from_text("git")),
         None
     );
     assert_eq!(
@@ -1015,11 +969,11 @@ fn unregistered_mode_is_skipped() {
             .cloned()
             .collect::<Vec<_>>(),
         vec![
-            parse_mode_name("floating-pane-move"),
-            parse_mode_name("locked"),
-            parse_mode_name("normal"),
-            parse_mode_name("pane-move-choice"),
-            parse_mode_name("pane-placement"),
+            ModeName::from_text("floating-pane-move"),
+            ModeName::from_text("locked"),
+            ModeName::from_text("normal"),
+            ModeName::from_text("pane-move-choice"),
+            ModeName::from_text("pane-placement"),
         ]
     );
 }
@@ -1030,11 +984,11 @@ fn sequences_merge_per_key_like_single_chords() {
     // that sequence, and the `<C-p> n` default stays.
     let close_pane_tree_key_sequence = build_two_chord_sequence(
         build_character_chord(BindingModifierFlags::CTRL, 'p'),
-        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('x')),
+        build_character_chord(BindingModifierFlags::NONE, 'x'),
     );
     let new_pane_key_sequence = build_two_chord_sequence(
         build_character_chord(BindingModifierFlags::CTRL, 'p'),
-        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('n')),
+        build_character_chord(BindingModifierFlags::NONE, 'n'),
     );
     let merged_keymap = merge_test_keymaps(&[
         build_default_keymap_layer(),
@@ -1047,7 +1001,7 @@ fn sequences_merge_per_key_like_single_chords() {
             )],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(
         normal_mode_keymap.user_bindings_by_key_sequence[&close_pane_tree_key_sequence],
@@ -1069,15 +1023,12 @@ fn sequences_merge_per_key_like_single_chords() {
 #[test]
 fn named_key_defaults_survive_untouched() {
     let merged_keymap = merge_test_keymaps(&[build_default_keymap_layer()]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(
-        normal_mode_keymap.default_bindings_by_key_sequence[&KeySequence::from_first_and_rest(
-            KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
-            vec![KeyChord::from_parts(
-                BindingModifierFlags::NONE,
-                Key::Named(NamedKey::Left)
-            )],
+        normal_mode_keymap.default_bindings_by_key_sequence[&build_two_chord_sequence(
+            build_character_chord(BindingModifierFlags::CTRL, 'p'),
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Left))
         )],
         build_bound_action("focus-pane-left")
     );
@@ -1102,7 +1053,7 @@ fn stealing_a_dead_defaults_key_unbinds_nothing() {
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
     ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(
         normal_mode_keymap.user_bindings_by_key_sequence[&key_sequence],
@@ -1122,13 +1073,13 @@ fn binding_past_the_chord_depth_cap_is_transparent() {
     // At a cap of 1 a two-chord entry enters no map, from the user layer or
     // the defaults layer. One-chord entries merge as usual.
     let long_default_key_sequence = build_two_chord_sequence(
-        KeyChord::from_parts(BindingModifierFlags::ALT, Key::Char('p')),
-        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('q')),
+        build_character_chord(BindingModifierFlags::ALT, 'p'),
+        build_character_chord(BindingModifierFlags::NONE, 'q'),
     );
     let short_default_key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 't');
     let long_user_key_sequence = build_two_chord_sequence(
-        KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('y')),
-        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('x')),
+        build_character_chord(BindingModifierFlags::CTRL, 'y'),
+        build_character_chord(BindingModifierFlags::NONE, 'x'),
     );
     let short_user_key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
     let merged_keymap = merge_keymaps(
@@ -1160,7 +1111,7 @@ fn binding_past_the_chord_depth_cap_is_transparent() {
         1,
         &ActionRegistry::new(),
     );
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&parse_mode_name("normal")];
+    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(
         normal_mode_keymap

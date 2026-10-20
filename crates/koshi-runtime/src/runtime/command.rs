@@ -35,6 +35,7 @@ use koshi_core::{
         SetPaneMinimizedArgs, SetPanePinnedArgs, SetSelectionArgs, SwitchSessionArgs, TabTarget,
         ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
     },
+    constant::GRACEFUL_TIMEOUT_DURATION,
     event::{
         Event, FloatingPaneMoved, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused,
         PaneMinimizedChanged, PanePinChanged, PanePlacementCommitted, PaneProcessExited,
@@ -60,7 +61,6 @@ use koshi_layout::{
     solver::{is_layout_within_rect, solve_layout_with_mode, solve_layout_with_sizing, PaneSizing},
     tree::LayoutNode,
 };
-use koshi_pane::pane::{lifecycle::PaneLifecycle, policy::PaneClosePolicy, state::PaneRecord};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::resize::{compute_pty_size, resize_for_layout_change};
 use koshi_renderer::floating_pane_chrome::compute_floating_pane_content_size;
@@ -114,19 +114,20 @@ fn list_clients_holding_floating_view(session: &Session, pane_id: PaneId) -> Vec
         .collect()
 }
 
-/// How `pane_record`'s child dies: `should_force_close` overrides the pane's own
-/// close policy with an immediate force-kill, and `should_kill_process_tree`
-/// widens the picked kill to the child's whole process group. Refuses nothing:
-/// [`Server::resolve_pane_kill_policy`] adds the busy-pane refusal.
+/// How a closed pane's child dies: an immediate force-kill when
+/// `should_force_close` is set, else a graceful close that escalates after
+/// [`GRACEFUL_TIMEOUT_DURATION`]. `should_kill_process_tree` widens the picked
+/// kill to the child's whole process group.
 fn compute_pane_kill_policy(
-    pane_record: &PaneRecord,
     should_force_close: bool,
     should_kill_process_tree: bool,
 ) -> KillPolicy {
     let kill_policy = if should_force_close {
         KillPolicy::Force
     } else {
-        pane_record.close_policy.to_kill_policy()
+        KillPolicy::Graceful {
+            timeout_duration: GRACEFUL_TIMEOUT_DURATION,
+        }
     };
     if should_kill_process_tree {
         kill_policy.apply_tree_scope()
@@ -135,27 +136,13 @@ fn compute_pane_kill_policy(
     }
 }
 
-/// Every floating pane of `session`, in creation order, with the kill policy
-/// a last-tab quit ends it with ([`compute_pane_kill_policy`]). A busy
-/// `ConfirmIfBusy` pane is listed like any other: a quit never waits on one.
-fn list_floating_pane_kill_policies(
-    session: &Session,
-    should_force_close: bool,
-    should_kill_process_tree: bool,
-) -> Vec<(PaneId, KillPolicy)> {
+/// Every floating pane of `session`, in creation order.
+fn list_floating_pane_ids(session: &Session) -> Vec<PaneId> {
     session
         .floating_set
         .list_members()
         .iter()
-        .filter_map(|floating_member| {
-            let pane_record = session
-                .panes
-                .get_pane_record_by_id(floating_member.pane_id)?;
-            Some((
-                floating_member.pane_id,
-                compute_pane_kill_policy(pane_record, should_force_close, should_kill_process_tree),
-            ))
-        })
+        .map(|floating_member| floating_member.pane_id)
         .collect()
 }
 
@@ -470,8 +457,10 @@ impl Server {
     /// Every mutation enters here; nothing mutates session, layout, or pane
     /// state outside a handler reached through this method. The command is
     /// validated first (target resolution, command source policy). A command
-    /// that reaches its handler schedules a repaint, whichever entry point —
-    /// key binding or IPC — delivered it.
+    /// that reaches its handler marks the view of every subscriber changed
+    /// ([`mark_every_view_changed`](Self::mark_every_view_changed)), whichever
+    /// entry point — key binding or IPC — delivered it. A command that fails
+    /// validation changes nothing and marks nothing.
     pub(crate) fn dispatch(&mut self, envelope: CommandEnvelope) -> CommandResult {
         self.dispatch_reporting_spare(envelope).0
     }
@@ -488,7 +477,6 @@ impl Server {
     ) -> (CommandResult, Option<u16>) {
         let command_id = envelope.command_id;
         if let Err(rejection) = self.validate_command(&envelope) {
-            self.render_scheduler.invalidate();
             return (Self::reject_command(command_id, rejection), None);
         }
         let outcome = match envelope.command {
@@ -567,7 +555,7 @@ impl Server {
                 self.handle_switch_session(command_id, &envelope.command_source, &command_args)
             }
         };
-        self.render_scheduler.invalidate();
+        self.mark_every_view_changed();
         match outcome {
             Ok(command_result) => (command_result, None),
             Err(rejection) => {
@@ -818,9 +806,11 @@ impl Server {
     /// the client's own subscriber queues and that client re-attaches from
     /// there.
     ///
-    /// A move into this session is refused — a switch detaches before it
-    /// attaches. A client whose queue is full is refused too: the move is
-    /// dropped there and never replayed.
+    /// A move that names this session's own `session_id` and no
+    /// `owner_user_id` is refused. A move that names an `owner_user_id` is
+    /// sent whatever its `session_id`: the client reads the socket in that
+    /// user's folder of the shared directory. A client whose queue is full is
+    /// refused too: the move is dropped there and never replayed.
     ///
     /// The client leaving is an ordinary detach, so `auto-close-session` ends
     /// this session when the client that moved was the last one attached.
@@ -831,7 +821,7 @@ impl Server {
         command_args: &SwitchSessionArgs,
     ) -> Result<CommandResult, Rejection> {
         let session = Self::require_session(self.resolve_acting_session(command_source)?)?;
-        if command_args.session_id == session.session_id {
+        if command_args.session_id == session.session_id && command_args.owner_user_id.is_none() {
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
                 "this client is already in that session",
@@ -839,7 +829,11 @@ impl Server {
         }
         let client_id =
             Self::resolve_target_client(command_args.client_id, command_source, session)?;
-        if !self.send_switch(client_id, command_args.session_id) {
+        if !self.send_switch(
+            client_id,
+            command_args.session_id,
+            command_args.owner_user_id,
+        ) {
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
                 "the client is too far behind to be moved right now; try again",

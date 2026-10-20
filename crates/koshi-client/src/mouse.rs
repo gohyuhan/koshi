@@ -48,7 +48,7 @@
 
 use std::time::{Duration, Instant};
 
-use ratatui::layout::Rect as RatatuiRect;
+use ratatui::layout::{Position, Rect as RatatuiRect};
 
 use koshi_config::types::WheelScroll;
 use koshi_core::command::{
@@ -57,7 +57,7 @@ use koshi_core::command::{
     SelectionKind, SetPaneMinimizedArgs, SetPanePinnedArgs, SetSelectionArgs, TabTarget,
     VisualCommand,
 };
-use koshi_core::geometry::{Direction, Point, Size};
+use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, TabId};
 use koshi_core::key::BindingModifierFlags;
 use koshi_core::mouse::{
@@ -96,16 +96,6 @@ const SELECTION_SCROLL_LINE_COUNT: usize = 1;
 
 /// Cells of horizontal drag that scroll the tab strip by one tab.
 pub const TABLINE_DRAG_CELL_COUNT: i32 = 6;
-
-/// Return whether a screen point lies in a ratatui rectangle.
-fn is_point_in_ratatui_rect(screen_point: Point, target_rect: RatatuiRect) -> bool {
-    u32::from(screen_point.column) >= u32::from(target_rect.x)
-        && u32::from(screen_point.row) >= u32::from(target_rect.y)
-        && u32::from(screen_point.column)
-            < u32::from(target_rect.x).saturating_add(u32::from(target_rect.width))
-        && u32::from(screen_point.row)
-            < u32::from(target_rect.y).saturating_add(u32::from(target_rect.height))
-}
 
 /// What the viewer decided one wheel tick means: where the pointer is, and what
 /// the session must do about it.
@@ -479,7 +469,7 @@ impl Client {
             return Some(PlacementInputAction::Consumed);
         }
         let frame_layout = mouse_frame.build_frame_layout();
-        let region = resolve_hit_region(frame_layout, mouse_input.position);
+        let hit_region = resolve_hit_region(frame_layout, mouse_input.position);
         if !self.is_placement_mode_active() {
             if mouse_input
                 .modifier_flags
@@ -488,7 +478,7 @@ impl Client {
                 return None;
             }
             if let (MouseKind::Press(MouseButton::Left), HitRegion::PlacementHandle { pane_id }) =
-                (mouse_input.mouse_kind, region)
+                (mouse_input.mouse_kind, hit_region)
             {
                 if frame_layout
                     .find_drawn_floating_pane_slot(pane_id)
@@ -511,16 +501,16 @@ impl Client {
             }
             return None;
         }
-        self.update_pointer_hover(mouse_frame, mouse_input.position, region);
+        self.update_pointer_hover(mouse_frame, mouse_input.position, hit_region);
         self.update_placement_tab_hover(
-            match region {
+            match hit_region {
                 HitRegion::Tab { tab_id } => Some(tab_id),
                 _ => None,
             },
             current_time,
         );
         let placement_action = match mouse_input.mouse_kind {
-            MouseKind::Press(MouseButton::Left) => match region {
+            MouseKind::Press(MouseButton::Left) => match hit_region {
                 HitRegion::Tab { tab_id } => self.select_placement_destination_tab(tab_id).map_or(
                     PlacementInputAction::Consumed,
                     |(source_pane_id, destination_tab_id)| PlacementInputAction::ReadPlacement {
@@ -565,7 +555,7 @@ impl Client {
                 | HitRegion::None => PlacementInputAction::Consumed,
             },
             MouseKind::Drag(MouseButton::Left) => {
-                match region {
+                match hit_region {
                     HitRegion::TablineScrollLeft => {
                         self.step_tabline_peek(mouse_frame, ScrollDirection::Left);
                     }
@@ -588,7 +578,7 @@ impl Client {
                 PlacementInputAction::Consumed
             }
             MouseKind::Scroll(scroll_direction) => {
-                if is_tab_strip_region(region) {
+                if is_tab_strip_region(hit_region) {
                     self.step_tabline_peek(mouse_frame, scroll_direction);
                 }
                 PlacementInputAction::Consumed
@@ -615,7 +605,6 @@ impl Client {
                 }
                 placement_action
             }
-            MouseKind::Motion => PlacementInputAction::Consumed,
             _ => PlacementInputAction::Consumed,
         };
         Some(placement_action)
@@ -640,13 +629,12 @@ impl Client {
         if self.is_placement_confirmation_pending() {
             return;
         }
-        let does_placement_target_preserve_layout =
-            placement_target.as_ref().is_some_and(|placement_target| {
-                self.get_placement_snapshot()
-                    .is_some_and(|placement_snapshot| {
-                        is_same_tab_placement_noop(placement_snapshot, placement_target)
-                    })
-            });
+        let is_placement_target_noop = placement_target.as_ref().is_some_and(|placement_target| {
+            self.get_placement_snapshot()
+                .is_some_and(|placement_snapshot| {
+                    is_same_tab_placement_noop(placement_snapshot, placement_target)
+                })
+        });
         let Some(placement_mode) = self.placement_state.placement_mode.as_mut() else {
             return;
         };
@@ -662,7 +650,7 @@ impl Client {
                         } if *target_pane_id == placement_mode.source_pane_id
                 )
             });
-        if is_target_source_pane || does_placement_target_preserve_layout {
+        if is_target_source_pane || is_placement_target_noop {
             placement_mode.placement_target = None;
         } else {
             placement_mode.placement_target = placement_target;
@@ -690,7 +678,7 @@ impl Client {
             compute_mouse_frame_pane_area(mouse_frame),
             tab_snapshot.tab_size,
         );
-        if !is_point_in_ratatui_rect(screen_point, destination_layout_rect) {
+        if !destination_layout_rect.contains(Position::new(screen_point.column, screen_point.row)) {
             return None;
         }
         if tab_snapshot.tab_size.column_count == 0 || tab_snapshot.tab_size.row_count == 0 {
@@ -946,14 +934,11 @@ impl Client {
                             pending_move_command_id: None,
                         }));
                 }
-                self.left_button_gesture = Some(LeftButtonGesture::FloatingPaneMove(
-                    FloatingPaneHandleDrag {
-                        pane_id,
-                        top_left_cell: floating_pane_slot.outer_rect.origin,
-                        press_position: mouse_input.position,
-                        press_top_left_cell: floating_pane_slot.outer_rect.origin,
-                    },
-                ));
+                self.begin_floating_pane_handle_drag(
+                    pane_id,
+                    floating_pane_slot.outer_rect.origin,
+                    mouse_input.position,
+                );
                 vec![build_focus_pane_action(self.client_id, pane_id)]
             }
             MouseKind::Drag(MouseButton::Left) => {
@@ -982,9 +967,15 @@ impl Client {
 
     /// How long until a selection drag held past a pane's edge must scroll the
     /// view again, or `None` when no drag is held there. The event loop blocks
-    /// no longer than this, so a still pointer keeps pulling text in.
+    /// no longer than this, and a pointer held still past the edge scrolls the
+    /// view at each wakeup. While an input event this terminal's input thread
+    /// read has not reached the loop (`InputReadClock::has_untaken_input`), the
+    /// answer is `None` too: that event's arrival wakes the loop.
     #[must_use]
     pub fn compute_next_mouse_wakeup(&self, current_time: Instant) -> Option<Duration> {
+        if self.input_read_clock.has_untaken_input() {
+            return None;
+        }
         self.find_selection_drag()
             .and_then(|selection_drag| selection_drag.next_scroll_time)
             .map(|next_scroll_time| next_scroll_time.saturating_duration_since(current_time))
@@ -1208,8 +1199,8 @@ impl Client {
     ///    scroll koshi's scrollback (the default), or do nothing.
     ///
     /// A wheel up over a plain shell with `scroll_line_count = 3` yields
-    /// `Scroll { pane_id, is_scrolling_up: true, scroll_line_count: 3 }`; the same tick over a `vim` in
-    /// normal tracking yields `Forward`.
+    /// `Scroll { pane_id, is_scrolling_up: true, scroll_line_count: 3 }`; the
+    /// same tick over a `vim` in normal tracking yields `Forward`.
     ///
     /// A tick over the tab strip moves this viewer's own peek and yields no
     /// action: nothing on the session changes.
@@ -1320,34 +1311,29 @@ impl Client {
                 self.press_pane_content(pane_id, mouse_input, mouse_frame, current_time)
             }
             HitRegion::PaneBorder { pane_id, side } => {
-                if let Some(floating_pane_slot) =
-                    frame_layout.find_drawn_floating_pane_slot(pane_id)
-                {
+                let floating_pane_slot = frame_layout.find_drawn_floating_pane_slot(pane_id);
+                let can_border_move = match floating_pane_slot {
                     // A pinned float keeps its left and top edges.
-                    let can_border_move = !floating_pane_slot.is_pinned
-                        || matches!(side, Direction::Right | Direction::Down);
-                    if self.client_config.mouse.can_resize_pane_border && can_border_move {
-                        self.left_button_gesture =
-                            Some(LeftButtonGesture::BorderResize(ResizeDrag {
-                                pane_id,
-                                border_side: side,
-                                last_accepted_position: mouse_input.position,
-                            }));
+                    Some(floating_pane_slot) => {
+                        !floating_pane_slot.is_pinned
+                            || matches!(side, Direction::Right | Direction::Down)
                     }
-                    return vec![build_focus_pane_action(self.client_id, pane_id)];
-                }
-                // Only a real divider — one with a pane drawn beside it to
-                // resize against — begins a drag.
-                if self.client_config.mouse.can_resize_pane_border
-                    && has_border_neighbor(mouse_frame, pane_id, side)
-                {
+                    // Only a real divider — one with a pane drawn beside it to
+                    // resize against — begins a drag.
+                    None => has_border_neighbor(mouse_frame, pane_id, side),
+                };
+                if self.client_config.mouse.can_resize_pane_border && can_border_move {
                     self.left_button_gesture = Some(LeftButtonGesture::BorderResize(ResizeDrag {
                         pane_id,
                         border_side: side,
                         last_accepted_position: mouse_input.position,
                     }));
                 }
-                Vec::new()
+                if floating_pane_slot.is_some() {
+                    vec![build_focus_pane_action(self.client_id, pane_id)]
+                } else {
+                    Vec::new()
+                }
             }
             HitRegion::PlacementHandle { pane_id } => {
                 let Some(floating_pane_slot) = frame_layout.find_drawn_floating_pane_slot(pane_id)
@@ -1355,14 +1341,11 @@ impl Client {
                     return Vec::new();
                 };
                 if !floating_pane_slot.is_pinned && self.sent_floating_pane_move.is_none() {
-                    self.left_button_gesture = Some(LeftButtonGesture::FloatingPaneMove(
-                        FloatingPaneHandleDrag {
-                            pane_id,
-                            top_left_cell: floating_pane_slot.outer_rect.origin,
-                            press_position: mouse_input.position,
-                            press_top_left_cell: floating_pane_slot.outer_rect.origin,
-                        },
-                    ));
+                    self.begin_floating_pane_handle_drag(
+                        pane_id,
+                        floating_pane_slot.outer_rect.origin,
+                        mouse_input.position,
+                    );
                 }
                 vec![build_focus_pane_action(self.client_id, pane_id)]
             }
@@ -1427,9 +1410,11 @@ impl Client {
     ///
     /// **Mouse-select mode takes the mouse back.** With the viewer's
     /// `mouse-select` mode on, a drag begins a koshi highlight even over a
-    /// mouse-aware program such as a full-screen `vim` or `htop`. Holding `Shift` on the press also begins a highlight, even when
-    /// the viewer's mode is off. The mode is read from
-    /// [`Client::is_mouse_selection_enabled`], the viewer's own copy, and not from `mouse_frame`.
+    /// mouse-aware program such as a full-screen `vim` or `htop`. Holding
+    /// `Shift` on the press also begins a highlight, even when the viewer's
+    /// mode is off. The mode is read from
+    /// [`Client::is_mouse_selection_enabled`], the viewer's own copy, and not
+    /// from `mouse_frame`.
     fn press_pane_content(
         &mut self,
         pane_id: PaneId,
@@ -1672,13 +1657,14 @@ impl Client {
     /// direction `resize_step`. Where the resize stopped is the wall, so the anchor stops
     /// there and a reverse drag resizes the pane the instant the pointer crosses back.
     ///
-    /// Nothing moves unless the drag now held is the one `pane_id` and `border_side` name:
-    /// an answer for a border the viewer has let go of, or for another border of
-    /// the same pane, leaves the anchor where it is.
+    /// Nothing moves unless the drag now held is the one `pane_id` and
+    /// `border_side` name: an answer for a border the viewer has let go of, or
+    /// for another border of the same pane, leaves the anchor where it is.
     ///
-    /// `resize_step` and `applied_cell_count` are the whole of the distance — the pointer is never
-    /// read here, so an answer that lands while the pointer is still moves the
-    /// anchor exactly as far as one that lands mid-motion.
+    /// `resize_step` and `applied_cell_count` are the whole of the distance —
+    /// the pointer is never read here, so an answer that lands while the
+    /// pointer is still moves the anchor exactly as far as one that lands
+    /// mid-motion.
     pub fn note_resize_applied(
         &mut self,
         pane_id: PaneId,
@@ -1759,8 +1745,9 @@ impl Client {
     /// Record a press into this viewer's run of clicks and report what it makes:
     /// one click, two, or three.
     ///
-    /// **The gap between presses decides this.** Pressing a different button always starts a new run: a left click followed by a
-    /// quick right click is not a double click.
+    /// **The gap between presses decides this.** Pressing a different button
+    /// always starts a new run: a left click followed by a quick right click is
+    /// not a double click.
     ///
     /// Press at `0ms` → [`Single`](ClickCount::Single); again at `120ms` →
     /// [`Double`](ClickCount::Double); again at `260ms` →
@@ -1993,6 +1980,25 @@ impl Client {
             } => find_visible_pane_handle(mouse_frame, pane_id, screen_point),
             _ => None,
         };
+    }
+
+    /// Start a grab-handle drag of floating pane `pane_id`, drawn with its
+    /// top-left cell at `drawn_top_left_cell`, from the left press at
+    /// `press_position`.
+    fn begin_floating_pane_handle_drag(
+        &mut self,
+        pane_id: PaneId,
+        drawn_top_left_cell: Point,
+        press_position: Point,
+    ) {
+        self.left_button_gesture = Some(LeftButtonGesture::FloatingPaneMove(
+            FloatingPaneHandleDrag {
+                pane_id,
+                top_left_cell: drawn_top_left_cell,
+                press_position,
+                press_top_left_cell: drawn_top_left_cell,
+            },
+        ));
     }
 
     /// Move the held grab handle's draft by the cells the pointer, now at
@@ -2346,7 +2352,9 @@ fn find_mouse_insertion_target(
                 destination_size,
                 destination_layout_rect,
             )?;
-            is_point_in_ratatui_rect(screen_point, span_rect).then_some((insertion_span, span_rect))
+            span_rect
+                .contains(Position::new(screen_point.column, screen_point.row))
+                .then_some((insertion_span, span_rect))
         })
         .min_by_key(|(_, span_rect)| span_rect.area())
         .map(|(insertion_span, span_rect)| PanePlacementTarget::Split {
@@ -2384,12 +2392,9 @@ fn compute_nearest_edge_direction(screen_point: Point, target_rect: RatatuiRect)
 }
 
 /// Return the visible pane's outer rectangle in client screen coordinates.
-fn find_pane_outer_screen_rect(
-    mouse_frame: &MouseFrame,
-    pane_id: PaneId,
-) -> Option<koshi_core::geometry::Rect> {
+fn find_pane_outer_screen_rect(mouse_frame: &MouseFrame, pane_id: PaneId) -> Option<Rect> {
     let content_rect = find_pane_content_rect(mouse_frame.build_frame_layout(), pane_id)?;
-    Some(koshi_core::geometry::Rect::from_origin_and_size(
+    Some(Rect::from_origin_and_size(
         Point {
             column: content_rect.origin.column.saturating_sub(1),
             row: content_rect.origin.row.saturating_sub(1),
@@ -2496,19 +2501,13 @@ fn is_pane_drawn(mouse_frame: &MouseFrame, pane_id: PaneId) -> bool {
 }
 
 /// Whether two pane boxes cover any of the same rows.
-fn has_row_overlap(
-    first_pane_rect: koshi_core::geometry::Rect,
-    second_pane_rect: koshi_core::geometry::Rect,
-) -> bool {
+fn has_row_overlap(first_pane_rect: Rect, second_pane_rect: Rect) -> bool {
     first_pane_rect.origin.row < second_pane_rect.origin.row + second_pane_rect.size.row_count
         && second_pane_rect.origin.row < first_pane_rect.origin.row + first_pane_rect.size.row_count
 }
 
 /// Whether two pane boxes cover any of the same columns.
-fn has_column_overlap(
-    first_pane_rect: koshi_core::geometry::Rect,
-    second_pane_rect: koshi_core::geometry::Rect,
-) -> bool {
+fn has_column_overlap(first_pane_rect: Rect, second_pane_rect: Rect) -> bool {
     first_pane_rect.origin.column
         < second_pane_rect.origin.column + second_pane_rect.size.column_count
         && second_pane_rect.origin.column
@@ -2579,10 +2578,11 @@ fn resolve_scrolling_up_for_direction(scroll_direction: ScrollDirection) -> Opti
     }
 }
 
-/// Cells the pointer at `end_position` has moved from `start_position` toward the grabbed `border_side`,
-/// signed for [`Command::ResizePane`]: positive grows the pane (its border moves
-/// outward), negative shrinks it. Left/right borders read the x axis, up/down
-/// borders read the y axis; motion on the other axis is ignored.
+/// Cells the pointer at `end_position` has moved from `start_position` toward
+/// the grabbed `border_side`, signed for [`Command::ResizePane`]: positive
+/// grows the pane (its border moves outward), negative shrinks it. Left/right
+/// borders read the x axis, up/down borders read the y axis; motion on the
+/// other axis is ignored.
 fn compute_resize_cell_delta(
     border_side: Direction,
     start_position: Point,

@@ -49,14 +49,14 @@ pub enum CursorShape {
     Bar,
 }
 
-/// Terminal mode flags the renderer and input/mouse layers consult: autowrap
-/// (`?7`), application cursor keys (`?1`), reverse video (`?5`), cursor blink
-/// (`?12`), cursor [shape][CursorShape] (DECSCUSR), bracketed paste (`?2004`),
-/// the mouse [tracking][MouseTracking] level and [encoding][MouseEncoding]
-/// (`?9`/`?1000`/`?1002`/`?1003` and `?1005`/`?1006`/`?1015`),
-/// alternate-scroll (`?1007`), left/right margin mode (`?69`), Sixel
-/// scrolling (`?80`), Sixel register scope (`?1070`), and Sixel cursor
-/// movement (`?8452`).
+/// Terminal mode flags the screen model, the renderer and the input/mouse
+/// layers consult: insert mode (`4`, IRM), autowrap (`?7`), application cursor
+/// keys (`?1`), reverse video (`?5`), cursor blink (`?12`), cursor
+/// [shape][CursorShape] (DECSCUSR), bracketed paste (`?2004`), the mouse
+/// [tracking][MouseTracking] level and [encoding][MouseEncoding]
+/// (`?9`/`?1000`/`?1002`/`?1003` and `?1005`/`?1006`/`?1015`), alternate-scroll
+/// (`?1007`), left/right margin mode (`?69`), Sixel scrolling (`?80`), Sixel
+/// register scope (`?1070`), and Sixel cursor movement (`?8452`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TerminalModes {
     /// `?2004` — bracketed paste: the input layer wraps pasted text in
@@ -73,6 +73,11 @@ pub(crate) struct TerminalModes {
     /// effective right bound parks the cursor there and the next glyph wraps to
     /// a new line. Off, the next glyph overwrites the bound in place.
     pub(in crate::state) is_autowrap_enabled: bool,
+    /// `4` (IRM) — insert mode. On, a printed glyph first shifts the cells
+    /// from the cursor to the right margin right by its width, as ICH does;
+    /// cells shifted past the right margin are lost. Off (the default), a
+    /// glyph overwrites the cells under it.
+    pub(in crate::state) is_insert_mode_enabled: bool,
     /// `?1` (DECCKM) — application cursor keys: the input layer sends `ESC O A`
     /// for the arrow keys; off, it sends `ESC [ A`.
     pub(in crate::state) is_application_cursor_keys_enabled: bool,
@@ -107,6 +112,7 @@ impl Default for TerminalModes {
             mouse_encoding: MouseEncoding::Default,
             is_alternate_scroll_enabled: false,
             is_autowrap_enabled: true,
+            is_insert_mode_enabled: false,
             is_application_cursor_keys_enabled: false,
             is_left_right_margin_mode_enabled: false,
             is_reverse_video_enabled: false,
@@ -115,6 +121,47 @@ impl Default for TerminalModes {
             is_sixel_scrolling_enabled: true,
             is_sixel_private_color_registers_enabled: true,
             is_sixel_cursor_right_enabled: false,
+        }
+    }
+}
+
+/// The terminal modes as resume format 4 writes them: every field of
+/// [`TerminalModes`] but `is_insert_mode_enabled`.
+#[derive(Deserialize)]
+pub(in crate::state) struct ResumeFormat4TerminalModes {
+    is_bracketed_paste_enabled: bool,
+    mouse_tracking: MouseTracking,
+    mouse_encoding: MouseEncoding,
+    is_alternate_scroll_enabled: bool,
+    is_autowrap_enabled: bool,
+    is_application_cursor_keys_enabled: bool,
+    is_left_right_margin_mode_enabled: bool,
+    is_reverse_video_enabled: bool,
+    is_cursor_blink_enabled: bool,
+    cursor_shape: Option<CursorShape>,
+    is_sixel_scrolling_enabled: bool,
+    is_sixel_private_color_registers_enabled: bool,
+    is_sixel_cursor_right_enabled: bool,
+}
+
+impl ResumeFormat4TerminalModes {
+    /// The same modes, with insert mode off.
+    pub(in crate::state) fn into_terminal_modes(self) -> TerminalModes {
+        TerminalModes {
+            is_bracketed_paste_enabled: self.is_bracketed_paste_enabled,
+            mouse_tracking: self.mouse_tracking,
+            mouse_encoding: self.mouse_encoding,
+            is_alternate_scroll_enabled: self.is_alternate_scroll_enabled,
+            is_autowrap_enabled: self.is_autowrap_enabled,
+            is_insert_mode_enabled: false,
+            is_application_cursor_keys_enabled: self.is_application_cursor_keys_enabled,
+            is_left_right_margin_mode_enabled: self.is_left_right_margin_mode_enabled,
+            is_reverse_video_enabled: self.is_reverse_video_enabled,
+            is_cursor_blink_enabled: self.is_cursor_blink_enabled,
+            cursor_shape: self.cursor_shape,
+            is_sixel_scrolling_enabled: self.is_sixel_scrolling_enabled,
+            is_sixel_private_color_registers_enabled: self.is_sixel_private_color_registers_enabled,
+            is_sixel_cursor_right_enabled: self.is_sixel_cursor_right_enabled,
         }
     }
 }

@@ -27,6 +27,10 @@ tracing.workspace = true
 [dev-dependencies]
 # koshi-client depends on this crate, so this edge exists in test builds only.
 koshi-client.workspace = true
+koshi-image.workspace = true
 koshi-test-support.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
+
+[lints]
+workspace = true

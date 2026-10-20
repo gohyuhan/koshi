@@ -30,12 +30,12 @@
 //! holds `U+17D8` takes 1 column, not the 3 that ratatui measures.
 
 use std::num::NonZeroU16;
+use std::sync::Arc;
 
 use ratatui::buffer::{Buffer, CellDiffOption, CellWidth};
 use ratatui::layout::{Position, Rect as RatatuiRect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Widget};
 
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
 use koshi_core::display_width::compute_text_display_width;
@@ -43,7 +43,6 @@ use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{PaneId, TabId};
 use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
-use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
 use crate::hit_test::{compute_placement_handle_rect, PLACEMENT_HANDLE_COLUMN_COUNT};
@@ -53,7 +52,7 @@ use crate::images::{
 };
 use crate::region::StatuslineInputs;
 use crate::snapshot::{
-    CommittedRegions, CursorStyle, KeymapHints, PanePlacementPresentation, PaneSnapshot,
+    CommittedRegions, CursorStyle, GridView, KeymapHints, PanePlacementPresentation, PaneSnapshot,
     Reconnecting, RenderSnapshot, SelectionSpans, ViewerChrome,
 };
 use crate::statusline_hints::draw_statusline;
@@ -68,6 +67,44 @@ use floating::draw_floating_pane;
 pub(crate) use floating::{list_placed_floating_panes, PlacedFloatingPane};
 use placement::draw_pane_placement_presentation;
 
+/// The rows of the buffer that one [`render_frame`] call draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrawnRows<'rows> {
+    /// Every row of the viewport.
+    Every,
+    /// The listed buffer rows, in ascending order with none repeated. Every
+    /// cell of a listed row ends as a call with [`DrawnRows::Every`] leaves
+    /// it. A cell of any other row ends in any state. Example: `Listed(&[3,
+    /// 9])` draws rows 3 and 9 whole.
+    Listed(&'rows [u16]),
+}
+
+impl<'rows> DrawnRows<'rows> {
+    /// Whether the row `row_index` is drawn. [`DrawnRows::Every`] gives
+    /// `true` for every row.
+    fn is_row_drawn(self, row_index: u16) -> bool {
+        match self {
+            DrawnRows::Every => true,
+            DrawnRows::Listed(listed_rows) => listed_rows.binary_search(&row_index).is_ok(),
+        }
+    }
+
+    /// Whether a row of `area`, from its top up to its bottom, is drawn.
+    /// [`DrawnRows::Every`] gives `true` for every area. Example: rows `[3,
+    /// 9]` and an area of rows 4 to 8 give `false`.
+    fn is_area_drawn(self, area: RatatuiRect) -> bool {
+        self.list_rows_between(area.top(), area.bottom())
+            .next()
+            .is_some()
+    }
+
+    /// The drawn rows from `top_row` up to, not including, `bottom_row`, top
+    /// to bottom. Example: rows `[3, 9]` between `2` and `9` give `3`.
+    fn list_rows_between(self, top_row: u16, bottom_row: u16) -> impl Iterator<Item = u16> + 'rows {
+        (top_row..bottom_row).filter(move |row_index| self.is_row_drawn(*row_index))
+    }
+}
+
 /// Paint `render_snapshot` into `screen_buffer` over `viewport_area`.
 ///
 /// It does nothing for a zero-size area. When the active tab has no room for any
@@ -76,12 +113,13 @@ use placement::draw_pane_placement_presentation;
 ///
 /// Otherwise paints in this order:
 ///
-/// 1. Blanks every cell of `viewport_area`: a buffer reused across frames shows
-///    no stale cells.
+/// 1. Blanks every cell of `viewport_area`.
 /// 2. Draws one bordered box per visible pane: the terminal title in the top
 ///    border, and the scroll position in the bottom border when the pane is
 ///    scrolled back.
-/// 3. Draws each visible terminal pane's cells into its content rect.
+/// 3. Draws each visible terminal pane's cells into its content rect, and
+///    tints the content of the pane whose placement handle the pointer rests
+///    on.
 /// 4. Keeps pane cells under native images or writes the unavailable-image
 ///    text over unavailable coverage.
 /// 5. Draws the one-row title strip for every collapsed stack member.
@@ -116,17 +154,23 @@ use placement::draw_pane_placement_presentation;
 /// `image_render_mode` `Placeholder` writes `terminal image unavailable` into visible
 /// image rectangles: a four-column image at `(12, 6)` shows `term` across its
 /// first four cells. `Native` keeps the pane cells beneath image pixels. In
-/// `Native` mode, `available_image_keys` names the image placements whose
-/// native bytes are ready, and every other image shows the unavailable-image
-/// text; `None` shows that text only over images whose record is missing. A
-/// `Native` image that a floating pane drawn above its pane covers shows no
-/// text.
+/// `Native` mode, an image shows the unavailable-image text while its record
+/// is missing or `unavailable_image_keys` names its placement. A `Native`
+/// image that a floating pane drawn above its pane covers shows no text.
 ///
 /// `placement_presentation` tints visible affected panes and paints messages
 /// inside visible pane content outside stack headers. Collapsed stack headers
 /// keep their text under the tint. The moving pane's tint and text take priority
 /// where pane rectangles overlap outside those headers. `placement_target`
 /// selects destination border styling before the preview colors affected panes.
+///
+/// `drawn_rows` [`DrawnRows::Every`] runs every step above over every row.
+/// [`DrawnRows::Listed`] leaves each listed row as `Every` would, and runs
+/// each step that writes whole rows (steps 1, 3, 7, 8's cells and 11) only
+/// over the listed rows. A box, strip or bar that covers no listed row is
+/// not drawn. Example: rows `[10]` of a frame whose one pane prints on row
+/// 10 redraws the 200 cells of row 10, and the pane's border cells on that
+/// row.
 ///
 /// # Panics
 ///
@@ -141,10 +185,11 @@ pub fn render_frame(
     pending_key_sequence: Option<&KeySequence>,
     viewer_chrome: ViewerChrome,
     image_render_mode: ImageRenderMode,
-    available_image_keys: Option<&[ImagePlacementKey]>,
+    unavailable_image_keys: &[ImagePlacementKey],
     placement_presentation: Option<&PanePlacementPresentation>,
     placement_target: Option<&PanePlacementTarget>,
     viewport_area: RatatuiRect,
+    drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
 ) {
     if viewport_area.width == 0 || viewport_area.height == 0 {
@@ -162,10 +207,8 @@ pub fn render_frame(
         "snapshot builder must solve the client's active tab into session_snapshot.active_tab_snapshot"
     );
 
-    // Reset every cell of `viewport_area` first: a buffer carried over from the
-    // previous frame keeps no stale cell in the tabline gap, the reserved
-    // statusline row, or a pane interior this frame does not paint.
-    Clear.render(viewport_area, screen_buffer);
+    // Reset every cell of each drawn row of `viewport_area` first.
+    clear_drawn_rows(viewport_area, drawn_rows, screen_buffer);
 
     // No room for any pane: the whole frame becomes the too-small overlay.
     if render_snapshot
@@ -203,17 +246,24 @@ pub fn render_frame(
         viewer_chrome,
         placement_target,
         layout_origin,
+        drawn_rows,
         screen_buffer,
     );
-    draw_pane_contents(render_snapshot, layout_origin, screen_buffer);
-    draw_placement_hover_tints(render_snapshot, viewer_chrome, layout_origin, screen_buffer);
+    draw_pane_contents(render_snapshot, layout_origin, drawn_rows, screen_buffer);
+    draw_placement_hover_tints(
+        render_snapshot,
+        viewer_chrome,
+        layout_origin,
+        drawn_rows,
+        screen_buffer,
+    );
     let placeholder_rects = compute_image_placeholder_rects(
         render_snapshot,
         committed_regions,
         &placed_floating_panes,
         viewport_area,
         image_render_mode,
-        available_image_keys,
+        unavailable_image_keys,
         placement_presentation,
     );
     draw_image_placeholders(&placeholder_rects, screen_buffer);
@@ -223,6 +273,7 @@ pub fn render_frame(
         viewer_chrome,
         placement_target,
         layout_origin,
+        drawn_rows,
         screen_buffer,
     );
     if let Some(placement_presentation) = placement_presentation {
@@ -237,7 +288,13 @@ pub fn render_frame(
 
     // The margin fills first; the floating panes, the tabline and the
     // statusline paint over it.
-    draw_letterbox(viewport_area, effective_layout_rect, theme, screen_buffer);
+    draw_letterbox(
+        viewport_area,
+        effective_layout_rect,
+        theme,
+        drawn_rows,
+        screen_buffer,
+    );
 
     // Back to front: each floating pane, then the unavailable-image text over
     // its images.
@@ -247,6 +304,7 @@ pub fn render_frame(
             placed_floating_pane,
             viewer_chrome,
             theme,
+            drawn_rows,
             screen_buffer,
         );
         let floating_pane_placeholder_rects = compute_floating_pane_image_placeholder_rects(
@@ -255,20 +313,24 @@ pub fn render_frame(
             &placed_floating_panes[floating_pane_index + 1..],
             viewport_area,
             image_render_mode,
-            available_image_keys,
+            unavailable_image_keys,
         );
         draw_image_placeholders(&floating_pane_placeholder_rects, screen_buffer);
     }
 
     // The tabline draws from the same tab-row facts hit-testing reads.
-    let tabline_inputs = render_snapshot
-        .build_frame_layout(viewer_chrome)
-        .get_tabline_inputs();
-    if let Some(tabline_rect) = find_region_area(committed_regions, 0, viewport_area) {
+    if let Some(tabline_rect) = find_region_area(committed_regions, 0, viewport_area)
+        .filter(|tabline_rect| drawn_rows.is_area_drawn(*tabline_rect))
+    {
+        let tabline_inputs = render_snapshot
+            .build_frame_layout(viewer_chrome)
+            .get_tabline_inputs();
         draw_tabline(tabline_inputs, theme, tabline_rect, screen_buffer);
     }
 
-    if let Some(statusline_rect) = find_region_area(committed_regions, 1, viewport_area) {
+    if let Some(statusline_rect) = find_region_area(committed_regions, 1, viewport_area)
+        .filter(|statusline_rect| drawn_rows.is_area_drawn(*statusline_rect))
+    {
         draw_statusline(
             StatuslineInputs {
                 keymap_hints,
@@ -281,7 +343,173 @@ pub fn render_frame(
         );
     }
 
-    apply_display_widths(viewport_area, screen_buffer);
+    apply_display_widths(viewport_area, drawn_rows, screen_buffer);
+}
+
+/// The buffer rows that differ between the frame [`render_frame`] draws from
+/// `previous_render_snapshot` and the one it draws from `next_render_snapshot`,
+/// when every other input of the two calls is equal: in ascending order, none
+/// repeated. `None` when the two snapshots differ in anything a frame draws
+/// other than pane rows.
+///
+/// A pane row differs when the grid views of the two snapshots hold different
+/// shared rows at its index ([`Arc::ptr_eq`]). That row lands on the buffer
+/// row of its pane's content area, tiled or floating, when that area shows
+/// it. Each pane's cursor, mouse modes, alternate screen state, top line
+/// number and `has_selection` are drawn into no cell and may differ. Every
+/// other field must be equal, each grid view must keep its row count, column
+/// count and scroll offset, and each pane must show the same scroll position
+/// text.
+///
+/// Example: one pane whose content area starts at buffer row 2, with grid row
+/// 8 alone replaced, gives `[10]`.
+#[must_use]
+pub fn list_changed_screen_rows(
+    previous_render_snapshot: &RenderSnapshot,
+    next_render_snapshot: &RenderSnapshot,
+    committed_regions: &CommittedRegions,
+    viewer_chrome: ViewerChrome,
+    viewport_area: RatatuiRect,
+) -> Option<Vec<u16>> {
+    let RenderSnapshot {
+        is_recovery_notice_visible,
+        session_snapshot,
+        pane_snapshots,
+        client_snapshot,
+    } = next_render_snapshot;
+    if previous_render_snapshot.is_recovery_notice_visible != *is_recovery_notice_visible
+        || previous_render_snapshot.session_snapshot != *session_snapshot
+        || previous_render_snapshot.client_snapshot != *client_snapshot
+        || previous_render_snapshot.pane_snapshots.len() != pane_snapshots.len()
+    {
+        return None;
+    }
+    let layout_origin =
+        compute_layout_origin(next_render_snapshot, committed_regions, viewport_area);
+    let placed_floating_panes = list_placed_floating_panes(
+        next_render_snapshot,
+        committed_regions,
+        viewer_chrome,
+        viewport_area,
+    );
+    let mut changed_screen_rows = Vec::new();
+    for (previous_pane_snapshot, next_pane_snapshot) in previous_render_snapshot
+        .pane_snapshots
+        .iter()
+        .zip(pane_snapshots)
+    {
+        if !is_pane_drawn_alike_except_rows(previous_pane_snapshot, next_pane_snapshot) {
+            return None;
+        }
+        let (Some(previous_grid_view), Some(next_grid_view)) = (
+            &previous_pane_snapshot.terminal_grid_view,
+            &next_pane_snapshot.terminal_grid_view,
+        ) else {
+            continue;
+        };
+        let pane_id = next_pane_snapshot.pane_id;
+        let tiled_content_area = session_snapshot
+            .active_tab_snapshot
+            .pane_slots
+            .iter()
+            .find(|pane_slot| pane_slot.pane_id == pane_id && pane_slot.is_visible)
+            .and_then(|pane_slot| pane_slot.content_rect)
+            .map(|content_rect| place_cell_rect(content_rect, layout_origin));
+        let floating_content_area = placed_floating_panes
+            .iter()
+            .find(|placed_floating_pane| placed_floating_pane.floating_pane_slot.pane_id == pane_id)
+            .map(|placed_floating_pane| placed_floating_pane.visible_content_area);
+        for content_area in [tiled_content_area, floating_content_area]
+            .into_iter()
+            .flatten()
+        {
+            let shown_area = content_area.intersection(viewport_area);
+            let shown_row_count = next_grid_view
+                .get_view_dimensions()
+                .0
+                .min(shown_area.height);
+            for (screen_row, (previous_row_snapshot, next_row_snapshot)) in
+                (shown_area.y..shown_area.y + shown_row_count).zip(
+                    previous_grid_view
+                        .row_snapshots
+                        .iter()
+                        .zip(&next_grid_view.row_snapshots),
+                )
+            {
+                if !Arc::ptr_eq(previous_row_snapshot, next_row_snapshot) {
+                    changed_screen_rows.push(screen_row);
+                }
+            }
+        }
+    }
+    changed_screen_rows.sort_unstable();
+    changed_screen_rows.dedup();
+    Some(changed_screen_rows)
+}
+
+/// Whether `previous_pane_snapshot` and `next_pane_snapshot` draw the same
+/// cells apart from their grid rows: the same pane, title, image placements,
+/// reverse video, selection and scroll position text, and grid views with the
+/// same row count, column count and scroll offset, or no grid view in both.
+/// The fields drawn into no cell are not compared.
+fn is_pane_drawn_alike_except_rows(
+    previous_pane_snapshot: &PaneSnapshot,
+    next_pane_snapshot: &PaneSnapshot,
+) -> bool {
+    let PaneSnapshot {
+        pane_id,
+        pane_title,
+        cursor_snapshot: _,
+        terminal_grid_view,
+        image_placement_snapshots,
+        is_reverse_video,
+        mouse_tracking: _,
+        is_alternate_scroll_enabled: _,
+        is_on_alternate_screen: _,
+        view_top_row_index: _,
+        selection_spans,
+        has_selection: _,
+        scrollback_metadata: _,
+    } = next_pane_snapshot;
+    let is_grid_shape_alike = match (
+        &previous_pane_snapshot.terminal_grid_view,
+        terminal_grid_view,
+    ) {
+        (None, None) => true,
+        (Some(previous_grid_view), Some(next_grid_view)) => {
+            let GridView {
+                row_snapshots,
+                column_count,
+                view_row_offset,
+            } = next_grid_view;
+            previous_grid_view.row_snapshots.len() == row_snapshots.len()
+                && previous_grid_view.column_count == *column_count
+                && previous_grid_view.view_row_offset == *view_row_offset
+        }
+        (None, Some(_)) | (Some(_), None) => false,
+    };
+    is_grid_shape_alike
+        && previous_pane_snapshot.pane_id == *pane_id
+        && previous_pane_snapshot.pane_title == *pane_title
+        && previous_pane_snapshot.image_placement_snapshots == *image_placement_snapshots
+        && previous_pane_snapshot.is_reverse_video == *is_reverse_video
+        && previous_pane_snapshot.selection_spans == *selection_spans
+        && get_pane_scroll(previous_pane_snapshot) == get_pane_scroll(next_pane_snapshot)
+}
+
+/// Reset every cell of `clear_area` inside the buffer on each row that
+/// `drawn_rows` draws.
+fn clear_drawn_rows(
+    clear_area: RatatuiRect,
+    drawn_rows: DrawnRows<'_>,
+    screen_buffer: &mut Buffer,
+) {
+    let clear_area = clear_area.intersection(screen_buffer.area);
+    for row_index in drawn_rows.list_rows_between(clear_area.top(), clear_area.bottom()) {
+        for column_index in clear_area.left()..clear_area.right() {
+            screen_buffer[(column_index, row_index)].reset();
+        }
+    }
 }
 
 /// The buffer cell where the client's focused pane wants the hardware cursor, or
@@ -438,13 +666,17 @@ pub fn get_cursor_style(render_snapshot: &RenderSnapshot) -> Option<CursorStyle>
 /// ([`is_placement_handle_hovered`]) shows the handle `⠿⠿⠿`. While
 /// `viewer_chrome.is_pane_placement_visible` is `true`, the pointer colors and
 /// the handle are not drawn: hovering `pane-123` does not change its border
-/// color. `layout_origin` shifts each pane into the centered content rect.
+/// color. `layout_origin` shifts each pane into the centered content rect. A
+/// box that covers no row `drawn_rows` draws is not drawn. The title, the
+/// handle and the scroll position are drawn only when `drawn_rows` draws
+/// their row.
 fn draw_panes(
     render_snapshot: &RenderSnapshot,
     theme: &Theme,
     viewer_chrome: ViewerChrome,
     placement_target: Option<&PanePlacementTarget>,
     layout_origin: Point,
+    drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
 ) {
     let displayed_tab_id = render_snapshot.client_snapshot.active_tab_id;
@@ -453,7 +685,8 @@ fn draw_panes(
         .active_tab_snapshot
         .pane_slots
     {
-        if !pane_slot.is_visible {
+        let pane_rect = place_cell_rect(pane_slot.outer_rect, layout_origin);
+        if !pane_slot.is_visible || !drawn_rows.is_area_drawn(pane_rect) {
             continue;
         }
         let is_placement_target =
@@ -465,11 +698,7 @@ fn draw_panes(
             viewer_chrome,
             theme,
         );
-        let pane_rect = place_cell_rect(pane_slot.outer_rect, layout_origin);
-        Block::new()
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .render(pane_rect, screen_buffer);
+        draw_pane_border(pane_rect, border_style, drawn_rows, screen_buffer);
 
         let pane_snapshot = render_snapshot.find_pane_snapshot(pane_slot.pane_id);
 
@@ -478,7 +707,8 @@ fn draw_panes(
         let pane_label = pane_snapshot
             .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
             .unwrap_or("");
-        if !pane_label.is_empty() && pane_rect.width > 4 {
+        let is_top_border_drawn = drawn_rows.is_row_drawn(pane_rect.y);
+        if !pane_label.is_empty() && pane_rect.width > 4 && is_top_border_drawn {
             let pane_label_line = Line::from(Span::styled(format!(" {pane_label} "), border_style));
             set_line_clipped(
                 screen_buffer,
@@ -489,7 +719,7 @@ fn draw_panes(
             );
         }
 
-        if is_placement_handle_hovered(pane_slot.pane_id, viewer_chrome) {
+        if is_top_border_drawn && is_placement_handle_hovered(pane_slot.pane_id, viewer_chrome) {
             if let Some(handle_rect) = compute_placement_handle_rect(pane_slot.outer_rect) {
                 let handle_origin = place_cell_rect(handle_rect, layout_origin);
                 let handle_text = "⠿".repeat(usize::from(PLACEMENT_HANDLE_COLUMN_COUNT));
@@ -502,9 +732,55 @@ fn draw_panes(
             }
         }
 
-        if let Some(pane_snapshot) = pane_snapshot {
+        if let Some(pane_snapshot) =
+            pane_snapshot.filter(|_| drawn_rows.is_row_drawn(pane_rect.bottom().saturating_sub(1)))
+        {
             draw_pane_scroll_position(pane_snapshot, pane_rect, border_style, screen_buffer);
         }
+    }
+}
+
+/// Draw the one-cell border of `pane_area`, cut to the buffer, in
+/// `border_style` on each row `drawn_rows` draws: `┌─┐` on the top row,
+/// `└─┘` on the bottom row and `│` at both ends of each row between. The
+/// cells inside the border keep their symbols and styles. A one-row area
+/// draws `┌─┐`, and a one-column area draws `┌`, then `│`, then `└`.
+/// Example: a `4x3` area draws `┌──┐`, `│  │` and `└──┘`.
+fn draw_pane_border(
+    pane_area: RatatuiRect,
+    border_style: Style,
+    drawn_rows: DrawnRows<'_>,
+    screen_buffer: &mut Buffer,
+) {
+    let border_area = pane_area.intersection(screen_buffer.area);
+    if border_area.is_empty() {
+        return;
+    }
+    let left_column = border_area.left();
+    let right_column = border_area.right() - 1;
+    let top_row = border_area.top();
+    let bottom_row = border_area.bottom() - 1;
+    for row_index in drawn_rows.list_rows_between(border_area.top(), border_area.bottom()) {
+        let (left_symbol, inner_symbol, right_symbol) = if row_index == top_row {
+            ("┌", Some("─"), "┐")
+        } else if row_index == bottom_row {
+            ("└", Some("─"), "┘")
+        } else {
+            ("│", None, "│")
+        };
+        if let Some(inner_symbol) = inner_symbol {
+            for column_index in left_column + 1..right_column {
+                screen_buffer[(column_index, row_index)]
+                    .set_symbol(inner_symbol)
+                    .set_style(border_style);
+            }
+        }
+        screen_buffer[(right_column, row_index)]
+            .set_symbol(right_symbol)
+            .set_style(border_style);
+        screen_buffer[(left_column, row_index)]
+            .set_symbol(left_symbol)
+            .set_style(border_style);
     }
 }
 
@@ -606,12 +882,13 @@ pub fn is_placement_target_pane(
 }
 
 /// Tint the content of the pane whose placement handle the pointer rests on
-/// ([`is_placement_handle_hovered`]). Nothing is tinted while
-/// `viewer_chrome.is_pane_placement_visible` is `true`.
+/// ([`is_placement_handle_hovered`]), on each row `drawn_rows` draws. Nothing
+/// is tinted while `viewer_chrome.is_pane_placement_visible` is `true`.
 fn draw_placement_hover_tints(
     render_snapshot: &RenderSnapshot,
     viewer_chrome: ViewerChrome,
     layout_origin: Point,
+    drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
 ) {
     for pane_slot in &render_snapshot
@@ -625,15 +902,24 @@ fn draw_placement_hover_tints(
         let Some(content_rect) = pane_slot.content_rect else {
             continue;
         };
-        draw_placement_hover_tint(place_cell_rect(content_rect, layout_origin), screen_buffer);
+        draw_placement_hover_tint(
+            place_cell_rect(content_rect, layout_origin),
+            drawn_rows,
+            screen_buffer,
+        );
     }
 }
 
-/// Set the background of every cell of `content_area` inside the buffer to
-/// the placement hover tint, keeping each cell's text and foreground.
-fn draw_placement_hover_tint(content_area: RatatuiRect, screen_buffer: &mut Buffer) {
+/// Set the background of every cell of `content_area` inside the buffer, on
+/// each row `drawn_rows` draws, to the placement hover tint, keeping each
+/// cell's text and foreground.
+fn draw_placement_hover_tint(
+    content_area: RatatuiRect,
+    drawn_rows: DrawnRows<'_>,
+    screen_buffer: &mut Buffer,
+) {
     let content_area = content_area.intersection(screen_buffer.area);
-    for row_index in content_area.top()..content_area.bottom() {
+    for row_index in drawn_rows.list_rows_between(content_area.top(), content_area.bottom()) {
         for column_index in content_area.left()..content_area.right() {
             screen_buffer[(column_index, row_index)].set_bg(PLACEMENT_HOVER_TINT_COLOR);
         }
@@ -671,69 +957,78 @@ fn draw_too_small_overlay(viewport_area: RatatuiRect, screen_buffer: &mut Buffer
 /// draws the grid into that rect. Panes with no grid or no content rect
 /// (suppressed, hidden, or a collapsed stack member) draw nothing.
 /// `layout_origin` shifts each content rect into the centered content area.
+/// Only the rows `drawn_rows` draws are drawn.
 fn draw_pane_contents(
     render_snapshot: &RenderSnapshot,
     layout_origin: Point,
+    drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
 ) {
-    for pane_slot in &render_snapshot
-        .session_snapshot
-        .active_tab_snapshot
-        .pane_slots
+    for (pane_snapshot, placed_content_rect) in
+        list_visible_tiled_panes(render_snapshot, layout_origin)
     {
-        if !pane_slot.is_visible {
-            continue;
-        }
-        let Some(content_rect) = pane_slot.content_rect else {
-            continue;
-        };
-        let Some(pane_snapshot) = render_snapshot.find_pane_snapshot(pane_slot.pane_id) else {
-            continue;
-        };
         let Some(terminal_grid_view) = &pane_snapshot.terminal_grid_view else {
             continue;
         };
         draw_grid(
-            &terminal_grid_view.grid,
-            place_cell_rect(content_rect, layout_origin),
+            terminal_grid_view,
+            placed_content_rect,
             pane_snapshot.is_reverse_video,
             pane_snapshot.selection_spans.as_ref(),
+            drawn_rows,
             screen_buffer,
         );
     }
 }
 
-/// Paint one terminal `terminal_grid` into `target_area`, one buffer cell per grid cell.
+/// Paint one pane's `grid_view` into `target_area`, one buffer cell per grid cell.
 ///
 /// Each grid cell is placed at its own column, so on-screen column positions
 /// always match grid column positions. The continuation half of a
 /// wide glyph (width 0) is skipped — the wide base already covers it. A wide
 /// glyph whose second half falls outside the content area is replaced by a blank
-/// so no half-glyph bleeds past the edge. `is_reverse_video` (DECSCNM) toggles
+/// so no half-glyph bleeds past the edge. A cell whose base character and
+/// combining marks together take more columns than the cell
+/// ([`compute_symbol_display_width`]) draws its base character alone: `U+2764`
+/// with VS16 in a 1-column cell draws `U+2764`. `is_reverse_video` (DECSCNM) toggles
 /// reverse for every cell. `target_area` is clipped to the buffer so an oversized rect
 /// cannot index out of bounds.
 ///
 /// A highlighted cell in `selection_spans` is drawn in reverse. The highlight
 /// combines with the cell's own reverse and with `is_reverse_video` by exclusive-or, so
 /// highlighting a cell that is already reverse swaps it back to normal.
+///
+/// Only the screen rows `drawn_rows` draws are drawn. A run of cells with one
+/// style and one reverse state converts the style once, and the symbol of
+/// each cell with combining marks is built in one string that the call
+/// reuses.
 fn draw_grid(
-    terminal_grid: &Grid,
+    grid_view: &GridView,
     target_area: RatatuiRect,
     is_reverse_video: bool,
     selection_spans: Option<&SelectionSpans>,
+    drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
 ) {
     let clipped_area = target_area.intersection(screen_buffer.area);
-    let (grid_row_count, grid_column_count) = terminal_grid.get_grid_dimensions();
+    let (grid_row_count, grid_column_count) = grid_view.get_view_dimensions();
     let visible_row_count = grid_row_count.min(clipped_area.height);
     let visible_column_count = grid_column_count.min(clipped_area.width);
-    for (row_index, cell_row) in (0..visible_row_count).zip(terminal_grid.list_rows()) {
+    let mut converted_style: Option<(CellStyle, bool, Style)> = None;
+    let mut cell_symbol = String::new();
+    for screen_row in
+        drawn_rows.list_rows_between(clipped_area.y, clipped_area.y + visible_row_count)
+    {
+        let row_index = screen_row - clipped_area.y;
+        let Some(row_snapshot) = grid_view.row_snapshots.get(usize::from(row_index)) else {
+            continue;
+        };
+        let cell_row = row_snapshot.list_row_cells();
         // A highlight is one column range per row, resolved before the row's
         // cells are walked.
         let row_span = selection_spans.and_then(|spans| spans.find_row_span(row_index));
-        let screen_row = clipped_area.y + row_index;
         for column_index in 0..visible_column_count {
-            let Some(cell) = cell_row.get(column_index as usize) else {
+            let Some(cell) = cell_row.get(usize::from(column_index)) else {
                 continue;
             };
             let cell_width = cell.get_display_width();
@@ -744,21 +1039,39 @@ fn draw_grid(
             let is_selected = row_span.is_some_and(|(start_column, end_column)| {
                 column_index >= start_column && column_index <= end_column
             });
-            let cell_style = get_cell_style(cell.get_style(), is_reverse_video ^ is_selected);
+            let is_cell_reversed = is_reverse_video ^ is_selected;
+            let cell_style = match converted_style {
+                Some((last_cell_style, last_is_cell_reversed, last_style))
+                    if last_cell_style == cell.get_style()
+                        && last_is_cell_reversed == is_cell_reversed =>
+                {
+                    last_style
+                }
+                _ => {
+                    let cell_style = get_cell_style(cell.get_style(), is_cell_reversed);
+                    converted_style = Some((cell.get_style(), is_cell_reversed, cell_style));
+                    cell_style
+                }
+            };
             if cell_width >= 2 && column_index + 1 >= visible_column_count {
                 screen_buffer[(screen_column, screen_row)]
                     .set_char(' ')
                     .set_style(cell_style);
                 continue;
             }
+            let screen_cell = &mut screen_buffer[(screen_column, screen_row)];
+            screen_cell.set_style(cell_style);
             if cell.list_combining_characters().is_empty() {
-                screen_buffer[(screen_column, screen_row)]
-                    .set_char(cell.get_character())
-                    .set_style(cell_style);
+                screen_cell.set_char(cell.get_character());
+                continue;
+            }
+            cell_symbol.clear();
+            cell_symbol.push(cell.get_character());
+            cell_symbol.extend(cell.list_combining_characters().iter().copied());
+            if compute_symbol_display_width(&cell_symbol) > u16::from(cell_width) {
+                screen_cell.set_char(cell.get_character());
             } else {
-                screen_buffer[(screen_column, screen_row)]
-                    .set_symbol(&get_cell_symbol(cell))
-                    .set_style(cell_style);
+                screen_cell.set_symbol(&cell_symbol);
             }
         }
     }
@@ -772,9 +1085,14 @@ fn draw_grid(
 /// Example: ratatui measures `U+17D8` 3 columns wide, and
 /// [`compute_symbol_display_width`] gives it 1. Its cell gets the forced width
 /// 1, and the frame diff takes the cell after it as the next screen column.
-fn apply_display_widths(viewport_area: RatatuiRect, screen_buffer: &mut Buffer) {
+/// Only the rows `drawn_rows` draws are visited.
+fn apply_display_widths(
+    viewport_area: RatatuiRect,
+    drawn_rows: DrawnRows<'_>,
+    screen_buffer: &mut Buffer,
+) {
     let drawn_area = viewport_area.intersection(screen_buffer.area);
-    for row_index in drawn_area.top()..drawn_area.bottom() {
+    for row_index in drawn_rows.list_rows_between(drawn_area.top(), drawn_area.bottom()) {
         for column_index in drawn_area.left()..drawn_area.right() {
             let screen_cell = &mut screen_buffer[(column_index, row_index)];
             let display_width = compute_symbol_display_width(screen_cell.symbol());
@@ -793,15 +1111,6 @@ fn apply_display_widths(viewport_area: RatatuiRect, screen_buffer: &mut Buffer) 
 /// `U+17D8` is 1, `世` is 2, and `世ﾞ` (`U+4E16` `U+FF9E`) is 3.
 fn compute_symbol_display_width(symbol: &str) -> u16 {
     u16::try_from(compute_text_display_width(symbol)).unwrap_or(u16::MAX)
-}
-
-/// The glyph a cell draws: its base character followed by any combining marks
-/// and joined code points, as one string.
-fn get_cell_symbol(cell: &Cell) -> String {
-    let mut cell_symbol = String::with_capacity(1 + cell.list_combining_characters().len());
-    cell_symbol.push(cell.get_character());
-    cell_symbol.extend(cell.list_combining_characters().iter().copied());
-    cell_symbol
 }
 
 /// Map a terminal cell style to a ratatui [`Style`].
@@ -861,13 +1170,15 @@ fn get_cell_color(cell_color: CellColor) -> Color {
 /// the pane title on the left, and a `[position/total]` indicator on the right.
 /// The strip of `viewer_chrome.placement_source_pane_id` takes the focus color, and
 /// a strip that `placement_target` names takes the placement hover color.
-/// `layout_origin` shifts each strip into the centered content rect.
+/// `layout_origin` shifts each strip into the centered content rect. A strip
+/// on no row `drawn_rows` draws is not drawn.
 fn draw_stack_headers(
     render_snapshot: &RenderSnapshot,
     theme: &Theme,
     viewer_chrome: ViewerChrome,
     placement_target: Option<&PanePlacementTarget>,
     layout_origin: Point,
+    drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
 ) {
     let displayed_tab_id = render_snapshot.client_snapshot.active_tab_id;
@@ -877,7 +1188,10 @@ fn draw_stack_headers(
         .stack_headers
     {
         let header_rect = place_cell_rect(stack_header.header_rect, layout_origin);
-        if header_rect.width == 0 || header_rect.height == 0 {
+        if header_rect.width == 0
+            || header_rect.height == 0
+            || !drawn_rows.is_area_drawn(header_rect)
+        {
             continue;
         }
 
@@ -909,8 +1223,9 @@ fn draw_stack_headers(
             header_rect.width,
         );
 
-        // Right-align `[N/total]`, with its start column clamped to `rect.x`. A
-        // strip narrower than the indicator writes only inside the strip.
+        // Right-align `[N/total]`, with its start column clamped to
+        // `header_rect.x`. A strip narrower than the indicator writes only inside
+        // the strip.
         let indicator_line = Line::from(format!(
             "[{}/{}]",
             stack_header.member_index + 1,
@@ -1028,6 +1343,27 @@ pub(crate) fn place_cell_rect(cell_rect: Rect, layout_origin: Point) -> RatatuiR
         width: cell_rect.size.column_count,
         height: cell_rect.size.row_count,
     }
+}
+
+/// Each visible tiled pane of the active tab that has a content rect and a pane
+/// snapshot, in pane slot order: its snapshot, and its content rect placed at
+/// `layout_origin` by [`place_cell_rect`]. A hidden pane, a pane with no
+/// content rect, and a pane with no snapshot are left out.
+pub(crate) fn list_visible_tiled_panes(
+    render_snapshot: &RenderSnapshot,
+    layout_origin: Point,
+) -> impl Iterator<Item = (&PaneSnapshot, RatatuiRect)> + '_ {
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots
+        .iter()
+        .filter(|pane_slot| pane_slot.is_visible)
+        .filter_map(move |pane_slot| {
+            let content_rect = pane_slot.content_rect?;
+            let pane_snapshot = render_snapshot.find_pane_snapshot(pane_slot.pane_id)?;
+            Some((pane_snapshot, place_cell_rect(content_rect, layout_origin)))
+        })
 }
 
 /// Return one committed region in the ratatui frame's coordinate space.
@@ -1176,13 +1512,15 @@ pub fn compute_content_rect(pane_area: RatatuiRect, tab_size: Size) -> RatatuiRe
 /// The margin is the four bands around `effective_layout_rect` once it is cut
 /// to `viewport_area`: a layout solved for a larger viewport reaches past the
 /// painted area, and the part outside it is not a band. Each band is restyled
-/// in place, never blanked: [`render_frame`] clears every cell of `viewport_area`
-/// before this runs. [`Buffer::set_style`] clips to the buffer, so a viewport
-/// area larger than `screen_buffer` writes only inside `screen_buffer`.
+/// in place, never blanked: [`render_frame`] clears every cell of each drawn
+/// row of `viewport_area` before this runs. [`Buffer::set_style`] clips to the
+/// buffer, so a viewport area larger than `screen_buffer` writes only inside
+/// `screen_buffer`. Only the rows `drawn_rows` draws are restyled.
 fn draw_letterbox(
     viewport_area: RatatuiRect,
     effective_layout_rect: RatatuiRect,
     theme: &Theme,
+    drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
 ) {
     let effective_layout_rect = viewport_area.intersection(effective_layout_rect);
@@ -1225,7 +1563,17 @@ fn draw_letterbox(
         },
     ];
     for letterbox_band in letterbox_bands {
-        screen_buffer.set_style(letterbox_band, letterbox_style);
+        for row_index in drawn_rows.list_rows_between(letterbox_band.top(), letterbox_band.bottom())
+        {
+            screen_buffer.set_style(
+                RatatuiRect {
+                    y: row_index,
+                    height: 1,
+                    ..letterbox_band
+                },
+                letterbox_style,
+            );
+        }
     }
 }
 

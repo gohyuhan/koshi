@@ -14,7 +14,7 @@ use koshi_ipc::remote_servers::SavedServer;
 
 use crate::cli::{Cli, CliCommand, OutputFormat};
 
-/// The parsed `remote` subcommand of `argv`.
+/// The parsed `remote` subcommand of `argument_values`.
 fn parse_test_remote_command(argument_values: &[&str]) -> RemoteCommand {
     match Cli::try_parse_from(argument_values)
         .expect("argv must parse")
@@ -28,7 +28,7 @@ fn parse_test_remote_command(argument_values: &[&str]) -> RemoteCommand {
     }
 }
 
-/// The moment `seconds` after the Unix epoch.
+/// The moment `elapsed_seconds` after the Unix epoch.
 fn build_test_system_time_at_seconds(elapsed_seconds: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(elapsed_seconds)
 }
@@ -46,7 +46,7 @@ fn build_two_saved_server_records() -> Vec<SavedServer> {
         },
         SavedServer {
             server_name: None,
-            server_address: "10.0.0.4:7654".to_string(),
+            server_address: "192.0.2.4:7654".to_string(),
             connection_token: ConnectionToken::from_secret("beef"),
             certificate_fingerprint: Some("bb".repeat(32)),
             added_at: build_test_system_time_at_seconds(30),
@@ -109,7 +109,7 @@ fn a_listing_renders_one_table_row_per_saved_server_with_an_absent_value_as_a_da
         format!(
             "name  address            fingerprint{}  last_used\n\
              work  laptop.local:7654  {}  20\n\
-             -     10.0.0.4:7654      {}  -\n",
+             -     192.0.2.4:7654     {}  -\n",
             " ".repeat(64 - "fingerprint".len()),
             "aa".repeat(32),
             "bb".repeat(32)
@@ -179,7 +179,7 @@ fn a_server_that_is_not_saved_is_refused_naming_the_listing_command() {
     );
 }
 
-/// A store holding the two records `build_two_saved_server_records` builds.
+/// A store holding `saved_server_records`, in the order given.
 fn build_server_store(saved_server_records: Vec<SavedServer>) -> ServerStore {
     let mut server_store = ServerStore::new();
     server_store.saved_servers = saved_server_records;
@@ -197,10 +197,10 @@ fn a_saved_server_is_found_by_its_name_and_by_its_address() {
         "laptop.local:7654"
     );
     assert_eq!(
-        find_saved_server(&server_store, "10.0.0.4:7654")
+        find_saved_server(&server_store, "192.0.2.4:7654")
             .expect("the address is saved")
             .server_address,
-        "10.0.0.4:7654"
+        "192.0.2.4:7654"
     );
 }
 
@@ -287,7 +287,7 @@ fn a_record_with_no_name_renders_its_address_alone() {
     let saved_server = build_two_saved_server_records().remove(1);
     assert_eq!(
         output::render_remote_updated(&saved_server),
-        "updated 10.0.0.4:7654.\n"
+        "updated 192.0.2.4:7654.\n"
     );
 }
 
@@ -358,7 +358,7 @@ fn a_name_that_is_another_record_s_address_is_refused_for_its_shape() {
     let server_store = build_server_store(build_two_saved_server_records());
 
     assert!(
-        validate_server_name_available(&server_store, "10.0.0.4:7654")
+        validate_server_name_available(&server_store, "192.0.2.4:7654")
             .expect_err("that is another saved server's address")
             .to_string()
             .contains("the shape of an address"),
@@ -390,11 +390,11 @@ fn an_address_another_record_answers_to_is_refused_naming_the_edit_command() {
     let server_store = build_server_store(build_two_saved_server_records());
 
     assert_eq!(
-        validate_saved_server_address_is_available(&server_store, "10.0.0.4:7654")
+        validate_saved_server_address_is_available(&server_store, "192.0.2.4:7654")
             .expect_err("another saved server holds that address")
             .to_string(),
-        "invalid arguments: 10.0.0.4:7654 already answers for a saved server; \
-         run `koshi remote edit 10.0.0.4:7654` to change it"
+        "invalid arguments: 192.0.2.4:7654 already answers for a saved server; \
+         run `koshi remote edit 192.0.2.4:7654` to change it"
     );
 }
 
@@ -427,7 +427,7 @@ fn a_new_record_joins_the_saved_servers_already_there() {
             .iter()
             .map(|saved_server| saved_server.server_address.as_str())
             .collect::<Vec<_>>(),
-        vec!["laptop.local:7654", "10.0.0.4:7654", "desk.local:7654"]
+        vec!["laptop.local:7654", "192.0.2.4:7654", "desk.local:7654"]
     );
 }
 
@@ -449,7 +449,7 @@ fn a_replaced_record_leaves_the_store_and_the_new_one_takes_its_place() {
                 saved_server.server_address.as_str()
             ))
             .collect::<Vec<_>>(),
-        vec![(None, "10.0.0.4:7654"), (Some("work"), "desk.local:7655")],
+        vec![(None, "192.0.2.4:7654"), (Some("work"), "desk.local:7655")],
         "one saved server answers for work, at the address the edit typed"
     );
 }
@@ -520,15 +520,15 @@ fn a_name_another_record_took_meanwhile_is_refused_and_changes_nothing() {
 #[test]
 fn an_address_another_record_took_meanwhile_is_refused_and_changes_nothing() {
     let mut taken_saved_server = build_new_saved_server_record();
-    taken_saved_server.server_address = "10.0.0.4:7654".to_string();
+    taken_saved_server.server_address = "192.0.2.4:7654".to_string();
     let mut server_store = build_server_store(build_two_saved_server_records());
 
     assert_eq!(
         save_saved_server(&mut server_store, &taken_saved_server, None)
             .expect_err("that address is taken")
             .to_string(),
-        "invalid arguments: 10.0.0.4:7654 already answers for a saved server; \
-         run `koshi remote edit 10.0.0.4:7654` to change it"
+        "invalid arguments: 192.0.2.4:7654 already answers for a saved server; \
+         run `koshi remote edit 192.0.2.4:7654` to change it"
     );
     assert_eq!(
         server_store.saved_servers,
@@ -542,15 +542,15 @@ fn an_address_another_record_took_meanwhile_is_refused_and_changes_nothing() {
 #[test]
 fn a_replacement_refused_after_the_record_left_puts_every_saved_server_back() {
     let mut moved_saved_server = build_two_saved_server_records().remove(0);
-    moved_saved_server.server_address = "10.0.0.4:7654".to_string();
+    moved_saved_server.server_address = "192.0.2.4:7654".to_string();
     let mut server_store = build_server_store(build_two_saved_server_records());
 
     assert_eq!(
         save_saved_server(&mut server_store, &moved_saved_server, Some("work"))
             .expect_err("the other saved server already answers to that address")
             .to_string(),
-        "invalid arguments: 10.0.0.4:7654 already answers for a saved server; \
-         run `koshi remote edit 10.0.0.4:7654` to change it"
+        "invalid arguments: 192.0.2.4:7654 already answers for a saved server; \
+         run `koshi remote edit 192.0.2.4:7654` to change it"
     );
     assert_eq!(
         server_store.saved_servers,

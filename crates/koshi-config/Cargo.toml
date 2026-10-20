@@ -10,3 +10,6 @@ koshi-core.workspace = true
 koshi-layout.workspace = true
 miette.workspace = true
 thiserror.workspace = true
+
+[lints]
+workspace = true

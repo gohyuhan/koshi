@@ -19,7 +19,6 @@ use koshi_core::process::ShellKind;
 use koshi_layout::edit::split_leaf;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::SplitNode;
-use koshi_pane::pane::lifecycle::PaneLifecycle;
 
 use crate::client::{Client, ClientOrigin, ClientRegistry};
 use crate::session::state::tests::build_default_floating_member;
@@ -174,16 +173,12 @@ fn commit_emits_events_swaps_the_tree_and_focuses_the_new_pane() {
         ))
     );
 
-    // The new pane is registered `Running`, focused, and at the front of the
+    // The new pane is registered, focused, and at the front of the
     // tab's focus history.
     assert_eq!(session.panes.count_pane_records(), 2);
     assert_eq!(
-        *session
-            .panes
-            .get_pane_record_by_id(new_pane_id)
-            .expect("pane record")
-            .get_lifecycle(),
-        PaneLifecycle::Running,
+        session.panes.get_pane_record_by_id(new_pane_id),
+        Some(&PaneRecord::from_terminal_pane(new_pane_id))
     );
     assert_eq!(
         session
@@ -1128,12 +1123,8 @@ fn commit_new_floating_pane_registers_the_member_and_focuses_it_for_the_designat
     );
     assert_eq!(session.floating_set.list_members(), [floating_member]);
     assert_eq!(
-        *session
-            .panes
-            .get_pane_record_by_id(floating_pane_id)
-            .expect("the floating pane is registered")
-            .get_lifecycle(),
-        PaneLifecycle::Running
+        session.panes.get_pane_record_by_id(floating_pane_id),
+        Some(&PaneRecord::from_terminal_pane(floating_pane_id))
     );
     let client = session
         .clients

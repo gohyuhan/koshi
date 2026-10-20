@@ -4,17 +4,22 @@
 //! A client is handed
 //! [`AttachedSessionStructureSnapshot`](crate::attach::AttachedSessionStructureSnapshot)
 //! once, in the attach reply. [`SessionEvent`](crate::event::SessionEvent) is
-//! everything after it: the painted frames the client draws, plus one frame per
-//! change to which tabs exist, how each tab's panes are arranged, which pane a
-//! client focused, and which panes are alive.
+//! every JSON frame after it: one frame per change to which tabs exist, how
+//! each tab's panes are arranged, which pane a client focused, and which panes
+//! are alive.
 //!
-//! Pane content travels in [`Painted`](crate::event::SessionEvent::Painted).
-//! Image placements in that frame name connection-local records. A record the
-//! client has not received follows as one
-//! [`ImageContentStart`](crate::event::SessionEvent::ImageContentStart) and its
-//! [`ImageContentChunk`](crate::event::SessionEvent::ImageContentChunk)
-//! events. An unchanged record is referenced again without sending its RGBA
-//! bytes again.
+//! Pane content travels in painted updates, which are binary frames
+//! ([`painted_update`](crate::painted_update)). Image placements in an
+//! update's [`PaintedFrame`](crate::frame::PaintedFrame) name connection-local
+//! records. A record the client has not received follows the update as one
+//! [`ImageContentStart`](crate::event::SessionEvent::ImageContentStart) event
+//! and its image chunk frames, which are binary
+//! ([`image_chunk`](crate::image_chunk)). The client keeps each record until
+//! an [`ImageContentReleased`](crate::event::SessionEvent::ImageContentReleased)
+//! event names it or an
+//! [`ImageCacheReset`](crate::event::SessionEvent::ImageCacheReset) event
+//! arrives, and each update that follows names a kept record without its
+//! RGBA bytes.
 //!
 //! Seven frames here are not session facts.
 //! [`Resync`](crate::event::SessionEvent::Resync) is the first: the server
@@ -41,7 +46,7 @@ use koshi_core::command::PanePlacementTarget;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use serde::{Deserialize, Serialize};
 
-use crate::frame::{FrameImageChunk, FrameImageTransfer, PaintedFrame};
+use crate::frame::FrameImageTransfer;
 use crate::placement::PanePlacementSnapshot;
 use crate::protocol::IpcErrorPayload;
 use crate::wire::{MaybeKnown, WireName, WireVariants};
@@ -61,6 +66,10 @@ pub type IncomingEvent = MaybeKnown<SessionEvent>;
 /// either kind, and 3 bytes more do not fit a `HostWritePart` frame.
 pub const MAX_HOST_WRITE_BYTE_COUNT: usize = 12_582_879;
 
+/// The most identities one [`SessionEvent::ImageContentReleased`] frame
+/// names: 4096.
+pub const MAX_RELEASED_IMAGE_CONTENT_COUNT: usize = 4_096;
+
 /// One frame on an attached client's event stream.
 ///
 /// A field this build does not know is ignored: a frame from a newer koshi
@@ -69,22 +78,22 @@ pub const MAX_HOST_WRITE_BYTE_COUNT: usize = 12_582_879;
 /// and keeps reading. A frame missing a field this build needs is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionEvent {
-    /// The picture the session composed for this client, drawn whole.
-    Painted {
-        /// The frame to draw.
-        frame: Box<PaintedFrame>,
-    },
-    /// Drop every connection-local image record before the next painted frame.
+    /// Drop every connection-local image record before the next painted
+    /// update.
     ImageCacheReset,
-    /// Metadata for one image record whose pixels follow in chunks.
+    /// Metadata for one image record whose pixels follow in image chunk
+    /// frames ([`image_chunk`](crate::image_chunk)).
     ImageContentStart {
         /// The image record and its exact RGBA byte count.
         image_transfer: FrameImageTransfer,
     },
-    /// One bounded piece of an image record.
-    ImageContentChunk {
-        /// The image bytes and their position in the transfer.
-        image_chunk: FrameImageChunk,
+    /// Drop the image records with these connection-local identities. The
+    /// session sends it after the last painted update or placement preview
+    /// that shows those records, and names at most
+    /// [`MAX_RELEASED_IMAGE_CONTENT_COUNT`] identities in one frame.
+    ImageContentReleased {
+        /// The identities of the records the client drops.
+        image_content_ids: Vec<u64>,
     },
     /// A read-only placement preview for one request.
     PanePlacementSnapshot {
@@ -214,8 +223,8 @@ pub enum SessionEvent {
     /// again.
     Detached,
     /// The client's queue overflowed, and the client missed every delivery
-    /// until this frame. A [`Painted`](Self::Painted) frame of the session as
-    /// it stands follows it.
+    /// until this frame. The painted update that follows, when the screen
+    /// changed, shows the session as it stands.
     Resync {
         /// How many deliveries the client missed.
         dropped_event_count: u64,
@@ -258,9 +267,16 @@ pub enum SessionEvent {
     },
     /// The client drops this session and attaches to the named one.
     SwitchTo {
-        /// The session to attach to. The client reads that session's socket
-        /// and connection token from the endpoint file keyed by this id.
+        /// The session to attach to. With no `owner_user_id`, the client reads
+        /// that session's socket and connection token from the endpoint file
+        /// keyed by this id, and looks in the shared directory when this user's
+        /// runtime directory holds none.
         session_id: SessionId,
+        /// The user id whose folder of the shared directory advertises
+        /// `session_id`. The client reads the socket in that one folder. A
+        /// message without `owner_user_id` is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        owner_user_id: Option<u32>,
     },
     /// A pane placement command from this client's key binding, or a
     /// floating pane move from its key binding or its mouse round, was
@@ -276,15 +292,14 @@ pub enum SessionEvent {
 }
 
 impl SessionEvent {
-    /// The frame's name, e.g. `"Painted"`, with none of its payload. Written
-    /// on log lines.
+    /// The frame's name, e.g. `"TabCreated"`, with none of its payload.
+    /// Written on log lines.
     #[must_use]
     pub fn get_event_name(&self) -> &'static str {
         match self {
-            SessionEvent::Painted { .. } => "Painted",
             SessionEvent::ImageCacheReset => "ImageCacheReset",
             SessionEvent::ImageContentStart { .. } => "ImageContentStart",
-            SessionEvent::ImageContentChunk { .. } => "ImageContentChunk",
+            SessionEvent::ImageContentReleased { .. } => "ImageContentReleased",
             SessionEvent::PanePlacementSnapshot { .. } => "PanePlacementSnapshot",
             SessionEvent::PanePlacementRefused { .. } => "PanePlacementRefused",
             SessionEvent::PaneCreated { .. } => "PaneCreated",
@@ -316,10 +331,9 @@ impl WireVariants for SessionEvent {
     /// Every frame this build has. A variant added to [`SessionEvent`] is
     /// added here and to [`SessionEvent::get_event_name`] in the same change.
     const VARIANTS: &'static [&'static str] = &[
-        "Painted",
         "ImageCacheReset",
         "ImageContentStart",
-        "ImageContentChunk",
+        "ImageContentReleased",
         "PanePlacementSnapshot",
         "PanePlacementRefused",
         "PaneCreated",

@@ -9,6 +9,8 @@ fn a_failed_exec_hands_back_its_error_and_leaves_sigpipe_ignored() {
     let missing_program_path = empty_directory.path().join("koshi");
 
     let exec_error = exec_and_keep_ignoring_sigpipe(&mut Command::new(&missing_program_path));
+    // SAFETY: `SIG_IGN` installs no handler code, and `SIGPIPE` is a signal
+    // that can be ignored.
     let sigpipe_disposition_after_exec = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
 
     assert_eq!(exec_error.kind(), std::io::ErrorKind::NotFound);

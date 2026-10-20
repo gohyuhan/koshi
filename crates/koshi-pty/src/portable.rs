@@ -1,21 +1,22 @@
-//! Real OS-PTY backend built on the `portable-pty` crate.
+//! Real OS-PTY backend: `portable-pty` on Unix, and on Windows a pseudoconsole
+//! the backend opens itself (`crate::pseudoconsole`).
 //!
 //! A spawned pane gets a kernel PTY and three helper threads (reader, writer,
 //! watcher), all owned through the [`crate::portable::PortablePtyBackend`]
 //! pane map. The backend streams child output, queues input, terminates the
 //! child under cross-platform kill policies, and tracks the exit status.
 //!
-//! Three threads is the whole per-pane cost: the reader delivers output to the
-//! consumer itself, through [`crate::backend::state::PtySink`].
+//! A pane runs these three threads and no others: the reader delivers output to
+//! the consumer itself, through [`crate::backend::state::PtySink`].
 //!
 //! One thread publishes a pane's exit. Which one it is follows from how the
 //! pane's terminal reaches the end of its output:
 //!
 //! - A Unix terminal the pane owns a descriptor for: the reader publishes. The
-//!   watcher wakes it once the child is reaped, and it hands over whatever the
+//!   watcher wakes it once the child has ended, and it hands over whatever the
 //!   terminal still holds before publishing.
 //! - Windows: the reader publishes, and the watcher stands by behind it. Once
-//!   the child is reaped the watcher waits for the reader to be back on the
+//!   the child has ended the watcher waits for the reader to be back on the
 //!   terminal, then closes that terminal on a thread of its own. The close
 //!   flushes the console's remaining output and ends the reader's pipe, and
 //!   returns only once every process attached to that console has let it go.
@@ -28,12 +29,12 @@
 //!
 //! # A Windows pane's pseudoconsole
 //!
-//! `portable-pty` opens every Windows pane's terminal with
-//! `CreatePseudoConsole`. It passes flags outside the documented set (`0` and
-//! `PSEUDOCONSOLE_INHERIT_CURSOR`), and it closes the two pipe handles it
-//! handed to the call before `CreateProcess` runs; Microsoft's reference
-//! closes them after, and states that handle lifetimes managed wrongly can
-//! deadlock a synchronous read or write.
+//! Every Windows pane's terminal is a pseudoconsole that
+//! `pseudoconsole::spawn_pane_program` opens with `CreatePseudoConsole`. It
+//! passes `PSEUDOCONSOLE_RESIZE_QUIRK` and `PSEUDOCONSOLE_WIN32_INPUT_MODE`,
+//! which are outside the documented set (`0` and
+//! `PSEUDOCONSOLE_INHERIT_CURSOR`). It closes the two pipe handles it handed
+//! to the call once `CreateProcessW` has started the pane program.
 //!
 //! `PSEUDOCONSOLE_INHERIT_CURSOR` is passed on every pane. A pseudoconsole
 //! created with it writes a cursor-position request to its output and holds
@@ -49,29 +50,38 @@ use std::{
     collections::HashMap,
     io::{ErrorKind, Read, Write},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicUsize, Ordering},
         mpsc::{channel, Receiver, RecvTimeoutError, Sender},
-        Arc, Mutex, OnceLock, Weak,
+        Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+use std::collections::BTreeSet;
+
 use koshi_core::{
+    constant::GRACEFUL_TIMEOUT_DURATION,
     ids::PaneId,
     process::{ExitStatus, KillPolicy, PtySize, SpawnSpec},
 };
+#[cfg(unix)]
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty};
 
-/// Only the reader park waits on a condition, and only Unix panes park.
 #[cfg(unix)]
-use std::sync::Condvar;
-
+use crate::env::build_environment_overlay;
 use crate::{
-    backend::state::{CarriedPtyPane, PtyBackend, PtySink, UNOBSERVED_EXIT},
-    env::build_environment_overlay,
+    backend::state::{
+        CarriedPtyPane, PtyBackend, PtySink, MAX_QUEUED_PANE_INPUT_BYTE_COUNT, UNOBSERVED_EXIT,
+    },
     error::PtyError,
     kill::{PtyChildKillControl, StopRequest},
+};
+#[cfg(windows)]
+use crate::{
+    kill::PaneJob,
+    pseudoconsole::{spawn_pane_program, PaneConsole, PaneProcess, SpawnedPaneProgram},
 };
 
 /// Bytes read from a pane's master end in one go.
@@ -178,7 +188,8 @@ impl ExitHandover {
 #[cfg(unix)]
 fn duplicate_terminal_file_descriptor(pty_master: &dyn MasterPty) -> Option<std::os::fd::OwnedFd> {
     pty_master.as_raw_fd().and_then(|master_file_descriptor| {
-        // `pty_master` is borrowed for this call and owns the descriptor throughout.
+        // SAFETY: `pty_master` owns the descriptor and stays borrowed until
+        // `try_clone_to_owned` returns.
         unsafe { std::os::fd::BorrowedFd::borrow_raw(master_file_descriptor) }
             .try_clone_to_owned()
             .ok()
@@ -197,6 +208,8 @@ fn read_terminal(
 ) -> std::io::Result<usize> {
     use std::os::fd::AsRawFd;
 
+    // SAFETY: `terminal_fd` is an open descriptor, and `read_buffer` is
+    // writable for the `read_buffer.len()` bytes passed.
     let read_byte_count = unsafe {
         libc::read(
             terminal_fd.as_raw_fd(),
@@ -225,6 +238,8 @@ fn write_terminal(terminal_fd: &std::os::fd::OwnedFd, input_bytes: &[u8]) -> std
 
     let mut written_byte_count = 0;
     while written_byte_count < input_bytes.len() {
+        // SAFETY: `terminal_fd` is an open descriptor, and the tail of
+        // `input_bytes` is readable for the byte count passed.
         let write_byte_count = unsafe {
             libc::write(
                 terminal_fd.as_raw_fd(),
@@ -260,6 +275,8 @@ fn resize_terminal(terminal_fd: &std::os::fd::OwnedFd, pty_size: PtySize) -> std
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    // SAFETY: `TIOCSWINSZ` reads one `winsize` through the pointer, and
+    // `window_size` lives for the call.
     let resize_ioctl_result = unsafe {
         libc::ioctl(
             terminal_fd.as_raw_fd(),
@@ -287,6 +304,8 @@ pub fn set_terminal_cloexec(
     terminal_file_descriptor: std::os::fd::RawFd,
     should_close_on_exec: bool,
 ) -> std::io::Result<()> {
+    // SAFETY: `F_GETFD` reads no memory, and a descriptor that is not open
+    // gives `-1`.
     let descriptor_flags = unsafe { libc::fcntl(terminal_file_descriptor, libc::F_GETFD) };
     if descriptor_flags < 0 {
         return Err(std::io::Error::last_os_error());
@@ -296,6 +315,7 @@ pub fn set_terminal_cloexec(
     } else {
         descriptor_flags & !libc::FD_CLOEXEC
     };
+    // SAFETY: `F_SETFD` takes the flags by value and reads no memory.
     if unsafe {
         libc::fcntl(
             terminal_file_descriptor,
@@ -347,6 +367,8 @@ pub fn find_terminal_master_name(terminal_file_descriptor: std::os::fd::RawFd) -
     // 128 bytes holds every terminal name these systems report: `/dev/pts/0`
     // through `/dev/pts/1048575` on Linux, `/dev/ttys009` on macOS.
     let mut terminal_name_buffer = [0 as libc::c_char; 128];
+    // SAFETY: `terminal_name_buffer` is writable for the full length passed. A
+    // descriptor that is no pseudoterminal master fails the call.
     if unsafe {
         ptsname_r(
             terminal_file_descriptor,
@@ -357,7 +379,8 @@ pub fn find_terminal_master_name(terminal_file_descriptor: std::os::fd::RawFd) -
     {
         return None;
     }
-    // The call writes the name and its terminating zero into the buffer.
+    // SAFETY: a successful `ptsname_r` writes the name and its terminating
+    // zero into the buffer, and fails when the buffer is too small.
     let terminal_name = unsafe { std::ffi::CStr::from_ptr(terminal_name_buffer.as_ptr()) };
     terminal_name.to_str().ok().map(str::to_string)
 }
@@ -400,8 +423,8 @@ type WakerInner = std::os::fd::OwnedFd;
 /// The one descriptor a pane's reader waits on beside its terminal. Another
 /// thread rings it to bring the reader back from that wait.
 ///
-/// A doorbell. A ring means *something about this pane changed*: its child was
-/// reaped, or the backend is parking its readers. The reader reads which of
+/// A doorbell. A ring means *something about this pane changed*: its child
+/// ended, or the backend is parking its readers. The reader reads which of
 /// those it was from the pane's own state, never from the doorbell.
 ///
 /// A ring stays pending until the reader drains it: one that lands before the
@@ -614,14 +637,14 @@ struct GateState {
 
 /// What tells a pane's reader why its doorbell rang, and where to park.
 ///
-/// The doorbell says only that something changed; `has_child_exited` and
+/// The doorbell says only that something changed; `child_exit` and
 /// `reader_gate` are the two things it can have been.
 #[cfg(unix)]
 struct ReaderSignals<'a> {
     /// The doorbell, waited on beside the pane's terminal.
     reader_waker: &'a Waker,
-    /// Set by the watcher before it rings: the child has been reaped.
-    has_child_exited: &'a AtomicBool,
+    /// Set by the watcher before it rings: the child has ended.
+    child_exit: &'a ChildExit,
     /// Where the reader parks while the backend holds its readers.
     reader_gate: &'a ReaderGate,
 }
@@ -667,8 +690,8 @@ impl ReaderGate {
         }
     }
 
-    /// Park here while the gate is paused. Returns at once when it is not: an
-    /// unpaused round costs one uncontended lock.
+    /// Park here while the gate is paused. Returns at once, after one lock,
+    /// when it is not.
     fn park_if_paused(&self) {
         let mut gate_state = self.gate_state.lock().expect("reader gate");
         if !gate_state.is_paused {
@@ -750,17 +773,17 @@ impl Delivery {
         // The consumer is called with the lock released: it runs for as long
         // as it likes, and the watcher can still read the chunk as in flight
         // throughout.
-        let was_output_accepted = self
+        let is_output_accepted = self
             .pty_sink
             .accept_output_bytes(pane_id, output_bytes.to_vec());
         let mut exit_handover_state = self.exit_handover_state.lock().expect("handover");
         exit_handover_state.finished_chunk_count += 1;
         // A consumer that refuses a chunk is done with this pane and is handed
         // no exit afterwards. Settled in the same step that releases the chunk.
-        if !was_output_accepted {
+        if !is_output_accepted {
             exit_handover_state.is_settled = true;
         }
-        was_output_accepted
+        is_output_accepted
     }
 
     /// Whether this pane's exit is already settled. A reader that finds it
@@ -866,7 +889,7 @@ const CURSOR_POSITION_REQUEST_BYTES: &[u8] = b"\x1b[6n";
 /// The answer to [`CURSOR_POSITION_REQUEST_BYTES`]: the cursor is at row 1, column 1. Queued
 /// on a pane's input as the pane opens.
 #[cfg(windows)]
-const CURSOR_POSITION_AT_HOME_RESPONSE_BYTES: &[u8] = b"\x1b[1;1R";
+pub(crate) const CURSOR_POSITION_AT_HOME_RESPONSE_BYTES: &[u8] = b"\x1b[1;1R";
 
 /// Reads a pane's output and takes the first [`CURSOR_POSITION_REQUEST_BYTES`] out of it.
 ///
@@ -1015,21 +1038,21 @@ fn drain_terminal(terminal_reader: &mut dyn Read) {
 /// wakeups. The wait ends when the terminal has something, or when the
 /// doorbell rings.
 ///
-/// The watcher rings the doorbell once it has reaped the child, and the ring
+/// The watcher rings the doorbell once it has seen the child end, and the ring
 /// reaches a reader that a descendant holding the terminal open keeps waiting.
 /// The ring stays pending until this pump drains it: one that lands before the
 /// reader reaches its wait is still there when it does.
 ///
 /// The doorbell only says something changed; the pump reads
-/// `reader_signals.has_child_exited`
-/// to see what. The grace rounds start when that flag says the child is
-/// reaped, never on the ring alone: the watcher stores the flag before it
-/// rings, and `reader_signals.reader_gate` rings the same doorbell to bring the
-/// reader to its park. From then on the wait runs in rounds of `grace_duration`, and a round in
-/// which the terminal produces nothing ends the pump: everything the dead
-/// child printed has been handed over, and the caller publishes the exit
-/// behind it. Rounds stop `limit_duration` after the ring that carried the flag, which
-/// bounds a descendant that holds the terminal open and keeps printing.
+/// `reader_signals.child_exit` to see what. The grace rounds start when that
+/// record says the child has ended, never on the ring alone: the watcher stores
+/// the record before it rings, and `reader_signals.reader_gate` rings the same
+/// doorbell to bring the reader to its park. From then on the wait runs in
+/// rounds of `grace_duration`, and a round in which the terminal produces
+/// nothing ends the pump: everything the dead child printed has been handed
+/// over, and the caller publishes the exit behind it. Rounds stop
+/// `limit_duration` after the ring that found the child ended, which bounds a
+/// descendant that holds the terminal open and keeps printing.
 ///
 /// Each round opens at the gate's park, before the wait. A reader held there
 /// has read nothing it did not hand over.
@@ -1038,8 +1061,9 @@ fn drain_terminal(terminal_reader: &mut dyn Read) {
 /// with anything but `Interrupted`, when the consumer refuses a chunk, when a
 /// ring finds the pane settled, and when the wait fails with anything but
 /// `EINTR`. [`kill_pane`](PortablePtyBackend::kill_pane) settles the pane and then
-/// kills the child: the ring the watcher fires on reaping it finds the pane
-/// settled, and the pump stops without starting a round.
+/// kills the child: the ring that kill fires, and the one the watcher fires
+/// once the child has ended, find the pane settled, and the pump stops without
+/// starting a round.
 #[cfg(unix)]
 fn pump_waited(
     delivery: &Delivery,
@@ -1094,7 +1118,7 @@ fn pump_waited(
                     }
                     // A ring from the gate leaves the rounds alone: the child
                     // is still running, and the pump loops back to the park.
-                    if reader_signals.has_child_exited.load(Ordering::SeqCst) {
+                    if reader_signals.child_exit.has_exited() {
                         exit_deadline = Some(Instant::now() + limit_duration);
                         is_woken = true;
                     }
@@ -1209,22 +1233,37 @@ fn wait_for_reader_to_read_again(
     }
 }
 
+/// A pane's master end: `portable-pty`'s master.
+#[cfg(unix)]
+type PtyMaster = Box<dyn MasterPty + Send>;
+
+/// A pane's master end: the pane's pseudoconsole.
+#[cfg(windows)]
+type PtyMaster = PaneConsole;
+
+/// A pane's child process: `portable-pty`'s child.
+#[cfg(unix)]
+type PtyChild = Box<dyn Child + Send + Sync>;
+
+/// A pane's child process: the pane program.
+#[cfg(windows)]
+type PtyChild = PaneProcess;
+
 /// A pane's terminal, as the backend holds it for resizing.
 ///
 /// The `Owned` arm is one descriptor the pane opened for itself, shared with
 /// its reader and writer threads: the whole pane spends a single descriptor on
-/// its terminal. `Crate` keeps `portable-pty`'s master, for a terminal that
-/// exposes no descriptor to share.
+/// its terminal. `Master` keeps the pane's master end: `portable-pty`'s master
+/// for a Unix terminal that exposes no descriptor to share, and the pane's
+/// pseudoconsole on Windows.
 enum Terminal {
     /// The pane's own descriptor, also held by its reader and writer.
     #[cfg(unix)]
     Owned(Arc<std::os::fd::OwnedFd>),
-    /// `portable-pty`'s master, resized through the crate.
-    ///
-    /// A slot the watcher shares. On Windows the watcher takes the master out
-    /// and drops it once the child is reaped, which closes the pane's
-    /// terminal; the slot is empty from then on.
-    Crate(Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>),
+    /// The pane's master end, in a slot the watcher shares. On Windows the
+    /// watcher takes the pseudoconsole out and drops it once the child has
+    /// ended, which closes the pane's terminal; the slot is empty from then on.
+    Master(Arc<Mutex<Option<PtyMaster>>>),
 }
 
 impl Terminal {
@@ -1239,10 +1278,15 @@ impl Terminal {
             #[cfg(unix)]
             Terminal::Owned(terminal_fd) => resize_terminal(terminal_fd, pty_size)
                 .map_err(|io_error| build_io_error(io_error.to_string())),
-            Terminal::Crate(pty_master_slot) => {
+            Terminal::Master(pty_master_slot) => {
                 match pty_master_slot.lock().expect("terminal").as_ref() {
+                    #[cfg(unix)]
                     Some(master_pty) => master_pty
                         .resize(build_portable_pty_size(pty_size))
+                        .map_err(|io_error| build_io_error(io_error.to_string())),
+                    #[cfg(windows)]
+                    Some(pane_console) => pane_console
+                        .resize(pty_size)
                         .map_err(|io_error| build_io_error(io_error.to_string())),
                     // The terminal is closed: nothing is left to retune.
                     None => Ok(()),
@@ -1258,8 +1302,10 @@ enum ReadSide {
     /// reader back from that wait.
     #[cfg(unix)]
     Owned(Arc<std::os::fd::OwnedFd>, Arc<Waker>),
-    /// `portable-pty`'s reader, blocked in `read` until the terminal ends.
-    Crate(Box<dyn Read + Send>),
+    /// A reader blocked in `read` until the terminal ends: `portable-pty`'s
+    /// reader on Unix, the read end of the pseudoconsole's output pipe on
+    /// Windows.
+    Blocking(Box<dyn Read + Send>),
 }
 
 /// What a pane's writer thread sends the child's input with.
@@ -1268,9 +1314,10 @@ enum WriteSide {
     /// directions of the terminal share it.
     #[cfg(unix)]
     Owned(Arc<std::os::fd::OwnedFd>),
-    /// `portable-pty`'s writer, which reports the end of input itself when
-    /// dropped.
-    Crate(Box<dyn Write + Send>),
+    /// A writer of the terminal's own, which reports the end of input when
+    /// dropped: `portable-pty`'s writer on Unix, the write end of the
+    /// pseudoconsole's input pipe on Windows.
+    Blocking(Box<dyn Write + Send>),
 }
 
 /// What the per-pane writer thread accepts on its channel.
@@ -1286,7 +1333,7 @@ enum WriterMessage {
     Stop,
 }
 
-/// What a pane's watcher thread does after it has reaped the child, chosen by
+/// What a pane's watcher thread does after it has seen the child end, chosen by
 /// how that pane's terminal can reach the end of its output.
 enum WatcherTail {
     /// Nothing: the reader reaches the end on its own and publishes the exit.
@@ -1300,8 +1347,8 @@ enum WatcherTail {
     /// to `pty_sink` when the reader has not settled it by the deadline.
     #[cfg(windows)]
     CloseTerminal {
-        /// The pane's master, taken out and dropped to close the console.
-        pty_master_slot: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
+        /// The pane's pseudoconsole, taken out and dropped to close it.
+        pty_master_slot: Arc<Mutex<Option<PtyMaster>>>,
         /// Where the standby publishes the exit. Held weakly: a watcher
         /// waiting on a long-lived child keeps no consumer alive.
         pty_sink: Weak<dyn PtySink>,
@@ -1316,7 +1363,7 @@ enum WatcherTail {
 /// Give `pane_id`'s reader until the standby's deadline to settle the exit, then
 /// settle it here and publish `exit_status` if the reader never did.
 ///
-/// The watcher's whole tail once the child is reaped, on both paths that have
+/// The watcher's whole tail once the child has ended, on both paths that have
 /// one: a Unix terminal exposing no descriptor, and a Windows pane whose
 /// console is being closed. Nothing is settled or published when `pty_sink` no
 /// longer has an owner.
@@ -1357,35 +1404,36 @@ fn settle_exit_and_publish_status(
     exit_status: ExitStatus,
     should_publish_exit_status: bool,
 ) {
-    let was_already_settled = std::mem::replace(
+    let is_already_settled = std::mem::replace(
         &mut exit_handover_state.lock().expect("handover").is_settled,
         true,
     );
-    if should_publish_exit_status && !was_already_settled {
+    if should_publish_exit_status && !is_already_settled {
         pty_sink.accept_exit_status(pane_id, exit_status);
     }
 }
 
 /// Kills the wrapped child on drop unless [`release_child`](ChildGuard::release_child)ed.
 ///
-/// Dropping a `portable-pty` child does not terminate the process. The guard
-/// wraps the child through [`spawn_pane`](PortablePtyBackend::spawn_pane)'s fallible
-/// setup: a step after launch that returns early drops the guard, which kills
-/// the child. [`release_child`](ChildGuard::release_child) hands the child to the watcher
+/// Dropping a `portable-pty` child or a Windows pane program does not terminate
+/// the process. The guard wraps the child through
+/// [`spawn_pane`](PortablePtyBackend::spawn_pane)'s fallible setup: a step
+/// after launch that returns early drops the guard, which kills the child.
+/// [`release_child`](ChildGuard::release_child) hands the child to the watcher
 /// thread, and the guard kills nothing after that.
 struct ChildGuard {
-    child_process: Option<Box<dyn Child + Send + Sync>>,
+    child_process: Option<PtyChild>,
 }
 
 impl ChildGuard {
-    fn from_child(child_process: Box<dyn Child + Send + Sync>) -> Self {
+    fn from_child(child_process: PtyChild) -> Self {
         ChildGuard {
             child_process: Some(child_process),
         }
     }
 
     /// Take the child out, leaving the guard inert (no kill on drop).
-    fn release_child(mut self) -> Box<dyn Child + Send + Sync> {
+    fn release_child(mut self) -> PtyChild {
         self.child_process
             .take()
             .expect("child present until disarmed")
@@ -1400,6 +1448,7 @@ impl Drop for ChildGuard {
     }
 }
 
+#[cfg(unix)]
 impl std::ops::Deref for ChildGuard {
     type Target = dyn Child + Send + Sync;
 
@@ -1423,24 +1472,33 @@ impl std::ops::Deref for ChildGuard {
 /// A [`WriterMessage::Barrier`] travels that same channel and is answered where it
 /// sits in it: its answer means every byte queued before it is on the
 /// terminal.
-fn start_writer(write_side: WriteSide) -> Sender<WriterMessage> {
+///
+/// After each [`WriterMessage::Bytes`] it has written, or failed to write, the
+/// thread takes that message's length off `queued_input_byte_count`.
+fn start_writer(
+    write_side: WriteSide,
+    queued_input_byte_count: Arc<AtomicUsize>,
+) -> Sender<WriterMessage> {
     let (writer_sender, writer_receiver) = channel::<WriterMessage>();
 
     let _ = spawn_pty_thread("koshi-pty-write", move || {
         let mut write_side = write_side;
         while let Ok(writer_message) = writer_receiver.recv() {
             match writer_message {
-                WriterMessage::Bytes(input_bytes) => match &mut write_side {
-                    #[cfg(unix)]
-                    WriteSide::Owned(terminal_fd) => {
-                        let _ = write_terminal(terminal_fd, &input_bytes);
+                WriterMessage::Bytes(input_bytes) => {
+                    match &mut write_side {
+                        #[cfg(unix)]
+                        WriteSide::Owned(terminal_fd) => {
+                            let _ = write_terminal(terminal_fd, &input_bytes);
+                        }
+                        WriteSide::Blocking(pty_writer) => {
+                            let _ = pty_writer
+                                .write_all(&input_bytes)
+                                .and_then(|_| pty_writer.flush());
+                        }
                     }
-                    WriteSide::Crate(pty_writer) => {
-                        let _ = pty_writer
-                            .write_all(&input_bytes)
-                            .and_then(|_| pty_writer.flush());
-                    }
-                },
+                    queued_input_byte_count.fetch_sub(input_bytes.len(), Ordering::SeqCst);
+                }
                 WriterMessage::Barrier(barrier_sender) => {
                     let _ = barrier_sender.send(());
                 }
@@ -1450,6 +1508,42 @@ fn start_writer(write_side: WriteSide) -> Sender<WriterMessage> {
     });
 
     writer_sender
+}
+
+/// Queue `input_bytes` for `pane_id`'s writer thread on `writer_sender`, and
+/// count them in `queued_input_byte_count` until that thread has written them.
+///
+/// # Errors
+/// [`PtyError::InputQueueFull`] when the bytes already counted plus
+/// `input_bytes` would pass [`MAX_QUEUED_PANE_INPUT_BYTE_COUNT`]: nothing is
+/// queued or counted. [`PtyError::Io`] when the writer thread has ended: the
+/// count is taken back.
+fn queue_pane_input(
+    pane_id: PaneId,
+    writer_sender: &Sender<WriterMessage>,
+    queued_input_byte_count: &AtomicUsize,
+    input_bytes: &[u8],
+) -> Result<(), PtyError> {
+    queued_input_byte_count
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |queued_byte_count| {
+            queued_byte_count
+                .checked_add(input_bytes.len())
+                .filter(|counted_byte_count| {
+                    *counted_byte_count <= MAX_QUEUED_PANE_INPUT_BYTE_COUNT
+                })
+        })
+        .map_err(|queued_byte_count| PtyError::InputQueueFull {
+            pane_id,
+            queued_byte_count,
+        })?;
+    writer_sender
+        .send(WriterMessage::Bytes(input_bytes.to_vec()))
+        .map_err(|send_error| {
+            queued_input_byte_count.fetch_sub(input_bytes.len(), Ordering::SeqCst);
+            PtyError::Io {
+                detail: send_error.to_string(),
+            }
+        })
 }
 
 /// Start the reader thread of a pane that owns its terminal descriptor.
@@ -1465,7 +1559,7 @@ fn start_owned_reader(
     pane_id: PaneId,
     terminal_fd: Arc<std::os::fd::OwnedFd>,
     reader_waker: Arc<Waker>,
-    has_child_exited: Arc<AtomicBool>,
+    child_exit: Arc<ChildExit>,
     reader_ticket: ReaderTicket,
 ) -> JoinHandle<()> {
     spawn_pty_thread("koshi-pty-read", move || {
@@ -1475,7 +1569,7 @@ fn start_owned_reader(
             &terminal_fd,
             ReaderSignals {
                 reader_waker: &reader_waker,
-                has_child_exited: &has_child_exited,
+                child_exit: &child_exit,
                 reader_gate: &reader_ticket.reader_gate,
             },
             EXIT_PUBLISH_GRACE_DURATION,
@@ -1486,37 +1580,182 @@ fn start_owned_reader(
     })
 }
 
+/// How a pane's child ended, as the pane's watcher learned it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ObservedChildExit {
+    /// How the child ended.
+    exit_status: ExitStatus,
+    /// `true` when the ended child stays a zombie of this process until
+    /// [`kill_pane`](PortablePtyBackend::kill_pane) reaps it: its process ID
+    /// and its process group ID stay reserved until then. `false` when an
+    /// earlier process image reaped it, or when its end could not be waited on.
+    #[cfg(unix)]
+    is_zombie_kept: bool,
+}
+
+/// How a pane's child ended, and whether the pane's watcher reaps it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ChildExitRecord {
+    /// How the child ended. `None` while it runs.
+    observed_exit: Option<ObservedChildExit>,
+    /// `true` once [`kill_pane`](PortablePtyBackend::kill_pane) stopped
+    /// waiting for a child that still ran ([`ChildExit::leave_child_running`]).
+    /// The watcher then reaps the child's zombie when the child ends.
+    is_left_running: bool,
+}
+
+/// How a pane's child ended, once its watcher saw it end, and the wake-up of
+/// every thread that waits for that.
+#[derive(Default)]
+struct ChildExit {
+    /// How the child ended, and who reaps it.
+    exit_record: Mutex<ChildExitRecord>,
+    /// Notified once `exit_record.observed_exit` is set.
+    exit_published: Condvar,
+}
+
+impl ChildExit {
+    /// The lock on `exit_record`, taken back from a thread that panicked
+    /// while it held it.
+    fn lock_exit_record(&self) -> MutexGuard<'_, ChildExitRecord> {
+        self.exit_record
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Record `observed_exit` as how the child ended, and wake every thread in
+    /// [`wait_for_exit`](Self::wait_for_exit). An exit already recorded stays.
+    ///
+    /// Returns `true` when [`kill_pane`](PortablePtyBackend::kill_pane) left
+    /// the child running ([`leave_child_running`](Self::leave_child_running)):
+    /// the caller reaps a kept zombie then.
+    fn publish_observed_exit(&self, observed_exit: ObservedChildExit) -> bool {
+        let is_left_running = {
+            let mut exit_record = self.lock_exit_record();
+            exit_record.observed_exit.get_or_insert(observed_exit);
+            exit_record.is_left_running
+        };
+        self.exit_published.notify_all();
+        is_left_running
+    }
+
+    /// Stop waiting for a child that still runs, and hand the reap of its
+    /// zombie to the watcher.
+    ///
+    /// Returns `true` when the child still ran: the watcher reaps it when it
+    /// ends. Returns `false`, and changes nothing, when the exit was recorded
+    /// first: the caller reaps it.
+    fn leave_child_running(&self) -> bool {
+        let mut exit_record = self.lock_exit_record();
+        if exit_record.observed_exit.is_some() {
+            return false;
+        }
+        exit_record.is_left_running = true;
+        true
+    }
+
+    /// How the child ended, or `None` while it runs.
+    fn get_exit_status(&self) -> Option<ExitStatus> {
+        self.lock_exit_record()
+            .observed_exit
+            .map(|observed_exit| observed_exit.exit_status)
+    }
+
+    /// How the child ended, for the process image that takes this pane back
+    /// next. `None` while the child runs, and on Unix also while its zombie is
+    /// kept: that image waits on the process ID itself.
+    fn get_carried_exit_status(&self) -> Option<ExitStatus> {
+        let observed_exit = self.lock_exit_record().observed_exit?;
+        #[cfg(unix)]
+        if observed_exit.is_zombie_kept {
+            return None;
+        }
+        Some(observed_exit.exit_status)
+    }
+
+    /// Whether the child has ended.
+    fn has_exited(&self) -> bool {
+        self.get_exit_status().is_some()
+    }
+
+    /// Whether the child's process ID, and the process group ID it names, are
+    /// still reserved for this pane: `true` while the child runs, and after it
+    /// ended while its zombie is kept.
+    #[cfg(unix)]
+    fn is_process_id_reserved(&self) -> bool {
+        self.lock_exit_record()
+            .observed_exit
+            .is_none_or(|observed_exit| observed_exit.is_zombie_kept)
+    }
+
+    /// Whether the ended child stays a zombie that
+    /// [`kill_pane`](PortablePtyBackend::kill_pane) reaps. `false` while the
+    /// child runs.
+    #[cfg(unix)]
+    fn is_zombie_kept(&self) -> bool {
+        self.lock_exit_record()
+            .observed_exit
+            .is_some_and(|observed_exit| observed_exit.is_zombie_kept)
+    }
+
+    /// Wait up to `wait_duration` for the child to end, and say whether it has.
+    /// A child that already ended returns `true` at once.
+    fn wait_for_exit(&self, wait_duration: Duration) -> bool {
+        let (exit_record, _) = self
+            .exit_published
+            .wait_timeout_while(self.lock_exit_record(), wait_duration, |exit_record| {
+                exit_record.observed_exit.is_none()
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+        exit_record.observed_exit.is_some()
+    }
+}
+
 /// The pane threads a watcher releases once it holds the child's exit status.
 struct WatchRelease {
-    /// Flipped once the child is reaped;
-    /// [`kill_pane`](PortablePtyBackend::kill_pane) reads it before signalling the
-    /// leader.
-    has_child_exited: Arc<AtomicBool>,
-    /// The status itself, kept on the pane;
-    /// [`list_carried_panes`](PortablePtyBackend::list_carried_panes) hands it to the
-    /// next process image.
-    child_exit_status: Arc<OnceLock<ExitStatus>>,
+    /// The record of how the child ended, kept on the pane:
+    /// [`kill_pane`](PortablePtyBackend::kill_pane) reads it before signalling
+    /// the leader, and
+    /// [`list_carried_panes`](PortablePtyBackend::list_carried_panes) hands it to
+    /// the next process image.
+    child_exit: Arc<ChildExit>,
     /// Carries the status to whoever publishes it.
     exit_status_sender: Sender<ExitStatus>,
     /// Releases the pane's writer thread.
     writer_stop_sender: Sender<WriterMessage>,
-    /// The reader's doorbell, rung once the child is reaped; the reader takes
+    /// The reader's doorbell, rung once the child has ended; the reader takes
     /// the last of the child's output.
     /// `None` for a reader that cannot be brought back from its `read`.
     #[cfg(unix)]
     reader_waker: Option<Arc<Waker>>,
+    /// The child's process ID, reaped here when
+    /// [`kill_pane`](PortablePtyBackend::kill_pane) left the child running.
+    #[cfg(unix)]
+    child_process_id: u32,
+    /// The backend's set of children left running, which `child_process_id`
+    /// leaves once this release reaps it.
+    #[cfg(unix)]
+    left_running_child_process_ids: Arc<Mutex<BTreeSet<u32>>>,
 }
 
 impl WatchRelease {
-    /// Record `exit_status` on the pane, mark the child gone, hand the status on,
-    /// release the writer, and ring the reader's doorbell.
-    ///
-    /// The status is stored before the flag: a reader of the flag finds the
-    /// status already stored.
-    fn publish_exit_status(&self, exit_status: ExitStatus) {
-        let _ = self.child_exit_status.set(exit_status);
-        self.has_child_exited.store(true, Ordering::SeqCst);
-        let _ = self.exit_status_sender.send(exit_status);
+    /// Record `observed_exit` on the pane, hand its status on, release the
+    /// writer, and ring the reader's doorbell. On Unix, a child that
+    /// [`kill_pane`](PortablePtyBackend::kill_pane) left running has its kept
+    /// zombie reaped first, and leaves `left_running_child_process_ids`.
+    fn publish_exit_status(&self, observed_exit: ObservedChildExit) {
+        let is_left_running = self.child_exit.publish_observed_exit(observed_exit);
+        #[cfg(unix)]
+        if is_left_running {
+            if observed_exit.is_zombie_kept {
+                reap_child(self.child_process_id);
+            }
+            lock_left_running_child_process_ids(&self.left_running_child_process_ids)
+                .remove(&self.child_process_id);
+        }
+        #[cfg(windows)]
+        let _ = is_left_running;
+        let _ = self.exit_status_sender.send(observed_exit.exit_status);
         let _ = self.writer_stop_sender.send(WriterMessage::Stop);
         #[cfg(unix)]
         if let Some(reader_waker) = &self.reader_waker {
@@ -1525,30 +1764,84 @@ impl WatchRelease {
     }
 }
 
-/// Wait for child `child_process_id` to end, and report how it ended.
+/// Wait for child `child_process_id` to end, and report how it ended, leaving
+/// it a zombie: its process ID and process group ID stay reserved until
+/// [`reap_child`] runs.
 ///
-/// What a pane taken back through [`adopt`](PortablePtyBackend::adopt) reaps
-/// its child with, when no image before it saw the child end: the swap left the
-/// process id but no `portable-pty` child to wait on. An interrupted wait is
-/// retried, and a stop or a continue is not an end. `ECHILD` — the child was
-/// reaped elsewhere — is reported as [`ExitStatus::ExitCode`]`(-1)`, the same
-/// value a failed wait reports.
+/// `waitid` with `WEXITED | WNOWAIT` is retried on `EINTR`. A child that
+/// ended with a code gives [`ExitStatus::ExitCode`], one a signal ended gives
+/// [`ExitStatus::Signaled`] with that signal's number, and both keep the
+/// zombie. Any other failure, such as `ECHILD` for a child this process cannot
+/// wait on, gives [`UNOBSERVED_EXIT`] with no zombie kept.
+///
+/// Example: a child that ran `exit 5` gives `ExitCode(5)`, and a child that
+/// `kill -TERM` ended gives `Signaled(15)`.
 #[cfg(unix)]
-fn wait_for_child(child_process_id: u32) -> ExitStatus {
-    use nix::errno::Errno;
-    use nix::sys::wait::{waitpid, WaitStatus};
-    use nix::unistd::Pid;
-
-    let waited_process_id = Pid::from_raw(child_process_id as i32);
+fn wait_for_child_exit(child_process_id: u32) -> ObservedChildExit {
     loop {
-        match waitpid(waited_process_id, None) {
-            Ok(WaitStatus::Exited(_, code)) => return ExitStatus::ExitCode(code),
-            Ok(WaitStatus::Signaled(_, signal, _)) => return ExitStatus::Signaled(signal as i32),
-            Ok(_) => {}
-            Err(Errno::EINTR) => {}
-            Err(_) => return UNOBSERVED_EXIT,
+        // SAFETY: an all-zero `siginfo_t` is valid, and `waitid` writes the
+        // child's state into it.
+        let mut child_signal_information: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `waitid` writes only into `child_signal_information`.
+        let wait_result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child_process_id,
+                &mut child_signal_information,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if wait_result == 0 {
+            // SAFETY: `waitid` answered for an ended child, which fills the
+            // status field.
+            let child_status = unsafe { child_signal_information.si_status() };
+            let exit_status = match child_signal_information.si_code {
+                libc::CLD_EXITED => ExitStatus::ExitCode(child_status),
+                libc::CLD_KILLED | libc::CLD_DUMPED => ExitStatus::Signaled(child_status),
+                _ => UNOBSERVED_EXIT,
+            };
+            return ObservedChildExit {
+                exit_status,
+                is_zombie_kept: true,
+            };
+        }
+        if std::io::Error::last_os_error().kind() != ErrorKind::Interrupted {
+            return ObservedChildExit {
+                exit_status: UNOBSERVED_EXIT,
+                is_zombie_kept: false,
+            };
         }
     }
+}
+
+/// The lock on a backend's set of children left running, taken back from a
+/// thread that panicked while it held it.
+#[cfg(unix)]
+fn lock_left_running_child_process_ids(
+    left_running_child_process_ids: &Mutex<BTreeSet<u32>>,
+) -> MutexGuard<'_, BTreeSet<u32>> {
+    left_running_child_process_ids
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Reap the zombie child `child_process_id` that [`wait_for_child_exit`]
+/// kept, which returns its process ID and process group ID to the system.
+///
+/// `waitpid` with `WNOHANG` never waits: a child that still runs is left
+/// alone, and an ID that names no child of this process is passed over. `0`
+/// and an ID above `i32::MAX`, which `waitpid` reads as a process group, are
+/// passed over too.
+#[cfg(unix)]
+fn reap_child(child_process_id: u32) {
+    let Ok(waited_process_id) = libc::pid_t::try_from(child_process_id) else {
+        return;
+    };
+    if waited_process_id <= 0 {
+        return;
+    }
+    // SAFETY: a null status pointer makes `waitpid` write no status.
+    unsafe { libc::waitpid(waited_process_id, std::ptr::null_mut(), libc::WNOHANG) };
 }
 
 /// Everything the backend retains for one live pane, keyed by [`PaneId`].
@@ -1576,13 +1869,11 @@ struct PaneEntry {
     /// stopped reading its stdin blocks only the writer thread, never the
     /// dispatcher.
     ///
-    /// The watcher's [`WriterMessage::Stop`], queued once the child has exited,
-    /// releases the writer — including on a pane left open past its child's
-    /// death. This is not the only `Sender` on the channel: the watcher holds a
-    /// clone to send that `Stop` with, and dropping this one (on
-    /// `kill_pane`/teardown) leaves the channel open until the watcher ends too.
-    /// `kill_pane` joins the watcher; the `Stop` has been queued by the time
-    /// `kill_pane` returns.
+    /// A [`WriterMessage::Stop`] releases the writer once the input queued
+    /// before it is written. The watcher queues one once the child has exited,
+    /// including on a pane left open past its child's death, and holds a clone
+    /// of this sender to do so. [`kill_pane`](PortablePtyBackend::kill_pane)
+    /// queues one before it waits for the child.
     ///
     /// A writer already blocked inside its write — the child stopped reading
     /// while a `setsid` descendant still holds the slave open (Linux; macOS
@@ -1592,21 +1883,21 @@ struct PaneEntry {
     /// [`flush_writers`](PortablePtyBackend::flush_writers) sends its barrier on
     /// this same channel, and names the pane whose writer is in that state.
     writer_sender: Sender<WriterMessage>,
+    /// How many bytes [`queue_pane_input`] queued on `writer_sender` that the
+    /// writer thread has not finished writing.
+    queued_input_byte_count: Arc<AtomicUsize>,
     /// Kill handle for the child process:
     /// [`force_kill_child`](PtyChildKillControl::force_kill_child) signals the child alone,
     /// [`force_kill_process_tree`](PtyChildKillControl::force_kill_process_tree) the whole group,
     /// and the two stop requests ask them to exit on their own.
     kill_control: PtyChildKillControl,
-    /// Flipped to `true` by the watcher thread the moment the child exits; read
-    /// by [`kill_pane`](PortablePtyBackend::kill_pane) before it signals the leader.
-    has_child_exited: Arc<AtomicBool>,
-    /// How the child ended, filled in by the watcher thread alongside
-    /// `has_child_exited`.
-    /// Empty while the child runs. Read by
-    /// [`list_carried_panes`](PortablePtyBackend::list_carried_panes), which is how a
-    /// status this process observed reaches the process image that replaces it:
-    /// a reaped child cannot be waited on twice.
-    child_exit_status: Arc<OnceLock<ExitStatus>>,
+    /// How the child ended, recorded by the watcher thread the moment it saw
+    /// the child end. Read by [`kill_pane`](PortablePtyBackend::kill_pane)
+    /// before it signals the leader, and by
+    /// [`list_carried_panes`](PortablePtyBackend::list_carried_panes), which is
+    /// how a status this process observed reaches the process image that
+    /// replaces it.
+    child_exit: Arc<ChildExit>,
     /// Reader thread: drains the pane's terminal to the backend's sink, and
     /// publishes the child's exit once that output has run dry, behind the last
     /// of the child's output.
@@ -1640,8 +1931,8 @@ struct PaneEntry {
     /// descriptor: that reader blocks in `read` and can never reach the park.
     #[cfg(unix)]
     reader_waker: Option<Arc<Waker>>,
-    /// Watcher thread: blocks on the child, records exit status, and flips
-    /// `has_child_exited`.
+    /// Watcher thread: blocks on the child, and records its exit status in
+    /// `child_exit`.
     watcher_thread: JoinHandle<()>,
     /// Whether this pane's exit is settled — the state the reader and watcher
     /// share. [`kill_pane`](PortablePtyBackend::kill_pane) sets it before killing
@@ -1650,9 +1941,9 @@ struct PaneEntry {
     exit_handover_state: Arc<Mutex<ExitHandover>>,
     /// Wakes the watcher out of the wait it is in.
     ///
-    /// [`kill_pane`](PortablePtyBackend::kill_pane) sends on this before joining the
-    /// watcher: tearing a pane down returns without sitting through the
-    /// rounds. What stops the exit being published is
+    /// [`kill_pane`](PortablePtyBackend::kill_pane) sends on this before it
+    /// waits for the child: tearing a pane down returns without sitting through
+    /// the rounds. What stops the exit being published is
     /// `exit_handover_state.is_settled`,
     /// which `kill_pane` sets first. Two waits listen: the standby of a Unix
     /// terminal that exposes no descriptor, and a Windows watcher waiting for
@@ -1661,9 +1952,10 @@ struct PaneEntry {
     exit_wait_cancel_sender: Sender<()>,
 }
 
-/// Real OS-PTY backend built on the `portable-pty` crate. Each spawned pane gets
-/// a kernel PTY plus three helper threads (reader, writer, watcher); the backend
-/// owns them all through one pane map, keyed by [`PaneId`].
+/// Real OS-PTY backend: `portable-pty` on Unix, a pseudoconsole of its own on
+/// Windows. Each spawned pane gets a PTY plus three helper threads (reader,
+/// writer, watcher); the backend owns them all through one pane map, keyed by
+/// [`PaneId`].
 pub struct PortablePtyBackend {
     /// Every live pane's PTY, threads, and kill handle, keyed by [`PaneId`]. Locked:
     /// [`spawn_pane`](PtyBackend::spawn_pane), [`resize_pane`](PtyBackend::resize_pane),
@@ -1675,10 +1967,18 @@ pub struct PortablePtyBackend {
     pty_sink: Arc<dyn PtySink>,
     /// Every pane reader's park, shared by each reader thread that owns its
     /// terminal descriptor. Driven by
-    /// [`pause_readers`](PortablePtyBackend::pause_readers) and
-    /// [`resume_readers`](PortablePtyBackend::resume_readers).
+    /// [`pause_readers`](PortablePtyBackend::pause_readers),
+    /// [`wait_until_readers_parked`](PortablePtyBackend::wait_until_readers_parked)
+    /// and [`resume_readers`](PortablePtyBackend::resume_readers).
     #[cfg(unix)]
     reader_gate: Arc<ReaderGate>,
+    /// The process IDs of the children that
+    /// [`kill_pane`](PtyBackend::kill_pane) left running, and of those an
+    /// earlier process image left running
+    /// ([`watch_left_running_children`](Self::watch_left_running_children)).
+    /// An ID leaves the set once its child is reaped.
+    #[cfg(unix)]
+    left_running_child_process_ids: Arc<Mutex<BTreeSet<u32>>>,
 }
 
 impl PortablePtyBackend {
@@ -1690,18 +1990,73 @@ impl PortablePtyBackend {
             pty_sink,
             #[cfg(unix)]
             reader_gate: Arc::new(ReaderGate::new()),
+            #[cfg(unix)]
+            left_running_child_process_ids: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
 
-    /// Hold every pane's reader at the top of its round: nothing more is read
-    /// from a terminal until the readers are resumed.
+    /// The process IDs of the children this backend left running and has not
+    /// reaped yet, in ascending order. The process image that replaces this
+    /// one hands them to its own
+    /// [`watch_left_running_children`](Self::watch_left_running_children).
+    #[cfg(unix)]
+    pub fn list_left_running_child_process_ids(&self) -> Vec<u32> {
+        lock_left_running_child_process_ids(&self.left_running_child_process_ids)
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    /// Wait on each child in `child_process_ids`, which an earlier process
+    /// image left running, and reap it when it ends.
     ///
-    /// A reader parks before it waits on its terminal: a paused backend has no
+    /// Each ID joins the set
+    /// [`list_left_running_child_process_ids`](Self::list_left_running_child_process_ids)
+    /// lists, and a thread of its own waits on it, reaps it, and takes it out
+    /// of that set. An ID that names no child of this process leaves the set
+    /// at once. An ID whose thread cannot start stays in the set and is not
+    /// reaped, and a warning names it.
+    #[cfg(unix)]
+    pub fn watch_left_running_children(&self, child_process_ids: &[u32]) {
+        for &child_process_id in child_process_ids {
+            lock_left_running_child_process_ids(&self.left_running_child_process_ids)
+                .insert(child_process_id);
+            let left_running_child_process_ids = Arc::clone(&self.left_running_child_process_ids);
+            let spawn_result = thread::Builder::new()
+                .name("koshi-pty-reap".to_string())
+                .spawn(move || {
+                    if wait_for_child_exit(child_process_id).is_zombie_kept {
+                        reap_child(child_process_id);
+                    }
+                    lock_left_running_child_process_ids(&left_running_child_process_ids)
+                        .remove(&child_process_id);
+                });
+            if let Err(spawn_error) = spawn_result {
+                tracing::warn!(
+                    child_process_id,
+                    %spawn_error,
+                    "a child an earlier image left running could not be watched; it is not reaped"
+                );
+            }
+        }
+    }
+
+    /// Tell every pane's reader to park at the top of its next round, and
+    /// ring each pane's doorbell to bring a reader waiting on a quiet terminal
+    /// to that top. Returns without waiting:
+    /// [`wait_until_readers_parked`](PortablePtyBackend::wait_until_readers_parked)
+    /// waits for the parks. Nothing more is read from a terminal once every
+    /// reader has parked, until the readers are resumed.
+    ///
+    /// Between this call and its park, each reader delivers at most one more
+    /// chunk. A reader inside the consumer's [`PtySink::accept_output_bytes`]
+    /// call finishes that call first.
+    ///
+    /// A reader parks before it waits on its terminal: a parked backend has no
     /// chunk in anyone's hands and no byte read but undelivered. Each parked
     /// reader keeps its `Delivery`, and with it the pane's exit channel, and
     /// [`resume_readers`](PortablePtyBackend::resume_readers) puts it back to
-    /// work in this same process. A reader whose pump already ended is no
-    /// longer counted and does not hold this up.
+    /// work in this same process.
     ///
     /// # Errors
     /// Returns [`PtyError::Io`] naming the first pane whose terminal exposes no
@@ -1731,15 +2086,17 @@ impl PortablePtyBackend {
                 waker.wake_reader();
             }
         }
-        self.reader_gate.wait_until_all_readers_parked();
         Ok(())
     }
 
-    /// Does nothing and answers `Ok(())`. On Windows the process that holds
-    /// the panes is never replaced, and its readers are never held still.
-    #[cfg(windows)]
-    pub fn pause_readers(&self) -> Result<(), PtyError> {
-        Ok(())
+    /// Wait until every reader that [`pause_readers`](PortablePtyBackend::pause_readers)
+    /// told to park has parked. A reader whose pump already ended is no longer
+    /// counted and does not hold this up. A reader waiting inside the
+    /// consumer's [`PtySink::accept_output_bytes`] call holds this up until
+    /// that call returns.
+    #[cfg(unix)]
+    pub fn wait_until_readers_parked(&self) {
+        self.reader_gate.wait_until_all_readers_parked();
     }
 
     /// Put every parked reader back to work. No byte is lost and no false exit
@@ -1750,10 +2107,6 @@ impl PortablePtyBackend {
         self.reader_gate.resume_readers();
     }
 
-    /// Does nothing. This backend's readers are never held still.
-    #[cfg(windows)]
-    pub fn resume_readers(&self) {}
-
     /// Wait until every pane's writer thread has written what it was handed:
     /// no byte this backend took for a child is still queued.
     ///
@@ -1762,9 +2115,8 @@ impl PortablePtyBackend {
     /// terminal. A pane whose writer thread has already ended is passed over:
     /// its child is gone.
     ///
-    /// The write-direction counterpart of
-    /// [`pause_readers`](PortablePtyBackend::pause_readers). A process about
-    /// to replace its own image calls both: the writer threads and their
+    /// The write-direction counterpart of `pause_readers` on Unix. A process
+    /// about to replace its own image calls both: the writer threads and their
     /// queues die with the old image.
     ///
     /// # Errors
@@ -1810,16 +2162,15 @@ impl PortablePtyBackend {
     /// One record per live pane: what a new process image needs to take each
     /// pane back.
     ///
-    /// A `terminal_fd` of `None` marks exactly the panes
-    /// [`pause_readers`](PortablePtyBackend::pause_readers) refuses. A pane
-    /// gets its own descriptor and its reader's doorbell together or gets
-    /// neither: a caller that finds a descriptor for every pane here knows
-    /// every reader can park.
+    /// On Unix, a `terminal_fd` of `None` marks exactly the panes
+    /// `pause_readers` refuses. A pane gets its own descriptor and its
+    /// reader's doorbell together or gets neither: a caller that finds a
+    /// descriptor for every pane here knows every reader can park.
     ///
-    /// A pane whose child this process already reaped carries the exit status
-    /// its watcher observed. Readers being held still does not hold a watcher
-    /// still: a child that ends during the hand-over is reaped here, and a
-    /// reaped child cannot be waited on again.
+    /// A pane carries an exit status only when the next process image cannot
+    /// wait for its child: an earlier image reaped the child, or its end could
+    /// not be waited on. A child that ended here stays a zombie, carries `None`,
+    /// and the next image waits on its process ID and reads the same status.
     pub fn list_carried_panes(&self) -> Vec<CarriedPtyPane> {
         #[cfg(unix)]
         use std::os::fd::AsRawFd;
@@ -1832,11 +2183,11 @@ impl PortablePtyBackend {
                 #[cfg(unix)]
                 terminal_fd: match &pane_entry.terminal {
                     Terminal::Owned(terminal_fd) => Some(terminal_fd.as_raw_fd()),
-                    Terminal::Crate(_) => None,
+                    Terminal::Master(_) => None,
                 },
                 process_id: pane_entry.kill_control.get_child_process_id(),
                 pty_size: pane_entry.pty_size,
-                exit_status: pane_entry.child_exit_status.get().copied(),
+                exit_status: pane_entry.child_exit.get_carried_exit_status(),
             })
             .collect()
     }
@@ -1860,24 +2211,29 @@ impl PortablePtyBackend {
     /// pane's last size; the terminal carried that size across the swap, and
     /// nothing is written to it: the child is sent no `SIGWINCH`.
     ///
-    /// `carried_exit_status` is how the child ended, as the image before this one observed it
-    /// — [`CarriedPtyPane::exit_status`]. The watcher publishes that status straight
-    /// away and waits on nothing: the process that reaped the child took the
-    /// status out of the kernel with it. The pane's reader still hands over
-    /// whatever the terminal holds before that exit reaches the consumer.
+    /// `carried_exit_status` is how the child ended, as an earlier image
+    /// reaped it — [`CarriedPtyPane::exit_status`]. The pane records that
+    /// status before this call returns, and the watcher publishes it and waits
+    /// on nothing: the image that reaped the child took the status out of the
+    /// kernel with it. No zombie is kept, so [`kill_pane`](PtyBackend::kill_pane)
+    /// reaps nothing and signals neither the process ID nor its group. The
+    /// pane's reader still hands over whatever the terminal holds before that
+    /// exit reaches the consumer.
     ///
-    /// `None` means no image has seen this child end, and the watcher reaps it
-    /// with `waitpid` on that one process id. `portable-pty` resets `SIGCHLD`
-    /// only inside `pre_exec`, on the child side of the fork (`portable-pty`
-    /// 0.9.0, `src/unix.rs`, `spawn_command`): no parent-side reaper competes
-    /// for the status. A child reaped by something outside this backend answers
-    /// `ECHILD` and is reported as [`ExitStatus::ExitCode`]`(-1)`.
+    /// `None` means no image reaped this child, and the watcher waits on that
+    /// one process ID with `waitid` and `WEXITED | WNOWAIT`, which keeps an
+    /// ended child a zombie as a spawned pane's watcher does. A child that
+    /// ended before this call is a zombie already, and its status reads at
+    /// once. `portable-pty` resets `SIGCHLD` only inside `pre_exec`, on the
+    /// child side of the fork (`portable-pty` 0.9.0, `src/unix.rs`,
+    /// `spawn_command`): no parent-side reaper competes for the status. A child
+    /// reaped by something outside this backend answers `ECHILD` and is
+    /// reported as [`ExitStatus::ExitCode`]`(-1)`.
     ///
     /// Before → after: a pane running `sh -c 'sleep 1; exit 3'` is restarted
     /// 0.9 s in, and the child ends while the images swap → the old image's
-    /// watcher reaps code 3 and carries it here, and the pane comes back
-    /// reporting `ExitCode(3)` rather than the `ExitCode(-1)` of a wait that
-    /// found nothing.
+    /// watcher keeps it a zombie and carries `None`, and this image's watcher
+    /// reads `ExitCode(3)` from that zombie.
     ///
     /// # Errors
     /// Returns [`PtyError::Io`] if this platform offers no one-descriptor wake
@@ -1906,8 +2262,7 @@ impl PortablePtyBackend {
             detail: "this platform offers no one-descriptor wake for a pane reader".to_string(),
         })?);
         let terminal_handle = Arc::new(terminal_fd);
-        let has_child_exited = Arc::new(AtomicBool::new(false));
-        let child_exit_status = Arc::new(OnceLock::new());
+        let child_exit = Arc::new(ChildExit::default());
 
         // Take the pane map and hold it until this pane is in it. An id the
         // backend already holds is refused here, with the map locked: the entry
@@ -1925,26 +2280,37 @@ impl PortablePtyBackend {
             pane_id,
             Arc::clone(&terminal_handle),
             Arc::clone(&waker),
-            Arc::clone(&has_child_exited),
+            Arc::clone(&child_exit),
             self.reader_gate.register_reader(),
         );
-        let writer_sender = start_writer(WriteSide::Owned(Arc::clone(&terminal_handle)));
+        let queued_input_byte_count = Arc::new(AtomicUsize::new(0));
+        let writer_sender = start_writer(
+            WriteSide::Owned(Arc::clone(&terminal_handle)),
+            Arc::clone(&queued_input_byte_count),
+        );
 
-        // The watcher publishes the carried status, or reaps the process id
-        // itself when no image saw the child end: the swap left no
-        // `portable-pty` child to wait on. Everything after that is what a
-        // spawned pane's watcher does.
+        // A carried status is recorded on the pane now; the watcher publishes
+        // it, or waits for the process id itself when no image reaped the
+        // child. Everything after that is what a spawned pane's watcher does.
+        let carried_observed_exit = carried_exit_status.map(|exit_status| ObservedChildExit {
+            exit_status,
+            is_zombie_kept: false,
+        });
+        if let Some(observed_exit) = carried_observed_exit {
+            child_exit.publish_observed_exit(observed_exit);
+        }
         let watch_release = WatchRelease {
-            has_child_exited: Arc::clone(&has_child_exited),
-            child_exit_status: Arc::clone(&child_exit_status),
+            child_exit: Arc::clone(&child_exit),
             exit_status_sender,
             writer_stop_sender: writer_sender.clone(),
             reader_waker: Some(Arc::clone(&waker)),
+            child_process_id: process_id,
+            left_running_child_process_ids: Arc::clone(&self.left_running_child_process_ids),
         };
         let watcher_thread = spawn_pty_thread("koshi-pty-watch", move || {
-            watch_release.publish_exit_status(
-                carried_exit_status.unwrap_or_else(|| wait_for_child(process_id)),
-            );
+            let observed_exit =
+                carried_observed_exit.unwrap_or_else(|| wait_for_child_exit(process_id));
+            watch_release.publish_exit_status(observed_exit);
         });
 
         pane_by_id.insert(
@@ -1953,9 +2319,9 @@ impl PortablePtyBackend {
                 terminal: Terminal::Owned(terminal_handle),
                 pty_size,
                 writer_sender,
+                queued_input_byte_count,
                 kill_control: PtyChildKillControl::from_process_id(process_id),
-                has_child_exited,
-                child_exit_status,
+                child_exit,
                 exit_handover_state,
                 exit_wait_cancel_sender,
                 reader_thread,
@@ -1974,17 +2340,19 @@ impl PtyBackend for PortablePtyBackend {
     /// The child runs detached on three background threads owned by the
     /// backend: a **reader** (master output → wherever this backend delivers),
     /// a **writer** (input channel → master; writes never block the
-    /// dispatcher), and a **watcher** (`child.wait()` → exit channel, flips the
-    /// `has_child_exited` flag, and releases the writer).
+    /// dispatcher), and a **watcher** (waits for the child to end → records
+    /// how it ended on the pane, sends it on the exit channel, and releases the
+    /// writer). On Unix the ended child stays a zombie until `kill_pane` reaps
+    /// it.
     ///
     /// The reader hands each chunk to the backend's PTY sink and publishes the
-    /// exit itself once the output runs out.
-    /// On Windows the watcher closes the pane's terminal once the child is
-    /// reaped, which brings the reader to that end; on a Unix terminal that
-    /// exposes no descriptor to wait on the watcher publishes the exit itself,
-    /// once output stops arriving. A pane always learns its child ended. The
-    /// reader then stops on its next chunk: a descendant still printing into a
-    /// closed pane's terminal is not forwarded.
+    /// exit itself once the output runs out. On Windows the watcher closes the
+    /// pane's terminal once the child has ended, which brings the reader to
+    /// that end; on a Unix terminal that exposes no descriptor to wait on the
+    /// watcher publishes the exit itself, once output stops arriving. A pane
+    /// always learns its child ended. The reader then stops on its next chunk:
+    /// a descendant still printing into a closed pane's terminal is not
+    /// forwarded.
     ///
     /// # Errors
     /// Returns [`PtyError::Spawn`] if the PTY can't be opened, the command can't
@@ -2014,85 +2382,101 @@ impl PtyBackend for PortablePtyBackend {
         // reader before closing the terminal. `kill_pane` sends on it.
         let (exit_wait_cancel_sender, exit_wait_cancel_receiver) = channel::<()>();
         let (delivery, exit_status_sender) = build_delivery(&self.pty_sink, &exit_handover_state);
-        // 2. Open the PTY pair sized to the pane. The pair is two linked ends:
-        //    `master` stays with us, `slave` becomes the child's terminal.
-        let pty_system = native_pty_system();
-        let pty_pair = pty_system
-            .openpty(build_portable_pty_size(pty_size))
-            .map_err(|io_error| PtyError::Spawn {
-                detail: io_error.to_string(),
-            })?;
+        // 2 to 5. Start the child on a terminal of its own and build its kill
+        //    control. On Windows one call opens the pane's pseudoconsole and
+        //    starts the program inside the pane's jobs, and the kill control
+        //    shares the program's process handle.
+        #[cfg(unix)]
+        let (pty_master, child_guard, kill_control, process_id) = {
+            // 2. Open the PTY pair sized to the pane. The pair is two linked
+            //    ends: `master` stays with us, `slave` becomes the child's
+            //    terminal.
+            let pty_pair = native_pty_system()
+                .openpty(build_portable_pty_size(pty_size))
+                .map_err(|io_error| PtyError::Spawn {
+                    detail: io_error.to_string(),
+                })?;
 
-        // 3. Build the launch command from the spawn specification (program,
-        // arguments, working directory, environment variables)...
-        let mut command_builder = CommandBuilder::new(spawn_spec.program.as_os_str());
-        command_builder.args(&spawn_spec.arguments);
-        // Resolve the working directory before launch: an explicit path wins;
-        // an absent path
-        // inherits koshi's process cwd, matching `SpawnSpec`'s contract.
-        match &spawn_spec.working_directory {
-            Some(working_directory) => command_builder.cwd(working_directory),
-            None => {
-                if let Ok(working_directory) = std::env::current_dir() {
-                    command_builder.cwd(working_directory);
+            // 3. Build the launch command from the spawn specification
+            //    (program, arguments, working directory, environment
+            //    variables)...
+            let mut command_builder = CommandBuilder::new(spawn_spec.program.as_os_str());
+            command_builder.args(&spawn_spec.arguments);
+            // Resolve the working directory before launch: an explicit path
+            // wins; an absent path inherits koshi's process cwd, matching
+            // `SpawnSpec`'s contract.
+            match &spawn_spec.working_directory {
+                Some(working_directory) => command_builder.cwd(working_directory),
+                None => {
+                    if let Ok(working_directory) = std::env::current_dir() {
+                        command_builder.cwd(working_directory);
+                    }
                 }
             }
-        }
 
-        //    ...including the environment. `CommandBuilder` is never cleared:
-        //    the child starts from the full parent env, kept as `OsString`, and
-        //    non-UTF-8 vars survive intact. On Windows, `CommandBuilder::new`
-        //    then sets each variable of the registry's system environment and
-        //    of the user's environment over the parent env, and `PATH` becomes
-        //    the system `PATH`, `;`, then the user `PATH`. `build_environment_overlay`
-        //    returns only koshi's overlay (terminal identity + shell bootstrap +
-        //    the spawn specification's environment variables), and applying
-        //    each key with `command_builder.env` replaces the value that the
-        //    child gets without it.
-        //    On Windows `portable-pty` folds env names case-insensitively: an
-        //    override such as `PATH` replaces a differently-cased inherited
-        //    key (`Path`).
-        for (environment_variable_name, environment_variable_value) in
-            build_environment_overlay(&spawn_spec)
-        {
-            command_builder.env(environment_variable_name, environment_variable_value);
-        }
+            //    ...including the environment. `CommandBuilder` is never
+            //    cleared: the child starts from the full parent env, kept as
+            //    `OsString`, and non-UTF-8 vars survive intact.
+            //    `build_environment_overlay` returns only koshi's overlay
+            //    (terminal identity + shell bootstrap + the spawn
+            //    specification's environment variables), and applying each key
+            //    with `command_builder.env` replaces the value that the child
+            //    gets without it.
+            for (environment_variable_name, environment_variable_value) in
+                build_environment_overlay(&spawn_spec)
+            {
+                command_builder.env(environment_variable_name, environment_variable_value);
+            }
 
-        //    ...and launch it on the slave end. The child now owns the slave as
-        //    its stdin/stdout/stderr; we keep `child_guard` only to wait on / kill it.
-        //    A `portable-pty` child is not terminated by being dropped;
-        //    `ChildGuard` kills the child when any step below returns early.
-        let child_guard =
-            ChildGuard::from_child(pty_pair.slave.spawn_command(command_builder).map_err(
-                |spawn_error| PtyError::Spawn {
-                    detail: spawn_error.to_string(),
-                },
-            )?);
+            //    ...and launch it on the slave end. The child now owns the
+            //    slave as its stdin/stdout/stderr; we keep `child_guard` only
+            //    to wait on / kill it. A `portable-pty` child is not
+            //    terminated by being dropped; `ChildGuard` kills the child
+            //    when any step below returns early.
+            let child_guard =
+                ChildGuard::from_child(pty_pair.slave.spawn_command(command_builder).map_err(
+                    |spawn_error| PtyError::Spawn {
+                        detail: spawn_error.to_string(),
+                    },
+                )?);
 
-        let process_id = child_guard.process_id().ok_or(PtyError::Spawn {
-            detail: "child has no PID".to_string(),
-        })?;
+            let process_id = child_guard.process_id().ok_or(PtyError::Spawn {
+                detail: "child has no PID".to_string(),
+            })?;
 
-        // 4. Build the kill control right away. On Windows this assigns the
-        //    child to its Job Object, first thing after the spawn.
-        //
-        //    The child is already running when the assignment happens. A
-        //    grandchild it forks before that assignment lands stays outside the
-        //    Job Object, where `KillPolicy::Tree` does not reach it.
-        #[cfg(unix)]
-        let kill_control = PtyChildKillControl::from_process_id(process_id);
+            // 4. Build the kill control. The child leads its own process
+            //    group from its start (`setsid`), and a process it starts stays
+            //    in that group until it moves to another.
+            let kill_control = PtyChildKillControl::from_process_id(process_id);
+
+            // 5. Drop OUR copy of the slave. The child kept its own; once the
+            //    child exits and the kernel closes its end, the terminal
+            //    reports EOF, and the reader thread (step 9) stops.
+            drop(pty_pair.slave);
+            (pty_pair.master, child_guard, kill_control, process_id)
+        };
         #[cfg(windows)]
-        let kill_control = PtyChildKillControl::from_process_id_and_handle(
-            process_id,
-            child_guard.as_raw_handle().ok_or(PtyError::Spawn {
-                detail: "child has no process handle".to_string(),
-            })?,
-        )?;
-
-        // 5. Drop OUR copy of the slave. The child kept its own; once the child
-        //    exits and the kernel closes its end, the terminal reports EOF, and
-        //    the reader thread (step 9) stops.
-        drop(pty_pair.slave);
+        let (pty_master, child_guard, kill_control, output_reader, input_writer) = {
+            let pane_job = PaneJob::create()?;
+            let SpawnedPaneProgram {
+                pane_console,
+                output_reader,
+                input_writer,
+                pane_process,
+            } = spawn_pane_program(&spawn_spec, pty_size, &pane_job)?;
+            let kill_control = PtyChildKillControl::from_pane_job(
+                pane_process.get_process_id(),
+                pane_process.share_process_handle(),
+                pane_job,
+            );
+            (
+                pane_console,
+                ChildGuard::from_child(pane_process),
+                kill_control,
+                output_reader,
+                input_writer,
+            )
+        };
 
         // 6. Decide how this pane reaches its terminal, and pull the exit flag.
         //
@@ -2109,17 +2493,16 @@ impl PtyBackend for PortablePtyBackend {
         //    left to drop at the end of this call, which closes the descriptor
         //    it was holding.
         //
-        //    Windows exposes none of this: there the pane keeps the crate's
-        //    own reader, writer and master, and its reader blocks in `read`.
+        //    Windows exposes none of this: there the pane keeps the
+        //    pseudoconsole's two pipe ends and the pseudoconsole itself, and
+        //    its reader blocks in `read`.
         #[cfg(unix)]
-        let owned_terminal_parts = duplicate_terminal_file_descriptor(&*pty_pair.master)
+        let owned_terminal_parts = duplicate_terminal_file_descriptor(&*pty_master)
             .zip(Waker::new())
             .map(|(terminal_fd, reader_waker)| (Arc::new(terminal_fd), Arc::new(reader_waker)));
-        #[cfg(not(unix))]
-        let owned_terminal_parts: Option<(Arc<()>, Arc<()>)> = None;
 
         // The doorbell's other two holders: the reader waits on it, the watcher
-        // rings it once the child is reaped, and the pane entry rings it to
+        // rings it once the child has ended, and the pane entry rings it to
         // park the reader.
         #[cfg(unix)]
         let watcher_reader_waker = owned_terminal_parts
@@ -2130,63 +2513,62 @@ impl PtyBackend for PortablePtyBackend {
             .as_ref()
             .map(|(_, reader_waker)| Arc::clone(reader_waker));
 
-        //    The watcher's tail — what it does once the child is reaped —
+        //    The watcher's tail — what it does once the child has ended —
         //    follows from the same choice: a reader that can be waited on
         //    publishes the exit itself, a Unix terminal with no descriptor
         //    leaves the watcher to publish, and Windows closes the terminal and
         //    then stands by behind the reader.
+        #[cfg(unix)]
         let (terminal_read_side, terminal_write_side, terminal_resource, watcher_tail) =
             match owned_terminal_parts {
-                #[cfg(unix)]
                 Some((terminal_fd, reader_waker)) => (
                     ReadSide::Owned(Arc::clone(&terminal_fd), reader_waker),
                     WriteSide::Owned(Arc::clone(&terminal_fd)),
                     Terminal::Owned(terminal_fd),
                     WatcherTail::ReaderPublishes,
                 ),
-                #[cfg(not(unix))]
-                Some(_) => unreachable!("no platform without a descriptor owns one"),
                 None => {
                     let terminal_reader =
-                        pty_pair
-                            .master
+                        pty_master
                             .try_clone_reader()
                             .map_err(|io_error| PtyError::Spawn {
                                 detail: io_error.to_string(),
                             })?;
                     let pty_writer =
-                        pty_pair
-                            .master
+                        pty_master
                             .take_writer()
                             .map_err(|io_error| PtyError::Spawn {
                                 detail: io_error.to_string(),
                             })?;
-                    // The master goes in a slot the watcher shares: on Windows it
-                    // takes it out and drops it once the child is reaped, which
-                    // closes the console and ends the reader's pipe.
-                    let pty_master_slot = Arc::new(Mutex::new(Some(pty_pair.master)));
-                    #[cfg(windows)]
-                    let watcher_tail = WatcherTail::CloseTerminal {
-                        pty_master_slot: Arc::clone(&pty_master_slot),
-                        pty_sink: Arc::downgrade(&self.pty_sink),
-                    };
-                    #[cfg(not(windows))]
-                    let watcher_tail =
-                        WatcherTail::WaitForReaderThenPublish(Arc::downgrade(&self.pty_sink));
                     (
-                        ReadSide::Crate(terminal_reader),
-                        WriteSide::Crate(pty_writer),
-                        Terminal::Crate(pty_master_slot),
-                        watcher_tail,
+                        ReadSide::Blocking(terminal_reader),
+                        WriteSide::Blocking(pty_writer),
+                        Terminal::Master(Arc::new(Mutex::new(Some(pty_master)))),
+                        WatcherTail::WaitForReaderThenPublish(Arc::downgrade(&self.pty_sink)),
                     )
                 }
             };
+        // The pseudoconsole goes in a slot the watcher shares: the watcher takes
+        // it out and drops it once the child has ended, which closes the
+        // console and ends the reader's pipe.
+        #[cfg(windows)]
+        let (terminal_read_side, terminal_write_side, terminal_resource, watcher_tail) = {
+            let pty_master_slot = Arc::new(Mutex::new(Some(pty_master)));
+            (
+                ReadSide::Blocking(Box::new(output_reader)),
+                WriteSide::Blocking(Box::new(input_writer)),
+                Terminal::Master(Arc::clone(&pty_master_slot)),
+                WatcherTail::CloseTerminal {
+                    pty_master_slot,
+                    pty_sink: Arc::downgrade(&self.pty_sink),
+                },
+            )
+        };
 
-        let has_child_exited = Arc::new(AtomicBool::new(false));
-        let child_exit_status = Arc::new(OnceLock::new());
+        let child_exit = Arc::new(ChildExit::default());
 
         // 7. Take the pane map now and hold it until this pane is in it. A
-        //    short-lived child can be reaped and its exit handed to the
+        //    short-lived child can end and its exit be handed to the
         //    consumer before this call returns; a `kill_pane` from inside that call
         //    blocks here until the insert lands, and then finds the pane. None
         //    of the threads started below touch this map.
@@ -2194,23 +2576,30 @@ impl PtyBackend for PortablePtyBackend {
         //    An id the backend already holds is refused here, with the map
         //    locked. The entry it would replace keeps its terminal and its I/O
         //    threads, and the guard is still armed, so it kills the child
-        //    launched above.
+        //    launched above. The child ends first, then the pane's two ends of
+        //    the terminal close, then the terminal itself.
         let mut pane_by_id = self.pane_by_id.lock().unwrap();
         if pane_by_id.contains_key(&pane_id) {
+            drop(child_guard);
+            drop(terminal_read_side);
+            drop(terminal_write_side);
+            drop(terminal_resource);
+            drop(watcher_tail);
             return Err(PtyError::Spawn {
                 detail: format!("pane {pane_id} is already open"),
             });
         }
 
         // That refusal is the last step that returns early: the watcher thread
-        // below owns the child and reaps it. Disarm the guard.
+        // below owns the child and waits for its end. Disarm the guard.
         let child_process = child_guard.release_child();
 
         // 8. Writer thread: drain the input channel onto the terminal. A write
         //    to a child that has stopped reading blocks only that thread,
         //    never the dispatcher. Started before the reader and before the
         //    watcher, which queues its `Stop` on this channel.
-        let writer_sender = start_writer(terminal_write_side);
+        let queued_input_byte_count = Arc::new(AtomicUsize::new(0));
+        let writer_sender = start_writer(terminal_write_side, Arc::clone(&queued_input_byte_count));
 
         //    A Windows pseudoconsole asks where the cursor is as it opens and
         //    holds its child's output until that is answered. The answer is
@@ -2218,9 +2607,12 @@ impl PtyBackend for PortablePtyBackend {
         //    [`write_pane_input`](PortablePtyBackend::write_pane_input): nothing a user types
         //    reaches the terminal before it.
         #[cfg(windows)]
-        let _ = writer_sender.send(WriterMessage::Bytes(
-            CURSOR_POSITION_AT_HOME_RESPONSE_BYTES.to_vec(),
-        ));
+        let _ = queue_pane_input(
+            pane_id,
+            &writer_sender,
+            &queued_input_byte_count,
+            CURSOR_POSITION_AT_HOME_RESPONSE_BYTES,
+        );
 
         // 9. Reader thread: wait on the terminal, handing each chunk of
         //    child output to `delivery` until EOF (child gone) or the consumer
@@ -2242,10 +2634,10 @@ impl PtyBackend for PortablePtyBackend {
                 pane_id,
                 terminal_fd,
                 reader_waker,
-                Arc::clone(&has_child_exited),
+                Arc::clone(&child_exit),
                 self.reader_gate.register_reader(),
             ),
-            ReadSide::Crate(terminal_reader) => spawn_pty_thread("koshi-pty-read", move || {
+            ReadSide::Blocking(terminal_reader) => spawn_pty_thread("koshi-pty-read", move || {
                 #[cfg(windows)]
                 let mut terminal_reader = RemovesCursorRequest::from_inner_reader(terminal_reader);
                 #[cfg(not(windows))]
@@ -2267,11 +2659,14 @@ impl PtyBackend for PortablePtyBackend {
             }),
         };
 
-        // 10. Watcher thread: block on `child.wait()`, map the OS exit status
-        //    into koshi's `ExitStatus`, then release the pane's other threads —
-        //    flip `has_child_exited` (read by `kill_pane` before it signals the leader),
-        //    publish the status on the exit channel, stop the writer, and ring
-        //    the reader's doorbell: the reader takes the last of the output.
+        // 10. Watcher thread: wait for the child to end — on Unix with
+        //    `wait_for_child_exit`, which leaves it a zombie that `kill_pane`
+        //    reaps, and on Windows with `PaneProcess::wait_for_exit_code` —
+        //    map the OS exit status into koshi's `ExitStatus`, then release
+        //    the pane's other threads: record the status in `child_exit` (read
+        //    by `kill_pane` before it signals the leader), publish it on the
+        //    exit channel, stop the writer, and ring the reader's doorbell: the
+        //    reader takes the last of the output.
         //
         //    What it does after that is its tail, decided in step 6: bring the
         //    reader to the end of the terminal, or stand by and publish the
@@ -2280,21 +2675,32 @@ impl PtyBackend for PortablePtyBackend {
         //    reader is there to read out. `kill_pane` wakes both waits: closing a
         //    pane returns without sitting through either.
         let watch_release = WatchRelease {
-            has_child_exited: Arc::clone(&has_child_exited),
-            child_exit_status: Arc::clone(&child_exit_status),
+            child_exit: Arc::clone(&child_exit),
             exit_status_sender,
             writer_stop_sender: writer_sender.clone(),
             #[cfg(unix)]
             reader_waker: watcher_reader_waker,
+            #[cfg(unix)]
+            child_process_id: process_id,
+            #[cfg(unix)]
+            left_running_child_process_ids: Arc::clone(&self.left_running_child_process_ids),
         };
         let watcher_exit_handover_state = Arc::clone(&exit_handover_state);
         let watcher_thread = spawn_pty_thread("koshi-pty-watch", move || {
-            let mut child_process = child_process;
-            let exit_status = match child_process.wait() {
-                Ok(process_exit_status) => parse_portable_exit_status(process_exit_status),
-                Err(_) => UNOBSERVED_EXIT,
+            #[cfg(unix)]
+            let observed_exit = {
+                drop(child_process);
+                wait_for_child_exit(process_id)
             };
-            watch_release.publish_exit_status(exit_status);
+            #[cfg(windows)]
+            let observed_exit = {
+                let exit_status = match child_process.wait_for_exit_code() {
+                    Ok(exit_code) => ExitStatus::ExitCode(exit_code as i32),
+                    Err(_) => UNOBSERVED_EXIT,
+                };
+                ObservedChildExit { exit_status }
+            };
+            watch_release.publish_exit_status(observed_exit);
 
             match watcher_tail {
                 // The reader reaches the end of the terminal itself and
@@ -2323,7 +2729,7 @@ impl PtyBackend for PortablePtyBackend {
                         &watcher_exit_handover_state,
                         &pty_sink,
                         pane_id,
-                        exit_status,
+                        observed_exit.exit_status,
                     );
                 }
                 #[cfg(not(windows))]
@@ -2333,23 +2739,23 @@ impl PtyBackend for PortablePtyBackend {
                         &watcher_exit_handover_state,
                         &pty_sink,
                         pane_id,
-                        exit_status,
+                        observed_exit.exit_status,
                     );
                 }
             }
         });
 
-        // 11. Retain the terminal, writer, killer, flag and both thread handles
-        //    under the pane id, then hand the caller its handle.
+        // 11. Retain the terminal, writer, killer, exit record and both thread
+        //    handles under the pane id, then hand the caller its handle.
         pane_by_id.insert(
             pane_id,
             PaneEntry {
                 terminal: terminal_resource,
                 pty_size,
                 writer_sender,
+                queued_input_byte_count,
                 kill_control,
-                has_child_exited,
-                child_exit_status,
+                child_exit,
                 exit_handover_state,
                 exit_wait_cancel_sender,
                 reader_thread,
@@ -2377,13 +2783,12 @@ impl PtyBackend for PortablePtyBackend {
         let Some(pane_entry) = pane_by_id.get(&pane_id) else {
             return Err(PtyError::UnknownPane { pane_id });
         };
-
-        pane_entry
-            .writer_sender
-            .send(WriterMessage::Bytes(input_bytes.to_vec()))
-            .map_err(|send_error| PtyError::Io {
-                detail: send_error.to_string(),
-            })
+        queue_pane_input(
+            pane_id,
+            &pane_entry.writer_sender,
+            &pane_entry.queued_input_byte_count,
+            input_bytes,
+        )
     }
     fn kill_pane(&self, pane_id: PaneId, kill_policy: KillPolicy) -> Result<(), PtyError> {
         let pane_entry = self
@@ -2404,29 +2809,38 @@ impl PtyBackend for PortablePtyBackend {
             .is_settled = true;
 
         // `Force`/`Graceful` signal the leader PID and are skipped once the
-        // watcher has reaped it: a recycled PID can belong to an unrelated
-        // process. `Tree` and `GracefulTree`'s closing group-kill signal the
-        // whole group/job (`killpg` / `TerminateJobObject`), which stays valid
-        // while any member lives, and fire unconditionally: the leader can
+        // watcher has seen it end. `Tree` and `GracefulTree`'s closing
+        // group-kill signal the whole group/job (`killpg` /
+        // `TerminateJobObject`) also after the leader ended: the leader can
         // exit while a same-group descendant keeps running, and the group-kill
-        // still reaps it. The `has_child_exited` flag tracks only the leader, not
-        // whether the group is empty.
+        // still ends it. `child_exit` records only the leader, not whether the
+        // group is empty. On Unix a leader this process saw end stays a zombie
+        // until this call reaps it at its end, so its PID and its process group
+        // ID still name this pane's processes for every signal below. A leader
+        // an earlier image reaped reserves neither, and its group is not
+        // signalled. Windows names the group by its job handle.
+        #[cfg(unix)]
+        let is_process_group_reserved = pane_entry.child_exit.is_process_id_reserved();
+        #[cfg(windows)]
+        let is_process_group_reserved = true;
         match kill_policy {
             KillPolicy::Force => {
-                if !pane_entry.has_child_exited.load(Ordering::SeqCst) {
+                if !pane_entry.child_exit.has_exited() {
                     let _ = pane_entry.kill_control.force_kill_child();
                 }
             }
             KillPolicy::Tree => {
-                let _ = pane_entry.kill_control.force_kill_process_tree();
+                if is_process_group_reserved {
+                    let _ = pane_entry.kill_control.force_kill_process_tree();
+                }
             }
             KillPolicy::Graceful { timeout_duration } => {
-                if !pane_entry.has_child_exited.load(Ordering::SeqCst) {
+                if !pane_entry.child_exit.has_exited() {
                     // Ask the leader to exit and give it the grace window; SIGKILL when the
                     // window runs out, or at once when the request never reached it.
                     if !is_child_stopped_within_grace(
                         pane_entry.kill_control.request_child_stop(),
-                        &pane_entry.has_child_exited,
+                        &pane_entry.child_exit,
                         timeout_duration,
                     ) {
                         let _ = pane_entry.kill_control.force_kill_child();
@@ -2434,36 +2848,91 @@ impl PtyBackend for PortablePtyBackend {
                 }
             }
             KillPolicy::GracefulTree { timeout_duration } => {
-                if !pane_entry.has_child_exited.load(Ordering::SeqCst) {
+                if !pane_entry.child_exit.has_exited() {
                     // Ask the whole group to exit — every member gets the stop request and
                     // the grace window — then wait for the leader. The wait is skipped
                     // only when no member received the request.
                     is_child_stopped_within_grace(
                         pane_entry.kill_control.request_process_tree_stop(),
-                        &pane_entry.has_child_exited,
+                        &pane_entry.child_exit,
                         timeout_duration,
                     );
                 }
 
                 // Group-kill even when the leader already exited: a disowned
                 // descendant can keep the group alive past its leader, and
-                // `killpg`/`TerminateJobObject` reaps it with the rest.
-                let _ = pane_entry.kill_control.force_kill_process_tree();
+                // `killpg`/`TerminateJobObject` ends it with the rest.
+                if is_process_group_reserved {
+                    let _ = pane_entry.kill_control.force_kill_process_tree();
+                }
             }
         }
+
+        let PaneEntry {
+            terminal,
+            writer_sender,
+            kill_control,
+            child_exit,
+            exit_wait_cancel_sender,
+            #[cfg(unix)]
+            reader_waker,
+            watcher_thread,
+            ..
+        } = pane_entry;
+
+        // Let go of the terminal: the writer stops at the `Stop` once the
+        // input queued before it is written, the reader leaves at its
+        // doorbell, and this call drops its own hold. On Unix the last
+        // descriptor to close hangs the terminal up: the kernel sends SIGHUP
+        // to the leader and to the foreground process group, whatever user
+        // they run as.
+        let _ = writer_sender.send(WriterMessage::Stop);
+        drop(writer_sender);
+        #[cfg(unix)]
+        if let Some(reader_waker) = &reader_waker {
+            reader_waker.wake_reader();
+        }
+        drop(terminal);
 
         // Wake the watcher out of the wait it is in: closing a pane returns
         // without sitting through the rounds. Two waits listen: the standby of
         // a Unix terminal with no descriptor, and a Windows watcher's wait for
         // the reader before it closes the terminal.
-        let _ = pane_entry.exit_wait_cancel_sender.send(());
-        drop(pane_entry.writer_sender);
+        let _ = exit_wait_cancel_sender.send(());
+
+        // A leader still running `GRACEFUL_TIMEOUT_DURATION` after the hangup
+        // is left running, and joins `left_running_child_process_ids` until
+        // its watcher reaps it.
+        if !child_exit.wait_for_exit(GRACEFUL_TIMEOUT_DURATION) {
+            let child_process_id = kill_control.get_child_process_id();
+            #[cfg(unix)]
+            lock_left_running_child_process_ids(&self.left_running_child_process_ids)
+                .insert(child_process_id);
+            if child_exit.leave_child_running() {
+                tracing::warn!(
+                    ?pane_id,
+                    child_process_id,
+                    "the closed pane's program still runs: it outlived every signal and the hangup, and is left running"
+                );
+                return Ok(());
+            }
+            #[cfg(unix)]
+            lock_left_running_child_process_ids(&self.left_running_child_process_ids)
+                .remove(&child_process_id);
+        }
+
         // Joined unless this *is* the watcher: a consumer handed an exit by the
         // watcher may close the pane from inside that call, and a thread that
         // joins itself never returns. The watcher has nothing left to do after
         // handing the exit over.
-        if pane_entry.watcher_thread.thread().id() != thread::current().id() {
-            let _ = pane_entry.watcher_thread.join();
+        if watcher_thread.thread().id() != thread::current().id() {
+            let _ = watcher_thread.join();
+        }
+        // The watcher has seen the leader end. On Unix a zombie it kept is
+        // reaped here.
+        #[cfg(unix)]
+        if child_exit.is_zombie_kept() {
+            reap_child(kill_control.get_child_process_id());
         }
 
         Ok(())
@@ -2471,9 +2940,8 @@ impl PtyBackend for PortablePtyBackend {
     fn find_live_working_directory(&self, pane_id: PaneId) -> Option<std::path::PathBuf> {
         let pane_by_id = self.pane_by_id.lock().unwrap();
         let pane_entry = pane_by_id.get(&pane_id)?;
-        // A reaped leader's PID can already belong to an unrelated process:
-        // no directory is answered for it.
-        if pane_entry.has_child_exited.load(Ordering::SeqCst) {
+        // A leader that ended has no live working directory.
+        if pane_entry.child_exit.has_exited() {
             return None;
         }
         crate::working_directory::get_process_working_directory(
@@ -2484,109 +2952,30 @@ impl PtyBackend for PortablePtyBackend {
 
 /// Whether the leader is gone after being asked to stop.
 ///
-/// Polls [`is_child_exit_observed_within_grace`] for up to `grace_duration` when anything received
-/// the stop request, including a group where only part of it did. Returns `false` at once, spending
+/// Waits on `child_exit` for up to `grace_duration` when anything received the
+/// stop request, including a group where only part of it did, and returns
+/// whether the leader ended in that window. Returns `false` at once, spending
 /// no grace window, when nothing received it.
 fn is_child_stopped_within_grace(
     stop_request: StopRequest,
-    has_child_exited: &AtomicBool,
+    child_exit: &ChildExit,
     grace_duration: Duration,
 ) -> bool {
     match stop_request {
-        StopRequest::Delivered | StopRequest::Unknown => {
-            is_child_exit_observed_within_grace(has_child_exited, grace_duration)
-        }
+        StopRequest::Delivered | StopRequest::Unknown => child_exit.wait_for_exit(grace_duration),
         StopRequest::NotDelivered => false,
     }
 }
 
-/// Poll the watcher's `has_child_exited` flag every 25ms until it flips or
-/// `grace_duration`
-/// elapses, returning whether the child exited within the window. The
-/// grace-window wait behind [`is_child_stopped_within_grace`].
-fn is_child_exit_observed_within_grace(
-    has_child_exited: &AtomicBool,
-    grace_duration: Duration,
-) -> bool {
-    let exit_deadline = Instant::now() + grace_duration;
-    while Instant::now() < exit_deadline {
-        if has_child_exited.load(Ordering::SeqCst) {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    has_child_exited.load(Ordering::SeqCst)
-}
-
 /// Convert koshi's [`PtySize`] into `portable-pty`'s own size type, zeroing
 /// the pixel dimensions `portable-pty` accepts but this crate does not track.
+#[cfg(unix)]
 fn build_portable_pty_size(pty_size: PtySize) -> portable_pty::PtySize {
     portable_pty::PtySize {
         rows: pty_size.row_count,
         cols: pty_size.column_count,
         pixel_width: 0,
         pixel_height: 0,
-    }
-}
-
-/// Convert `portable-pty`'s exit status into koshi's own [`ExitStatus`]:
-/// a signal name (Unix only) maps to [`ExitStatus::Signaled`] via
-/// [`parse_signal_number`],
-/// anything else maps to [`ExitStatus::ExitCode`].
-fn parse_portable_exit_status(portable_exit_status: portable_pty::ExitStatus) -> ExitStatus {
-    match portable_exit_status.signal() {
-        Some(signal_description) => ExitStatus::Signaled(parse_signal_number(signal_description)),
-        None => ExitStatus::ExitCode(portable_exit_status.exit_code() as i32),
-    }
-}
-
-/// Recover a Unix signal number from portable-pty's exit status string.
-///
-/// portable-pty discards the raw `WTERMSIG` and hands back `strsignal(3)` text,
-/// never the `SIG*` mnemonic. That text is platform-specific:
-/// - macOS/BSD: `"<description>: <n>"` — e.g. `"Terminated: 15"`
-/// - Linux/glibc: `"<description>"` — e.g. `"Terminated"` (no number)
-/// - portable-pty's fallback when `strsignal` returns null: `"Signal <n>"`
-///
-/// The number is parsed ONLY when it follows a `": "` (macOS) or the
-/// `"Signal "` prefix (the fallback) — never a bare trailing word. Some glibc
-/// descriptions end in a non-signal ordinal: `"User defined signal 1"` is
-/// SIGUSR1 = 10, not signal 1. A bare description is mapped through the table
-/// below; an unrecognised one yields 0. Reachable only for Unix children: on
-/// Windows `signal()` is always `None`, and `parse_portable_exit_status` takes the exit-code
-/// arm.
-fn parse_signal_number(signal_description: &str) -> i32 {
-    // macOS appends ": <n>" — the real number is after the colon.
-    if let Some((_, signal_number_text)) = signal_description.rsplit_once(": ") {
-        if let Ok(signal_number) = signal_number_text.parse::<i32>() {
-            return signal_number;
-        }
-    }
-    // portable-pty's null-strsignal fallback is "Signal <n>".
-    if let Some(signal_number) = signal_description
-        .strip_prefix("Signal ")
-        .and_then(|signal_number_text| signal_number_text.parse::<i32>().ok())
-    {
-        return signal_number;
-    }
-    // Linux glibc: bare description, no trailing number.
-    match signal_description {
-        "Hangup" => 1,
-        "Interrupt" => 2,
-        "Quit" => 3,
-        "Illegal instruction" => 4,
-        "Trace/breakpoint trap" => 5,
-        "Aborted" => 6,
-        "Bus error" => 7,
-        "Floating point exception" => 8,
-        "Killed" => 9,
-        "User defined signal 1" => 10,
-        "Segmentation fault" => 11,
-        "User defined signal 2" => 12,
-        "Broken pipe" => 13,
-        "Alarm clock" => 14,
-        "Terminated" => 15,
-        _ => 0,
     }
 }
 

@@ -31,6 +31,7 @@ use super::*;
 use crate::cli::OutputFormat;
 use crate::keymap::tests::build_partial_keybindings_config_with_binding;
 use crate::keymap::{build_keymap_view_from_partial, KeymapValidationOutcome, KeymapView};
+use koshi_test_support::fixtures::build_test_uuid_with_suffix;
 
 /// The fixed UUID every fake id of the output tests uses:
 /// `00000000-0000-0000-0000-000000000001`.
@@ -82,6 +83,7 @@ fn build_test_session_row() -> SessionRow {
         session_id: SessionId::from_uuid(build_fixed_test_uuid()),
         session_name: "quiet-lake".to_string(),
         server_name_or_address: None,
+        owner_user_id: None,
     }
 }
 
@@ -154,12 +156,13 @@ fn session_json_schema_is_stable() {
 }
 
 #[test]
-fn session_list_json_is_an_array_of_id_name_and_server() {
+fn session_list_json_is_an_array_of_id_name_server_and_owner() {
     let expected_text = r#"[
   {
     "session_id": "00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake",
-    "server_name_or_address": null
+    "server_name_or_address": null,
+    "owner_user_id": null
   }
 ]
 "#;
@@ -177,12 +180,32 @@ fn session_list_json_names_the_server_of_a_remote_row() {
   {
     "session_id": "00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake",
-    "server_name_or_address": "desk"
+    "server_name_or_address": "desk",
+    "owner_user_id": null
   }
 ]
 "#;
     assert_eq!(
         render_sessions(&[remote_session_row], OutputFormat::Json),
+        expected_text
+    );
+}
+
+#[test]
+fn session_list_json_names_the_owner_of_another_users_session() {
+    let mut foreign_session_row = build_test_session_row();
+    foreign_session_row.owner_user_id = Some(1001);
+    let expected_text = r#"[
+  {
+    "session_id": "00000000-0000-0000-0000-000000000001",
+    "session_name": "quiet-lake",
+    "server_name_or_address": null,
+    "owner_user_id": 1001
+  }
+]
+"#;
+    assert_eq!(
+        render_sessions(&[foreign_session_row], OutputFormat::Json),
         expected_text
     );
 }
@@ -347,35 +370,6 @@ fn build_non_utf8_path() -> PathBuf {
 }
 
 #[test]
-fn an_exited_pane_lifecycle_json_carries_the_exit_code() {
-    let mut pane_discovery = build_test_pane_discovery();
-    pane_discovery.lifecycle = PaneLifecycle::Exited { exit_code: Some(0) };
-    assert_eq!(
-        render_pane(&pane_discovery, OutputFormat::Json),
-        r#"{
-  "pane_id": "00000000-0000-0000-0000-000000000001",
-  "tab_id": "00000000-0000-0000-0000-000000000001",
-  "session_id": "00000000-0000-0000-0000-000000000001",
-  "pane_title": "htop",
-  "working_directory": "/home/user",
-  "command_argv": [
-    "htop",
-    "--tree"
-  ],
-  "lifecycle": {
-    "Exited": {
-      "exit_code": 0
-    }
-  },
-  "focused_by_client_ids": [
-    "00000000-0000-0000-0000-000000000001"
-  ]
-}
-"#
-    );
-}
-
-#[test]
 fn client_json_schema_is_stable() {
     let expected_text = r#"{
   "client_id": "00000000-0000-0000-0000-000000000001",
@@ -442,17 +436,24 @@ fn a_reported_pane_area_json_is_a_tagged_size() {
 // --- Table renderings ---
 
 #[test]
-fn session_table_marks_where_each_session_runs() {
+fn session_table_marks_where_each_session_runs_and_whose_it_is() {
     let mut remote_session_row = build_test_session_row();
     remote_session_row.server_name_or_address = Some("desk".to_string());
+    let mut foreign_session_row = build_test_session_row();
+    foreign_session_row.owner_user_id = Some(1001);
     let expected_text = "\
-id                                            name        server
-session-00000000-0000-0000-0000-000000000001  quiet-lake  local
-session-00000000-0000-0000-0000-000000000001  quiet-lake  desk
+id                                            name        server  owner
+session-00000000-0000-0000-0000-000000000001  quiet-lake  local   -
+session-00000000-0000-0000-0000-000000000001  quiet-lake  desk    -
+session-00000000-0000-0000-0000-000000000001  quiet-lake  local   1001
 ";
     assert_eq!(
         render_sessions(
-            &[build_test_session_row(), remote_session_row],
+            &[
+                build_test_session_row(),
+                remote_session_row,
+                foreign_session_row
+            ],
             OutputFormat::Table,
         ),
         expected_text
@@ -463,7 +464,7 @@ session-00000000-0000-0000-0000-000000000001  quiet-lake  desk
 fn empty_list_table_is_just_the_header() {
     assert_eq!(
         render_sessions(&[], OutputFormat::Table),
-        "id  name  server\n"
+        "id  name  server  owner\n"
     );
 }
 
@@ -519,7 +520,6 @@ fn absent_pane_fields_render_as_dashes() {
     pane_discovery.pane_title = None;
     pane_discovery.working_directory = None;
     pane_discovery.command_argv = None;
-    pane_discovery.lifecycle = PaneLifecycle::Exited { exit_code: None };
     let rendered_text = render_pane(&pane_discovery, OutputFormat::Table);
     assert_eq!(
         rendered_text,
@@ -530,7 +530,7 @@ session: session-00000000-0000-0000-0000-000000000001
 title: -
 cwd: -
 command: -
-state: exited(-)
+state: running
 focused_by: 1
 "
     );
@@ -742,12 +742,6 @@ fn a_joined_cell_renders_an_empty_list_as_a_dash_and_joins_the_rest_with_commas(
 }
 
 // --- Cell helpers ---
-
-#[test]
-fn format_pane_state_cell_renders_spawning_and_closing() {
-    assert_eq!(format_pane_state_cell(PaneLifecycle::Spawning), "spawning");
-    assert_eq!(format_pane_state_cell(PaneLifecycle::Closing), "closing");
-}
 
 #[test]
 fn format_time_cell_before_the_unix_epoch_renders_as_a_dash() {
@@ -1384,15 +1378,6 @@ fn explain_of_an_empty_or_blank_action_name_is_none() {
 }
 
 // --- Debug dumps ---
-
-/// A fixed UUID ending in `suffix_byte` as two decimal digits: `4` gives
-/// `00000000-0000-0000-0000-000000000004`.
-fn build_test_uuid_with_suffix(suffix_byte: u8) -> Uuid {
-    Uuid::parse_str(&format!(
-        "00000000-0000-0000-0000-0000000000{suffix_byte:02}"
-    ))
-    .expect("literal UUID parses")
-}
 
 /// One session's whole record: itself, one tab, one pane, and one client.
 fn build_test_session_overview() -> SessionOverview {

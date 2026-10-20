@@ -30,3 +30,6 @@ windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Securit
 [dev-dependencies]
 rcgen.workspace = true
 tempfile.workspace = true
+
+[lints]
+workspace = true

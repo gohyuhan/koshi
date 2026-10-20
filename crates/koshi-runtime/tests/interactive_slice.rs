@@ -13,33 +13,11 @@ use koshi_core::ids::SessionId;
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, NamedKey};
 use koshi_core::process::{ExitStatus, KillPolicy};
 use koshi_observability::cleanup::TerminalCleanupGuard;
-use koshi_runtime::runtime::event::RuntimeEvent;
-use koshi_runtime::server::Server;
+use koshi_runtime::runtime::driver::DispatchPassOutcome;
 use koshi_test_support::fixtures::build_key_input_for_chord;
 
-/// Receive the first inbox event `accepts_event` accepts, dropping the ones before it.
-/// Panics once 2 seconds have passed with no accepted event.
-fn receive_matching_runtime_event(
-    server: &Server,
-    mut accepts_event: impl FnMut(&RuntimeEvent) -> bool,
-) -> RuntimeEvent {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let remaining_wait_duration = deadline
-            .checked_duration_since(Instant::now())
-            .expect("event did not arrive in time");
-        let runtime_event = server
-            .get_inbox_receiver()
-            .recv_timeout(remaining_wait_duration)
-            .expect("event did not arrive in time");
-        if accepts_event(&runtime_event) {
-            return runtime_event;
-        }
-    }
-}
-
 #[test]
-fn bootstrap_opens_one_shell_and_marks_a_frame_due() {
+fn bootstrap_opens_one_shell_and_its_first_subscriber_gets_a_frame_at_once() {
     let (mut server, fake_pty_backend, _) = build_server_with_fake_pty_backend();
 
     let client_id = server
@@ -55,72 +33,42 @@ fn bootstrap_opens_one_shell_and_marks_a_frame_due() {
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     assert_eq!(render_snapshot.pane_snapshots.len(), 1);
 
-    // Genesis invalidated layout, so the first frame is due immediately.
-    assert!(server.poll_render(Instant::now()));
+    // A new subscriber is owed its first frame, which is due immediately.
+    let (_delivery_receiver, _writer_handoff) = server.subscribe(client_id, 60);
+    assert_eq!(
+        server.compute_next_render_wakeup(Instant::now()),
+        Some(Duration::ZERO)
+    );
 }
 
 #[test]
-fn pty_output_is_forwarded_into_the_inbox() {
-    let (mut server, fake_pty_backend, _) = build_server_with_fake_pty_backend();
-    server
-        .bootstrap_local(SessionId::new(), TEST_VIEWPORT_SIZE, SystemTime::now())
-        .expect("bootstrap");
-    let pane_id = fake_pty_backend.list_spawned_pane_ids()[0];
-
-    fake_pty_backend
-        .push_output(pane_id, b"hi".to_vec())
-        .expect("push");
-
-    let runtime_event = receive_matching_runtime_event(&server, |runtime_event| {
-        matches!(runtime_event, RuntimeEvent::PtyOutput { .. })
-    });
-    match runtime_event {
-        RuntimeEvent::PtyOutput {
-            pane_id: received_pane_id,
-            output_bytes,
-        } => {
-            assert_eq!(received_pane_id, pane_id);
-            assert_eq!(output_bytes, b"hi");
-        }
-        unexpected_event => panic!("expected PtyOutput, got {unexpected_event:?}"),
-    }
-}
-
-#[test]
-fn pty_output_received_through_the_inbox_reaches_the_client_snapshot() {
+fn pty_output_reaches_the_client_snapshot_in_one_dispatch_pass() {
     let (mut server, fake_pty_backend, _) = build_server_with_fake_pty_backend();
     let client_id = server
         .bootstrap_local(SessionId::new(), TEST_VIEWPORT_SIZE, SystemTime::now())
         .expect("bootstrap");
     let pane_id = fake_pty_backend.list_spawned_pane_ids()[0];
 
-    // End to end: fake child writes bytes -> the backend's sink queues them on
-    // the real inbox channel -> the dispatcher applies them to the pane's
-    // terminal engine -> a client-facing snapshot shows the result.
+    // End to end: the fake child writes two chunks -> the backend's sink
+    // queues both on the pane's output queue and sends a wake into the real
+    // inbox -> one dispatch pass takes the wake and gives the pane its turn
+    // -> a client-facing snapshot shows the result.
     fake_pty_backend
-        .push_output(pane_id, b"hi".to_vec())
+        .push_output(pane_id, b"h".to_vec())
         .expect("push");
-    let runtime_event = receive_matching_runtime_event(&server, |runtime_event| {
-        matches!(runtime_event, RuntimeEvent::PtyOutput { .. })
-    });
-    let RuntimeEvent::PtyOutput {
-        pane_id: output_pane_id,
-        output_bytes,
-    } = runtime_event
-    else {
-        unreachable!("matched above")
-    };
-    server.handle_pty_output(output_pane_id, &output_bytes);
+    fake_pty_backend
+        .push_output(pane_id, b"i".to_vec())
+        .expect("push");
+    assert_eq!(server.run_dispatch_pass(), DispatchPassOutcome::Served);
 
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     let pane_snapshot = render_snapshot
         .find_pane_snapshot(pane_id)
         .expect("pane in snapshot");
-    let terminal_grid = &pane_snapshot
+    let terminal_grid = pane_snapshot
         .terminal_grid_view
         .as_ref()
-        .expect("terminal grid view")
-        .grid;
+        .expect("terminal grid view");
     assert_eq!(
         terminal_grid
             .get_cell(0, 0)
@@ -146,11 +94,9 @@ fn typed_keys_write_to_the_focused_pane() {
     // `ls` + Enter, key by key. The viewer resolves each one, binds none of
     // them, and hands the press to the session, which writes it to the focused
     // pane as it is made.
-    let (delivery_receiver, _) = server.subscribe(client_id);
     let mut viewer = koshi_client::Client::from_client_id_and_viewport_size(
         client_id,
         TEST_VIEWPORT_SIZE,
-        delivery_receiver,
         TerminalCleanupGuard::new(),
     );
     for key in [Key::Char('l'), Key::Char('s'), Key::Named(NamedKey::Enter)] {
@@ -186,68 +132,37 @@ fn child_exit_is_forwarded_and_ends_the_last_pane() {
         .trigger_child_exit(pane_id, ExitStatus::ExitCode(0))
         .expect("exit");
 
-    let runtime_event = receive_matching_runtime_event(&server, |runtime_event| {
-        matches!(runtime_event, RuntimeEvent::ChildExit { .. })
-    });
-    let RuntimeEvent::ChildExit {
-        pane_id: exited_pane_id,
-        exit_status,
-    } = runtime_event
-    else {
-        unreachable!("matched above")
-    };
-    assert_eq!(exited_pane_id, pane_id);
-    assert_eq!(exit_status, ExitStatus::ExitCode(0));
-
-    // Applying the exit removes the only pane, and the server has no active pane.
-    let _ = server.handle_child_exit(exited_pane_id, exit_status);
+    // One pass takes the wake and the exit: the only pane is removed, and the
+    // server has no active pane.
+    assert_eq!(server.run_dispatch_pass(), DispatchPassOutcome::Served);
     assert!(!server.has_active_panes());
 }
 
 #[test]
-fn trailing_output_is_forwarded_before_the_exit() {
+fn trailing_output_is_parsed_before_the_exit() {
     let (mut server, fake_pty_backend, _) = build_server_with_fake_pty_backend();
     server
         .bootstrap_local(SessionId::new(), TEST_VIEWPORT_SIZE, SystemTime::now())
         .expect("bootstrap");
     let pane_id = fake_pty_backend.list_spawned_pane_ids()[0];
 
-    // The child writes, then exits: the output reaches the inbox before the exit.
+    // The child asks for its status (`CSI 5 n`), then exits. The engine reads
+    // the question and writes `CSI 0 n` back before the exit removes it.
     fake_pty_backend
-        .push_output(pane_id, b"bye".to_vec())
+        .push_output(pane_id, b"\x1b[5n".to_vec())
         .expect("push");
     fake_pty_backend
         .trigger_child_exit(pane_id, ExitStatus::ExitCode(3))
         .expect("exit");
 
-    let first_runtime_event = server
-        .get_inbox_receiver()
-        .recv_timeout(Duration::from_secs(2))
-        .expect("first event");
-    match first_runtime_event {
-        RuntimeEvent::PtyOutput {
-            pane_id: received_pane_id,
-            output_bytes,
-        } => {
-            assert_eq!(received_pane_id, pane_id);
-            assert_eq!(output_bytes, b"bye");
-        }
-        unexpected_event => panic!("expected PtyOutput, got {unexpected_event:?}"),
-    }
-    let second_runtime_event = server
-        .get_inbox_receiver()
-        .recv_timeout(Duration::from_secs(2))
-        .expect("second event");
-    match second_runtime_event {
-        RuntimeEvent::ChildExit {
-            pane_id: exited_pane_id,
-            exit_status,
-        } => {
-            assert_eq!(exited_pane_id, pane_id);
-            assert_eq!(exit_status, ExitStatus::ExitCode(3));
-        }
-        unexpected_event => panic!("expected ChildExit, got {unexpected_event:?}"),
-    }
+    assert_eq!(server.run_dispatch_pass(), DispatchPassOutcome::Served);
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![b"\x1b[0n".to_vec()]
+    );
+    assert!(!server.has_active_panes());
 }
 
 #[test]

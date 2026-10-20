@@ -40,6 +40,12 @@ pub(crate) mod remote_listener;
 /// them.
 pub mod router;
 
+/// The thread that holds the runtime files of the router and of a session
+/// server: a shared lock on their folders, and an access time 30 days ahead
+/// of the clock on each file.
+#[cfg(unix)]
+pub(crate) mod runtime_file_keeper;
+
 /// The per-session server process: one session's panes and PTYs, served
 /// headlessly over that session's control socket.
 pub mod session_server;

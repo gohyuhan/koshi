@@ -54,7 +54,7 @@ mod router {
     }
 }
 
-/// Returns the captured log lines whose `function` field is `function`.
+/// Returns the captured log lines whose `function` field is `function_name`.
 fn list_warnings_for_function<'a>(log_lines: &'a [String], function_name: &str) -> Vec<&'a String> {
     let function_field = format!(r#""function":"{function_name}""#);
     log_lines
@@ -65,7 +65,7 @@ fn list_warnings_for_function<'a>(log_lines: &'a [String], function_name: &str) 
 
 #[test]
 fn a_gated_body_runs_only_when_beta_features_are_allowed() {
-    let (_guard, logs) = koshi_observability::logging::with_test_writer();
+    let (_logging_guard, captured_log_output) = koshi_observability::logging::with_test_writer();
 
     // Off: the body never runs and the call returns the `otherwise` value.
     koshi_beta::set_beta_features_allowed(false);
@@ -94,7 +94,7 @@ fn a_gated_body_runs_only_when_beta_features_are_allowed() {
     assert_eq!(session::attach(), 0);
     assert_eq!(router::attach(), 0);
 
-    let log_lines = logs.lines();
+    let log_lines = captured_log_output.lines();
     let warnings = list_warnings_for_function(&log_lines, "gate::emit_blocked_warning_once");
     assert_eq!(
         warnings.len(),

@@ -7,21 +7,31 @@ license.workspace = true
 [dependencies]
 koshi-core.workspace = true
 koshi-ipc.workspace = true
-portable-pty.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 nix = { workspace = true, features = ["event", "hostname", "poll", "process", "signal"] }
+portable-pty.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
+  "Win32_Globalization",
   "Win32_Security",
+  "Win32_System_Console",
+  "Win32_System_Environment",
   "Win32_System_JobObjects",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Pipes",
+  "Win32_System_Registry",
   "Win32_System_Threading",
 ] }
 
 [dev-dependencies]
 serde_json.workspace = true
 tempfile.workspace = true
+
+[lints]
+workspace = true

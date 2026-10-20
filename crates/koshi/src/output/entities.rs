@@ -170,7 +170,7 @@ fn render_entity_record<SerializableRecord: Serialize>(
 }
 
 /// Column headers for [`SessionRow`] listings, matching [`format_session_row_cells`].
-const SESSION_ROW_HEADERS: &[&str] = &["id", "name", "server"];
+const SESSION_ROW_HEADERS: &[&str] = &["id", "name", "server", "owner"];
 
 /// Column headers for [`TabRow`] listings, matching [`format_tab_row_cells`].
 const TAB_ROW_HEADERS: &[&str] = &["id", "name", "session", "session_name"];
@@ -215,7 +215,9 @@ const CLIENT_HEADERS: &[&str] = &[
 
 /// One [`SessionRow`] as table cells, in [`SESSION_ROW_HEADERS`] order. The
 /// `server` cell is `local` for a session on this machine, else the saved
-/// server the session runs on.
+/// server the session runs on. The `owner` cell is the user id of another
+/// user whose folder of the shared directory advertises the session, such as
+/// `1001`, and `-` for every other session.
 fn format_session_row_cells(session: &SessionRow) -> Vec<String> {
     vec![
         session.session_id.to_string(),
@@ -224,6 +226,10 @@ fn format_session_row_cells(session: &SessionRow) -> Vec<String> {
             .server_name_or_address
             .clone()
             .unwrap_or_else(|| String::from("local")),
+        session.owner_user_id.map_or_else(
+            || String::from("-"),
+            |owner_user_id| owner_user_id.to_string(),
+        ),
     ]
 }
 
@@ -350,16 +356,9 @@ pub(super) fn format_size_cell(size: Size) -> String {
     format!("{}x{}", size.column_count, size.row_count)
 }
 
-/// A pane state as a cell: its lowercase name, with the exit code appended
-/// as `exited(<exit_code>)` when one was observed and `exited(-)` when not.
+/// A pane state as a cell: its lowercase name, `running`.
 pub(super) fn format_pane_state_cell(pane_lifecycle: PaneLifecycle) -> String {
     match pane_lifecycle {
-        PaneLifecycle::Spawning => "spawning".to_string(),
         PaneLifecycle::Running => "running".to_string(),
-        PaneLifecycle::Exited {
-            exit_code: Some(exit_code),
-        } => format!("exited({exit_code})"),
-        PaneLifecycle::Exited { exit_code: None } => "exited(-)".to_string(),
-        PaneLifecycle::Closing => "closing".to_string(),
     }
 }

@@ -196,6 +196,8 @@ pub struct PartialKoshiConfig {
     pub should_reconnect_remote_session: Option<bool>,
     /// Remote link timeout override, in milliseconds.
     pub remote_link_timeout_ms: Option<u32>,
+    /// Frame rate cap override, in frames a second.
+    pub max_frames_per_second: Option<u16>,
     /// Beta-feature gate override.
     pub should_allow_beta_features: Option<bool>,
     /// Other-users gate override.
@@ -302,6 +304,10 @@ impl PartialKoshiConfig {
         merge_override_field(
             &mut client_config.remote_link_timeout_ms,
             self.remote_link_timeout_ms,
+        );
+        merge_override_field(
+            &mut client_config.max_frames_per_second,
+            self.max_frames_per_second,
         );
     }
 

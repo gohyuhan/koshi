@@ -74,13 +74,15 @@ fn a_switch_ends_the_stream_with_the_session_to_join_next() {
         Command::SwitchSession(SwitchSessionArgs {
             client_id: None,
             session_id: target_session.session_id,
+            owner_user_id: None,
         }),
     );
 
     assert_eq!(
         read_session_ending(source_connection).expect("the stream ends with a frame"),
         SessionEvent::SwitchTo {
-            session_id: target_session.session_id
+            session_id: target_session.session_id,
+            owner_user_id: None,
         }
     );
 }

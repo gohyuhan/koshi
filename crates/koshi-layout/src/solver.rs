@@ -59,7 +59,7 @@ pub struct PaneSizing {
     /// sized, and a child that is suppressed reserves none. A stacked split
     /// places no gap between its members. `0` places children edge to edge.
     ///
-    /// `A | B` over 120 columns with `gap: 2` solves to `A` at columns 0–58
+    /// `A | B` over 120 columns with `gap_cell_count: 2` solves to `A` at columns 0–58
     /// and `B` at 61–119; columns 59 and 60 belong to no pane.
     pub gap_cell_count: u16,
 }
@@ -353,11 +353,6 @@ pub(crate) fn compute_slot_floor(
     compute_child_floor(split, child_index, axis_minimum)
 }
 
-/// The cell count of `rect`: columns × rows. A 40 by 24 rect gives 960.
-pub(crate) fn compute_cell_area(rect: Rect) -> u64 {
-    u64::from(rect.size.column_count) * u64::from(rect.size.row_count)
-}
-
 /// `column_count` and `row_count` ordered along the split axis, then across
 /// it: columns then rows for a horizontal split, rows then columns for a
 /// vertical one.
@@ -461,7 +456,7 @@ fn solve_directional_split(split: &SplitNode, rect: Rect, solve_state: &mut Layo
     }
 }
 
-/// The rectangle each child of a directional split receives inside `rect`,
+/// The rectangle each child of a directional split receives inside `split_rect`,
 /// in child order. A suppressed child gets a zero rect at its position; a
 /// kept child's rect meets the child's floor, and an empty rect always means
 /// "suppressed".
@@ -572,14 +567,15 @@ pub(crate) fn compute_directional_child_rects(
     child_rects
 }
 
-/// The rectangle each child of a stacked split receives inside `rect`, in
+/// The rectangle each child of a stacked split receives inside `split_rect`, in
 /// child order. Members stay in layout order: each collapsed member takes a
 /// one-row header strip spanning the stack's width, and the active member
 /// takes the band left over between them.
 ///
-/// Every rect is `Rect::build_empty_at_origin()` when `rect` cannot hold every header plus the
-/// active member at minimum size, or is narrower than the widest member needs
-/// ([`compute_stack_minimum_size`]). A stack with no children yields no rects.
+/// Every rect is `Rect::build_empty_at_origin()` when `split_rect` cannot hold
+/// every header plus the active member at minimum size, or is narrower than the
+/// widest member needs ([`compute_stack_minimum_size`]). A stack with no
+/// children yields no rects.
 pub(crate) fn compute_stacked_child_rects(
     split: &SplitNode,
     split_rect: Rect,
@@ -937,4 +933,4 @@ fn repair_cell_count_sum(child_cell_counts: &mut [u16], available_cell_count: u1
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

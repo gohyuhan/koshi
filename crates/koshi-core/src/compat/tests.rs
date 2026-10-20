@@ -160,7 +160,7 @@ fn the_table_pins_every_surface_by_name_and_numbers() {
         [
             ("session protocol", 5, 5, Some(4)),
             ("control plane", 3, 3, Some(3)),
-            ("supervisor link", 2, 2, Some(2)),
+            ("supervisor link", 2, 3, Some(2)),
             ("token store format", 1, 2, Some(2)),
             ("remote protocol", 2, 2, Some(2)),
             ("saved server file format", 1, 2, Some(2)),

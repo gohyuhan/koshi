@@ -1305,6 +1305,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -1328,6 +1329,7 @@ dependencies = [
  "koshi-client",
  "koshi-config",
  "koshi-core",
+ "koshi-image",
  "koshi-input",
  "koshi-ipc",
  "koshi-layout",
@@ -1391,6 +1393,8 @@ dependencies = [
  "koshi-iterm",
  "koshi-kitty",
  "koshi-sixel",
+ "koshi-test-support",
+ "memchr",
  "percent-encoding",
  "serde",
  "serde_json",
@@ -1408,6 +1412,7 @@ dependencies = [
  "libc",
  "serde_json",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]

@@ -15,14 +15,13 @@ use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_ipc::endpoint::EndpointFile;
-use koshi_ipc::protocol::{
-    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, ProcessImageId,
-};
-use koshi_ipc::transport::{Connection, Listener};
+use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcRequestKind, IpcResult};
+use koshi_ipc::transport::Listener;
 use uuid::uuid;
 
 use super::*;
 use crate::cli::CliCommand;
+use koshi_test_support::fixtures::{build_accepted_hello_result, send_ipc_reply};
 
 /// One session overview with the given name and one tab/pane/client per
 /// listed id, wired to each other in order.
@@ -96,6 +95,7 @@ fn build_complete_discovery<const N: usize>(session_overviews: [SessionOverview;
         sessions: session_overviews.to_vec(),
         unasked_session_count: 0,
         unread_path_count: 0,
+        owner_user_id_by_session_id: std::collections::HashMap::new(),
     }
 }
 
@@ -109,6 +109,7 @@ fn build_incomplete_discovery<const N: usize>(
         sessions: session_overviews.to_vec(),
         unasked_session_count,
         unread_path_count: 0,
+        owner_user_id_by_session_id: std::collections::HashMap::new(),
     }
 }
 
@@ -148,16 +149,6 @@ fn build_test_runtime_directory(test_label: &str) -> PathBuf {
     runtime_directory
 }
 
-/// Send one scripted reply back over `connection`.
-fn send_ipc_reply(connection: &mut Connection, request_id: u64, ipc_result: IpcResult) {
-    connection
-        .send(&IpcResponse {
-            request_id: Some(request_id),
-            answer_result: ipc_result,
-        })
-        .expect("send scripted reply");
-}
-
 /// A stand-in session: it advertises an endpoint file in `runtime_directory` and
 /// answers exactly one discovery exchange with `session_overview`.
 fn serve_discovery(runtime_directory: &Path, session_overview: SessionOverview) -> JoinHandle<()> {
@@ -181,25 +172,15 @@ fn serve_discovery(runtime_directory: &Path, session_overview: SessionOverview) 
         let hello_request: IpcRequest = discovery_connection.recv().expect("read discovery hello");
         let discovery_request: IpcRequest =
             discovery_connection.recv().expect("read discovery request");
-        assert!(matches!(
-            &hello_request.request_kind,
-            IpcRequestKind::Hello {
-                connection_token: presented_connection_token,
-                ..
-            } if presented_connection_token == &connection_token
-        ));
-        assert!(matches!(
-            discovery_request.request_kind,
-            IpcRequestKind::Discovery
-        ));
+        assert_eq!(
+            hello_request.request_kind,
+            IpcRequestKind::build_hello_request(connection_token)
+        );
+        assert_eq!(discovery_request.request_kind, IpcRequestKind::Discovery);
         send_ipc_reply(
             &mut discovery_connection,
             hello_request.request_id,
-            IpcResult::Hello {
-                protocol_version: koshi_ipc::protocol::PROTOCOL_VERSION,
-                build_version: env!("CARGO_PKG_VERSION").to_string(),
-                process_image_id: ProcessImageId::get_own(),
-            },
+            build_accepted_hello_result(),
         );
         send_ipc_reply(
             &mut discovery_connection,
@@ -1020,6 +1001,134 @@ fn in_session_command_with_no_flags_routes_home_without_probing() {
 }
 
 #[test]
+fn in_session_command_naming_its_own_session_id_under_another_user_does_not_route_home() {
+    let runtime_directory = koshi_test_support::fixtures::build_test_runtime_directory();
+    #[cfg(unix)]
+    let other_user_id = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(runtime_directory.path())
+            .expect("read the runtime directory")
+            .uid()
+            + 1
+    };
+    #[cfg(windows)]
+    let other_user_id = 1001;
+    let in_session_context = InSessionContext {
+        session_id: SessionId::new(),
+        client_id: None,
+        pane_id: PaneId::new(),
+    };
+    let command = CliCommand::CloseTab {
+        tab_reference: None,
+        session_reference: Some(SessionReference::OwnedSessionId(OwnedSessionId {
+            owner_user_id: other_user_id,
+            session_id: in_session_context.session_id,
+        })),
+        should_force_close: false,
+    };
+
+    let command_route = resolve_command_route_in_runtime_directory(
+        runtime_directory.path(),
+        None,
+        &command,
+        Some(&in_session_context),
+    );
+
+    let Err(CliError::SessionNotFound { session_name }) = command_route else {
+        panic!("expected SessionNotFound, got {command_route:?}");
+    };
+    assert_eq!(
+        session_name,
+        format!("{other_user_id}/{}", in_session_context.session_id)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn in_session_command_naming_its_own_session_id_in_another_users_folder_routes_there() {
+    use std::os::unix::fs::MetadataExt;
+
+    // Every folder a test makes belongs to the user running it. With no
+    // runtime directory, that user's id names another user.
+    let shared_sessions_base_directory = build_test_runtime_directory("owned-same-id");
+    let runtime_directory = shared_sessions_base_directory.join("missing-runtime");
+    let folder_owner_user_id = std::fs::metadata(&shared_sessions_base_directory)
+        .expect("read the shared directory")
+        .uid();
+    let user_directory =
+        shared_sessions_base_directory.join((folder_owner_user_id + 1).to_string());
+    std::fs::create_dir(&user_directory).expect("create a user's folder");
+    let in_session_context = InSessionContext {
+        session_id: SessionId::new(),
+        client_id: None,
+        pane_id: PaneId::new(),
+    };
+    let listener = Listener::bind(&koshi_ipc::endpoint::compute_socket_address(
+        &user_directory,
+        in_session_context.session_id,
+    ))
+    .expect("the other user's session binds");
+    let session_overview =
+        build_session_overview("amber-fox", in_session_context.session_id, &[], &[], &[]);
+    let discovery_server_thread = std::thread::spawn(move || {
+        let mut discovery_connection = listener.accept().expect("accept discovery");
+        let hello_request: IpcRequest = discovery_connection.recv().expect("read discovery hello");
+        let discovery_request: IpcRequest =
+            discovery_connection.recv().expect("read discovery request");
+        let IpcRequestKind::Hello {
+            connection_token: presented_connection_token,
+            ..
+        } = &hello_request.request_kind
+        else {
+            panic!("expected a Hello first");
+        };
+        assert_eq!(presented_connection_token.expose_secret(), "");
+        send_ipc_reply(
+            &mut discovery_connection,
+            hello_request.request_id,
+            build_accepted_hello_result(),
+        );
+        send_ipc_reply(
+            &mut discovery_connection,
+            discovery_request.request_id,
+            IpcResult::Overview(session_overview),
+        );
+    });
+    let command = CliCommand::CloseTab {
+        tab_reference: None,
+        session_reference: Some(SessionReference::OwnedSessionId(OwnedSessionId {
+            owner_user_id: folder_owner_user_id,
+            session_id: in_session_context.session_id,
+        })),
+        should_force_close: false,
+    };
+
+    let command_route = resolve_command_route_in_runtime_directory(
+        &runtime_directory,
+        Some(&shared_sessions_base_directory),
+        &command,
+        Some(&in_session_context),
+    )
+    .expect("the other user's session answers");
+
+    discovery_server_thread
+        .join()
+        .expect("stand-in session exits");
+    assert_eq!(
+        command_route,
+        Route::External {
+            session_id: in_session_context.session_id,
+            owner_user_id: Some(folder_owner_user_id),
+            targets: ResolvedTargets {
+                session_id: Some(in_session_context.session_id),
+                tab_id: None,
+            },
+        }
+    );
+    let _ = std::fs::remove_dir_all(&shared_sessions_base_directory);
+}
+
+#[test]
 fn in_session_tab_id_routes_home_and_rides_into_the_command() {
     let runtime_directory = koshi_test_support::fixtures::build_test_runtime_directory();
     let in_session_context = InSessionContext {
@@ -1072,8 +1181,8 @@ fn in_session_move_tab_by_id_routes_home_and_rides_into_the_command() {
         tab_index: 2,
         tab_reference: Some(TabReference::TabId(tab_id)),
     };
-    // No runtime directory exists under test, so answering at all proves no
-    // session was probed.
+    // The runtime directory under test holds no session, so answering at all
+    // proves no session was probed.
     let command_route = resolve_command_route_in_runtime_directory(
         runtime_directory.path(),
         None,

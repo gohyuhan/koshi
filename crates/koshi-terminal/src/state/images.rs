@@ -11,16 +11,19 @@ use koshi_sixel::{IndexedImage, SixelPalette};
 use serde::de::{self, DeserializeSeed, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer as DeserializerTrait, Serialize};
 
+use koshi_image::AnimationFrame;
 pub use koshi_image::ImagePlacementError;
 
 use crate::graphics::{
     DecodedAnimation, GraphicsProtocol, ImageAction, ImageDimension, ImageRecord,
     MAX_IMAGE_SIDE_PIXEL_COUNT,
 };
-use crate::grid::state::{Grid, ImagePlaceholder};
+use crate::grid::row_snapshot::RowSnapshot;
+use crate::grid::state::{Cell, CellExtra, Grid, ImagePlaceholder};
+use crate::style::Style;
 
 mod coverage;
-use crate::state::{Screen, TerminalState};
+use crate::state::{AlternateScreen, Screen, TerminalState};
 pub(in crate::state) use coverage::discard_native_fragment_references;
 pub(super) use coverage::NativeImageSource;
 
@@ -205,12 +208,12 @@ pub(super) struct RasterPlan {
 }
 
 impl RasterPlan {
-    fn is_same_raster(&self, other: &Self) -> bool {
-        self.needs_raster == other.needs_raster
-            && self.source_rect == other.source_rect
-            && self.target_size == other.target_size
-            && self.canvas_size == other.canvas_size
-            && self.pixel_offset == other.pixel_offset
+    fn is_same_raster(&self, other_raster_plan: &Self) -> bool {
+        self.needs_raster == other_raster_plan.needs_raster
+            && self.source_rect == other_raster_plan.source_rect
+            && self.target_size == other_raster_plan.target_size
+            && self.canvas_size == other_raster_plan.canvas_size
+            && self.pixel_offset == other_raster_plan.pixel_offset
     }
 
     /// Returns `canvas_size.0 * canvas_size.1 * 4`, or an error when the
@@ -307,8 +310,8 @@ fn is_zero_numeric_field(numeric_field: &(impl PartialEq + Default)) -> bool {
     numeric_field == &Default::default()
 }
 
-fn is_false_boolean_flag(boolean_flag: &bool) -> bool {
-    !*boolean_flag
+fn is_false_boolean_flag(is_flag_set: &bool) -> bool {
+    !*is_flag_set
 }
 
 pub(super) struct RestoredImageState {
@@ -388,6 +391,24 @@ impl ImageStateBudget {
     }
 }
 
+/// The frame of `animation` at `animation_frame_index`. An index past the last
+/// frame gives the [`ImagePlacementError::AnimationFrameNotFound`] message for
+/// that index.
+fn find_animation_frame(
+    animation: &DecodedAnimation,
+    animation_frame_index: u32,
+) -> Result<&AnimationFrame, String> {
+    usize::try_from(animation_frame_index)
+        .ok()
+        .and_then(|frame_list_index| animation.list_frames().get(frame_list_index))
+        .ok_or_else(|| {
+            ImagePlacementError::AnimationFrameNotFound {
+                frame_index: animation_frame_index,
+            }
+            .to_string()
+        })
+}
+
 fn alias_animation_image(
     decoded_image: &mut Option<Arc<crate::graphics::DecodedImage>>,
     animation: Option<&Arc<DecodedAnimation>>,
@@ -397,22 +418,8 @@ fn alias_animation_image(
     let (Some(current_image), Some(animation)) = (decoded_image.as_ref(), animation) else {
         return Ok(());
     };
-    let animation_frame_index_usize = usize::try_from(animation_frame_index).map_err(|_| {
-        ImagePlacementError::AnimationFrameNotFound {
-            frame_index: animation_frame_index,
-        }
-        .to_string()
-    })?;
-    let animation_frame_image = animation
-        .list_frames()
-        .get(animation_frame_index_usize)
-        .ok_or_else(|| {
-            ImagePlacementError::AnimationFrameNotFound {
-                frame_index: animation_frame_index,
-            }
-            .to_string()
-        })?
-        .clone_decoded_image();
+    let animation_frame_image =
+        find_animation_frame(animation, animation_frame_index)?.clone_decoded_image();
     if current_image.as_ref() != animation_frame_image.as_ref() {
         return Err("image content pixels do not match its current animation frame".to_owned());
     }
@@ -1469,22 +1476,8 @@ fn validate_animation_content_state(
         }
         return Ok(());
     };
-    let animation_frame_index_usize = usize::try_from(animation_frame_index).map_err(|_| {
-        ImagePlacementError::AnimationFrameNotFound {
-            frame_index: animation_frame_index,
-        }
-        .to_string()
-    })?;
-    let animation_frame_image = animation
-        .list_frames()
-        .get(animation_frame_index_usize)
-        .ok_or_else(|| {
-            ImagePlacementError::AnimationFrameNotFound {
-                frame_index: animation_frame_index,
-            }
-            .to_string()
-        })?
-        .get_decoded_image();
+    let animation_frame_image =
+        find_animation_frame(animation, animation_frame_index)?.get_decoded_image();
     if animation_frame_image != decoded_image.as_ref() {
         return Err("image content pixels do not match its current animation frame".to_owned());
     }
@@ -2308,7 +2301,11 @@ pub(super) fn validate_image_state(
             if placement.image_record.protocol != GraphicsProtocol::Kitty {
                 (u16::MAX, u16::MAX)
             } else {
-                terminal_state_fields.alternate.get_grid_dimensions()
+                terminal_state_fields
+                    .alternate
+                    .get_allocated_grid()
+                    .unwrap_or(&terminal_state_fields.primary)
+                    .get_grid_dimensions()
             },
             &mut image_placement_ids,
             &mut alternate_kitty_identities,
@@ -3051,7 +3048,7 @@ impl TerminalState {
         let mut placements = self.list_active_image_placements().to_vec();
         coverage::append_derived_image_placements(
             &mut placements,
-            self.list_native_image_placements(self.get_active_grid(), 0)
+            self.list_native_image_placements(&list_grid_image_rows(self.get_active_grid()), 0)
                 .into_iter()
                 .filter_map(|placement| placement.into_live_image_placement(0)),
         );
@@ -3063,9 +3060,14 @@ impl TerminalState {
     #[must_use]
     pub fn list_image_placements_for_view(&self, view_row_offset: usize) -> Vec<ImagePlacement> {
         if self.active_screen == Screen::Alternate {
-            let (row_count, column_count) = self.alternate.get_grid_dimensions();
-            let mut virtual_placements =
-                self.list_virtual_image_placements(self.alternate.as_ref(), 0);
+            let alternate_grid = self.get_active_grid();
+            let (row_count, column_count) = alternate_grid.get_grid_dimensions();
+            let alternate_image_rows = list_grid_image_rows(alternate_grid);
+            let mut virtual_placements = self.list_virtual_image_placements(
+                &alternate_image_rows,
+                (row_count, column_count),
+                0,
+            );
             let mut absolute = self
                 .alternate_image_placements
                 .iter()
@@ -3082,8 +3084,7 @@ impl TerminalState {
                 })
                 .collect::<Vec<_>>();
             self.remap_relative_absolute_placements(&mut absolute, &virtual_placements);
-            virtual_placements
-                .extend(self.list_native_image_placements(self.alternate.as_ref(), 0));
+            virtual_placements.extend(self.list_native_image_placements(&alternate_image_rows, 0));
             let mut placements = absolute
                 .into_iter()
                 .filter_map(|placement| {
@@ -3100,8 +3101,9 @@ impl TerminalState {
             );
             return placements;
         }
-        let (view_grid, scrolled_row_count) = self.get_scrolled_view(view_row_offset);
-        let (row_count, column_count) = view_grid.get_grid_dimensions();
+        let scrolled_row_count = self.compute_effective_view_offset(view_row_offset);
+        let (row_count, column_count) = self.primary.get_grid_dimensions();
+        let view_image_rows = self.list_view_image_rows(scrolled_row_count);
         let view_top_row = self
             .scrollback
             .get_total_pushed_line_count()
@@ -3111,11 +3113,14 @@ impl TerminalState {
             .list_primary_absolute_image_placements()
             .into_iter()
             .collect::<Vec<_>>();
-        let mut virtual_placements =
-            self.list_virtual_image_placements(view_grid.as_ref(), view_top_row);
+        let mut virtual_placements = self.list_virtual_image_placements(
+            &view_image_rows,
+            (row_count, column_count),
+            view_top_row,
+        );
         self.remap_relative_absolute_placements(&mut placements, &virtual_placements);
         virtual_placements
-            .extend(self.list_native_image_placements(view_grid.as_ref(), view_top_row));
+            .extend(self.list_native_image_placements(&view_image_rows, view_top_row));
         let mut visible = placements
             .into_iter()
             .filter_map(|placement| {
@@ -3135,9 +3140,29 @@ impl TerminalState {
         visible
     }
 
+    /// The image cells of each row a view scrolled `scrolled_row_count` lines
+    /// back shows, top to bottom: the `scrolled_row_count` newest history
+    /// rows, then the primary screen's top rows, as many rows as the primary
+    /// screen holds.
+    fn list_view_image_rows(&self, scrolled_row_count: usize) -> Vec<Vec<(u16, &CellExtra)>> {
+        let (row_count, _) = self.primary.get_grid_dimensions();
+        let history = self.scrollback.list_retained_lines();
+        history
+            .iter()
+            .skip(history.len().saturating_sub(scrolled_row_count))
+            .map(|row_snapshot| list_history_row_image_cells(row_snapshot))
+            .chain(self.primary.list_row_cells().map(list_live_row_image_cells))
+            .take(usize::from(row_count))
+            .collect()
+    }
+
+    /// The Kitty virtual placements the placeholder cells in `view_image_rows`
+    /// draw, for a view of `grid_dimensions` whose top row is absolute row
+    /// `view_top_row`.
     fn list_virtual_image_placements(
         &self,
-        terminal_grid: &Grid,
+        view_image_rows: &[Vec<(u16, &CellExtra)>],
+        grid_dimensions: (u16, u16),
         view_top_row: u64,
     ) -> Vec<AbsoluteImagePlacement> {
         let mut kitty_image_index_by_identity = HashMap::new();
@@ -3158,28 +3183,16 @@ impl TerminalState {
             usize,
             Vec<(u16, u16, ResolvedPlaceholder)>,
         > = BTreeMap::new();
-        for (row_index, grid_row_cells) in terminal_grid.list_rows().iter().enumerate() {
-            let mut previous_placeholder = None;
-            for (column_index, terminal_cell) in grid_row_cells.iter().enumerate() {
-                let resolved_placeholder =
-                    terminal_cell
-                        .get_image_placeholder()
-                        .and_then(|raw_placeholder| {
-                            resolve_placeholder(raw_placeholder, previous_placeholder)
-                        });
-                previous_placeholder = resolved_placeholder;
-                let Some(resolved_placeholder) = resolved_placeholder else {
-                    continue;
-                };
-                let kitty_image_id = resolved_placeholder.image_id
-                    | (u32::from(resolved_placeholder.image_id_most_significant_byte) << 24);
-                if let Some(&kitty_image_index) = kitty_image_index_by_identity
-                    .get(&(kitty_image_id, resolved_placeholder.placement_id))
-                {
+        for (row_index, row_image_cells) in view_image_rows.iter().enumerate() {
+            for (column_index, resolved_placeholder) in resolve_row_placeholders(row_image_cells) {
+                if let Some(&kitty_image_index) = kitty_image_index_by_identity.get(&(
+                    resolved_placeholder.compute_kitty_image_id(),
+                    resolved_placeholder.placement_id,
+                )) {
                     placeholder_cells_by_kitty_image_index
                         .entry(kitty_image_index)
                         .or_default()
-                        .push((row_index as u16, column_index as u16, resolved_placeholder));
+                        .push((row_index as u16, column_index, resolved_placeholder));
                 }
             }
         }
@@ -3189,7 +3202,7 @@ impl TerminalState {
             let Ok(prepared) = raster::prepare_image_with_raster_plan(
                 &kitty_image.image_record,
                 self.cell_size,
-                terminal_grid.get_grid_dimensions(),
+                grid_dimensions,
             ) else {
                 continue;
             };
@@ -3377,7 +3390,7 @@ impl TerminalState {
     ) where
         PlacementMapper: FnMut(u16, u16) -> Option<(u16, u16)>,
     {
-        let (rows, columns) = self.alternate.get_grid_dimensions();
+        let (rows, columns) = self.get_alternate_grid_dimensions();
         self.alternate_image_placements = std::mem::take(&mut self.alternate_image_placements)
             .into_iter()
             .filter_map(|mut placement| {
@@ -3995,16 +4008,23 @@ impl TerminalState {
         relative_anchor_by_placement_id
     }
 
-    pub(super) fn clear_alternate_image_placements(&mut self) {
-        let (row_count, column_count) = self.alternate.get_grid_dimensions();
-        let previous_active_screen = self.active_screen;
-        self.active_screen = Screen::Alternate;
-        let mut has_removed_image_fragments = false;
-        for row_index in 0..row_count {
-            has_removed_image_fragments |=
-                self.clear_image_fragments_at_cells(row_index, 0, column_count);
-        }
-        self.active_screen = previous_active_screen;
+    /// Free the alternate grid: the alternate screen becomes
+    /// [`AlternateScreen::Blank`] in `fill_style`, every image fragment its
+    /// cells carried stops counting toward its native source, and every
+    /// alternate image placement and native source goes.
+    pub(super) fn release_alternate_grid(&mut self, fill_style: Style) {
+        let released_alternate_screen =
+            std::mem::replace(&mut self.alternate, AlternateScreen::Blank { fill_style });
+        let has_removed_image_fragments = match &released_alternate_screen {
+            AlternateScreen::Blank { .. } => false,
+            AlternateScreen::Allocated(alternate_grid) => discard_native_fragment_references(
+                &mut self.native_fragment_count_by_image_source_id,
+                alternate_grid
+                    .list_row_cells()
+                    .flatten()
+                    .map(Cell::get_image_fragments),
+            ),
+        };
         self.native_images
             .retain(|native_image| native_image.screen != Screen::Alternate);
         self.alternate_image_placements.clear();
@@ -4310,24 +4330,92 @@ struct ResolvedPlaceholder {
     image_id_most_significant_byte: u8,
 }
 
-fn find_placeholder_anchor(grid: &Grid, kitty_image: &KittyImage) -> Option<(i64, i64)> {
-    find_placeholder_anchor_in_rows(
-        kitty_image,
-        grid.list_rows()
-            .iter()
-            .enumerate()
-            .filter_map(|(row_index, row_cells)| {
-                Some((i64::try_from(row_index).ok()?, row_cells.as_slice()))
-            }),
-    )
+impl ResolvedPlaceholder {
+    /// The full Kitty image id: `image_id`, with
+    /// `image_id_most_significant_byte` as its bits 24 through 31.
+    fn compute_kitty_image_id(&self) -> u32 {
+        self.image_id | (u32::from(self.image_id_most_significant_byte) << 24)
+    }
 }
 
-fn find_placeholder_anchor_in_rows<'a, I>(
+/// The cells of `row_cells` that carry image data, as `(column, continuation
+/// tail)` pairs by rising column.
+fn list_live_row_image_cells(row_cells: &[Cell]) -> Vec<(u16, &CellExtra)> {
+    row_cells
+        .iter()
+        .enumerate()
+        .filter_map(|(column_index, cell)| {
+            Some((column_index as u16, cell.get_image_cell_extra()?))
+        })
+        .collect()
+}
+
+/// The image cells of the history row `row_snapshot`, as `(column,
+/// continuation tail)` pairs by rising column.
+fn list_history_row_image_cells(row_snapshot: &RowSnapshot) -> Vec<(u16, &CellExtra)> {
+    row_snapshot
+        .list_image_cells()
+        .iter()
+        .map(|image_cell| (image_cell.column_index, &image_cell.cell_extra))
+        .collect()
+}
+
+/// The image cells of every row of `grid`, top to bottom.
+fn list_grid_image_rows(grid: &Grid) -> Vec<Vec<(u16, &CellExtra)>> {
+    grid.list_row_cells()
+        .map(list_live_row_image_cells)
+        .collect()
+}
+
+/// The resolved placeholder of each cell of `row_image_cells` that holds one,
+/// as `(column, placeholder)` pairs by rising column. A cell whose left
+/// neighbor holds a resolved placeholder resolves against it. A cell that
+/// holds no placeholder, or whose placeholder does not resolve, is left out.
+fn resolve_row_placeholders<'a>(
+    row_image_cells: &'a [(u16, &'a CellExtra)],
+) -> impl Iterator<Item = (u16, ResolvedPlaceholder)> + 'a {
+    let mut previous_placeholder: Option<(u16, ResolvedPlaceholder)> = None;
+    row_image_cells
+        .iter()
+        .filter_map(move |&(column_index, cell_extra)| {
+            let resolved_placeholder =
+                cell_extra
+                    .get_image_placeholder()
+                    .and_then(|raw_placeholder| {
+                        resolve_placeholder(
+                            raw_placeholder,
+                            find_left_neighbor_placeholder(previous_placeholder, column_index),
+                        )
+                    });
+            previous_placeholder = resolved_placeholder
+                .map(|resolved_placeholder| (column_index, resolved_placeholder));
+            previous_placeholder
+        })
+}
+
+/// The placeholder `previous_placeholder` holds when it sits in the column
+/// just left of `column_index`, and `None` otherwise.
+fn find_left_neighbor_placeholder(
+    previous_placeholder: Option<(u16, ResolvedPlaceholder)>,
+    column_index: u16,
+) -> Option<ResolvedPlaceholder> {
+    previous_placeholder
+        .filter(|(previous_column_index, _)| {
+            previous_column_index.checked_add(1) == Some(column_index)
+        })
+        .map(|(_, placeholder)| placeholder)
+}
+
+fn find_placeholder_anchor(grid: &Grid, kitty_image: &KittyImage) -> Option<(i64, i64)> {
+    find_placeholder_anchor_in_rows(kitty_image, (0_i64..).zip(list_grid_image_rows(grid)))
+}
+
+fn find_placeholder_anchor_in_rows<'a, GridRowEntries>(
     kitty_image: &KittyImage,
-    grid_row_entries: I,
+    grid_row_entries: GridRowEntries,
 ) -> Option<(i64, i64)>
 where
-    I: IntoIterator<Item = (i64, &'a [crate::grid::state::Cell])>,
+    GridRowEntries: IntoIterator<Item = (i64, Vec<(u16, &'a CellExtra)>)>,
 {
     let requested_image_id = kitty_image
         .display
@@ -4336,22 +4424,9 @@ where
     let requested_row_count = kitty_image.display.requested_row_count?;
     let requested_column_count = kitty_image.display.requested_column_count?;
     let mut anchor = None;
-    for (row_index, row_cells) in grid_row_entries {
-        let mut previous_placeholder = None;
-        for (column_index, cell) in row_cells.iter().enumerate() {
-            let Some(raw_placeholder) = cell.get_image_placeholder() else {
-                previous_placeholder = None;
-                continue;
-            };
-            let Some(placeholder) = resolve_placeholder(raw_placeholder, previous_placeholder)
-            else {
-                previous_placeholder = None;
-                continue;
-            };
-            previous_placeholder = Some(placeholder);
-            let resolved_image_id = placeholder.image_id
-                | (u32::from(placeholder.image_id_most_significant_byte) << 24);
-            if resolved_image_id != requested_image_id
+    for (row_index, row_image_cells) in grid_row_entries {
+        for (column_index, placeholder) in resolve_row_placeholders(&row_image_cells) {
+            if placeholder.compute_kitty_image_id() != requested_image_id
                 || (placeholder.placement_id.is_some()
                     && placeholder.placement_id != kitty_image.display.placement_id)
                 || u32::from(placeholder.source_row_index) >= requested_row_count
@@ -4359,7 +4434,7 @@ where
             {
                 continue;
             }
-            let placeholder_column_offset = i64::try_from(column_index).ok()?;
+            let placeholder_column_offset = i64::from(column_index);
             let anchor_row_offset =
                 row_index.checked_sub(i64::from(placeholder.source_row_index))?;
             let anchor_column_offset = placeholder_column_offset
@@ -4390,23 +4465,19 @@ fn find_primary_placeholder_anchor(
         .list_retained_lines()
         .iter()
         .enumerate()
-        .filter_map(|(history_row_index, (row_cells, _))| {
+        .filter_map(|(history_row_index, row_snapshot)| {
             let absolute_scrollback_line_count = retained_history_start_line_count
                 .checked_add(u64::try_from(history_row_index).ok()?)?;
             let relative_row_index = i64::try_from(
                 i128::from(absolute_scrollback_line_count) - i128::from(live_scrollback_line_count),
             )
             .ok()?;
-            Some((relative_row_index, row_cells.as_slice()))
+            Some((
+                relative_row_index,
+                list_history_row_image_cells(row_snapshot),
+            ))
         });
-    let live_rows = terminal_state
-        .primary
-        .list_rows()
-        .iter()
-        .enumerate()
-        .filter_map(|(live_row_index, row_cells)| {
-            Some((i64::try_from(live_row_index).ok()?, row_cells.as_slice()))
-        });
+    let live_rows = (0_i64..).zip(list_grid_image_rows(&terminal_state.primary));
     find_placeholder_anchor_in_rows(kitty_image, retained_history_rows.chain(live_rows))
 }
 

@@ -22,6 +22,18 @@
 //! sizes are safe, including a buffer shorter than the laid-out frame. Pane
 //! placement keeps pane titles visible while the source and destination
 //! previews soften their pane areas.
+//!
+//! For seeded frames, a frame that draws listed rows into a buffer of stale
+//! cells leaves each listed row as a frame that draws every row leaves it,
+//! and no drawn cell reaches past its row. The changed rows of two frames are
+//! the buffer rows their replaced pane rows land on, tiled, letterboxed or
+//! floating, and a change drawn outside the pane rows lists none. A tiled
+//! pane that prints under a floating pane keeps the floating cells on top. A
+//! pane border draws the cells a bordered ratatui block draws.
+//!
+//! The walk over visible tiled panes keeps slot order, finds each snapshot by
+//! pane id, and leaves out a hidden slot, a slot with no content rect and a
+//! slot with no snapshot.
 
 use super::*;
 
@@ -34,14 +46,16 @@ use koshi_core::mouse::MouseTracking;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as TermColor, Style as TermStyle};
 use koshi_test_support::fixtures::build_cell_rect;
+use koshi_test_support::output_workloads::SeededSequence;
+use ratatui::widgets::{Block, Borders, Widget};
 
 use koshi_terminal::state::CursorShape;
 
 use super::tabline::format_version_badge_text;
 use crate::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, CursorStyle, FloatingPaneSlot, GridView,
-    KeymapHints, PaneSlot, PaneSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot,
-    TabMetadata, TabSnapshot, ViewerChrome,
+    ImagePlacementSnapshot, KeymapHints, PaneSlot, PaneSnapshot, ScrollbackMetadata,
+    SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
 };
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::{solve_region_rects, Edge, RegionGeometry, SolvedRegions};
@@ -221,10 +235,11 @@ fn render_frame_to_buffer(
         None,
         viewer_chrome,
         ImageRenderMode::Placeholder,
-        None,
+        &[],
         None,
         None,
         viewport_area,
+        DrawnRows::Every,
         &mut render_buffer,
     );
     render_buffer
@@ -284,10 +299,11 @@ fn render_placement_preview(
         None,
         viewer_chrome,
         ImageRenderMode::Placeholder,
-        None,
+        &[],
         Some(placement_presentation),
         placement_target,
         viewport_area,
+        DrawnRows::Every,
         &mut render_buffer,
     );
     render_buffer
@@ -396,10 +412,10 @@ fn committed_regions_keep_panes_and_cursor_inside_a_side_region() {
         .session_snapshot
         .active_tab_snapshot
         .tab_size = tab_size;
-    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::build_blank(36, 98, TermStyle::default())),
-        view_row_offset: 0,
-    });
+    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView::from_grid(
+        &Grid::build_blank(36, 98, TermStyle::default()),
+        0,
+    ));
     let committed_regions = CommittedRegions::from_solved_regions(
         viewport_size,
         solve_region_rects(
@@ -1135,16 +1151,12 @@ fn placement_preview_distinguishes_pane_roles_and_keeps_content_visible() {
     );
     let mut source_grid = Grid::build_blank(4, 38, TermStyle::default());
     *source_grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('S', 1, TermStyle::default());
-    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(source_grid),
-        view_row_offset: 0,
-    });
+    render_snapshot.pane_snapshots[0].terminal_grid_view =
+        Some(GridView::from_grid(&source_grid, 0));
     let mut target_grid = Grid::build_blank(4, 38, TermStyle::default());
     *target_grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('T', 1, TermStyle::default());
-    render_snapshot.pane_snapshots[1].terminal_grid_view = Some(GridView {
-        grid: Arc::new(target_grid),
-        view_row_offset: 0,
-    });
+    render_snapshot.pane_snapshots[1].terminal_grid_view =
+        Some(GridView::from_grid(&target_grid, 0));
     let placement_target = PanePlacementTarget::Split {
         destination_tab_id: render_snapshot.client_snapshot.active_tab_id,
         anchor: PanePlacementAnchor::Pane(target_pane_id),
@@ -1864,10 +1876,10 @@ fn scroll_indicator_shown_only_when_scrolled_back() {
 
     // Scrolled back three lines with 100 retained: the count sits right-aligned
     // in this pane's own bottom border. The tabline keeps the ` BASE ` mode tag.
-    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::build_blank(6, 40, TermStyle::default())),
-        view_row_offset: 3,
-    });
+    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView::from_grid(
+        &Grid::build_blank(6, 40, TermStyle::default()),
+        3,
+    ));
     render_snapshot.pane_snapshots[0]
         .scrollback_metadata
         .retained_line_count = 100;
@@ -1903,17 +1915,17 @@ fn each_pane_shows_its_own_scroll_position() {
         },
     );
     // The left pane is scrolled 3 up of 100; the right pane 7 up of 50.
-    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::build_blank(6, 20, TermStyle::default())),
-        view_row_offset: 3,
-    });
+    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView::from_grid(
+        &Grid::build_blank(6, 20, TermStyle::default()),
+        3,
+    ));
     render_snapshot.pane_snapshots[0]
         .scrollback_metadata
         .retained_line_count = 100;
-    render_snapshot.pane_snapshots[1].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::build_blank(6, 20, TermStyle::default())),
-        view_row_offset: 7,
-    });
+    render_snapshot.pane_snapshots[1].terminal_grid_view = Some(GridView::from_grid(
+        &Grid::build_blank(6, 20, TermStyle::default()),
+        7,
+    ));
     render_snapshot.pane_snapshots[1]
         .scrollback_metadata
         .retained_line_count = 50;
@@ -1941,10 +1953,10 @@ fn build_narrow_scrolled_render_snapshot(column_count: u16) -> RenderSnapshot {
             row_count: 6,
         },
     );
-    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::build_blank(2, column_count - 2, TermStyle::default())),
-        view_row_offset: 3,
-    });
+    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView::from_grid(
+        &Grid::build_blank(2, column_count - 2, TermStyle::default()),
+        3,
+    ));
     render_snapshot.pane_snapshots[0]
         .scrollback_metadata
         .retained_line_count = 100;
@@ -1979,10 +1991,10 @@ fn a_scrolled_pane_that_retained_nothing_shows_a_zero_total() {
             row_count: 8,
         },
     );
-    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::build_blank(4, 38, TermStyle::default())),
-        view_row_offset: 3,
-    });
+    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView::from_grid(
+        &Grid::build_blank(4, 38, TermStyle::default()),
+        3,
+    ));
     render_snapshot.pane_snapshots[0]
         .scrollback_metadata
         .retained_line_count = 0;
@@ -2056,10 +2068,11 @@ fn reused_buffer_is_blanked_before_painting() {
         None,
         ViewerChrome::default(),
         ImageRenderMode::Placeholder,
-        None,
+        &[],
         None,
         None,
         viewport_area,
+        DrawnRows::Every,
         &mut render_buffer,
     );
 
@@ -2483,10 +2496,7 @@ fn build_content_render_snapshot(
         LockMode::Normal,
         viewport_size,
     );
-    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(grid),
-        view_row_offset: 0,
-    });
+    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView::from_grid(&grid, 0));
     render_snapshot.pane_snapshots[0].is_reverse_video = is_reverse_video;
     render_snapshot
 }
@@ -2571,6 +2581,38 @@ fn wide_glyph_at_right_edge_is_padded() {
     // Padded to a blank; a half-glyph never bleeds onto the right border.
     assert_eq!(render_buffer[(5, 2)].symbol(), " ");
     assert_eq!(render_buffer[(6, 2)].symbol(), "│");
+}
+
+#[test]
+fn a_cluster_wider_than_its_one_column_cell_draws_its_base_character_alone() {
+    // The content rect is 5 wide. Its last column holds `U+2764` with VS16 in
+    // a 1-column cell, the width the terminal keeps it at on its right edge.
+    let mut grid = Grid::build_blank(1, 5, TermStyle::default());
+    let mut heart_cell = Cell::from_character('\u{2764}', 1, TermStyle::default());
+    heart_cell.push_combining('\u{FE0F}');
+    *grid.get_cell_mut(0, 4).unwrap() = heart_cell;
+    let render_snapshot = build_content_render_snapshot(
+        grid,
+        build_cell_rect(0, 1, 7, 3),
+        false,
+        Size {
+            column_count: 7,
+            row_count: 4,
+        },
+    );
+    let render_buffer = render_test_snapshot(&render_snapshot, 7, 4);
+
+    assert_eq!(render_buffer[(5, 2)].symbol(), "\u{2764}");
+    assert_eq!(render_buffer[(5, 2)].cell_width(), 1);
+    let written_cells: Vec<(u16, u16, &str)> = Buffer::empty(render_buffer.area)
+        .diff(&render_buffer)
+        .into_iter()
+        .filter(|(column_index, row_index, _)| *row_index == 2 && *column_index >= 5)
+        .map(|(column_index, row_index, written_cell)| {
+            (column_index, row_index, written_cell.symbol())
+        })
+        .collect();
+    assert_eq!(written_cells, [(5, 2, "\u{2764}"), (6, 2, "│")]);
 }
 
 #[test]
@@ -2841,7 +2883,7 @@ fn cursor_at_focused_pane_maps_to_content_cell() {
 fn cursor_past_content_rect_is_clamped_inside_it() {
     // A frozen cursor (e.g. a dead pane whose content rect became smaller) beyond
     // the content area: the returned cell is clamped to the last cell inside the
-    // rect, never onto the border or a neighbour. Content rect origin (1,2),
+    // rect, never onto the border or a neighbor. Content rect origin (1,2),
     // 38x4 → last cell (38, 5).
     let mut render_snapshot = build_content_render_snapshot(
         Grid::build_blank(4, 38, TermStyle::default()),
@@ -3051,10 +3093,10 @@ fn cursor_follows_focus_and_never_leaks_to_unfocused_panes() {
     );
     // Both panes carry a grid and a visible cursor at their own content origin.
     for pane_snapshot in &mut render_snapshot.pane_snapshots {
-        pane_snapshot.terminal_grid_view = Some(GridView {
-            grid: Arc::new(Grid::build_blank(4, 18, TermStyle::default())),
-            view_row_offset: 0,
-        });
+        pane_snapshot.terminal_grid_view = Some(GridView::from_grid(
+            &Grid::build_blank(4, 18, TermStyle::default()),
+            0,
+        ));
     }
 
     // Focused on the right pane (content origin (21,2)): the cursor sits in
@@ -3095,10 +3137,10 @@ fn cursor_style_follows_focus_between_panes() {
         },
     );
     for pane_snapshot in &mut render_snapshot.pane_snapshots {
-        pane_snapshot.terminal_grid_view = Some(GridView {
-            grid: Arc::new(Grid::build_blank(4, 18, TermStyle::default())),
-            view_row_offset: 0,
-        });
+        pane_snapshot.terminal_grid_view = Some(GridView::from_grid(
+            &Grid::build_blank(4, 18, TermStyle::default()),
+            0,
+        ));
     }
     render_snapshot.pane_snapshots[0].cursor_snapshot.shape = Some(CursorShape::Bar);
     render_snapshot.pane_snapshots[0]
@@ -3378,10 +3420,10 @@ fn cursor_shifts_into_centered_content() {
             row_count: 8,
         },
     );
-    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::build_blank(4, 38, TermStyle::default())),
-        view_row_offset: 0,
-    });
+    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView::from_grid(
+        &Grid::build_blank(4, 38, TermStyle::default()),
+        0,
+    ));
     render_snapshot.pane_snapshots[0].cursor_snapshot = CursorSnapshot {
         row_index: 2,
         column_index: 5,
@@ -3414,10 +3456,10 @@ fn a_pane_whose_content_rect_holds_no_cells_places_no_cursor() {
             row_count: 10,
         },
     );
-    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::build_blank(4, 1, TermStyle::default())),
-        view_row_offset: 0,
-    });
+    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView::from_grid(
+        &Grid::build_blank(4, 1, TermStyle::default()),
+        0,
+    ));
     assert_eq!(
         render_snapshot
             .session_snapshot
@@ -3460,10 +3502,11 @@ fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
         None,
         ViewerChrome::default(),
         ImageRenderMode::Placeholder,
-        None,
+        &[],
         None,
         None,
         RatatuiRect::new(0, 0, 60, 12),
+        DrawnRows::Every,
         &mut render_buffer,
     );
 
@@ -3499,10 +3542,11 @@ fn an_area_smaller_than_the_committed_regions_letterboxes_nothing_below_it() {
         None,
         ViewerChrome::default(),
         ImageRenderMode::Placeholder,
-        None,
+        &[],
         None,
         None,
         viewport_area,
+        DrawnRows::Every,
         &mut render_buffer,
     );
 
@@ -3778,19 +3822,15 @@ fn overlapping_panes_draw_in_layout_order_last_wins() {
         Cell::from_character('Z', 1, TermStyle::default());
     *first_pane_grid.get_cell_mut(0, 15).unwrap() =
         Cell::from_character('X', 1, TermStyle::default());
-    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(first_pane_grid),
-        view_row_offset: 0,
-    });
+    render_snapshot.pane_snapshots[0].terminal_grid_view =
+        Some(GridView::from_grid(&first_pane_grid, 0));
     let mut second_pane_grid = Grid::build_blank(4, 18, TermStyle::default());
     *second_pane_grid.get_cell_mut(0, 0).unwrap() =
         Cell::from_character('Y', 1, TermStyle::default());
     *second_pane_grid.get_cell_mut(0, 17).unwrap() =
         Cell::from_character('W', 1, TermStyle::default());
-    render_snapshot.pane_snapshots[1].terminal_grid_view = Some(GridView {
-        grid: Arc::new(second_pane_grid),
-        view_row_offset: 0,
-    });
+    render_snapshot.pane_snapshots[1].terminal_grid_view =
+        Some(GridView::from_grid(&second_pane_grid, 0));
     let render_buffer = render_test_snapshot(&render_snapshot, 40, 8);
 
     // The first pane's own corner (outside the second pane's rect) survives
@@ -4020,10 +4060,10 @@ fn cursor_position_with_focused_pane_absent_from_layout_returns_none() {
         .pane_slots
         .retain(|pane_slot| pane_slot.pane_id != orphaned_pane_id);
     // The orphaned pane carries a grid and a visible cursor.
-    render_snapshot.pane_snapshots[1].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::build_blank(4, 18, TermStyle::default())),
-        view_row_offset: 0,
-    });
+    render_snapshot.pane_snapshots[1].terminal_grid_view = Some(GridView::from_grid(
+        &Grid::build_blank(4, 18, TermStyle::default()),
+        0,
+    ));
     assert_eq!(get_whole_viewport_cursor_position(&render_snapshot), None);
 }
 
@@ -4532,7 +4572,7 @@ fn display_widths_force_only_a_glyph_ratatui_measures_at_another_width() {
     // columns 4 and 5.
     render_buffer.set_string(0, 0, "\u{17D8}x漢", Style::default());
 
-    apply_display_widths(buffer_area, &mut render_buffer);
+    apply_display_widths(buffer_area, DrawnRows::Every, &mut render_buffer);
 
     assert_eq!(render_buffer[(0, 0)].cell_width(), 1);
     assert_eq!(render_buffer[(4, 0)].diff_option, CellDiffOption::None);
@@ -4585,10 +4625,10 @@ fn build_focused_floating_pane_render_snapshot() -> (RenderSnapshot, PaneId) {
         ));
     let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
     floating_pane_snapshot.pane_id = floating_pane_id;
-    floating_pane_snapshot.terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::build_blank(4, 28, TermStyle::default())),
-        view_row_offset: 0,
-    });
+    floating_pane_snapshot.terminal_grid_view = Some(GridView::from_grid(
+        &Grid::build_blank(4, 28, TermStyle::default()),
+        0,
+    ));
     floating_pane_snapshot.cursor_snapshot = CursorSnapshot {
         row_index: 2,
         column_index: 5,
@@ -4715,11 +4755,9 @@ fn a_floating_pane_over_the_focused_tiled_panes_cursor_cell_hides_the_cursor() {
         .pane_slots[0]
         .pane_id;
     render_snapshot.client_snapshot.focused_pane_id = Some(tiled_pane_id);
-    get_pane_snapshot_mut(&mut render_snapshot, tiled_pane_id).terminal_grid_view =
-        Some(GridView {
-            grid: Arc::new(Grid::build_blank(6, 38, TermStyle::default())),
-            view_row_offset: 0,
-        });
+    get_pane_snapshot_mut(&mut render_snapshot, tiled_pane_id).terminal_grid_view = Some(
+        GridView::from_grid(&Grid::build_blank(6, 38, TermStyle::default()), 0),
+    );
     let tiled_cursor_snapshot =
         &mut get_pane_snapshot_mut(&mut render_snapshot, tiled_pane_id).cursor_snapshot;
     tiled_cursor_snapshot.row_index = 2;
@@ -4786,5 +4824,876 @@ fn a_floating_panes_cursor_cell_past_the_pane_area_places_no_cursor() {
     assert_eq!(
         get_core_cursor_position(&render_snapshot, ViewerChrome::default()),
         None
+    );
+}
+
+/// The seed of the first frame the listed-row equivalence test draws.
+const LISTED_ROWS_FIRST_SEED: u64 = 0x6b6f_7368_6900_0012;
+
+/// How many seeded frames the listed-row equivalence test draws: 400.
+const LISTED_ROWS_FRAME_COUNT: u64 = 400;
+
+/// A seeded cell style: a palette foreground, a truecolor background, bold,
+/// or the default style, one time in four each.
+fn pick_seeded_cell_style(seeded_sequence: &mut SeededSequence) -> TermStyle {
+    let mut cell_style = TermStyle::default();
+    match seeded_sequence.compute_next_index(4) {
+        0 => cell_style.set_foreground_color(TermColor::Indexed(
+            seeded_sequence.compute_next_index(256) as u8,
+        )),
+        1 => cell_style.set_background_color(TermColor::Rgb(0x10, 0x20, 0x30)),
+        2 => cell_style.set_bold(true),
+        _ => {}
+    }
+    cell_style
+}
+
+/// A seeded `row_count x column_count` grid. Each cell holds, in a seeded
+/// style, a lowercase letter, `中` two columns wide, `U+2764` with VS16 two
+/// columns wide, `e` with `U+0301`, Thai `U+0E01` with `U+0E34`, or
+/// `U+17D8`. A two-column character takes the next column as its spacer, and
+/// in the last column a letter takes its place.
+fn build_seeded_grid(
+    seeded_sequence: &mut SeededSequence,
+    row_count: u16,
+    column_count: u16,
+) -> Grid {
+    let mut grid = Grid::build_blank(row_count, column_count, TermStyle::default());
+    for row_index in 0..row_count {
+        let mut column_index = 0;
+        while column_index < column_count {
+            let cell_style = pick_seeded_cell_style(seeded_sequence);
+            let has_spacer_column = column_index + 1 < column_count;
+            let seeded_cell = match seeded_sequence.compute_next_index(10) {
+                0 if has_spacer_column => Cell::from_character('中', 2, cell_style),
+                1 if has_spacer_column => {
+                    let mut heart_cell = Cell::from_character('\u{2764}', 2, cell_style);
+                    heart_cell.push_combining('\u{FE0F}');
+                    heart_cell
+                }
+                2 => {
+                    let mut accented_cell = Cell::from_character('e', 1, cell_style);
+                    accented_cell.push_combining('\u{0301}');
+                    accented_cell
+                }
+                3 => {
+                    let mut thai_cell = Cell::from_character('\u{0E01}', 1, cell_style);
+                    thai_cell.push_combining('\u{0E34}');
+                    thai_cell
+                }
+                4 => Cell::from_character('\u{17D8}', 1, cell_style),
+                _ => Cell::from_character(
+                    char::from(b'a' + seeded_sequence.compute_next_index(26) as u8),
+                    1,
+                    cell_style,
+                ),
+            };
+            let cell_width = seeded_cell.get_display_width();
+            *grid
+                .get_cell_mut(row_index, column_index)
+                .expect("the column is inside the grid") = seeded_cell;
+            if cell_width == 2 {
+                *grid
+                    .get_cell_mut(row_index, column_index + 1)
+                    .expect("the spacer column is inside the grid") =
+                    Cell::from_character(' ', 0, cell_style);
+            }
+            column_index += u16::from(cell_width);
+        }
+    }
+    grid
+}
+
+/// Give `pane_snapshot`, whose content area is `content_size`, a seeded
+/// title and, five times in six, a seeded grid. The grid has one row fewer,
+/// the same rows or one row more than `content_size`, 1 at least, and its
+/// columns are seeded the same way. The grid may show reverse video, a
+/// selection over two rows, a view scrolled back from 40 retained lines,
+/// and an unavailable image of up to `4x4` cells.
+fn decorate_seeded_pane(
+    seeded_sequence: &mut SeededSequence,
+    pane_snapshot: &mut PaneSnapshot,
+    content_size: Size,
+) {
+    pane_snapshot.pane_title = match seeded_sequence.compute_next_index(4) {
+        0 => None,
+        1 => Some("vim".to_string()),
+        2 => Some("build 中文 log".to_string()),
+        _ => Some("htop \u{2764}\u{FE0F} e\u{0301}".to_string()),
+    };
+    if seeded_sequence.compute_next_index(6) == 0 {
+        return;
+    }
+    let grid_row_count = (content_size.row_count + seeded_sequence.compute_next_index(3) as u16)
+        .saturating_sub(1)
+        .max(1);
+    let grid_column_count = (content_size.column_count
+        + seeded_sequence.compute_next_index(3) as u16)
+        .saturating_sub(1)
+        .max(1);
+    let grid = build_seeded_grid(seeded_sequence, grid_row_count, grid_column_count);
+    let view_row_offset = if seeded_sequence.compute_next_index(4) == 0 {
+        seeded_sequence.compute_next_in_range(1, 40)
+    } else {
+        0
+    };
+    pane_snapshot.terminal_grid_view = Some(GridView::from_grid(&grid, view_row_offset));
+    pane_snapshot.scrollback_metadata.retained_line_count = 40;
+    pane_snapshot.is_reverse_video = seeded_sequence.compute_next_index(6) == 0;
+    if seeded_sequence.compute_next_index(3) == 0 {
+        let first_row_index =
+            seeded_sequence.compute_next_index(usize::from(grid_row_count)) as u16;
+        let first_column_index =
+            seeded_sequence.compute_next_index(usize::from(grid_column_count)) as u16;
+        let last_column_index = seeded_sequence.compute_next_in_range(
+            usize::from(first_column_index),
+            usize::from(grid_column_count - 1),
+        ) as u16;
+        pane_snapshot.selection_spans = Some(SelectionSpans {
+            row_spans: vec![
+                (first_row_index, first_column_index, last_column_index),
+                (first_row_index + 1, 0, last_column_index),
+            ],
+        });
+    }
+    if seeded_sequence.compute_next_index(4) == 0 {
+        let anchor_cell = (
+            seeded_sequence.compute_next_index(usize::from(grid_row_count)) as u16,
+            seeded_sequence.compute_next_index(usize::from(grid_column_count)) as u16,
+        );
+        pane_snapshot.image_placement_snapshots = vec![ImagePlacementSnapshot::build_unavailable(
+            1,
+            1,
+            anchor_cell,
+            seeded_sequence.compute_next_in_range(1, 4) as u16,
+            seeded_sequence.compute_next_in_range(1, 4) as u16,
+        )
+        .expect("a valid placement")];
+    }
+}
+
+/// A seeded frame and the viewer chrome it is drawn with: a client of 12 to
+/// 48 columns and 5 to 18 rows over the compiled-in region solve, whose tab
+/// is letterboxed when it is smaller than the pane area. The tab holds one to
+/// three tiled panes side by side and up to two floating panes, each
+/// decorated by [`decorate_seeded_pane`]. A stack header strip, a hovered
+/// pane, a placement handle and the too-small overlay each show in some
+/// frames.
+fn build_seeded_frame(seeded_sequence: &mut SeededSequence) -> (RenderSnapshot, ViewerChrome) {
+    let viewport_size = Size {
+        column_count: seeded_sequence.compute_next_in_range(12, 48) as u16,
+        row_count: seeded_sequence.compute_next_in_range(5, 18) as u16,
+    };
+    let pane_area_row_count = viewport_size.row_count - 2;
+    let tab_size = Size {
+        column_count: seeded_sequence.compute_next_in_range(
+            usize::from(viewport_size.column_count / 2),
+            usize::from(viewport_size.column_count),
+        ) as u16,
+        row_count: seeded_sequence.compute_next_in_range(3, usize::from(pane_area_row_count))
+            as u16,
+    };
+    let tiled_pane_count =
+        (seeded_sequence.compute_next_in_range(1, 3) as u16).min(tab_size.column_count / 3);
+    let tiled_pane_column_count = tab_size.column_count / tiled_pane_count;
+    let tiled_pane_layouts: Vec<(PaneId, Rect, bool)> = (0..tiled_pane_count)
+        .map(|tiled_pane_index| {
+            let left_column = tiled_pane_index * tiled_pane_column_count;
+            let column_count = if tiled_pane_index + 1 == tiled_pane_count {
+                tab_size.column_count - left_column
+            } else {
+                tiled_pane_column_count
+            };
+            (
+                PaneId::new(),
+                build_cell_rect(left_column, 0, column_count, tab_size.row_count),
+                true,
+            )
+        })
+        .collect();
+    let mut render_snapshot = build_render_snapshot(
+        "seeded",
+        &[("one", true), ("two", false)],
+        &tiled_pane_layouts,
+        Some(tiled_pane_layouts[0].0),
+        LockMode::Normal,
+        viewport_size,
+    );
+    let active_tab_snapshot = &mut render_snapshot.session_snapshot.active_tab_snapshot;
+    active_tab_snapshot.tab_size = tab_size;
+    active_tab_snapshot.is_every_pane_suppressed = seeded_sequence.compute_next_index(20) == 0;
+    if seeded_sequence.compute_next_index(4) == 0 {
+        let header_outer_rect = tiled_pane_layouts[0].1;
+        active_tab_snapshot.stack_headers = vec![StackHeader {
+            pane_id: PaneId::new(),
+            header_rect: build_cell_rect(
+                header_outer_rect.origin.column,
+                seeded_sequence.compute_next_index(usize::from(tab_size.row_count)) as u16,
+                header_outer_rect.size.column_count,
+                1,
+            ),
+            member_index: 1,
+            member_count: 2,
+        }];
+    }
+    for _ in 0..seeded_sequence.compute_next_index(3) {
+        let floating_pane_id = PaneId::new();
+        let outer_rect = build_cell_rect(
+            seeded_sequence.compute_next_index(usize::from(viewport_size.column_count)) as u16,
+            seeded_sequence.compute_next_index(usize::from(pane_area_row_count)) as u16,
+            seeded_sequence.compute_next_in_range(4, usize::from(viewport_size.column_count))
+                as u16,
+            seeded_sequence.compute_next_in_range(3, usize::from(pane_area_row_count)) as u16,
+        );
+        let is_pinned = seeded_sequence.compute_next_index(2) == 0;
+        render_snapshot.session_snapshot.floating_pane_slots.push(
+            FloatingPaneSlot::from_outer_rect(floating_pane_id, outer_rect, is_pinned),
+        );
+        let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
+        floating_pane_snapshot.pane_id = floating_pane_id;
+        render_snapshot.pane_snapshots.push(floating_pane_snapshot);
+    }
+    let content_sizes: Vec<(PaneId, Size)> = render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots
+        .iter()
+        .filter_map(|pane_slot| {
+            pane_slot
+                .content_rect
+                .map(|content_rect| (pane_slot.pane_id, content_rect.size))
+        })
+        .chain(
+            render_snapshot
+                .session_snapshot
+                .floating_pane_slots
+                .iter()
+                .map(|floating_pane_slot| {
+                    (
+                        floating_pane_slot.pane_id,
+                        floating_pane_slot.content_rect.size,
+                    )
+                }),
+        )
+        .collect();
+    for (pane_id, content_size) in content_sizes {
+        decorate_seeded_pane(
+            seeded_sequence,
+            get_pane_snapshot_mut(&mut render_snapshot, pane_id),
+            content_size,
+        );
+    }
+    let pane_ids: Vec<PaneId> = render_snapshot
+        .pane_snapshots
+        .iter()
+        .map(|pane_snapshot| pane_snapshot.pane_id)
+        .collect();
+    let mut viewer_chrome = ViewerChrome::default();
+    if seeded_sequence.compute_next_index(2) == 0 {
+        viewer_chrome.hovered_pane_id =
+            Some(pane_ids[seeded_sequence.compute_next_index(pane_ids.len())]);
+    }
+    if seeded_sequence.compute_next_index(3) == 0 {
+        viewer_chrome.placement_handle_pane_id =
+            Some(pane_ids[seeded_sequence.compute_next_index(pane_ids.len())]);
+    }
+    (render_snapshot, viewer_chrome)
+}
+
+/// A `viewport_area` buffer whose every cell holds a seeded symbol, palette
+/// foreground, truecolor background, bold reverse modifier and diff option.
+fn build_stale_buffer(seeded_sequence: &mut SeededSequence, viewport_area: RatatuiRect) -> Buffer {
+    let mut stale_buffer = Buffer::empty(viewport_area);
+    for stale_cell in &mut stale_buffer.content {
+        stale_cell.set_symbol(
+            ["Z", "中", "\u{2764}\u{FE0F}", " "][seeded_sequence.compute_next_index(4)],
+        );
+        stale_cell.fg = Color::Indexed(seeded_sequence.compute_next_index(256) as u8);
+        stale_cell.bg = Color::Rgb(0x01, 0x02, 0x03);
+        stale_cell.modifier = Modifier::REVERSED | Modifier::BOLD;
+        stale_cell.set_diff_option(
+            [
+                CellDiffOption::None,
+                CellDiffOption::Skip,
+                CellDiffOption::AlwaysUpdate,
+                CellDiffOption::ForcedWidth(NonZeroU16::new(2).expect("2 is not zero")),
+            ][seeded_sequence.compute_next_index(4)],
+        );
+    }
+    stale_buffer
+}
+
+/// Paint `render_snapshot` over the compiled-in region solve of its client's
+/// viewport into `screen_buffer`, in the default theme, with no hints,
+/// `viewer_chrome`, images in `image_render_mode` with no placement named
+/// unavailable, and the rows `drawn_rows`.
+fn render_core_frame_rows(
+    render_snapshot: &RenderSnapshot,
+    viewer_chrome: ViewerChrome,
+    image_render_mode: ImageRenderMode,
+    drawn_rows: DrawnRows<'_>,
+    screen_buffer: &mut Buffer,
+) {
+    render_frame(
+        render_snapshot,
+        &CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0),
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        viewer_chrome,
+        image_render_mode,
+        &[],
+        None,
+        None,
+        build_viewport_area(render_snapshot),
+        drawn_rows,
+        screen_buffer,
+    );
+}
+
+#[test]
+fn each_listed_row_ends_as_a_frame_that_draws_every_row_leaves_it_and_no_cell_reaches_past_its_row()
+{
+    for frame_index in 0..LISTED_ROWS_FRAME_COUNT {
+        let seed = LISTED_ROWS_FIRST_SEED + frame_index;
+        let mut seeded_sequence = SeededSequence::from_seed(seed);
+        let (render_snapshot, viewer_chrome) = build_seeded_frame(&mut seeded_sequence);
+        let image_render_mode = if seeded_sequence.compute_next_index(2) == 0 {
+            ImageRenderMode::Placeholder
+        } else {
+            ImageRenderMode::Native
+        };
+        let viewport_area = build_viewport_area(&render_snapshot);
+        let mut every_row_buffer = Buffer::empty(viewport_area);
+        render_core_frame_rows(
+            &render_snapshot,
+            viewer_chrome,
+            image_render_mode,
+            DrawnRows::Every,
+            &mut every_row_buffer,
+        );
+        for row_index in 0..viewport_area.height {
+            for column_index in 0..viewport_area.width {
+                let screen_cell = &every_row_buffer[(column_index, row_index)];
+                assert!(
+                    column_index + screen_cell.cell_width() <= viewport_area.width,
+                    "seed {seed:#x}: {:?} at ({column_index}, {row_index}) reaches past its row",
+                    screen_cell.symbol()
+                );
+            }
+        }
+        for _ in 0..3 {
+            let listed_rows: Vec<u16> = (0..viewport_area.height)
+                .filter(|_| seeded_sequence.compute_next_index(3) == 0)
+                .collect();
+            let mut listed_row_buffer = build_stale_buffer(&mut seeded_sequence, viewport_area);
+            render_core_frame_rows(
+                &render_snapshot,
+                viewer_chrome,
+                image_render_mode,
+                DrawnRows::Listed(&listed_rows),
+                &mut listed_row_buffer,
+            );
+            let row_width = usize::from(viewport_area.width);
+            for listed_row in &listed_rows {
+                let row_cell_range = usize::from(*listed_row) * row_width
+                    ..(usize::from(*listed_row) + 1) * row_width;
+                assert_eq!(
+                    listed_row_buffer.content[row_cell_range.clone()],
+                    every_row_buffer.content[row_cell_range],
+                    "seed {seed:#x}, listed rows {listed_rows:?}, row {listed_row}"
+                );
+            }
+        }
+    }
+}
+
+/// A `20x10` client over the compiled-in region solve whose `20x8` tab holds
+/// one focused pane with outer rect `(0, 0)` `20x8`, and that pane's blank
+/// `6x18` grid shown at the live tail. The pane's content area starts at
+/// buffer cell `(1, 2)`.
+fn build_one_grid_render_snapshot() -> (RenderSnapshot, Grid) {
+    let pane_id = PaneId::new();
+    let mut render_snapshot = build_render_snapshot(
+        "rows",
+        &[("one", true)],
+        &[(pane_id, build_cell_rect(0, 0, 20, 8), true)],
+        Some(pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 20,
+            row_count: 10,
+        },
+    );
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .tab_size = Size {
+        column_count: 20,
+        row_count: 8,
+    };
+    let grid = Grid::build_blank(6, 18, TermStyle::default());
+    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView::from_grid(&grid, 0));
+    (render_snapshot, grid)
+}
+
+/// Write `x` into the cell at (`row_index`, `0`) of `grid`.
+fn write_x_at_row_start(grid: &mut Grid, row_index: u16) {
+    *grid
+        .get_cell_mut(row_index, 0)
+        .expect("the row is inside the grid") = Cell::from_character('x', 1, TermStyle::default());
+}
+
+/// [`list_changed_screen_rows`] from `previous_render_snapshot` to
+/// `next_render_snapshot` over the compiled-in region solve of the next
+/// client's viewport, with the default viewer chrome.
+fn list_core_changed_screen_rows(
+    previous_render_snapshot: &RenderSnapshot,
+    next_render_snapshot: &RenderSnapshot,
+) -> Option<Vec<u16>> {
+    list_changed_screen_rows(
+        previous_render_snapshot,
+        next_render_snapshot,
+        &CommittedRegions::build_core(next_render_snapshot.client_snapshot.viewport_size, 0),
+        ViewerChrome::default(),
+        build_viewport_area(next_render_snapshot),
+    )
+}
+
+#[test]
+fn a_replaced_grid_row_lists_the_buffer_row_it_lands_on() {
+    let (previous_render_snapshot, mut grid) = build_one_grid_render_snapshot();
+    write_x_at_row_start(&mut grid, 3);
+    let mut next_render_snapshot = previous_render_snapshot.clone();
+    next_render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView::from_grid(&grid, 0));
+
+    assert_eq!(
+        list_core_changed_screen_rows(&previous_render_snapshot, &next_render_snapshot),
+        Some(vec![5])
+    );
+}
+
+#[test]
+fn a_change_drawn_into_no_cell_lists_no_rows() {
+    let (previous_render_snapshot, _) = build_one_grid_render_snapshot();
+    let mut next_render_snapshot = previous_render_snapshot.clone();
+    let next_pane_snapshot = &mut next_render_snapshot.pane_snapshots[0];
+    next_pane_snapshot.cursor_snapshot.row_index = 4;
+    next_pane_snapshot.cursor_snapshot.is_visible = false;
+    next_pane_snapshot.mouse_tracking = MouseTracking::AnyMotion;
+    next_pane_snapshot.is_alternate_scroll_enabled = true;
+    next_pane_snapshot.is_on_alternate_screen = true;
+    next_pane_snapshot.view_top_row_index = 7;
+    next_pane_snapshot.has_selection = true;
+    next_pane_snapshot.scrollback_metadata.retained_line_count = 12;
+
+    assert_eq!(
+        list_core_changed_screen_rows(&previous_render_snapshot, &next_render_snapshot),
+        Some(Vec::new())
+    );
+}
+
+#[test]
+fn only_the_printing_pane_of_four_lists_its_rows() {
+    let pane_ids: Vec<PaneId> = (0..4).map(|_| PaneId::new()).collect();
+    let pane_layouts: Vec<(PaneId, Rect, bool)> = (0..4)
+        .map(|pane_index| {
+            (
+                pane_ids[pane_index],
+                build_cell_rect(pane_index as u16 * 10, 0, 10, 8),
+                true,
+            )
+        })
+        .collect();
+    let mut previous_render_snapshot = build_render_snapshot(
+        "rows",
+        &[("one", true)],
+        &pane_layouts,
+        Some(pane_ids[0]),
+        LockMode::Normal,
+        Size {
+            column_count: 40,
+            row_count: 10,
+        },
+    );
+    previous_render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .tab_size = Size {
+        column_count: 40,
+        row_count: 8,
+    };
+    let mut grids: Vec<Grid> = (0..4)
+        .map(|_| Grid::build_blank(6, 8, TermStyle::default()))
+        .collect();
+    for (pane_snapshot, grid) in previous_render_snapshot
+        .pane_snapshots
+        .iter_mut()
+        .zip(&grids)
+    {
+        pane_snapshot.terminal_grid_view = Some(GridView::from_grid(grid, 0));
+    }
+    write_x_at_row_start(&mut grids[2], 0);
+    write_x_at_row_start(&mut grids[2], 5);
+    let mut next_render_snapshot = previous_render_snapshot.clone();
+    next_render_snapshot.pane_snapshots[2].terminal_grid_view =
+        Some(GridView::from_grid(&grids[2], 0));
+
+    assert_eq!(
+        list_core_changed_screen_rows(&previous_render_snapshot, &next_render_snapshot),
+        Some(vec![2, 7])
+    );
+}
+
+#[test]
+fn a_grid_row_below_the_content_area_lists_no_row() {
+    let (mut previous_render_snapshot, _) = build_one_grid_render_snapshot();
+    let mut grid = Grid::build_blank(8, 18, TermStyle::default());
+    previous_render_snapshot.pane_snapshots[0].terminal_grid_view =
+        Some(GridView::from_grid(&grid, 0));
+    write_x_at_row_start(&mut grid, 5);
+    write_x_at_row_start(&mut grid, 7);
+    let mut next_render_snapshot = previous_render_snapshot.clone();
+    next_render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView::from_grid(&grid, 0));
+
+    assert_eq!(
+        list_core_changed_screen_rows(&previous_render_snapshot, &next_render_snapshot),
+        Some(vec![7])
+    );
+}
+
+#[test]
+fn a_letterboxed_pane_row_lists_the_row_its_centered_content_area_shows_it_on() {
+    let (mut previous_render_snapshot, _) = build_one_grid_render_snapshot();
+    let active_tab_snapshot = &mut previous_render_snapshot
+        .session_snapshot
+        .active_tab_snapshot;
+    active_tab_snapshot.tab_size = Size {
+        column_count: 10,
+        row_count: 6,
+    };
+    active_tab_snapshot.pane_slots[0].outer_rect = build_cell_rect(0, 0, 10, 6);
+    active_tab_snapshot.pane_slots[0].content_rect = Some(build_cell_rect(1, 1, 8, 4));
+    let mut grid = Grid::build_blank(4, 8, TermStyle::default());
+    previous_render_snapshot.pane_snapshots[0].terminal_grid_view =
+        Some(GridView::from_grid(&grid, 0));
+    write_x_at_row_start(&mut grid, 2);
+    let mut next_render_snapshot = previous_render_snapshot.clone();
+    next_render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView::from_grid(&grid, 0));
+
+    // The `10x6` tab centers in the `20x8` pane area at `(5, 2)`, so the
+    // content area starts at `(6, 3)`.
+    assert_eq!(
+        list_core_changed_screen_rows(&previous_render_snapshot, &next_render_snapshot),
+        Some(vec![5])
+    );
+}
+
+#[test]
+fn a_floating_pane_row_lists_the_row_its_visible_content_area_shows_it_on() {
+    let (mut previous_render_snapshot, _) = build_one_grid_render_snapshot();
+    let floating_pane_id = PaneId::new();
+    previous_render_snapshot
+        .session_snapshot
+        .floating_pane_slots
+        .push(FloatingPaneSlot::from_outer_rect(
+            floating_pane_id,
+            build_cell_rect(2, 3, 12, 7),
+            false,
+        ));
+    let mut floating_pane_snapshot = previous_render_snapshot.pane_snapshots[0].clone();
+    floating_pane_snapshot.pane_id = floating_pane_id;
+    let mut floating_grid = Grid::build_blank(3, 10, TermStyle::default());
+    floating_pane_snapshot.terminal_grid_view = Some(GridView::from_grid(&floating_grid, 0));
+    previous_render_snapshot
+        .pane_snapshots
+        .push(floating_pane_snapshot);
+    for row_index in 0..3 {
+        write_x_at_row_start(&mut floating_grid, row_index);
+    }
+    let mut next_render_snapshot = previous_render_snapshot.clone();
+    next_render_snapshot.pane_snapshots[1].terminal_grid_view =
+        Some(GridView::from_grid(&floating_grid, 0));
+
+    // The content rect starts at pane-area row `6`, buffer row `7`, and the
+    // pane area ends after buffer row `8`: grid row `2` is not shown.
+    assert_eq!(
+        list_core_changed_screen_rows(&previous_render_snapshot, &next_render_snapshot),
+        Some(vec![7, 8])
+    );
+}
+
+/// One named change to a render snapshot: the name an assertion message
+/// carries, and the edit that makes the change.
+type RenderSnapshotChange = (&'static str, fn(&mut RenderSnapshot));
+
+#[test]
+fn a_change_drawn_outside_the_grid_rows_lists_no_rows() {
+    let (mut previous_render_snapshot, _) = build_one_grid_render_snapshot();
+    previous_render_snapshot.pane_snapshots[0]
+        .terminal_grid_view
+        .as_mut()
+        .expect("the pane has a grid")
+        .view_row_offset = 2;
+    previous_render_snapshot.pane_snapshots[0]
+        .scrollback_metadata
+        .retained_line_count = 30;
+    let changes: [RenderSnapshotChange; 14] = [
+        ("the recovery notice", |render_snapshot| {
+            render_snapshot.is_recovery_notice_visible = true;
+        }),
+        ("the session name", |render_snapshot| {
+            render_snapshot.session_snapshot.session_name = "other".to_string();
+        }),
+        ("the focused pane", |render_snapshot| {
+            render_snapshot.client_snapshot.focused_pane_id = None;
+        }),
+        ("a pane title", |render_snapshot| {
+            render_snapshot.pane_snapshots[0].pane_title = Some("vim".to_string());
+        }),
+        ("reverse video", |render_snapshot| {
+            render_snapshot.pane_snapshots[0].is_reverse_video = true;
+        }),
+        ("a selection", |render_snapshot| {
+            render_snapshot.pane_snapshots[0].selection_spans = Some(SelectionSpans {
+                row_spans: vec![(0, 0, 3)],
+            });
+        }),
+        ("an image placement", |render_snapshot| {
+            render_snapshot.pane_snapshots[0].image_placement_snapshots = vec![
+                ImagePlacementSnapshot::build_unavailable(1, 1, (0, 0), 2, 2)
+                    .expect("a valid placement"),
+            ];
+        }),
+        ("the grid row count", |render_snapshot| {
+            render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView::from_grid(
+                &Grid::build_blank(7, 18, TermStyle::default()),
+                2,
+            ));
+        }),
+        ("the grid column count", |render_snapshot| {
+            render_snapshot.pane_snapshots[0]
+                .terminal_grid_view
+                .as_mut()
+                .expect("the pane has a grid")
+                .column_count = 17;
+        }),
+        ("the scroll offset", |render_snapshot| {
+            render_snapshot.pane_snapshots[0]
+                .terminal_grid_view
+                .as_mut()
+                .expect("the pane has a grid")
+                .view_row_offset = 3;
+        }),
+        (
+            "the retained line count while scrolled back",
+            |render_snapshot| {
+                render_snapshot.pane_snapshots[0]
+                    .scrollback_metadata
+                    .retained_line_count = 31;
+            },
+        ),
+        ("a dropped grid", |render_snapshot| {
+            render_snapshot.pane_snapshots[0].terminal_grid_view = None;
+        }),
+        ("another pane", |render_snapshot| {
+            render_snapshot.pane_snapshots[0].pane_id = PaneId::new();
+        }),
+        ("an added pane snapshot", |render_snapshot| {
+            let added_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
+            render_snapshot.pane_snapshots.push(added_pane_snapshot);
+        }),
+    ];
+    for (change_name, apply_change) in changes {
+        let mut next_render_snapshot = previous_render_snapshot.clone();
+        apply_change(&mut next_render_snapshot);
+
+        assert_eq!(
+            list_core_changed_screen_rows(&previous_render_snapshot, &next_render_snapshot),
+            None,
+            "{change_name}"
+        );
+    }
+}
+
+#[test]
+fn a_pane_border_draws_the_cells_a_bordered_ratatui_block_draws() {
+    let buffer_area = RatatuiRect::new(2, 1, 12, 8);
+    let border_style = Style::default()
+        .fg(Color::Indexed(33))
+        .add_modifier(Modifier::BOLD);
+    let mut seeded_sequence = SeededSequence::from_seed(0x6b6f_7368_6900_0014);
+    for area_index in 0..300 {
+        let pane_area = RatatuiRect::new(
+            seeded_sequence.compute_next_in_range(0, 16) as u16,
+            seeded_sequence.compute_next_in_range(0, 11) as u16,
+            seeded_sequence.compute_next_in_range(0, 14) as u16,
+            seeded_sequence.compute_next_in_range(0, 10) as u16,
+        );
+        let stale_buffer = build_stale_buffer(&mut seeded_sequence, buffer_area);
+        let mut block_buffer = stale_buffer.clone();
+        Widget::render(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_style(border_style),
+            pane_area,
+            &mut block_buffer,
+        );
+        let mut border_buffer = stale_buffer;
+
+        draw_pane_border(
+            pane_area,
+            border_style,
+            DrawnRows::Every,
+            &mut border_buffer,
+        );
+
+        assert_eq!(
+            border_buffer, block_buffer,
+            "area {area_index}: {pane_area:?}"
+        );
+    }
+}
+
+#[test]
+fn a_tiled_pane_printing_under_a_floating_pane_keeps_the_floating_cells_on_top() {
+    let (mut previous_render_snapshot, mut tiled_grid) = build_one_grid_render_snapshot();
+    let floating_pane_id = PaneId::new();
+    previous_render_snapshot
+        .session_snapshot
+        .floating_pane_slots
+        .push(FloatingPaneSlot::from_outer_rect(
+            floating_pane_id,
+            build_cell_rect(4, 1, 10, 6),
+            false,
+        ));
+    let mut floating_grid = Grid::build_blank(2, 8, TermStyle::default());
+    for row_index in 0..2 {
+        for column_index in 0..8 {
+            *floating_grid
+                .get_cell_mut(row_index, column_index)
+                .expect("the cell is inside the grid") =
+                Cell::from_character('f', 1, TermStyle::default());
+        }
+    }
+    let mut floating_pane_snapshot = previous_render_snapshot.pane_snapshots[0].clone();
+    floating_pane_snapshot.pane_id = floating_pane_id;
+    floating_pane_snapshot.terminal_grid_view = Some(GridView::from_grid(&floating_grid, 0));
+    previous_render_snapshot
+        .pane_snapshots
+        .push(floating_pane_snapshot);
+    for column_index in 0..18 {
+        *tiled_grid
+            .get_cell_mut(3, column_index)
+            .expect("the cell is inside the grid") =
+            Cell::from_character('x', 1, TermStyle::default());
+    }
+    let mut next_render_snapshot = previous_render_snapshot.clone();
+    next_render_snapshot.pane_snapshots[0].terminal_grid_view =
+        Some(GridView::from_grid(&tiled_grid, 0));
+    let viewport_area = build_viewport_area(&next_render_snapshot);
+    let mut shown_buffer = Buffer::empty(viewport_area);
+    render_core_frame_rows(
+        &previous_render_snapshot,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        DrawnRows::Every,
+        &mut shown_buffer,
+    );
+    let changed_rows =
+        list_core_changed_screen_rows(&previous_render_snapshot, &next_render_snapshot)
+            .expect("only a pane row changed");
+
+    render_core_frame_rows(
+        &next_render_snapshot,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        DrawnRows::Listed(&changed_rows),
+        &mut shown_buffer,
+    );
+
+    // The tiled content row 3 lands on buffer row 5, the floating pane's
+    // first content row: columns 5 to 12.
+    assert_eq!(changed_rows, vec![5]);
+    assert_eq!(
+        format_rendered_cells(&shown_buffer, 5, 0..20),
+        "│xxx│ffffffff│xxxxx│"
+    );
+    let mut every_row_buffer = Buffer::empty(viewport_area);
+    render_core_frame_rows(
+        &next_render_snapshot,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        DrawnRows::Every,
+        &mut every_row_buffer,
+    );
+    assert_eq!(shown_buffer, every_row_buffer);
+}
+
+#[test]
+fn the_visible_tiled_pane_walk_keeps_slot_order_and_leaves_out_hidden_rectless_and_snapshotless_slots(
+) {
+    let first_shown_pane_id = PaneId::new();
+    let hidden_pane_id = PaneId::new();
+    let rectless_pane_id = PaneId::new();
+    let snapshotless_pane_id = PaneId::new();
+    let second_shown_pane_id = PaneId::new();
+    let mut render_snapshot = build_render_snapshot(
+        "s",
+        &[("a", true)],
+        &[
+            (first_shown_pane_id, build_cell_rect(0, 0, 10, 5), true),
+            (hidden_pane_id, build_cell_rect(10, 0, 10, 5), false),
+            (rectless_pane_id, build_cell_rect(20, 0, 10, 5), true),
+            (snapshotless_pane_id, build_cell_rect(30, 0, 10, 5), true),
+            (second_shown_pane_id, build_cell_rect(40, 0, 10, 5), true),
+        ],
+        None,
+        LockMode::Normal,
+        Size {
+            column_count: 50,
+            row_count: 5,
+        },
+    );
+    let pane_slots = &mut render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots;
+    pane_slots[1].content_rect = Some(build_cell_rect(11, 1, 8, 3));
+    pane_slots[2].content_rect = None;
+    render_snapshot
+        .pane_snapshots
+        .retain(|pane_snapshot| pane_snapshot.pane_id != snapshotless_pane_id);
+    render_snapshot.pane_snapshots.reverse();
+
+    let walked_panes: Vec<(PaneId, RatatuiRect)> =
+        list_visible_tiled_panes(&render_snapshot, Point { column: 3, row: 2 })
+            .map(|(pane_snapshot, placed_content_rect)| {
+                (pane_snapshot.pane_id, placed_content_rect)
+            })
+            .collect();
+
+    assert_eq!(
+        walked_panes,
+        vec![
+            (
+                first_shown_pane_id,
+                RatatuiRect {
+                    x: 4,
+                    y: 3,
+                    width: 8,
+                    height: 3,
+                },
+            ),
+            (
+                second_shown_pane_id,
+                RatatuiRect {
+                    x: 44,
+                    y: 3,
+                    width: 8,
+                    height: 3,
+                },
+            ),
+        ]
     );
 }

@@ -25,7 +25,8 @@ use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::style::{Color, Style};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::runtime::render_schedule::FRAME_INTERVAL_DURATION;
+use crate::runtime::delivery_queue::DeliveryReceiver;
+use crate::runtime::render_schedule::tests::{get_frame_wait, DEFAULT_FRAME_INTERVAL_DURATION};
 
 use super::*;
 
@@ -88,6 +89,56 @@ fn get_pane_cell_character(
         .get_cell(row_index, column_index)
         .expect("cell in bounds")
         .get_character()
+}
+
+/// One session whose tab shows one 8x3 pane, and one client viewing that tab,
+/// subscribed at 60 frames a second with its first frame pushed at
+/// `first_frame_time` and taken off its queue. The pane is not spawned in the
+/// fake backend. Returns the server, the backend, the pane, the client and
+/// the client's queue.
+fn build_viewed_pane_server(
+    first_frame_time: Instant,
+) -> (
+    Server,
+    Arc<FakePtyBackend>,
+    PaneId,
+    ClientId,
+    DeliveryReceiver,
+) {
+    let (mut runtime, fake_pty_backend) = build_test_server();
+    let pane_id = insert_test_terminal_engine(&mut runtime);
+    let tab_id = TabId::new();
+    let mut session = Session::from_identity_and_client_registry(
+        SessionId::new(),
+        "s".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
+    session.tabs.insert(
+        tab_id,
+        Tab::from_root_pane(tab_id, "t".to_owned(), 0, pane_id),
+    );
+    let client = build_measured_client(session.session_id, tab_id, SystemTime::UNIX_EPOCH, 8, 16);
+    let client_id = client.get_client_id();
+    session.attach_client(client);
+    runtime.session_by_id.insert(session.session_id, session);
+    let (delivery_receiver, _) = runtime.subscribe(client_id, 60);
+    runtime.push_frames(first_frame_time);
+    assert_eq!(
+        delivery_receiver.try_recv(),
+        Ok(Delivery::Frame(Box::new(
+            runtime
+                .build_snapshot(client_id)
+                .expect("the client views a tab")
+        )))
+    );
+    (
+        runtime,
+        fake_pty_backend,
+        pane_id,
+        client_id,
+        delivery_receiver,
+    )
 }
 
 /// A local client of `session_id` attached at `attached_at`, viewing
@@ -232,11 +283,11 @@ fn bytes_update_only_the_owning_panes_grid() {
 }
 
 #[test]
-fn an_escape_sequence_split_across_two_events_decodes_once() {
+fn an_escape_sequence_split_across_two_chunks_decodes_once() {
     let (mut runtime, _fake_pty_backend) = build_test_server();
     let pane_id = insert_test_terminal_engine(&mut runtime);
 
-    // SGR 31 (red foreground) split mid-sequence across two output events:
+    // SGR 31 (red foreground) split mid-sequence across two output chunks:
     // the pane's parser carries the partial sequence between handler calls.
     runtime.handle_pty_output(pane_id, b"\x1b[3");
     runtime.handle_pty_output(pane_id, b"1mx");
@@ -254,26 +305,110 @@ fn an_escape_sequence_split_across_two_events_decodes_once() {
 }
 
 #[test]
-fn output_schedules_a_render() {
+fn output_marks_the_view_of_each_client_that_shows_its_pane_and_of_no_other() {
     let (mut runtime, _fake_pty_backend) = build_test_server();
-    let pane_id = insert_test_terminal_engine(&mut runtime);
+    let (db_tab_id, web_tab_id) = (TabId::new(), TabId::new());
+    let db_pane_id = insert_test_terminal_engine(&mut runtime);
+    let web_pane_id = insert_test_terminal_engine(&mut runtime);
+    let floating_pane_id = insert_test_terminal_engine(&mut runtime);
+    let mut session = Session::from_identity_and_client_registry(
+        SessionId::new(),
+        "s".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
+    session.tabs.insert(
+        db_tab_id,
+        Tab::from_root_pane(db_tab_id, "db".to_owned(), 0, db_pane_id),
+    );
+    session.tabs.insert(
+        web_tab_id,
+        Tab::from_root_pane(web_tab_id, "web".to_owned(), 1, web_pane_id),
+    );
+    let twenty_cells = FloatingPaneDimension::Cells(NonZeroU16::new(20).expect("20 is nonzero"));
+    session
+        .floating_set
+        .add_member(FloatingMember {
+            pane_id: floating_pane_id,
+            desired_size: FloatingPaneSize {
+                width: twenty_cells,
+                height: twenty_cells,
+            },
+            solved_size: Size {
+                column_count: 20,
+                row_count: 20,
+            },
+        })
+        .expect("the floating set is empty");
+    let db_client =
+        build_measured_client(session.session_id, db_tab_id, SystemTime::UNIX_EPOCH, 8, 16);
+    let web_client = build_measured_client(
+        session.session_id,
+        web_tab_id,
+        SystemTime::UNIX_EPOCH,
+        8,
+        16,
+    );
+    let (db_client_id, web_client_id) = (db_client.get_client_id(), web_client.get_client_id());
+    session.attach_client(db_client);
+    session.attach_client(web_client);
+    runtime.session_by_id.insert(session.session_id, session);
+    let _db_deliveries = runtime.subscribe(db_client_id, 60);
+    let _web_deliveries = runtime.subscribe(web_client_id, 60);
+    let first_frame_time = Instant::now();
+    runtime.push_frames(first_frame_time);
 
-    runtime.handle_pty_output(pane_id, b"hi");
+    runtime.handle_pty_output(db_pane_id, b"hi");
+    assert_eq!(
+        get_frame_wait(&runtime, db_client_id, first_frame_time),
+        Some(DEFAULT_FRAME_INTERVAL_DURATION)
+    );
+    assert_eq!(
+        get_frame_wait(&runtime, web_client_id, first_frame_time),
+        None
+    );
 
-    // PtyOutput was marked pending and nothing has rendered yet, so a render
-    // is due immediately.
-    assert!(runtime.render_scheduler.claim_due_render(Instant::now()));
+    let second_frame_time = first_frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    runtime.push_frames(second_frame_time);
+    runtime.handle_pty_output(floating_pane_id, b"hi");
+    assert_eq!(
+        get_frame_wait(&runtime, db_client_id, second_frame_time),
+        Some(DEFAULT_FRAME_INTERVAL_DURATION)
+    );
+    assert_eq!(
+        get_frame_wait(&runtime, web_client_id, second_frame_time),
+        Some(Duration::ZERO)
+    );
+
+    runtime.push_frames(second_frame_time + DEFAULT_FRAME_INTERVAL_DURATION);
+    runtime.handle_pty_output(PaneId::new(), b"hi");
+    assert_eq!(
+        get_frame_wait(&runtime, db_client_id, second_frame_time),
+        None
+    );
+    assert_eq!(
+        get_frame_wait(&runtime, web_client_id, second_frame_time),
+        None
+    );
 }
 
 #[test]
 fn synchronized_body_keeps_the_committed_state_and_side_effects_hidden() {
-    let (mut runtime, fake_pty_backend) = build_test_server();
-    let pane_id = insert_test_terminal_engine(&mut runtime);
-    spawn_test_pane(&fake_pty_backend, pane_id);
-    let (event_deliveries, _) = runtime.subscribe(ClientId::new());
     let render_time = Instant::now();
+    let (mut runtime, fake_pty_backend, pane_id, client_id, delivery_receiver) =
+        build_viewed_pane_server(render_time);
+    spawn_test_pane(&fake_pty_backend, pane_id);
     runtime.handle_pty_output(pane_id, b"old");
-    assert!(runtime.render_scheduler.claim_due_render(render_time));
+    let old_frame_time = render_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    runtime.push_frames(old_frame_time);
+    assert_eq!(
+        delivery_receiver.try_recv(),
+        Ok(Delivery::Frame(Box::new(
+            runtime
+                .build_snapshot(client_id)
+                .expect("the client views a tab")
+        )))
+    );
 
     runtime.handle_pty_output(pane_id, b"\x1b[?2026h");
     runtime.handle_pty_output(pane_id, b"\x1b[2J\x1b[Hnew\x1b[5n\x1b]133;C\x07");
@@ -287,8 +422,8 @@ fn synchronized_body_keeps_the_committed_state_and_side_effects_hidden() {
             .expect("pane exists"),
         Vec::<Vec<u8>>::new()
     );
-    assert_eq!(event_deliveries.try_iter().collect::<Vec<_>>(), Vec::new());
-    assert!(!runtime.render_scheduler.claim_due_render(render_time));
+    assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
+    assert_eq!(get_frame_wait(&runtime, client_id, old_frame_time), None);
 
     runtime.handle_pty_output(pane_id, b"\x1b[?2026l");
 
@@ -302,27 +437,23 @@ fn synchronized_body_keeps_the_committed_state_and_side_effects_hidden() {
         [b"\x1b[0n".to_vec()]
     );
     assert_eq!(
-        event_deliveries.try_iter().collect::<Vec<_>>(),
+        delivery_receiver.try_iter().collect::<Vec<_>>(),
         [Delivery::Event(Event::PaneCommandStarted(
             PaneCommandStarted { pane_id }
         ))]
     );
     assert_eq!(
-        runtime.render_scheduler.compute_next_wakeup(render_time),
-        Some(FRAME_INTERVAL_DURATION)
+        get_frame_wait(&runtime, client_id, old_frame_time),
+        Some(DEFAULT_FRAME_INTERVAL_DURATION)
     );
-    assert!(runtime
-        .render_scheduler
-        .claim_due_render(render_time + FRAME_INTERVAL_DURATION));
 }
 
 #[test]
 fn synchronized_deadline_uses_the_runtime_wakeup_and_common_delivery_path() {
-    let (mut runtime, fake_pty_backend) = build_test_server();
-    let pane_id = insert_test_terminal_engine(&mut runtime);
-    spawn_test_pane(&fake_pty_backend, pane_id);
-    let (event_deliveries, _) = runtime.subscribe(ClientId::new());
     let current_time = Instant::now();
+    let (mut runtime, fake_pty_backend, pane_id, client_id, delivery_receiver) =
+        build_viewed_pane_server(current_time);
+    spawn_test_pane(&fake_pty_backend, pane_id);
     let engine = runtime
         .terminal_engine_by_pane_id
         .get_mut(&pane_id)
@@ -330,12 +461,21 @@ fn synchronized_deadline_uses_the_runtime_wakeup_and_common_delivery_path() {
     let _ = engine.process_pty_output_with_shell_integration_at(b"\x1b[?2026h", current_time);
     let _ = engine
         .process_pty_output_with_shell_integration_at(b"X\x1b[5n\x1b]133;C\x07", current_time);
+    runtime.refresh_pane_render_deadlines(pane_id, current_time);
 
     assert_eq!(
         runtime.compute_next_render_wakeup(current_time + Duration::from_millis(149)),
         Some(Duration::from_millis(1))
     );
-    assert!(!runtime.poll_render(current_time + Duration::from_millis(149)));
+    runtime.advance_due_pane_renders(current_time + Duration::from_millis(149));
+    assert_eq!(
+        get_frame_wait(
+            &runtime,
+            client_id,
+            current_time + Duration::from_millis(149)
+        ),
+        None
+    );
     assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 0), ' ');
     assert_eq!(
         fake_pty_backend
@@ -343,13 +483,21 @@ fn synchronized_deadline_uses_the_runtime_wakeup_and_common_delivery_path() {
             .expect("pane exists"),
         Vec::<Vec<u8>>::new()
     );
-    assert_eq!(event_deliveries.try_iter().collect::<Vec<_>>(), Vec::new());
+    assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
 
     assert_eq!(
         runtime.compute_next_render_wakeup(current_time + Duration::from_millis(150)),
         Some(Duration::ZERO)
     );
-    assert!(runtime.poll_render(current_time + Duration::from_millis(150)));
+    runtime.advance_due_pane_renders(current_time + Duration::from_millis(150));
+    assert_eq!(
+        get_frame_wait(
+            &runtime,
+            client_id,
+            current_time + Duration::from_millis(150)
+        ),
+        Some(Duration::ZERO)
+    );
     assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 0), 'X');
     assert_eq!(
         fake_pty_backend
@@ -358,7 +506,7 @@ fn synchronized_deadline_uses_the_runtime_wakeup_and_common_delivery_path() {
         [b"\x1b[0n".to_vec()]
     );
     assert_eq!(
-        event_deliveries.try_iter().collect::<Vec<_>>(),
+        delivery_receiver.try_iter().collect::<Vec<_>>(),
         [Delivery::Event(Event::PaneCommandStarted(
             PaneCommandStarted { pane_id }
         ))]
@@ -369,12 +517,12 @@ fn synchronized_deadline_uses_the_runtime_wakeup_and_common_delivery_path() {
 fn shell_markers_publish_command_events_in_order() {
     let (mut runtime, _fake_pty_backend) = build_test_server();
     let pane_id = insert_test_terminal_engine(&mut runtime);
-    let (event_deliveries, _) = runtime.subscribe(ClientId::new());
+    let (delivery_receiver, _) = runtime.subscribe(ClientId::new(), 60);
 
     runtime.handle_pty_output(pane_id, b"\x1b]133;C\x07\x1b]133;D;137\x07");
 
     assert_eq!(
-        event_deliveries.try_iter().collect::<Vec<_>>(),
+        delivery_receiver.try_iter().collect::<Vec<_>>(),
         vec![
             Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted { pane_id })),
             Delivery::Event(Event::PaneCommandFinished(PaneCommandFinished {
@@ -389,12 +537,12 @@ fn shell_markers_publish_command_events_in_order() {
 fn duplicate_shell_starts_publish_one_command_pair() {
     let (mut runtime, _fake_pty_backend) = build_test_server();
     let pane_id = insert_test_terminal_engine(&mut runtime);
-    let (event_deliveries, _) = runtime.subscribe(ClientId::new());
+    let (delivery_receiver, _) = runtime.subscribe(ClientId::new(), 60);
 
     runtime.handle_pty_output(pane_id, b"\x1b]133;C\x07\x1b]133;C\x07\x1b]133;D;0\x07");
 
     assert_eq!(
-        event_deliveries.try_iter().collect::<Vec<_>>(),
+        delivery_receiver.try_iter().collect::<Vec<_>>(),
         vec![
             Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted { pane_id })),
             Delivery::Event(Event::PaneCommandFinished(PaneCommandFinished {
@@ -409,11 +557,11 @@ fn duplicate_shell_starts_publish_one_command_pair() {
 fn an_unmatched_finish_and_plain_output_publish_no_command_events() {
     let (mut runtime, _fake_pty_backend) = build_test_server();
     let pane_id = insert_test_terminal_engine(&mut runtime);
-    let (event_deliveries, _) = runtime.subscribe(ClientId::new());
+    let (delivery_receiver, _) = runtime.subscribe(ClientId::new(), 60);
 
     runtime.handle_pty_output(pane_id, b"\x1b]133;D;1\x07plain output");
 
-    assert_eq!(event_deliveries.try_iter().collect::<Vec<_>>(), Vec::new());
+    assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
 }
 
 #[test]
@@ -421,7 +569,7 @@ fn command_lifecycle_state_is_independent_per_pane() {
     let (mut runtime, _fake_pty_backend) = build_test_server();
     let first_pane_id = insert_test_terminal_engine(&mut runtime);
     let second_pane_id = insert_test_terminal_engine(&mut runtime);
-    let (event_deliveries, _) = runtime.subscribe(ClientId::new());
+    let (delivery_receiver, _) = runtime.subscribe(ClientId::new(), 60);
 
     runtime.handle_pty_output(first_pane_id, b"\x1b]133;C\x07");
     runtime.handle_pty_output(second_pane_id, b"\x1b]133;C\x07");
@@ -429,7 +577,7 @@ fn command_lifecycle_state_is_independent_per_pane() {
     runtime.handle_pty_output(second_pane_id, b"\x1b]133;D\x07");
 
     assert_eq!(
-        event_deliveries.try_iter().collect::<Vec<_>>(),
+        delivery_receiver.try_iter().collect::<Vec<_>>(),
         vec![
             Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted {
                 pane_id: first_pane_id,
@@ -494,17 +642,21 @@ fn output_without_a_query_writes_nothing_back() {
 
 #[test]
 fn a_failed_reply_write_is_dropped_and_output_still_lands() {
-    let (mut runtime, fake_pty_backend) = build_test_server();
     // The engine exists but the pane was never spawned in the backend, so the
     // reply write fails with an unknown-pane error.
-    let pane_id = insert_test_terminal_engine(&mut runtime);
+    let first_frame_time = Instant::now();
+    let (mut runtime, fake_pty_backend, pane_id, client_id, _delivery_receiver) =
+        build_viewed_pane_server(first_frame_time);
 
     runtime.handle_pty_output(pane_id, b"x\x1b[5n");
 
-    // The chunk still reached the grid and scheduled a render; the failed
-    // write left no record.
+    // The chunk still reached the grid and marked the view changed; the
+    // failed write left no record.
     assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 0), 'x');
-    assert!(runtime.render_scheduler.claim_due_render(Instant::now()));
+    assert_eq!(
+        get_frame_wait(&runtime, client_id, first_frame_time),
+        Some(DEFAULT_FRAME_INTERVAL_DURATION)
+    );
     assert_eq!(
         fake_pty_backend.list_pane_write_bytes(pane_id).unwrap_err(),
         PtyError::UnknownPane { pane_id }
@@ -513,33 +665,17 @@ fn a_failed_reply_write_is_dropped_and_output_still_lands() {
 
 #[test]
 fn bytes_for_a_pane_with_no_engine_are_ignored() {
-    let (mut runtime, _fake_pty_backend) = build_test_server();
-    let live_pane_id = insert_test_terminal_engine(&mut runtime);
+    let first_frame_time = Instant::now();
+    let (mut runtime, _fake_pty_backend, live_pane_id, client_id, _delivery_receiver) =
+        build_viewed_pane_server(first_frame_time);
     let closed_pane_id = PaneId::new();
 
     runtime.handle_pty_output(closed_pane_id, b"\x1b[31mboom");
 
-    // No engine changed, no engine was created, and no render was scheduled.
+    // No engine changed, no engine was created, and no view was marked.
     assert_eq!(get_pane_cell_character(&runtime, live_pane_id, 0, 0), ' ');
     assert_eq!(runtime.list_terminal_engines().len(), 1);
-    assert!(!runtime.render_scheduler.claim_due_render(Instant::now()));
-}
-
-#[test]
-fn an_empty_chunk_schedules_a_render_and_leaves_the_grid_alone() {
-    let (mut runtime, _fake_pty_backend) = build_test_server();
-    let pane_id = insert_test_terminal_engine(&mut runtime);
-
-    runtime.handle_pty_output(pane_id, b"");
-
-    assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 0), ' ');
-    assert_eq!(
-        runtime.list_terminal_engines()[&pane_id]
-            .get_terminal_state()
-            .get_active_cursor_position(),
-        (0, 0)
-    );
-    assert!(runtime.render_scheduler.claim_due_render(Instant::now()));
+    assert_eq!(get_frame_wait(&runtime, client_id, first_frame_time), None);
 }
 
 #[test]

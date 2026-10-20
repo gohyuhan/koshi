@@ -39,7 +39,8 @@ use koshi_core::command::CommandResult;
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::RejectReason;
 use koshi_core::geometry::Direction;
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, OwnedSessionId, PaneId, SessionId, TabId};
+use koshi_ipc::remote_servers::SavedServer;
 use koshi_ipc::remote_wire::RemoteSessionRow;
 
 use crate::cli::{CliCommand, ResolvedTargets, SessionReference, TabReference};
@@ -47,7 +48,7 @@ use koshi_link::discovery::{self, Discovered};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client;
-use koshi_link::remote_client::{self, ServerReference};
+use koshi_link::remote_client;
 
 /// Where one invocation goes: over the current pane's own session socket, or
 /// to another running session as an external command.
@@ -59,6 +60,9 @@ pub enum Route {
     External {
         /// The session the command is sent to.
         session_id: SessionId,
+        /// The user id whose folder of the shared directory advertises the
+        /// session, or `None` for a session looked up by its id alone.
+        owner_user_id: Option<u32>,
         /// The command's resolved `--session`/`--tab` flags.
         targets: ResolvedTargets,
     },
@@ -68,10 +72,11 @@ pub enum Route {
 /// concrete ids.
 ///
 /// With an in-session identity and no `--session` flag (or one naming the
-/// current session), the command stays home: only a `--tab` given as a name
-/// costs a lookup, answered by the session itself. An explicit `--session`
-/// id asks that one session alone; everything else probes the runtime
-/// directory's advertised sessions, skipping an endpoint nobody answers.
+/// current session by its id), the command stays home: only a `--tab` given as
+/// a name costs a lookup, answered by the session itself. The other sessions
+/// in scope are the ones [`resolve_session_scope`] gives for the `--session`
+/// flag. A session another user's folder of the shared directory advertises is
+/// sent the command with that user's id.
 pub fn resolve_command_route(
     command: &CliCommand,
     in_session_context: Option<&InSessionContext>,
@@ -109,6 +114,8 @@ fn resolve_command_route_in_runtime_directory(
                 Some(SessionReference::SessionId(session_id)) => {
                     *session_id == in_session_context.session_id
                 }
+                // Another user's folder never holds this pane's own session.
+                Some(SessionReference::OwnedSessionId(_)) => false,
                 // A name may or may not be this session's; only a probe can tell.
                 Some(SessionReference::SessionName(_)) => false,
             };
@@ -122,6 +129,7 @@ fn resolve_command_route_in_runtime_directory(
                         None,
                         in_session_context.session_id,
                         None,
+                        None,
                     )?;
                     Some(resolve_target_tab(&session_overview, tab_reference)?)
                 }
@@ -134,39 +142,30 @@ fn resolve_command_route_in_runtime_directory(
         }
     }
 
-    // An explicit `--session <id>` names its endpoint directly, so only that
-    // session is asked. Anything else needs the whole picture — a name, an
-    // owner lookup, or the count rule — so every advertised session is
-    // probed; one nobody answers is skipped and its leftovers swept.
-    let discovered_sessions = match command.get_target_session_reference() {
-        Some(SessionReference::SessionId(session_id)) => {
-            Discovered::from_overview(discovery::fetch_session_overview(
-                runtime_directory,
-                shared_sessions_base_directory,
-                *session_id,
-                None,
-            )?)
-        }
-        _ => discovery::fetch_all_session_overviews(
-            runtime_directory,
-            shared_sessions_base_directory,
-        ),
-    };
+    let discovered_sessions = resolve_session_scope(
+        runtime_directory,
+        shared_sessions_base_directory,
+        command.get_target_session_reference(),
+    )?;
 
     let (target_session_id, resolved_targets) =
         resolve_command_targets(command, &discovered_sessions)?;
+    let target_owner_user_id = discovered_sessions.find_owner_user_id(target_session_id);
 
     // A probe can land back on the session this CLI runs inside (e.g.
     // `--session` naming it); then the command still travels as the pane's
     // own, keeping the issuing pane as the default target.
     match in_session_context {
         Some(in_session_context)
-            if in_session_context.session_id == target_session_id && !has_source_client =>
+            if in_session_context.session_id == target_session_id
+                && target_owner_user_id.is_none()
+                && !has_source_client =>
         {
             Ok(Route::InSession(resolved_targets))
         }
         _ => Ok(Route::External {
             session_id: target_session_id,
+            owner_user_id: target_owner_user_id,
             targets: resolved_targets,
         }),
     }
@@ -210,9 +209,8 @@ pub fn submit_remote(
     // The dials below open their own connections.
     drop(remote_link);
 
-    let server_reference = ServerReference::Saved(saved_server_record);
     let discovered_sessions = discover_remote_sessions(
-        &server_reference,
+        &saved_server_record,
         select_remote_rows_to_probe(command.get_target_session_reference(), remote_session_rows),
     );
 
@@ -223,7 +221,7 @@ pub fn submit_remote(
         .build_action_command(&resolved_targets, new_pane_direction)
         .expect("only an action verb reaches the remote dispatch");
     remote_client::submit_remote_command(
-        &server_reference,
+        &saved_server_record,
         target_session_id,
         command.get_source_client_id(),
         action,
@@ -252,24 +250,27 @@ fn select_remote_rows_to_probe(
     }
 }
 
-/// Ask each session in `remote_session_rows` on the machine `server_reference`
-/// names to describe itself,
-/// as the census the targeting rules read.
+/// Ask each session in `remote_session_rows` on the saved server
+/// `saved_server_record` names to describe itself, as the census the targeting
+/// rules read.
 ///
-/// One dial per record. Callers narrow `remote_session_rows` with
+/// One dial per record, one after another. No dial writes the saved-server
+/// store. Callers narrow `remote_session_rows` with
 /// [`select_remote_rows_to_probe`] first.
 ///
 /// A session the server listed but could not describe is named on stderr and
 /// counted in `Discovered::unasked_session_count`. The sessions that answered are sorted by
 /// name, then by id.
 fn discover_remote_sessions(
-    server_reference: &ServerReference,
+    saved_server_record: &SavedServer,
     remote_session_rows: Vec<RemoteSessionRow>,
 ) -> Discovered {
     let mut discovered_sessions = Discovered::default();
     for remote_session_row in remote_session_rows {
-        match remote_client::fetch_remote_overview(server_reference, remote_session_row.session_id)
-        {
+        match remote_client::fetch_remote_overview(
+            saved_server_record,
+            remote_session_row.session_id,
+        ) {
             Ok(session_overview) => discovered_sessions.sessions.push(session_overview),
             Err(remote_error) => {
                 eprintln!(
@@ -392,8 +393,7 @@ pub(crate) fn select_only_session<'a>(
 ///
 /// Every branch that would answer "nowhere", "there is only this one", or
 /// "exactly one has this name" needs a complete census: with a running
-/// session unasked ([`Discovered::is_complete`]), the command is refused
-/// rather than aimed at whichever session did answer.
+/// session unasked ([`Discovered::is_complete`]), the command is refused.
 fn select_target_session<'a>(
     session_reference: Option<&SessionReference>,
     target_pane_id: Option<PaneId>,
@@ -404,12 +404,16 @@ fn select_target_session<'a>(
     let session_overviews = discovered_sessions.sessions.as_slice();
     let selected_session_overview = if let Some(session_reference) = session_reference {
         match session_reference {
-            SessionReference::SessionId(session_id) => session_overviews
-                .iter()
-                .find(|session_overview| session_overview.session.session_id == *session_id)
-                .ok_or_else(|| {
-                    discovered_sessions.build_missing_session_error(&session_id.to_string())
-                })?,
+            SessionReference::SessionId(session_id)
+            | SessionReference::OwnedSessionId(OwnedSessionId { session_id, .. }) => {
+                session_overviews
+                    .iter()
+                    .find(|session_overview| session_overview.session.session_id == *session_id)
+                    .ok_or_else(|| {
+                        discovered_sessions
+                            .build_missing_session_error(&session_reference.to_string())
+                    })?
+            }
             SessionReference::SessionName(session_name) => {
                 find_session_by_name(discovered_sessions, session_name)?
             }
@@ -621,9 +625,12 @@ fn resolve_target_tab(
 }
 
 /// The sessions a `--session` flag puts in scope: an id asks that one
-/// session alone, a name is looked up over a full census and scopes to the
-/// one session it matches, and an absent flag scopes to every session that
-/// answered.
+/// session alone, `<user id>/<session id>` asks that one session in that
+/// user's folder of the shared directory, a name is looked up over a full
+/// census and scopes to the one session it matches, and an absent flag scopes
+/// to every session that answered. The scope keeps the user id of a session
+/// another user's folder advertises, as
+/// [`Discovered::find_owner_user_id`] gives it.
 ///
 /// The census covers the sessions `runtime_directory` advertises and those
 /// `shared_sessions_base_directory` advertises for the other local users; `None` covers
@@ -633,19 +640,28 @@ pub fn resolve_session_scope(
     shared_sessions_base_directory: Option<&Path>,
     session_reference: Option<&SessionReference>,
 ) -> Result<Discovered, CliError> {
+    let fetch_one_session = |session_id: SessionId, owner_user_id: Option<u32>| {
+        Ok(Discovered::from_overview(
+            discovery::fetch_session_overview(
+                runtime_directory,
+                shared_sessions_base_directory,
+                session_id,
+                owner_user_id,
+                None,
+            )?,
+            owner_user_id,
+        ))
+    };
     match session_reference {
         None => Ok(discovery::fetch_all_session_overviews(
             runtime_directory,
             shared_sessions_base_directory,
         )),
-        Some(SessionReference::SessionId(session_id)) => Ok(Discovered::from_overview(
-            discovery::fetch_session_overview(
-                runtime_directory,
-                shared_sessions_base_directory,
-                *session_id,
-                None,
-            )?,
-        )),
+        Some(SessionReference::SessionId(session_id)) => fetch_one_session(*session_id, None),
+        Some(SessionReference::OwnedSessionId(owned_session_id)) => fetch_one_session(
+            owned_session_id.session_id,
+            Some(owned_session_id.owner_user_id),
+        ),
         Some(session_reference) => {
             let discovered_sessions = discovery::fetch_all_session_overviews(
                 runtime_directory,
@@ -658,7 +674,11 @@ pub fn resolve_session_scope(
                 None,
                 &discovered_sessions,
             )?;
-            Ok(Discovered::from_overview(selected_session_overview.clone()))
+            Ok(Discovered::from_overview(
+                selected_session_overview.clone(),
+                discovered_sessions
+                    .find_owner_user_id(selected_session_overview.session.session_id),
+            ))
         }
     }
 }

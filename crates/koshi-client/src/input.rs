@@ -21,6 +21,7 @@
 //! deadline, firing the complete binding.
 
 use std::collections::HashSet;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use koshi_config::types::BoundAction;
@@ -52,6 +53,94 @@ use crate::{
 
 #[cfg(test)]
 mod tests;
+
+/// The read times of this terminal's input events, shared by its input thread
+/// and the attach loop under one lock.
+///
+/// The input thread stamps each event it reads, a key, a mouse event, a paste,
+/// a resize or a focus loss ([`stamp_input_read`](Self::stamp_input_read)), and
+/// the loop records each event it takes off its channel
+/// ([`note_input_taken`](Self::note_input_taken)). An event stamped and not yet
+/// taken is on its way to the loop.
+///
+/// Example: the input thread reads `a` 400 ms after `<C-y>` opened a sequence
+/// whose deadline is 500 ms out, and the loop is still drawing a frame at
+/// 600 ms. [`find_input_judge_time`](Self::find_input_judge_time) answers
+/// `None` until the loop takes `a`, and `a` then continues the sequence.
+#[derive(Debug, Default)]
+pub(crate) struct InputReadClock {
+    input_read_times: Mutex<InputReadTimes>,
+}
+
+/// The stamp of the last input event the input thread read, and of the last
+/// one the loop took. `None` before the first one.
+#[derive(Debug, Default)]
+struct InputReadTimes {
+    last_read_at: Option<Instant>,
+    last_taken_read_at: Option<Instant>,
+}
+
+impl InputReadTimes {
+    /// Whether the input thread read an input event that the loop has not
+    /// taken.
+    fn has_untaken_input(&self) -> bool {
+        match (self.last_read_at, self.last_taken_read_at) {
+            (Some(last_read_at), Some(last_taken_read_at)) => last_read_at > last_taken_read_at,
+            (Some(_), None) => true,
+            (None, _) => false,
+        }
+    }
+}
+
+impl InputReadClock {
+    /// Stamp an input event the input thread read at `current_time`, and
+    /// return the stamp: `current_time`, or one nanosecond past the previous
+    /// stamp when `current_time` is at or before it. Each stamp is greater
+    /// than the one before it. Example: two events read at the same clock
+    /// reading `t` get `t` and `t + 1 ns`.
+    pub(crate) fn stamp_input_read(&self, current_time: Instant) -> Instant {
+        let mut input_read_times = self.lock_input_read_times();
+        let read_at = match input_read_times.last_read_at {
+            Some(last_read_at) if current_time <= last_read_at => {
+                last_read_at + Duration::from_nanos(1)
+            }
+            _ => current_time,
+        };
+        input_read_times.last_read_at = Some(read_at);
+        read_at
+    }
+
+    /// Record that the loop took the input event stamped `read_at` off its
+    /// channel. Input events reach the loop in the order they were read.
+    pub(crate) fn note_input_taken(&self, read_at: Instant) {
+        self.lock_input_read_times().last_taken_read_at = Some(read_at);
+    }
+
+    /// Whether the input thread read an input event that the loop has not
+    /// taken.
+    pub(crate) fn has_untaken_input(&self) -> bool {
+        self.lock_input_read_times().has_untaken_input()
+    }
+
+    /// The instant to judge the input timers at, an open sequence's ambiguity
+    /// deadline, a placement tab hover and a selection drag's edge scroll: the
+    /// clock read under the lock, or `None` while an input event the input
+    /// thread read has not reached the loop.
+    pub(crate) fn find_input_judge_time(&self) -> Option<Instant> {
+        let input_read_times = self.lock_input_read_times();
+        if input_read_times.has_untaken_input() {
+            return None;
+        }
+        Some(Instant::now())
+    }
+
+    /// The read times, taken over from a thread that panicked holding them.
+    fn lock_input_read_times(&self) -> MutexGuard<'_, InputReadTimes> {
+        self.input_read_times
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+}
 
 /// The chord that backs out of an open multi-chord sequence.
 const ESCAPE_KEY_CHORD: KeyChord =
@@ -921,7 +1010,7 @@ impl Client {
             sequence_match.has_longer_key_sequence,
         ) {
             (Some(bound_action), false) => {
-                self.rearm_continuous(&bound_action, &key_sequence);
+                self.rearm_continuous_sequence_prefix(&bound_action, &key_sequence);
                 KeyOutcome::Fire(bound_action)
             }
             (exact_bound_action, true) => {
@@ -957,9 +1046,15 @@ impl Client {
     }
 
     /// How long until an open sequence's ambiguity deadline. A prefix-only
-    /// sequence carries no deadline and returns `None`.
+    /// sequence carries no deadline and returns `None`. While an input event
+    /// this terminal's input thread read has not reached the loop
+    /// (`InputReadClock::has_untaken_input`), the answer is `None` too: that
+    /// event's arrival wakes the loop.
     #[must_use]
     pub fn compute_next_key_wakeup(&self, current_time: Instant) -> Option<Duration> {
+        if self.input_read_clock.has_untaken_input() {
+            return None;
+        }
         self.pending_key_sequence
             .as_ref()
             .and_then(|pending_key_sequence| pending_key_sequence.ambiguity_deadline)
@@ -986,8 +1081,14 @@ impl Client {
             .keymap_catalog
             .match_sequence(self.get_active_input_mode(), &pending_key_sequence.sequence)
             .exact_bound_action?;
-        self.rearm_continuous(&bound_action, &pending_key_sequence.sequence);
+        self.rearm_continuous_sequence_prefix(&bound_action, &pending_key_sequence.sequence);
         Some(bound_action)
+    }
+
+    /// The read times of this terminal's input events, shared with its input
+    /// thread.
+    pub(crate) fn get_input_read_clock(&self) -> &InputReadClock {
+        &self.input_read_clock
     }
 
     /// Re-open the prefix of a sequence whose action the registry marks
@@ -998,7 +1099,11 @@ impl Client {
     /// captures the keyboard like any other open sequence, so a key that
     /// resizes nothing is discarded and the prefix stands until `Esc` leaves
     /// it.
-    fn rearm_continuous(&mut self, bound_action: &BoundAction, key_sequence: &KeySequence) {
+    fn rearm_continuous_sequence_prefix(
+        &mut self,
+        bound_action: &BoundAction,
+        key_sequence: &KeySequence,
+    ) {
         let is_continuous = self
             .registry
             .find_action_metadata(&bound_action.action_reference)
@@ -1076,7 +1181,7 @@ pub(crate) fn build_placement_destinations(
         gap_cell_count: pane_sizing.gap_cell_count,
     };
     let tab_rect = Rect::from_size_at_origin(destination_tab_snapshot.tab_size);
-    let layout_solution = solve_layout_with_mode(
+    let layout_solve = solve_layout_with_mode(
         &destination_tab_snapshot.layout_tree,
         LayoutMode::Tiled,
         tab_rect,
@@ -1084,7 +1189,7 @@ pub(crate) fn build_placement_destinations(
     );
     list_placement_destinations(
         &destination_tab_snapshot.layout_tree,
-        &layout_solution,
+        &layout_solve,
         tab_rect,
         source_pane_id,
     )

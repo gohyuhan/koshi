@@ -20,7 +20,7 @@ jobs:
 
       # Installs the toolchain pinned in rust-toolchain.toml (channel +
       # rustfmt/clippy components) and configures build caching. No version
-      # is named here, so the pin file stays the single source of truth.
+      # is named here: rust-toolchain.toml alone sets it.
       - name: Install Rust toolchain (from rust-toolchain.toml)
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -29,16 +29,10 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
-      # --locked: CI must build exactly what Cargo.lock pins, never a
-      # silently-updated transitive dependency.
+      # --locked: the build uses exactly the versions Cargo.lock pins, and
+      # fails when Cargo.lock needs a change.
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-
-      # rustdoc reads RUSTDOCFLAGS, not the workflow-level RUSTFLAGS.
-      - name: Rustdoc
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --no-deps --all-features --locked
 
   dep-guard:
     name: dependency guard
@@ -64,9 +58,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Audits dependencies against deny.toml. Pin the compiler to the
-      # project version so cargo-deny reads the v4 Cargo.lock with a modern
-      # cargo (the action image ships an older default).
+      # Audits dependencies against deny.toml with the compiler version that
+      # rust-toolchain.toml pins, whose cargo reads the version 4 Cargo.lock.
       - name: Audit dependencies
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
@@ -102,17 +95,25 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-      # --no-fail-fast: run every crate's tests even after one fails, so a
-      # cross-OS run reports all failures in a single pass, not one per push.
+      # Documents every crate on each runner, including the items that only
+      # one operating system compiles. rustdoc reads RUSTDOCFLAGS, not the
+      # job-level RUSTFLAGS.
+      - name: Rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --all-features --locked
+
+      # --no-fail-fast: every crate's tests run even after one fails, and the
+      # run reports every failure.
       - name: Test
         run: cargo test --workspace --all-features --locked --no-fail-fast
 
-      # The second-user tests skip without root, because only root may take
-      # on another user id. The Linux and macOS runners allow passwordless
-      # sudo, so the admit-and-refuse flow really executes on both; Windows
-      # has no second account a test can use. `env "PATH=$PATH"` carries the
-      # runner's cargo past sudo's PATH reset, and the flags match the step
-      # above so the already-built test binary is reused.
+      # The second-user tests skip without root: only root may take on
+      # another user id. This step runs them as root through the passwordless
+      # sudo of the Linux and macOS runners, and does not run on Windows.
+      # `env "PATH=$PATH"` carries the runner's cargo past sudo's PATH reset.
+      # The flags match the step above, and the step reuses the test binary
+      # that step built.
       - name: Test as a second user
         if: runner.os != 'Windows'
         run: sudo -E env "PATH=$PATH" cargo test -p koshi --test other_user_access --all-features --locked

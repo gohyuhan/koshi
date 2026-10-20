@@ -1,8 +1,7 @@
 //! Pane registry: runtime metadata for every pane, keyed by pane id.
 //!
 //! A layout tree holds bare `PaneId` leaves. The registry holds everything else
-//! about a pane: its spawn specification, its working directory and its
-//! lifecycle state.
+//! about a pane: its spawn specification and its working directory.
 
 use std::collections::BTreeMap;
 
@@ -55,9 +54,9 @@ impl PaneRegistry {
     }
 
     /// Returns a mutable reference to the record for `pane_id`, or `None` when
-    /// the id is not registered. Callers can edit fields in place, including
-    /// policies and the working directory. The record keeps its original id,
-    /// which [`PaneRecord::get_pane_id`] returns.
+    /// the id is not registered. Callers can edit fields in place, such as the
+    /// spawn specification and the working directory. The record keeps its
+    /// original id, which [`PaneRecord::get_pane_id`] returns.
     pub fn get_pane_record_mut_by_id(&mut self, pane_id: PaneId) -> Option<&mut PaneRecord> {
         self.pane_record_by_id.get_mut(&pane_id)
     }

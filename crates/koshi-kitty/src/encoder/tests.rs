@@ -1,22 +1,20 @@
 //! Tests for Kitty image encoding and protocol output.
 
 use super::*;
-use std::io;
-use std::sync::Arc;
+use std::io::{self, Read};
 
-use flate2::{Compress, Compression};
 use koshi_image::DecodedImage;
 
 fn build_decoded_image(
     image_width_pixels: u32,
     image_height_pixels: u32,
     rgba_bytes: Vec<u8>,
-) -> Arc<DecodedImage> {
-    Arc::new(DecodedImage {
+) -> DecodedImage {
+    DecodedImage {
         pixel_width: image_width_pixels,
         pixel_height: image_height_pixels,
         rgba_bytes,
-    })
+    }
 }
 
 #[derive(Default)]
@@ -30,8 +28,8 @@ impl io::Write for WriterFailureAfterByteLimit {
         if self.kitty_output_bytes.len() >= self.maximum_output_byte_count {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "write limit"));
         }
-        let remaining = self.maximum_output_byte_count - self.kitty_output_bytes.len();
-        let written_byte_count = remaining.min(kitty_output_bytes.len());
+        let remaining_byte_count = self.maximum_output_byte_count - self.kitty_output_bytes.len();
+        let written_byte_count = remaining_byte_count.min(kitty_output_bytes.len());
         self.kitty_output_bytes
             .extend_from_slice(&kitty_output_bytes[..written_byte_count]);
         if written_byte_count < kitty_output_bytes.len() {
@@ -58,62 +56,76 @@ fn build_pseudorandom_rgba_bytes(byte_count: usize) -> Vec<u8> {
 }
 
 #[test]
-fn one_pixel_upload_writes_the_exact_kitty_packet() {
-    let mut upload =
-        KittyUpload::from_decoded_image(build_decoded_image(1, 1, vec![1, 2, 3, 4]), 7)
-            .expect("the image is valid");
+fn one_pixel_transmit_writes_the_exact_kitty_packet() {
+    let compressed_bytes =
+        compress_kitty_image(&build_decoded_image(1, 1, vec![1, 2, 3, 4]), || false)
+            .expect("the image compresses")
+            .expect("nothing cancels the compression");
     let mut kitty_output_bytes = Vec::new();
 
-    upload
-        .advance_upload(&mut kitty_output_bytes)
-        .expect("the upload writes");
+    write_kitty_transmit(&mut kitty_output_bytes, 1, 1, 7, &compressed_bytes)
+        .expect("the transmit writes");
 
     assert_eq!(
         kitty_output_bytes,
-        b"\x1b_Ga=t,f=32,s=1,v=1,I=7,q=2,o=z,m=0;eAFjZGJmAQAAGAAL\x1b\\"
+        b"\x1b_Ga=t,f=32,s=1,v=1,i=7,q=2,o=z,m=0;eAFjZGJmAQAAGAAL\x1b\\"
     );
-    assert!(upload.has_started_transmission);
-    assert!(upload.is_upload_complete());
 }
 
 #[test]
-fn upload_retains_the_caller_arc_and_exposes_its_identity() {
-    let decoded_image = build_decoded_image(1, 1, vec![1, 2, 3, 4]);
-    let upload = KittyUpload::from_decoded_image(Arc::clone(&decoded_image), 11)
-        .expect("the image is valid");
+fn a_compressed_image_inflates_back_to_its_rgba_bytes() {
+    // 2 MiB of RGBA takes eight compression steps; the stream inflates back
+    // to the same bytes.
+    let rgba_bytes = build_pseudorandom_rgba_bytes(2_097_152);
+    let compressed_bytes =
+        compress_kitty_image(&build_decoded_image(16_384, 32, rgba_bytes.clone()), || {
+            false
+        })
+        .expect("the image compresses")
+        .expect("nothing cancels the compression");
+    let mut inflated_bytes = Vec::new();
 
-    assert!(Arc::ptr_eq(&upload.decoded_image, &decoded_image));
-    assert_eq!(upload.image_number, 11);
-    assert!(!upload.has_started_transmission);
-    assert!(!upload.is_upload_complete());
+    flate2::read::ZlibDecoder::new(compressed_bytes.as_slice())
+        .read_to_end(&mut inflated_bytes)
+        .expect("the stream inflates");
+
+    assert_eq!(inflated_bytes, rgba_bytes);
 }
 
 #[test]
-fn upload_rejects_zero_image_number() {
+fn a_compression_stops_before_the_step_after_its_cancellation() {
+    // The image needs eight steps. The cancellation answers `true` from its
+    // third call, so two steps run and no stream comes back.
+    let decoded_image = build_decoded_image(16_384, 32, vec![0; 2_097_152]);
+    let cancellation_call_count = std::cell::Cell::new(0);
+
+    let compression_result = compress_kitty_image(&decoded_image, || {
+        cancellation_call_count.set(cancellation_call_count.get() + 1);
+        cancellation_call_count.get() >= 3
+    });
+
+    assert!(matches!(compression_result, Ok(None)));
+    assert_eq!(cancellation_call_count.get(), 3);
+}
+
+#[test]
+fn compression_rejects_invalid_dimensions_and_rgba_length() {
     assert!(matches!(
-        KittyUpload::from_decoded_image(build_decoded_image(1, 1, vec![1, 2, 3, 4]), 0),
-        Err(KittyOutputError::InvalidImageNumber)
-    ));
-}
-
-#[test]
-fn upload_rejects_invalid_dimensions_and_rgba_length() {
-    assert!(matches!(
-        KittyUpload::from_decoded_image(build_decoded_image(0, 1, Vec::new()), 1),
+        compress_kitty_image(&build_decoded_image(0, 1, Vec::new()), || false),
         Err(KittyOutputError::InvalidImageDimensions {
             image_width_pixels: 0,
             image_height_pixels: 1,
         })
     ));
     assert!(matches!(
-        KittyUpload::from_decoded_image(build_decoded_image(16_385, 1, Vec::new()), 1),
+        compress_kitty_image(&build_decoded_image(16_385, 1, Vec::new()), || false),
         Err(KittyOutputError::InvalidImageDimensions {
             image_width_pixels: 16_385,
             image_height_pixels: 1,
         })
     ));
     assert!(matches!(
-        KittyUpload::from_decoded_image(build_decoded_image(1, 1, vec![1]), 1),
+        compress_kitty_image(&build_decoded_image(1, 1, vec![1]), || false),
         Err(KittyOutputError::InvalidImageRgbaByteCount {
             image_width_pixels: 1,
             image_height_pixels: 1,
@@ -124,100 +136,62 @@ fn upload_rejects_invalid_dimensions_and_rgba_length() {
 }
 
 #[test]
-fn upload_reports_a_writer_failure_at_a_packet_boundary_without_progress() {
-    let rgba_bytes = build_pseudorandom_rgba_bytes(16_384);
-    let mut expected_upload =
-        KittyUpload::from_decoded_image(build_decoded_image(4_096, 1, rgba_bytes.clone()), 3)
-            .expect("the image is valid");
-    let mut expected_kitty_output_bytes = Vec::new();
-    expected_upload
-        .advance_upload(&mut expected_kitty_output_bytes)
-        .expect("the complete output step writes");
-    let first_packet_end_byte_offset = expected_kitty_output_bytes
-        .windows(2)
-        .position(|packet_bytes| packet_bytes == b"\x1b\\")
-        .expect("the output has a packet terminator")
-        + 2;
+fn a_transmit_cuts_its_payload_into_3072_byte_chunks() {
+    // 6 145 payload bytes give three commands: two of 3 072 bytes that say
+    // more follows, and one of 1 byte that says it is the last.
+    let compressed_bytes = vec![0x5a; 6_145];
+    let mut kitty_output_bytes = Vec::new();
 
-    let mut upload = KittyUpload::from_decoded_image(build_decoded_image(4_096, 1, rgba_bytes), 3)
-        .expect("the image is valid");
+    write_kitty_transmit(&mut kitty_output_bytes, 4, 3, 9, &compressed_bytes)
+        .expect("the transmit writes");
+
+    let full_chunk_base64 = STANDARD.encode(&compressed_bytes[..3_072]);
+    let last_chunk_base64 = STANDARD.encode(&compressed_bytes[6_144..]);
+    assert_eq!(
+        String::from_utf8(kitty_output_bytes).expect("the transmit is text"),
+        format!(
+            "\x1b_Ga=t,f=32,s=4,v=3,i=9,q=2,o=z,m=1;{full_chunk_base64}\x1b\\\
+             \x1b_Gq=2,m=1;{full_chunk_base64}\x1b\\\
+             \x1b_Gq=2,m=0;{last_chunk_base64}\x1b\\"
+        )
+    );
+}
+
+#[test]
+fn a_transmit_rejects_a_zero_image_id_and_writes_nothing() {
+    let mut kitty_output_bytes = Vec::new();
+
+    assert!(matches!(
+        write_kitty_transmit(&mut kitty_output_bytes, 1, 1, 0, &[1, 2, 3]),
+        Err(KittyOutputError::InvalidImageId)
+    ));
+    assert_eq!(kitty_output_bytes, Vec::<u8>::new());
+}
+
+#[test]
+fn a_transmit_of_an_empty_payload_writes_nothing() {
+    let mut kitty_output_bytes = Vec::new();
+
+    write_kitty_transmit(&mut kitty_output_bytes, 1, 1, 7, &[]).expect("the transmit writes");
+
+    assert_eq!(kitty_output_bytes, Vec::<u8>::new());
+}
+
+#[test]
+fn a_transmit_reports_a_writer_failure() {
     let mut writer = WriterFailureAfterByteLimit {
         kitty_output_bytes: Vec::new(),
-        maximum_output_byte_count: first_packet_end_byte_offset,
+        maximum_output_byte_count: 8,
     };
-    let kitty_output_error = upload
-        .advance_upload(&mut writer)
-        .expect_err("the second packet write fails");
+
+    let kitty_output_error = write_kitty_transmit(&mut writer, 1, 1, 7, &[1, 2, 3])
+        .expect_err("the write past 8 bytes fails");
 
     assert!(matches!(
         kitty_output_error,
         KittyOutputError::Io(ref io_error) if io_error.kind() == io::ErrorKind::BrokenPipe
     ));
-    assert_eq!(
-        writer.kitty_output_bytes,
-        expected_kitty_output_bytes[..first_packet_end_byte_offset]
-    );
-    assert!(!upload.has_started_transmission);
-    assert!(!upload.is_upload_complete());
-}
-
-#[test]
-fn one_upload_advance_compresses_at_most_256_kibibytes_of_rgba_input() {
-    let mut upload =
-        KittyUpload::from_decoded_image(build_decoded_image(16_384, 32, vec![0; 2_097_152]), 1)
-            .expect("the image is valid");
-    let mut kitty_output_bytes = Vec::new();
-
-    upload
-        .advance_upload(&mut kitty_output_bytes)
-        .expect("the bounded step writes");
-
-    assert_eq!(
-        upload.rgba_input_byte_offset,
-        KITTY_COMPRESSION_RGBA_BYTE_COUNT_PER_STEP
-    );
-    assert!(!upload.is_compression_complete);
-}
-
-#[test]
-fn one_upload_advance_writes_at_most_sixteen_compressed_chunks() {
-    let decoded_image = build_decoded_image(1, 1, vec![1, 2, 3, 4]);
-    let mut upload = KittyUpload {
-        decoded_image,
-        image_number: 7,
-        compressor: Compress::new(Compression::fast(), true),
-        rgba_input_byte_offset: 4,
-        compressed_bytes: vec![
-            0x5a;
-            KITTY_COMPRESSED_CHUNK_BYTE_COUNT
-                * (KITTY_IMAGE_CHUNK_COUNT_PER_STEP + 1)
-        ],
-        compressed_byte_offset: 0,
-        is_compression_complete: true,
-        has_started_transmission: false,
-    };
-    let mut kitty_output_bytes = Vec::new();
-
-    upload
-        .advance_upload(&mut kitty_output_bytes)
-        .expect("the bounded step writes");
-
-    assert_eq!(
-        upload.compressed_byte_offset,
-        KITTY_COMPRESSED_CHUNK_BYTE_COUNT * KITTY_IMAGE_CHUNK_COUNT_PER_STEP
-    );
-    assert!(upload.has_started_transmission);
-    assert!(!upload.is_upload_complete());
-    assert_eq!(
-        kitty_output_bytes
-            .windows(b"\x1b_G".len())
-            .filter(|packet_bytes| *packet_bytes == b"\x1b_G")
-            .count(),
-        KITTY_IMAGE_CHUNK_COUNT_PER_STEP
-    );
-    assert!(kitty_output_bytes
-        .windows(4)
-        .all(|packet_bytes| packet_bytes != b"m=0;"));
+    assert_eq!(writer.kitty_output_bytes, b"\x1b_Ga=t,f");
 }
 
 #[test]
@@ -228,7 +202,7 @@ fn placement_writes_source_offsets_and_z_index() {
         rgba_bytes: vec![0; 4 * 3 * 4],
     };
     let placement = KittyPlacement {
-        image_number: 7,
+        image_id: 7,
         placement_id: 9,
         source_x_pixels: 1,
         source_y_pixels: 2,
@@ -247,7 +221,7 @@ fn placement_writes_source_offsets_and_z_index() {
 
     assert_eq!(
         kitty_output_bytes,
-        b"\x1b_Ga=p,I=7,p=9,x=1,y=2,w=2,h=1,X=5,Y=6,c=3,r=4,C=1,z=-2,q=2;\x1b\\"
+        b"\x1b_Ga=p,i=7,p=9,x=1,y=2,w=2,h=1,X=5,Y=6,c=3,r=4,C=1,z=-2,q=2;\x1b\\"
     );
 }
 
@@ -259,7 +233,7 @@ fn placement_rejects_zero_ids_dimensions_and_out_of_bounds_source() {
         rgba_bytes: vec![0; 16],
     };
     let valid_placement = KittyPlacement {
-        image_number: 1,
+        image_id: 1,
         placement_id: 1,
         source_x_pixels: 0,
         source_y_pixels: 0,
@@ -274,10 +248,10 @@ fn placement_rejects_zero_ids_dimensions_and_out_of_bounds_source() {
     let mut kitty_output_bytes = Vec::new();
 
     let mut placement = valid_placement;
-    placement.image_number = 0;
+    placement.image_id = 0;
     assert!(matches!(
         write_kitty_placement(&mut kitty_output_bytes, &decoded_image, &placement),
-        Err(KittyOutputError::InvalidImageNumber)
+        Err(KittyOutputError::InvalidImageId)
     ));
     placement = valid_placement;
     placement.placement_id = 0;
@@ -320,7 +294,7 @@ fn delete_commands_write_exact_kitty_bytes() {
 
     assert_eq!(
         kitty_output_bytes,
-        b"\x1b_Ga=d,d=N,I=7,q=2;\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b_Ga=d,d=a,q=2;\x1b\\"
+        b"\x1b_Ga=d,d=I,i=7,q=2;\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b_Ga=d,d=a,q=2;\x1b\\"
     );
 }
 
@@ -334,12 +308,12 @@ fn abort_writes_the_exact_open_transfer_cancellation_bytes() {
 }
 
 #[test]
-fn image_delete_rejects_a_zero_image_number() {
+fn image_delete_rejects_a_zero_image_id() {
     let mut kitty_output_bytes = Vec::new();
 
     assert!(matches!(
         write_kitty_image_delete(&mut kitty_output_bytes, 0),
-        Err(KittyOutputError::InvalidImageNumber)
+        Err(KittyOutputError::InvalidImageId)
     ));
     assert!(kitty_output_bytes.is_empty());
 }

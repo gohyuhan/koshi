@@ -5,7 +5,8 @@
 //! [`WriterHandoff`].
 //! `EventBus::publish` clones each event into every subscriber's queue,
 //! `EventBus::try_send_frame` puts the frame the session composed for one
-//! subscriber's client on that subscriber's own queue,
+//! subscriber's client on that subscriber's own queue, in the place of a frame
+//! at the tail of the queue that the writing thread has not taken,
 //! `EventBus::try_send_mouse_answer` puts one round of mouse answers on it,
 //! `EventBus::queue_host_write` adds bytes aimed at that subscriber's own
 //! terminal to its waiting host writes, and `EventBus::try_send_switch` puts
@@ -51,7 +52,7 @@
 //! waiting host-write bytes into the frames that client is sent.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::TrySendError;
 use std::sync::{Arc, Mutex};
 
 use koshi_core::event::{Event, SubscriberLagged};
@@ -63,8 +64,8 @@ use koshi_renderer::snapshot::{
 };
 
 use crate::runtime::clipboard::encode_osc52_copy;
+use crate::runtime::delivery_queue::{create_delivery_queue, DeliveryReceiver, DeliverySender};
 use crate::runtime::event::{EndingNotice, SessionEnding};
-use crate::runtime::frame::build_wire_frame;
 
 /// How many undelivered items one subscriber's queue holds. Anything put on a
 /// full queue is dropped for that subscriber.
@@ -109,7 +110,7 @@ struct Subscriber {
     delivery_state: DeliveryState,
     /// Sending end of the subscriber's bounded queue; the receiver lives with
     /// the subscriber.
-    delivery_sender: SyncSender<Delivery>,
+    delivery_sender: DeliverySender,
     /// What waits beside the queue for the thread that writes the client's
     /// connection, shared with that thread.
     writer_handoff: Arc<WriterHandoff>,
@@ -221,25 +222,25 @@ impl WriterHandoff {
 
     /// Put `delivery`, a frame or a resync snapshot, on `delivery_sender`
     /// while holding the owed-frame mark, and set the mark when the queue is
-    /// full. Returns what the send returned, with the delivery that did not
-    /// fit dropped.
+    /// full. A frame takes the place of a frame at the tail of the queue
+    /// ([`DeliverySender::try_send_frame`]). Returns what the send returned.
     ///
     /// # Panics
     /// When a thread panicked while it held the mark.
     fn send_or_mark_frame_owed(
         &self,
-        delivery_sender: &SyncSender<Delivery>,
+        delivery_sender: &DeliverySender,
         delivery: Delivery,
     ) -> Result<(), TrySendError<()>> {
         let mut is_frame_owed = self.is_frame_owed.lock().expect("owed frame mark");
-        match delivery_sender.try_send(delivery) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => {
-                *is_frame_owed = true;
-                Err(TrySendError::Full(()))
-            }
-            Err(TrySendError::Disconnected(_)) => Err(TrySendError::Disconnected(())),
+        let send_result = match delivery {
+            Delivery::Frame(render_snapshot) => delivery_sender.try_send_frame(render_snapshot),
+            delivery => delivery_sender.try_send(delivery),
+        };
+        if let Err(TrySendError::Full(())) = send_result {
+            *is_frame_owed = true;
         }
+        send_result
     }
 }
 
@@ -275,8 +276,8 @@ impl EventBus {
     /// host write waiting and no frame owed. The subscriber starts live.
     /// Dropping the receiver ends the subscription; the bus removes it on the
     /// next publish or delivery to it.
-    pub(crate) fn subscribe(&mut self) -> (SubscriberId, Receiver<Delivery>, Arc<WriterHandoff>) {
-        let (delivery_sender, delivery_receiver) = sync_channel(SUBSCRIBER_QUEUE_CAPACITY);
+    pub(crate) fn subscribe(&mut self) -> (SubscriberId, DeliveryReceiver, Arc<WriterHandoff>) {
+        let (delivery_sender, delivery_receiver) = create_delivery_queue(SUBSCRIBER_QUEUE_CAPACITY);
         let subscriber_id = SubscriberId::new();
         let writer_handoff = Arc::new(WriterHandoff::default());
         self.subscribers.push(Subscriber {
@@ -331,6 +332,11 @@ impl EventBus {
             {
                 Ok(()) => true,
                 Err(TrySendError::Full(_)) => {
+                    // The writing thread reads the raised notice when it
+                    // wakes, also while a frame waits at its queue's head.
+                    if is_stream_ending {
+                        subscriber.delivery_sender.wake_receiver();
+                    }
                     match &mut subscriber.delivery_state {
                         DeliveryState::Desynced {
                             dropped_event_count,
@@ -476,7 +482,10 @@ impl EventBus {
     }
 
     /// Put `snapshot` on live subscriber `subscriber_id`'s queue as the frame its client
-    /// draws.
+    /// draws. A frame at the tail of the queue that the writing thread has not
+    /// taken is replaced by `snapshot`: the queue holds `Frame(a)`, `Event(e)`,
+    /// `Frame(b)`, and a new `Frame(c)` leaves `Frame(a)`, `Event(e)`,
+    /// `Frame(c)`.
     ///
     /// Returns `true` once the frame is queued. Returns `false` when `subscriber_id` is
     /// unknown, when it is desynced — a paused subscriber takes its resync
@@ -720,7 +729,9 @@ impl EventBus {
     }
 
     /// Put the session live subscriber `subscriber_id`'s client moves to on that
-    /// subscriber's queue. The thread that writes the client's connection
+    /// subscriber's queue: `session_id`, and `owner_user_id`, the user id whose
+    /// folder of the shared directory advertises it, or `None` for a lookup by
+    /// id alone. The thread that writes the client's connection
     /// writes the host-write bytes that waited before the switch was queued
     /// ahead of it.
     ///
@@ -731,8 +742,15 @@ impl EventBus {
         &mut self,
         subscriber_id: SubscriberId,
         session_id: SessionId,
+        owner_user_id: Option<u32>,
     ) -> bool {
-        match self.try_send_delivery(subscriber_id, Delivery::SwitchTo(session_id)) {
+        match self.try_send_delivery(
+            subscriber_id,
+            Delivery::SwitchTo {
+                session_id,
+                owner_user_id,
+            },
+        ) {
             QueueDeliveryStatus::Sent => true,
             QueueDeliveryStatus::Dropped => {
                 tracing::warn!(
@@ -777,14 +795,13 @@ impl EventBus {
 /// The frame an attached client is sent for one item off its queue, or `None`
 /// when no [`SessionEvent`] spells that item.
 ///
-/// A [`Delivery::Frame`] becomes [`SessionEvent::Painted`] carrying the text
-/// cells and image placements in koshi-ipc's wire spellings. A client that can
-/// paint images receives new RGBA records from its connection writer after
-/// this conversion.
+/// A [`Delivery::Frame`] gives `None`: the connection writer sends it as a
+/// painted update ([`crate::runtime::painted_update`]), and a client that can
+/// paint images receives new RGBA records after it.
 ///
 /// A [`Delivery::Snapshot`] becomes [`SessionEvent::Resync`] carrying the count
 /// of missed events. The connection writer sends the snapshot's frame right
-/// after it, as a [`SessionEvent::Painted`].
+/// after it, as a painted update.
 ///
 /// A [`Delivery::MouseAnswer`] becomes [`SessionEvent::MouseAnswer`] carrying
 /// the id of the round it answers and that round's answers.
@@ -794,7 +811,8 @@ impl EventBus {
 /// lists.
 ///
 /// A [`Delivery::SwitchTo`] becomes [`SessionEvent::SwitchTo`] carrying the id
-/// of the session the client attaches to next.
+/// of the session the client attaches to next and the user id whose shared
+/// folder advertises it.
 ///
 /// A [`Delivery::PlacementCommandRejected`] becomes
 /// [`SessionEvent::PlacementCommandRejected`] carrying the rejected command id.
@@ -863,9 +881,9 @@ pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             Event::Quit(_) => Some(SessionEvent::Quit),
             Event::Restarting => Some(SessionEvent::Restarting),
 
-            // PTY size: the client redraws from the next `Painted` frame.
+            // PTY size: the client redraws from the next painted update.
             Event::PtyResized(_) => None,
-            // Visibility: the `Painted` frame already shows which panes have
+            // Visibility: the painted update already shows which panes have
             // area.
             Event::TerminalTooSmallEntered(_) => None,
             Event::ConfigReloaded(_) => None,
@@ -882,9 +900,7 @@ pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             | Event::PanePinChanged(_)
             | Event::PaneMinimizedChanged(_) => None,
         },
-        Delivery::Frame(render_snapshot) => Some(SessionEvent::Painted {
-            frame: Box::new(build_wire_frame(render_snapshot)),
-        }),
+        Delivery::Frame(_) => None,
         Delivery::PanePlacementSnapshot {
             request_id,
             snapshot,
@@ -922,8 +938,12 @@ pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             mouse_answers: mouse_answers.clone(),
         }),
         Delivery::HostWrite => None,
-        Delivery::SwitchTo(session_id) => Some(SessionEvent::SwitchTo {
+        Delivery::SwitchTo {
+            session_id,
+            owner_user_id,
+        } => Some(SessionEvent::SwitchTo {
             session_id: *session_id,
+            owner_user_id: *owner_user_id,
         }),
         Delivery::PlacementCommandRejected(command_id) => {
             Some(SessionEvent::PlacementCommandRejected {

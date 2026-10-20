@@ -4,6 +4,13 @@
 //! into an in-memory buffer. Event conversion is tested here. Platform terminal
 //! setup and the input reader need a TTY and are not tested here. Key decoding
 //! is tested in `koshi-input`.
+//!
+//! A seeded sequence of prints, splits, floating panes, scrolls, focus
+//! changes, resizes and a selection drag, on Kitty, iTerm2, Sixel and
+//! no-image terminals, and a text print beside a native image in every
+//! protocol pair, paint each committed frame with the bytes of a frame that
+//! draws every row. A print draws only its changed rows, and every other
+//! step draws every row.
 
 use super::*;
 
@@ -15,7 +22,7 @@ use std::time::{Duration, Instant, SystemTime};
 /// [`paint_frame_with_images`] with image placeholders, no native image output,
 /// no cell measurement and no placement preview.
 fn paint_frame<B: Backend>(
-    terminal: &mut Terminal<B>,
+    paint_driver: &mut PaintDriver<B>,
     client: &Client,
     render_snapshot: &RenderSnapshot,
     committed_regions: &CommittedRegions,
@@ -23,9 +30,9 @@ fn paint_frame<B: Backend>(
     last_window_title: &mut String,
     last_cursor_style: &mut Option<CursorStyle>,
 ) -> Result<(), PaintError<B::Error>> {
-    let mut image_output_state = ImageOutputState::from_output_kind(None);
+    let mut image_output_state = ImageOutputState::from_output_kind(None, Arc::new(|| {}));
     paint_frame_with_images(
-        terminal,
+        paint_driver,
         client,
         render_snapshot,
         committed_regions,
@@ -42,11 +49,11 @@ fn paint_frame<B: Backend>(
 }
 
 /// Paint one frame, drawing the placement preview when `placement_display_snapshot`
-/// or `placement_snapshot` names one, through
-/// [`paint_frame_with_displayed_snapshot`].
+/// or `placement_snapshot` names one, through [`paint_frame_with_writer`]. The
+/// frame bytes the backend of `paint_driver` does not write go nowhere.
 #[allow(clippy::too_many_arguments)]
 fn paint_frame_with_images<B: Backend>(
-    terminal: &mut Terminal<B>,
+    paint_driver: &mut PaintDriver<B>,
     client: &Client,
     render_snapshot: &RenderSnapshot,
     committed_regions: &CommittedRegions,
@@ -58,7 +65,7 @@ fn paint_frame_with_images<B: Backend>(
     last_cursor_style: &mut Option<CursorStyle>,
     placement_snapshot: Option<&PlacementSnapshot>,
     placement_display_snapshot: Option<&PlacementSnapshot>,
-) -> Result<bool, PaintError<B::Error>> {
+) -> Result<(), PaintError<B::Error>> {
     let placement_render_snapshot =
         placement_display_snapshot
             .or(placement_snapshot)
@@ -68,8 +75,9 @@ fn paint_frame_with_images<B: Backend>(
     let displayed_render_snapshot = placement_render_snapshot
         .as_ref()
         .unwrap_or(render_snapshot);
-    paint_frame_with_displayed_snapshot(
-        terminal,
+    paint_frame_with_writer(
+        &mut io::sink(),
+        paint_driver,
         client,
         displayed_render_snapshot,
         committed_regions,
@@ -77,6 +85,7 @@ fn paint_frame_with_images<B: Backend>(
         image_mode,
         image_output_state,
         cell_size,
+        &mut None,
         last_window_title,
         last_cursor_style,
         placement_snapshot,
@@ -91,18 +100,21 @@ use ratatui::layout::{Position, Rect};
 use koshi_config::layer::{PartialColorPalette, PartialKeybindingsConfig, PartialThemeConfig};
 use koshi_config::types::RgbColor;
 use koshi_core::command::{
-    Command, CommandEnvelope, CommandSource, PanePlacementAnchor, PanePlacementTarget,
+    ClearSelectionArgs, Command, CommandEnvelope, CommandSource, FocusPaneArgs, FocusTarget,
+    NewPaneArgs, NewPanePlacement, PanePlacementAnchor, PanePlacementTarget, ScrollPaneArgs,
+    SetSelectionArgs, VisualCommand,
 };
-use koshi_core::geometry::{
-    Direction, PaneArea, Point as CorePoint, Rect as CoreRect, Size, SplitDirection,
-};
+use koshi_core::geometry::{Direction, PaneArea, Rect as CoreRect, Size, SplitDirection};
 use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{
-    BindingModifierFlags, Key, KeyChord, KeyEventKind, KeyIdentity, KeyModifierFlags,
+    BindingModifierFlags, Key, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
 };
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
-use koshi_input::host::{GraphicAttributeError, GraphicAttributeReply, KeyCode};
+use koshi_core::selection::{GridPosition, Selection, SelectionKind};
+use koshi_input::host::{
+    GraphicAttributeError, GraphicAttributeReply, KeyCode, KittyGraphicsReply,
+};
 use koshi_ipc::protocol::WireMouseAction;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
@@ -117,9 +129,11 @@ use koshi_renderer::{build_image_cell_snapshot, build_image_paints};
 use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::Server;
 use koshi_terminal::engine::TerminalEngine;
+use koshi_terminal::graphics::GraphicsProtocol;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::Style as TerminalStyle;
 use koshi_test_support::fake_pty::FakePtyBackend;
+use koshi_test_support::output_workloads::SeededSequence;
 
 use koshi_link::config::LoadedConfig;
 
@@ -141,15 +155,29 @@ struct ProbeSource {
 }
 
 impl reader::EventSource for ProbeSource {
-    fn try_read_event(&mut self, _timeout: Option<Duration>) -> io::Result<Option<Event>> {
+    fn try_read_event(&mut self, _timeout_duration: Option<Duration>) -> io::Result<Option<Event>> {
         Ok(self.pending_events.pop_front())
     }
 }
 
 fn build_probe_reader(probe_events: impl IntoIterator<Item = Event>) -> InputReader<ProbeSource> {
-    InputReader::from_event_source_for_tests(ProbeSource {
+    InputReader::from_event_source(ProbeSource {
         pending_events: probe_events.into_iter().collect(),
     })
+}
+
+/// A terminal whose input reads `pending_events` in order, then fails.
+struct ScriptedInputSource {
+    pending_events: VecDeque<Event>,
+}
+
+impl reader::EventSource for ScriptedInputSource {
+    fn try_read_event(&mut self, _timeout_duration: Option<Duration>) -> io::Result<Option<Event>> {
+        match self.pending_events.pop_front() {
+            Some(terminal_event) => Ok(Some(terminal_event)),
+            None => Err(io::Error::other("the scripted terminal closed")),
+        }
+    }
 }
 
 /// A bootstrapped server over a fake backend, with its client id and sole pane id.
@@ -167,33 +195,39 @@ fn build_test_server_with_pane() -> (Server, ClientId, PaneId) {
     (server, client_id, pane_id)
 }
 
-/// A client half for `client_id`, subscribed to `server`'s events, built the
-/// way the launch builds it — through [`build_client_with_loaded_config`].
-fn build_test_client(server: &mut Server, client_id: ClientId) -> Client {
-    build_test_client_with_config(server, client_id, LoadedConfig::default())
+/// A client half for `client_id`, built the way the launch builds it —
+/// through [`build_client_with_loaded_config`].
+fn build_launch_client(client_id: ClientId) -> Client {
+    build_launch_client_with_config(client_id, LoadedConfig::default())
 }
 
-/// A client half for `client_id`, subscribed to `server`'s events, built from
-/// `loaded_config`.
-fn build_test_client_with_config(
-    server: &mut Server,
-    client_id: ClientId,
-    loaded_config: LoadedConfig,
-) -> Client {
-    let (frame_delivery_receiver, _) = server.subscribe(client_id);
+/// A client half for `client_id`, built from `loaded_config`.
+fn build_launch_client_with_config(client_id: ClientId, loaded_config: LoadedConfig) -> Client {
     build_client_with_loaded_config(
         client_id,
         TEST_VIEWPORT_SIZE,
-        frame_delivery_receiver,
         TerminalCleanupGuard::new(),
         loaded_config,
+        Arc::default(),
+    )
+}
+
+/// A paint driver over an in-memory terminal of `column_count` by `row_count`
+/// cells.
+fn build_test_paint_driver(column_count: u16, row_count: u16) -> PaintDriver<TestBackend> {
+    PaintDriver::from_backend(
+        TestBackend::new(column_count, row_count),
+        Size {
+            column_count,
+            row_count,
+        },
     )
 }
 
 /// Flatten the whole rendered terminal screen to a string for substring assertions.
-fn serialize_terminal_screen_text(terminal: &Terminal<TestBackend>) -> String {
-    terminal
-        .backend()
+fn serialize_terminal_screen_text(paint_driver: &PaintDriver<TestBackend>) -> String {
+    paint_driver
+        .backend
         .buffer()
         .content()
         .iter()
@@ -354,8 +388,12 @@ fn build_second_opaque_image_pixels() -> Vec<u8> {
     .collect()
 }
 
+/// The input that draws the 4 by 4 pixel image `rgba_pixel_bytes` over 4 by 4
+/// cells: a Kitty transmit and place as content id `image_content_id`, the
+/// iTerm2 packets of koshi's encoder, or `ESC [ ? 80 l` and koshi's Sixel
+/// encoder output.
 fn build_protocol_image_input(
-    graphics_protocol: koshi_terminal::graphics::GraphicsProtocol,
+    graphics_protocol: GraphicsProtocol,
     rgba_pixel_bytes: Vec<u8>,
     image_content_id: u32,
 ) -> Vec<u8> {
@@ -368,12 +406,12 @@ fn build_protocol_image_input(
         rgba_bytes: rgba_pixel_bytes,
     };
     match graphics_protocol {
-        koshi_terminal::graphics::GraphicsProtocol::Kitty => format!(
+        GraphicsProtocol::Kitty => format!(
             "\x1b_Ga=T,f=32,s=4,v=4,i={image_content_id},c=4,r=4,C=1,q=2;{}\x1b\\",
             STANDARD.encode(decoded_image.rgba_bytes)
         )
         .into_bytes(),
-        koshi_terminal::graphics::GraphicsProtocol::Iterm2 => {
+        GraphicsProtocol::Iterm2 => {
             let mut iterm_encoder = koshi_iterm::ItermEncoder::from_image(
                 &decoded_image,
                 koshi_iterm::ItermOutputOptions::from_cell_dimensions(4, 4)
@@ -386,7 +424,7 @@ fn build_protocol_image_input(
             }
             iterm_output_bytes
         }
-        koshi_terminal::graphics::GraphicsProtocol::Sixel => {
+        GraphicsProtocol::Sixel => {
             let mut sixel_encoder =
                 koshi_sixel::SixelEncoder::from_image(Arc::new(decoded_image), [0, 0, 0])
                     .expect("Sixel image encoding");
@@ -402,7 +440,7 @@ fn build_protocol_image_input(
     }
 }
 
-fn build_two_image_input(graphics_protocol: koshi_terminal::graphics::GraphicsProtocol) -> Vec<u8> {
+fn build_two_image_input(graphics_protocol: GraphicsProtocol) -> Vec<u8> {
     let mut terminal_input_bytes = b"\x1b[22;1Hscroll-test\x1b[2;2H".to_vec();
     terminal_input_bytes.extend_from_slice(&build_protocol_image_input(
         graphics_protocol,
@@ -498,25 +536,14 @@ fn build_terminal_image_pixel_map(
     image_pixel_by_position
 }
 
-fn build_opaque_image_input(
-    graphics_protocol: koshi_terminal::graphics::GraphicsProtocol,
-) -> Vec<u8> {
-    use koshi_terminal::graphics::GraphicsProtocol;
+/// The input that draws the image of [`build_opaque_image_pixels`] over 4 by 4
+/// cells, as content id `42` on Kitty. The Sixel input is a hand-written
+/// string that draws one color per pixel row: red, green, blue and white.
+fn build_opaque_image_input(graphics_protocol: GraphicsProtocol) -> Vec<u8> {
     match graphics_protocol {
-        GraphicsProtocol::Kitty => b"\x1b_Ga=T,f=32,s=4,v=4,i=42,c=4,r=4,C=1,q=2;/wAA//8AAP//AAD//wAA/wD/AP8A/wD/AP8A/wD/AP8AAP//AAD//wAA//8AAP///////////////////////w==\x1b\\".to_vec(),
         GraphicsProtocol::Sixel => b"\x1b[?80l\x1bP0;1q\"1;1;4;4#1;2;100;0;0#1@@@@$#2;2;0;100;0#2AAAA$#3;2;0;0;100#3CCCC$#4;2;100;100;100#4GGGG\x1b\\".to_vec(),
-        GraphicsProtocol::Iterm2 => {
-            let decoded_image = koshi_image::DecodedImage { pixel_width: 4, pixel_height: 4, rgba_bytes: build_opaque_image_pixels() };
-            let mut iterm_encoder = koshi_iterm::ItermEncoder::from_image(
-                &decoded_image,
-                koshi_iterm::ItermOutputOptions::from_cell_dimensions(4, 4).unwrap(),
-            )
-            .unwrap();
-            let mut iterm_output_bytes = Vec::new();
-            while let Some(iterm_packet) = iterm_encoder.take_next_packet() {
-                iterm_output_bytes.extend_from_slice(iterm_packet);
-            }
-            iterm_output_bytes
+        other_graphics_protocol => {
+            build_protocol_image_input(other_graphics_protocol, build_opaque_image_pixels(), 42)
         }
     }
 }
@@ -577,7 +604,7 @@ fn round_trip_image_frame_through_wire(
     image_cache: &mut crate::attach::paint::ImageCache,
     image_wire_content_ids: &mut ImageWireContentIds,
 ) -> RenderSnapshot {
-    use koshi_ipc::frame::{FrameImageChunk, FrameImageTransfer, PaintedFrame};
+    use koshi_ipc::frame::{FrameImageTransfer, PaintedFrame};
     image_wire_content_ids.retain_visible_image_content_ids(render_snapshot);
     let mut wire_frame = koshi_runtime::runtime::frame::build_wire_frame(render_snapshot);
     for (source_pane_snapshot, wire_pane_snapshot) in render_snapshot
@@ -603,7 +630,9 @@ fn round_trip_image_frame_through_wire(
     let wire_frame: PaintedFrame =
         serde_json::from_slice(&serde_json::to_vec(&wire_frame).unwrap()).unwrap();
     let mut resolved_render_snapshot = image_cache
-        .adopt_painted_frame(Box::new(wire_frame.clone()))
+        .adopt_painted_frame(Box::new(
+            crate::attach::paint::tests::carry_first_painted_frame(render_snapshot, &wire_frame),
+        ))
         .unwrap();
     let mut transferred_image_content_ids = HashSet::new();
     for (source_pane_snapshot, wire_pane_snapshot) in render_snapshot
@@ -642,17 +671,14 @@ fn round_trip_image_frame_through_wire(
                 }
                 Err(transfer_error) => panic!("image transfer failed to start: {transfer_error}"),
             }
-            let image_chunk = FrameImageChunk {
-                image_transfer_id: wire_image_placement.image_content_id,
-                byte_offset: 0,
-                is_last: true,
-                chunk_bytes: image_record.image.rgba_bytes.clone(),
-            };
-            if let Some(completed_render_snapshot) = image_cache
-                .accept_image_chunk(
-                    serde_json::from_slice(&serde_json::to_vec(&image_chunk).unwrap()).unwrap(),
-                )
-                .unwrap()
+            let image_chunk_frame = koshi_test_support::fixtures::build_image_chunk_frame(
+                wire_image_placement.image_content_id,
+                0,
+                true,
+                &image_record.image.rgba_bytes,
+            );
+            if let Some(completed_render_snapshot) =
+                image_cache.accept_image_chunk(&image_chunk_frame).unwrap()
             {
                 resolved_render_snapshot = Some(completed_render_snapshot);
             }
@@ -668,7 +694,6 @@ fn all_input_and_output_protocols_preserve_opaque_pixels_through_scrolling() {
 
 #[test]
 fn all_output_protocols_match_source_image_coverage_after_text_overwrite() {
-    use koshi_terminal::graphics::GraphicsProtocol;
     for image_protocol in [
         GraphicsProtocol::Kitty,
         GraphicsProtocol::Iterm2,
@@ -681,21 +706,15 @@ fn all_output_protocols_match_source_image_coverage_after_text_overwrite() {
         });
         let mut output_bytes = b"A\x1b[1;1H".to_vec();
         output_bytes.extend_from_slice(&build_opaque_image_input(image_protocol));
-        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
-            pane_id,
-            output_bytes,
-        });
+        server.handle_pty_output(pane_id, &output_bytes);
         let initial_render_snapshot = build_render_snapshot(&server, client_id);
-        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
-            pane_id,
-            output_bytes: b"\x1b[1;1HB".to_vec(),
-        });
+        server.handle_pty_output(pane_id, b"\x1b[1;1HB");
         let changed_render_snapshot = build_render_snapshot(&server, client_id);
         let mut overwritten_image_pixels = build_opaque_image_pixels();
         if image_protocol != GraphicsProtocol::Kitty {
             overwritten_image_pixels[..4].fill(0);
         }
-        let client = build_test_client(&mut server, client_id);
+        let client = build_launch_client(client_id);
         assert_image_trace_output(
             &client,
             image_protocol,
@@ -711,8 +730,6 @@ fn all_output_protocols_match_source_image_coverage_after_text_overwrite() {
 
 #[test]
 fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
-    use koshi_terminal::graphics::GraphicsProtocol;
-
     for image_protocol in [
         GraphicsProtocol::Kitty,
         GraphicsProtocol::Iterm2,
@@ -725,17 +742,11 @@ fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
         });
         let mut image_input_bytes = b"\x1b[1;1H".to_vec();
         image_input_bytes.extend_from_slice(&build_opaque_image_input(image_protocol));
-        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
-            pane_id,
-            output_bytes: image_input_bytes,
-        });
+        server.handle_pty_output(pane_id, &image_input_bytes);
         let initial_render_snapshot = build_render_snapshot(&server, client_id);
-        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
-            pane_id,
-            output_bytes: b"\x1b[1;1HB".to_vec(),
-        });
+        server.handle_pty_output(pane_id, b"\x1b[1;1HB");
         let repainted_render_snapshot = build_render_snapshot(&server, client_id);
-        let client = build_test_client(&mut server, client_id);
+        let client = build_launch_client(client_id);
 
         for graphics_support in [
             GraphicsSupport::Kitty,
@@ -750,15 +761,11 @@ fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
             let backend = ImageTraceBackend(ratatui::backend::CrosstermBackend::new(
                 ImageTraceWriter::default(),
             ));
-            let mut terminal = Terminal::with_options(
-                backend,
-                ratatui::TerminalOptions {
-                    viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 80, 24)),
-                },
-            )
-            .expect("test terminal");
-            let mut image_output_state =
-                ImageOutputState::from_output_kind(ImageOutputKind::from_support(graphics_support));
+            let mut paint_driver = PaintDriver::from_backend(backend, TEST_VIEWPORT_SIZE);
+            let mut image_output_state = ImageOutputState::from_output_kind(
+                ImageOutputKind::from_support(graphics_support),
+                Arc::new(|| {}),
+            );
             let mut image_cache = crate::attach::paint::ImageCache::new();
             let mut image_wire_content_ids = ImageWireContentIds::default();
 
@@ -775,9 +782,9 @@ fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
                 let settle_deadline = Instant::now() + Duration::from_secs(5);
                 let mut stage_output_bytes = Vec::new();
                 loop {
-                    let is_frame_committed = paint_frame_with_writer(
+                    paint_frame_with_writer(
                         &mut writer,
-                        &mut terminal,
+                        &mut paint_driver,
                         &client,
                         &render_snapshot,
                         &build_committed_regions(TEST_VIEWPORT_SIZE),
@@ -789,6 +796,7 @@ fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
                         graphics_support.get_image_render_mode(),
                         &mut image_output_state,
                         Some(PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size")),
+                        &mut None,
                         &mut String::new(),
                         &mut None,
                         None,
@@ -798,7 +806,7 @@ fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
                     stage_output_bytes.extend_from_slice(&std::mem::take(
                         &mut *writer.0.lock().expect("trace lock"),
                     ));
-                    if is_frame_committed && !image_output_state.is_work_pending() {
+                    if !image_output_state.is_work_pending() {
                         break;
                     }
                     assert!(
@@ -859,16 +867,12 @@ fn pi_hidden_scrollbar_frames_preserve_pixels_in_every_output_protocol() {
 }
 
 fn assert_pi_scrollbar_output(has_scrollbar: bool) {
-    use koshi_terminal::graphics::GraphicsProtocol;
     let (mut server, client_id, pane_id) = build_test_server_with_pane();
     let _ = server.handle_runtime_event(RuntimeEvent::CellSize {
         client_id,
         cell_size: PixelCellSize::from_pixel_dimensions(1, 1).unwrap(),
     });
-    let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
-        pane_id,
-        output_bytes: b"\x1b[?1049h".to_vec(),
-    });
+    server.handle_pty_output(pane_id, b"\x1b[?1049h");
     let kitty_upload_text = String::from_utf8(build_opaque_image_input(GraphicsProtocol::Kitty))
         .unwrap()
         .replace("c=4,r=4,C=1", "c=4,C=1,y=3,h=1,r=1");
@@ -922,10 +926,7 @@ fn assert_pi_scrollbar_output(has_scrollbar: bool) {
             }
         }
         terminal_input_text.push_str("\x1b[?2026l");
-        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
-            pane_id,
-            output_bytes: terminal_input_text.into_bytes(),
-        });
+        server.handle_pty_output(pane_id, &terminal_input_text.into_bytes());
         render_snapshots.push(build_render_snapshot(&server, client_id));
         expected_frame_pixel_rows.push((
             image_row_index - 1,
@@ -933,7 +934,7 @@ fn assert_pi_scrollbar_output(has_scrollbar: bool) {
             build_opaque_image_pixels()[usize::from(source_pixel_row_index) * 16..].to_vec(),
         ));
     }
-    let client = build_test_client(&mut server, client_id);
+    let client = build_launch_client(client_id);
     assert_image_trace_output(
         &client,
         GraphicsProtocol::Kitty,
@@ -953,9 +954,7 @@ fn utf8_border_before_kitty_upload_preserves_pixels() {
         terminal.set_cell_size(PixelCellSize::from_pixel_dimensions(1, 1).unwrap());
         let mut terminal_input_bytes = border_prefix.as_bytes().to_vec();
         terminal_input_bytes.extend_from_slice(b"\x1b[1;1H");
-        terminal_input_bytes.extend_from_slice(&build_opaque_image_input(
-            koshi_terminal::graphics::GraphicsProtocol::Kitty,
-        ));
+        terminal_input_bytes.extend_from_slice(&build_opaque_image_input(GraphicsProtocol::Kitty));
         let _ = terminal.process_pty_output(&terminal_input_bytes);
         let placement_pixels = terminal
             .get_terminal_state()
@@ -979,8 +978,6 @@ fn native_graphics_without_text_preserve_opaque_pixels_through_scrolling() {
 
 #[test]
 fn two_images_survive_partial_full_and_reverse_scrolling_for_every_protocol_pair() {
-    use koshi_terminal::graphics::GraphicsProtocol;
-
     for image_protocol in [
         GraphicsProtocol::Kitty,
         GraphicsProtocol::Iterm2,
@@ -991,22 +988,13 @@ fn two_images_survive_partial_full_and_reverse_scrolling_for_every_protocol_pair
             client_id,
             cell_size: PixelCellSize::from_pixel_dimensions(1, 1).unwrap(),
         });
-        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
-            pane_id,
-            output_bytes: build_two_image_input(image_protocol),
-        });
+        server.handle_pty_output(pane_id, &build_two_image_input(image_protocol));
         let mut render_snapshots = vec![build_render_snapshot(&server, client_id)];
 
-        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
-            pane_id,
-            output_bytes: b"\x1b[3S".to_vec(),
-        });
+        server.handle_pty_output(pane_id, b"\x1b[3S");
         render_snapshots.push(build_render_snapshot(&server, client_id));
 
-        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
-            pane_id,
-            output_bytes: b"\x1b[5S".to_vec(),
-        });
+        server.handle_pty_output(pane_id, b"\x1b[5S");
         render_snapshots.push(build_render_snapshot(&server, client_id));
 
         let _ = server.handle_runtime_event(RuntimeEvent::ClientMouse {
@@ -1056,13 +1044,102 @@ fn two_images_survive_partial_full_and_reverse_scrolling_for_every_protocol_pair
             "source {image_protocol:?} must expose distinct pixels from both images"
         );
 
-        let client = build_test_client(&mut server, client_id);
+        let client = build_launch_client(client_id);
         assert_two_image_trace_output(
             &client,
             image_protocol,
             &render_snapshots,
             &expected_frame_pixel_maps,
         );
+    }
+}
+
+#[test]
+fn a_native_paint_snapshots_only_the_cells_under_its_images() {
+    let (mut server, client_id, pane_id) = build_test_server_with_pane();
+    let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size");
+    let _ = server.handle_runtime_event(RuntimeEvent::CellSize {
+        client_id,
+        cell_size,
+    });
+    server.handle_pty_output(pane_id, &build_opaque_image_input(GraphicsProtocol::Iterm2));
+    let render_snapshot = build_render_snapshot(&server, client_id);
+    let client = build_launch_client(client_id);
+    let committed_regions = build_committed_regions(TEST_VIEWPORT_SIZE);
+    let frame_paint = ViewerPaint::from_client(
+        &client,
+        render_snapshot.client_snapshot.active_tab_id,
+        &render_snapshot,
+    );
+    let image_target_areas = build_image_paints(
+        &render_snapshot,
+        &committed_regions,
+        frame_paint.chrome,
+        Rect::new(
+            0,
+            0,
+            TEST_VIEWPORT_SIZE.column_count,
+            TEST_VIEWPORT_SIZE.row_count,
+        ),
+    )
+    .iter()
+    .map(|image_paint| image_paint.target_area)
+    .collect::<Vec<_>>();
+    assert_eq!(image_target_areas.len(), 1);
+    let mut paint_driver = PaintDriver::from_backend(
+        TestBackend::new(
+            TEST_VIEWPORT_SIZE.column_count,
+            TEST_VIEWPORT_SIZE.row_count,
+        ),
+        TEST_VIEWPORT_SIZE,
+    );
+    let mut image_output_state =
+        ImageOutputState::from_output_kind(Some(ImageOutputKind::Iterm), Arc::new(|| {}));
+
+    paint_frame_with_images(
+        &mut paint_driver,
+        &client,
+        &render_snapshot,
+        &committed_regions,
+        &frame_paint,
+        ImageRenderMode::Native,
+        &mut image_output_state,
+        Some(cell_size),
+        &mut String::new(),
+        &mut None,
+        None,
+        None,
+    )
+    .expect("the frame paints");
+
+    assert_eq!(
+        image_output_state.list_covered_cell_counts(),
+        image_target_areas
+            .iter()
+            .map(|image_target_area| usize::from(image_target_area.width)
+                * usize::from(image_target_area.height))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        image_target_areas[0].area()
+            < u32::from(TEST_VIEWPORT_SIZE.column_count) * u32::from(TEST_VIEWPORT_SIZE.row_count)
+    );
+}
+
+/// Pane placement mode that moves `source_pane_id`, with no destination
+/// panes, showing `Moving pane: choose a destination`.
+fn build_moving_pane_presentation(
+    source_pane_id: PaneId,
+) -> koshi_renderer::snapshot::PanePlacementPresentation {
+    koshi_renderer::snapshot::PanePlacementPresentation {
+        source_pane_id,
+        target_pane_ids: Vec::new(),
+        source_message: koshi_renderer::snapshot::PanePlacementMessage {
+            full_text: "Moving pane: choose a destination".to_string(),
+            compact_text: "Moving pane",
+            detail_text: None,
+        },
+        target_message: None,
     }
 }
 
@@ -1074,12 +1151,9 @@ fn pane_placement_preview_clears_native_images_from_the_softened_pane() {
         client_id,
         cell_size,
     });
-    let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
-        pane_id,
-        output_bytes: build_opaque_image_input(koshi_terminal::graphics::GraphicsProtocol::Kitty),
-    });
+    server.handle_pty_output(pane_id, &build_opaque_image_input(GraphicsProtocol::Kitty));
     let render_snapshot = build_render_snapshot(&server, client_id);
-    let client = build_test_client(&mut server, client_id);
+    let client = build_launch_client(client_id);
     let committed_regions = build_committed_regions(TEST_VIEWPORT_SIZE);
 
     for graphics_support in [
@@ -1093,15 +1167,11 @@ fn pane_placement_preview_clears_native_images_from_the_softened_pane() {
     ] {
         let mut writer = ImageTraceWriter::default();
         let backend = ImageTraceBackend(ratatui::backend::CrosstermBackend::new(writer.clone()));
-        let mut terminal = Terminal::with_options(
-            backend,
-            ratatui::TerminalOptions {
-                viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 80, 24)),
-            },
-        )
-        .expect("test terminal");
-        let mut image_output_state =
-            ImageOutputState::from_output_kind(ImageOutputKind::from_support(graphics_support));
+        let mut paint_driver = PaintDriver::from_backend(backend, TEST_VIEWPORT_SIZE);
+        let mut image_output_state = ImageOutputState::from_output_kind(
+            ImageOutputKind::from_support(graphics_support),
+            Arc::new(|| {}),
+        );
         let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
             column_count: 80,
             row_count: 24,
@@ -1116,21 +1186,12 @@ fn pane_placement_preview_clears_native_images_from_the_softened_pane() {
 
         for should_show_preview in [false, true, false] {
             frame_paint.placement_presentation =
-                should_show_preview.then(|| koshi_renderer::snapshot::PanePlacementPresentation {
-                    source_pane_id: pane_id,
-                    target_pane_ids: Vec::new(),
-                    source_message: koshi_renderer::snapshot::PanePlacementMessage {
-                        full_text: "Moving pane: choose a destination".to_string(),
-                        compact_text: "Moving pane",
-                        detail_text: None,
-                    },
-                    target_message: None,
-                });
+                should_show_preview.then(|| build_moving_pane_presentation(pane_id));
             let settle_deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                let is_frame_committed = paint_frame_with_writer(
+                paint_frame_with_writer(
                     &mut writer,
-                    &mut terminal,
+                    &mut paint_driver,
                     &client,
                     &render_snapshot,
                     &committed_regions,
@@ -1138,6 +1199,7 @@ fn pane_placement_preview_clears_native_images_from_the_softened_pane() {
                     graphics_support.get_image_render_mode(),
                     &mut image_output_state,
                     Some(cell_size),
+                    &mut None,
                     &mut String::new(),
                     &mut None,
                     None,
@@ -1146,7 +1208,7 @@ fn pane_placement_preview_clears_native_images_from_the_softened_pane() {
                 .expect("native image frame paints");
                 let output_bytes = std::mem::take(&mut *writer.0.lock().unwrap());
                 let _ = terminal_engine.process_pty_output(&output_bytes);
-                if is_frame_committed && !image_output_state.is_work_pending() {
+                if !image_output_state.is_work_pending() {
                     break;
                 }
                 assert!(
@@ -1166,27 +1228,19 @@ fn pane_placement_preview_clears_native_images_from_the_softened_pane() {
 
 #[test]
 fn pane_placement_preview_hides_the_focused_panes_hardware_cursor() {
-    let (mut server, client_id, pane_id) = build_test_server_with_pane();
+    let (server, client_id, pane_id) = build_test_server_with_pane();
     let mut render_snapshot = build_render_snapshot(&server, client_id);
     render_snapshot.pane_snapshots[0].cursor_snapshot.is_visible = true;
-    let client = build_test_client(&mut server, client_id);
+    let client = build_launch_client(client_id);
     let committed_regions = build_committed_regions(TEST_VIEWPORT_SIZE);
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+    let mut paint_driver = build_test_paint_driver(80, 24);
     let mut frame_paint = ViewerPaint::from_client(
         &client,
         render_snapshot.client_snapshot.active_tab_id,
         &render_snapshot,
     );
-    assert!(get_cursor_position(
-        &render_snapshot,
-        &committed_regions,
-        ViewerChrome::default(),
-        Rect::new(0, 0, 80, 24)
-    )
-    .is_some());
-
     paint_frame(
-        &mut terminal,
+        &mut paint_driver,
         &client,
         &render_snapshot,
         &committed_regions,
@@ -1195,21 +1249,11 @@ fn pane_placement_preview_hides_the_focused_panes_hardware_cursor() {
         &mut None,
     )
     .expect("normal frame paints");
-    assert!(terminal.backend().cursor_visible());
+    assert!(paint_driver.backend.cursor_visible());
 
-    frame_paint.placement_presentation =
-        Some(koshi_renderer::snapshot::PanePlacementPresentation {
-            source_pane_id: pane_id,
-            target_pane_ids: Vec::new(),
-            source_message: koshi_renderer::snapshot::PanePlacementMessage {
-                full_text: "Moving pane: choose a destination".to_string(),
-                compact_text: "Moving pane",
-                detail_text: None,
-            },
-            target_message: None,
-        });
+    frame_paint.placement_presentation = Some(build_moving_pane_presentation(pane_id));
     paint_frame(
-        &mut terminal,
+        &mut paint_driver,
         &client,
         &render_snapshot,
         &committed_regions,
@@ -1218,11 +1262,11 @@ fn pane_placement_preview_hides_the_focused_panes_hardware_cursor() {
         &mut None,
     )
     .expect("placement preview paints");
-    assert!(!terminal.backend().cursor_visible());
+    assert!(!paint_driver.backend.cursor_visible());
 
     frame_paint.placement_presentation = None;
     paint_frame(
-        &mut terminal,
+        &mut paint_driver,
         &client,
         &render_snapshot,
         &committed_regions,
@@ -1231,12 +1275,12 @@ fn pane_placement_preview_hides_the_focused_panes_hardware_cursor() {
         &mut None,
     )
     .expect("normal frame paints after placement");
-    assert!(terminal.backend().cursor_visible());
+    assert!(paint_driver.backend.cursor_visible());
 }
 
 fn assert_two_image_trace_output(
     client: &Client,
-    image_protocol: koshi_terminal::graphics::GraphicsProtocol,
+    image_protocol: GraphicsProtocol,
     render_snapshots: &[RenderSnapshot],
     expected_frame_pixel_maps: &[BTreeMap<(u16, u16), [u8; 4]>],
 ) {
@@ -1251,15 +1295,11 @@ fn assert_two_image_trace_output(
     ] {
         let mut writer = ImageTraceWriter::default();
         let backend = ImageTraceBackend(ratatui::backend::CrosstermBackend::new(writer.clone()));
-        let mut terminal = Terminal::with_options(
-            backend,
-            ratatui::TerminalOptions {
-                viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 80, 24)),
-            },
-        )
-        .unwrap();
-        let mut image_output_state =
-            ImageOutputState::from_output_kind(ImageOutputKind::from_support(graphics_support));
+        let mut paint_driver = PaintDriver::from_backend(backend, TEST_VIEWPORT_SIZE);
+        let mut image_output_state = ImageOutputState::from_output_kind(
+            ImageOutputKind::from_support(graphics_support),
+            Arc::new(|| {}),
+        );
         let mut image_cache = crate::attach::paint::ImageCache::new();
         let mut image_wire_content_ids = ImageWireContentIds::default();
         let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
@@ -1282,9 +1322,9 @@ fn assert_two_image_trace_output(
             );
             let settle_deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                let is_frame_committed = paint_frame_with_writer(
+                paint_frame_with_writer(
                     &mut writer,
-                    &mut terminal,
+                    &mut paint_driver,
                     client,
                     &render_snapshot,
                     &build_committed_regions(TEST_VIEWPORT_SIZE),
@@ -1296,6 +1336,7 @@ fn assert_two_image_trace_output(
                     graphics_support.get_image_render_mode(),
                     &mut image_output_state,
                     Some(PixelCellSize::from_pixel_dimensions(1, 1).unwrap()),
+                    &mut None,
                     &mut String::new(),
                     &mut None,
                     None,
@@ -1305,7 +1346,7 @@ fn assert_two_image_trace_output(
                 let output_bytes = std::mem::take(&mut *writer.0.lock().unwrap());
                 stage_bytes.extend_from_slice(&output_bytes);
                 let _ = terminal_engine.process_pty_output(&output_bytes);
-                if is_frame_committed && !image_output_state.is_work_pending() {
+                if !image_output_state.is_work_pending() {
                     break;
                 }
                 assert!(
@@ -1318,9 +1359,8 @@ fn assert_two_image_trace_output(
             let terminal_text = terminal_engine
                 .get_terminal_state()
                 .get_active_grid()
-                .list_rows()
-                .iter()
-                .flat_map(|grid_row| grid_row.iter())
+                .list_row_cells()
+                .flatten()
                 .map(|grid_cell| grid_cell.get_character())
                 .collect::<String>();
             assert!(
@@ -1350,12 +1390,9 @@ fn assert_partial_native_frame_write_recovers(
         client_id,
         cell_size,
     });
-    let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
-        pane_id,
-        output_bytes: build_opaque_image_input(koshi_terminal::graphics::GraphicsProtocol::Kitty),
-    });
+    server.handle_pty_output(pane_id, &build_opaque_image_input(GraphicsProtocol::Kitty));
     let render_snapshot = build_render_snapshot(&server, client_id);
-    let client = build_test_client(&mut server, client_id);
+    let client = build_launch_client(client_id);
     let committed_regions = build_committed_regions(TEST_VIEWPORT_SIZE);
     let render_area = Rect::new(0, 0, 80, 24);
     let image_paint_commands = build_image_paints(
@@ -1369,16 +1406,23 @@ fn assert_partial_native_frame_write_recovers(
         &committed_regions,
         ViewerChrome::default(),
         render_area,
+        render_area,
     )
     .map(Arc::new);
-    let mut image_output_state =
-        ImageOutputState::from_output_kind(ImageOutputKind::from_support(graphics_support));
+    let mut image_output_state = ImageOutputState::from_output_kind(
+        ImageOutputKind::from_support(graphics_support),
+        Arc::new(|| {}),
+    );
     let settle_deadline = Instant::now() + Duration::from_secs(5);
-    while !image_output_state.prepare_frame(
-        &image_paint_commands,
-        image_cell_snapshot.clone(),
-        Some(cell_size),
-    ) {
+    loop {
+        image_output_state.prepare_frame(
+            &image_paint_commands,
+            image_cell_snapshot.clone(),
+            Some(cell_size),
+        );
+        if !image_output_state.is_work_pending() {
+            break;
+        }
         assert!(
             Instant::now() < settle_deadline,
             "{graphics_support:?} output did not prepare"
@@ -1386,7 +1430,7 @@ fn assert_partial_native_frame_write_recovers(
         std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
     }
     assert!(image_output_state.is_native_commit_pending());
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let mut paint_driver = build_test_paint_driver(80, 24);
     let mut writer = FailInsideSequence {
         sequence_bytes,
         split_byte_count,
@@ -1397,7 +1441,7 @@ fn assert_partial_native_frame_write_recovers(
 
     let paint_error = paint_frame_with_writer(
         &mut writer,
-        &mut terminal,
+        &mut paint_driver,
         &client,
         &render_snapshot,
         &committed_regions,
@@ -1409,6 +1453,7 @@ fn assert_partial_native_frame_write_recovers(
         graphics_support.get_image_render_mode(),
         &mut image_output_state,
         Some(cell_size),
+        &mut None,
         &mut build_window_title(&render_snapshot),
         &mut get_cursor_style(&render_snapshot),
         None,
@@ -1416,7 +1461,9 @@ fn assert_partial_native_frame_write_recovers(
     )
     .expect_err("the partial write is returned");
 
-    let PaintError::Image(paint_error) = paint_error;
+    let PaintError::Output(paint_error) = paint_error else {
+        panic!("expected an output error, got {paint_error:?}");
+    };
     assert_eq!(paint_error.kind(), io::ErrorKind::BrokenPipe);
     assert_eq!(
         paint_error.to_string(),
@@ -1425,7 +1472,176 @@ fn assert_partial_native_frame_write_recovers(
     assert!(writer.has_failed);
     assert!(writer.written_bytes.ends_with(b"\x18\x1b\\\x1b[?2026l"));
     assert!(image_output_state.is_native_commit_pending());
-    assert_eq!(image_output_state.list_prepared_placement_keys(), []);
+    image_output_state.prepare_frame(&image_paint_commands, image_cell_snapshot, Some(cell_size));
+    assert!(
+        !image_output_state.is_work_pending(),
+        "{graphics_support:?}: the failed frame encoded its images again"
+    );
+    assert!(image_output_state.is_native_commit_pending());
+}
+
+/// A terminal sink that keeps the bytes of each write apart.
+#[derive(Clone, Default)]
+struct FrameWriteRecorder(Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
+
+impl FrameWriteRecorder {
+    fn take_frame_writes(&self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut *self.0.lock().expect("the frame write lock"))
+    }
+}
+
+impl Write for FrameWriteRecorder {
+    fn write(&mut self, output_bytes: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .expect("the frame write lock")
+            .push(output_bytes.to_vec());
+        Ok(output_bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Whether `searched_bytes` occurs in `frame_bytes`.
+fn has_byte_sequence(frame_bytes: &[u8], searched_bytes: &[u8]) -> bool {
+    frame_bytes
+        .windows(searched_bytes.len())
+        .any(|candidate_bytes| candidate_bytes == searched_bytes)
+}
+
+#[test]
+fn a_text_frame_writes_at_once_and_its_image_follows_inside_one_synchronized_update() {
+    for (graphics_support, image_introducer_bytes) in [
+        (GraphicsSupport::Unsupported, None),
+        (GraphicsSupport::Kitty, Some(&b"\x1b_Ga=t,"[..])),
+        (GraphicsSupport::Iterm, Some(&b"\x1b]1337;"[..])),
+        (
+            GraphicsSupport::Sixel {
+                palette_color_count: 256,
+                maximum_pixel_width: None,
+                maximum_pixel_height: None,
+            },
+            Some(&b"\x1bP"[..]),
+        ),
+    ] {
+        let (mut server, client_id, pane_id) = build_test_server_with_pane();
+        let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size");
+        let _ = server.handle_runtime_event(RuntimeEvent::CellSize {
+            client_id,
+            cell_size,
+        });
+        server.handle_pty_output(pane_id, &build_opaque_image_input(GraphicsProtocol::Kitty));
+        let mut render_snapshot = build_render_snapshot(&server, client_id);
+        render_snapshot.session_snapshot.session_name = "quiet-lake".to_string();
+        let client = build_launch_client(client_id);
+        let frame_write_recorder = FrameWriteRecorder::default();
+        let mut frame_output =
+            TerminalOutput::from_terminal_sink(Box::new(frame_write_recorder.clone()));
+        let mut paint_driver = PaintDriver::from_backend(
+            ratatui::backend::CrosstermBackend::new(frame_output.build_held_flush_output()),
+            TEST_VIEWPORT_SIZE,
+        );
+        let mut image_output_state = ImageOutputState::from_output_kind(
+            ImageOutputKind::from_support(graphics_support),
+            Arc::new(|| {}),
+        );
+        let mut paint_frame = |image_output_state: &mut ImageOutputState| {
+            paint_frame_with_writer(
+                &mut frame_output,
+                &mut paint_driver,
+                &client,
+                &render_snapshot,
+                &build_committed_regions(TEST_VIEWPORT_SIZE),
+                &ViewerPaint::from_client(
+                    &client,
+                    render_snapshot.client_snapshot.active_tab_id,
+                    &render_snapshot,
+                ),
+                graphics_support.get_image_render_mode(),
+                image_output_state,
+                Some(cell_size),
+                &mut None,
+                &mut String::new(),
+                &mut None,
+                None,
+                None,
+            )
+            .expect("the frame paints");
+        };
+        let count_synchronized_update_marks = |frame_bytes: &[u8]| {
+            frame_bytes
+                .windows(8)
+                .filter(|candidate_bytes| {
+                    *candidate_bytes == b"\x1b[?2026h" || *candidate_bytes == b"\x1b[?2026l"
+                })
+                .count()
+        };
+
+        paint_frame(&mut image_output_state);
+        let text_frame_writes = frame_write_recorder.take_frame_writes();
+        assert_eq!(text_frame_writes.len(), 1, "{graphics_support:?}");
+        assert!(
+            has_byte_sequence(&text_frame_writes[0], b"\x1b]0;quiet-lake\x07"),
+            "{graphics_support:?}: the text frame sets the window title"
+        );
+        assert_eq!(
+            count_synchronized_update_marks(&text_frame_writes[0]),
+            0,
+            "{graphics_support:?}"
+        );
+        let Some(image_introducer_bytes) = image_introducer_bytes else {
+            continue;
+        };
+        assert!(
+            !has_byte_sequence(&text_frame_writes[0], image_introducer_bytes),
+            "{graphics_support:?}: the text frame waited for the image"
+        );
+
+        let settle_deadline = Instant::now() + Duration::from_secs(5);
+        let image_frame_writes = loop {
+            assert!(
+                Instant::now() < settle_deadline,
+                "{graphics_support:?} output did not prepare"
+            );
+            std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
+            paint_frame(&mut image_output_state);
+            let frame_writes = frame_write_recorder.take_frame_writes();
+            if frame_writes
+                .iter()
+                .any(|frame_bytes| has_byte_sequence(frame_bytes, image_introducer_bytes))
+            {
+                break frame_writes;
+            }
+            for frame_bytes in &frame_writes {
+                assert_eq!(
+                    count_synchronized_update_marks(frame_bytes),
+                    0,
+                    "{graphics_support:?}: a frame with no image opened a synchronized update"
+                );
+            }
+        };
+        assert_eq!(image_frame_writes.len(), 1, "{graphics_support:?}");
+        let image_frame_bytes = &image_frame_writes[0];
+        assert_eq!(
+            count_synchronized_update_marks(image_frame_bytes),
+            2,
+            "{graphics_support:?}"
+        );
+        assert!(
+            image_frame_bytes.starts_with(b"\x1b[?2026h"),
+            "{graphics_support:?}"
+        );
+        assert!(
+            image_frame_bytes.ends_with(b"\x1b[?2026l"),
+            "{graphics_support:?}"
+        );
+        assert!(
+            has_byte_sequence(image_frame_bytes, image_introducer_bytes),
+            "{graphics_support:?}: the image frame carries the image"
+        );
+    }
 }
 
 #[test]
@@ -1461,7 +1677,6 @@ fn partial_native_packets_are_aborted_before_synchronized_output_ends() {
 }
 
 fn assert_opaque_protocol_matrix(should_include_text: bool) {
-    use koshi_terminal::graphics::GraphicsProtocol;
     for image_protocol in [
         GraphicsProtocol::Kitty,
         GraphicsProtocol::Iterm2,
@@ -1473,15 +1688,9 @@ fn assert_opaque_protocol_matrix(should_include_text: bool) {
             client_id,
             cell_size,
         });
-        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
-            pane_id,
-            output_bytes: build_opaque_image_input(image_protocol),
-        });
+        server.handle_pty_output(pane_id, &build_opaque_image_input(image_protocol));
         let initial_render_snapshot = build_render_snapshot(&server, client_id);
-        let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
-            pane_id,
-            output_bytes: b"\x1b[3S".to_vec(),
-        });
+        server.handle_pty_output(pane_id, b"\x1b[3S");
         let cropped_render_snapshot = build_render_snapshot(&server, client_id);
         let _ = server.handle_runtime_event(RuntimeEvent::ClientMouse {
             client_id,
@@ -1493,7 +1702,7 @@ fn assert_opaque_protocol_matrix(should_include_text: bool) {
             }],
         });
         let restored_render_snapshot = build_render_snapshot(&server, client_id);
-        let client = build_test_client(&mut server, client_id);
+        let client = build_launch_client(client_id);
         assert_image_trace_output(
             &client,
             image_protocol,
@@ -1514,7 +1723,7 @@ fn assert_opaque_protocol_matrix(should_include_text: bool) {
 
 fn assert_image_trace_output(
     client: &Client,
-    image_protocol: koshi_terminal::graphics::GraphicsProtocol,
+    image_protocol: GraphicsProtocol,
     render_snapshots: &[RenderSnapshot],
     expected_frame_pixel_rows: &[(u16, u16, Vec<u8>)],
     should_include_text: bool,
@@ -1536,15 +1745,11 @@ fn assert_image_trace_output(
                 ImageTraceWriter::default()
             },
         ));
-        let mut terminal = Terminal::with_options(
-            backend,
-            ratatui::TerminalOptions {
-                viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 80, 24)),
-            },
-        )
-        .unwrap();
-        let mut image_output_state =
-            ImageOutputState::from_output_kind(ImageOutputKind::from_support(graphics_support));
+        let mut paint_driver = PaintDriver::from_backend(backend, TEST_VIEWPORT_SIZE);
+        let mut image_output_state = ImageOutputState::from_output_kind(
+            ImageOutputKind::from_support(graphics_support),
+            Arc::new(|| {}),
+        );
         let mut image_cache = crate::attach::paint::ImageCache::new();
         let mut image_wire_content_ids = ImageWireContentIds::default();
         let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
@@ -1569,9 +1774,9 @@ fn assert_image_trace_output(
             );
             let settle_deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                let is_frame_committed = paint_frame_with_writer(
+                paint_frame_with_writer(
                     &mut writer,
-                    &mut terminal,
+                    &mut paint_driver,
                     client,
                     &render_snapshot,
                     &build_committed_regions(TEST_VIEWPORT_SIZE),
@@ -1583,6 +1788,7 @@ fn assert_image_trace_output(
                     graphics_support.get_image_render_mode(),
                     &mut image_output_state,
                     Some(PixelCellSize::from_pixel_dimensions(1, 1).unwrap()),
+                    &mut None,
                     &mut String::new(),
                     &mut None,
                     None,
@@ -1592,7 +1798,7 @@ fn assert_image_trace_output(
                 let output_bytes = std::mem::take(&mut *writer.0.lock().unwrap());
                 stage_bytes.extend_from_slice(&output_bytes);
                 let _ = terminal_engine.process_pty_output(&output_bytes);
-                if is_frame_committed && !image_output_state.is_work_pending() {
+                if !image_output_state.is_work_pending() {
                     break;
                 }
                 assert!(
@@ -1601,42 +1807,7 @@ fn assert_image_trace_output(
                 );
                 std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
             }
-            let image_placements = terminal_engine
-                .get_terminal_state()
-                .list_image_placements_for_view(0);
-            let mut actual_pixels = std::collections::BTreeMap::new();
-            for image_placement in &image_placements {
-                let render_image_record = image_placement.create_render_image_record();
-                let (source_pixel_x, source_pixel_y, source_pixel_width, source_pixel_height) =
-                    render_image_record.compute_source_rect().unwrap();
-                let image_geometry = image_placement.get_image_geometry();
-                for placement_row_index in 0..image_placement.get_image_cell_dimensions().0 {
-                    for placement_column_index in 0..image_placement.get_image_cell_dimensions().1 {
-                        let source_y = source_pixel_y
-                            + u32::from(image_geometry.cell_offset.row + placement_row_index)
-                                * source_pixel_height
-                                / u32::from(image_geometry.full_size.row_count);
-                        let source_x = source_pixel_x
-                            + u32::from(image_geometry.cell_offset.column + placement_column_index)
-                                * source_pixel_width
-                                / u32::from(image_geometry.full_size.column_count);
-                        let pixel_start_byte_index =
-                            ((source_y * render_image_record.image.pixel_width + source_x) * 4)
-                                as usize;
-                        let rgba_pixel: [u8; 4] = render_image_record.image.rgba_bytes
-                            [pixel_start_byte_index..pixel_start_byte_index + 4]
-                            .try_into()
-                            .unwrap();
-                        actual_pixels.insert(
-                            (
-                                image_placement.get_image_anchor().0 + placement_row_index,
-                                image_placement.get_image_anchor().1 + placement_column_index,
-                            ),
-                            rgba_pixel,
-                        );
-                    }
-                }
-            }
+            let actual_pixels = build_terminal_image_pixel_map(&terminal_engine);
             let expected_pixel_by_position = (0..*pixel_row_count)
                 .flat_map(|pixel_row_index| {
                     (0..4).filter_map(move |pixel_column_index| {
@@ -1672,10 +1843,9 @@ fn assert_image_trace_output(
 fn the_launch_hands_the_viewer_the_config_files_it_read() {
     // The client's settings and colors come from the theme file the launch
     // read: theme `ocean` with a red focused border.
-    let (mut server, client_id, _pane_id) = build_test_server_with_pane();
+    let (_server, client_id, _pane_id) = build_test_server_with_pane();
 
-    let client = build_test_client_with_config(
-        &mut server,
+    let client = build_launch_client_with_config(
         client_id,
         LoadedConfig {
             app_config_layer: None,
@@ -1701,10 +1871,9 @@ fn the_launch_hands_the_viewer_the_config_files_it_read() {
 fn the_launch_hands_the_viewer_the_keymap_file_it_read() {
     // A keymap layer that validates replaces the built-in keybinding settings:
     // `chord_timeout_ms` becomes `1234`.
-    let (mut server, client_id, _pane_id) = build_test_server_with_pane();
+    let (_server, client_id, _pane_id) = build_test_server_with_pane();
 
-    let client = build_test_client_with_config(
-        &mut server,
+    let client = build_launch_client_with_config(
         client_id,
         LoadedConfig {
             app_config_layer: None,
@@ -1728,13 +1897,13 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
     // entry reads `Mouse Select` while the session's mouse-select mode is off
     // and `Mouse Unselect` while it is on.
     let (mut server, client_id, _pane_id) = build_test_server_with_pane();
-    let mut client = build_test_client(&mut server, client_id);
-    let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+    let mut client = build_launch_client(client_id);
+    let mut paint_driver = build_test_paint_driver(120, 24);
     let render_snapshot = build_render_snapshot(&server, client_id);
     client.apply_render_snapshot(&render_snapshot);
 
     paint_frame(
-        &mut terminal,
+        &mut paint_driver,
         &client,
         &render_snapshot,
         &build_committed_regions(Size {
@@ -1750,17 +1919,13 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
         &mut None,
     )
     .expect("paint");
-    assert!(serialize_terminal_screen_text(&terminal).contains("Mouse Select"));
+    assert!(serialize_terminal_screen_text(&paint_driver).contains("Mouse Select"));
 
-    server.submit_command(CommandEnvelope::from_parts(
-        CommandId::new(),
-        CommandSource::KeyBinding { client_id },
-        Command::ToggleMouseSelect,
-    ));
+    submit_client_command(&mut server, client_id, Command::ToggleMouseSelect);
     let render_snapshot = build_render_snapshot(&server, client_id);
     client.apply_render_snapshot(&render_snapshot);
     paint_frame(
-        &mut terminal,
+        &mut paint_driver,
         &client,
         &render_snapshot,
         &build_committed_regions(Size {
@@ -1777,7 +1942,7 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
     )
     .expect("paint");
 
-    let painted_screen_text = serialize_terminal_screen_text(&terminal);
+    let painted_screen_text = serialize_terminal_screen_text(&paint_driver);
     assert!(
         painted_screen_text.contains("Mouse Unselect"),
         "{painted_screen_text}"
@@ -1788,18 +1953,13 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
 fn pty_output_is_painted_to_the_screen() {
     let (mut server, client_id, pane_id) = build_test_server_with_pane();
 
-    assert!(server
-        .handle_runtime_event(RuntimeEvent::PtyOutput {
-            pane_id,
-            output_bytes: b"hello".to_vec(),
-        },)
-        .is_continue());
+    server.handle_pty_output(pane_id, b"hello");
 
-    let client = build_test_client(&mut server, client_id);
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let client = build_launch_client(client_id);
+    let mut paint_driver = build_test_paint_driver(80, 24);
     let render_snapshot = build_render_snapshot(&server, client_id);
     paint_frame(
-        &mut terminal,
+        &mut paint_driver,
         &client,
         &render_snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
@@ -1814,7 +1974,7 @@ fn pty_output_is_painted_to_the_screen() {
     .expect("paint");
 
     assert!(
-        serialize_terminal_screen_text(&terminal).contains("hello"),
+        serialize_terminal_screen_text(&paint_driver).contains("hello"),
         "the shell's output should appear on the rendered screen"
     );
 }
@@ -1822,21 +1982,16 @@ fn pty_output_is_painted_to_the_screen() {
 #[test]
 fn painting_emits_a_changed_cursor_style_and_records_it() {
     let (mut server, client_id, pane_id) = build_test_server_with_pane();
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let mut paint_driver = build_test_paint_driver(80, 24);
 
     // The pane asks for a steady bar via DECSCUSR (`CSI 6 SP q`); the first
     // painting sees it differ from the starting `None` and records the new style.
-    assert!(server
-        .handle_runtime_event(RuntimeEvent::PtyOutput {
-            pane_id,
-            output_bytes: b"\x1b[6 q".to_vec(),
-        },)
-        .is_continue());
-    let client = build_test_client(&mut server, client_id);
+    server.handle_pty_output(pane_id, b"\x1b[6 q");
+    let client = build_launch_client(client_id);
     let mut last_cursor_style = None;
     let render_snapshot = build_render_snapshot(&server, client_id);
     paint_frame(
-        &mut terminal,
+        &mut paint_driver,
         &client,
         &render_snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
@@ -1864,9 +2019,9 @@ fn painting_a_frame_that_names_no_cursor_style_records_none() {
     // A frame with no focused pane leaves `get_cursor_style` with nothing to
     // report. The record still follows the frame: the next frame that names a
     // style counts as a change and is sent again.
-    let (mut server, client_id, _pane_id) = build_test_server_with_pane();
-    let client = build_test_client(&mut server, client_id);
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let (server, client_id, _pane_id) = build_test_server_with_pane();
+    let client = build_launch_client(client_id);
+    let mut paint_driver = build_test_paint_driver(80, 24);
     let mut render_snapshot = build_render_snapshot(&server, client_id);
     render_snapshot.client_snapshot.focused_pane_id = None;
     let mut last_cursor_style = Some(CursorStyle::Shaped {
@@ -1875,7 +2030,7 @@ fn painting_a_frame_that_names_no_cursor_style_records_none() {
     });
 
     paint_frame(
-        &mut terminal,
+        &mut paint_driver,
         &client,
         &render_snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
@@ -1894,9 +2049,9 @@ fn painting_a_frame_that_names_no_cursor_style_records_none() {
 
 #[test]
 fn painting_records_the_window_title_it_sent() {
-    let (mut server, client_id, pane_id) = build_test_server_with_pane();
-    let client = build_test_client(&mut server, client_id);
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let (server, client_id, pane_id) = build_test_server_with_pane();
+    let client = build_launch_client(client_id);
+    let mut paint_driver = build_test_paint_driver(80, 24);
     let mut render_snapshot = build_render_snapshot(&server, client_id);
     render_snapshot.session_snapshot.session_name = "quiet-lake".to_string();
     render_snapshot.client_snapshot.focused_pane_id = Some(pane_id);
@@ -1905,7 +2060,7 @@ fn painting_records_the_window_title_it_sent() {
     let mut last_window_title = String::new();
 
     paint_frame(
-        &mut terminal,
+        &mut paint_driver,
         &client,
         &render_snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
@@ -1926,19 +2081,19 @@ fn painting_records_the_window_title_it_sent() {
 fn a_paint_after_a_title_change_records_the_new_title() {
     // The last title decides whether `SetTitle` is written at all. It tracks every
     // frame, not only the first one.
-    let (mut server, client_id, _pane_id) = build_test_server_with_pane();
-    let client = build_test_client(&mut server, client_id);
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let (server, client_id, _pane_id) = build_test_server_with_pane();
+    let client = build_launch_client(client_id);
+    let mut paint_driver = build_test_paint_driver(80, 24);
     let mut render_snapshot = build_render_snapshot(&server, client_id);
     render_snapshot.session_snapshot.session_name = "quiet-lake".to_string();
     render_snapshot.client_snapshot.focused_pane_id = None;
     let mut last_window_title = String::new();
     let paint_frame_with_snapshot =
-        |terminal: &mut Terminal<TestBackend>,
+        |paint_driver: &mut PaintDriver<TestBackend>,
          render_snapshot: &RenderSnapshot,
          last_window_title: &mut String| {
             paint_frame(
-                terminal,
+                paint_driver,
                 &client,
                 render_snapshot,
                 &build_committed_regions(TEST_VIEWPORT_SIZE),
@@ -1953,11 +2108,11 @@ fn a_paint_after_a_title_change_records_the_new_title() {
             .expect("paint");
         };
 
-    paint_frame_with_snapshot(&mut terminal, &render_snapshot, &mut last_window_title);
+    paint_frame_with_snapshot(&mut paint_driver, &render_snapshot, &mut last_window_title);
     assert_eq!(last_window_title, "quiet-lake");
 
     render_snapshot.session_snapshot.session_name = "loud-hill".to_string();
-    paint_frame_with_snapshot(&mut terminal, &render_snapshot, &mut last_window_title);
+    paint_frame_with_snapshot(&mut paint_driver, &render_snapshot, &mut last_window_title);
 
     assert_eq!(last_window_title, "loud-hill");
 }
@@ -2058,7 +2213,7 @@ fn window_title_reads_a_focused_floating_panes_title() {
     render_snapshot.pane_snapshots[0].pane_title = Some("bash".to_string());
     let floating_pane_id = PaneId::new();
     let floating_outer_rect = CoreRect::from_origin_and_size(
-        CorePoint { column: 4, row: 2 },
+        Point { column: 4, row: 2 },
         Size {
             column_count: 30,
             row_count: 8,
@@ -2148,7 +2303,10 @@ fn round_trip_title_through_wire(session_name: &str, pane_title: &str) -> String
     }
 
     let read_back_render_snapshot = crate::attach::paint::build_render_snapshot(
-        &koshi_runtime::runtime::frame::build_wire_frame(&sent_render_snapshot),
+        &crate::attach::paint::tests::carry_first_painted_frame(
+            &sent_render_snapshot,
+            &koshi_runtime::runtime::frame::build_wire_frame(&sent_render_snapshot),
+        ),
     );
     build_window_title(&read_back_render_snapshot)
 }
@@ -2198,7 +2356,7 @@ fn a_window_title_is_bounded_by_the_pane_title_cap() {
 }
 
 #[test]
-fn terminal_probe_uses_a_300_ms_deadline_and_a_non_storing_query() {
+fn terminal_probe_uses_a_300_ms_deadline_a_non_storing_query_and_asks_for_device_attributes_last() {
     let mut probe_output_bytes = Vec::new();
 
     write_terminal_probe_queries(&mut probe_output_bytes).expect("query writes");
@@ -2206,7 +2364,7 @@ fn terminal_probe_uses_a_300_ms_deadline_and_a_non_storing_query() {
     assert_eq!(TERMINAL_QUERY_TIMEOUT_DURATION, Duration::from_millis(300));
     assert_eq!(
         probe_output_bytes,
-        b"\x1b_Gi=4294967295,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b]1337;Capabilities\x1b\\\x1b[c\x1b[?1;1;0S\x1b[?2;4;0S\x1b[16t"
+        b"\x1b_Gi=4294967295,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b]1337;Capabilities\x1b\\\x1b[?1;1;0S\x1b[?2;4;0S\x1b[16t\x1b[c"
     );
 }
 
@@ -2388,8 +2546,6 @@ fn raw_mode_operation_keeps_the_operation_error_when_restore_also_fails() {
 
 #[test]
 fn terminal_probe_filter_leaves_keys_and_other_replies_buffered() {
-    use koshi_input::host::{KeyCode, KittyGraphicsReply};
-
     assert!(is_probe_event(&Event::KittyGraphicsReply(
         KittyGraphicsReply {
             image_id: u32::MAX,
@@ -2407,20 +2563,18 @@ fn terminal_probe_filter_leaves_keys_and_other_replies_buffered() {
 }
 
 #[test]
-fn terminal_probe_collects_reordered_replies_before_selecting_kitty() {
-    use koshi_input::host::KittyGraphicsReply;
-
+fn terminal_probe_collects_every_reply_up_to_the_device_attributes_reply_before_selecting_kitty() {
     let mut reader = build_probe_reader([
         Event::Key(KeyCode::Char('k').into()),
-        Event::PrimaryDeviceAttributes(vec![1, 2, 4]),
-        Event::TerminalFeatures(b"FSx".to_vec()),
-        Event::SixelGraphicsAttributeReply(GraphicAttributeReply::Palette(Ok(256))),
-        Event::SixelGraphicsAttributeReply(GraphicAttributeReply::Geometry(Ok((640, 480)))),
-        Event::CellSize(PixelCellSize::from_pixel_dimensions(10, 20).expect("nonzero cell size")),
         Event::KittyGraphicsReply(KittyGraphicsReply {
             image_id: KITTY_QUERY_IMAGE_ID,
             is_successful: true,
         }),
+        Event::TerminalFeatures(b"FSx".to_vec()),
+        Event::SixelGraphicsAttributeReply(GraphicAttributeReply::Palette(Ok(256))),
+        Event::SixelGraphicsAttributeReply(GraphicAttributeReply::Geometry(Ok((640, 480)))),
+        Event::CellSize(PixelCellSize::from_pixel_dimensions(10, 20).expect("nonzero cell size")),
+        Event::PrimaryDeviceAttributes(vec![1, 2, 4]),
         Event::Paste("pasted".to_string()),
     ]);
     let mut probe_output_bytes = Vec::new();
@@ -2449,14 +2603,44 @@ fn terminal_probe_collects_reordered_replies_before_selecting_kitty() {
 }
 
 #[test]
+fn terminal_probe_ends_at_the_device_attributes_reply_and_leaves_the_replies_after_it_unread() {
+    let mut reader = build_probe_reader([
+        Event::PrimaryDeviceAttributes(vec![1, 4]),
+        Event::CellSize(PixelCellSize::from_pixel_dimensions(10, 20).expect("nonzero cell size")),
+        Event::KittyGraphicsReply(KittyGraphicsReply {
+            image_id: KITTY_QUERY_IMAGE_ID,
+            is_successful: true,
+        }),
+    ]);
+
+    let probe_result = probe_terminal(&mut Vec::new(), &mut reader).expect("probe reads replies");
+
+    assert_eq!(
+        probe_result.graphics_support,
+        GraphicsSupport::Sixel {
+            palette_color_count: 2,
+            maximum_pixel_width: None,
+            maximum_pixel_height: None,
+        }
+    );
+    assert_eq!(probe_result.cell_size, None);
+    assert_eq!(
+        reader
+            .read_matching_event(is_probe_event)
+            .expect("the cell size reply stays unread"),
+        Event::CellSize(PixelCellSize::from_pixel_dimensions(10, 20).expect("nonzero cell size"))
+    );
+}
+
+#[test]
 fn terminal_probe_prefers_iterm_file_over_sixel() {
     let mut reader = build_probe_reader([
-        Event::PrimaryDeviceAttributes(vec![1, 2, 4]),
         Event::TerminalFeatures(b"SxF".to_vec()),
         Event::SixelGraphicsAttributeReply(GraphicAttributeReply::Palette(Err(
             GraphicAttributeError::Failure,
         ))),
         Event::SixelGraphicsAttributeReply(GraphicAttributeReply::Geometry(Ok((0, 0)))),
+        Event::PrimaryDeviceAttributes(vec![1, 2, 4]),
     ]);
 
     let probe_result = probe_terminal(&mut Vec::new(), &mut reader).expect("probe reads replies");
@@ -2535,8 +2719,8 @@ fn terminal_probe_accepts_successful_sixel_geometry_without_other_sixel_evidence
 #[test]
 fn terminal_probe_rejects_a_reported_one_color_sixel_palette() {
     let mut reader = build_probe_reader([
-        Event::PrimaryDeviceAttributes(vec![1, 2, 4]),
         Event::SixelGraphicsAttributeReply(GraphicAttributeReply::Palette(Ok(1))),
+        Event::PrimaryDeviceAttributes(vec![1, 2, 4]),
     ]);
 
     let probe_result = probe_terminal(&mut Vec::new(), &mut reader).expect("probe reads replies");
@@ -2595,7 +2779,7 @@ fn terminal_modes_are_enabled_after_entering_the_alternate_screen() {
 
     assert_eq!(
         terminal_mode_bytes,
-        b"\x1b[?1049h\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?u"
+        b"\x1b[?1049h\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?u"
     );
 }
 
@@ -2675,7 +2859,7 @@ fn sixel_modes_are_saved_before_application_modes() {
 
     assert_eq!(
         terminal_mode_bytes,
-        b"\x1b[?80s\x1b[?8452s\x1b[?1070s\x1b[?1049h\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?u"
+        b"\x1b[?80s\x1b[?8452s\x1b[?1070s\x1b[?1049h\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?u"
     );
 }
 
@@ -2693,7 +2877,7 @@ fn terminal_cleanup_reverses_modes_and_deletes_kitty_images() {
 
     assert_eq!(
         cleanup_bytes,
-        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
+        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
     assert!(is_image_cleanup_claimed.load(Ordering::Acquire));
 }
@@ -2717,7 +2901,7 @@ fn sixel_cleanup_aborts_a_control_string_before_restoring_modes() {
 
     assert_eq!(
         cleanup_bytes,
-        b"\x18\x1b\\\x1b[?80r\x1b[?8452r\x1b[?1070r\x1b[>0s\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
+        b"\x18\x1b\\\x1b[?80r\x1b[?8452r\x1b[?1070r\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
 }
 
@@ -2740,7 +2924,7 @@ fn terminal_cleanup_attempts_mode_resets_after_image_delete_fails() {
     assert_eq!(cleanup_error.kind(), io::ErrorKind::BrokenPipe);
     assert_eq!(
         writer.written_bytes,
-        b"\x18\x1b\\\x1b[>0s\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
+        b"\x18\x1b\\\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
 }
 
@@ -2758,7 +2942,7 @@ fn terminal_cleanup_cancels_a_partial_kitty_apc_before_deleting_images() {
     .expect("cleanup writes after the partial packet");
     assert_eq!(
         &writer[partial_kitty_packet.len()..],
-        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
+        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
 
     let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
@@ -2793,7 +2977,7 @@ fn terminal_application_modes_are_restored_once_across_cleanup_paths() {
 
     assert_eq!(
         cleanup_bytes,
-        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
+        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
     assert!(!has_active_application_modes.load(Ordering::Acquire));
     assert!(is_image_cleanup_claimed.load(Ordering::Acquire));
@@ -2815,6 +2999,71 @@ fn terminal_cleanup_skips_image_commands_before_application_modes_are_active() {
 
     assert!(cleanup_bytes.is_empty());
     assert!(!is_image_cleanup_claimed.load(Ordering::Acquire));
+}
+
+#[test]
+fn the_input_thread_sends_each_event_with_a_stamp_greater_than_the_one_before() {
+    let client_id = ClientId::new();
+    let mut input_reader = InputReader::from_event_source(ScriptedInputSource {
+        pending_events: VecDeque::from([
+            Event::Key(KeyCode::Char('a').into()),
+            Event::FocusIn,
+            Event::Paste(String::from("p")),
+            Event::FocusOut,
+        ]),
+    });
+    let (terminal_input_sender, terminal_input_receiver) = mpsc::sync_channel(16);
+    let input_read_clock = InputReadClock::default();
+
+    run_terminal_input(
+        &mut input_reader,
+        &terminal_input_sender,
+        client_id,
+        &input_read_clock,
+        &AtomicBool::new(false),
+    );
+
+    let terminal_inputs: Vec<TerminalInput> = terminal_input_receiver.try_iter().collect();
+    let [key_input, paste_input, focus_lost_input, quit_input] = terminal_inputs.as_slice() else {
+        panic!("expected a key, a paste, a focus loss and a hangup, got {terminal_inputs:?}");
+    };
+    let RuntimeEvent::KeyInput {
+        client_id: key_client_id,
+        ..
+    } = key_input.runtime_event
+    else {
+        panic!("the first event is the key, got {key_input:?}");
+    };
+    assert_eq!(key_client_id, client_id);
+    let RuntimeEvent::HostPaste {
+        client_id: paste_client_id,
+        ref pasted_text,
+    } = paste_input.runtime_event
+    else {
+        panic!("the second event is the paste, got {paste_input:?}");
+    };
+    assert_eq!(paste_client_id, client_id);
+    assert_eq!(pasted_text, "p");
+    let RuntimeEvent::OuterTerminalFocusLost {
+        client_id: focus_client_id,
+    } = focus_lost_input.runtime_event
+    else {
+        panic!("the third event is the focus loss, got {focus_lost_input:?}");
+    };
+    assert_eq!(focus_client_id, client_id);
+    let RuntimeEvent::Quit = quit_input.runtime_event else {
+        panic!("the failed read is the hangup, got {quit_input:?}");
+    };
+    assert!(key_input.read_at < paste_input.read_at);
+    assert!(paste_input.read_at < focus_lost_input.read_at);
+    assert!(focus_lost_input.read_at < quit_input.read_at);
+    input_read_clock.note_input_taken(focus_lost_input.read_at);
+    assert!(
+        input_read_clock.has_untaken_input(),
+        "the hangup is still on its way"
+    );
+    input_read_clock.note_input_taken(quit_input.read_at);
+    assert!(!input_read_clock.has_untaken_input());
 }
 
 #[test]
@@ -2927,6 +3176,31 @@ fn local_pixel_cell_size_requires_complete_evenly_divisible_metrics() {
     ] {
         assert_eq!(compute_pixel_cell_size(invalid_window_size), None);
     }
+}
+
+#[test]
+fn a_window_over_the_viewport_cell_limit_loses_its_rows_past_it_and_its_pixels() {
+    let fitting_window_size = WindowSize {
+        column_count: 200,
+        row_count: 50,
+        pixel_width: Some(2000),
+        pixel_height: Some(1000),
+    };
+    assert_eq!(limit_window_size(fitting_window_size), fitting_window_size);
+    assert_eq!(
+        limit_window_size(WindowSize {
+            column_count: 65_535,
+            row_count: 65_535,
+            pixel_width: Some(4096),
+            pixel_height: Some(4096),
+        }),
+        WindowSize {
+            column_count: 65_535,
+            row_count: 32,
+            pixel_width: None,
+            pixel_height: None,
+        }
+    );
 }
 
 #[test]
@@ -3057,8 +3331,6 @@ fn an_ipc_reconnect_keeps_an_outer_terminal_query_pending() {
 
 #[test]
 fn terminal_runtime_discards_capability_reply_events() {
-    use koshi_input::host::GraphicAttributeReply;
-
     let client_id = ClientId::new();
     for host_event in [
         Event::PrimaryDeviceAttributes(vec![1, 2]),
@@ -3088,11 +3360,11 @@ fn terminal_focus_loss_becomes_a_viewer_cancellation_event() {
 #[test]
 fn unsupported_paint_writes_no_terminal_image_output() {
     let (mut server, client_id, pane_id) = build_test_server_with_pane();
-    let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
+    server.handle_pty_output(
         pane_id,
-        output_bytes: b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\".to_vec(),
-    });
-    let client = build_test_client(&mut server, client_id);
+        b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\",
+    );
+    let client = build_launch_client(client_id);
     let render_snapshot = build_render_snapshot(&server, client_id);
     assert_eq!(
         render_snapshot.pane_snapshots[0]
@@ -3100,15 +3372,15 @@ fn unsupported_paint_writes_no_terminal_image_output() {
             .len(),
         1
     );
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let mut paint_driver = build_test_paint_driver(80, 24);
     let mut terminal_output_bytes = Vec::new();
     let mut last_window_title = build_window_title(&render_snapshot);
     let mut last_cursor_style = get_cursor_style(&render_snapshot);
-    let mut image_output_state = ImageOutputState::from_output_kind(None);
+    let mut image_output_state = ImageOutputState::from_output_kind(None, Arc::new(|| {}));
 
     paint_frame_with_writer(
         &mut terminal_output_bytes,
-        &mut terminal,
+        &mut paint_driver,
         &client,
         &render_snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
@@ -3120,6 +3392,7 @@ fn unsupported_paint_writes_no_terminal_image_output() {
         ImageRenderMode::Placeholder,
         &mut image_output_state,
         None,
+        &mut None,
         &mut last_window_title,
         &mut last_cursor_style,
         None,
@@ -3139,28 +3412,6 @@ fn image_cleanup_has_one_owner() {
 }
 
 // ------------------------------------ the keyboard enhancement flag query ----
-
-#[test]
-fn the_mode_setup_pushes_the_keyboard_flags_and_asks_what_landed() {
-    let mut terminal_mode_bytes = Vec::new();
-
-    enable_terminal_modes(&mut terminal_mode_bytes, GraphicsSupport::Unsupported)
-        .expect("terminal modes write");
-
-    // The push asks for flags 1|2|4|8|16, and the query follows it in the same
-    // batch.
-    let mode_setup_text = String::from_utf8(terminal_mode_bytes).expect("mode bytes are text");
-    let push_position = mode_setup_text
-        .find("\x1b[>31u")
-        .expect("the keyboard push is written");
-    let query_position = mode_setup_text
-        .find("\x1b[?u")
-        .expect("the keyboard query is written");
-    assert!(
-        push_position < query_position,
-        "the query must follow the push: {mode_setup_text:?}"
-    );
-}
 
 #[test]
 fn ordinary_typing_reaches_the_runtime_as_the_character_typed() {
@@ -3219,16 +3470,17 @@ fn every_captured_field_survives_the_runtime_boundary() {
         build_terminal_runtime_event(ClientId::new(), host_event).expect("a key is input");
 
     match runtime_event {
-        RuntimeEvent::KeyInput { key_input, .. } => {
-            assert_eq!(key_input.key, KeyIdentity::Key(Key::Char('\'')));
-            assert_eq!(key_input.key_event_kind, KeyEventKind::Repeat);
-            assert_eq!(key_input.shifted_key, Some('"'));
-            assert_eq!(key_input.base_layout_key, Some('q'));
-            assert_eq!(key_input.associated_text, "\"");
-            assert!(key_input
-                .modifier_flags
-                .has_all_modifiers(KeyModifierFlags::NUM_LOCK));
-        }
+        RuntimeEvent::KeyInput { key_input, .. } => assert_eq!(
+            key_input,
+            KeyInput {
+                key: KeyIdentity::Key(Key::Char('\'')),
+                key_event_kind: KeyEventKind::Repeat,
+                shifted_key: Some('"'),
+                base_layout_key: Some('q'),
+                associated_text: "\"".to_string(),
+                modifier_flags: KeyModifierFlags::SHIFT | KeyModifierFlags::NUM_LOCK,
+            }
+        ),
         other_runtime_event => panic!("expected a key, got {other_runtime_event:?}"),
     }
 }
@@ -3253,6 +3505,7 @@ fn a_typed_key_becomes_a_key_input_for_its_client() {
         RuntimeEvent::KeyInput {
             client_id: key_client_id,
             key_input,
+            ..
         } => {
             assert_eq!(key_client_id, client_id);
             assert_eq!(
@@ -3271,7 +3524,7 @@ fn a_typed_key_becomes_a_key_input_for_its_client() {
 fn placement_projection_keeps_scaled_rectangles_inside_the_preview() {
     let projected_rect = project_core_rect(
         CoreRect {
-            origin: CorePoint {
+            origin: Point {
                 column: 20,
                 row: 10,
             },
@@ -3289,8 +3542,6 @@ fn placement_projection_keeps_scaled_rectangles_inside_the_preview() {
     .expect("the source rectangle is visible");
 
     assert_eq!(projected_rect, Rect::new(12, 8, 20, 10));
-    assert!(projected_rect.right() <= 62);
-    assert!(projected_rect.bottom() <= 23);
 }
 
 #[test]
@@ -3298,40 +3549,8 @@ fn proposed_same_tab_swap_replaces_slots_without_mutating_the_snapshot() {
     let source_pane_id = PaneId::new();
     let target_pane_id = PaneId::new();
     let tab_id = TabId::new();
-    let tab_snapshot =
-        build_test_placement_tab_snapshot(tab_id, "work", [source_pane_id, target_pane_id]);
-    let placement_snapshot = PlacementSnapshot {
-        session_id: SessionId::new(),
-        source_pane_id,
-        source_tab_id: tab_id,
-        destination_tab_id: tab_id,
-        session_placement_revision: 4,
-        client_placement_revision: 7,
-        source_tab_snapshot: tab_snapshot,
-        destination_tab_snapshot: None,
-        client_snapshot: PlacementClientSnapshot {
-            client_snapshot: ClientSnapshot {
-                client_id: ClientId::new(),
-                client_revision: 7,
-                viewport_size: Size {
-                    column_count: 20,
-                    row_count: 8,
-                },
-                active_tab_id: tab_id,
-                focused_pane_id: Some(source_pane_id),
-                active_tab_focused_pane_id: Some(source_pane_id),
-                lock_mode: LockMode::Normal,
-                last_applied_lock_command_id: None,
-                last_applied_floating_pane_move_command_id: None,
-                is_mouse_selection_enabled: false,
-            },
-            reported_pane_area: Some(PaneArea::Reported(Size {
-                column_count: 20,
-                row_count: 8,
-            })),
-        },
-        pane_sizing: PaneSizing::default(),
-    };
+    let placement_snapshot =
+        build_same_tab_placement_snapshot(tab_id, source_pane_id, target_pane_id);
     let original_snapshot = placement_snapshot.clone();
 
     let proposed_snapshot = build_proposed_placement_snapshot(
@@ -3356,46 +3575,12 @@ fn proposed_same_tab_swap_replaces_slots_without_mutating_the_snapshot() {
 }
 
 #[test]
-fn placement_interpolation_reaches_the_target_without_overshooting() {
+fn placement_interpolation_returns_both_ends_and_the_exact_midpoint() {
     let source_pane_id = PaneId::new();
     let target_pane_id = PaneId::new();
     let tab_id = TabId::new();
-    let placement_snapshot = PlacementSnapshot {
-        session_id: SessionId::new(),
-        source_pane_id,
-        source_tab_id: tab_id,
-        destination_tab_id: tab_id,
-        session_placement_revision: 4,
-        client_placement_revision: 7,
-        source_tab_snapshot: build_test_placement_tab_snapshot(
-            tab_id,
-            "work",
-            [source_pane_id, target_pane_id],
-        ),
-        destination_tab_snapshot: None,
-        client_snapshot: PlacementClientSnapshot {
-            client_snapshot: ClientSnapshot {
-                client_id: ClientId::new(),
-                client_revision: 7,
-                viewport_size: Size {
-                    column_count: 20,
-                    row_count: 8,
-                },
-                active_tab_id: tab_id,
-                focused_pane_id: Some(source_pane_id),
-                active_tab_focused_pane_id: Some(source_pane_id),
-                lock_mode: LockMode::Normal,
-                last_applied_lock_command_id: None,
-                last_applied_floating_pane_move_command_id: None,
-                is_mouse_selection_enabled: false,
-            },
-            reported_pane_area: Some(PaneArea::Reported(Size {
-                column_count: 20,
-                row_count: 8,
-            })),
-        },
-        pane_sizing: PaneSizing::default(),
-    };
+    let placement_snapshot =
+        build_same_tab_placement_snapshot(tab_id, source_pane_id, target_pane_id);
     let proposed_snapshot = build_proposed_placement_snapshot(
         &placement_snapshot,
         &PanePlacementTarget::Swap { target_pane_id },
@@ -3412,45 +3597,27 @@ fn placement_interpolation_reaches_the_target_without_overshooting() {
         interpolate_placement_snapshot(&placement_snapshot, &proposed_snapshot, 1.0),
         proposed_snapshot
     );
-    for pane_id in [source_pane_id, target_pane_id] {
-        let from_pane_slot = placement_snapshot
-            .source_tab_snapshot
-            .tab_snapshot
-            .pane_slots
-            .iter()
-            .find(|pane_slot| pane_slot.pane_id == pane_id)
-            .expect("the source slot exists");
-        let to_pane_slot = proposed_snapshot
-            .source_tab_snapshot
-            .tab_snapshot
-            .pane_slots
-            .iter()
-            .find(|pane_slot| pane_slot.pane_id == pane_id)
-            .expect("the target slot exists");
-        let halfway_pane_slot = halfway_snapshot
-            .source_tab_snapshot
-            .tab_snapshot
-            .pane_slots
-            .iter()
-            .find(|pane_slot| pane_slot.pane_id == pane_id)
-            .expect("the halfway slot exists");
-        assert!(
-            halfway_pane_slot.outer_rect.origin.column
-                >= from_pane_slot
-                    .outer_rect
-                    .origin
-                    .column
-                    .min(to_pane_slot.outer_rect.origin.column)
-        );
-        assert!(
-            halfway_pane_slot.outer_rect.origin.column
-                <= from_pane_slot
-                    .outer_rect
-                    .origin
-                    .column
-                    .max(to_pane_slot.outer_rect.origin.column)
-        );
-    }
+    let halfway_outer_rects = halfway_snapshot
+        .source_tab_snapshot
+        .tab_snapshot
+        .pane_slots
+        .iter()
+        .map(|pane_slot| (pane_slot.pane_id, pane_slot.outer_rect))
+        .collect::<Vec<_>>();
+    let halfway_outer_rect = CoreRect::from_origin_and_size(
+        Point { column: 12, row: 0 },
+        Size {
+            column_count: 24,
+            row_count: 8,
+        },
+    );
+    assert_eq!(
+        halfway_outer_rects,
+        [
+            (target_pane_id, halfway_outer_rect),
+            (source_pane_id, halfway_outer_rect),
+        ]
+    );
 }
 
 #[test]
@@ -3459,28 +3626,8 @@ fn pane_insertion_preview_shows_both_messages_and_terminal_contents() {
     let mut render_snapshot = build_render_snapshot(&session_server, client_id);
     let tab_id = render_snapshot.client_snapshot.active_tab_id;
     let target_pane_id = PaneId::new();
-    let placement_snapshot = PlacementSnapshot {
-        session_id: render_snapshot.session_snapshot.session_id,
-        source_pane_id,
-        source_tab_id: tab_id,
-        destination_tab_id: tab_id,
-        session_placement_revision: render_snapshot.session_snapshot.session_revision,
-        client_placement_revision: render_snapshot.client_snapshot.client_revision,
-        source_tab_snapshot: build_test_placement_tab_snapshot(
-            tab_id,
-            "work",
-            [source_pane_id, target_pane_id],
-        ),
-        destination_tab_snapshot: None,
-        client_snapshot: PlacementClientSnapshot {
-            client_snapshot: render_snapshot.client_snapshot.clone(),
-            reported_pane_area: Some(PaneArea::Reported(Size {
-                column_count: 80,
-                row_count: 24,
-            })),
-        },
-        pane_sizing: PaneSizing::default(),
-    };
+    let placement_snapshot =
+        build_same_tab_placement_snapshot(tab_id, source_pane_id, target_pane_id);
     let placement_target = PanePlacementTarget::Split {
         destination_tab_id: tab_id,
         anchor: PanePlacementAnchor::Pane(target_pane_id),
@@ -3530,10 +3677,11 @@ fn pane_insertion_preview_shows_both_messages_and_terminal_contents() {
             ..ViewerChrome::default()
         },
         ImageRenderMode::Placeholder,
-        None,
+        &[],
         Some(&placement_presentation),
         Some(&placement_target),
         viewport_area,
+        DrawnRows::Every,
         &mut render_buffer,
     );
     draw_placement_target_outline(
@@ -3547,74 +3695,48 @@ fn pane_insertion_preview_shows_both_messages_and_terminal_contents() {
         &mut render_buffer,
     );
 
+    let displayed_tab_snapshot = &displayed_render_snapshot
+        .session_snapshot
+        .active_tab_snapshot;
+    let layout_rect = koshi_renderer::compute_content_rect(
+        koshi_renderer::compute_pane_area(&committed_regions, viewport_area),
+        displayed_tab_snapshot.tab_size,
+    );
+    let [source_pane_slot, target_pane_slot] = [source_pane_id, target_pane_id].map(|pane_id| {
+        displayed_tab_snapshot
+            .pane_slots
+            .iter()
+            .find(|pane_slot| pane_slot.pane_id == pane_id)
+            .expect("the displayed pane has a proposed slot")
+    });
     assert_eq!(
-        get_rendered_pane_heading(
-            &render_buffer,
-            &committed_regions,
-            viewport_area,
-            &displayed_render_snapshot,
-            source_pane_id,
-            29,
-        ),
+        get_rendered_pane_heading(&render_buffer, layout_rect, source_pane_slot, 29),
         "Moving pane will insert below"
     );
     assert_eq!(
-        get_rendered_pane_heading(
-            &render_buffer,
-            &committed_regions,
-            viewport_area,
-            &displayed_render_snapshot,
-            target_pane_id,
-            31,
-        ),
+        get_rendered_pane_heading(&render_buffer, layout_rect, target_pane_slot, 31),
         "Other pane will make room below"
     );
     assert_eq!(
-        get_rendered_pane_cell(
-            &render_buffer,
-            &committed_regions,
-            viewport_area,
-            &displayed_render_snapshot,
-            source_pane_id,
-        ),
+        get_rendered_pane_cell(&render_buffer, layout_rect, source_pane_slot),
         "A",
         "the moving pane keeps its terminal cells in the proposed slot"
     );
     assert_eq!(
-        get_rendered_pane_cell(
-            &render_buffer,
-            &committed_regions,
-            viewport_area,
-            &displayed_render_snapshot,
-            target_pane_id,
-        ),
+        get_rendered_pane_cell(&render_buffer, layout_rect, target_pane_slot),
         "B",
         "the target pane keeps its terminal cells in the proposed slot"
     );
 }
 
+/// The text of the `heading_column_count` cells centered on the middle row of
+/// `pane_slot`'s outer rect, with the tab drawn at `layout_rect`.
 fn get_rendered_pane_heading(
     render_buffer: &Buffer,
-    committed_regions: &CommittedRegions,
-    viewport_area: Rect,
-    displayed_render_snapshot: &RenderSnapshot,
-    pane_id: PaneId,
+    layout_rect: Rect,
+    pane_slot: &PaneSlot,
     heading_column_count: u16,
 ) -> String {
-    let pane_slot = displayed_render_snapshot
-        .session_snapshot
-        .active_tab_snapshot
-        .pane_slots
-        .iter()
-        .find(|pane_slot| pane_slot.pane_id == pane_id)
-        .expect("the displayed pane has a proposed slot");
-    let layout_rect = koshi_renderer::compute_content_rect(
-        koshi_renderer::compute_pane_area(committed_regions, viewport_area),
-        displayed_render_snapshot
-            .session_snapshot
-            .active_tab_snapshot
-            .tab_size,
-    );
     let heading_column = layout_rect.x
         + pane_slot.outer_rect.origin.column
         + (pane_slot.outer_rect.size.column_count - heading_column_count) / 2;
@@ -3625,30 +3747,16 @@ fn get_rendered_pane_heading(
         .collect()
 }
 
+/// The symbol of the first cell of `pane_slot`'s content rect, with the tab
+/// drawn at `layout_rect`.
 fn get_rendered_pane_cell(
     render_buffer: &Buffer,
-    committed_regions: &CommittedRegions,
-    viewport_area: Rect,
-    displayed_render_snapshot: &RenderSnapshot,
-    pane_id: PaneId,
+    layout_rect: Rect,
+    pane_slot: &PaneSlot,
 ) -> String {
-    let pane_slot = displayed_render_snapshot
-        .session_snapshot
-        .active_tab_snapshot
-        .pane_slots
-        .iter()
-        .find(|pane_slot| pane_slot.pane_id == pane_id)
-        .expect("the displayed pane has a proposed slot");
     let content_rect = pane_slot
         .content_rect
         .expect("the displayed pane has a content rect");
-    let layout_rect = koshi_renderer::compute_content_rect(
-        koshi_renderer::compute_pane_area(committed_regions, viewport_area),
-        displayed_render_snapshot
-            .session_snapshot
-            .active_tab_snapshot
-            .tab_size,
-    );
     render_buffer[(
         layout_rect.x + content_rect.origin.column,
         layout_rect.y + content_rect.origin.row,
@@ -3663,28 +3771,8 @@ fn placement_render_snapshot_replaces_the_active_pane_layout() {
     let mut render_snapshot = build_render_snapshot(&session_server, client_id);
     let tab_id = render_snapshot.client_snapshot.active_tab_id;
     let target_pane_id = PaneId::new();
-    let placement_snapshot = PlacementSnapshot {
-        session_id: render_snapshot.session_snapshot.session_id,
-        source_pane_id,
-        source_tab_id: tab_id,
-        destination_tab_id: tab_id,
-        session_placement_revision: render_snapshot.session_snapshot.session_revision,
-        client_placement_revision: render_snapshot.client_snapshot.client_revision,
-        source_tab_snapshot: build_test_placement_tab_snapshot(
-            tab_id,
-            "work",
-            [source_pane_id, target_pane_id],
-        ),
-        destination_tab_snapshot: None,
-        client_snapshot: PlacementClientSnapshot {
-            client_snapshot: render_snapshot.client_snapshot.clone(),
-            reported_pane_area: Some(PaneArea::Reported(Size {
-                column_count: 20,
-                row_count: 8,
-            })),
-        },
-        pane_sizing: PaneSizing::default(),
-    };
+    let placement_snapshot =
+        build_same_tab_placement_snapshot(tab_id, source_pane_id, target_pane_id);
     let proposed_snapshot = build_proposed_placement_snapshot(
         &placement_snapshot,
         &PanePlacementTarget::Swap { target_pane_id },
@@ -3784,7 +3872,7 @@ fn placement_render_snapshot_keeps_the_floating_panes_and_their_content() {
     let mut render_snapshot = build_render_snapshot(&session_server, client_id);
     let floating_pane_id = PaneId::new();
     let floating_outer_rect = CoreRect::from_origin_and_size(
-        CorePoint { column: 4, row: 2 },
+        Point { column: 4, row: 2 },
         Size {
             column_count: 30,
             row_count: 8,
@@ -3848,13 +3936,6 @@ fn target_outline_skips_a_group_member_with_an_empty_rect() {
         (PaneId::new(), PaneId::new(), PaneId::new());
     let mut placement_tab_snapshot =
         build_test_placement_tab_snapshot(tab_id, "work", [left_pane_id, right_pane_id]);
-    let right_outer_rect = placement_tab_snapshot
-        .tab_snapshot
-        .pane_slots
-        .iter()
-        .find(|pane_slot| pane_slot.pane_id == right_pane_id)
-        .expect("the right pane has a slot")
-        .outer_rect;
     // The second leaf of a collapsed stack member solves to an empty rect.
     placement_tab_snapshot
         .tab_snapshot
@@ -3884,12 +3965,7 @@ fn target_outline_skips_a_group_member_with_an_empty_rect() {
             tab_size,
             layout_rect,
         ),
-        Some(Rect::new(
-            right_outer_rect.origin.column,
-            right_outer_rect.origin.row,
-            right_outer_rect.size.column_count,
-            right_outer_rect.size.row_count,
-        ))
+        Some(Rect::new(24, 0, 24, 8))
     );
 }
 
@@ -3903,7 +3979,7 @@ fn placement_tab_interpolation_switches_headers_and_layout_mode_at_halfway() {
     to_tab_snapshot.tab_snapshot.stack_headers = vec![koshi_layout::solver::StackHeader {
         pane_id: left_pane_id,
         header_rect: CoreRect::from_origin_and_size(
-            CorePoint { column: 0, row: 0 },
+            Point { column: 0, row: 0 },
             Size {
                 column_count: 24,
                 row_count: 1,
@@ -4000,6 +4076,52 @@ fn target_outline_leaves_cells_on_the_source_border_unstyled() {
     );
 }
 
+/// A placement of `source_pane_id` within tab `tab_id`, which holds
+/// `source_pane_id` and `target_pane_id` side by side, for a client that
+/// reports a `20x8` pane area.
+fn build_same_tab_placement_snapshot(
+    tab_id: TabId,
+    source_pane_id: PaneId,
+    target_pane_id: PaneId,
+) -> PlacementSnapshot {
+    PlacementSnapshot {
+        session_id: SessionId::new(),
+        source_pane_id,
+        source_tab_id: tab_id,
+        destination_tab_id: tab_id,
+        session_placement_revision: 4,
+        client_placement_revision: 7,
+        source_tab_snapshot: build_test_placement_tab_snapshot(
+            tab_id,
+            "work",
+            [source_pane_id, target_pane_id],
+        ),
+        destination_tab_snapshot: None,
+        client_snapshot: PlacementClientSnapshot {
+            client_snapshot: ClientSnapshot {
+                client_id: ClientId::new(),
+                client_revision: 7,
+                viewport_size: Size {
+                    column_count: 20,
+                    row_count: 8,
+                },
+                active_tab_id: tab_id,
+                focused_pane_id: Some(source_pane_id),
+                active_tab_focused_pane_id: Some(source_pane_id),
+                lock_mode: LockMode::Normal,
+                last_applied_lock_command_id: None,
+                last_applied_floating_pane_move_command_id: None,
+                is_mouse_selection_enabled: false,
+            },
+            reported_pane_area: Some(PaneArea::Reported(Size {
+                column_count: 20,
+                row_count: 8,
+            })),
+        },
+        pane_sizing: PaneSizing::default(),
+    }
+}
+
 /// A placement of `source_pane_id` from the active tab of `render_snapshot`
 /// into tab `destination_tab_id`, which holds `destination_pane_ids` side by
 /// side, for a client that reports a `20x8` pane area.
@@ -4038,6 +4160,10 @@ fn build_cross_tab_placement_snapshot(
     }
 }
 
+/// Tab `tab_id`, named `tab_name`, `48x8` cells, with `pane_ids` side by
+/// side in two `24x8` slots. Each pane holds an `8x4` grid whose first cell
+/// is `A` for the first pane and `B` for the second. The first pane also holds
+/// one unavailable image placement.
 fn build_test_placement_tab_snapshot(
     tab_id: TabId,
     tab_name: &str,
@@ -4086,10 +4212,7 @@ fn build_test_placement_tab_snapshot(
             );
             PlacementPaneSnapshot {
                 pane_id: *pane_id,
-                terminal_grid_view: Some(GridView {
-                    grid: Arc::new(test_grid),
-                    view_row_offset: 0,
-                }),
+                terminal_grid_view: Some(GridView::from_grid(&test_grid, 0)),
                 image_placement_snapshots: if pane_index == 0 {
                     vec![
                         koshi_renderer::snapshot::ImagePlacementSnapshot::build_unavailable(
@@ -4248,4 +4371,561 @@ fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its
         expected_start_tab_snapshot,
         "a progress below 0.0 draws the start of the slide"
     );
+}
+
+/// One frame painter of the listed-row tests: a pipeline that keeps the
+/// inputs of the frame it drew, and a second paint driver that draws every
+/// row of each frame the pipeline commits.
+struct ListedRowPaintCheck {
+    /// The cells and cursor the pipeline's paint driver writes.
+    listed_cell_writer: ImageTraceWriter,
+    /// The other bytes of each pipeline frame: resets, title and images.
+    frame_writer: ImageTraceWriter,
+    /// The pipeline's paint driver.
+    listed_paint_driver: PaintDriver<ImageTraceBackend>,
+    /// The cells and cursor the every-row paint driver writes.
+    every_row_cell_writer: ImageTraceWriter,
+    /// The paint driver that draws every row of each committed frame.
+    every_row_paint_driver: PaintDriver<ImageTraceBackend>,
+    /// The pipeline's native image output.
+    image_output_state: ImageOutputState,
+    /// The image mode of the outer terminal.
+    image_mode: ImageRenderMode,
+    /// The inputs of the frame the pipeline drew last.
+    shown_frame_inputs: Option<FrameInputs>,
+    /// How many committed frames drew listed rows.
+    listed_frame_count: usize,
+}
+
+impl ListedRowPaintCheck {
+    /// A check for an `80x24` outer terminal with `graphics_support`, or with
+    /// image placeholders when it is `None`.
+    fn from_graphics_support(graphics_support: Option<GraphicsSupport>) -> Self {
+        let listed_cell_writer = ImageTraceWriter::default();
+        let every_row_cell_writer = ImageTraceWriter::default();
+        Self {
+            listed_paint_driver: PaintDriver::from_backend(
+                ImageTraceBackend(ratatui::backend::CrosstermBackend::new(
+                    listed_cell_writer.clone(),
+                )),
+                TEST_VIEWPORT_SIZE,
+            ),
+            listed_cell_writer,
+            frame_writer: ImageTraceWriter::default(),
+            every_row_paint_driver: PaintDriver::from_backend(
+                ImageTraceBackend(ratatui::backend::CrosstermBackend::new(
+                    every_row_cell_writer.clone(),
+                )),
+                TEST_VIEWPORT_SIZE,
+            ),
+            every_row_cell_writer,
+            image_output_state: ImageOutputState::from_output_kind(
+                graphics_support.and_then(ImageOutputKind::from_support),
+                Arc::new(|| {}),
+            ),
+            image_mode: graphics_support.map_or(
+                ImageRenderMode::Placeholder,
+                GraphicsSupport::get_image_render_mode,
+            ),
+            shown_frame_inputs: None,
+            listed_frame_count: 0,
+        }
+    }
+
+    /// Paint `render_snapshot` for `client` through the pipeline with a
+    /// measured cell of `1x1` pixels, then draw every row of it through the
+    /// every-row paint driver, cleared first when the pipeline cleared the
+    /// screen, and require both drivers to write the same bytes. Returns the
+    /// rows the frame drew, `None` for every row.
+    fn paint_frame(
+        &mut self,
+        client: &Client,
+        render_snapshot: &RenderSnapshot,
+        check_name: &str,
+    ) -> Option<Vec<u16>> {
+        let committed_regions = build_committed_regions(client.get_viewport_size());
+        let previous_frame_inputs = self.shown_frame_inputs.clone();
+        paint_frame_with_writer(
+            &mut self.frame_writer,
+            &mut self.listed_paint_driver,
+            client,
+            render_snapshot,
+            &committed_regions,
+            &ViewerPaint::from_client(
+                client,
+                render_snapshot.client_snapshot.active_tab_id,
+                render_snapshot,
+            ),
+            self.image_mode,
+            &mut self.image_output_state,
+            Some(PixelCellSize::from_pixel_dimensions(1, 1).expect("a nonzero cell")),
+            &mut self.shown_frame_inputs,
+            &mut String::new(),
+            &mut None,
+            None,
+            None,
+        )
+        .expect("the frame paints");
+        let frame_bytes = std::mem::take(&mut *self.frame_writer.0.lock().expect("frame lock"));
+        let listed_cell_bytes =
+            std::mem::take(&mut *self.listed_cell_writer.0.lock().expect("cell lock"));
+        let frame_inputs = self
+            .shown_frame_inputs
+            .as_ref()
+            .expect("a committed frame keeps its inputs");
+        let is_screen_cleared = has_byte_sequence(&frame_bytes, b"\x1b[2J");
+        let drawn_rows = previous_frame_inputs
+            .filter(|_| !is_screen_cleared)
+            .and_then(|previous_frame_inputs| {
+                previous_frame_inputs.list_changed_screen_rows(frame_inputs)
+            });
+        if drawn_rows.is_some() {
+            self.listed_frame_count += 1;
+        }
+        if is_screen_cleared {
+            self.every_row_paint_driver.clear_shown_cells();
+        }
+        let render_area = Rect::new(
+            0,
+            0,
+            frame_inputs.terminal_size.column_count,
+            frame_inputs.terminal_size.row_count,
+        );
+        let cursor_position = get_cursor_position(
+            &frame_inputs.render_snapshot,
+            &frame_inputs.committed_regions,
+            frame_inputs.viewer_chrome,
+            render_area,
+        );
+        self.every_row_paint_driver
+            .draw_frame(
+                frame_inputs.terminal_size,
+                None,
+                |frame_buffer, drawn_rows| {
+                    SnapshotWidget {
+                        render_snapshot: &frame_inputs.render_snapshot,
+                        theme: &frame_inputs.theme,
+                        keymap_hints: &frame_inputs.keymap_hints,
+                        pending_key_sequence: frame_inputs.pending_key_sequence.as_ref(),
+                        viewer_chrome: frame_inputs.viewer_chrome,
+                        committed_regions: &frame_inputs.committed_regions,
+                        image_mode: frame_inputs.image_mode,
+                        unavailable_image_placement_keys: &frame_inputs
+                            .unavailable_image_placement_keys,
+                        placement_snapshot: None,
+                        placement_display_snapshot: None,
+                        placement_target: None,
+                        placement_presentation: None,
+                        drawn_rows,
+                    }
+                    .render(render_area, frame_buffer);
+                    cursor_position
+                },
+            )
+            .expect("the every-row frame draws");
+        let every_row_cell_bytes =
+            std::mem::take(&mut *self.every_row_cell_writer.0.lock().expect("cell lock"));
+        assert_eq!(
+            String::from_utf8_lossy(&listed_cell_bytes),
+            String::from_utf8_lossy(&every_row_cell_bytes),
+            "{check_name}: drawn rows {drawn_rows:?}"
+        );
+        drawn_rows
+    }
+}
+
+/// Bytes that print `line_count` seeded lines, each of 1 to 30 pieces and
+/// ended by CR LF. A piece is `k`, `中`, `U+2764` with VS16, `e` with
+/// `U+0301`, Thai `U+0E01` with `U+0E34`, `U+17D8`, `ESC [ 31 m` or
+/// `ESC [ 0 m`.
+fn build_seeded_print_bytes(seeded_sequence: &mut SeededSequence, line_count: usize) -> Vec<u8> {
+    let mut print_bytes = Vec::new();
+    for _ in 0..line_count {
+        for _ in 0..seeded_sequence.compute_next_in_range(1, 30) {
+            let printed_piece = match seeded_sequence.compute_next_index(8) {
+                0 => "中",
+                1 => "\u{2764}\u{FE0F}",
+                2 => "e\u{0301}",
+                3 => "\u{0E01}\u{0E34}",
+                4 => "\u{17D8}",
+                5 => "\x1b[31m",
+                6 => "\x1b[0m",
+                _ => "k",
+            };
+            print_bytes.extend_from_slice(printed_piece.as_bytes());
+        }
+        print_bytes.extend_from_slice(b"\r\n");
+    }
+    print_bytes
+}
+
+/// Submit `command` to `server` as a keybinding of `client_id`.
+fn submit_client_command(server: &mut Server, client_id: ClientId, command: Command) {
+    server.submit_command(CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::KeyBinding { client_id },
+        command,
+    ));
+}
+
+/// What one frame of the seeded paint sequence does before it is painted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeededPaintStep {
+    /// Print seeded lines into one pane.
+    Print,
+    /// Split the first pane to the right.
+    SplitPane,
+    /// Open a floating pane at the default placement.
+    OpenFloatingPane,
+    /// Scroll the first pane 3 lines back into its history.
+    ScrollFirstPaneBack,
+    /// Scroll the first pane 3 lines toward its live output.
+    ScrollFirstPaneForward,
+    /// Focus another pane.
+    FocusAnotherPane,
+    /// Resize the outer terminal to the size it holds.
+    Resize(Size),
+    /// Highlight the first pane from column 2 of its second row to its fourth
+    /// row, ending at column 8 on frame 170 and 4 columns further on each
+    /// frame after it.
+    DragSelection,
+    /// Drop the first pane's highlight.
+    ClearSelection,
+}
+
+/// The step of frame `frame_index` of the seeded paint sequence: a split at
+/// frames 20 and 60, a floating pane at 40 and 160, a scroll back at 100 and
+/// forward at 110, a focus change at 120, a resize to `100x30` at 80 and back
+/// to `80x24` at 140, a selection drag over frames 170 to 172 and its clear at
+/// 173, and a print at every other frame.
+fn pick_seeded_paint_step(frame_index: usize) -> SeededPaintStep {
+    match frame_index {
+        20 | 60 => SeededPaintStep::SplitPane,
+        40 | 160 => SeededPaintStep::OpenFloatingPane,
+        100 => SeededPaintStep::ScrollFirstPaneBack,
+        110 => SeededPaintStep::ScrollFirstPaneForward,
+        120 => SeededPaintStep::FocusAnotherPane,
+        80 => SeededPaintStep::Resize(Size {
+            column_count: 100,
+            row_count: 30,
+        }),
+        140 => SeededPaintStep::Resize(TEST_VIEWPORT_SIZE),
+        170..=172 => SeededPaintStep::DragSelection,
+        173 => SeededPaintStep::ClearSelection,
+        _ => SeededPaintStep::Print,
+    }
+}
+
+#[test]
+fn seeded_frames_that_draw_their_changed_rows_write_the_bytes_of_frames_that_draw_every_row() {
+    for graphics_support in [
+        None,
+        Some(GraphicsSupport::Kitty),
+        Some(GraphicsSupport::Iterm),
+        Some(GraphicsSupport::Sixel {
+            palette_color_count: 256,
+            maximum_pixel_width: None,
+            maximum_pixel_height: None,
+        }),
+    ] {
+        let (mut server, client_id, first_pane_id) = build_test_server_with_pane();
+        let mut client = build_launch_client(client_id);
+        let mut listed_row_paint_check =
+            ListedRowPaintCheck::from_graphics_support(graphics_support);
+        let mut seeded_sequence = SeededSequence::from_seed(0x6b6f_7368_6900_0013);
+        let mut print_frame_count_after_frame_zero = 0;
+
+        for frame_index in 0..200 {
+            let render_snapshot = build_render_snapshot(&server, client_id);
+            let pane_ids: Vec<PaneId> = render_snapshot
+                .pane_snapshots
+                .iter()
+                .map(|pane_snapshot| pane_snapshot.pane_id)
+                .collect();
+            let paint_step = pick_seeded_paint_step(frame_index);
+            match paint_step {
+                SeededPaintStep::Print if frame_index == 0 => {
+                    server.handle_pty_output(
+                        first_pane_id,
+                        &build_seeded_print_bytes(&mut seeded_sequence, 40),
+                    );
+                }
+                SeededPaintStep::Print => {
+                    let printed_pane_ids: Vec<PaneId> = pane_ids
+                        .iter()
+                        .copied()
+                        .filter(|pane_id| {
+                            !(100..110).contains(&frame_index) || *pane_id != first_pane_id
+                        })
+                        .collect();
+                    let printed_pane_id = printed_pane_ids
+                        [seeded_sequence.compute_next_index(printed_pane_ids.len())];
+                    let line_count = seeded_sequence.compute_next_in_range(1, 3);
+                    server.handle_pty_output(
+                        printed_pane_id,
+                        &build_seeded_print_bytes(&mut seeded_sequence, line_count),
+                    );
+                    print_frame_count_after_frame_zero += 1;
+                }
+                SeededPaintStep::SplitPane => submit_client_command(
+                    &mut server,
+                    client_id,
+                    Command::NewPane(NewPaneArgs {
+                        placement: NewPanePlacement::Split {
+                            source_pane_id: Some(first_pane_id),
+                            tab_id: None,
+                            direction: Direction::Right,
+                        },
+                        working_directory: None,
+                        spawn_spec: None,
+                        client_id: None,
+                    }),
+                ),
+                SeededPaintStep::OpenFloatingPane => submit_client_command(
+                    &mut server,
+                    client_id,
+                    Command::NewPane(NewPaneArgs {
+                        placement: NewPanePlacement::Floating {
+                            size: None,
+                            top_left_cell: None,
+                            is_pinned: false,
+                        },
+                        working_directory: None,
+                        spawn_spec: None,
+                        client_id: None,
+                    }),
+                ),
+                SeededPaintStep::ScrollFirstPaneBack | SeededPaintStep::ScrollFirstPaneForward => {
+                    let scroll_line_count = if paint_step == SeededPaintStep::ScrollFirstPaneBack {
+                        3
+                    } else {
+                        -3
+                    };
+                    submit_client_command(
+                        &mut server,
+                        client_id,
+                        Command::ScrollPane(ScrollPaneArgs {
+                            pane_id: Some(first_pane_id),
+                            scroll_line_count,
+                        }),
+                    );
+                }
+                SeededPaintStep::FocusAnotherPane => {
+                    let focused_pane_id = render_snapshot.client_snapshot.focused_pane_id;
+                    let other_pane_id = pane_ids
+                        .iter()
+                        .copied()
+                        .find(|pane_id| Some(*pane_id) != focused_pane_id)
+                        .expect("the tab holds a second pane");
+                    submit_client_command(
+                        &mut server,
+                        client_id,
+                        Command::FocusPane(FocusPaneArgs {
+                            focus_target: FocusTarget::Pane(other_pane_id),
+                            client_id: None,
+                        }),
+                    );
+                }
+                SeededPaintStep::DragSelection => {
+                    let top_row_index = render_snapshot
+                        .pane_snapshots
+                        .iter()
+                        .find(|pane_snapshot| pane_snapshot.pane_id == first_pane_id)
+                        .expect("the first pane shows")
+                        .view_top_row_index;
+                    let end_column_index =
+                        u16::try_from(frame_index - 168).expect("a small frame index") * 4;
+                    submit_client_command(
+                        &mut server,
+                        client_id,
+                        Command::Visual(VisualCommand::SetSelection(SetSelectionArgs {
+                            pane_id: first_pane_id,
+                            selection: Selection {
+                                selection_kind: SelectionKind::Character,
+                                anchor: GridPosition {
+                                    row_index: top_row_index + 1,
+                                    column_index: 2,
+                                },
+                                cursor: GridPosition {
+                                    row_index: top_row_index + 3,
+                                    column_index: end_column_index,
+                                },
+                            },
+                        })),
+                    );
+                }
+                SeededPaintStep::ClearSelection => submit_client_command(
+                    &mut server,
+                    client_id,
+                    Command::Visual(VisualCommand::ClearSelection(ClearSelectionArgs {
+                        pane_id: first_pane_id,
+                    })),
+                ),
+                SeededPaintStep::Resize(viewport_size) => {
+                    let _ = server.handle_runtime_event(RuntimeEvent::Resize {
+                        client_id,
+                        viewport_size,
+                        pane_area: None,
+                        cell_size: None,
+                    });
+                    client.set_viewport_size(viewport_size);
+                }
+            }
+            let render_snapshot = build_render_snapshot(&server, client_id);
+            client.apply_render_snapshot(&render_snapshot);
+            let check_name = format!("{graphics_support:?}, frame {frame_index}, {paint_step:?}");
+
+            let drawn_rows =
+                listed_row_paint_check.paint_frame(&client, &render_snapshot, &check_name);
+
+            if paint_step != SeededPaintStep::Print || frame_index == 0 {
+                assert_eq!(drawn_rows, None, "{check_name}");
+            }
+        }
+        assert_eq!(
+            listed_row_paint_check.listed_frame_count, print_frame_count_after_frame_zero,
+            "{graphics_support:?}"
+        );
+    }
+}
+
+#[test]
+fn a_text_print_beside_a_native_image_draws_only_its_row_in_every_protocol() {
+    for image_protocol in [
+        GraphicsProtocol::Kitty,
+        GraphicsProtocol::Iterm2,
+        GraphicsProtocol::Sixel,
+    ] {
+        for graphics_support in [
+            GraphicsSupport::Kitty,
+            GraphicsSupport::Iterm,
+            GraphicsSupport::Sixel {
+                palette_color_count: 256,
+                maximum_pixel_width: None,
+                maximum_pixel_height: None,
+            },
+        ] {
+            let (mut server, client_id, pane_id) = build_test_server_with_pane();
+            let _ = server.handle_runtime_event(RuntimeEvent::CellSize {
+                client_id,
+                cell_size: PixelCellSize::from_pixel_dimensions(1, 1).expect("a nonzero cell"),
+            });
+            let client = build_launch_client(client_id);
+            let mut listed_row_paint_check =
+                ListedRowPaintCheck::from_graphics_support(Some(graphics_support));
+            let check_name = format!("{image_protocol:?} -> {graphics_support:?}");
+            let stages: [(&[u8], Option<Vec<u16>>); 4] = [
+                (&build_opaque_image_input(image_protocol), None),
+                (b"\x1b[20;1Hzz", Some(vec![21])),
+                (b"\x1b[3S", None),
+                (b"\x1b[19;1Hyy", Some(vec![20])),
+            ];
+            for (stage_index, (stage_output_bytes, expected_drawn_rows)) in
+                stages.into_iter().enumerate()
+            {
+                server.handle_pty_output(pane_id, stage_output_bytes);
+                let render_snapshot = build_render_snapshot(&server, client_id);
+                let stage_check_name = format!("{check_name}, stage {stage_index}");
+                let settle_deadline = Instant::now() + Duration::from_secs(5);
+                let mut committed_drawn_rows = Vec::new();
+                loop {
+                    committed_drawn_rows.push(listed_row_paint_check.paint_frame(
+                        &client,
+                        &render_snapshot,
+                        &stage_check_name,
+                    ));
+                    if !listed_row_paint_check.image_output_state.is_work_pending() {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < settle_deadline,
+                        "{stage_check_name} did not settle"
+                    );
+                    std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
+                }
+                if expected_drawn_rows.is_some() {
+                    assert_eq!(
+                        committed_drawn_rows,
+                        vec![expected_drawn_rows],
+                        "{stage_check_name}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// One named change to the frame inputs: the name an assertion message
+/// carries, and the edit that makes the change.
+type FrameInputsChange = (&'static str, fn(&mut FrameInputs));
+
+#[test]
+fn frame_inputs_list_no_rows_when_an_input_other_than_the_render_snapshot_differs() {
+    let (server, client_id, _) = build_test_server_with_pane();
+    let frame_inputs = FrameInputs {
+        render_snapshot: build_render_snapshot(&server, client_id),
+        committed_regions: build_committed_regions(TEST_VIEWPORT_SIZE),
+        theme: Theme::default(),
+        keymap_hints: KeymapHints::default(),
+        pending_key_sequence: None,
+        viewer_chrome: ViewerChrome::default(),
+        image_mode: ImageRenderMode::Placeholder,
+        unavailable_image_placement_keys: Vec::new(),
+        terminal_size: TEST_VIEWPORT_SIZE,
+        has_placement_state: false,
+    };
+    let changes: [FrameInputsChange; 9] = [
+        ("the region solve", |frame_inputs| {
+            frame_inputs.committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 1);
+        }),
+        ("the theme", |frame_inputs| {
+            frame_inputs.theme.ramp_start = (1, 2, 3);
+        }),
+        ("the hint bar", |frame_inputs| {
+            frame_inputs.keymap_hints.is_reverted_to_defaults = true;
+        }),
+        ("an open key sequence", |frame_inputs| {
+            frame_inputs.pending_key_sequence = Some(KeySequence::from(KeyChord::from_parts(
+                BindingModifierFlags::CTRL,
+                Key::Char('p'),
+            )));
+        }),
+        ("the hovered pane", |frame_inputs| {
+            frame_inputs.viewer_chrome.hovered_pane_id = Some(PaneId::new());
+        }),
+        ("the image mode", |frame_inputs| {
+            frame_inputs.image_mode = ImageRenderMode::Native;
+        }),
+        ("the unavailable images", |frame_inputs| {
+            frame_inputs.unavailable_image_placement_keys = vec![(PaneId::new(), 1)];
+        }),
+        ("the terminal size", |frame_inputs| {
+            frame_inputs.terminal_size = Size {
+                column_count: 81,
+                row_count: 24,
+            };
+        }),
+        ("a placement state", |frame_inputs| {
+            frame_inputs.has_placement_state = true;
+        }),
+    ];
+
+    assert_eq!(
+        frame_inputs.list_changed_screen_rows(&frame_inputs.clone()),
+        Some(Vec::new())
+    );
+    for (change_name, apply_change) in changes {
+        let mut changed_frame_inputs = frame_inputs.clone();
+        apply_change(&mut changed_frame_inputs);
+        assert_eq!(
+            frame_inputs.list_changed_screen_rows(&changed_frame_inputs),
+            None,
+            "{change_name} in the next frame"
+        );
+        assert_eq!(
+            changed_frame_inputs.list_changed_screen_rows(&frame_inputs),
+            None,
+            "{change_name} in the shown frame"
+        );
+    }
 }

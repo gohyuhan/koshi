@@ -14,8 +14,10 @@ use std::time::{Duration, Instant};
 
 use common::{
     count_attached_clients, get_last_painted_frame, open_session_connection,
-    read_session_frames_to_detached, read_session_frames_until, serve_test_session,
-    start_test_session, submit_test_command, wait_for_client_count, TEST_WAIT_TIMEOUT_DURATION,
+    read_session_frames_to_detached, read_session_frames_to_mouse_answer,
+    read_session_frames_until, read_session_frames_until_painted_frame, serve_test_session,
+    start_test_session, submit_test_command, wait_for_client_count, wait_for_mouse_tracking,
+    ViewerConnection, TEST_WAIT_TIMEOUT_DURATION,
 };
 use koshi_config::layer::PartialKoshiConfig;
 use koshi_core::command::{
@@ -26,15 +28,15 @@ use koshi_core::geometry::{PaneArea, Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::key::BindingModifierFlags;
 use koshi_core::lock::LockMode;
-use koshi_core::mouse::{MouseButton, MouseKind, MouseTracking};
+use koshi_core::mouse::{MouseButton, MouseKind};
 use koshi_core::process::PtySize;
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::frame::FrameSlot;
 use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult, WireMouseAction};
 use koshi_ipc::transport::Connection;
+use koshi_runtime::runtime::painted_update::SessionFrame;
 use koshi_runtime::server::Server;
-use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::send_committed_request;
 
 /// The PTY size [`common::TEST_VIEWPORT_SIZE`] gives the seeded session's single pane: one
@@ -54,6 +56,13 @@ const LARGE_VIEWPORT_SIZE: Size = Size {
 const SMALL_VIEWPORT_SIZE: Size = Size {
     column_count: 80,
     row_count: 30,
+};
+
+/// The per-axis minimum of [`LARGE_VIEWPORT_SIZE`] and [`SMALL_VIEWPORT_SIZE`],
+/// as a pane region: the size the tab holds while both clients view it.
+const SHARED_PANE_VIEWPORT_SIZE: Size = Size {
+    column_count: 80,
+    row_count: 28,
 };
 
 /// Narrower than [`SHORT_VIEWPORT_SIZE`], and taller than it.
@@ -106,6 +115,7 @@ fn attach_test_client_with_pane_area(
                 graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
                 link_timeout_ms: None,
+                max_frames_per_second: 60,
             },
         },
     );
@@ -328,11 +338,11 @@ fn a_starving_client_attaching_first_leaves_the_seeded_size_until_a_sized_client
 
             // The tab has no viewer that sizes it: it solves at 0x0, and the
             // starving client's own frames carry its pane suppressed.
-            let (starving_client_connection, session_events) =
-                read_session_frames_until(starving_client_connection, |session_event| {
-                    matches!(session_event, SessionEvent::Painted { .. })
+            let (starving_client_connection, session_frames) =
+                read_session_frames_until(starving_client_connection, |session_frame| {
+                    matches!(session_frame, SessionFrame::Painted(_))
                 });
-            let painted_frame = get_last_painted_frame(&session_events);
+            let painted_frame = &get_last_painted_frame(&session_frames).painted_frame;
             assert_eq!(
                 painted_frame.session_snapshot.active_tab_snapshot.tab_size,
                 Size {
@@ -379,7 +389,7 @@ fn a_starving_client_attaching_first_leaves_the_seeded_size_until_a_sized_client
             (
                 vec![
                     caller_connection,
-                    starving_client_connection,
+                    starving_client_connection.ipc_connection,
                     large_client_connection,
                 ],
                 pane_id,
@@ -473,16 +483,19 @@ fn each_axis_takes_its_minimum_from_a_different_client_and_grows_back_when_that_
                 })],
             );
 
-            let (short_client_connection, session_events) =
+            let (short_client_connection, session_frames) =
                 read_session_frames_to_detached(short_client_connection);
-            assert_eq!(session_events.last(), Some(&SessionEvent::Detached));
+            assert_eq!(
+                session_frames.last(),
+                Some(&SessionFrame::Event(SessionEvent::Detached))
+            );
             wait_for_client_count(&mut caller_connection, 1, 5);
 
             (
                 vec![
                     caller_connection,
                     narrow_client_connection,
-                    short_client_connection,
+                    short_client_connection.ipc_connection,
                 ],
                 pane_id,
             )
@@ -639,13 +652,6 @@ fn a_client_viewing_another_tab_never_constrains_this_tabs_size() {
 
 #[test]
 fn the_larger_client_sees_the_tab_letterboxed_at_the_shared_size() {
-    // The per-axis minimum of [`LARGE_VIEWPORT_SIZE`] and [`SMALL_VIEWPORT_SIZE`], as a pane
-    // region.
-    const SHARED_PANE_VIEWPORT_SIZE: Size = Size {
-        column_count: 80,
-        row_count: 28,
-    };
-
     let (_server, _fake_pty_backend, ()) = serve_test_session(
         "letterbox",
         |runtime_directory, session_id, _fake_pty_backend| {
@@ -669,19 +675,11 @@ fn the_larger_client_sees_the_tab_letterboxed_at_the_shared_size() {
                 SMALL_VIEWPORT_SIZE,
             );
 
-            let (large_client_connection, session_events) =
-                read_session_frames_until(large_client_connection, move |session_event| {
-                    match session_event {
-                        SessionEvent::Painted {
-                            frame: painted_frame,
-                        } => {
-                            painted_frame.session_snapshot.active_tab_snapshot.tab_size
-                                == SHARED_PANE_VIEWPORT_SIZE
-                        }
-                        _ => false,
-                    }
-                });
-            let painted_frame = get_last_painted_frame(&session_events);
+            let (large_client_connection, session_frames) = read_session_frames_until_tab_size(
+                large_client_connection,
+                SHARED_PANE_VIEWPORT_SIZE,
+            );
+            let painted_frame = &get_last_painted_frame(&session_frames).painted_frame;
 
             // The large client's own terminal is unchanged; the tab it draws is the
             // shared size, and the margin around it is the letterbox.
@@ -731,7 +729,13 @@ fn the_larger_client_sees_the_tab_letterboxed_at_the_shared_size() {
                     .is_every_pane_suppressed
             );
 
-            (vec![large_client_connection, small_client_connection], ())
+            (
+                vec![
+                    large_client_connection.ipc_connection,
+                    small_client_connection,
+                ],
+                (),
+            )
         },
     );
 }
@@ -879,41 +883,34 @@ fn setting_the_lock_mode_a_client_already_holds_emits_nothing() {
     );
 }
 
-/// Turn normal mouse tracking with SGR encoding on in `pane_id`, the way the
-/// program running there does, and read `ipc_connection`'s stream until a painted
-/// frame shows the pane asking for reports. From that frame on, a forwarded
-/// event is written to the pane.
-fn wait_for_mouse_tracking(
-    fake_pty_backend: &FakePtyBackend,
-    pane_id: PaneId,
-    ipc_connection: Connection,
-) -> Connection {
-    fake_pty_backend
-        .push_output(pane_id, b"\x1b[?1000h\x1b[?1006h".to_vec())
-        .expect("the pane was spawned");
-    let (ipc_connection, _) =
-        read_session_frames_until(ipc_connection, move |session_event| match session_event {
-            SessionEvent::Painted {
-                frame: painted_frame,
-            } => painted_frame.pane_snapshots.iter().any(|pane_snapshot| {
-                pane_snapshot.pane_id == pane_id
-                    && pane_snapshot.mouse_tracking == MouseTracking::Normal
-            }),
-            _ => false,
-        });
-    ipc_connection
+/// [`read_session_frames_until_painted_frame`] stopping at a painted update
+/// whose active tab is `tab_size`.
+fn read_session_frames_until_tab_size(
+    viewer_connection: impl Into<ViewerConnection>,
+    tab_size: Size,
+) -> (ViewerConnection, Vec<SessionFrame<SessionEvent>>) {
+    read_session_frames_until_painted_frame(viewer_connection, move |received_painted_frame| {
+        received_painted_frame
+            .painted_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .tab_size
+            == tab_size
+    })
 }
 
 /// Send one mouse round holding a single left press on `pane_id` at the
-/// 0-based pane cell `pane_local_cell`, then read `ipc_connection`'s stream
-/// until that round is answered.
+/// 0-based pane cell `pane_local_cell`, then read `viewer_connection`'s
+/// stream until that round is answered.
 fn send_mouse_press(
-    mut ipc_connection: Connection,
+    viewer_connection: impl Into<ViewerConnection>,
     pane_id: PaneId,
     pane_local_cell: Point,
     request_id: u64,
-) -> Connection {
-    ipc_connection
+) -> ViewerConnection {
+    let mut viewer_connection = viewer_connection.into();
+    viewer_connection
+        .ipc_connection
         .send(&IpcRequest {
             request_id,
             request_kind: IpcRequestKind::Mouse(vec![WireMouseAction::Forward {
@@ -924,15 +921,8 @@ fn send_mouse_press(
             }]),
         })
         .expect("send mouse round");
-    let (ipc_connection, _) =
-        read_session_frames_until(ipc_connection, move |session_event| match session_event {
-            SessionEvent::MouseAnswer {
-                request_id: answered_request_id,
-                mouse_answers: _,
-            } => *answered_request_id == request_id,
-            _ => false,
-        });
-    ipc_connection
+    let (viewer_connection, _) = read_session_frames_to_mouse_answer(viewer_connection, request_id);
+    viewer_connection
 }
 
 #[test]
@@ -983,7 +973,10 @@ fn a_mouse_press_from_each_client_reaches_the_pane_cell_it_names() {
                 send_mouse_press(large_client_connection, pane_id, PAST_THE_GRID_PANE_CELL, 4);
 
             (
-                vec![large_client_connection, small_client_connection],
+                vec![
+                    large_client_connection.ipc_connection,
+                    small_client_connection.ipc_connection,
+                ],
                 pane_id,
             )
         },
@@ -1017,13 +1010,12 @@ fn a_mouse_press_before_the_pane_asks_for_reports_writes_nothing() {
             );
             let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
 
-            // The client is the tab's only viewer. The pane's content starts at
-            // column 1, row 2 of its terminal: one tabline row, then the pane's
-            // 1-cell border.
+            // The client is the tab's only viewer, and it presses the pane's
+            // 0-based cell (1, 2).
             let client_connection =
                 send_mouse_press(client_connection, pane_id, Point { column: 1, row: 2 }, 3);
 
-            (vec![client_connection], pane_id)
+            (vec![client_connection.ipc_connection], pane_id)
         },
     );
 
@@ -1037,13 +1029,6 @@ fn a_mouse_press_before_the_pane_asks_for_reports_writes_nothing() {
 
 #[test]
 fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session() {
-    // The per-axis minimum of [`LARGE_VIEWPORT_SIZE`] and [`SMALL_VIEWPORT_SIZE`], as a pane
-    // region: the size the tab holds while both clients view it.
-    const SHARED_PANE_VIEWPORT_SIZE: Size = Size {
-        column_count: 80,
-        row_count: 28,
-    };
-
     // The pane region [`LARGE_VIEWPORT_SIZE`] gives the tab on its own, once the other client
     // is gone.
     const SINGLE_CLIENT_PANE_VIEWPORT_SIZE: Size = Size {
@@ -1152,18 +1137,10 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
 
             // Read the large client's stream past the shared size. The next frame
             // read after the move is one the move caused.
-            let (large_client_connection, _) =
-                read_session_frames_until(large_client_connection, |session_event| {
-                    match session_event {
-                        SessionEvent::Painted {
-                            frame: painted_frame,
-                        } => {
-                            painted_frame.session_snapshot.active_tab_snapshot.tab_size
-                                == SHARED_PANE_VIEWPORT_SIZE
-                        }
-                        _ => false,
-                    }
-                });
+            let (large_client_connection, _) = read_session_frames_until_tab_size(
+                large_client_connection,
+                SHARED_PANE_VIEWPORT_SIZE,
+            );
 
             // The move itself. It puts the other session on the moved client's own
             // queue, changes nothing here, and emits nothing.
@@ -1174,21 +1151,26 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
                 Command::SwitchSession(SwitchSessionArgs {
                     client_id: Some(small_client_id),
                     session_id: destination_session_id,
+                    owner_user_id: None,
                 }),
                 3,
             );
             assert_eq!(emitted_events, Vec::<Event>::new());
 
             // The moved client is told where to go on its event stream.
-            let (small_client_connection, switch_session_events) =
-                read_session_frames_until(small_client_connection, |session_event| {
-                    matches!(session_event, SessionEvent::SwitchTo { .. })
+            let (small_client_connection, switch_session_frames) =
+                read_session_frames_until(small_client_connection, |session_frame| {
+                    matches!(
+                        session_frame,
+                        SessionFrame::Event(SessionEvent::SwitchTo { .. })
+                    )
                 });
             assert_eq!(
-                switch_session_events.last(),
-                Some(&SessionEvent::SwitchTo {
+                switch_session_frames.last(),
+                Some(&SessionFrame::Event(SessionEvent::SwitchTo {
                     session_id: destination_session_id,
-                }),
+                    owner_user_id: None,
+                })),
             );
 
             // The client leaves by closing its connection, the same as a real
@@ -1200,20 +1182,14 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
 
             // The tab grows back to the client that stayed, over one pane inside a
             // 1-cell border: this session keeps serving that client.
-            let (large_client_connection, large_client_session_events) =
-                read_session_frames_until(large_client_connection, |session_event| {
-                    match session_event {
-                        SessionEvent::Painted {
-                            frame: painted_frame,
-                        } => {
-                            painted_frame.session_snapshot.active_tab_snapshot.tab_size
-                                == SINGLE_CLIENT_PANE_VIEWPORT_SIZE
-                        }
-                        _ => false,
-                    }
-                });
+            let (large_client_connection, large_client_session_frames) =
+                read_session_frames_until_tab_size(
+                    large_client_connection,
+                    SINGLE_CLIENT_PANE_VIEWPORT_SIZE,
+                );
             assert_eq!(
-                get_last_painted_frame(&large_client_session_events)
+                get_last_painted_frame(&large_client_session_frames)
+                    .painted_frame
                     .session_snapshot
                     .active_tab_snapshot
                     .pane_slots,
@@ -1236,7 +1212,7 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
             );
 
             (
-                vec![caller_connection, large_client_connection],
+                vec![caller_connection, large_client_connection.ipc_connection],
                 source_pane_id,
             )
         },
@@ -1286,7 +1262,7 @@ const QUIT_TIMEOUT_DURATION: Duration = Duration::from_secs(2);
 /// other event. It stops when the quit request is set or
 /// [`QUIT_TIMEOUT_DURATION`] has passed.
 ///
-/// Returns the server, so a test can read whether the session asked to close.
+/// Returns the server, with the quit request it holds when the run ends.
 fn run_server_until_quit(
     session_label: &str,
     should_auto_close_session: bool,
@@ -1339,20 +1315,25 @@ fn move_the_only_client_away(runtime_directory: PathBuf, session_id: SessionId) 
         Command::SwitchSession(SwitchSessionArgs {
             client_id: Some(client_id),
             session_id: destination_session_id,
+            owner_user_id: None,
         }),
         3,
     );
     assert_eq!(emitted_events, Vec::<Event>::new());
 
-    let (client_connection, session_events) =
-        read_session_frames_until(client_connection, |session_event| {
-            matches!(session_event, SessionEvent::SwitchTo { .. })
+    let (client_connection, session_frames) =
+        read_session_frames_until(client_connection, |session_frame| {
+            matches!(
+                session_frame,
+                SessionFrame::Event(SessionEvent::SwitchTo { .. })
+            )
         });
     assert_eq!(
-        session_events.last(),
-        Some(&SessionEvent::SwitchTo {
+        session_frames.last(),
+        Some(&SessionFrame::Event(SessionEvent::SwitchTo {
             session_id: destination_session_id,
-        }),
+            owner_user_id: None,
+        })),
     );
 
     drop(client_connection);

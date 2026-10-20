@@ -169,28 +169,14 @@ impl Server {
     }
 
     /// Confirm the pane an in-session CLI command was issued from is still a
-    /// valid command source: registered in `session` and `Spawning`, `Running`, or
-    /// `Exited` (a dead pane its close policy keeps on screen can still be
-    /// commanded from — a background child it left behind may clean up after
-    /// itself). A pane that is `Closing`, `Removed`, or absent from the
-    /// registry rejects with [`RejectReason::TargetGone`].
+    /// valid command source: registered in `session`. A pane absent from the
+    /// registry rejects with [`RejectReason::TargetGone`] `source pane no
+    /// longer exists`.
     pub(super) fn require_live_source_pane(
         session: &Session,
         pane_id: PaneId,
     ) -> Result<(), Rejection> {
-        let is_source_pane_live =
-            session
-                .panes
-                .get_pane_record_by_id(pane_id)
-                .is_some_and(|pane_record| {
-                    matches!(
-                        pane_record.get_lifecycle(),
-                        PaneLifecycle::Spawning
-                            | PaneLifecycle::Running
-                            | PaneLifecycle::Exited { .. }
-                    )
-                });
-        if is_source_pane_live {
+        if session.panes.get_pane_record_by_id(pane_id).is_some() {
             Ok(())
         } else {
             Err(Rejection::from_reason_and_help(
@@ -241,7 +227,7 @@ impl Server {
     /// `--pane` is global, a focused-pane default is the client's active tab
     /// ([`Self::require_pane_in_active_tab`]), and an in-session-CLI default is
     /// the issuing pane within the acting session
-    /// ([`Self::resolve_pane_in_session`]). Tab targets are the acting
+    /// ([`Self::require_live_source_pane`]). Tab targets are the acting
     /// session's tabs; session-level commands need a resolved session. The
     /// match is exhaustive so a new `Command` variant must declare its scope.
     pub(super) fn resolve_target(
@@ -1242,7 +1228,7 @@ impl Server {
                     CommandSource::InSessionCli { pane_id, .. } => {
                         // The captured pane defines its own tab, or floats; confirm
                         // it is still registered before acting on it.
-                        Self::resolve_pane_in_session(session, *pane_id)?;
+                        Self::require_live_source_pane(session, *pane_id)?;
                         let tab_id = Self::resolve_pane_tab_id(session, *pane_id)?;
                         Ok(PaneTarget {
                             session_id: session.session_id,
@@ -1311,20 +1297,6 @@ impl Server {
             .first()
             .copied()
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))
-    }
-
-    /// Confirm `pane_id` exists in `session`'s registry. Used for the in-session
-    /// CLI default, whose target is the captured `pane_id` (tied to the session,
-    /// not to live focus) — never the global registry.
-    pub(super) fn resolve_pane_in_session(
-        session: &Session,
-        pane_id: PaneId,
-    ) -> Result<(), Rejection> {
-        if session.panes.get_pane_record_by_id(pane_id).is_some() {
-            Ok(())
-        } else {
-            Err(Rejection::from_reason(RejectReason::TargetNotFound))
-        }
     }
 
     /// Confirm `pane_id` is in the client's **active tab** layout AND has a
@@ -1574,7 +1546,7 @@ impl Server {
             }
             None => {
                 if let CommandSource::InSessionCli { pane_id, .. } = command_source {
-                    Self::resolve_pane_in_session(session, *pane_id)?;
+                    Self::require_live_source_pane(session, *pane_id)?;
                     return match Self::resolve_pane_tab_id(session, *pane_id) {
                         Ok(Some(tab_id)) => Ok(tab_id),
                         Ok(None) => Err(Rejection::from_reason_and_help(

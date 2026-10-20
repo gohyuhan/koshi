@@ -710,6 +710,35 @@ fn a_unicode_placeholder_is_rendered_from_the_matching_cell() {
 }
 
 #[test]
+fn a_unicode_placeholder_with_no_diacritics_continues_the_cell_to_its_left() {
+    let mut engine = build_terminal_engine();
+    assert_eq!(
+        engine.process_pty_output(b"\x1b_Ga=t,f=32,s=1,v=1,i=7,q=2;/wAA/w==\x1b\\"),
+        b""
+    );
+    assert_eq!(
+        engine.process_pty_output(b"\x1b_Ga=p,i=7,p=3,c=2,r=2,U=1,C=1,q=2\x1b\\"),
+        b""
+    );
+    // Row 0 and column 0, then a cell with no diacritic: row 0 and column 1.
+    assert_eq!(
+        engine.process_pty_output("\x1b[38;5;7m\u{10eeee}\u{0305}\u{0305}\u{10eeee}".as_bytes()),
+        b""
+    );
+
+    let image_placements = engine
+        .get_terminal_state()
+        .list_image_placements_for_view(0);
+    assert_eq!(image_placements.len(), 1);
+    assert_eq!(image_placements[0].get_image_anchor(), (0, 0));
+    assert_eq!(image_placements[0].get_image_cell_dimensions(), (1, 2));
+    assert_eq!(
+        image_placements[0].get_image_geometry().cell_offset,
+        koshi_core::geometry::Point { column: 0, row: 0 }
+    );
+}
+
+#[test]
 fn a_unicode_placeholder_follows_the_image_into_scrollback() {
     let mut engine = build_terminal_engine();
     assert_eq!(

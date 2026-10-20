@@ -16,8 +16,8 @@
 //! ## Suppressed panes
 //!
 //! The solver clips a pane that cannot fit to an empty rect and marks it
-//! suppressed. These helpers treat every rect with zero `cols` or zero `rows`
-//! as suppressed, regardless of its origin. Occupancy counts it as zero area;
+//! suppressed. These helpers treat every rect with a zero `column_count` or a
+//! zero `row_count` as suppressed, regardless of its origin. Occupancy counts it as zero area;
 //! overlap ignores it; bounds and minimum-size checks skip it.
 //!
 //! ## Live pane references
@@ -31,8 +31,7 @@ use std::collections::HashSet;
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::PaneId;
 
-/// A pane id paired with the rectangle assigned by the layout solver
-/// (`LayoutTree + TabRect -> Vec<(PaneId, Rect)>`).
+/// A pane id paired with the rectangle the layout solver assigns it.
 pub type PlacedPane = (PaneId, Rect);
 
 /// A layout invariant failure with the geometry that caused it.
@@ -118,11 +117,6 @@ impl std::fmt::Display for LayoutAssertionError {
 
 impl std::error::Error for LayoutAssertionError {}
 
-/// Return the cells covered by `rect` as `cols * rows` in `u64`.
-fn compute_cell_area(rect: Rect) -> u64 {
-    u64::from(rect.size.column_count) * u64::from(rect.size.row_count)
-}
-
 /// Check that placed pane areas sum to the tab area.
 ///
 /// Sums `column_count * row_count` for every placed pane and compares the result with the tab area.
@@ -138,9 +132,9 @@ pub fn check_all_space_occupied(
 ) -> Result<(), LayoutAssertionError> {
     let occupied_cell_area: u64 = placed_panes
         .iter()
-        .map(|&(_, pane_rect)| compute_cell_area(pane_rect))
+        .map(|&(_, pane_rect)| u64::from(pane_rect.size.compute_cell_count()))
         .sum();
-    let tab_cell_area = compute_cell_area(tab_rect);
+    let tab_cell_area = u64::from(tab_rect.size.compute_cell_count());
     if occupied_cell_area == tab_cell_area {
         Ok(())
     } else {

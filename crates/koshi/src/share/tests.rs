@@ -2,8 +2,8 @@
 //! subcommands parse, what each answer renders to, the order the secret is
 //! written and flushed in, the refusal inside a pane someone watches from
 //! another machine, the revoke that narrows to one session, the connect
-//! commands for each listen address, and the host addresses each listen
-//! address lists.
+//! commands for each listen address, the host addresses each listen
+//! address lists, and the sessions a `--session` flag can name.
 
 use super::*;
 
@@ -14,7 +14,7 @@ use clap::Parser;
 use koshi_core::client::ClientOrigin;
 use koshi_core::discovery::{ClientDiscovery, SessionDiscovery, SessionOverview};
 use koshi_core::geometry::Size;
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, OwnedSessionId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::remote_tokens::TokenEntry;
@@ -51,7 +51,7 @@ fn parse_share_command(argv: &[&str]) -> ShareCommand {
     }
 }
 
-/// The IP address and port `address_text` names, such as `192.168.1.20:7654`.
+/// The IP address and port `address_text` names, such as `192.0.2.20:7654`.
 fn parse_listen_address(address_text: &str) -> SocketAddr {
     address_text.parse().expect("an address literal")
 }
@@ -256,7 +256,7 @@ fn a_grant_block_with_remote_access_on_ends_with_the_command_that_connects() {
             + &output::render_remote_ready(
                 "alice",
                 &RemoteReady::On {
-                    remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+                    remote_listen_address: parse_listen_address("192.0.2.20:7654"),
                     host_addresses: Vec::new(),
                     certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
                 },
@@ -268,10 +268,10 @@ fn a_grant_block_with_remote_access_on_ends_with_the_command_that_connects() {
             "anyone holding this token can run anything you can.\n\
              f00d\n\
              connect from another machine:\n\
-             \x20 koshi attach --remote 192.168.1.20:7654 --certificate-fingerprint \
+             \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
              {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-             this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); \
+             this machine accepts connections on 192.0.2.20 only (remote-listen in koshi.kdl); \
              the other machine must connect to that address.\n"
         )
     );
@@ -427,7 +427,7 @@ fn an_identity_shaped_like_an_address_is_not_offered_as_a_saved_name() {
     let rendered_output = output::render_remote_ready(
         "desk:22",
         &RemoteReady::On {
-            remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+            remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         },
@@ -437,10 +437,10 @@ fn an_identity_shaped_like_an_address_is_not_offered_as_a_saved_name() {
         rendered_output,
         format!(
             "connect from another machine:\n\
-             \x20 koshi attach --remote 192.168.1.20:7654 --certificate-fingerprint \
+             \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
              {TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-             this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); \
+             this machine accepts connections on 192.0.2.20 only (remote-listen in koshi.kdl); \
              the other machine must connect to that address.\n"
         )
     );
@@ -452,7 +452,7 @@ fn an_identity_with_a_space_in_it_is_not_offered_as_a_saved_name() {
     let rendered_output = output::render_remote_ready(
         "ada lovelace",
         &RemoteReady::On {
-            remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+            remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         },
@@ -462,34 +462,10 @@ fn an_identity_with_a_space_in_it_is_not_offered_as_a_saved_name() {
         rendered_output,
         format!(
             "connect from another machine:\n\
-             \x20 koshi attach --remote 192.168.1.20:7654 --certificate-fingerprint \
+             \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
              {TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-             this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); \
-             the other machine must connect to that address.\n"
-        )
-    );
-}
-
-#[test]
-fn a_plain_identity_is_still_offered_as_the_saved_name() {
-    let rendered_output = output::render_remote_ready(
-        "alice",
-        &RemoteReady::On {
-            remote_listen_address: parse_listen_address("192.168.1.20:7654"),
-            host_addresses: Vec::new(),
-            certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
-        },
-    );
-
-    assert_eq!(
-        rendered_output,
-        format!(
-            "connect from another machine:\n\
-             \x20 koshi attach --remote 192.168.1.20:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
-             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-             this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); \
+             this machine accepts connections on 192.0.2.20 only (remote-listen in koshi.kdl); \
              the other machine must connect to that address.\n"
         )
     );
@@ -505,14 +481,14 @@ fn a_router_that_could_not_answer_leaves_the_state_unread_rather_than_off() {
     assert_eq!(failed_remote_ready, RemoteReady::Unknown);
 
     let answered_remote_ready = resolve_remote_ready_or_unknown(Ok(RemoteReady::On {
-        remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+        remote_listen_address: parse_listen_address("192.0.2.20:7654"),
         host_addresses: Vec::new(),
         certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
     }));
     assert_eq!(
         answered_remote_ready,
         RemoteReady::On {
-            remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+            remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         },
@@ -527,14 +503,14 @@ fn a_router_that_could_not_answer_leaves_the_state_unread_rather_than_off() {
     );
 }
 
-/// A `RemoteStatus` answer for the listen address `192.168.1.20:7654`.
+/// A `RemoteStatus` answer for the listen address `192.0.2.20:7654`.
 fn build_remote_status(
     is_remote_access_enabled: bool,
     is_listening: bool,
     certificate_fingerprint: Option<String>,
 ) -> RouterResult {
     RouterResult::RemoteStatus {
-        remote_listen_address: Some(parse_listen_address("192.168.1.20:7654")),
+        remote_listen_address: Some(parse_listen_address("192.0.2.20:7654")),
         is_remote_access_enabled,
         is_listening,
         certificate_fingerprint,
@@ -560,7 +536,7 @@ fn a_serving_router_gives_the_fingerprint_it_names_and_nothing_is_asked() {
     assert_eq!(
         remote_ready,
         RemoteReady::On {
-            remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+            remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         }
@@ -583,7 +559,7 @@ fn a_serving_router_that_names_no_fingerprint_gives_no_connect_command() {
     };
     assert_eq!(
         detail,
-        "the router serves 192.168.1.20:7654 and named no certificate fingerprint"
+        "the router serves 192.0.2.20:7654 and named no certificate fingerprint"
     );
 }
 
@@ -598,7 +574,7 @@ fn an_enable_the_user_confirms_gives_the_fingerprint_the_router_answers_with() {
         |router_request_kind| match router_request_kind {
             RouterRequestKind::RemoteStatus => Ok(build_remote_status(false, false, None)),
             RouterRequestKind::EnableRemote => Ok(RouterResult::RemoteEnabled {
-                remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+                remote_listen_address: parse_listen_address("192.0.2.20:7654"),
                 certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
             }),
             unexpected_request_kind => panic!("unexpected request {unexpected_request_kind:?}"),
@@ -608,12 +584,12 @@ fn an_enable_the_user_confirms_gives_the_fingerprint_the_router_answers_with() {
 
     assert_eq!(
         asked_prompt_texts,
-        vec!["remote access is off.\nturn it on and open 192.168.1.20:7654? [y/N] ".to_string()]
+        vec!["remote access is off.\nturn it on and open 192.0.2.20:7654? [y/N] ".to_string()]
     );
     assert_eq!(
         remote_ready,
         RemoteReady::On {
-            remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+            remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         }
@@ -642,13 +618,13 @@ fn a_port_held_by_something_else_says_what_to_run_to_try_again() {
     let rendered_text = output::render_remote_ready(
         "alice",
         &RemoteReady::Blocked {
-            remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+            remote_listen_address: parse_listen_address("192.0.2.20:7654"),
         },
     );
 
     assert_eq!(
         rendered_text,
-        "remote access is on, and nothing is listening on 192.168.1.20:7654: another program \
+        "remote access is on, and nothing is listening on 192.0.2.20:7654: another program \
          holds it. Free that address, then run `koshi share grant` again to open the port. This \
          token cannot be used to connect until then.\n"
     );
@@ -1304,8 +1280,8 @@ fn a_listener_on_every_ipv4_address_names_each_address_of_this_machine_with_its_
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("0.0.0.0:7654"),
             host_addresses: vec![
-                build_host_address("192.168.1.20", "en0"),
-                build_host_address("100.64.0.2", "utun3"),
+                build_host_address("192.0.2.20", "en0"),
+                build_host_address("198.51.100.2", "utun3"),
             ],
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         },
@@ -1315,9 +1291,9 @@ fn a_listener_on_every_ipv4_address_names_each_address_of_this_machine_with_its_
         rendered_output,
         format!(
             "connect from another machine, at the address of this one it can reach:\n\
-             \x20 koshi attach --remote 192.168.1.20:7654 --certificate-fingerprint \
+             \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
              {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # en0\n\
-             \x20 koshi attach --remote 100.64.0.2:7654 --certificate-fingerprint \
+             \x20 koshi attach --remote 198.51.100.2:7654 --certificate-fingerprint \
              {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # utun3\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
         )
@@ -1352,7 +1328,7 @@ fn an_interface_name_is_printed_without_its_control_characters() {
         "alice",
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("0.0.0.0:7654"),
-            host_addresses: vec![build_host_address("192.168.1.20", "en0\u{1b}]0;x\u{7}")],
+            host_addresses: vec![build_host_address("192.0.2.20", "en0\u{1b}]0;x\u{7}")],
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         },
     );
@@ -1361,7 +1337,7 @@ fn an_interface_name_is_printed_without_its_control_characters() {
         rendered_output,
         format!(
             "connect from another machine, at the address of this one it can reach:\n\
-             \x20 koshi attach --remote 192.168.1.20:7654 --certificate-fingerprint \
+             \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
              {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # en0]0;x\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
         )
@@ -1391,11 +1367,12 @@ fn a_listener_on_every_address_of_a_machine_with_none_names_a_placeholder() {
 }
 
 #[test]
-fn a_listener_on_one_address_names_it_and_says_it_is_the_only_one() {
+fn a_listener_on_one_address_names_it_as_the_only_one_and_offers_a_plain_identity_as_the_saved_name(
+) {
     let rendered_output = output::render_remote_ready(
         "alice",
         &RemoteReady::On {
-            remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+            remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         },
@@ -1405,10 +1382,10 @@ fn a_listener_on_one_address_names_it_and_says_it_is_the_only_one() {
         rendered_output,
         format!(
             "connect from another machine:\n\
-             \x20 koshi attach --remote 192.168.1.20:7654 --certificate-fingerprint \
+             \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
              {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-             this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); \
+             this machine accepts connections on 192.0.2.20 only (remote-listen in koshi.kdl); \
              the other machine must connect to that address.\n"
         )
     );
@@ -1445,7 +1422,7 @@ fn a_listener_on_a_loopback_address_says_no_other_machine_can_connect() {
 
 #[test]
 fn list_host_addresses_for_listen_address_reads_nothing_for_one_address() {
-    for remote_listen_address in ["192.168.1.20:7654", "[2001:db8::20]:7654", "127.0.0.1:7654"] {
+    for remote_listen_address in ["192.0.2.20:7654", "[2001:db8::20]:7654", "127.0.0.1:7654"] {
         assert_eq!(
             list_host_addresses_for_listen_address(
                 parse_listen_address(remote_listen_address),
@@ -1462,9 +1439,9 @@ fn list_host_addresses_for_listen_address_keeps_the_family_of_the_listen_address
     let list_machine_addresses = || {
         vec![
             build_host_address("2001:db8::20", "en0"),
-            build_host_address("192.168.1.20", "en0"),
-            build_host_address("fd00::5", "utun3"),
-            build_host_address("100.64.0.2", "utun3"),
+            build_host_address("192.0.2.20", "en0"),
+            build_host_address("2001:db8::5", "utun3"),
+            build_host_address("198.51.100.2", "utun3"),
         ]
     };
 
@@ -1474,8 +1451,8 @@ fn list_host_addresses_for_listen_address_keeps_the_family_of_the_listen_address
             list_machine_addresses
         ),
         vec![
-            build_host_address("192.168.1.20", "en0"),
-            build_host_address("100.64.0.2", "utun3"),
+            build_host_address("192.0.2.20", "en0"),
+            build_host_address("198.51.100.2", "utun3"),
         ]
     );
     assert_eq!(
@@ -1485,7 +1462,59 @@ fn list_host_addresses_for_listen_address_keeps_the_family_of_the_listen_address
         ),
         vec![
             build_host_address("2001:db8::20", "en0"),
-            build_host_address("fd00::5", "utun3"),
+            build_host_address("2001:db8::5", "utun3"),
         ]
     );
+}
+
+#[test]
+fn a_session_scope_reads_no_session_of_another_user() {
+    let runtime_directory = koshi_test_support::fixtures::build_test_runtime_directory();
+    #[cfg(unix)]
+    let own_user_id = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(runtime_directory.path())
+            .expect("read the runtime directory")
+            .uid()
+    };
+    #[cfg(windows)]
+    let own_user_id = 1000;
+    let other_user_id = own_user_id + 1;
+    let session_id = SessionId::new();
+
+    assert_eq!(
+        resolve_token_scope(runtime_directory.path(), None).expect("no flag reads nothing"),
+        None
+    );
+    let other_user_scope = resolve_token_scope(
+        runtime_directory.path(),
+        Some(&SessionReference::OwnedSessionId(OwnedSessionId {
+            owner_user_id: other_user_id,
+            session_id,
+        })),
+    );
+    let Err(CliError::SessionNotFound { session_name }) = other_user_scope else {
+        panic!("expected SessionNotFound, got {other_user_scope:?}");
+    };
+    assert_eq!(session_name, format!("{other_user_id}/{session_id}"));
+    #[cfg(unix)]
+    {
+        let own_user_scope = resolve_token_scope(
+            runtime_directory.path(),
+            Some(&SessionReference::OwnedSessionId(OwnedSessionId {
+                owner_user_id: own_user_id,
+                session_id,
+            })),
+        );
+        let Err(CliError::InvalidArgs { detail }) = own_user_scope else {
+            panic!("expected InvalidArgs, got {own_user_scope:?}");
+        };
+        assert_eq!(
+            detail,
+            format!(
+                "{own_user_id}/{session_id} names a session of yours; name it by its id alone: \
+                 `{session_id}`"
+            )
+        );
+    }
 }

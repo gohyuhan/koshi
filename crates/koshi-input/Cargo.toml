@@ -10,3 +10,6 @@ koshi-core.workspace = true
 [[bench]]
 name = "host_input"
 harness = false
+
+[lints]
+workspace = true

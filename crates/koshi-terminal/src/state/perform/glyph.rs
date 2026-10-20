@@ -9,19 +9,133 @@
 //! (`U+FF9E`, `U+FF9F`), and a continuation that makes its cluster wider than
 //! 2 columns, start a new cell.
 
-use crate::grid::state::{Cell, RowEnd};
-use crate::state::{rebuild_cell_with_width, TerminalState};
+use crate::grid::state::{Cell, RowEnd, MAX_GRAPHEME_CONTINUATION_COUNT};
+use crate::state::{rebuild_cell_with_width, Charset, TerminalState};
 use koshi_core::display_width::{compute_text_display_width, is_halfwidth_katakana_sound_mark};
 use unicode_segmentation::GraphemeCursor;
 
-/// Upper bound on the continuation code points one cell keeps in its
-/// `combining` tail. A continuation that arrives when the base already holds
-/// this many is dropped. A real grapheme cluster — a skin-toned ZWJ
-/// (zero-width joiner) emoji family included — stays well under it; a flood of
-/// combining marks ("zalgo" text) reaches it.
-pub(super) const MAX_GRAPHEME_CONTINUATION_COUNT: usize = 32;
-
 impl TerminalState {
+    /// Print every character of `printed_text` in order, as one `print` call
+    /// per character leaves the screen, the cursor and the grapheme cluster.
+    ///
+    /// Each run of printable ASCII characters that fits before the right wrap
+    /// bound is written into its row at once; every other character goes
+    /// through `print`. Example — `ab\u{301}c` at column 0 writes `ab` at once,
+    /// folds `\u{301}` onto `b`, then writes `c` at column 2.
+    pub(crate) fn print_text(&mut self, printed_text: &str) {
+        let mut unprinted_text = printed_text;
+        while let Some(first_character) = unprinted_text.chars().next() {
+            let printed_byte_count = match self.print_ascii_run(unprinted_text.as_bytes()) {
+                0 => {
+                    vte::Perform::print(self, first_character);
+                    first_character.len_utf8()
+                }
+                ascii_byte_count => ascii_byte_count,
+            };
+            unprinted_text = &unprinted_text[printed_byte_count..];
+        }
+    }
+
+    /// Print the leading printable ASCII characters (`0x20`–`0x7E`) of
+    /// `text_bytes` that fit on the cursor row up to the right wrap bound, and
+    /// return how many it printed. Each cell, the cursor, the wrap latch and the
+    /// grapheme cluster end as `print` leaves them for the same characters.
+    ///
+    /// Prints nothing and returns `0` when the first byte is not printable
+    /// ASCII, the wrap latch is armed, insert mode (IRM) is on, the active
+    /// charset is not ASCII, or the grapheme cluster built so far holds more
+    /// than one byte.
+    ///
+    /// The run blanks, in the pen background, the base of a wide glyph whose
+    /// right half is its first cell, and the right half of a wide glyph whose
+    /// base is its last cell. It clears the image fragments of every cell it
+    /// writes or blanks.
+    fn print_ascii_run(&mut self, text_bytes: &[u8]) -> usize {
+        let Some(first_text_byte) = text_bytes.first() else {
+            return 0;
+        };
+        if !is_printable_ascii_byte(*first_text_byte)
+            || self.get_active_cursor().is_wrap_pending
+            || self.modes.is_insert_mode_enabled
+            || self.cluster.len() > 1
+            || self.get_active_charset() != Charset::Ascii
+        {
+            return 0;
+        }
+        let (_, last_column_index) = self.get_horizontal_wrap_bounds();
+        let cursor_row_index = self.get_active_cursor().row;
+        let first_column_index = self.get_active_cursor().column;
+        let row_room_count = usize::from(last_column_index.saturating_sub(first_column_index)) + 1;
+        let ascii_byte_count = text_bytes[..text_bytes.len().min(row_room_count)]
+            .iter()
+            .take_while(|text_byte| is_printable_ascii_byte(**text_byte))
+            .count();
+        let last_written_column_index = first_column_index + (ascii_byte_count as u16 - 1);
+
+        let active_grid = self.get_active_grid();
+        let is_first_cell_wide_glyph_right_half = first_column_index > 0
+            && active_grid
+                .get_cell(cursor_row_index, first_column_index)
+                .is_some_and(|cell| cell.get_display_width() == 0);
+        let is_last_cell_wide_glyph_base = active_grid
+            .get_cell(cursor_row_index, last_written_column_index)
+            .is_some_and(|cell| cell.get_display_width() == 2);
+        let (_, column_count) = active_grid.get_grid_dimensions();
+        let cleared_first_column_index = if is_first_cell_wide_glyph_right_half {
+            first_column_index - 1
+        } else {
+            first_column_index
+        };
+        let cleared_end_column_index = if is_last_cell_wide_glyph_base {
+            last_written_column_index + 2
+        } else {
+            last_written_column_index + 1
+        };
+        self.clear_images_at_cells(
+            cursor_row_index,
+            cleared_first_column_index,
+            cleared_end_column_index - cleared_first_column_index,
+        );
+
+        let style = self.get_active_render().style;
+        let background_style = style.get_background_fill_style();
+        let active_grid = self.get_active_grid_mut();
+        if is_first_cell_wide_glyph_right_half {
+            if let Some(wide_glyph_base_cell) =
+                active_grid.get_cell_mut(cursor_row_index, first_column_index - 1)
+            {
+                *wide_glyph_base_cell = Cell::build_blank_with_style(background_style);
+            }
+        }
+        if is_last_cell_wide_glyph_base {
+            if let Some(wide_glyph_right_half_cell) =
+                active_grid.get_cell_mut(cursor_row_index, last_written_column_index + 1)
+            {
+                *wide_glyph_right_half_cell = Cell::build_blank_with_style(background_style);
+            }
+        }
+        active_grid.write_ascii_cells(
+            cursor_row_index,
+            first_column_index,
+            &text_bytes[..ascii_byte_count],
+            style,
+        );
+        if last_written_column_index + 1 >= column_count {
+            active_grid.set_row_end(cursor_row_index, RowEnd::Hard);
+        }
+
+        self.cluster.clear();
+        self.cluster
+            .push(char::from(text_bytes[ascii_byte_count - 1]));
+        self.cluster_base = Some((cursor_row_index, last_written_column_index));
+        if last_written_column_index >= last_column_index {
+            self.arm_wrap_latch();
+        } else {
+            self.get_active_cursor_mut().column = last_written_column_index + 1;
+        }
+        ascii_byte_count
+    }
+
     /// Discard any in-progress grapheme cluster. Every non-printing event
     /// (control bytes, CSI / ESC / OSC, DCS hook/unhook) calls it; a
     /// continuation printed after one starts a new cluster.
@@ -366,4 +480,10 @@ impl TerminalState {
             }
         }
     }
+}
+
+/// Whether `text_byte` is a printable ASCII character: `0x20` (space) through
+/// `0x7E` (`~`).
+fn is_printable_ascii_byte(text_byte: u8) -> bool {
+    (0x20..=0x7e).contains(&text_byte)
 }

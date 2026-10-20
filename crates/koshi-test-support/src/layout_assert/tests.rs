@@ -4,11 +4,6 @@ use super::*;
 use crate::fixtures::build_cell_rect;
 use koshi_core::geometry::Point;
 
-/// Create a standard 80×24 cell tab rectangle.
-fn build_tab_rect() -> Rect {
-    build_cell_rect(0, 0, 80, 24)
-}
-
 /// Two panes split left/right that exactly tile the tab.
 fn build_left_right_split() -> Vec<PlacedPane> {
     vec![
@@ -20,9 +15,9 @@ fn build_left_right_split() -> Vec<PlacedPane> {
 #[test]
 fn full_tiling_passes_all_invariants() {
     let panes = build_left_right_split();
-    check_all_space_occupied(&panes, build_tab_rect()).unwrap();
+    check_all_space_occupied(&panes, build_cell_rect(0, 0, 80, 24)).unwrap();
     check_no_overlap(&panes).unwrap();
-    check_no_outside(&panes, build_tab_rect()).unwrap();
+    check_no_outside(&panes, build_cell_rect(0, 0, 80, 24)).unwrap();
     check_minimum_size_respected(
         &panes,
         Size {
@@ -53,7 +48,8 @@ fn gap_fails_occupancy() {
         (PaneId::new(), build_cell_rect(0, 0, 40, 24)),
         (PaneId::new(), build_cell_rect(40, 0, 39, 24)),
     ];
-    let assertion_error = check_all_space_occupied(&panes, build_tab_rect()).unwrap_err();
+    let assertion_error =
+        check_all_space_occupied(&panes, build_cell_rect(0, 0, 80, 24)).unwrap_err();
     assert_eq!(
         assertion_error,
         LayoutAssertionError::SpaceNotFullyOccupied {
@@ -102,13 +98,13 @@ fn overlap_is_detected_and_names_both_panes() {
 fn pane_past_tab_edge_fails_no_outside() {
     let pane_id = PaneId::new();
     let panes = vec![(pane_id, build_cell_rect(40, 0, 41, 24))];
-    let assertion_error = check_no_outside(&panes, build_tab_rect()).unwrap_err();
+    let assertion_error = check_no_outside(&panes, build_cell_rect(0, 0, 80, 24)).unwrap_err();
     assert_eq!(
         assertion_error,
         LayoutAssertionError::OutsideTab {
             pane_id,
             pane_rect: build_cell_rect(40, 0, 41, 24),
-            tab_rect: build_tab_rect(),
+            tab_rect: build_cell_rect(0, 0, 80, 24),
         }
     );
 }
@@ -161,7 +157,8 @@ fn dead_pane_reference_is_detected() {
 #[test]
 fn empty_pane_list_fails_occupancy_against_nonempty_tab() {
     let panes: Vec<PlacedPane> = Vec::new();
-    let assertion_error = check_all_space_occupied(&panes, build_tab_rect()).unwrap_err();
+    let assertion_error =
+        check_all_space_occupied(&panes, build_cell_rect(0, 0, 80, 24)).unwrap_err();
     assert_eq!(
         assertion_error,
         LayoutAssertionError::SpaceNotFullyOccupied {
@@ -175,7 +172,7 @@ fn empty_pane_list_fails_occupancy_against_nonempty_tab() {
 fn empty_pane_list_vacuously_passes_overlap_outside_and_min_size() {
     let panes: Vec<PlacedPane> = Vec::new();
     check_no_overlap(&panes).unwrap();
-    check_no_outside(&panes, build_tab_rect()).unwrap();
+    check_no_outside(&panes, build_cell_rect(0, 0, 80, 24)).unwrap();
     check_minimum_size_respected(
         &panes,
         Size {
@@ -188,10 +185,10 @@ fn empty_pane_list_vacuously_passes_overlap_outside_and_min_size() {
 
 #[test]
 fn single_pane_exactly_fills_tab_passes_all_invariants() {
-    let panes = vec![(PaneId::new(), build_tab_rect())];
-    check_all_space_occupied(&panes, build_tab_rect()).unwrap();
+    let panes = vec![(PaneId::new(), build_cell_rect(0, 0, 80, 24))];
+    check_all_space_occupied(&panes, build_cell_rect(0, 0, 80, 24)).unwrap();
     check_no_overlap(&panes).unwrap();
-    check_no_outside(&panes, build_tab_rect()).unwrap();
+    check_no_outside(&panes, build_cell_rect(0, 0, 80, 24)).unwrap();
     check_minimum_size_respected(
         &panes,
         Size {
@@ -260,9 +257,9 @@ fn suppressed_panes_are_exempt() {
         (PaneId::new(), Rect::build_empty_at_origin()),
     ];
     // Empty pane adds no area, no overlap, no outside, and skips the floor.
-    check_all_space_occupied(&panes, build_tab_rect()).unwrap();
+    check_all_space_occupied(&panes, build_cell_rect(0, 0, 80, 24)).unwrap();
     check_no_overlap(&panes).unwrap();
-    check_no_outside(&panes, build_tab_rect()).unwrap();
+    check_no_outside(&panes, build_cell_rect(0, 0, 80, 24)).unwrap();
     check_minimum_size_respected(
         &panes,
         Size {
@@ -323,7 +320,11 @@ fn a_suppressed_pane_placed_outside_the_tab_is_still_exempt() {
             row_count: 0,
         },
     );
-    check_no_outside(&[(PaneId::new(), far_away_rect)], build_tab_rect()).unwrap();
+    check_no_outside(
+        &[(PaneId::new(), far_away_rect)],
+        build_cell_rect(0, 0, 80, 24),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -358,12 +359,12 @@ fn every_error_variant_displays_its_geometry() {
             LayoutAssertionError::OutsideTab {
                 pane_id: first_pane_id,
                 pane_rect: build_cell_rect(40, 0, 41, 24),
-                tab_rect: build_tab_rect(),
+                tab_rect: build_cell_rect(0, 0, 80, 24),
             },
             format!(
                 "pane {first_pane_id} {:?} extends outside the tab {:?}",
                 build_cell_rect(40, 0, 41, 24),
-                build_tab_rect()
+                build_cell_rect(0, 0, 80, 24)
             ),
         ),
         (
@@ -412,7 +413,7 @@ fn overlapping_panes_whose_areas_sum_to_the_tab_pass_occupancy_and_fail_overlap(
         (first_pane_id, build_cell_rect(0, 0, 80, 12)),
         (second_pane_id, build_cell_rect(0, 0, 80, 12)),
     ];
-    check_all_space_occupied(&panes, build_tab_rect()).unwrap();
+    check_all_space_occupied(&panes, build_cell_rect(0, 0, 80, 24)).unwrap();
     assert_eq!(
         check_no_overlap(&panes).unwrap_err(),
         LayoutAssertionError::Overlap {
@@ -429,13 +430,13 @@ fn overlapping_panes_whose_areas_sum_to_the_tab_pass_occupancy_and_fail_overlap(
 fn a_pane_outside_the_tab_with_the_tab_area_passes_occupancy_and_fails_no_outside() {
     let pane_id = PaneId::new();
     let panes = vec![(pane_id, build_cell_rect(80, 0, 80, 24))];
-    check_all_space_occupied(&panes, build_tab_rect()).unwrap();
+    check_all_space_occupied(&panes, build_cell_rect(0, 0, 80, 24)).unwrap();
     assert_eq!(
-        check_no_outside(&panes, build_tab_rect()).unwrap_err(),
+        check_no_outside(&panes, build_cell_rect(0, 0, 80, 24)).unwrap_err(),
         LayoutAssertionError::OutsideTab {
             pane_id,
             pane_rect: build_cell_rect(80, 0, 80, 24),
-            tab_rect: build_tab_rect(),
+            tab_rect: build_cell_rect(0, 0, 80, 24),
         }
     );
 }
@@ -518,8 +519,8 @@ fn a_zero_minimum_passes_every_live_pane() {
 
 #[test]
 fn a_pane_whose_edge_passes_u16_max_is_reported_not_wrapped() {
-    // x + cols = 65_536 does not fit in u16. The check computes the edge in
-    // u32 and reports the pane as outside; a u16 edge would wrap to column 0.
+    // The right edge, 65_534 + 2 = 65_536, does not fit in u16. The check
+    // computes the edge in u32 and reports the pane as outside.
     let pane_id = PaneId::new();
     let maximum_tab_rect = build_cell_rect(0, 0, u16::MAX, u16::MAX);
     let spilled_rect = build_cell_rect(u16::MAX - 1, 0, 2, 1);
@@ -605,7 +606,7 @@ fn a_leaf_pane_listed_twice_passes_when_it_is_live() {
 
 #[test]
 fn exact_tiling_passes_on_a_full_split() {
-    check_exact_tiling(&build_left_right_split(), build_tab_rect()).unwrap();
+    check_exact_tiling(&build_left_right_split(), build_cell_rect(0, 0, 80, 24)).unwrap();
 }
 
 #[test]
@@ -618,7 +619,7 @@ fn exact_tiling_reports_the_occupancy_failure_first() {
         (PaneId::new(), build_cell_rect(0, 0, 40, 24)),
     ];
     assert_eq!(
-        check_exact_tiling(&panes, build_tab_rect()).unwrap_err(),
+        check_exact_tiling(&panes, build_cell_rect(0, 0, 80, 24)).unwrap_err(),
         LayoutAssertionError::SpaceNotFullyOccupied {
             tab_cell_area: 80 * 24,
             occupied_cell_area: 3 * 40 * 24,
@@ -636,7 +637,7 @@ fn exact_tiling_reports_an_overlap_when_the_area_sums_up() {
         (second_pane_id, build_cell_rect(39, 0, 40, 24)),
     ];
     assert_eq!(
-        check_exact_tiling(&panes, build_tab_rect()).unwrap_err(),
+        check_exact_tiling(&panes, build_cell_rect(0, 0, 80, 24)).unwrap_err(),
         LayoutAssertionError::Overlap {
             first_pane_id,
             first_pane_rect: build_cell_rect(0, 0, 40, 24),
@@ -657,11 +658,11 @@ fn exact_tiling_reports_a_spill_when_the_area_sums_up_and_nothing_overlaps() {
         (second_pane_id, build_cell_rect(41, 0, 40, 24)),
     ];
     assert_eq!(
-        check_exact_tiling(&panes, build_tab_rect()).unwrap_err(),
+        check_exact_tiling(&panes, build_cell_rect(0, 0, 80, 24)).unwrap_err(),
         LayoutAssertionError::OutsideTab {
             pane_id: second_pane_id,
             pane_rect: build_cell_rect(41, 0, 40, 24),
-            tab_rect: build_tab_rect(),
+            tab_rect: build_cell_rect(0, 0, 80, 24),
         }
     );
 }

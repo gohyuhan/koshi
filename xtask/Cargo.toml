@@ -7,3 +7,6 @@ publish = false
 
 [dependencies]
 cargo_metadata.workspace = true
+
+[lints]
+workspace = true

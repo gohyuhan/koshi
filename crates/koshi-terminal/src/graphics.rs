@@ -118,7 +118,7 @@ impl<'de> Visitor<'de> for GraphicsTransportVisitor {
 
     fn visit_map<MapReader>(
         self,
-        mut transport_state_map: MapReader,
+        mut map_access: MapReader,
     ) -> Result<Self::Value, MapReader::Error>
     where
         MapReader: MapAccess<'de>,
@@ -131,13 +131,13 @@ impl<'de> Visitor<'de> for GraphicsTransportVisitor {
         let mut is_tmux_continuation = None;
         let mut tmux_inner_transport = None;
 
-        while let Some(field_name) = transport_state_map.next_key::<String>()? {
+        while let Some(field_name) = map_access.next_key::<String>()? {
             match field_name.as_str() {
                 "carry_bytes" => {
                     if carry_bytes.is_some() {
                         return Err(de::Error::duplicate_field("carry_bytes"));
                     }
-                    carry_bytes = Some(transport_state_map.next_value_seed(
+                    carry_bytes = Some(map_access.next_value_seed(
                         BoundedBytesSeed::from_byte_limit_and_error_label(
                             MAX_GRAPHICS_CARRY_BYTE_COUNT,
                             "graphics carry",
@@ -148,48 +148,46 @@ impl<'de> Visitor<'de> for GraphicsTransportVisitor {
                     if is_carryable.is_some() {
                         return Err(de::Error::duplicate_field("is_carryable"));
                     }
-                    is_carryable = Some(transport_state_map.next_value()?);
+                    is_carryable = Some(map_access.next_value()?);
                 }
                 "graphics_abandonment" => {
                     if graphics_abandonment.is_some() {
                         return Err(de::Error::duplicate_field("graphics_abandonment"));
                     }
-                    graphics_abandonment = Some(transport_state_map.next_value()?);
+                    graphics_abandonment = Some(map_access.next_value()?);
                 }
                 "is_screen_continuation" => {
                     if is_screen_continuation.is_some() {
                         return Err(de::Error::duplicate_field("is_screen_continuation"));
                     }
-                    is_screen_continuation = Some(transport_state_map.next_value()?);
+                    is_screen_continuation = Some(map_access.next_value()?);
                 }
                 "screen_inner_transport" => {
                     if screen_inner_transport.is_some() {
                         return Err(de::Error::duplicate_field("screen_inner_transport"));
                     }
-                    screen_inner_transport = Some(transport_state_map.next_value_seed(
-                        GraphicsTransportOptionSeed {
+                    screen_inner_transport =
+                        Some(map_access.next_value_seed(GraphicsTransportOptionSeed {
                             wrapper_depth: self.wrapper_depth.saturating_add(1),
-                        },
-                    )?);
+                        })?);
                 }
                 "is_tmux_continuation" => {
                     if is_tmux_continuation.is_some() {
                         return Err(de::Error::duplicate_field("is_tmux_continuation"));
                     }
-                    is_tmux_continuation = Some(transport_state_map.next_value()?);
+                    is_tmux_continuation = Some(map_access.next_value()?);
                 }
                 "tmux_inner_transport" => {
                     if tmux_inner_transport.is_some() {
                         return Err(de::Error::duplicate_field("tmux_inner_transport"));
                     }
-                    tmux_inner_transport = Some(transport_state_map.next_value_seed(
-                        GraphicsTransportOptionSeed {
+                    tmux_inner_transport =
+                        Some(map_access.next_value_seed(GraphicsTransportOptionSeed {
                             wrapper_depth: self.wrapper_depth.saturating_add(1),
-                        },
-                    )?);
+                        })?);
                 }
                 _ => {
-                    let _: de::IgnoredAny = transport_state_map.next_value()?;
+                    let _: de::IgnoredAny = map_access.next_value()?;
                 }
             }
         }
@@ -400,6 +398,16 @@ impl GraphicsParser {
         let mut completed_graphics_events = Vec::new();
         let mut byte_offset = 0;
         while byte_offset < graphics_bytes.len() {
+            let ground_text_byte_count =
+                self.count_ground_text_bytes(&graphics_bytes[byte_offset..]);
+            if ground_text_byte_count != 0 {
+                byte_offset += ground_text_byte_count;
+                continue;
+            }
+            if self.skip_escape_without_graphics(&graphics_bytes[byte_offset..]) {
+                byte_offset += 2;
+                continue;
+            }
             if self.consume_utf8_byte(graphics_bytes[byte_offset]) {
                 byte_offset += 1;
                 continue;
@@ -454,6 +462,46 @@ impl GraphicsParser {
             completed_graphics_events: graphics_events,
             terminal_inert_ranges,
         }
+    }
+
+    /// The count of leading bytes of `graphics_bytes` that leave the parser as
+    /// it is: in ground with no code point open, every byte of the complete
+    /// UTF-8 text before the first CAN, SUB or ESC. `0` in any other state.
+    ///
+    /// Example — in ground, `ab\x1b[1m` gives `2`, and `ab\xe2\x94` gives `2`:
+    /// the open code point is left to [`consume_utf8_byte`](Self::consume_utf8_byte).
+    fn count_ground_text_bytes(&self, graphics_bytes: &[u8]) -> usize {
+        if !matches!(self.graphics_state, GraphicsState::Ground)
+            || self.remaining_utf8_continuation_count != 0
+        {
+            return 0;
+        }
+        let control_byte_index =
+            memchr::memchr3(0x18, 0x1a, 0x1b, graphics_bytes).unwrap_or(graphics_bytes.len());
+        count_valid_utf8_prefix_bytes(&graphics_bytes[..control_byte_index])
+    }
+
+    /// Skip an `ESC` and the byte after it while the parser stands in ground,
+    /// when that byte opens no string and cancels nothing: not `P`, `_`, `]`,
+    /// `X`, `^`, `ESC`, CAN or SUB. Returns whether it skipped them. The parser
+    /// then stands in ground with nothing pending, as feeding the two bytes one
+    /// at a time leaves it. Example — in ground, `\x1b[1m` skips `\x1b[`, and
+    /// `\x1b_G` skips nothing.
+    fn skip_escape_without_graphics(&mut self, graphics_bytes: &[u8]) -> bool {
+        if !matches!(self.graphics_state, GraphicsState::Ground) {
+            return false;
+        }
+        let [0x1b, escape_final_byte, ..] = graphics_bytes else {
+            return false;
+        };
+        if matches!(
+            *escape_final_byte,
+            0x18 | 0x1a | 0x1b | b'P' | b'_' | b']' | b'X' | b'^'
+        ) {
+            return false;
+        }
+        self.reset_graphics_parser();
+        true
     }
 
     fn consume_utf8_byte(&mut self, graphics_byte: u8) -> bool {
@@ -2213,5 +2261,18 @@ impl ScreenParser {
     }
 }
 
+/// The byte count of the longest prefix of `text_bytes` that is valid UTF-8.
+///
+/// Example — `ab\u{e9}` gives `4`, and `ab\xe2\x94` gives `2`.
+pub(crate) fn count_valid_utf8_prefix_bytes(text_bytes: &[u8]) -> usize {
+    if text_bytes.is_ascii() {
+        return text_bytes.len();
+    }
+    match std::str::from_utf8(text_bytes) {
+        Ok(_) => text_bytes.len(),
+        Err(utf8_error) => utf8_error.valid_up_to(),
+    }
+}
+
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

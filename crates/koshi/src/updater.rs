@@ -9,14 +9,14 @@
 //! `koshi` binary, copy it beside the program file, run the copy with
 //! `--version`, and swap the copy in once it prints the release's version. A
 //! build from source downloads nothing. An interactive launch also calls
-//! `prompt_startup_update`, which does the same check on a timer and offers to
-//! install.
+//! `prompt_startup_update`, which offers the newer release an earlier check
+//! found, and starts the same check on a timer in a background thread.
 //!
 //! Two files back this. `koshi.kdl` holds the preferences koshi reads:
 //! `update.auto-check`, `update.check-interval-days`, and
 //! `update.allow-prerelease`. `update.json` in the state directory holds the
-//! last-check time, the one value this module writes. This module does not
-//! write `koshi.kdl`.
+//! last-check time and the release waiting to be offered, the two values this
+//! module writes. This module does not write `koshi.kdl`.
 //!
 //! The CLI process runs this flow once per command, and reads the clock and
 //! the network directly. After every update, whatever it did, it asks the
@@ -224,10 +224,19 @@ pub fn run_restart_servers_command() -> Result<(), CliError> {
 }
 
 /// On an interactive launch, delete the stale backups as
-/// `delete_stale_backups` states. Then, when auto-check is enabled and a check
-/// is due, look for a newer release and offer to install it. Every failure is
-/// swallowed and the launch continues. Runs before the terminal enters raw
-/// mode, and reads the answer from plain standard input.
+/// `delete_stale_backups` states. Then, when auto-check is enabled:
+///
+/// 1. Take the release an earlier check left in `update.json` to be offered,
+///    and write the file back without it. Each found release is offered once.
+/// 2. When a check is due, start a background thread that checks GitHub for
+///    a newer release and records the result in `update.json`. Nothing waits
+///    for it.
+/// 3. Offer to install the taken release when it is newer than this build,
+///    and it is a stable release or pre-releases are allowed. A tag that does
+///    not parse as a version is not offered.
+///
+/// Every failure is swallowed and the launch continues. Runs before the
+/// terminal enters raw mode, and reads the answer from plain standard input.
 ///
 /// A build from source, and a koshi whose path cannot be read, offer nothing.
 /// A Homebrew install is offered stable releases only. A yes installs the
@@ -250,21 +259,22 @@ pub fn prompt_startup_update() {
     else {
         return;
     };
-    let mut update_state = load_update_state();
-    if !is_update_due(&update_state, update_config.check_interval_days) {
-        return;
-    }
-    // The attempt is recorded before the network call, whatever that call
-    // answers: a check that fails or hangs is tried again only once a full
-    // interval has passed.
-    update_state.last_check_unix_seconds = Some(get_current_unix_seconds());
-    let _ = save_update_state(&update_state);
     let should_allow_prerelease_updates = update_config.should_allow_prerelease_updates
         && !matches!(release_install, ReleaseInstall::Homebrew { .. });
-    let release_tag = match check_for_update(should_allow_prerelease_updates) {
-        Ok(Some(release_tag)) => release_tag,
-        Ok(None) | Err(_) => return,
+    let mut update_state = load_update_state();
+    let found_release_tag = update_state.available_release_tag.take();
+    if found_release_tag.is_some() {
+        let _ = save_update_state(&update_state);
+    }
+    if is_update_due(&update_state, update_config.check_interval_days) {
+        start_update_check(should_allow_prerelease_updates);
+    }
+    let Some(release_tag) = found_release_tag else {
+        return;
     };
+    if !is_release_offered(&release_tag, should_allow_prerelease_updates) {
+        return;
+    }
 
     let update_prompt = format!(
         "koshi {} is available (you have {APP_VERSION}). Update now? [y/N] ",
@@ -287,6 +297,53 @@ pub fn prompt_startup_update() {
         }
         Err(update_install_error) => eprintln!("koshi: update failed: {update_install_error}"),
     }
+}
+
+/// Start a thread that checks GitHub for a newer release as
+/// [`check_for_update`] does, then records the result in `update.json` as
+/// [`record_update_check_result`] states. Nothing waits for the thread: a
+/// process that ends first ends the check, and nothing is recorded. A thread
+/// that cannot start checks nothing.
+fn start_update_check(should_allow_prerelease_updates: bool) {
+    let _ = std::thread::Builder::new()
+        .name("koshi-update-check".to_string())
+        .spawn(move || {
+            let check_result = check_for_update(should_allow_prerelease_updates);
+            let mut update_state = load_update_state();
+            record_update_check_result(&mut update_state, check_result, get_current_unix_seconds());
+            let _ = save_update_state(&update_state);
+        });
+}
+
+/// Record in `update_state` a check that ended with `check_result` at
+/// `checked_at_unix_seconds`.
+///
+/// The check time becomes the last-check time. A newer release found becomes
+/// the release the next launch offers, and a check that found none clears the
+/// offer. A failed check keeps the offer that waits.
+fn record_update_check_result(
+    update_state: &mut UpdateState,
+    check_result: Result<Option<String>, String>,
+    checked_at_unix_seconds: u64,
+) {
+    update_state.last_check_unix_seconds = Some(checked_at_unix_seconds);
+    if let Ok(available_release_tag) = check_result {
+        update_state.available_release_tag = available_release_tag;
+    }
+}
+
+/// Whether a launch offers `release_tag`, the release an earlier check found:
+/// the release is newer than this build, and it is a stable release or
+/// `should_allow_prerelease_updates` is `true`. A tag that does not parse as
+/// a version is not offered.
+///
+/// `v9.0.0-rc.1` with pre-releases not allowed gives `false`.
+fn is_release_offered(release_tag: &str, should_allow_prerelease_updates: bool) -> bool {
+    let Ok(release_version) = Version::parse(strip_version_prefix(release_tag)) else {
+        return false;
+    };
+    is_release_newer(release_tag)
+        && (should_allow_prerelease_updates || release_version.pre.is_empty())
 }
 
 /// Install the release `release_tag` the way `release_install` takes updates.
@@ -393,7 +450,7 @@ enum RestartScope<'program_path> {
 /// How long a router or session has to answer the Restart request, and then
 /// to come back answering Hello with the installed version. A session that
 /// took the Restart has
-/// [`SESSION_ANSWER_TIMEOUT_DURATION`](ipc_client::SESSION_ANSWER_TIMEOUT_DURATION)
+/// [`SERVER_ANSWER_TIMEOUT_DURATION`](ipc_client::SERVER_ANSWER_TIMEOUT_DURATION)
 /// more to answer its `Commit`.
 const RESTART_CONFIRM_WAIT_DURATION: Duration = Duration::from_secs(20);
 
@@ -896,6 +953,7 @@ fn probe_restarted_session(
         runtime_directory,
         None,
         session_id,
+        None,
         Some(probe_deadline),
     ) {
         Ok(session_hello_answer) => {
@@ -1154,7 +1212,7 @@ fn end_sessions_without_restart_request(
     for (session_runtime_directory, session_id) in
         other_sessions.into_iter().chain(own_pane_sessions)
     {
-        match end_session(session_runtime_directory, None, *session_id) {
+        match end_session(session_runtime_directory, None, *session_id, None) {
             Ok(_) => {
                 let _ = writeln!(
                     io::stdout(),
@@ -1334,7 +1392,11 @@ pub fn format_koshi_0_1_0_window_note(
 /// Ask every session `runtime_directory` advertises to restart, waiting up to
 /// `wait_duration` on each for a Hello reporting `installed_version` from
 /// another process image than the one that took the Restart, and hand back
-/// each result. Example: a session that answered `Restarting` and still
+/// each result in the order the directory lists the sessions. Up to
+/// [`MAX_SESSIONS_ASKED_AT_ONCE`](ipc_client::MAX_SESSIONS_ASKED_AT_ONCE)
+/// sessions restart at the same time, as
+/// [`ask_sessions_at_once`](ipc_client::ask_sessions_at_once) asks them with
+/// no deadline. Example: a session that answered `Restarting` and still
 /// answers its Hello from the same image, reporting `installed_version`, has
 /// not restarted yet, and the wait goes on.
 ///
@@ -1357,7 +1419,7 @@ pub fn format_koshi_0_1_0_window_note(
 /// than this build, and [`SessionOutcome::Incompatible`] otherwise. A session
 /// of koshi 0.2.0 or older gives [`SessionOutcome::WithoutRestartRequest`].
 /// One session's failure never ends the walk: every advertised session is
-/// asked, whatever the one before it answered.
+/// asked, whatever another one answered.
 ///
 /// # Errors
 /// [`UnreadPath`] naming `runtime_directory` when it cannot be read, other than
@@ -1368,8 +1430,9 @@ fn restart_advertised_sessions(
     restart_scope: RestartScope,
     wait_duration: Duration,
 ) -> Result<Vec<(SessionId, SessionOutcome)>, UnreadPath> {
-    let mut session_outcomes = Vec::new();
-    for session_id in ipc_client::list_advertised_sessions(runtime_directory)? {
+    let session_ids = ipc_client::list_advertised_sessions(runtime_directory)?;
+    let session_answers = ipc_client::ask_sessions_at_once(&session_ids, None, |session_id| {
+        let session_id = *session_id;
         let session_program_file_path =
             ServerProgramFile::resolve_session_program_file_path(runtime_directory, session_id);
         let session_endpoint_path =
@@ -1394,8 +1457,7 @@ fn restart_advertised_sessions(
             _ => None,
         };
         if let Some(left_running_outcome) = left_running_outcome {
-            session_outcomes.push((session_id, left_running_outcome));
-            continue;
+            return Ok(Some(left_running_outcome));
         }
         let wait_for_installed_version = |asked_process_image_id: Option<ProcessImageId>| {
             wait_for_restart_into_version(installed_version, wait_duration, || {
@@ -1409,7 +1471,7 @@ fn restart_advertised_sessions(
             Instant::now() + wait_duration,
         );
         let session_outcome = match session_restart {
-            Ok(SessionRestart::NotRunning) => continue,
+            Ok(SessionRestart::NotRunning) => return Ok(None),
             Ok(SessionRestart::WithoutRestartRequest) => SessionOutcome::WithoutRestartRequest,
             Ok(SessionRestart::Restarting {
                 asked_process_image_id,
@@ -1445,11 +1507,23 @@ fn restart_advertised_sessions(
                 detail: refusal_detail,
             }) => SessionOutcome::Incompatible(refusal_detail),
             Err(CliError::SessionAnswerTimedOut) => SessionOutcome::Unconfirmed,
-            Err(session_restart_error) => SessionOutcome::Failed(session_restart_error.to_string()),
+            Err(session_restart_error) => return Err(session_restart_error),
         };
-        session_outcomes.push((session_id, session_outcome));
-    }
-    Ok(session_outcomes)
+        Ok(Some(session_outcome))
+    });
+    Ok(session_ids
+        .into_iter()
+        .zip(session_answers)
+        .filter_map(|(session_id, session_answer)| {
+            let session_outcome = match session_answer {
+                Ok(session_outcome) => session_outcome?,
+                Err(session_restart_error) => {
+                    SessionOutcome::Failed(session_restart_error.to_string())
+                }
+            };
+            Some((session_id, session_outcome))
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -2138,17 +2212,18 @@ fn validate_release_binary(binary_path: &Path, release_tag: &str) -> Result<(), 
 /// Deletes the staged copies that updates which no longer run left beside that
 /// file, as [`delete_staged_copies_of_ended_updates`] states. Then copies
 /// `new_binary` beside that file as `<name>.koshi-update-<pid>`, sets mode
-/// `0755` on the copy, checks that the copy prints the version of
-/// `release_tag`, as [`validate_release_binary`] states, and renames the copy
-/// over the file in one step. A process that runs the old file keeps running
-/// it. A failed copy, mode change, check, or rename removes the copy. A copy
-/// refused with a permission error then installs through `sudo`, as
-/// [`replace_with_sudo`] states. Every other failure leaves the program file
-/// as it was.
+/// `0755` on the copy, writes the copy through to the disk, as
+/// [`flush_staged_copy_to_disk`] states, checks that the copy prints the
+/// version of `release_tag`, as [`validate_release_binary`] states, and
+/// renames the copy over the file in one step. A process that runs the old
+/// file keeps running it. A failed copy, mode change, flush, check, or rename
+/// removes the copy. A copy refused with a permission error then installs
+/// through `sudo`, as [`replace_with_sudo`] states. Every other failure leaves
+/// the program file as it was.
 ///
 /// # Errors
-/// The failure of the path lookup, the copy, the mode change, the check, or
-/// the rename, as text.
+/// The failure of the path lookup, the copy, the mode change, the flush, the
+/// check, or the rename, as text.
 #[cfg(unix)]
 fn swap_executable(
     new_binary: &Path,
@@ -2176,6 +2251,7 @@ fn swap_executable(
         return Err(copy_error.to_string());
     }
     let replace_result = set_executable_permissions(&staged_binary_path)
+        .and_then(|()| flush_staged_copy_to_disk(&staged_binary_path))
         .and_then(|()| validate_release_binary(&staged_binary_path, release_tag))
         .and_then(|()| {
             fs::rename(&staged_binary_path, executable_path)
@@ -2194,15 +2270,16 @@ fn swap_executable(
 ///
 /// Deletes the staged copies that updates which no longer run left beside that
 /// file, as [`delete_staged_copies_of_ended_updates`] states. Then copies
-/// `new_binary` beside that file as `koshi-staged-<pid>.exe`, checks that the
-/// copy prints the version of `release_tag`, as [`validate_release_binary`]
+/// `new_binary` beside that file as `koshi-staged-<pid>.exe`, writes the copy
+/// through to the disk, as [`flush_staged_copy_to_disk`] states, checks that
+/// the copy prints the version of `release_tag`, as [`validate_release_binary`]
 /// states, and puts the copy in place of the file, as
-/// [`replace_program_file_with_staged_copy`] states. A failed copy, check, or
-/// replacement removes the copy.
+/// [`replace_program_file_with_staged_copy`] states. A failed copy, flush,
+/// check, or replacement removes the copy.
 ///
 /// # Errors
-/// The failure of the path lookup, the copy, the check, or the replacement, as
-/// text.
+/// The failure of the path lookup, the copy, the flush, the check, or the
+/// replacement, as text.
 #[cfg(windows)]
 fn swap_executable(
     new_binary: &Path,
@@ -2218,7 +2295,8 @@ fn swap_executable(
         executable_path.with_file_name(staged_copy_name.format_file_name(std::process::id()));
     let replace_result = fs::copy(new_binary, &staged_binary_path)
         .map_err(|staged_copy_error| staged_copy_error.to_string())
-        .and_then(|_copied_byte_count| validate_release_binary(&staged_binary_path, release_tag))
+        .and_then(|_copied_byte_count| flush_staged_copy_to_disk(&staged_binary_path))
+        .and_then(|()| validate_release_binary(&staged_binary_path, release_tag))
         .and_then(|()| replace_program_file_with_staged_copy(&staged_binary_path, executable_path));
     if let Err(replace_error) = replace_result {
         let _ = fs::remove_file(&staged_binary_path);
@@ -2349,8 +2427,9 @@ fn list_staged_copy_rename_arguments(
 ///    deletes each staged copy that [`list_staged_copies_of_ended_updates`]
 ///    lists, copies `new_binary` to `staged_binary_path`, and sets mode
 ///    `0755` on the copy.
-/// 2. Checks, as this user, that the copy prints the version of
-///    `release_tag`, as [`validate_release_binary`] states.
+/// 2. Writes the copy through to the disk, as [`flush_staged_copy_to_disk`]
+///    states, and checks that the copy prints the version of `release_tag`,
+///    as [`validate_release_binary`] states, both as this user.
 /// 3. Runs [`STAGED_COPY_RENAME_SCRIPT`] as root in a second `sudo sh`
 ///    command: it renames the copy over `executable_path` in one step.
 ///
@@ -2398,23 +2477,25 @@ fn replace_with_sudo(
             executable_path.display()
         ));
     }
-    let replace_result = validate_release_binary(staged_binary_path, release_tag).and_then(|()| {
-        let rename_command_status = std::process::Command::new("sudo")
-            .arg("sh")
-            .args(list_staged_copy_rename_arguments(
-                staged_binary_path,
-                executable_path,
-            ))
-            .status()
-            .map_err(|sudo_spawn_error| sudo_spawn_error.to_string())?;
-        if !rename_command_status.success() {
-            return Err(format!(
-                "`sudo` could not replace {}",
-                executable_path.display()
-            ));
-        }
-        Ok(())
-    });
+    let replace_result = flush_staged_copy_to_disk(staged_binary_path)
+        .and_then(|()| validate_release_binary(staged_binary_path, release_tag))
+        .and_then(|()| {
+            let rename_command_status = std::process::Command::new("sudo")
+                .arg("sh")
+                .args(list_staged_copy_rename_arguments(
+                    staged_binary_path,
+                    executable_path,
+                ))
+                .status()
+                .map_err(|sudo_spawn_error| sudo_spawn_error.to_string())?;
+            if !rename_command_status.success() {
+                return Err(format!(
+                    "`sudo` could not replace {}",
+                    executable_path.display()
+                ));
+            }
+            Ok(())
+        });
     if let Err(replace_error) = replace_result {
         let is_staged_copy_missing = || {
             fs::symlink_metadata(staged_binary_path)
@@ -2439,6 +2520,30 @@ fn replace_with_sudo(
     Ok(())
 }
 
+/// Write the bytes of the staged copy at `staged_binary_path` through to the
+/// disk: `fsync` on a handle opened for reading on Unix, which is
+/// `F_FULLFSYNC` on macOS, and `FlushFileBuffers` on a handle opened for
+/// writing on Windows. On Unix, a copy that root owns and this user can read
+/// is flushed too.
+///
+/// # Errors
+/// `could not write <path> to the disk: <error>` when the open or the flush
+/// fails.
+fn flush_staged_copy_to_disk(staged_binary_path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    let staged_copy_file = fs::File::open(staged_binary_path);
+    #[cfg(windows)]
+    let staged_copy_file = fs::OpenOptions::new().write(true).open(staged_binary_path);
+    staged_copy_file
+        .and_then(|staged_copy_file| staged_copy_file.sync_all())
+        .map_err(|flush_error| {
+            format!(
+                "could not write {} to the disk: {flush_error}",
+                staged_binary_path.display()
+            )
+        })
+}
+
 /// Sets the Unix executable bit (`0755`) on `executable_path`.
 #[cfg(unix)]
 fn set_executable_permissions(executable_path: &Path) -> Result<(), String> {
@@ -2448,18 +2553,23 @@ fn set_executable_permissions(executable_path: &Path) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// State file (koshi-owned): last check time
+// State file (koshi-owned): last check time and the release waiting to be offered
 // ---------------------------------------------------------------------------
 
 /// The update state koshi owns and rewrites, stored as `update.json` in the
-/// state directory. Holds only the last-check time, the one update fact this
-/// module writes. Every user preference lives in `koshi.kdl`, which this module
-/// does not write.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// state directory. Holds the last-check time and the release waiting to be
+/// offered, the two update facts this module writes. Every user preference
+/// lives in `koshi.kdl`, which this module does not write.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct UpdateState {
     /// Unix seconds of the last completed check, or `None` if never checked.
     #[serde(default)]
     last_check_unix_seconds: Option<u64>,
+    /// The tag of the newer release the last completed check found, such as
+    /// `v0.6.0`, which the next interactive launch offers. `None` when no
+    /// offer waits.
+    #[serde(default)]
+    available_release_tag: Option<String>,
 }
 
 /// The path of the koshi-owned update state file, if a state directory exists.
@@ -2502,6 +2612,7 @@ fn parse_update_state(serialized_update_state: &str) -> UpdateState {
     match serde_json::from_str::<PreviousReleaseUpdateState>(serialized_update_state) {
         Ok(previous_release_update_state) => UpdateState {
             last_check_unix_seconds: previous_release_update_state.last_check,
+            available_release_tag: None,
         },
         Err(_) => update_state,
     }

@@ -51,13 +51,14 @@ use koshi_ipc::endpoint::{resolve_clipboard_tool_directory_path, EndpointFile};
 use koshi_ipc::event::SessionEvent;
 #[cfg(unix)]
 use koshi_ipc::protocol::{
-    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, ProcessImageId,
-    MAX_CLIPBOARD_COPY_PART_BYTE_COUNT, PROTOCOL_VERSION,
+    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MAX_CLIPBOARD_COPY_PART_BYTE_COUNT,
 };
 #[cfg(unix)]
 use koshi_ipc::transport::{Connection, Listener};
 #[cfg(unix)]
-use koshi_test_support::fixtures::{build_test_runtime_directory, write_session_endpoint_file};
+use koshi_test_support::fixtures::{
+    build_accepted_hello_result, build_test_runtime_directory, write_session_endpoint_file,
+};
 use koshi_test_support::fixtures::{start_program_process, write_printing_program};
 use tempfile::TempDir;
 
@@ -255,11 +256,7 @@ fn spawn_session_leaving_the_commit_unanswered(
         session_connection
             .send(&IpcResponse {
                 request_id: Some(hello_request.request_id),
-                answer_result: IpcResult::Hello {
-                    protocol_version: PROTOCOL_VERSION,
-                    build_version: env!("CARGO_PKG_VERSION").to_string(),
-                    process_image_id: ProcessImageId::get_own(),
-                },
+                answer_result: build_accepted_hello_result(),
             })
             .expect("answer the Hello");
         session_connection
@@ -314,7 +311,8 @@ fn attach_client_from_another_machine(
         );
     };
     let _ = attach_client_on_connection(&mut connection, session.session_id);
-    forward_session_events(move || connection.recv::<SessionEvent>())
+    let (session_frame_reader, client_frame_writer) = connection.split();
+    forward_session_events(session_frame_reader, client_frame_writer)
 }
 
 /// The bytes of the next host write among `session_events`, the session
@@ -380,6 +378,42 @@ fn a_copy_outside_a_session_runs_the_real_tool_with_every_byte_of_the_input() {
     assert_eq!(
         stand_in_fixture.read_recorded_file("input.bin"),
         Some(b"hi\n".to_vec())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_copy_started_by_a_program_that_ignores_child_exits_exits_with_the_real_tools_code() {
+    use std::os::unix::process::CommandExt;
+
+    let stand_in_fixture = build_stand_in_fixture("xclip", Some(EXIT_WITH_CODE_3_COMMAND));
+    let mut stand_in_command = Command::new(&stand_in_fixture.stand_in_path);
+    stand_in_command
+        .env_clear()
+        .env("PATH", stand_in_fixture.build_path_entries())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // SAFETY: `signal` is async-signal-safe, and the closure touches no other
+    // state of the forked child.
+    unsafe {
+        stand_in_command.pre_exec(|| {
+            libc::signal(libc::SIGCHLD, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+
+    let stand_in_output = stand_in_command.output().expect("the stand-in runs");
+
+    assert_eq!(
+        stand_in_output.status.code(),
+        Some(3),
+        "stderr: {}",
+        String::from_utf8_lossy(&stand_in_output.stderr)
+    );
+    assert_eq!(
+        stand_in_fixture.read_recorded_file("input.bin"),
+        Some(Vec::new())
     );
 }
 

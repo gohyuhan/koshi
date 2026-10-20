@@ -31,6 +31,15 @@
 //! A supervisor keeps running the binary image it started from; the session
 //! server that reconnects to it can be a newer build. A request kind the
 //! supervisor does not have is refused by name and the link stays open.
+//!
+//! From [`OUTPUT_WINDOW_PROTOCOL_VERSION`](crate::supervisor::OUTPUT_WINDOW_PROTOCOL_VERSION)
+//! on, each pane has an output window on each link: the supervisor sends at
+//! most [`PANE_OUTPUT_WINDOW_BYTE_COUNT`](crate::supervisor::PANE_OUTPUT_WINDOW_BYTE_COUNT)
+//! bytes of one pane's output ahead of what the session server granted back
+//! with [`GrantPaneOutput`](crate::supervisor::SupervisorRequestKind::GrantPaneOutput),
+//! and each chunk of output travels as one binary frame
+//! ([`build_pane_output_frame_head`](crate::supervisor::build_pane_output_frame_head)).
+//! Every other message stays JSON.
 
 use std::path::{Path, PathBuf};
 
@@ -38,7 +47,9 @@ use koshi_core::compat::SUPERVISOR_PROTOCOL;
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
+use crate::error::IpcError;
 use crate::handshake::{GateWords, VersionGate};
 use crate::protocol::{ConnectionToken, IpcErrorPayload};
 use crate::wire::{Answer, Envelope, MaybeKnown, WireName, WireVariants};
@@ -51,8 +62,27 @@ pub mod migration;
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::SUPERVISOR_PROTOCOL`].
 ///
-/// Version 2 is the current version of the link.
+/// Version 3 is the current version of the link.
 pub const SUPERVISOR_PROTOCOL_VERSION: u32 = SUPERVISOR_PROTOCOL.maximum_version;
+
+/// The first supervisor-link protocol version whose links give each pane an
+/// output window and carry pane output as binary frames. A link that settles
+/// on a lower version carries every chunk of output whole, as JSON, with no
+/// window.
+pub const OUTPUT_WINDOW_PROTOCOL_VERSION: u32 = 3;
+
+/// The output one pane may have in flight on one link: the supervisor sends at
+/// most this many bytes of the pane's output beyond what the session server
+/// granted back. Each new link starts every pane at this credit.
+pub const PANE_OUTPUT_WINDOW_BYTE_COUNT: u32 = 128 * 1024;
+
+/// The fewest parsed bytes a session server grants back in one
+/// [`GrantPaneOutput`](SupervisorRequestKind::GrantPaneOutput): half of
+/// [`PANE_OUTPUT_WINDOW_BYTE_COUNT`].
+pub const MINIMUM_OUTPUT_GRANT_BYTE_COUNT: u32 = PANE_OUTPUT_WINDOW_BYTE_COUNT / 2;
+
+/// The byte count of the pane id at the start of a pane output frame.
+const PANE_ID_BYTE_COUNT: usize = 16;
 
 /// The lowest supervisor-link protocol version this build speaks. A peer whose
 /// highest is below this one is refused with
@@ -160,6 +190,18 @@ pub enum SupervisorRequestKind {
     /// End the supervisor: it closes every pane it still holds and exits. The
     /// session server sends it when the session ends.
     Shutdown,
+    /// Give `pane_id` `granted_byte_count` more bytes of output window on this
+    /// link: the session server parsed that many bytes of the pane's output.
+    /// The pane's credit never grows past [`PANE_OUTPUT_WINDOW_BYTE_COUNT`].
+    /// Sent only on a link of [`OUTPUT_WINDOW_PROTOCOL_VERSION`] or newer, and
+    /// answered with nothing, a refusal included.
+    GrantPaneOutput {
+        /// The pane whose output the session server parsed.
+        pane_id: PaneId,
+        /// How many bytes of that pane's output the session server parsed
+        /// since its last grant for the pane.
+        granted_byte_count: u32,
+    },
 }
 
 impl SupervisorRequestKind {
@@ -190,6 +232,7 @@ impl SupervisorRequestKind {
             SupervisorRequestKind::PauseOutput => "PauseOutput",
             SupervisorRequestKind::ResumeOutput => "ResumeOutput",
             SupervisorRequestKind::Shutdown => "Shutdown",
+            SupervisorRequestKind::GrantPaneOutput { .. } => "GrantPaneOutput",
         }
     }
 }
@@ -266,6 +309,10 @@ pub enum SupervisorResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SupervisorEvent {
     /// One chunk of a pane's child output, in the order the pane produced it.
+    ///
+    /// On a link of [`OUTPUT_WINDOW_PROTOCOL_VERSION`] or newer, the
+    /// supervisor sends each chunk as a binary frame
+    /// ([`build_pane_output_frame_head`]) instead.
     Output {
         /// The pane that printed these bytes.
         pane_id: PaneId,
@@ -410,6 +457,37 @@ impl SupervisorHandshake {
     }
 }
 
+/// The head of the binary frame that carries one chunk of `pane_id`'s output
+/// on a link of [`OUTPUT_WINDOW_PROTOCOL_VERSION`] or newer: the pane id's 16
+/// bytes. The chunk's output bytes follow the head in the same frame.
+///
+/// Example — pane `0190…` printing `hi` sends the payload of the 16 bytes of
+/// `0190…`, then `68 69`.
+#[must_use]
+pub fn build_pane_output_frame_head(pane_id: PaneId) -> [u8; PANE_ID_BYTE_COUNT] {
+    *pane_id.get_uuid().as_bytes()
+}
+
+/// The pane and the output that `frame_bytes`, the payload of a pane output
+/// binary frame, carry: the pane that [`build_pane_output_frame_head`] wrote,
+/// and the bytes after it.
+///
+/// # Errors
+/// [`IpcError::MalformedFrame`] when `frame_bytes` is shorter than a pane id.
+pub fn decode_pane_output_frame(mut frame_bytes: Vec<u8>) -> Result<(PaneId, Vec<u8>), IpcError> {
+    let Some((pane_id_bytes, _)) = frame_bytes.split_first_chunk::<PANE_ID_BYTE_COUNT>() else {
+        return Err(IpcError::MalformedFrame {
+            error_detail: format!(
+                "a pane output frame of {} bytes holds no {PANE_ID_BYTE_COUNT}-byte pane id",
+                frame_bytes.len()
+            ),
+        });
+    };
+    let pane_id = PaneId::from_uuid(Uuid::from_bytes(*pane_id_bytes));
+    frame_bytes.drain(..PANE_ID_BYTE_COUNT);
+    Ok((pane_id, frame_bytes))
+}
+
 /// The address the supervisor holding `session_id`'s panes listens on: the string
 /// [`Connection::connect`](crate::transport::Connection::connect) takes.
 ///
@@ -456,6 +534,7 @@ impl WireVariants for SupervisorRequestKind {
         "PauseOutput",
         "ResumeOutput",
         "Shutdown",
+        "GrantPaneOutput",
     ];
 }
 

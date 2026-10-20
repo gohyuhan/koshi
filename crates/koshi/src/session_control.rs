@@ -8,14 +8,15 @@ use koshi_core::ids::{ClientId, SessionId};
 use crate::cli::SessionReference;
 use crate::session_end::{end_session, SessionEnding};
 use crate::targeting;
-use koshi_core::ids::parse_prefixed_uuid;
+use koshi_core::ids::{parse_owned_session_id, parse_prefixed_uuid};
 use koshi_link::discovery::{self, Discovered};
 use koshi_link::error::CliError;
 use koshi_link::ipc_client;
 
 /// End the session named by `session_reference`, or the only running session when
-/// absent, through [`end_session`]. An id goes straight to that session; a name
-/// is resolved against every running session first.
+/// absent, through [`end_session`]. An id, or `<user id>/<session id>`, goes
+/// straight to that session; a name is resolved against every running session
+/// first.
 ///
 /// From the start, this process ignores `SIGHUP`, `SIGINT` and `SIGQUIT`, or
 /// Ctrl+C on Windows, through
@@ -39,7 +40,7 @@ fn kill_session_in_runtime_directory(
     shared_sessions_base_directory: Option<&Path>,
     session_reference: Option<&SessionReference>,
 ) -> Result<SessionEnding, CliError> {
-    let session_id = resolve_session_id_from_reference(
+    let (session_id, owner_user_id) = resolve_session_target_from_reference(
         runtime_directory,
         shared_sessions_base_directory,
         session_reference,
@@ -48,33 +49,43 @@ fn kill_session_in_runtime_directory(
         runtime_directory,
         shared_sessions_base_directory,
         session_id,
+        owner_user_id,
     )
 }
 
-/// Resolve the session a `kill-session` or `detach --all` argument names: an id is
-/// taken as it stands, and a name or an absent argument is resolved against
-/// every running session by [`resolve_discovered_session_id`].
-fn resolve_session_id_from_reference(
+/// Resolve the session a `kill-session` or `detach --all` argument names, and
+/// the user id whose folder of the shared directory advertises it: an id is
+/// taken as it stands with no user id, `<user id>/<session id>` as it stands,
+/// and a name or an absent argument is resolved against every running session
+/// by [`resolve_discovered_session_target`].
+fn resolve_session_target_from_reference(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
     session_reference: Option<&SessionReference>,
-) -> Result<SessionId, CliError> {
+) -> Result<(SessionId, Option<u32>), CliError> {
     let session_name = match session_reference {
-        Some(SessionReference::SessionId(session_id)) => return Ok(*session_id),
+        Some(SessionReference::SessionId(session_id)) => return Ok((*session_id, None)),
+        Some(SessionReference::OwnedSessionId(owned_session_id)) => {
+            return Ok((
+                owned_session_id.session_id,
+                Some(owned_session_id.owner_user_id),
+            ));
+        }
         Some(SessionReference::SessionName(session_name)) => Some(session_name.as_str()),
         None => None,
     };
-    resolve_discovered_session_id(
+    resolve_discovered_session_target(
         &discovery::fetch_all_session_overviews(runtime_directory, shared_sessions_base_directory),
         session_name,
     )
 }
 
-/// Pick the named session, or apply the sole-running-session rule.
-fn resolve_discovered_session_id(
+/// Pick the named session, or apply the sole-running-session rule, and give
+/// its id with the user id [`Discovered::find_owner_user_id`] gives for it.
+fn resolve_discovered_session_target(
     discovered_sessions: &Discovered,
     session_name: Option<&str>,
-) -> Result<SessionId, CliError> {
+) -> Result<(SessionId, Option<u32>), CliError> {
     let session_overview = match session_name {
         Some(session_name) => targeting::find_session_by_name(discovered_sessions, session_name)?,
         None => targeting::select_only_session(
@@ -83,16 +94,20 @@ fn resolve_discovered_session_id(
             "cannot tell which session to kill; name one: koshi kill-session <name>",
         )?,
     };
-    Ok(session_overview.session.session_id)
+    let session_id = session_overview.session.session_id;
+    Ok((
+        session_id,
+        discovered_sessions.find_owner_user_id(session_id),
+    ))
 }
 
 /// Detach the client named by the `koshi detach` argument, leaving the session
 /// running and its panes untouched.
 ///
-/// The target text is a client id, a session id, or a session display name. A target
-/// that names a session rather than a client leaves the choice to that
-/// session, which detaches its only attached client and lists the attached ids
-/// when there are several.
+/// The target text is a client id, a session id, `<user id>/<session id>`, or a
+/// session display name. A target that names a session rather than a client
+/// leaves the choice to that session, which detaches its only attached client
+/// and lists the attached ids when there are several.
 pub fn detach_client_or_session(detach_target_text: &str) -> Result<CommandResult, CliError> {
     detach_client_or_session_in_runtime_directory(
         &ipc_client::resolve_runtime_directory()?,
@@ -109,7 +124,7 @@ fn detach_client_or_session_in_runtime_directory(
     shared_sessions_base_directory: Option<&Path>,
     detach_target_text: &str,
 ) -> Result<CommandResult, CliError> {
-    let (session_id, client_id) = resolve_detach_target(
+    let (session_id, owner_user_id, client_id) = resolve_detach_target(
         runtime_directory,
         shared_sessions_base_directory,
         detach_target_text,
@@ -118,48 +133,66 @@ fn detach_client_or_session_in_runtime_directory(
         runtime_directory,
         shared_sessions_base_directory,
         session_id,
+        owner_user_id,
         None,
         Command::Detach(DetachArgs { client_id }),
     )
 }
 
-/// The session to ask and the client it detaches, for the target text typed after
+/// The session to ask, the user id whose folder of the shared directory
+/// advertises it, and the client it detaches, for the target text typed after
 /// `koshi detach`.
 ///
-/// A `session-<uuid>` id names a session and goes straight there, asking no
-/// session to describe itself. Anything else is read against the running
+/// A `session-<uuid>` id names a session and goes straight there with no user
+/// id, and `<user id>/<session id>` goes straight to that session with that
+/// user id, asking no session to describe itself. Text with any other `/` is
+/// [`CliError::InvalidArgs`]. Anything else is read against the running
 /// sessions: a `client-<uuid>` id, or a bare UUID that an answering session reports
-/// as an attached client, names that client and the session holding it; a bare
-/// UUID no attached client carries is read as a session id instead; any other
+/// as an attached client, names that client and the session holding it. A bare
+/// UUID no attached client carries is read as a session id when an answering
+/// session has that id or every session answered, and otherwise gives the error
+/// [`Discovered::build_missing_target_error`] builds for the client. Any other
 /// target text is a session display name, resolved the way `kill-session` resolves
 /// one. A resolved session with no named client is returned as `None`, so the
-/// session itself picks the client.
+/// session itself picks the client. A session the running sessions resolve
+/// carries the user id [`Discovered::find_owner_user_id`] gives for it.
 fn resolve_detach_target(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
     detach_target_text: &str,
-) -> Result<(SessionId, Option<ClientId>), CliError> {
+) -> Result<(SessionId, Option<u32>, Option<ClientId>), CliError> {
+    let build_invalid_args_error = |parse_error_detail| CliError::InvalidArgs {
+        detail: parse_error_detail,
+    };
+    if let Some(owned_session_id) =
+        parse_owned_session_id(detach_target_text).map_err(build_invalid_args_error)?
+    {
+        return Ok((
+            owned_session_id.session_id,
+            Some(owned_session_id.owner_user_id),
+            None,
+        ));
+    }
     if detach_target_text.starts_with("session-") {
         let target_uuid =
-            parse_prefixed_uuid(detach_target_text, "session").map_err(|parse_error_detail| {
-                CliError::InvalidArgs {
-                    detail: parse_error_detail,
-                }
-            })?;
-        return Ok((SessionId::from_uuid(target_uuid), None));
+            parse_prefixed_uuid(detach_target_text, "session").map_err(build_invalid_args_error)?;
+        return Ok((SessionId::from_uuid(target_uuid), None, None));
     }
 
     let discovered_sessions =
         discovery::fetch_all_session_overviews(runtime_directory, shared_sessions_base_directory);
     let Ok(target_uuid) = parse_prefixed_uuid(detach_target_text, "client") else {
-        return Ok((
-            resolve_discovered_session_id(&discovered_sessions, Some(detach_target_text))?,
-            None,
-        ));
+        let (session_id, owner_user_id) =
+            resolve_discovered_session_target(&discovered_sessions, Some(detach_target_text))?;
+        return Ok((session_id, owner_user_id, None));
     };
     let client_id = ClientId::from_uuid(target_uuid);
     match find_session_for_client(&discovered_sessions, client_id) {
-        Ok(session_id) => Ok((session_id, Some(client_id))),
+        Ok(session_id) => Ok((
+            session_id,
+            discovered_sessions.find_owner_user_id(session_id),
+            Some(client_id),
+        )),
         // A `client-` id is a client and nothing else.
         Err(client_target_error) if detach_target_text.starts_with("client-") => {
             Err(client_target_error)
@@ -171,7 +204,11 @@ fn resolve_detach_target(
                 .iter()
                 .any(|session_overview| session_overview.session.session_id == session_id);
             if has_session || discovered_sessions.is_complete() {
-                Ok((session_id, None))
+                Ok((
+                    session_id,
+                    discovered_sessions.find_owner_user_id(session_id),
+                    None,
+                ))
             } else {
                 Err(client_target_error)
             }
@@ -203,8 +240,8 @@ fn find_session_for_client(
 /// only running session when absent. The session keeps running and its panes
 /// are untouched.
 ///
-/// An id goes straight to that session; a name is resolved against every
-/// running session first.
+/// An id, or `<user id>/<session id>`, goes straight to that session; a name
+/// is resolved against every running session first.
 pub fn detach_all_session(
     session_reference: Option<&SessionReference>,
 ) -> Result<CommandResult, CliError> {
@@ -223,7 +260,7 @@ fn detach_all_session_in_runtime_directory(
     shared_sessions_base_directory: Option<&Path>,
     session_reference: Option<&SessionReference>,
 ) -> Result<CommandResult, CliError> {
-    let session_id = resolve_session_id_from_reference(
+    let (session_id, owner_user_id) = resolve_session_target_from_reference(
         runtime_directory,
         shared_sessions_base_directory,
         session_reference,
@@ -232,6 +269,7 @@ fn detach_all_session_in_runtime_directory(
         runtime_directory,
         shared_sessions_base_directory,
         session_id,
+        owner_user_id,
         None,
         Command::DetachAll,
     )

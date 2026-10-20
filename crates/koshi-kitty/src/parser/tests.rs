@@ -482,7 +482,7 @@ fn disposable_file_transfer_reads_and_deletes_one_resolved_path() {
 
     assert_eq!(decoded_graphics.image.rgba_bytes, build_red_rgba_pixel());
     assert!(!target_path.exists());
-    assert!(fs::symlink_metadata(&alias_path).is_ok());
+    assert_eq!(fs::read_link(&alias_path).ok(), Some(target_path));
     fs::remove_file(alias_path).expect("the test alias removes");
 }
 
@@ -529,6 +529,8 @@ fn external_fifo_and_socket_sources_are_rejected_without_blocking() {
     let fifo_path_cstring =
         CString::new(fifo_path.as_os_str().as_encoded_bytes()).expect("FIFO path");
     assert_eq!(
+        // SAFETY: `fifo_path_cstring` is a NUL-terminated path that lives for
+        // the call.
         unsafe { libc::mkfifo(fifo_path_cstring.as_ptr(), 0o600) },
         0
     );
@@ -596,6 +598,8 @@ fn shared_memory_transfer_reads_and_unlinks_the_object() {
     );
     let shared_memory_name_cstring =
         CString::new(shared_memory_name.clone()).expect("the shared-memory name has no NUL");
+    // SAFETY: `shared_memory_name_cstring` is a NUL-terminated name that lives
+    // for the call.
     let shared_memory_descriptor = unsafe {
         libc::shm_open(
             shared_memory_name_cstring.as_ptr(),
@@ -606,6 +610,8 @@ fn shared_memory_transfer_reads_and_unlinks_the_object() {
     if shared_memory_descriptor < 0 {
         return;
     }
+    // SAFETY: `shm_open` just opened `shared_memory_descriptor`, and nothing
+    // else owns it.
     let mut shared_memory_file = unsafe { File::from_raw_fd(shared_memory_descriptor) };
     let mut shared_memory_bytes = build_red_rgba_pixel().to_vec();
     shared_memory_bytes.extend_from_slice(&[0; 32]);
@@ -623,6 +629,8 @@ fn shared_memory_transfer_reads_and_unlinks_the_object() {
         .expect("the shared-memory transfer decodes");
 
     assert_eq!(decoded_graphics.image.rgba_bytes, build_red_rgba_pixel());
+    // SAFETY: `shared_memory_name_cstring` is a NUL-terminated name that lives
+    // for the call.
     let reopened_shared_memory_descriptor =
         unsafe { libc::shm_open(shared_memory_name_cstring.as_ptr(), libc::O_RDONLY, 0) };
     assert_eq!(

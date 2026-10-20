@@ -11,12 +11,15 @@ use thiserror::Error;
 /// [`ConnectTimedOut`](IpcError::ConnectTimedOut),
 /// [`TlsHandshakeFailed`](IpcError::TlsHandshakeFailed),
 /// [`CertificateMismatch`](IpcError::CertificateMismatch)), a refused frame
-/// ([`FrameTooLarge`](IpcError::FrameTooLarge)), an answer from a server that
+/// ([`FrameTooLarge`](IpcError::FrameTooLarge),
+/// [`UnexpectedBinaryFrame`](IpcError::UnexpectedBinaryFrame)), an answer from a server that
 /// koshi 0.1.0 to 0.4.0 started
 /// ([`PreviousReleaseAnswer`](IpcError::PreviousReleaseAnswer)), a socket address that fails
 /// its trust or liveness checks
 /// ([`UntrustedSocket`](IpcError::UntrustedSocket),
-/// [`NoListener`](IpcError::NoListener), [`SocketBusy`](IpcError::SocketBusy)),
+/// [`NoListener`](IpcError::NoListener),
+/// [`PeerIsOtherUser`](IpcError::PeerIsOtherUser),
+/// [`SocketBusy`](IpcError::SocketBusy)),
 /// an endpoint file the caller cannot read
 /// ([`EndpointFileMissing`](IpcError::EndpointFileMissing),
 /// [`EndpointFileUnreadable`](IpcError::EndpointFileUnreadable),
@@ -48,10 +51,12 @@ pub enum IpcError {
     /// [`MAX_FRAME_BYTE_COUNT`](crate::transport::MAX_FRAME_BYTE_COUNT). On receive, the
     /// length prefix named more bytes than the limit and the payload is left
     /// unread: the stream is off frame boundaries and the connection closes;
-    /// `frame_byte_count` is the length the prefix named. On send, encoding
-    /// stopped at the byte that crossed the limit and nothing was written;
-    /// `frame_byte_count` is the payload size the refused write reached,
-    /// which for a message encoded in one piece is its full size.
+    /// `frame_byte_count` is the byte count bits 0 to 30 of the prefix named.
+    /// On send, nothing was written. For a message, encoding stopped at the
+    /// byte that crossed the limit, and `frame_byte_count` is the payload size
+    /// the refused write reached, which for a message encoded in one piece is
+    /// its full size. For a binary frame, `frame_byte_count` is the payload's
+    /// byte count.
     #[error(
         "ipc frame of {frame_byte_count} bytes exceeds the {maximum_frame_byte_count}-byte limit"
     )]
@@ -59,6 +64,11 @@ pub enum IpcError {
         frame_byte_count: u64,
         maximum_frame_byte_count: u32,
     },
+    /// A binary frame, bit 31 of its length prefix set, read where only JSON
+    /// frames are taken. Its payload is left unread: the stream is off frame
+    /// boundaries and the connection closes.
+    #[error("ipc frame is binary where a JSON frame was expected")]
+    UnexpectedBinaryFrame,
     /// A frame whose bytes are not a readable message: the payload arrived
     /// whole but did not decode, or a message failed to encode.
     #[error("ipc frame is not a readable message: {error_detail}")]

@@ -5,7 +5,7 @@
 //! Both kinds of koshi program sit on this crate. The command-line program
 //! reads a config, finds the session a verb is aimed at, and submits it. A
 //! server process reads the same config at startup and asks the router where
-//! its neighbours are.
+//! its neighbors are.
 //!
 //! Two halves:
 //!

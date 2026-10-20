@@ -45,6 +45,7 @@ use koshi_core::key::{BindingModifierFlags, Key, KeyChord, NamedKey};
 use koshi_core::mouse::{is_mouse_kind_reported, MouseAnswer, MouseButton, MouseKind};
 use koshi_input::keyboard::encode_key_chord;
 use koshi_ipc::protocol::WireMouseAction;
+use koshi_pty::backend::state::MAX_QUEUED_PANE_INPUT_BYTE_COUNT;
 use koshi_terminal::mouse_report::encode_mouse;
 use koshi_terminal::state::Screen;
 
@@ -489,7 +490,8 @@ impl Server {
     /// The byte form follows the program's cursor-key mode (DECCKM), read at the
     /// same moment: `ESC O A` under application keys, `ESC [ A` otherwise.
     ///
-    /// An `arrow_count` of `0` writes nothing.
+    /// An `arrow_count` of `0` writes nothing, and so does one whose bytes
+    /// would pass [`MAX_QUEUED_PANE_INPUT_BYTE_COUNT`].
     pub fn write_alternate_scroll_arrows(
         &mut self,
         pane_id: PaneId,
@@ -517,10 +519,18 @@ impl Server {
             KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(arrow_key)),
             is_application_cursor_keys_enabled,
         );
-        let mut arrow_key_bytes_to_write = Vec::with_capacity(arrow_count * arrow_key_bytes.len());
-        for _ in 0..arrow_count {
-            arrow_key_bytes_to_write.extend_from_slice(&arrow_key_bytes);
+        let is_within_pane_input_limit = arrow_count
+            .checked_mul(arrow_key_bytes.len())
+            .is_some_and(|arrow_byte_count| arrow_byte_count <= MAX_QUEUED_PANE_INPUT_BYTE_COUNT);
+        if !is_within_pane_input_limit {
+            tracing::debug!(
+                %pane_id,
+                arrow_count,
+                "alternate-scroll arrows past the pane input limit are not written"
+            );
+            return;
         }
+        let arrow_key_bytes_to_write = arrow_key_bytes.repeat(arrow_count);
         if !arrow_key_bytes_to_write.is_empty()
             && self
                 .get_pty_backend()

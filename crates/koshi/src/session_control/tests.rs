@@ -1,5 +1,7 @@
-//! Tests for creating, choosing and ending a running session.
+//! Tests for choosing a running session, ending it, and reading the target
+//! of `koshi detach`.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::time::SystemTime;
@@ -7,24 +9,14 @@ use std::time::SystemTime;
 use koshi_core::command::CliExitCode;
 use koshi_core::discovery::{SessionDiscovery, SessionOverview};
 use koshi_core::event::{Event, QuitCause, RejectReason};
+use koshi_core::ids::OwnedSessionId;
 use koshi_ipc::endpoint::EndpointFile;
-use koshi_ipc::protocol::{
-    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, ProcessImageId,
-    PROTOCOL_VERSION,
-};
+use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcRequestKind, IpcResult};
 use koshi_ipc::transport::{Connection, Listener};
 use uuid::Uuid;
 
 use super::*;
-
-/// The answer an accepted session Hello earns.
-fn build_hello_accepted() -> IpcResult {
-    IpcResult::Hello {
-        protocol_version: PROTOCOL_VERSION,
-        build_version: env!("CARGO_PKG_VERSION").to_string(),
-        process_image_id: ProcessImageId::get_own(),
-    }
-}
+use koshi_test_support::fixtures::{build_accepted_hello_result, send_ipc_reply};
 
 fn build_session_overview(session_name: &str) -> SessionOverview {
     build_named_session_overview(SessionId::new(), session_name)
@@ -50,6 +42,7 @@ fn build_complete_discovery(session_overviews: Vec<SessionOverview>) -> Discover
         sessions: session_overviews,
         unasked_session_count: 0,
         unread_path_count: 0,
+        owner_user_id_by_session_id: HashMap::new(),
     }
 }
 
@@ -58,6 +51,7 @@ fn build_incomplete_discovery(session_overviews: Vec<SessionOverview>) -> Discov
         sessions: session_overviews,
         unasked_session_count: 1,
         unread_path_count: 0,
+        owner_user_id_by_session_id: HashMap::new(),
     }
 }
 
@@ -71,15 +65,6 @@ fn build_test_runtime_directory(test_label: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&runtime_directory);
     std::fs::create_dir_all(&runtime_directory).expect("create runtime dir");
     runtime_directory
-}
-
-fn send_ipc_reply(connection: &mut Connection, request_id: u64, ipc_result: IpcResult) {
-    connection
-        .send(&IpcResponse {
-            request_id: Some(request_id),
-            answer_result: ipc_result,
-        })
-        .expect("send scripted reply");
 }
 
 /// Answer the Hello numbered `hello_request_id` on `kill_connection`, answer
@@ -101,7 +86,11 @@ fn answer_prepared_quit(
         panic!("expected a prepared submitted command");
     };
     assert_eq!(command_envelope.command, Command::Quit);
-    send_ipc_reply(kill_connection, hello_request_id, build_hello_accepted());
+    send_ipc_reply(
+        kill_connection,
+        hello_request_id,
+        build_accepted_hello_result(),
+    );
     send_ipc_reply(
         kill_connection,
         kill_prepare_request.request_id,
@@ -151,7 +140,7 @@ fn serve_kill_session(
         send_ipc_reply(
             &mut discovery_connection,
             hello_request.request_id,
-            build_hello_accepted(),
+            build_accepted_hello_result(),
         );
         send_ipc_reply(
             &mut discovery_connection,
@@ -219,9 +208,28 @@ fn a_name_selects_its_session() {
     ]);
 
     assert_eq!(
-        resolve_discovered_session_id(&discovered_sessions, Some("quiet-lake"))
+        resolve_discovered_session_target(&discovered_sessions, Some("quiet-lake"))
             .expect("name matches"),
-        quiet_session_id
+        (quiet_session_id, None)
+    );
+}
+
+#[test]
+fn a_name_selects_another_users_session_with_its_owner() {
+    let quiet_session_overview = build_session_overview("quiet-lake");
+    let quiet_session_id = quiet_session_overview.session.session_id;
+    let discovered_sessions = Discovered {
+        owner_user_id_by_session_id: HashMap::from([(quiet_session_id, 1001)]),
+        ..build_complete_discovery(vec![
+            build_session_overview("amber-fox"),
+            quiet_session_overview,
+        ])
+    };
+
+    assert_eq!(
+        resolve_discovered_session_target(&discovered_sessions, Some("quiet-lake"))
+            .expect("name matches"),
+        (quiet_session_id, Some(1001))
     );
 }
 
@@ -231,18 +239,18 @@ fn no_name_selects_the_only_running_session() {
     let quiet_session_id = quiet_session_overview.session.session_id;
 
     assert_eq!(
-        resolve_discovered_session_id(
+        resolve_discovered_session_target(
             &build_complete_discovery(vec![quiet_session_overview]),
             None,
         )
         .expect("sole session"),
-        quiet_session_id
+        (quiet_session_id, None)
     );
 }
 
 #[test]
 fn an_unknown_name_uses_the_session_not_found_exit_code() {
-    let session_resolution_error = resolve_discovered_session_id(
+    let session_resolution_error = resolve_discovered_session_target(
         &build_complete_discovery(vec![build_session_overview("quiet-lake")]),
         Some("missing"),
     )
@@ -261,7 +269,7 @@ fn an_unknown_name_uses_the_session_not_found_exit_code() {
 #[test]
 fn no_running_session_uses_the_session_not_found_exit_code() {
     let session_resolution_error =
-        resolve_discovered_session_id(&build_complete_discovery(Vec::new()), None)
+        resolve_discovered_session_target(&build_complete_discovery(Vec::new()), None)
             .expect_err("nothing to kill");
 
     assert_eq!(
@@ -277,7 +285,7 @@ fn no_running_session_uses_the_session_not_found_exit_code() {
 fn duplicate_names_list_every_session_id() {
     let first_session_id = SessionId::from_uuid(Uuid::from_u128(1));
     let second_session_id = SessionId::from_uuid(Uuid::from_u128(2));
-    let session_resolution_error = resolve_discovered_session_id(
+    let session_resolution_error = resolve_discovered_session_target(
         &build_complete_discovery(vec![
             build_named_session_overview(first_session_id, "quiet-lake"),
             build_named_session_overview(second_session_id, "quiet-lake"),
@@ -300,7 +308,7 @@ fn duplicate_names_list_every_session_id() {
 
 #[test]
 fn several_sessions_need_a_name() {
-    let session_resolution_error = resolve_discovered_session_id(
+    let session_resolution_error = resolve_discovered_session_target(
         &build_complete_discovery(vec![
             build_session_overview("quiet-lake"),
             build_session_overview("amber-fox"),
@@ -321,7 +329,7 @@ fn several_sessions_need_a_name() {
 
 #[test]
 fn an_incomplete_census_cannot_prove_a_name_is_unique() {
-    let session_resolution_error = resolve_discovered_session_id(
+    let session_resolution_error = resolve_discovered_session_target(
         &build_incomplete_discovery(vec![build_session_overview("quiet-lake")]),
         Some("quiet-lake"),
     )
@@ -338,7 +346,7 @@ fn an_incomplete_census_cannot_prove_a_name_is_unique() {
 
 #[test]
 fn an_incomplete_census_cannot_apply_the_count_rule() {
-    let session_resolution_error = resolve_discovered_session_id(
+    let session_resolution_error = resolve_discovered_session_target(
         &build_incomplete_discovery(vec![build_session_overview("quiet-lake")]),
         None,
     )
@@ -439,4 +447,67 @@ fn kill_by_unknown_session_id_is_session_not_found() {
     };
     assert_eq!(session_name, session_id.to_string());
     let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[test]
+fn kill_by_owned_session_id_looks_in_that_users_folder_alone() {
+    let runtime_directory = build_test_runtime_directory("owned-session-id");
+    #[cfg(unix)]
+    let other_user_id = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(&runtime_directory)
+            .expect("read the runtime directory")
+            .uid()
+            + 1
+    };
+    #[cfg(windows)]
+    let other_user_id = 1001;
+    let session_id = SessionId::new();
+    EndpointFile {
+        socket_address: koshi_ipc::endpoint::compute_socket_address(&runtime_directory, session_id),
+        connection_token: ConnectionToken::generate(),
+        process_id: std::process::id(),
+    }
+    .write_to_path(&EndpointFile::resolve_endpoint_file_path(
+        &runtime_directory,
+        session_id,
+    ))
+    .expect("endpoint file written");
+
+    let kill_error = kill_session_in_runtime_directory(
+        &runtime_directory,
+        None,
+        Some(&SessionReference::OwnedSessionId(OwnedSessionId {
+            owner_user_id: other_user_id,
+            session_id,
+        })),
+    )
+    .expect_err("no folder of that user advertises the session");
+
+    assert_eq!(CliExitCode::from(&kill_error), CliExitCode::SessionNotFound);
+    let CliError::SessionNotFound { session_name } = kill_error else {
+        panic!("expected SessionNotFound, got {kill_error:?}");
+    };
+    assert_eq!(session_name, format!("{other_user_id}/{session_id}"));
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[test]
+fn detach_by_owned_session_id_goes_to_that_session_and_refuses_any_other_slash_form() {
+    let runtime_directory = PathBuf::from("/home/user/missing-runtime");
+    let session_id = SessionId::new();
+
+    assert_eq!(
+        resolve_detach_target(&runtime_directory, None, &format!("1001/{session_id}"))
+            .expect("the owned id reads without a lookup"),
+        (session_id, Some(1001), None)
+    );
+    let malformed_target_result = resolve_detach_target(&runtime_directory, None, "1001/work");
+    let Err(CliError::InvalidArgs { detail }) = malformed_target_result else {
+        panic!("expected InvalidArgs, got {malformed_target_result:?}");
+    };
+    assert_eq!(
+        detail,
+        "expected `<user id>/session-<uuid>`, such as `1001/session-<uuid>`"
+    );
 }

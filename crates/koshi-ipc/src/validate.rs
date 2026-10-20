@@ -133,6 +133,7 @@ fn validate_socket_directory(
             )));
         }
         let owner_user_id = directory_metadata.uid();
+        // SAFETY: `geteuid` takes no arguments and always succeeds.
         let effective_user_id = unsafe { libc::geteuid() };
         if owner_user_id != effective_user_id {
             return Err(build_untrusted_socket_error(format!(

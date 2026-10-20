@@ -14,7 +14,10 @@
 
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence};
 
-use crate::key::{build_key_parse_error, parse_chord, KeyParseError, KeyParseErrorKind, Leader};
+use crate::key::{
+    build_key_parse_error, finish_key_character, parse_chord, KeyParseError, KeyParseErrorKind,
+    Leader,
+};
 
 /// True when `word_fragment` holds a `-` between two alphanumeric characters.
 fn has_dash_between_alphanumerics(word_fragment: &str) -> bool {
@@ -88,26 +91,25 @@ fn is_leader_token(key_token: &str) -> bool {
         .is_some_and(|token_body| token_body.eq_ignore_ascii_case("leader"))
 }
 
-/// Merges a modifier-run leader into the chord that follows it. Rejects a
-/// merge that lands `SHIFT` on a [`Key::Char`] that is not lowercase; a named
-/// key takes `SHIFT` unchanged.
+/// Merges a modifier-run leader into the chord that follows it. A
+/// [`Key::Char`] passes through [`finish_key_character`], which rejects
+/// `SHIFT` on a character that is not lowercase; a named key takes `SHIFT`
+/// unchanged.
 fn merge_leader_modifier_flags(
     key_token: &str,
     leader_modifier_flags: BindingModifierFlags,
     key_chord: KeyChord,
 ) -> Result<KeyChord, KeyParseError> {
     let merged_modifier_flags = key_chord.modifier_flags.union(leader_modifier_flags);
-    if let Key::Char(key_character) = key_chord.key {
-        if merged_modifier_flags.has_all_modifiers(BindingModifierFlags::SHIFT)
-            && !key_character.is_lowercase()
-        {
-            return Err(build_key_parse_error(
-                key_token,
-                KeyParseErrorKind::ShiftOnNonLetter { key_character },
-            ));
+    match key_chord.key {
+        Key::Char(key_character) => {
+            finish_key_character(key_token, merged_modifier_flags, key_character)
         }
+        Key::Named(named_key) => Ok(KeyChord::from_parts(
+            merged_modifier_flags,
+            Key::Named(named_key),
+        )),
     }
-    Ok(KeyChord::from_parts(merged_modifier_flags, key_chord.key))
 }
 
 /// Parses a whole key sequence from its config text form.

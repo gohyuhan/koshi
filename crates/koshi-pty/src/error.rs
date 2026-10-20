@@ -18,10 +18,17 @@ pub enum PtyError {
     #[error("invalid pane: id - {pane_id}")]
     UnknownPane { pane_id: PaneId },
     /// Delivering a termination signal (Unix) or a Job-Object/`TerminateProcess`
-    /// call (Windows) to the child failed, or the child could not join its
-    /// Job Objects at spawn (Windows).
+    /// call (Windows) to the child failed, or a pane's Job Objects could not be
+    /// created at spawn (Windows).
     #[error("pty signal error: {detail}")]
     Signal { detail: String },
+    /// The pane's child has not taken the input queued for it, and the input
+    /// written next would pass [`crate::backend::state::MAX_QUEUED_PANE_INPUT_BYTE_COUNT`].
+    #[error("pane {pane_id} is not reading its input: {queued_byte_count} bytes wait for it")]
+    InputQueueFull {
+        pane_id: PaneId,
+        queued_byte_count: usize,
+    },
 }
 
 #[cfg(test)]

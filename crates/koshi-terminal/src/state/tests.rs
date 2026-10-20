@@ -11,10 +11,29 @@ impl TerminalState {
 use crate::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
 };
+use crate::grid::state::tests::build_line_cells;
 use crate::grid::state::{Cell, Grid, RowEnd, RowMetadata};
 use crate::scrollback::ScrollbackLimit;
 use crate::state::images::{MAX_IMAGE_PLACEMENT_COUNT, MAX_IMAGE_STORAGE_BYTE_COUNT};
 use crate::style::{Color, Style};
+
+/// Make the alternate screen active, with its grid allocated, as a switch
+/// to it does. The render state stays as it is.
+pub(super) fn switch_to_alternate_screen(terminal_state: &mut TerminalState) {
+    terminal_state.allocate_alternate_grid();
+    terminal_state.active_screen = Screen::Alternate;
+}
+
+/// The alternate screen's grid.
+///
+/// # Panics
+/// Panics when the alternate screen holds no grid.
+fn get_alternate_grid(terminal_state: &TerminalState) -> &Grid {
+    terminal_state
+        .alternate
+        .get_allocated_grid()
+        .expect("the alternate screen holds a grid")
+}
 
 /// Overwrite the cell at (`row_index`, `column_index`) of the active grid with
 /// `character` of the given display `cell_width`, in the default style. Plants
@@ -54,24 +73,27 @@ fn build_image_record(
     }
 }
 
-fn process_terminal_bytes(terminal_state: &mut TerminalState, input_bytes: &[u8]) {
+/// Feed `input_bytes` through a fresh parser into `terminal_state`.
+pub(crate) fn process_terminal_bytes(terminal_state: &mut TerminalState, input_bytes: &[u8]) {
     let mut parser = vte::Parser::<{ crate::engine::OSC_BUFFER_BYTE_CAPACITY }>::new_with_size();
     parser.advance(terminal_state, input_bytes);
 }
 
 #[test]
-fn new_initializes_both_screens_to_blank_of_size() {
+fn new_starts_the_primary_blank_and_the_alternate_with_no_grid() {
     let terminal_state = TerminalState::from_pty_size(PtySize {
         column_count: 5,
         row_count: 3,
     });
     assert_eq!(
-        *terminal_state.primary,
+        terminal_state.primary,
         Grid::build_blank(3, 5, Style::default())
     );
     assert_eq!(
-        *terminal_state.alternate,
-        Grid::build_blank(3, 5, Style::default())
+        terminal_state.alternate,
+        AlternateScreen::Blank {
+            fill_style: Style::default()
+        }
     );
 }
 
@@ -643,11 +665,14 @@ fn raw_image_state_deserialization_charges_every_image_content_to_one_budget() {
     use serde::de::IntoDeserializer;
 
     let deserializer = serialized_state.into_deserializer();
-    let deserialize_error =
-        match RawTerminalStateFields::deserialize_with_budget(deserializer, &mut budget) {
-            Ok(_) => panic!("the fifth 4-byte image content must exceed the 16-byte budget"),
-            Err(deserialize_error) => deserialize_error,
-        };
+    let deserialize_error = match RawTerminalStateFields::deserialize_with_budget(
+        deserializer,
+        &mut budget,
+        StoredStateShape::Current,
+    ) {
+        Ok(_) => panic!("the fifth 4-byte image content must exceed the 16-byte budget"),
+        Err(deserialize_error) => deserialize_error,
+    };
     assert_eq!(
         deserialize_error.to_string(),
         "image state RGBA data exceeds the remaining storage budget of 0 bytes"
@@ -745,7 +770,7 @@ fn kitty_transmit_and_display_replaces_all_old_placements_after_validation() {
     terminal_state
         .apply_image_record(&build_image_record(image_display.clone(), (0, 0), 1, 1))
         .expect("the primary image fits");
-    terminal_state.active_screen = Screen::Alternate;
+    switch_to_alternate_screen(&mut terminal_state);
     terminal_state
         .apply_image_record(&build_image_record(image_display, (1, 1), 1, 1))
         .expect("the alternate image fits");
@@ -1171,7 +1196,7 @@ fn kitty_transmit_removes_matching_images_from_both_screens() {
         .apply_image_record(&primary_image_record)
         .expect("the primary image fits");
 
-    terminal_state.active_screen = Screen::Alternate;
+    switch_to_alternate_screen(&mut terminal_state);
     terminal_state
         .apply_image_record(&build_image_record(image_display, (1, 1), 1, 1))
         .expect("the alternate image fits");
@@ -1519,7 +1544,7 @@ fn serialized_scrollback_cannot_exceed_its_absolute_row_count() {
     });
     terminal_state
         .scrollback
-        .push_row(&[Cell::build_blank()], RowMetadata::default());
+        .push_row_cells(&[Cell::build_blank()], RowMetadata::default());
 
     let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
     serialized_state["scrollback"]["total_pushed_line_count"] = serde_json::json!(0);
@@ -2063,6 +2088,7 @@ fn serialized_image_placement_identity_cannot_repeat_across_screens() {
     terminal_state
         .apply_image_record(&image_record)
         .expect("the image fits");
+    terminal_state.allocate_alternate_grid();
 
     let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
     let placement = serialized_state["primary_image_placements"][0].clone();
@@ -2173,12 +2199,12 @@ fn active_grid_follows_active_screen() {
     });
     assert!(std::ptr::eq(
         terminal_state.get_active_grid(),
-        terminal_state.primary.as_ref()
+        &terminal_state.primary
     ));
-    terminal_state.active_screen = Screen::Alternate;
+    switch_to_alternate_screen(&mut terminal_state);
     assert!(std::ptr::eq(
         terminal_state.get_active_grid(),
-        terminal_state.alternate.as_ref()
+        get_alternate_grid(&terminal_state)
     ));
 }
 
@@ -2192,7 +2218,7 @@ fn active_grid_mut_follows_active_screen() {
         terminal_state.get_active_grid_mut(),
         &Grid::build_blank(2, 4, Style::default())
     );
-    terminal_state.active_screen = Screen::Alternate;
+    switch_to_alternate_screen(&mut terminal_state);
     assert_eq!(
         terminal_state.get_active_grid_mut(),
         &Grid::build_blank(2, 4, Style::default())
@@ -2200,7 +2226,7 @@ fn active_grid_mut_follows_active_screen() {
 }
 
 #[test]
-fn resize_reallocs_both_grids_to_new_size() {
+fn resize_reallocs_the_primary_and_allocates_no_alternate_grid() {
     let mut terminal_state = TerminalState::from_pty_size(PtySize {
         column_count: 80,
         row_count: 24,
@@ -2210,12 +2236,31 @@ fn resize_reallocs_both_grids_to_new_size() {
         row_count: 5,
     });
     assert_eq!(
-        *terminal_state.primary,
+        terminal_state.primary,
         Grid::build_blank(5, 10, Style::default())
     );
     assert_eq!(
-        *terminal_state.alternate,
-        Grid::build_blank(5, 10, Style::default())
+        terminal_state.alternate,
+        AlternateScreen::Blank {
+            fill_style: Style::default()
+        }
+    );
+}
+
+#[test]
+fn resize_reallocs_an_allocated_alternate_grid_to_new_size() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 80,
+        row_count: 24,
+    });
+    terminal_state.allocate_alternate_grid();
+    terminal_state.resize_terminal_state(PtySize {
+        column_count: 10,
+        row_count: 5,
+    });
+    assert_eq!(
+        terminal_state.alternate,
+        AlternateScreen::Allocated(Grid::build_blank(5, 10, Style::default()))
     );
 }
 
@@ -2231,6 +2276,7 @@ fn resize_pads_each_grid_with_its_own_screen_background() {
         row_count: 2,
     });
     set_terminal_cell(&mut terminal_state, 0, 0, 'x', 1);
+    terminal_state.allocate_alternate_grid();
     terminal_state
         .primary_render
         .style
@@ -2267,15 +2313,15 @@ fn resize_pads_each_grid_with_its_own_screen_background() {
     // The alternate crops in place: its untouched cells stay default and
     // only the grown region takes the alternate fill.
     assert_eq!(
-        terminal_state.alternate.get_cell(0, 0),
+        get_alternate_grid(&terminal_state).get_cell(0, 0),
         Some(&Cell::build_blank())
     );
     assert_eq!(
-        terminal_state.alternate.get_cell(0, 5),
+        get_alternate_grid(&terminal_state).get_cell(0, 5),
         Some(&Cell::build_blank_with_style(red_fill))
     );
     assert_eq!(
-        terminal_state.alternate.get_cell(2, 3),
+        get_alternate_grid(&terminal_state).get_cell(2, 3),
         Some(&Cell::build_blank_with_style(red_fill))
     );
 }
@@ -2420,11 +2466,11 @@ fn resize_shrink_pushes_top_rows_to_scrollback_and_grow_pulls_them_back() {
     });
     assert_eq!(terminal_state.scrollback.get_retained_line_count(), 2);
     assert_eq!(
-        terminal_state.scrollback.list_retained_lines()[0].0[0].get_character(),
+        terminal_state.scrollback.list_retained_lines()[0].decode_text_cells()[0].get_character(),
         'a'
     );
     assert_eq!(
-        terminal_state.scrollback.list_retained_lines()[1].0[0].get_character(),
+        terminal_state.scrollback.list_retained_lines()[1].decode_text_cells()[0].get_character(),
         'b'
     );
     assert_eq!(
@@ -2560,9 +2606,9 @@ fn resize_to_zero_rows_pushes_all_content_into_scrollback_without_panicking() {
         column_count: 4,
         row_count: 0,
     });
-    // A zero-row grid reports zero columns too: `dimensions()` derives cols
-    // from the first row, and there is no first row (see the grid-level
-    // `dimensions_of_grids_with_a_zero_axis` test for the same rule).
+    // A zero-row grid reports zero columns too: `get_grid_dimensions` reads
+    // the column count from the first row, and there is no first row (see the
+    // grid-level `dimensions_of_grids_with_a_zero_axis` test for the same rule).
     assert_eq!(terminal_state.primary.get_grid_dimensions(), (0, 0));
     assert_eq!(terminal_state.scrollback.get_retained_line_count(), 3);
     assert_eq!(terminal_state.primary_cursor.row, 0); // clamped: no row to sit on
@@ -2651,7 +2697,7 @@ fn resize_alternate_screen_crops_without_touching_scrollback() {
         column_count: 4,
         row_count: 3,
     });
-    terminal_state.active_screen = Screen::Alternate;
+    switch_to_alternate_screen(&mut terminal_state);
     for row_index in 0..3 {
         set_terminal_cell(
             &mut terminal_state,
@@ -2672,23 +2718,21 @@ fn resize_alternate_screen_crops_without_touching_scrollback() {
     // The top row is cropped away — the alternate screen has no history.
     assert_eq!(terminal_state.scrollback.get_retained_line_count(), 0);
     assert_eq!(
-        terminal_state
-            .alternate
+        get_alternate_grid(&terminal_state)
             .get_cell(0, 0)
             .unwrap()
             .get_character(),
         'y'
     );
-    assert!(terminal_state.alternate.has_prompt_mark(0));
+    assert!(get_alternate_grid(&terminal_state).has_prompt_mark(0));
     assert_eq!(
-        terminal_state
-            .alternate
+        get_alternate_grid(&terminal_state)
             .get_cell(1, 0)
             .unwrap()
             .get_character(),
         'z'
     );
-    assert!(!terminal_state.alternate.has_prompt_mark(1));
+    assert!(!get_alternate_grid(&terminal_state).has_prompt_mark(1));
 }
 
 #[test]
@@ -2701,24 +2745,27 @@ fn new_starts_with_an_empty_scrollback() {
     assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 0);
 }
 
-/// A row of `line_text`, one default-styled cell per character — a scrollback line fixture.
-fn build_line_cells(line_text: &str) -> Vec<Cell> {
-    line_text
-        .chars()
-        .map(|character| Cell::from_character(character, 1, Style::default()))
+/// The characters of `row_snapshot`'s cells as a string; blank cells read as
+/// spaces.
+fn get_row_snapshot_text(row_snapshot: &RowSnapshot) -> String {
+    row_snapshot
+        .decode_row_cells()
+        .iter()
+        .map(Cell::get_character)
         .collect()
 }
 
-/// Read `row_index` of `grid` as a string; blank cells read as spaces.
-fn get_grid_row_text(grid: &Grid, row_index: u16) -> String {
-    let (_, column_count) = grid.get_grid_dimensions();
-    (0..column_count)
-        .map(|column_index| {
-            grid.get_cell(row_index, column_index)
-                .map(Cell::get_character)
-                .unwrap_or(' ')
-        })
-        .collect()
+/// Whether `row_snapshots` are the published snapshots of every row of
+/// `screen_grid`, shared and not copied.
+fn is_published_row_snapshot_list(row_snapshots: &[Arc<RowSnapshot>], screen_grid: &Grid) -> bool {
+    let (row_count, _) = screen_grid.get_grid_dimensions();
+    row_snapshots.len() == usize::from(row_count)
+        && row_snapshots
+            .iter()
+            .zip(screen_grid.list_row_snapshots())
+            .all(|(row_snapshot, published_row_snapshot)| {
+                Arc::ptr_eq(row_snapshot, &published_row_snapshot)
+            })
 }
 
 /// A 3-wide, 2-row primary screen with live rows `L0`/`L1` and three retained
@@ -2742,22 +2789,26 @@ fn build_state_with_history() -> TerminalState {
     }
     terminal_state
         .scrollback
-        .push_row(&build_line_cells("h0."), RowMetadata::default());
+        .push_row_cells(&build_line_cells("h0."), RowMetadata::default());
     terminal_state
         .scrollback
-        .push_row(&build_line_cells("h1."), RowMetadata::default());
+        .push_row_cells(&build_line_cells("h1."), RowMetadata::default());
     terminal_state
         .scrollback
-        .push_row(&build_line_cells("h2."), RowMetadata::default());
+        .push_row_cells(&build_line_cells("h2."), RowMetadata::default());
     terminal_state
 }
 
 #[test]
 fn scrolled_view_at_offset_zero_shares_the_live_buffer() {
     let terminal_state = build_state_with_history();
-    // Offset 0 follows live: the same Arc (no compose, no copy) and effective 0.
-    let (grid, clamped_scroll_offset) = terminal_state.get_scrolled_view(0);
-    assert!(Arc::ptr_eq(&grid, &terminal_state.get_active_grid_arc()));
+    // Offset 0 follows live: the live rows' own snapshots, no copy, and
+    // effective 0.
+    let (row_snapshots, clamped_scroll_offset) = terminal_state.get_scrolled_view(0);
+    assert!(is_published_row_snapshot_list(
+        &row_snapshots,
+        terminal_state.get_active_grid()
+    ));
     assert_eq!(clamped_scroll_offset, 0);
 }
 
@@ -2765,17 +2816,17 @@ fn scrolled_view_at_offset_zero_shares_the_live_buffer() {
 fn scrolled_view_composes_history_above_the_live_screen() {
     let terminal_state = build_state_with_history();
     // Offset 1: newest history row on top, top live row below.
-    let (grid, clamped_scroll_offset) = terminal_state.get_scrolled_view(1);
-    assert_eq!(grid.get_grid_dimensions(), (2, 3));
-    assert_eq!(get_grid_row_text(&grid, 0), "h2.");
-    assert_eq!(get_grid_row_text(&grid, 1), "L0.");
+    let (row_snapshots, clamped_scroll_offset) = terminal_state.get_scrolled_view(1);
+    assert_eq!(row_snapshots.len(), 2);
+    assert_eq!(get_row_snapshot_text(&row_snapshots[0]), "h2.");
+    assert_eq!(get_row_snapshot_text(&row_snapshots[1]), "L0.");
     assert_eq!(clamped_scroll_offset, 1);
 }
 
 #[test]
 fn scrolled_view_keeps_a_history_row_prompt_mark() {
     let mut terminal_state = build_state_with_history();
-    terminal_state.scrollback.push_row(
+    terminal_state.scrollback.push_row_cells(
         &build_line_cells("prompt"),
         RowMetadata {
             row_end: RowEnd::Hard,
@@ -2783,19 +2834,19 @@ fn scrolled_view_keeps_a_history_row_prompt_mark() {
         },
     );
 
-    let (grid, _) = terminal_state.get_scrolled_view(1);
+    let (row_snapshots, _) = terminal_state.get_scrolled_view(1);
 
-    assert!(grid.has_prompt_mark(0));
-    assert!(!grid.has_prompt_mark(1));
+    assert!(row_snapshots[0].get_row_metadata().has_prompt_mark);
+    assert!(!row_snapshots[1].get_row_metadata().has_prompt_mark);
 }
 
 #[test]
 fn scrolled_view_at_the_screen_height_shows_only_history() {
     let terminal_state = build_state_with_history();
-    // Offset 2 == the 2-row screen pixel_height: both rows come from history.
-    let (grid, clamped_scroll_offset) = terminal_state.get_scrolled_view(2);
-    assert_eq!(get_grid_row_text(&grid, 0), "h1.");
-    assert_eq!(get_grid_row_text(&grid, 1), "h2.");
+    // Offset 2 == the 2-row screen height: both rows come from history.
+    let (row_snapshots, clamped_scroll_offset) = terminal_state.get_scrolled_view(2);
+    assert_eq!(get_row_snapshot_text(&row_snapshots[0]), "h1.");
+    assert_eq!(get_row_snapshot_text(&row_snapshots[1]), "h2.");
     assert_eq!(clamped_scroll_offset, 2);
 }
 
@@ -2803,27 +2854,75 @@ fn scrolled_view_at_the_screen_height_shows_only_history() {
 fn scrolled_view_clamps_an_over_scroll_to_the_oldest_line() {
     let terminal_state = build_state_with_history();
     // Three history rows, screen height 2: offset 3 shows the oldest window,
-    // and any larger offset clamps — grid and effective offset both — to that
-    // same window rather than reading past.
-    let (grid, clamped_scroll_offset) = terminal_state.get_scrolled_view(3);
-    assert_eq!(get_grid_row_text(&grid, 0), "h0.");
-    assert_eq!(get_grid_row_text(&grid, 1), "h1.");
+    // and any larger offset clamps — the rows and the clamped offset both — to
+    // that same window rather than reading past.
+    let (row_snapshots, clamped_scroll_offset) = terminal_state.get_scrolled_view(3);
+    assert_eq!(get_row_snapshot_text(&row_snapshots[0]), "h0.");
+    assert_eq!(get_row_snapshot_text(&row_snapshots[1]), "h1.");
     assert_eq!(clamped_scroll_offset, 3);
 
-    let (over, over_effective) = terminal_state.get_scrolled_view(99);
-    assert_eq!(get_grid_row_text(&over, 0), "h0.");
-    assert_eq!(get_grid_row_text(&over, 1), "h1.");
-    assert_eq!(over_effective, 3); // clamped to the retained count
+    let (over_scrolled_row_snapshots, over_scrolled_clamped_offset) =
+        terminal_state.get_scrolled_view(99);
+    assert_eq!(
+        get_row_snapshot_text(&over_scrolled_row_snapshots[0]),
+        "h0."
+    );
+    assert_eq!(
+        get_row_snapshot_text(&over_scrolled_row_snapshots[1]),
+        "h1."
+    );
+    assert_eq!(over_scrolled_clamped_offset, 3); // clamped to the retained count
+}
+
+#[test]
+fn a_scrolled_view_at_offset_thirty_shares_every_history_line_and_screen_row() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 10,
+        row_count: 50,
+    });
+    for line_index in 0..1_000 {
+        terminal_state.scrollback.push_row_cells(
+            &build_line_cells(&format!("line {line_index}")),
+            RowMetadata::default(),
+        );
+    }
+
+    let (row_snapshots, clamped_scroll_offset) = terminal_state.get_scrolled_view(30);
+
+    let retained_lines = terminal_state.get_scrollback().list_retained_lines();
+    let shared_row_snapshots: Vec<Arc<RowSnapshot>> = retained_lines
+        .range(970..1_000)
+        .cloned()
+        .chain(
+            terminal_state
+                .get_active_grid()
+                .list_row_snapshots()
+                .take(20),
+        )
+        .collect();
+    assert_eq!(clamped_scroll_offset, 30);
+    assert_eq!(row_snapshots.len(), 50);
+    for (view_row_index, (row_snapshot, shared_row_snapshot)) in
+        row_snapshots.iter().zip(&shared_row_snapshots).enumerate()
+    {
+        assert!(
+            Arc::ptr_eq(row_snapshot, shared_row_snapshot),
+            "view row {view_row_index}"
+        );
+    }
 }
 
 #[test]
 fn scrolled_view_on_the_alternate_screen_reports_a_live_zero_offset() {
     let mut terminal_state = build_state_with_history();
-    terminal_state.active_screen = Screen::Alternate; // full-screen apps keep no scrollback
-    let (grid, clamped_scroll_offset) = terminal_state.get_scrolled_view(5);
-    // The alternate screen always shows live: the live Arc and a zero effective
-    // offset, so the indicator and cursor never treat it as scrolled.
-    assert!(Arc::ptr_eq(&grid, &terminal_state.get_active_grid_arc()));
+    switch_to_alternate_screen(&mut terminal_state); // full-screen apps keep no scrollback
+    let (row_snapshots, clamped_scroll_offset) = terminal_state.get_scrolled_view(5);
+    // The alternate screen always shows live: the live rows and a zero
+    // effective offset.
+    assert!(is_published_row_snapshot_list(
+        &row_snapshots,
+        get_alternate_grid(&terminal_state)
+    ));
     assert_eq!(clamped_scroll_offset, 0);
 }
 
@@ -2833,18 +2932,19 @@ fn scrolled_view_with_empty_history_follows_live() {
         column_count: 3,
         row_count: 2,
     });
-    let (grid, clamped_scroll_offset) = terminal_state.get_scrolled_view(5);
-    assert!(Arc::ptr_eq(&grid, &terminal_state.get_active_grid_arc()));
+    let (row_snapshots, clamped_scroll_offset) = terminal_state.get_scrolled_view(5);
+    assert!(is_published_row_snapshot_list(
+        &row_snapshots,
+        terminal_state.get_active_grid()
+    ));
     assert_eq!(clamped_scroll_offset, 0);
 }
 
 #[test]
-fn scrolled_view_pads_history_rows_with_the_blanks_that_were_trimmed() {
-    // A history row holding `ab` on a 3-wide screen: its third cell was a
-    // default blank and is not stored. The app has since set a background pen
-    // (SGR 48), which must not reach back and repaint that column — the cell
-    // was default when the line scrolled off, and scrolling back shows the
-    // line as it was, not as the running program currently paints.
+fn scrolled_view_shows_a_history_rows_default_blanks_as_they_were() {
+    // A history row holding `ab` and a default blank on a 3-wide screen. The
+    // app has since set a background pen (SGR 48), which does not reach back
+    // and repaint that column: scrolling back shows the line as it was.
     let mut terminal_state = TerminalState::from_pty_size(PtySize {
         column_count: 3,
         row_count: 2,
@@ -2853,14 +2953,14 @@ fn scrolled_view_pads_history_rows_with_the_blanks_that_were_trimmed() {
         .primary_render
         .style
         .set_background_color(Color::Indexed(4));
+    let mut history_row_cells = build_line_cells("ab");
+    history_row_cells.push(Cell::build_blank());
     terminal_state
         .scrollback
-        .push_row(&build_line_cells("ab"), RowMetadata::default());
+        .push_row_cells(&history_row_cells, RowMetadata::default());
 
-    let (grid, _) = terminal_state.get_scrolled_view(1);
-    let padded = grid.get_cell(0, 2).unwrap();
-    assert_eq!(padded.get_character(), ' ');
-    assert_eq!(padded.get_style(), Style::default());
+    let (row_snapshots, _) = terminal_state.get_scrolled_view(1);
+    assert_eq!(row_snapshots[0].decode_row_cells(), history_row_cells);
 }
 
 #[test]
@@ -2872,23 +2972,18 @@ fn scrolled_view_keeps_a_history_rows_own_background() {
         column_count: 3,
         row_count: 2,
     });
-    let mut red = Style::default();
-    red.set_background_color(Color::Indexed(1));
-    terminal_state.scrollback.push_row(
-        &vec![Cell::build_blank_with_style(red); 3],
+    let mut red_background_style = Style::default();
+    red_background_style.set_background_color(Color::Indexed(1));
+    terminal_state.scrollback.push_row_cells(
+        &vec![Cell::build_blank_with_style(red_background_style); 3],
         RowMetadata::default(),
     );
 
-    let (grid, _) = terminal_state.get_scrolled_view(1);
-    for column_index in 0..3 {
-        assert_eq!(
-            grid.get_cell(0, column_index)
-                .unwrap()
-                .get_style()
-                .get_background_color(),
-            Color::Indexed(1)
-        );
-    }
+    let (row_snapshots, _) = terminal_state.get_scrolled_view(1);
+    assert_eq!(
+        row_snapshots[0].decode_row_cells(),
+        vec![Cell::build_blank_with_style(red_background_style); 3]
+    );
 }
 
 #[test]
@@ -2898,14 +2993,14 @@ fn text_view_on_the_alternate_screen_reads_its_grid_alone() {
     // alone: its top row is the first readable row, and the primary's history
     // rows read as gone.
     let mut terminal_state = build_state_with_history();
-    terminal_state.active_screen = Screen::Alternate;
+    switch_to_alternate_screen(&mut terminal_state);
 
     // Three rows were pushed into history, so the live top row is absolute
     // row 3 and the screen's two rows are 3 and 4.
-    let view = terminal_state.get_text_view();
-    assert_eq!(view.get_first_row_index(), 3);
-    assert_eq!(view.get_last_row_index(), 4);
-    assert_eq!(view.get_row(2).map(|(cells, _)| cells.len()), None);
+    let text_view = terminal_state.get_text_view();
+    assert_eq!(text_view.get_first_row_index(), 3);
+    assert_eq!(text_view.get_last_row_index(), 4);
+    assert_eq!(text_view.get_row_end(2), None);
 
     // The primary's own view still reaches back over the same history.
     terminal_state.active_screen = Screen::Primary;
@@ -2921,7 +3016,7 @@ fn resize_blanks_a_wide_glyph_the_alternate_screen_cuts_in_half() {
         column_count: 4,
         row_count: 1,
     });
-    terminal_state.active_screen = Screen::Alternate;
+    switch_to_alternate_screen(&mut terminal_state);
     set_terminal_cell(&mut terminal_state, 0, 0, 'a', 1);
     set_terminal_cell(&mut terminal_state, 0, 2, '世', 2);
     set_terminal_cell(&mut terminal_state, 0, 3, ' ', 0);
@@ -2931,15 +3026,14 @@ fn resize_blanks_a_wide_glyph_the_alternate_screen_cuts_in_half() {
         row_count: 1,
     });
     assert_eq!(
-        terminal_state
-            .alternate
+        get_alternate_grid(&terminal_state)
             .get_cell(0, 0)
             .unwrap()
             .get_character(),
         'a'
     );
     assert_eq!(
-        terminal_state.alternate.get_cell(0, 2),
+        get_alternate_grid(&terminal_state).get_cell(0, 2),
         Some(&Cell::build_blank())
     );
 }
@@ -2953,7 +3047,7 @@ fn resize_moves_the_alternate_cursor_up_by_the_rows_cropped_off_the_top() {
         column_count: 2,
         row_count: 4,
     });
-    terminal_state.active_screen = Screen::Alternate;
+    switch_to_alternate_screen(&mut terminal_state);
     for (row, character) in "abcd".chars().enumerate() {
         set_terminal_cell(&mut terminal_state, row as u16, 0, character, 1);
     }
@@ -2965,8 +3059,7 @@ fn resize_moves_the_alternate_cursor_up_by_the_rows_cropped_off_the_top() {
         row_count: 2,
     });
     assert_eq!(
-        terminal_state
-            .alternate
+        get_alternate_grid(&terminal_state)
             .get_cell(0, 0)
             .unwrap()
             .get_character(),
@@ -2974,4 +3067,646 @@ fn resize_moves_the_alternate_cursor_up_by_the_rows_cropped_off_the_top() {
     );
     assert_eq!(terminal_state.alternate_cursor.row, 0);
     assert_eq!(terminal_state.alternate_cursor.column, 1);
+}
+
+/// `terminal_state` written in the shape resume format 4 stores it: each
+/// grid as `rows` of JSON cells beside a `row_metadata` list, the alternate
+/// screen as its grid (an [`AlternateScreen::Blank`] one as its blank grid at
+/// the primary screen's size), each history line as a pair of its JSON cells,
+/// without the trailing default blanks of a hard-ended line, and its metadata,
+/// and the modes without `is_insert_mode_enabled`.
+fn write_as_resume_format_4(terminal_state: &TerminalState) -> serde_json::Value {
+    let mut terminal_state_json =
+        serde_json::to_value(terminal_state).expect("the terminal state serializes");
+    let (row_count, column_count) = terminal_state.primary.get_grid_dimensions();
+    let alternate_grid = match &terminal_state.alternate {
+        AlternateScreen::Blank { fill_style } => {
+            Grid::build_blank(row_count, column_count, *fill_style)
+        }
+        AlternateScreen::Allocated(alternate_grid) => alternate_grid.clone(),
+    };
+    terminal_state_json["alternate"] =
+        serde_json::to_value(&alternate_grid).expect("the alternate grid serializes");
+    terminal_state_json["modes"]
+        .as_object_mut()
+        .expect("the modes are a JSON object")
+        .remove("is_insert_mode_enabled")
+        .expect("the modes hold is_insert_mode_enabled");
+    for grid_name in ["primary", "alternate"] {
+        let stored_rows: Vec<RowSnapshot> =
+            serde_json::from_value(terminal_state_json[grid_name]["rows"].take())
+                .expect("read the stored grid rows");
+        terminal_state_json[grid_name] = serde_json::json!({
+            "rows": stored_rows
+                .iter()
+                .map(RowSnapshot::decode_row_cells)
+                .collect::<Vec<Vec<Cell>>>(),
+            "row_metadata": stored_rows
+                .iter()
+                .map(RowSnapshot::get_row_metadata)
+                .collect::<Vec<RowMetadata>>(),
+        });
+    }
+    let stored_lines: Vec<RowSnapshot> =
+        serde_json::from_value(terminal_state_json["scrollback"]["retained_lines"].take())
+            .expect("read the stored history lines");
+    terminal_state_json["scrollback"]["retained_lines"] = serde_json::to_value(
+        stored_lines
+            .iter()
+            .map(|row_snapshot| {
+                (
+                    row_snapshot.decode_text_cells(),
+                    row_snapshot.get_row_metadata(),
+                )
+            })
+            .collect::<Vec<(Vec<Cell>, RowMetadata)>>(),
+    )
+    .expect("encode the history lines");
+    terminal_state_json
+}
+
+/// `terminal_state_json`, in the shape resume format 4 stores, read back as a
+/// terminal state.
+fn read_as_resume_format_4(terminal_state_json: serde_json::Value) -> TerminalState {
+    serde_json::from_value::<ResumeFormat4TerminalState>(terminal_state_json)
+        .expect("the format 4 state reads")
+        .into_terminal_state()
+}
+
+#[test]
+fn a_resume_format_4_terminal_state_reads_back_the_screens_and_history_it_was_written_from() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 6,
+        row_count: 2,
+    });
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"ab\r\n\x1b]133;A\x07wrapped-line\r\n\x1b[41mred\x1b[0m\r\nlast",
+    );
+    assert_eq!(terminal_state.scrollback.get_retained_line_count(), 3);
+    let terminal_state_json = write_as_resume_format_4(&terminal_state);
+    assert_eq!(
+        terminal_state_json["scrollback"]["retained_lines"][0][0]
+            .as_array()
+            .map(Vec::len),
+        Some(2),
+        "the hard-ended line `ab` is stored without its padding"
+    );
+
+    assert_eq!(read_as_resume_format_4(terminal_state_json), terminal_state);
+}
+
+#[test]
+fn a_resume_format_4_history_line_wider_than_the_screen_drops_the_image_fragments_it_loses() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 4,
+        row_count: 2,
+    });
+    let image_record = ImageRecord {
+        protocol: GraphicsProtocol::Iterm2,
+        image: Arc::new(DecodedImage {
+            pixel_width: 2,
+            pixel_height: 1,
+            rgba_bytes: vec![255; 2 * 4],
+        }),
+        animation: None,
+        action: ImageAction::Display,
+        display: ImageDisplay {
+            requested_width: Some(ImageDimension::Cells(2)),
+            requested_height: Some(ImageDimension::Cells(1)),
+            should_move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        anchor: (0, 2),
+    };
+    terminal_state
+        .apply_image_record(&image_record)
+        .expect("the image fits");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[2;1H\n");
+    let image_source_id = terminal_state.native_images[0]
+        .placement
+        .get_image_placement_id();
+    assert_eq!(
+        terminal_state.native_fragment_count_by_image_source_id,
+        HashMap::from([(image_source_id, 2)])
+    );
+    let mut terminal_state_json = write_as_resume_format_4(&terminal_state);
+    let history_line_cells = terminal_state_json["scrollback"]["retained_lines"][0][0]
+        .as_array_mut()
+        .expect("the history line holds a list of cells");
+    let last_image_cell = history_line_cells[3].clone();
+    history_line_cells.push(last_image_cell);
+
+    let read_terminal_state = read_as_resume_format_4(terminal_state_json);
+
+    assert_eq!(
+        read_terminal_state.native_fragment_count_by_image_source_id,
+        HashMap::from([(image_source_id, 2)])
+    );
+    assert_eq!(read_terminal_state, terminal_state);
+}
+
+#[test]
+fn a_resume_format_4_terminal_state_reads_back_with_insert_mode_off() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 6,
+        row_count: 2,
+    });
+    process_terminal_bytes(&mut terminal_state, b"ab\x1b[?7l\x1b[4h");
+    let terminal_state_json = write_as_resume_format_4(&terminal_state);
+
+    let read_terminal_state = read_as_resume_format_4(terminal_state_json);
+
+    assert!(!read_terminal_state.modes.is_insert_mode_enabled);
+    assert!(!read_terminal_state.modes.is_autowrap_enabled);
+    let mut expected_terminal_state = terminal_state;
+    expected_terminal_state.modes.is_insert_mode_enabled = false;
+    assert_eq!(read_terminal_state, expected_terminal_state);
+}
+
+#[test]
+fn a_terminal_state_in_insert_mode_round_trips_through_the_current_shape() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 6,
+        row_count: 2,
+    });
+    process_terminal_bytes(&mut terminal_state, b"ab\x1b[4h");
+    let terminal_state_json =
+        serde_json::to_string(&terminal_state).expect("the terminal state serializes");
+
+    let read_terminal_state: TerminalState =
+        serde_json::from_str(&terminal_state_json).expect("the state reads back");
+
+    assert!(read_terminal_state.modes.is_insert_mode_enabled);
+    assert_eq!(read_terminal_state, terminal_state);
+}
+
+/// The blank fill style of a pen whose background is `Color::Indexed(color_index)`.
+fn build_background_fill_style(color_index: u8) -> Style {
+    let mut fill_style = Style::default();
+    fill_style.set_background_color(Color::Indexed(color_index));
+    fill_style
+}
+
+#[test]
+fn a_pane_that_never_enters_the_alternate_screen_holds_no_alternate_grid() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 6,
+        row_count: 3,
+    });
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"\x1b[44mprompt\r\n\x1b]133;A\x07ls\r\nout\x1b[!p\x1b[2J",
+    );
+    for (column_count, row_count) in [(2, 1), (9, 5), (0, 0), (6, 3)] {
+        terminal_state.resize_terminal_state(PtySize {
+            column_count,
+            row_count,
+        });
+    }
+
+    assert_eq!(
+        terminal_state.alternate,
+        AlternateScreen::Blank {
+            fill_style: Style::default()
+        }
+    );
+}
+
+#[test]
+fn a_non_clearing_exit_keeps_the_alternate_cells_for_the_next_entry() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 5,
+        row_count: 2,
+    });
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?47habc\x1b[?47l\x1b[?47h");
+
+    let first_row_characters: String = terminal_state
+        .get_active_grid()
+        .get_row_cells(0)
+        .expect("the alternate screen has a first row")
+        .iter()
+        .map(Cell::get_character)
+        .collect();
+    assert_eq!(first_row_characters, "abc  ");
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 3));
+}
+
+#[test]
+fn a_clearing_exit_leaves_the_blanks_a_held_grid_cleared_in_the_pen_background() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 4,
+        row_count: 3,
+    });
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"\x1b[?1049h\x1b[44m\x1b]133;A\x07wrapped-text\x1b[2;2H\xe4\xb8\x96",
+    );
+    let mut cleared_grid = terminal_state.get_active_grid().clone();
+    for row_index in 0..3 {
+        cleared_grid.clear_line(row_index, 0, 4, build_background_fill_style(4));
+        cleared_grid.set_prompt_mark(row_index, false);
+    }
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?1049l");
+    assert_eq!(
+        terminal_state.alternate,
+        AlternateScreen::Blank {
+            fill_style: build_background_fill_style(4)
+        }
+    );
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?47h");
+
+    assert_eq!(terminal_state.get_active_grid(), &cleared_grid);
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 0));
+}
+
+#[test]
+fn every_order_of_alternate_screen_switches_matches_an_alternate_grid_held_from_the_start() {
+    const STEP_BYTES: [&[u8]; 21] = [
+        b"\x1b[?47h",
+        b"\x1b[?47l",
+        b"\x1b[?1047h",
+        b"\x1b[?1047l",
+        b"\x1b[?1049h",
+        b"\x1b[?1049l",
+        b"\x1b[?47;1049h",
+        b"\x1b[?1049;1047l",
+        b"\x1b[41m",
+        b"\x1b[44m",
+        b"\x1b[0m",
+        b"abc",
+        b"\x1b[2;3Hxyz",
+        b"\r\n",
+        b"\x1b[2J",
+        b"\x1b]133;A\x07",
+        b"\x1b[!p",
+        b"\x1bc",
+        b"\x1b7",
+        b"\x1b8",
+        b"\x1b[2;3r\x1b[3;1H\n\n",
+    ];
+    const STEP_COUNT_PER_SEED: usize = 400;
+
+    for seed in 0..8 {
+        let mut seeded_sequence =
+            koshi_test_support::output_workloads::SeededSequence::from_seed(seed);
+        let starting_pty_size = PtySize {
+            column_count: 5,
+            row_count: 3,
+        };
+        let mut lazy_terminal_state = TerminalState::from_pty_size(starting_pty_size);
+        let mut held_terminal_state = TerminalState::from_pty_size(starting_pty_size);
+        for step_index in 0..STEP_COUNT_PER_SEED {
+            held_terminal_state.allocate_alternate_grid();
+            let step_choice = seeded_sequence.compute_next_index(STEP_BYTES.len() + 1);
+            let step_name = if step_choice == STEP_BYTES.len() {
+                let pty_size = PtySize {
+                    column_count: seeded_sequence.compute_next_index(8) as u16,
+                    row_count: seeded_sequence.compute_next_index(6) as u16,
+                };
+                lazy_terminal_state.resize_terminal_state(pty_size);
+                held_terminal_state.resize_terminal_state(pty_size);
+                format!("resize to {pty_size:?}")
+            } else {
+                let step_bytes = STEP_BYTES[step_choice];
+                process_terminal_bytes(&mut lazy_terminal_state, step_bytes);
+                process_terminal_bytes(&mut held_terminal_state, step_bytes);
+                format!("{:?}", String::from_utf8_lossy(step_bytes))
+            };
+            let mut compared_lazy_terminal_state = lazy_terminal_state.clone();
+            compared_lazy_terminal_state.allocate_alternate_grid();
+            let mut compared_held_terminal_state = held_terminal_state.clone();
+            compared_held_terminal_state.allocate_alternate_grid();
+            assert_eq!(
+                compared_lazy_terminal_state, compared_held_terminal_state,
+                "seed {seed}, step {step_index}: {step_name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_resume_format_4_blank_alternate_grid_reads_back_as_no_grid() {
+    let terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 6,
+        row_count: 2,
+    });
+    let terminal_state_json = write_as_resume_format_4(&terminal_state);
+
+    let read_terminal_state = read_as_resume_format_4(terminal_state_json);
+
+    assert_eq!(
+        read_terminal_state.alternate,
+        AlternateScreen::Blank {
+            fill_style: Style::default()
+        }
+    );
+}
+
+#[test]
+fn a_resume_format_4_alternate_grid_that_holds_text_keeps_its_grid() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 6,
+        row_count: 2,
+    });
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?47habc\x1b[?47l");
+    let terminal_state_json = write_as_resume_format_4(&terminal_state);
+
+    let read_terminal_state = read_as_resume_format_4(terminal_state_json);
+
+    assert_eq!(read_terminal_state, terminal_state);
+}
+
+#[test]
+fn a_resume_format_4_blank_alternate_grid_keeps_its_grid_while_it_is_active() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 6,
+        row_count: 2,
+    });
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?1049h");
+    let terminal_state_json = write_as_resume_format_4(&terminal_state);
+
+    let read_terminal_state = read_as_resume_format_4(terminal_state_json);
+
+    assert_eq!(
+        read_terminal_state.alternate,
+        AlternateScreen::Allocated(Grid::build_blank(2, 6, Style::default()))
+    );
+}
+
+#[test]
+fn a_resume_format_4_blank_alternate_grid_off_the_alternate_pen_background_keeps_its_grid() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 6,
+        row_count: 2,
+    });
+    process_terminal_bytes(&mut terminal_state, b"\x1b[41m\x1b[?47h\x1b[?47l");
+    let terminal_state_json = write_as_resume_format_4(&terminal_state);
+
+    let read_terminal_state = read_as_resume_format_4(terminal_state_json);
+
+    assert_eq!(
+        read_terminal_state.alternate,
+        AlternateScreen::Allocated(Grid::build_blank(2, 6, Style::default()))
+    );
+}
+
+#[test]
+fn an_alternate_screen_with_no_grid_is_stored_as_its_blank_style() {
+    let terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 6,
+        row_count: 2,
+    });
+
+    let terminal_state_json =
+        serde_json::to_value(&terminal_state).expect("the terminal state serializes");
+
+    assert_eq!(
+        terminal_state_json["alternate"],
+        serde_json::json!({
+            "Blank": {
+                "fill_style": serde_json::to_value(Style::default())
+                    .expect("the style serializes")
+            }
+        })
+    );
+    let read_terminal_state: TerminalState =
+        serde_json::from_value(terminal_state_json).expect("the state reads back");
+    assert_eq!(read_terminal_state, terminal_state);
+}
+
+#[test]
+fn a_stored_active_alternate_screen_with_no_grid_does_not_load() {
+    let terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 6,
+        row_count: 2,
+    });
+    let mut terminal_state_json =
+        serde_json::to_value(&terminal_state).expect("the terminal state serializes");
+    terminal_state_json["active_screen"] =
+        serde_json::to_value(Screen::Alternate).expect("the screen serializes");
+
+    let read_error = serde_json::from_value::<TerminalState>(terminal_state_json)
+        .expect_err("an active alternate screen needs a grid");
+
+    assert_eq!(
+        read_error.to_string(),
+        "the active alternate screen holds no grid"
+    );
+}
+
+#[test]
+fn a_stored_alternate_screen_with_no_grid_and_an_image_placement_does_not_load() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 6,
+        row_count: 2,
+    });
+    terminal_state
+        .apply_image_record(&build_image_record(
+            ImageDisplay {
+                requested_column_count: Some(1),
+                requested_row_count: Some(1),
+                should_move_cursor: false,
+                ..ImageDisplay::default()
+            },
+            (0, 0),
+            1,
+            1,
+        ))
+        .expect("the image fits");
+    let mut terminal_state_json =
+        serde_json::to_value(&terminal_state).expect("the terminal state serializes");
+    let image_placement = terminal_state_json["primary_image_placements"][0].clone();
+    terminal_state_json["primary_image_placements"] = serde_json::json!([]);
+    terminal_state_json["alternate_image_placements"] = serde_json::json!([image_placement]);
+
+    let read_error = serde_json::from_value::<TerminalState>(terminal_state_json)
+        .expect_err("an alternate screen with no grid holds no image placement");
+
+    assert_eq!(
+        read_error.to_string(),
+        "an alternate screen with no grid holds an image placement"
+    );
+}
+
+#[test]
+fn a_resume_format_4_blank_alternate_grid_resizes_as_its_grid_did() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 3,
+        row_count: 4,
+    });
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?47h\x1b[3;2H\x1b[?47l");
+    let terminal_state_json = write_as_resume_format_4(&terminal_state);
+    let mut read_terminal_state = read_as_resume_format_4(terminal_state_json);
+    assert_eq!(
+        read_terminal_state.alternate,
+        AlternateScreen::Blank {
+            fill_style: Style::default()
+        }
+    );
+    let mut held_terminal_state = read_terminal_state.clone();
+    held_terminal_state.allocate_alternate_grid();
+
+    let pty_size = PtySize {
+        column_count: 5,
+        row_count: 2,
+    };
+    read_terminal_state.resize_terminal_state(pty_size);
+    held_terminal_state.resize_terminal_state(pty_size);
+
+    assert_eq!(
+        (
+            read_terminal_state.alternate_cursor.row,
+            read_terminal_state.alternate_cursor.column
+        ),
+        (0, 1)
+    );
+    read_terminal_state.allocate_alternate_grid();
+    assert_eq!(read_terminal_state, held_terminal_state);
+}
+
+#[test]
+fn a_clearing_exit_drops_the_native_images_the_alternate_cells_held() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 8,
+        row_count: 8,
+    });
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?1049h");
+    let mut iterm_image_record = build_image_record(
+        ImageDisplay {
+            requested_width: Some(ImageDimension::Cells(1)),
+            requested_height: Some(ImageDimension::Cells(1)),
+            should_move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    iterm_image_record.protocol = GraphicsProtocol::Iterm2;
+    terminal_state
+        .apply_image_record(&iterm_image_record)
+        .expect("the iTerm2 image fits");
+    assert_eq!(
+        terminal_state
+            .native_fragment_count_by_image_source_id
+            .values()
+            .copied()
+            .collect::<Vec<usize>>(),
+        vec![1]
+    );
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?1049l");
+
+    assert_eq!(
+        terminal_state.native_fragment_count_by_image_source_id,
+        HashMap::new()
+    );
+    assert_eq!(terminal_state.native_images, Vec::new());
+}
+
+#[test]
+fn a_resume_format_4_blank_alternate_grid_with_an_image_placement_keeps_its_grid() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 6,
+        row_count: 2,
+    });
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?47h");
+    terminal_state
+        .apply_image_record(&build_image_record(
+            ImageDisplay {
+                requested_column_count: Some(1),
+                requested_row_count: Some(1),
+                should_move_cursor: false,
+                ..ImageDisplay::default()
+            },
+            (0, 0),
+            1,
+            1,
+        ))
+        .expect("the alternate image fits");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?47l");
+    assert_eq!(
+        terminal_state.alternate,
+        AlternateScreen::Allocated(Grid::build_blank(2, 6, Style::default()))
+    );
+    let terminal_state_json = write_as_resume_format_4(&terminal_state);
+
+    let read_terminal_state = read_as_resume_format_4(terminal_state_json);
+
+    assert_eq!(read_terminal_state, terminal_state);
+}
+
+/// A 5-column, 1-row state whose history holds the hard line `abc` encoded
+/// 3 cells wide, then the soft line `abcdefg` encoded 7 cells wide.
+fn build_state_with_history_of_other_widths() -> TerminalState {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 5,
+        row_count: 1,
+    });
+    terminal_state
+        .scrollback
+        .push_row_cells(&build_line_cells("abc"), RowMetadata::default());
+    terminal_state.scrollback.push_row_cells(
+        &build_line_cells("abcdefg"),
+        RowMetadata {
+            row_end: RowEnd::Soft,
+            has_prompt_mark: false,
+        },
+    );
+    terminal_state
+}
+
+#[test]
+fn a_stored_state_whose_history_line_holds_another_width_does_not_load() {
+    let terminal_state_json = serde_json::to_value(build_state_with_history_of_other_widths())
+        .expect("the terminal state serializes");
+
+    let read_error = serde_json::from_value::<TerminalState>(terminal_state_json)
+        .expect_err("every history line holds the screen's width");
+
+    assert_eq!(
+        read_error.to_string(),
+        "a history line holds another column count than the primary screen"
+    );
+}
+
+#[test]
+fn a_resume_format_4_history_line_of_another_width_reads_back_at_the_screen_width() {
+    let terminal_state_json = write_as_resume_format_4(&build_state_with_history_of_other_widths());
+
+    let read_terminal_state = read_as_resume_format_4(terminal_state_json);
+
+    let list_padded_line_texts_and_metadata =
+        |terminal_state: &TerminalState| -> Vec<(String, RowMetadata)> {
+            terminal_state
+                .scrollback
+                .list_retained_lines()
+                .iter()
+                .map(|row_snapshot| {
+                    (
+                        get_row_snapshot_text(row_snapshot),
+                        row_snapshot.get_row_metadata(),
+                    )
+                })
+                .collect()
+        };
+    assert_eq!(
+        list_padded_line_texts_and_metadata(&read_terminal_state),
+        vec![
+            ("abc  ".to_string(), RowMetadata::default()),
+            (
+                "abcde".to_string(),
+                RowMetadata {
+                    row_end: RowEnd::Soft,
+                    has_prompt_mark: false,
+                }
+            ),
+        ]
+    );
+    assert!(read_terminal_state
+        .scrollback
+        .has_only_lines_of_column_count(5));
 }

@@ -8,10 +8,15 @@
 //! existing UUID (`from_uuid`), or read from typed text with
 //! [`parse_prefixed_uuid`] followed by `from_uuid`.
 //!
-//! The six types below share the same shape: a wrapped [`Uuid`], a `new`
+//! The six id types below share the same shape: a wrapped [`Uuid`], a `new`
 //! constructor that mints a fresh id, a `from_uuid` constructor that wraps an
 //! existing one, a `get_uuid` accessor, and a `Display` impl that prefixes the
 //! id with its entity name.
+//!
+//! [`OwnedSessionId`] pairs a session id with the user id whose folder of the
+//! shared directory advertises the session, as `1001/session-<uuid>`.
+//! [`format_session_target`] writes that text, and [`parse_owned_session_id`]
+//! reads it.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -230,6 +235,72 @@ impl Default for SubscriberId {
 impl fmt::Display for SubscriberId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "subscriber-{}", self.0)
+    }
+}
+
+/// A session named together with the user whose folder of the shared directory
+/// advertises it, as a person types it: `<user id>/<session id>`. Displays as
+/// `1001/session-<uuid>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnedSessionId {
+    /// The user id that owns the folder advertising the session, such as `1001`.
+    pub owner_user_id: u32,
+    /// The session's id.
+    pub session_id: SessionId,
+}
+
+impl fmt::Display for OwnedSessionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}/{}", self.owner_user_id, self.session_id)
+    }
+}
+
+/// The text that names `session_id` to `koshi attach`: `<user id>/<session id>`
+/// when `owner_user_id` is set, and the session id alone otherwise.
+///
+/// Example — `Some(1001)` gives `1001/session-01a0…`, and `None` gives
+/// `session-01a0…`.
+#[must_use]
+pub fn format_session_target(session_id: SessionId, owner_user_id: Option<u32>) -> String {
+    match owner_user_id {
+        Some(owner_user_id) => OwnedSessionId {
+            owner_user_id,
+            session_id,
+        }
+        .to_string(),
+        None => session_id.to_string(),
+    }
+}
+
+/// Reads `session_text` as an [`OwnedSessionId`] when it holds a `/`. The part
+/// before the first `/` is a user id in decimal with no sign and no leading
+/// zero, and the part after it is a session id as [`parse_prefixed_uuid`]
+/// reads it with the prefix `session`. `Ok(None)` for text with no `/`.
+///
+/// Example — `1001/session-01a0…` gives user `1001` and that session, while
+/// `quiet-lake` and `session-01a0…` give `Ok(None)`.
+///
+/// # Errors
+/// ``expected `<user id>/session-<uuid>`, such as `1001/session-<uuid>` `` for
+/// text with a `/` that is not that form, such as `01001/session-01a0…`,
+/// `alice/session-01a0…` or `1001/quiet-lake`.
+pub fn parse_owned_session_id(session_text: &str) -> Result<Option<OwnedSessionId>, String> {
+    let Some((owner_text, session_id_text)) = session_text.split_once('/') else {
+        return Ok(None);
+    };
+    let owner_user_id = owner_text
+        .parse::<u32>()
+        .ok()
+        .filter(|owner_user_id| owner_user_id.to_string() == owner_text);
+    let session_uuid = parse_prefixed_uuid(session_id_text, "session").ok();
+    match (owner_user_id, session_uuid) {
+        (Some(owner_user_id), Some(session_uuid)) => Ok(Some(OwnedSessionId {
+            owner_user_id,
+            session_id: SessionId::from_uuid(session_uuid),
+        })),
+        _ => Err(String::from(
+            "expected `<user id>/session-<uuid>`, such as `1001/session-<uuid>`",
+        )),
     }
 }
 

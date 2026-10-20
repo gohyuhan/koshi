@@ -109,6 +109,33 @@ pub struct Surface {
 /// - The `Hello` answer carries `process_image_id`: the id of the answering
 ///   session's process image, which a restart into a new image changes. The
 ///   field is required, and 4 has no such field.
+/// - A frame travels as a painted update in binary frames, whose length
+///   prefix has bit 31 set: the frame's JSON only when it changed, and each
+///   pane's cursor, scroll position and rows in the row encoding, with only
+///   the rows the client does not hold. A frame that changes nothing is not
+///   sent. 4 sent every frame as one `Painted` JSON event that carried every
+///   row as cell runs.
+/// - The `PaintedUpdate` request exists in 5 only. An attached client sends it
+///   after each paint, naming the last painted update it applied, and nothing
+///   answers it. The session sends the next painted update once the bytes in
+///   flight past the last reported update fit the connection's window, and
+///   one that names an update not sent closes the connection. 4 sent every
+///   frame as it was composed.
+/// - The `Attach` request carries `max_frames_per_second`, from `30` to `120`:
+///   the session sends the attached client at most that many frames a second,
+///   and refuses an `Attach` with a value outside that range with the
+///   `RequestFailed` code. The field is required, and 4 has no such field.
+/// - Each chunk of an image record's RGBA bytes travels as a binary frame of
+///   kind `2`: the transfer id and the byte offset as 8 big-endian bytes each,
+///   the last-chunk flag as one byte, then the raw bytes. The
+///   `ImageContentChunk` event exists in 4 only, and carried the bytes as
+///   base64 text in JSON.
+/// - A `SwitchSession` command and a `SwitchTo` event carry `owner_user_id`:
+///   the user id whose folder of the shared directory advertises the session,
+///   or `null`. The field is required, and 4 has no such field.
+/// - A pane row of an `Overview` answer carries the lifecycle `Running` only.
+///   4 also carried `Spawning`, `Exited` with the child's `exit_code`, and
+///   `Closing`.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A
@@ -145,10 +172,14 @@ pub const CONTROL_PROTOCOL: Surface = Surface {
 /// speak.
 ///
 /// `v0.4.0` speaks 1. `v0.5.0` speaks 2. The floor is 2.
+///
+/// Version 3 gives each pane an output window: the supervisor sends at most
+/// that many bytes of one pane's output ahead of the session's
+/// `GrantPaneOutput` requests. Each pane's output travels as a binary frame.
 pub const SUPERVISOR_PROTOCOL: Surface = Surface {
     surface_name: "supervisor link",
     minimum_version: 2,
-    maximum_version: 2,
+    maximum_version: 3,
     released_version: Some(2),
 };
 
@@ -220,10 +251,12 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// own process image, and the next image reads back.
 ///
 /// `v0.3.0` writes 2, `v0.4.0` writes 3, and `v0.5.0` writes 4. This build
-/// writes 5: format 5 adds each session's floating panes and each client's view
-/// of them. Formats 4 and 5 use the declared field names in the saved records.
-/// Formats 1 through 4 pass through the ordered migration steps before they are
-/// restored.
+/// writes 5: format 5 adds each session's floating panes, each client's view of
+/// them, the views detached clients left with the resume-token hashes, and the
+/// process IDs of the children closed panes left running. It drops each pane
+/// record's lifecycle and close policy. Formats 4 and 5 use the declared field
+/// names in the saved records. Formats 1 through 4 pass through the ordered
+/// migration steps before they are restored.
 ///
 /// The build being installed states which format it writes. The running server
 /// reads that answer before it commits to the swap.
@@ -236,9 +269,9 @@ pub const RESUME_FORMAT: Surface = Surface {
 
 /// The config schema: the shape of the files under the config directory.
 ///
-/// `v0.4.0` writes 1. `v0.5.0` writes 2. `koshi resume-support`,
-/// `koshi serve-session`, and `koshi serve-router` migrate version 1 files to
-/// version 2 before they read config.
+/// `v0.4.0` writes 1. `v0.5.0` writes 2. `koshi serve-session` and
+/// `koshi serve-router` migrate version 1 files to version 2 before they read
+/// config.
 pub const CONFIG_SCHEMA: Surface = Surface {
     surface_name: "config schema",
     minimum_version: 1,

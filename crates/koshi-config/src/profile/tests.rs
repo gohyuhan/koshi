@@ -203,12 +203,15 @@ fn fixed_cell_size_parses_as_fixed_constraint() {
 fn stack_defaults_to_first_member_expanded() {
     let profile_template =
         parse_profile_text("version 1\ntab { stack { pane; pane; pane } }").unwrap();
-    let TemplateNode::Split(split) = &profile_template.tabs[0].root else {
-        panic!("expected stack root");
-    };
-    assert_eq!(split.direction, SplitDirection::Stacked);
-    assert_eq!(split.active_child_index, 0);
-    assert_eq!(split.children.len(), 3);
+    assert_eq!(
+        profile_template.tabs[0].root,
+        TemplateNode::Split(TemplateSplit {
+            direction: SplitDirection::Stacked,
+            children: vec![build_shell_leaf(), build_shell_leaf(), build_shell_leaf()],
+            weights: vec![build_default_size_weight(); 3],
+            active_child_index: 0,
+        })
+    );
 }
 
 #[test]
@@ -232,8 +235,8 @@ tab {
 
 #[test]
 fn default_focus_skips_collapsed_stack_members() {
-    // No `focus` marker anywhere: initial focus must land on the expanded
-    // member (leaf 1), never the collapsed leaf 0.
+    // No `focus` marker anywhere: initial focus lands on the expanded member
+    // (leaf 1), not the collapsed leaf 0.
     let profile_template =
         parse_profile_text("version 1\ntab { stack { pane; pane {expanded} } }").unwrap();
     assert_eq!(profile_template.tabs[0].focused_leaf_index, 1);
@@ -626,8 +629,8 @@ fn split_inside_stack_is_reported() {
 
 #[test]
 fn focus_inside_an_invalid_stack_member_adds_no_extra_diagnostic() {
-    // The invalid `vertical` member is the one and only problem; the focused
-    // pane inside it must not also be judged as a collapsed-member focus.
+    // The invalid `vertical` member is the one and only problem. The focused
+    // pane inside it is not judged as a collapsed-member focus.
     assert_eq!(
         collect_profile_diagnostic_messages(
             "version 1\ntab { stack { pane {expanded}; vertical { pane {focus}; pane } } }"
@@ -901,8 +904,9 @@ fn weight_arity_is_reported() {
 
 #[test]
 fn min_as_a_property_is_reported() {
-    // A named property (`m=5`) is not a positional argument: `single_argument`
-    // must reject it the same way it rejects extra positional arguments.
+    // A named property (`m=5`) is not a positional argument:
+    // `find_single_argument` rejects it the same way it rejects extra
+    // positional arguments.
     assert_eq!(
         collect_profile_diagnostic_messages(
             "version 1\ntab { horizontal { pane { min m=5 }; pane } }"
@@ -914,8 +918,7 @@ fn min_as_a_property_is_reported() {
 #[test]
 fn two_sizing_violations_outside_directional_context_are_both_reported() {
     // Each sizing child of a leaf outside a directional split is checked and
-    // reset independently, so two sizing nodes on the same leaf draw two
-    // separate diagnostics, not one aggregated report.
+    // reset on its own: two sizing nodes on one leaf draw two diagnostics.
     assert_eq!(
         collect_profile_diagnostic_messages(
             "version 1\ntab { stack { pane { size 30; min 5 }; pane } }"
@@ -1058,10 +1061,8 @@ fn non_string_env_name_is_reported() {
 
 #[test]
 fn a_third_non_string_entry_is_reported_even_though_two_valid_strings_remain() {
-    // Filtering the non-string third entry leaves exactly two strings, which
-    // would coincidentally match the name/value shape; the entry-count
-    // cross-check must still catch the extra entry rather than silently
-    // accepting the first two and dropping it.
+    // Filtering the non-string third entry leaves two strings. The entry-count
+    // check still refuses the node.
     assert_eq!(
         collect_profile_diagnostic_messages("version 1\ntab { pane { env \"A\" \"B\" 5 } }"),
         ["`env` takes a name and a value, both strings, like `env \"RUST_LOG\" \"debug\"`"]
@@ -1080,9 +1081,8 @@ fn duplicate_env_name_is_reported() {
 
 #[test]
 fn case_variant_env_duplicate_is_reported() {
-    // `Path` and `PATH` are one variable to a Windows child, so a layout
-    // setting both must fail on every platform rather than behave
-    // differently per OS.
+    // `Path` and `PATH` name one variable for a Windows child. Setting both
+    // fails on every platform.
     assert_eq!(
         collect_profile_diagnostic_messages(
             "version 1\ntab { pane { env \"Path\" \"a\"; env \"PATH\" \"b\" } }"
@@ -1218,6 +1218,27 @@ fn focus_with_arguments_is_reported() {
 }
 
 #[test]
+fn every_diagnostic_of_one_file_shares_one_source_text() {
+    let profile_source_text = "version 1\ntab { pane; pane }\ntab { stack {pane} }\n";
+    let Err(ProfileError::Invalid { diagnostics, .. }) = parse_profile_text(profile_source_text)
+    else {
+        panic!("expected schema diagnostics");
+    };
+    let [first_diagnostic, second_diagnostic] = diagnostics.as_slice() else {
+        panic!("expected two diagnostics, got {diagnostics:?}");
+    };
+    assert_eq!(first_diagnostic.profile_source.name(), "profile/dev.kdl");
+    assert_eq!(
+        &**first_diagnostic.profile_source.inner(),
+        profile_source_text
+    );
+    assert!(Arc::ptr_eq(
+        first_diagnostic.profile_source.inner(),
+        second_diagnostic.profile_source.inner()
+    ));
+}
+
+#[test]
 fn every_violation_is_collected_not_just_the_first() {
     let profile_source_text = r#"
 version 999
@@ -1273,8 +1294,8 @@ fn a_second_lock_marker_is_reported() {
 
 #[test]
 fn a_malformed_first_lock_still_reports_the_duplicate() {
-    // The second `lock` is a duplicate whether or not the first one parsed,
-    // so both faults reach the user in one run.
+    // The second `lock` is a duplicate whether or not the first one parsed.
+    // One run reports both faults.
     assert_eq!(
         collect_profile_diagnostic_messages("version 1\nlock #true\nlock\ntab {pane}"),
         [

@@ -12,6 +12,7 @@ koshi-image.workspace = true
 koshi-iterm.workspace = true
 koshi-kitty.workspace = true
 koshi-sixel.workspace = true
+memchr.workspace = true
 percent-encoding.workspace = true
 serde = { workspace = true, features = ["rc"] }
 unicode-segmentation.workspace = true
@@ -19,4 +20,8 @@ vte.workspace = true
 
 [dev-dependencies]
 flate2.workspace = true
+koshi-test-support.workspace = true
 serde_json.workspace = true
+
+[lints]
+workspace = true

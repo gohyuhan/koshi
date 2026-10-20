@@ -20,7 +20,8 @@ use std::time::{Instant, SystemTime};
 
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::command::{
-    Command, CommandSource, NewPaneArgs, NewPanePlacement, ToggleLockModeArgs,
+    ClosePaneArgs, Command, CommandSource, NewPaneArgs, NewPanePlacement, PanePlacementAnchor,
+    PanePlacementTarget, PlacePaneArgs, ToggleLockModeArgs,
 };
 use koshi_core::event::{
     InputModeChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved, PtyResized,
@@ -43,9 +44,11 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 
 use super::*;
 use crate::runtime::bus::SUBSCRIBER_QUEUE_CAPACITY;
-use crate::runtime::command::tests::{build_floating_new_pane_args, create_floating_pane};
+use crate::runtime::command::tests::{
+    build_floating_new_pane_args, create_floating_pane, get_command_outcome,
+};
 use crate::runtime::event::{AttachAccepted, SessionEnding};
-use crate::runtime::render_schedule::FRAME_INTERVAL_DURATION;
+use crate::runtime::render_schedule::tests::{get_frame_wait, DEFAULT_FRAME_INTERVAL_DURATION};
 use crate::runtime::saved_view::SavedView;
 
 impl Server {
@@ -58,7 +61,7 @@ impl Server {
     pub(crate) fn take_host_writes(
         &self,
         client_id: ClientId,
-        delivery_receiver: &mpsc::Receiver<Delivery>,
+        delivery_receiver: &DeliveryReceiver,
     ) -> Option<Vec<u8>> {
         let writer_handoff = self
             .find_subscriber_id_by_client_id(client_id)
@@ -195,6 +198,21 @@ fn close_undriven_panes_removes_a_floating_pane_whose_child_is_gone() {
         .next()
         .expect("the booted session");
     assert_eq!(session.floating_set.list_members(), &[]);
+}
+
+/// Each subscription as its subscriber and the client it views, in
+/// subscription order.
+fn list_subscription_pairs(server: &Server) -> Vec<(SubscriberId, ClientId)> {
+    server
+        .subscriptions
+        .iter()
+        .map(|frame_subscription| {
+            (
+                frame_subscription.subscriber_id,
+                frame_subscription.client_id,
+            )
+        })
+        .collect()
 }
 
 /// Publish critical events until every subscriber's queue overflows and pauses
@@ -499,7 +517,7 @@ fn submit_command_dispatches_against_live_state() {
 #[test]
 fn a_subscriber_receives_the_events_a_command_emits() {
     let (mut server, client_id) = boot_server();
-    let (inbox_receiver, _) = server.subscribe(client_id);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
 
     let _ = server.submit_command(CommandEnvelope::from_parts(
         CommandId::new(),
@@ -508,7 +526,7 @@ fn a_subscriber_receives_the_events_a_command_emits() {
     ));
 
     assert_eq!(
-        inbox_receiver.try_iter().collect::<Vec<_>>(),
+        delivery_receiver.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Event(Event::InputModeChanged(InputModeChanged {
             client_id,
             lock_mode: LockMode::Locked,
@@ -519,13 +537,13 @@ fn a_subscriber_receives_the_events_a_command_emits() {
 #[test]
 fn publish_events_delivers_out_of_command_events_to_subscribers() {
     let (mut server, client_id) = boot_server();
-    let (inbox_receiver, _) = server.subscribe(client_id);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
     let published_events = vec![Event::Quit(QuitCause::Requested)];
 
     server.publish_events(&published_events);
 
     assert_eq!(
-        inbox_receiver.try_iter().collect::<Vec<_>>(),
+        delivery_receiver.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Event(Event::Quit(QuitCause::Requested))]
     );
 }
@@ -554,44 +572,50 @@ fn publish_events_remembers_out_of_command_events_in_the_recent_events_ring() {
 fn subscribing_records_which_client_the_subscriber_views() {
     let (mut server, client_id) = boot_server();
 
-    let (_event_receiver, _) = server.subscribe(client_id);
+    let (_delivery_receiver, _) = server.subscribe(client_id, 60);
 
-    assert_eq!(server.subscriptions.len(), 1);
-    assert_eq!(server.subscriptions[0].1, client_id);
+    assert_eq!(
+        server
+            .subscriptions
+            .iter()
+            .map(|frame_subscription| frame_subscription.client_id)
+            .collect::<Vec<ClientId>>(),
+        vec![client_id]
+    );
 }
 
 #[test]
 fn a_subscriber_whose_receiver_is_gone_loses_its_recorded_client_too() {
     let (mut server, client_id) = boot_server();
-    let (inbox_receiver, _) = server.subscribe(client_id);
-    let (subscriber_id, _) = server.subscriptions[0];
-    drop(inbox_receiver);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let subscriber_id = server.subscriptions[0].subscriber_id;
+    drop(delivery_receiver);
 
     server.publish_events(&[Event::Quit(QuitCause::Requested)]);
 
     assert!(!server.event_bus.has_subscriber(subscriber_id));
-    assert_eq!(server.subscriptions, Vec::new());
+    assert_eq!(list_subscription_pairs(&server), Vec::new());
 }
 
 #[test]
 fn resyncing_hands_a_paused_subscriber_a_frame_of_the_client_it_views() {
     let (mut server, client_id) = boot_server();
-    let (inbox_receiver, _) = server.subscribe(client_id);
-    let (subscriber_id, _) = server.subscriptions[0];
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
     assert_eq!(
         server.event_bus.list_desynced_subscriber_ids(),
         vec![subscriber_id]
     );
     // Drain the queue: the frame fits on the next pass.
-    let _delivery_backlog: Vec<Delivery> = inbox_receiver.try_iter().collect();
+    let _delivery_backlog: Vec<Delivery> = delivery_receiver.try_iter().collect();
     let expected_render_snapshot = server.build_snapshot(client_id).expect("frame");
 
-    server.resync_lagged();
+    server.resync_lagged(Instant::now());
 
     assert_eq!(server.event_bus.list_desynced_subscriber_ids(), Vec::new());
     assert_eq!(
-        inbox_receiver.try_iter().collect::<Vec<_>>(),
+        delivery_receiver.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Snapshot {
             render_snapshot: Box::new(expected_render_snapshot),
             lag_report: SubscriberLagged {
@@ -600,7 +624,10 @@ fn resyncing_hands_a_paused_subscriber_a_frame_of_the_client_it_views() {
             },
         }]
     );
-    assert_eq!(server.subscriptions, vec![(subscriber_id, client_id)]);
+    assert_eq!(
+        list_subscription_pairs(&server),
+        vec![(subscriber_id, client_id)]
+    );
 }
 
 /// A paused subscriber whose client is the tab's only viewer and reports
@@ -615,34 +642,23 @@ fn resyncing_a_starving_sole_viewer_keeps_its_subscription() {
         Some(PaneArea::Starving),
         None,
     );
-    let (inbox_receiver, _) = server.subscribe(client_id);
-    let (subscriber_id, _) = server.subscriptions[0];
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
     assert_eq!(
         server.event_bus.list_desynced_subscriber_ids(),
         vec![subscriber_id]
     );
-    let _delivery_backlog: Vec<Delivery> = inbox_receiver.try_iter().collect();
-
-    server.resync_lagged();
-
-    assert_eq!(server.event_bus.list_desynced_subscriber_ids(), Vec::new());
-    assert_eq!(server.subscriptions, vec![(subscriber_id, client_id)]);
-    let delivered_deliveries: Vec<Delivery> = inbox_receiver.try_iter().collect();
-    let [Delivery::Snapshot {
-        render_snapshot, ..
-    }] = delivered_deliveries.as_slice()
-    else {
-        panic!("one resync frame, got {delivered_deliveries:?}");
-    };
+    let _delivery_backlog: Vec<Delivery> = delivery_receiver.try_iter().collect();
+    let expected_render_snapshot = server.build_snapshot(client_id).expect("frame");
     assert!(
-        render_snapshot
+        expected_render_snapshot
             .session_snapshot
             .active_tab_snapshot
             .is_every_pane_suppressed
     );
     assert_eq!(
-        render_snapshot
+        expected_render_snapshot
             .session_snapshot
             .active_tab_snapshot
             .tab_size,
@@ -651,34 +667,55 @@ fn resyncing_a_starving_sole_viewer_keeps_its_subscription() {
             row_count: 0
         }
     );
+
+    server.resync_lagged(Instant::now());
+
+    assert_eq!(server.event_bus.list_desynced_subscriber_ids(), Vec::new());
+    assert_eq!(
+        list_subscription_pairs(&server),
+        vec![(subscriber_id, client_id)]
+    );
+    assert_eq!(
+        delivery_receiver.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Snapshot {
+            render_snapshot: Box::new(expected_render_snapshot),
+            lag_report: SubscriberLagged {
+                subscriber_id,
+                dropped_event_count: 1,
+            },
+        }]
+    );
 }
 
 #[test]
 fn resyncing_with_nobody_paused_delivers_nothing() {
     let (mut server, client_id) = boot_server();
-    let (inbox_receiver, _) = server.subscribe(client_id);
-    let (subscriber_id, _) = server.subscriptions[0];
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let subscriber_id = server.subscriptions[0].subscriber_id;
 
-    server.resync_lagged();
+    server.resync_lagged(Instant::now());
 
     assert_eq!(
-        inbox_receiver.try_iter().collect::<Vec<_>>(),
+        delivery_receiver.try_iter().collect::<Vec<_>>(),
         Vec::<Delivery>::new()
     );
-    assert_eq!(server.subscriptions, vec![(subscriber_id, client_id)]);
+    assert_eq!(
+        list_subscription_pairs(&server),
+        vec![(subscriber_id, client_id)]
+    );
     assert!(server.event_bus.has_subscriber(subscriber_id));
 }
 
 #[test]
 fn a_resync_blocked_by_a_full_queue_retries_with_a_newer_frame() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, writer_handoff) = server.subscribe(client_id);
-    let (subscriber_id, _) = server.subscriptions[0];
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60);
+    let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
 
     // The queue is still full, so the frame does not fit and the subscriber
     // stays paused.
-    server.resync_lagged();
+    server.resync_lagged(Instant::now());
     assert_eq!(
         server.event_bus.list_desynced_subscriber_ids(),
         vec![subscriber_id]
@@ -699,7 +736,7 @@ fn a_resync_blocked_by_a_full_queue_retries_with_a_newer_frame() {
         koshi_core::lock::LockMode::Locked
     );
 
-    server.resync_lagged();
+    server.resync_lagged(Instant::now());
 
     // The retry built a new frame: it carries the mode set after the first
     // attempt failed, not the one that was current then. The count covers the
@@ -720,8 +757,8 @@ fn a_resync_blocked_by_a_full_queue_retries_with_a_newer_frame() {
 #[test]
 fn one_unresyncable_subscriber_does_not_block_the_others_frame() {
     let (mut server, client_id) = boot_server();
-    let (kept_receiver, _) = server.subscribe(client_id);
-    let (kept_subscriber_id, _) = server.subscriptions[0];
+    let (kept_receiver, _) = server.subscribe(client_id, 60);
+    let kept_subscriber_id = server.subscriptions[0].subscriber_id;
     // Straight off the bus, so nothing records which client it views.
     let (orphan_subscriber_id, orphan_receiver, _) = server.event_bus.subscribe();
     pause_subscribers(&mut server);
@@ -733,7 +770,7 @@ fn one_unresyncable_subscriber_does_not_block_the_others_frame() {
     let _orphan_backlog: Vec<Delivery> = orphan_receiver.try_iter().collect();
     let expected_render_snapshot = server.build_snapshot(client_id).expect("frame");
 
-    server.resync_lagged();
+    server.resync_lagged(Instant::now());
 
     assert_eq!(
         kept_receiver.try_iter().collect::<Vec<_>>(),
@@ -750,23 +787,29 @@ fn one_unresyncable_subscriber_does_not_block_the_others_frame() {
         orphan_receiver.try_iter().collect::<Vec<_>>(),
         Vec::<Delivery>::new()
     );
-    assert_eq!(server.subscriptions, vec![(kept_subscriber_id, client_id)]);
+    assert_eq!(
+        list_subscription_pairs(&server),
+        vec![(kept_subscriber_id, client_id)]
+    );
 }
 
 #[test]
 fn a_gone_receiver_costs_only_its_own_recorded_client() {
     let (mut server, client_id) = boot_server();
-    let (kept_receiver, _) = server.subscribe(client_id);
-    let (gone_receiver, _) = server.subscribe(client_id);
-    let (kept_subscriber_id, _) = server.subscriptions[0];
-    let (gone_subscriber_id, _) = server.subscriptions[1];
+    let (kept_receiver, _) = server.subscribe(client_id, 60);
+    let (gone_receiver, _) = server.subscribe(client_id, 60);
+    let kept_subscriber_id = server.subscriptions[0].subscriber_id;
+    let gone_subscriber_id = server.subscriptions[1].subscriber_id;
     drop(gone_receiver);
 
     server.publish_events(&[Event::Quit(QuitCause::Requested)]);
 
     assert!(!server.event_bus.has_subscriber(gone_subscriber_id));
     assert!(server.event_bus.has_subscriber(kept_subscriber_id));
-    assert_eq!(server.subscriptions, vec![(kept_subscriber_id, client_id)]);
+    assert_eq!(
+        list_subscription_pairs(&server),
+        vec![(kept_subscriber_id, client_id)]
+    );
     assert_eq!(
         kept_receiver.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Event(Event::Quit(QuitCause::Requested))]
@@ -785,7 +828,7 @@ fn a_paused_subscriber_that_views_no_client_is_unsubscribed() {
     );
     let _drained_deliveries: Vec<Delivery> = delivery_receiver.try_iter().collect();
 
-    server.resync_lagged();
+    server.resync_lagged(Instant::now());
 
     assert_eq!(server.event_bus.count_subscribers(), 0);
     assert_eq!(
@@ -798,8 +841,8 @@ fn a_paused_subscriber_that_views_no_client_is_unsubscribed() {
 fn a_paused_subscriber_whose_client_is_gone_is_unsubscribed() {
     let (mut server, _client_id) = boot_server();
     // No session holds this id, so no frame can ever be built for it.
-    let (delivery_receiver, _) = server.subscribe(ClientId::new());
-    let (subscriber_id, _) = server.subscriptions[0];
+    let (delivery_receiver, _) = server.subscribe(ClientId::new(), 60);
+    let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
     assert_eq!(
         server.event_bus.list_desynced_subscriber_ids(),
@@ -807,14 +850,14 @@ fn a_paused_subscriber_whose_client_is_gone_is_unsubscribed() {
     );
     let _backlog: Vec<Delivery> = delivery_receiver.try_iter().collect();
 
-    server.resync_lagged();
+    server.resync_lagged(Instant::now());
 
     assert_eq!(server.event_bus.count_subscribers(), 0);
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<_>>(),
         Vec::<Delivery>::new()
     );
-    assert_eq!(server.subscriptions, Vec::new());
+    assert_eq!(list_subscription_pairs(&server), Vec::new());
 }
 
 #[test]
@@ -822,8 +865,8 @@ fn pushing_frames_serves_every_client() {
     let (mut server, local_client_id) = boot_server();
     let remote_client_id =
         attach_additional_client(&mut server, local_client_id, REMOTE_VIEWPORT_SIZE);
-    let (local_receiver, _) = server.subscribe(local_client_id);
-    let (remote_receiver, _) = server.subscribe(remote_client_id);
+    let (local_receiver, _) = server.subscribe(local_client_id, 60);
+    let (remote_receiver, _) = server.subscribe(remote_client_id, 60);
     let local_frame = server.build_snapshot(local_client_id).expect("frame");
     let remote_frame = server.build_snapshot(remote_client_id).expect("frame");
     assert_eq!(
@@ -835,7 +878,7 @@ fn pushing_frames_serves_every_client() {
         REMOTE_VIEWPORT_SIZE
     );
 
-    server.push_frames();
+    server.push_frames(Instant::now());
 
     assert_eq!(
         local_receiver.try_iter().collect::<Vec<_>>(),
@@ -850,12 +893,12 @@ fn pushing_frames_serves_every_client() {
 #[test]
 fn a_host_write_queues_its_wake_ahead_of_the_next_frame() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, writer_handoff) = server.subscribe(client_id);
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60);
     // An OSC 52 copy of "hello", as `copy_to_clipboard` queues it.
     assert!(server.queue_host_write(client_id, &HostWrite::from_clipboard_copy("c", b"hello")));
     let expected_render_snapshot = server.build_snapshot(client_id).expect("frame");
 
-    server.push_frames();
+    server.push_frames(Instant::now());
 
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<_>>(),
@@ -876,7 +919,7 @@ fn a_host_write_for_a_client_with_no_subscriber_is_dropped() {
 
     assert!(!server.queue_host_write(client_id, &HostWrite::from_clipboard_copy("c", b"hello")));
 
-    let (delivery_receiver, _) = server.subscribe(client_id);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
     assert_eq!(server.take_host_writes(client_id, &delivery_receiver), None);
 }
 
@@ -885,8 +928,8 @@ fn a_detach_leaves_the_waiting_bytes_to_the_connection_writer_and_adds_none() {
     let (mut server, local_client_id) = boot_server();
     let remote_client_id =
         attach_additional_client(&mut server, local_client_id, TEST_VIEWPORT_SIZE);
-    let (delivery_receiver, writer_handoff) = server.subscribe(remote_client_id);
-    let (subscriber_id, _) = server.subscriptions[0];
+    let (delivery_receiver, writer_handoff) = server.subscribe(remote_client_id, 60);
+    let subscriber_id = server.subscriptions[0].subscriber_id;
     assert!(server.queue_host_write(
         remote_client_id,
         &HostWrite::from_clipboard_copy("c", b"one")
@@ -921,15 +964,15 @@ fn pushing_frames_serves_no_client_that_detached() {
     let (mut server, local_client_id) = boot_server();
     let remote_client_id =
         attach_additional_client(&mut server, local_client_id, TEST_VIEWPORT_SIZE);
-    let (remote_receiver, _) = server.subscribe(remote_client_id);
-    let (subscriber_id, _) = server.subscriptions[0];
+    let (remote_receiver, _) = server.subscribe(remote_client_id, 60);
+    let subscriber_id = server.subscriptions[0].subscriber_id;
 
     // The detach takes the subscription with the client record, so the push
     // finds nobody to build a frame for.
     let _ = server.handle_client_detach(remote_client_id);
-    server.push_frames();
+    server.push_frames(Instant::now());
 
-    assert_eq!(server.subscriptions, Vec::new());
+    assert_eq!(list_subscription_pairs(&server), Vec::new());
     assert!(!server.event_bus.has_subscriber(subscriber_id));
     assert_eq!(
         remote_receiver.try_iter().collect::<Vec<_>>(),
@@ -940,18 +983,21 @@ fn pushing_frames_serves_no_client_that_detached() {
 #[test]
 fn a_frame_for_a_gone_receiver_costs_that_subscription_its_recorded_client() {
     let (mut server, client_id) = boot_server();
-    let (kept_receiver, _) = server.subscribe(client_id);
-    let (gone_receiver, _) = server.subscribe(client_id);
-    let (kept_subscriber_id, _) = server.subscriptions[0];
-    let (gone_subscriber_id, _) = server.subscriptions[1];
+    let (kept_receiver, _) = server.subscribe(client_id, 60);
+    let (gone_receiver, _) = server.subscribe(client_id, 60);
+    let kept_subscriber_id = server.subscriptions[0].subscriber_id;
+    let gone_subscriber_id = server.subscriptions[1].subscriber_id;
     let expected_render_snapshot = server.build_snapshot(client_id).expect("frame");
     drop(gone_receiver);
 
-    server.push_frames();
+    server.push_frames(Instant::now());
 
     assert!(!server.event_bus.has_subscriber(gone_subscriber_id));
     assert!(server.event_bus.has_subscriber(kept_subscriber_id));
-    assert_eq!(server.subscriptions, vec![(kept_subscriber_id, client_id)]);
+    assert_eq!(
+        list_subscription_pairs(&server),
+        vec![(kept_subscriber_id, client_id)]
+    );
     assert_eq!(
         kept_receiver.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Frame(Box::new(expected_render_snapshot))]
@@ -961,26 +1007,58 @@ fn a_frame_for_a_gone_receiver_costs_that_subscription_its_recorded_client() {
 #[test]
 fn a_frame_blocked_by_a_full_queue_leaves_the_subscription_in_place() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, _) = server.subscribe(client_id);
-    let (subscriber_id, _) = server.subscriptions[0];
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
     // Free one slot and spend it on the resync frame: the subscriber is live
     // again, with a queue that is full again.
     let _oldest_delivery: Delivery = delivery_receiver.recv().expect("queued event");
-    server.resync_lagged();
+    let resync_time = Instant::now();
+    server.resync_lagged(resync_time);
     assert_eq!(server.event_bus.list_desynced_subscriber_ids(), Vec::new());
+    server.mark_every_view_changed();
+    let frame_time = resync_time + DEFAULT_FRAME_INTERVAL_DURATION;
 
-    server.push_frames();
+    server.push_frames(frame_time);
 
-    assert_eq!(server.subscriptions, vec![(subscriber_id, client_id)]);
+    assert_eq!(
+        list_subscription_pairs(&server),
+        vec![(subscriber_id, client_id)]
+    );
     assert!(server.event_bus.has_subscriber(subscriber_id));
-    let queued_deliveries: Vec<Delivery> = delivery_receiver.try_iter().collect();
-    assert!(
-        !queued_deliveries
-            .iter()
-            .any(|delivery| matches!(delivery, Delivery::Frame(_))),
+    let mut expected_deliveries =
+        vec![Delivery::Event(Event::Quit(QuitCause::Requested)); SUBSCRIBER_QUEUE_CAPACITY - 1];
+    expected_deliveries.push(Delivery::Snapshot {
+        render_snapshot: Box::new(server.build_snapshot(client_id).expect("frame")),
+        lag_report: SubscriberLagged {
+            subscriber_id,
+            dropped_event_count: 1,
+        },
+    });
+    assert_eq!(
+        delivery_receiver.try_iter().collect::<Vec<_>>(),
+        expected_deliveries,
         "the frame did not fit, so none was queued"
     );
+    assert_eq!(
+        get_frame_wait(&server, client_id, frame_time),
+        Some(Duration::ZERO),
+        "the frame that did not fit leaves the view change in place"
+    );
+}
+
+#[test]
+fn a_paused_subscriber_whose_view_changed_sets_no_wakeup() {
+    let (mut server, client_id) = boot_server();
+    let (_delivery_receiver, _) = server.subscribe(client_id, 60);
+    pause_subscribers(&mut server);
+    let current_time = Instant::now();
+
+    assert_eq!(
+        get_frame_wait(&server, client_id, current_time),
+        Some(Duration::ZERO)
+    );
+    assert_eq!(server.compute_next_render_wakeup(current_time), None);
 }
 
 /// Publish one `TabCreated` event [`SUBSCRIBER_QUEUE_CAPACITY`] times, which
@@ -1001,14 +1079,13 @@ fn freed_slots_on_two_full_queues_give_each_client_one_frame_and_owe_nothing_mor
     let (mut server, local_client_id) = boot_server();
     let remote_client_id =
         attach_additional_client(&mut server, local_client_id, REMOTE_VIEWPORT_SIZE);
-    let (local_receiver, local_writer_handoff) = server.subscribe(local_client_id);
-    let (remote_receiver, remote_writer_handoff) = server.subscribe(remote_client_id);
+    let (local_receiver, local_writer_handoff) = server.subscribe(local_client_id, 60);
+    let (remote_receiver, remote_writer_handoff) = server.subscribe(remote_client_id, 60);
     let tab_created_delivery = Delivery::Event(fill_subscriber_queues(&mut server));
-    // A due render finds both queues full: both frames are dropped, and both
-    // subscribers are owed a frame.
+    // The first frames find both queues full: both frames are dropped, and
+    // both subscribers are owed a frame.
     let render_time = Instant::now();
-    assert!(server.poll_render(render_time));
-    server.push_frames();
+    server.push_frames(render_time);
     let local_frame = server.build_snapshot(local_client_id).expect("frame");
     let remote_frame = server.build_snapshot(remote_client_id).expect("frame");
 
@@ -1016,15 +1093,15 @@ fn freed_slots_on_two_full_queues_give_each_client_one_frame_and_owe_nothing_mor
     // session, remote first. Each wake runs one pass of the serve loop, one
     // frame interval after the last.
     let wakes = [
-        (remote_client_id, &remote_receiver, &remote_writer_handoff),
-        (local_client_id, &local_receiver, &local_writer_handoff),
+        (&remote_receiver, &remote_writer_handoff),
+        (&local_receiver, &local_writer_handoff),
     ];
-    for (pass_number, (client_id, delivery_receiver, writer_handoff)) in (1..).zip(wakes) {
+    for (pass_number, (delivery_receiver, writer_handoff)) in (1..).zip(wakes) {
         assert_eq!(delivery_receiver.recv(), Ok(tab_created_delivery.clone()));
         assert!(writer_handoff.take_owed_frame_mark());
-        let control_flow = server.handle_runtime_event(RuntimeEvent::QueueRoomFreed { client_id });
+        let control_flow = server.handle_runtime_event(RuntimeEvent::QueueRoomFreed);
         assert_eq!(control_flow, std::ops::ControlFlow::Continue(()));
-        server.push_due_frames(render_time + FRAME_INTERVAL_DURATION * pass_number);
+        server.push_due_frames(render_time + DEFAULT_FRAME_INTERVAL_DURATION * pass_number);
     }
 
     assert!(
@@ -1050,16 +1127,18 @@ fn freed_slots_on_two_full_queues_give_each_client_one_frame_and_owe_nothing_mor
 #[test]
 fn a_freed_slot_taken_before_the_frame_owes_the_subscriber_a_frame_again() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, writer_handoff) = server.subscribe(client_id);
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60);
     let tab_created_event = fill_subscriber_queues(&mut server);
     let tab_created_delivery = Delivery::Event(tab_created_event.clone());
-    server.push_frames();
+    let frame_time = Instant::now();
+    server.push_frames(frame_time);
     assert_eq!(delivery_receiver.recv(), Ok(tab_created_delivery.clone()));
     assert!(writer_handoff.take_owed_frame_mark());
     // An event takes the freed slot before the session reads the wake.
     server.event_bus.publish(&tab_created_event);
 
-    server.push_client_frame(client_id);
+    let _ = server.handle_runtime_event(RuntimeEvent::QueueRoomFreed);
+    server.push_due_frames(frame_time);
 
     assert!(writer_handoff.take_owed_frame_mark());
     assert_eq!(
@@ -1071,16 +1150,17 @@ fn a_freed_slot_taken_before_the_frame_owes_the_subscriber_a_frame_again() {
 #[test]
 fn a_freed_slot_for_a_paused_subscriber_takes_the_resync_snapshot_and_no_frame() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, writer_handoff) = server.subscribe(client_id);
-    let (subscriber_id, _) = server.subscriptions[0];
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60);
+    let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
-    server.resync_lagged();
+    let frame_time = Instant::now();
+    server.resync_lagged(frame_time);
     let _oldest_delivery: Delivery = delivery_receiver.recv().expect("queued event");
     assert!(writer_handoff.take_owed_frame_mark());
     let expected_render_snapshot = server.build_snapshot(client_id).expect("frame");
 
-    server.push_client_frame(client_id);
-    server.resync_lagged();
+    let _ = server.handle_runtime_event(RuntimeEvent::QueueRoomFreed);
+    server.push_due_frames(frame_time);
 
     let mut expected_deliveries =
         vec![Delivery::Event(Event::Quit(QuitCause::Requested)); SUBSCRIBER_QUEUE_CAPACITY - 1];
@@ -1101,17 +1181,18 @@ fn a_freed_slot_for_a_paused_subscriber_takes_the_resync_snapshot_and_no_frame()
 #[test]
 fn a_render_offers_a_subscriber_owed_a_frame_nothing_until_its_writer_takes_the_mark() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, writer_handoff) = server.subscribe(client_id);
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60);
     let tab_created_delivery = Delivery::Event(fill_subscriber_queues(&mut server));
-    server.push_frames();
+    let frame_time = Instant::now();
+    server.push_frames(frame_time);
     // The writing thread reads one delivery and has not taken its mark yet.
     assert_eq!(delivery_receiver.recv(), Ok(tab_created_delivery.clone()));
 
-    server.push_frames();
+    server.push_frames(frame_time);
     let owed_deliveries: Vec<Delivery> = delivery_receiver.try_iter().collect();
     assert!(writer_handoff.take_owed_frame_mark());
     let expected_render_snapshot = server.build_snapshot(client_id).expect("frame");
-    server.push_frames();
+    server.push_frames(frame_time);
 
     assert_eq!(
         owed_deliveries,
@@ -1126,14 +1207,14 @@ fn a_render_offers_a_subscriber_owed_a_frame_nothing_until_its_writer_takes_the_
 #[test]
 fn a_paused_subscriber_owed_a_frame_is_not_resynced_until_its_writer_takes_the_mark() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, writer_handoff) = server.subscribe(client_id);
-    let (subscriber_id, _) = server.subscriptions[0];
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60);
+    let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
-    server.resync_lagged();
+    server.resync_lagged(Instant::now());
     // The writing thread reads one delivery and has not taken its mark yet.
     let _oldest_delivery: Delivery = delivery_receiver.recv().expect("queued event");
 
-    server.resync_lagged();
+    server.resync_lagged(Instant::now());
 
     assert_eq!(
         server.event_bus.list_desynced_subscriber_ids(),
@@ -1147,18 +1228,18 @@ fn a_paused_subscriber_owed_a_frame_is_not_resynced_until_its_writer_takes_the_m
 }
 
 #[test]
-fn a_freed_slot_queues_nothing_for_a_gone_client_and_drops_a_gone_receivers_subscription() {
+fn a_push_queues_nothing_for_a_gone_client_and_drops_a_gone_receivers_subscription() {
     let (mut server, client_id) = boot_server();
     // No session holds this id, so no frame can ever be built for it.
     let unknown_client_id = ClientId::new();
-    let (unknown_client_receiver, _) = server.subscribe(unknown_client_id);
-    let (gone_receiver, _) = server.subscribe(client_id);
-    let (unknown_client_subscriber_id, _) = server.subscriptions[0];
-    let (gone_subscriber_id, _) = server.subscriptions[1];
+    let (unknown_client_receiver, _) = server.subscribe(unknown_client_id, 60);
+    let (gone_receiver, _) = server.subscribe(client_id, 60);
+    let unknown_client_subscriber_id = server.subscriptions[0].subscriber_id;
+    let gone_subscriber_id = server.subscriptions[1].subscriber_id;
     drop(gone_receiver);
+    let frame_time = Instant::now();
 
-    server.push_client_frame(unknown_client_id);
-    server.push_client_frame(client_id);
+    server.push_frames(frame_time);
 
     assert_eq!(
         unknown_client_receiver.try_iter().collect::<Vec<_>>(),
@@ -1166,8 +1247,13 @@ fn a_freed_slot_queues_nothing_for_a_gone_client_and_drops_a_gone_receivers_subs
     );
     assert!(!server.event_bus.has_subscriber(gone_subscriber_id));
     assert_eq!(
-        server.subscriptions,
+        list_subscription_pairs(&server),
         vec![(unknown_client_subscriber_id, unknown_client_id)]
+    );
+    assert_eq!(
+        server.compute_next_render_wakeup(frame_time),
+        None,
+        "a client the session shows no frame for is owed none"
     );
 }
 
@@ -1207,6 +1293,25 @@ fn get_booted_parts(server: &Server, client_id: ClientId) -> (SessionId, TabId, 
         .copied()
         .expect("the tab's root pane");
     (session_id, tab_id, pane_id)
+}
+
+/// The view a booted client files: `booted_tab_id` active with `root_pane_id`
+/// focused, no zoom, `scroll_offset_by_pane_id` as its scroll positions, and no
+/// floating pane view.
+fn build_booted_saved_view(
+    booted_tab_id: TabId,
+    root_pane_id: PaneId,
+    scroll_offset_by_pane_id: HashMap<PaneId, usize>,
+) -> SavedView {
+    SavedView {
+        active_tab_id: booted_tab_id,
+        focused_pane_id_by_tab_id: HashMap::from([(booted_tab_id, root_pane_id)]),
+        zoomed_pane_id_by_tab_id: HashMap::new(),
+        scroll_offset_by_pane_id,
+        floating_pane_view_by_pane_id: HashMap::new(),
+        floating_pane_focus_order: Vec::new(),
+        focused_floating_pane_id: None,
+    }
 }
 
 /// Add a tab named `second` to `session_id`, holding one new pane record.
@@ -1395,42 +1500,16 @@ fn only_a_pane_not_ready_can_end_while_the_program_file_stays_the_same() {
 }
 
 #[test]
-fn a_restart_is_refused_while_no_check_is_installed_and_leaves_the_flag_down() {
-    let (mut server, _inbox_sender) = build_test_server_with_event_sender();
-
-    assert_eq!(
-        server.handle_ipc_restart(),
-        Err(RestartRefusal::ImageReplacementUnsupported)
-    );
-    assert!(!server.is_restart_requested());
-}
-
-#[test]
-fn a_restart_the_check_refuses_leaves_the_flag_down() {
-    let (mut server, _inbox_sender) = build_test_server_with_event_sender();
-    server.set_restart_check(Arc::new(|| {
-        Err(RestartRefusal::UnfitProgramFile {
-            refusal_reason: "the binary at /x is not executable".to_string(),
-        })
-    }));
-
-    assert_eq!(
-        server.handle_ipc_restart(),
-        Err(RestartRefusal::UnfitProgramFile {
-            refusal_reason: "the binary at /x is not executable".to_string(),
-        })
-    );
-    assert!(!server.is_restart_requested());
-}
-
-#[test]
-fn a_restart_the_check_passes_raises_the_flag_and_changes_nothing_else() {
+fn a_taken_restart_raises_the_flag_and_changes_nothing_else() {
     let (mut server, client_id) = boot_server();
     let (session_id, _tab_id, _pane_id) = get_booted_parts(&server, client_id);
-    server.set_restart_check(Arc::new(|| Ok(())));
+    let (response_sender, response_receiver) = mpsc::channel();
 
-    assert_eq!(server.handle_ipc_restart(), Ok(()));
+    let _ = server.handle_runtime_event(RuntimeEvent::IpcRestart { response_sender });
 
+    response_receiver
+        .try_recv()
+        .expect("the dispatcher answers the restart");
     assert!(server.is_restart_requested());
     assert!(!server.is_quit_requested());
     assert_eq!(server.session_by_id[&session_id].clients.count_clients(), 1);
@@ -1438,48 +1517,21 @@ fn a_restart_the_check_passes_raises_the_flag_and_changes_nothing_else() {
 }
 
 #[test]
-fn a_restart_taken_back_lowers_the_flag_and_the_next_one_is_accepted_again() {
+fn a_restart_taken_back_lowers_the_flag_and_the_next_one_is_taken_again() {
     let (mut server, _client_id) = boot_server();
-    server.set_restart_check(Arc::new(|| Ok(())));
-    assert_eq!(server.handle_ipc_restart(), Ok(()));
+    let _ = server.handle_runtime_event(RuntimeEvent::IpcRestart {
+        response_sender: mpsc::channel().0,
+    });
     assert!(server.is_restart_requested());
 
     server.cancel_restart();
 
     assert!(!server.is_restart_requested());
     assert!(!server.is_quit_requested());
-    assert_eq!(server.handle_ipc_restart(), Ok(()));
+    let _ = server.handle_runtime_event(RuntimeEvent::IpcRestart {
+        response_sender: mpsc::channel().0,
+    });
     assert!(server.is_restart_requested());
-}
-
-#[test]
-fn a_check_installed_again_replaces_the_one_before_it() {
-    let (mut server, _client_id) = boot_server();
-    server.set_restart_check(Arc::new(|| {
-        Err(RestartRefusal::PaneNotReady {
-            refusal_reason: "the first check".to_string(),
-        })
-    }));
-    assert_eq!(
-        server.handle_ipc_restart(),
-        Err(RestartRefusal::PaneNotReady {
-            refusal_reason: "the first check".to_string(),
-        })
-    );
-
-    server.set_restart_check(Arc::new(|| {
-        Err(RestartRefusal::UnfitProgramFile {
-            refusal_reason: "the second check".to_string(),
-        })
-    }));
-
-    assert_eq!(
-        server.handle_ipc_restart(),
-        Err(RestartRefusal::UnfitProgramFile {
-            refusal_reason: "the second check".to_string(),
-        })
-    );
-    assert!(!server.is_restart_requested());
 }
 
 #[test]
@@ -1501,17 +1553,19 @@ fn an_attach_claiming_a_carried_client_keeps_its_id_zoom_focus_and_tab() {
         // The client was looking at the second tab when the image was replaced.
         client.update_active_tab_id(additional_tab_id);
     }
+    let resume_token = server.saved_view_store.mint_resume_token(client_id);
     server.client_ids_awaiting_reconnect.insert(client_id);
 
     let attachment = server
         .handle_ipc_attach(
             Some(client_id),
-            None,
+            Some(resume_token),
             REMOTE_VIEWPORT_SIZE,
             None,
             None,
             SystemTime::now(),
             false,
+            60,
         )
         .expect("the session hands the record back");
 
@@ -1544,6 +1598,7 @@ fn handle_ipc_attach_echoes_the_stored_pane_area() {
             None,
             SystemTime::now(),
             false,
+            60,
         )
         .expect("the session mints a client");
     assert_eq!(starving_attachment.pane_area, Some(PaneArea::Starving));
@@ -1557,6 +1612,7 @@ fn handle_ipc_attach_echoes_the_stored_pane_area() {
             None,
             SystemTime::now(),
             false,
+            60,
         )
         .expect("the session mints a client");
     assert_eq!(unreported_attachment.pane_area, None);
@@ -1577,6 +1633,7 @@ fn an_attach_claiming_a_client_this_session_does_not_hold_mints_a_new_one() {
             None,
             SystemTime::now(),
             false,
+            60,
         )
         .expect("the session mints a client instead of refusing");
 
@@ -1594,17 +1651,19 @@ fn an_attach_claiming_a_client_this_session_does_not_hold_mints_a_new_one() {
 fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
     let (mut server, client_id) = boot_server();
     let (session_id, _tab_id, _pane_id) = get_booted_parts(&server, client_id);
-    // The first attach takes the record and holds its queue, so the record is
-    // in use when the second attach names it.
+    // The first attach takes the record with its token and holds its queue.
+    // The record is in use when the second attach names it.
+    let resume_token = server.saved_view_store.mint_resume_token(client_id);
     let held_attachment = server
         .handle_ipc_attach(
             Some(client_id),
-            None,
+            Some(resume_token),
             TEST_VIEWPORT_SIZE,
             None,
             None,
             SystemTime::now(),
             false,
+            60,
         )
         .expect("the first attach takes the record");
     assert_eq!(held_attachment.client_id, client_id);
@@ -1618,6 +1677,7 @@ fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
             None,
             SystemTime::now(),
             false,
+            60,
         )
         .expect("the second attach mints a client instead of refusing");
 
@@ -1628,7 +1688,7 @@ fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
     let viewed_client_ids: Vec<ClientId> = server
         .subscriptions
         .iter()
-        .map(|&(_, client)| client)
+        .map(|frame_subscription| frame_subscription.client_id)
         .collect();
     assert_eq!(
         viewed_client_ids.len(),
@@ -1676,6 +1736,7 @@ fn an_attach_naming_no_client_to_come_back_as_mints_one_on_the_first_tab() {
             None,
             SystemTime::now(),
             false,
+            60,
         )
         .expect("the session mints a client");
 
@@ -1714,9 +1775,16 @@ fn split_booted_pane(server: &mut Server, client_id: ClientId, root_pane_id: Pan
             client_id: None,
         }),
     ));
-    assert!(
-        matches!(command_result, CommandResult::Ok { .. }),
-        "the split ran, got {command_result:?}"
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec![
+            "PaneCreated",
+            "LayoutChanged",
+            "PaneFocused",
+            "PtyResized",
+            "PtyResized"
+        ]),
+        "the split ran"
     );
     let added_pane_ids: Vec<PaneId> = server.session_by_id[&session_id]
         .panes
@@ -1744,6 +1812,7 @@ fn attach_with_token(
             None,
             attached_at,
             false,
+            60,
         )
         .expect("the session mints a client")
 }
@@ -1828,6 +1897,70 @@ fn a_token_takes_back_the_tab_focus_zoom_and_scroll_the_client_left() {
 }
 
 #[test]
+fn a_token_whose_focused_pane_moved_to_another_tab_keeps_the_focus_the_attach_gave() {
+    let (mut server, client_id) = boot_server();
+    let (session_id, booted_tab_id, root_pane_id) = get_booted_parts(&server, client_id);
+    let split_pane_id = split_booted_pane(&mut server, client_id, root_pane_id);
+    let (additional_tab_id, _additional_pane_id) = add_additional_tab(&mut server, session_id);
+    let leaving_attachment = attach_with_token(&mut server, None, SystemTime::now());
+    {
+        let client = server
+            .session_by_id
+            .get_mut(&session_id)
+            .expect("the session")
+            .clients
+            .get_client_mut_by_id(leaving_attachment.client_id)
+            .expect("the client that is about to leave");
+        client.update_focused_pane(booted_tab_id, split_pane_id);
+        client.zoom_pane(booted_tab_id, split_pane_id);
+    }
+    let detached_at = SystemTime::now();
+    server.save_client_view(leaving_attachment.client_id, detached_at);
+    let _ = server.handle_client_detach(leaving_attachment.client_id);
+    let placement_result = server.submit_command(CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::KeyBinding { client_id },
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id: split_pane_id,
+            placement_target: PanePlacementTarget::Split {
+                destination_tab_id: additional_tab_id,
+                anchor: PanePlacementAnchor::Tab,
+                direction: Direction::Right,
+            },
+            expected_placement_revision: None,
+        }),
+    ));
+    assert_eq!(
+        get_command_outcome(&placement_result),
+        Ok(vec![
+            "PanePlacementCommitted",
+            "LayoutChanged",
+            "LayoutChanged",
+            "TabFocused",
+            "PaneFocused",
+            "PaneFocused"
+        ]),
+        "the placement ran"
+    );
+
+    let returning_attachment = attach_with_token(
+        &mut server,
+        Some(leaving_attachment.resume_token),
+        detached_at,
+    );
+
+    let client = server.session_by_id[&session_id]
+        .clients
+        .get_client_by_id(returning_attachment.client_id)
+        .expect("the client the token attached");
+    assert_eq!(
+        client.get_focused_pane_id(booted_tab_id),
+        Some(root_pane_id)
+    );
+    assert_eq!(client.get_layout_mode(booted_tab_id), LayoutMode::Tiled);
+}
+
+#[test]
 fn a_restored_view_announces_the_focus_it_puts_back() {
     let (mut server, client_id) = boot_server();
     let (session_id, booted_tab_id, root_pane_id) = get_booted_parts(&server, client_id);
@@ -1854,7 +1987,7 @@ fn a_restored_view_announces_the_focus_it_puts_back() {
     let detached_at = SystemTime::now();
     server.save_client_view(leaving_attachment.client_id, detached_at);
     let _ = server.handle_client_detach(leaving_attachment.client_id);
-    let (watcher_receiver, _) = server.subscribe(client_id);
+    let (watcher_receiver, _) = server.subscribe(client_id, 60);
 
     let returning_attachment = attach_with_token(
         &mut server,
@@ -1932,7 +2065,7 @@ fn a_token_takes_back_the_floating_view_and_the_floating_pane_that_takes_the_inp
     let detached_at = SystemTime::now();
     server.save_client_view(leaving_attachment.client_id, detached_at);
     let _ = server.handle_client_detach(leaving_attachment.client_id);
-    let (watcher_receiver, _) = server.subscribe(client_id);
+    let (watcher_receiver, _) = server.subscribe(client_id, 60);
 
     let returning_attachment = attach_with_token(
         &mut server,
@@ -2233,12 +2366,26 @@ fn a_view_whose_zoomed_pane_was_closed_while_it_stood_comes_back_tiled() {
     let detached_at = SystemTime::now();
     server.save_client_view(leaving_attachment.client_id, detached_at);
     let _ = server.handle_client_detach(leaving_attachment.client_id);
-    server
-        .session_by_id
-        .get_mut(&session_id)
-        .expect("the session")
-        .panes
-        .remove_pane_record(split_pane_id);
+    let close_result = server.submit_command(CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::KeyBinding { client_id },
+        Command::ClosePane(ClosePaneArgs {
+            pane_id: Some(split_pane_id),
+            should_force_close: true,
+            should_kill_process_tree: false,
+        }),
+    ));
+    assert_eq!(
+        get_command_outcome(&close_result),
+        Ok(vec![
+            "PaneClosing",
+            "PaneRemoved",
+            "LayoutChanged",
+            "PaneFocused",
+            "PtyResized"
+        ]),
+        "the close ran"
+    );
 
     let returning_attachment = attach_with_token(
         &mut server,
@@ -2277,12 +2424,20 @@ fn a_view_whose_focused_pane_was_closed_while_it_stood_comes_back_unfocused_ther
     let detached_at = SystemTime::now();
     server.save_client_view(leaving_attachment.client_id, detached_at);
     let _ = server.handle_client_detach(leaving_attachment.client_id);
-    server
-        .session_by_id
-        .get_mut(&session_id)
-        .expect("the session")
-        .panes
-        .remove_pane_record(additional_pane_id);
+    let close_result = server.submit_command(CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::KeyBinding { client_id },
+        Command::ClosePane(ClosePaneArgs {
+            pane_id: Some(additional_pane_id),
+            should_force_close: true,
+            should_kill_process_tree: false,
+        }),
+    ));
+    assert_eq!(
+        get_command_outcome(&close_result),
+        Ok(vec!["PaneClosing", "PaneRemoved", "TabClosed"]),
+        "the close ran"
+    );
 
     let returning_attachment = attach_with_token(
         &mut server,
@@ -2325,7 +2480,7 @@ fn taking_a_zoom_back_resizes_the_tabs_panes() {
     let detached_at = SystemTime::now();
     server.save_client_view(leaving_attachment.client_id, detached_at);
     let _ = server.handle_client_detach(leaving_attachment.client_id);
-    let (delivery_receiver, _) = server.subscribe(ClientId::new());
+    let (delivery_receiver, _) = server.subscribe(ClientId::new(), 60);
 
     let _returning_attachment = attach_with_token(
         &mut server,
@@ -2384,68 +2539,11 @@ fn a_client_the_restart_grace_still_holds_files_no_view_and_keeps_its_token() {
     server.save_client_view(client_id, now);
     assert_eq!(
         server.saved_view_store.take_saved_view(&resume_token, now),
-        Some(SavedView {
-            active_tab_id: booted_tab_id,
-            focused_pane_id_by_tab_id: HashMap::from([(booted_tab_id, root_pane_id)]),
-            zoomed_pane_id_by_tab_id: HashMap::new(),
-            scroll_offset_by_pane_id: HashMap::from([(root_pane_id, 500)]),
-            floating_pane_view_by_pane_id: HashMap::new(),
-            floating_pane_focus_order: Vec::new(),
-            focused_floating_pane_id: None,
-        })
-    );
-}
-
-#[test]
-fn a_claim_that_wins_keeps_its_record_and_drops_the_presented_tokens_view() {
-    let (mut server, client_id) = boot_server();
-    let (session_id, booted_tab_id, root_pane_id) = get_booted_parts(&server, client_id);
-    let (additional_tab_id, _) = add_additional_tab(&mut server, session_id);
-    let leaving_attachment = attach_with_token(&mut server, None, SystemTime::now());
-    {
-        let client = server
-            .session_by_id
-            .get_mut(&session_id)
-            .expect("the session")
-            .clients
-            .get_client_mut_by_id(leaving_attachment.client_id)
-            .expect("the client that is about to leave");
-        client.zoom_pane(booted_tab_id, root_pane_id);
-        client.set_scroll_offset(root_pane_id, 500);
-        client.update_active_tab_id(additional_tab_id);
-    }
-    let detached_at = SystemTime::now();
-    server.save_client_view(leaving_attachment.client_id, detached_at);
-    let _ = server.handle_client_detach(leaving_attachment.client_id);
-
-    // The booted client's record is still held and no connection streams for
-    // it, so the claim wins and the token names a view of another client.
-    let returning_attachment = server
-        .handle_ipc_attach(
-            Some(client_id),
-            Some(leaving_attachment.resume_token.clone()),
-            TEST_VIEWPORT_SIZE,
-            None,
-            None,
-            detached_at,
-            false,
-        )
-        .expect("the session hands the record back");
-
-    assert_eq!(returning_attachment.client_id, client_id);
-    let client = server.session_by_id[&session_id]
-        .clients
-        .get_client_by_id(client_id)
-        .expect("the record the claim took");
-    assert_eq!(client.get_active_tab_id(), booted_tab_id);
-    assert_eq!(client.get_layout_mode(booted_tab_id), LayoutMode::Tiled);
-    assert_eq!(client.get_scroll_offset(root_pane_id), 0);
-    // The token is spent either way, so presenting it again takes nothing.
-    assert_eq!(
-        server
-            .saved_view_store
-            .take_saved_view(&leaving_attachment.resume_token, detached_at),
-        None
+        Some(build_booted_saved_view(
+            booted_tab_id,
+            root_pane_id,
+            HashMap::from([(root_pane_id, 500)])
+        ))
     );
 }
 
@@ -2509,6 +2607,7 @@ fn an_attach_that_finds_no_session_spends_no_token() {
         None,
         now,
         false,
+        60,
     );
 
     assert!(refused_attachment.is_none(), "no session is left to join");
@@ -2516,15 +2615,11 @@ fn an_attach_that_finds_no_session_spends_no_token() {
         server
             .saved_view_store
             .take_saved_view(&leaving_attachment.resume_token, now),
-        Some(SavedView {
-            active_tab_id: booted_tab_id,
-            focused_pane_id_by_tab_id: HashMap::from([(booted_tab_id, root_pane_id)]),
-            zoomed_pane_id_by_tab_id: HashMap::new(),
-            scroll_offset_by_pane_id: HashMap::from([(root_pane_id, 42)]),
-            floating_pane_view_by_pane_id: HashMap::new(),
-            floating_pane_focus_order: Vec::new(),
-            focused_floating_pane_id: None,
-        }),
+        Some(build_booted_saved_view(
+            booted_tab_id,
+            root_pane_id,
+            HashMap::from([(root_pane_id, 42)])
+        )),
         "the refused attach read no token and spent none"
     );
 }
@@ -2589,15 +2684,11 @@ fn a_client_the_session_no_longer_holds_files_no_view_and_drops_its_token() {
         server
             .saved_view_store
             .take_saved_view(&next_attachment.resume_token, now),
-        Some(SavedView {
-            active_tab_id: booted_tab_id,
-            focused_pane_id_by_tab_id: HashMap::from([(booted_tab_id, root_pane_id)]),
-            zoomed_pane_id_by_tab_id: HashMap::new(),
-            scroll_offset_by_pane_id: HashMap::from([(root_pane_id, 500)]),
-            floating_pane_view_by_pane_id: HashMap::new(),
-            floating_pane_focus_order: Vec::new(),
-            focused_floating_pane_id: None,
-        })
+        Some(build_booted_saved_view(
+            booted_tab_id,
+            root_pane_id,
+            HashMap::from([(root_pane_id, 500)])
+        ))
     );
 }
 
@@ -2638,20 +2729,22 @@ fn closing_the_grace_window_detaches_only_the_clients_that_never_came_back() {
     server
         .client_ids_awaiting_reconnect
         .insert(absent_client_id);
+    let resume_token = server.saved_view_store.mint_resume_token(client_id);
     // One of the two came back before the window closed.
     let _held = server
         .handle_ipc_attach(
             Some(client_id),
-            None,
+            Some(resume_token),
             TEST_VIEWPORT_SIZE,
             None,
             None,
             SystemTime::now(),
             false,
+            60,
         )
         .expect("the record is handed back");
 
-    server.handle_drop_unclaimed_clients(Instant::now());
+    server.handle_drop_unclaimed_clients(SystemTime::now());
 
     let clients = &server.session_by_id[&session_id].clients;
     assert_eq!(clients.count_clients(), 1);
@@ -2675,7 +2768,7 @@ fn closing_the_grace_window_with_nobody_awaited_detaches_nobody() {
     let (mut server, client_id) = boot_server();
     let (session_id, _tab_id, _pane_id) = get_booted_parts(&server, client_id);
 
-    let emitted_events = server.handle_drop_unclaimed_clients(Instant::now());
+    let emitted_events = server.handle_drop_unclaimed_clients(SystemTime::now());
 
     assert_eq!(emitted_events, Vec::new());
     assert_eq!(server.session_by_id[&session_id].clients.count_clients(), 1);
@@ -2688,7 +2781,7 @@ fn closing_the_grace_window_keeps_a_session_left_with_no_client_under_auto_close
     server.config.should_auto_close_session = true;
     server.client_ids_awaiting_reconnect.insert(client_id);
 
-    server.handle_drop_unclaimed_clients(Instant::now());
+    server.handle_drop_unclaimed_clients(SystemTime::now());
 
     assert_eq!(server.session_by_id[&session_id].clients.count_clients(), 0);
     assert!(server.client_ids_awaiting_reconnect.is_empty());
@@ -2748,7 +2841,7 @@ fn a_session_that_still_expects_a_client_back_is_not_ended_by_a_carried_quit() {
         "a carried record is still unclaimed"
     );
 
-    server.handle_drop_unclaimed_clients(Instant::now());
+    server.handle_drop_unclaimed_clients(SystemTime::now());
 
     assert!(
         !server.is_awaiting_client(),
@@ -2791,7 +2884,7 @@ fn a_detach_that_lands_while_a_client_is_awaited_leaves_its_record_alone() {
     assert!(server.client_ids_awaiting_reconnect.contains(&client_id));
 
     // The window closing is what detaches it, and it takes the record with it.
-    server.handle_drop_unclaimed_clients(Instant::now());
+    server.handle_drop_unclaimed_clients(SystemTime::now());
 
     assert_eq!(server.session_by_id[&session_id].clients.count_clients(), 0);
     assert!(server.client_ids_awaiting_reconnect.is_empty());
@@ -2820,7 +2913,7 @@ fn the_restart_announcement_waits_for_every_client_to_hold_the_frame() {
         "the notice must name the frame the clients are told"
     );
     assert_eq!(
-        ending_notice.count_running_writers(),
+        ending_notice.wait_until_writers_end(Instant::now()),
         0,
         "the call must return only once no writing thread is left"
     );
@@ -2845,7 +2938,7 @@ fn the_restart_announcement_gives_up_on_a_client_that_never_takes_the_frame() {
     let waited_duration = wait_started_at.elapsed();
 
     assert_eq!(
-        ending_notice.count_running_writers(),
+        ending_notice.wait_until_writers_end(Instant::now()),
         1,
         "the writing thread that never ends must still be counted"
     );
@@ -2918,107 +3011,33 @@ fn a_quit_announced_after_a_restart_keeps_the_restart_as_the_last_frame() {
 }
 
 #[test]
-fn an_attach_claiming_a_client_whose_tab_is_gone_mints_a_new_one_and_leaves_that_record_awaited() {
-    // Another client closes the tab that this client was viewing while this
-    // client is away. The attach mints a fresh client on the first tab, and the
-    // record keeps waiting for the grace window.
-    let (mut server, client_id) = boot_server();
-    let (session_id, booted_tab_id, _booted_pane_id) = get_booted_parts(&server, client_id);
-    let (closed_tab_id, _) = add_additional_tab(&mut server, session_id);
-    {
-        let session = server
-            .session_by_id
-            .get_mut(&session_id)
-            .expect("the session");
-        session
-            .clients
-            .get_client_mut_by_id(client_id)
-            .expect("the booted client")
-            .update_active_tab_id(closed_tab_id);
-        session.tabs.remove(&closed_tab_id);
-    }
-    server.client_ids_awaiting_reconnect.insert(client_id);
-
-    let attachment = server
-        .handle_ipc_attach(
-            Some(client_id),
-            None,
-            REMOTE_VIEWPORT_SIZE,
-            None,
-            None,
-            SystemTime::now(),
-            false,
-        )
-        .expect("the session mints a client instead of refusing");
-
-    assert_ne!(attachment.client_id, client_id);
-    assert_eq!(attachment.session_id, session_id);
-    assert_eq!(server.session_by_id[&session_id].clients.count_clients(), 2);
-    assert_eq!(
-        server.session_by_id[&session_id]
-            .clients
-            .get_client_by_id(attachment.client_id)
-            .expect("the minted record")
-            .get_active_tab_id(),
-        booted_tab_id
-    );
-    assert_eq!(
-        server.client_ids_awaiting_reconnect,
-        HashSet::from([client_id]),
-        "the record nobody could come back as keeps waiting for the grace window"
-    );
-}
-
-#[test]
-fn a_second_restart_request_runs_the_check_again_and_leaves_one_swap_asked_for() {
+fn a_second_restart_taken_leaves_one_swap_asked_for() {
     // Two `koshi update` runs can reach one session before its loop reads the
     // flag. Each request is answered on its own, and the loop still exits into
     // exactly one swap.
     let (mut server, _client_id) = boot_server();
-    let check_run_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counted_check_run_count = Arc::clone(&check_run_count);
-    server.set_restart_check(Arc::new(move || {
-        counted_check_run_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
-    }));
+    let (first_response_sender, first_response_receiver) = mpsc::channel();
+    let (second_response_sender, second_response_receiver) = mpsc::channel();
 
-    assert_eq!(server.handle_ipc_restart(), Ok(()));
-    assert_eq!(server.handle_ipc_restart(), Ok(()));
+    let _ = server.handle_runtime_event(RuntimeEvent::IpcRestart {
+        response_sender: first_response_sender,
+    });
+    let _ = server.handle_runtime_event(RuntimeEvent::IpcRestart {
+        response_sender: second_response_sender,
+    });
 
-    assert_eq!(
-        check_run_count.load(std::sync::atomic::Ordering::SeqCst),
-        2,
-        "each request is checked on its own"
-    );
+    first_response_receiver
+        .try_recv()
+        .expect("the first is answered");
+    second_response_receiver
+        .try_recv()
+        .expect("the second is answered");
     assert!(server.is_restart_requested());
     server.cancel_restart();
     assert!(
         !server.is_restart_requested(),
-        "one cancel takes the accepted restart back, whatever the count of requests"
+        "one cancel takes the restart back, whatever the count of requests"
     );
-}
-
-#[test]
-fn a_restart_refused_after_one_was_accepted_leaves_the_swap_asked_for() {
-    // The second request is answered with what the check says now, and the
-    // swap the first one asked for stays asked for.
-    let (mut server, _client_id) = boot_server();
-    server.set_restart_check(Arc::new(|| Ok(())));
-    assert_eq!(server.handle_ipc_restart(), Ok(()));
-
-    server.set_restart_check(Arc::new(|| {
-        Err(RestartRefusal::UnfitProgramFile {
-            refusal_reason: "the binary at /x is not executable".to_string(),
-        })
-    }));
-
-    assert_eq!(
-        server.handle_ipc_restart(),
-        Err(RestartRefusal::UnfitProgramFile {
-            refusal_reason: "the binary at /x is not executable".to_string(),
-        })
-    );
-    assert!(server.is_restart_requested());
 }
 
 #[test]
@@ -3042,29 +3061,319 @@ fn a_carried_client_that_never_came_back_is_detached_even_after_its_tab_was_clos
     }
     server.client_ids_awaiting_reconnect.insert(client_id);
 
-    server.handle_drop_unclaimed_clients(Instant::now());
+    server.handle_drop_unclaimed_clients(SystemTime::now());
 
     assert_eq!(server.session_by_id[&session_id].clients.count_clients(), 0);
     assert!(server.client_ids_awaiting_reconnect.is_empty());
 }
 
 #[test]
-fn a_session_switch_reaches_every_subscriber_that_views_the_client() {
-    let (mut server, client_id) = boot_server();
-    let (first_receiver, _) = server.subscribe(client_id);
-    let (second_receiver, _) = server.subscribe(client_id);
-    let (onlooker_receiver, _) = server.subscribe(ClientId::new());
-    let target_session_id = SessionId::new();
+fn after_a_swap_a_carried_client_comes_back_only_with_the_token_its_last_attach_minted() {
+    // A viewer names the owner's client id after a swap, first with no token,
+    // then with the viewer's own token. Each attach is a fresh client, and the
+    // owner's token takes the owner's record back.
+    let (mut server, booted_client_id) = boot_server();
+    let (session_id, _booted_tab_id, _root_pane_id) = get_booted_parts(&server, booted_client_id);
+    let owner_attachment = attach_with_token(&mut server, None, SystemTime::now());
+    let viewer_attachment = attach_with_token(&mut server, None, SystemTime::now());
+    let pty_size_by_pane_id = server.pty_size_by_pane_id.clone();
+    let (_header, body) = server.carry_out(&[]).expect("a session to carry");
+    let mut resumed_server = resume_carried_server(body, pty_size_by_pane_id);
 
-    assert!(server.send_switch(client_id, target_session_id));
+    let tokenless_attachment = resumed_server
+        .handle_ipc_attach(
+            Some(owner_attachment.client_id),
+            None,
+            REMOTE_VIEWPORT_SIZE,
+            None,
+            None,
+            SystemTime::now(),
+            true,
+            60,
+        )
+        .expect("the session mints a client");
+    let foreign_token_attachment = resumed_server
+        .handle_ipc_attach(
+            Some(owner_attachment.client_id),
+            Some(viewer_attachment.resume_token),
+            REMOTE_VIEWPORT_SIZE,
+            None,
+            None,
+            SystemTime::now(),
+            true,
+            60,
+        )
+        .expect("the session mints a client");
+
+    assert_ne!(tokenless_attachment.client_id, owner_attachment.client_id);
+    assert_ne!(
+        foreign_token_attachment.client_id,
+        owner_attachment.client_id
+    );
+    assert_eq!(
+        resumed_server.client_ids_awaiting_reconnect,
+        HashSet::from([booted_client_id, owner_attachment.client_id]),
+        "the viewer's token took the viewer's own record over, and the owner's record still waits"
+    );
+
+    let owner_returning_attachment = resumed_server
+        .handle_ipc_attach(
+            Some(owner_attachment.client_id),
+            Some(owner_attachment.resume_token),
+            TEST_VIEWPORT_SIZE,
+            None,
+            None,
+            SystemTime::now(),
+            false,
+            60,
+        )
+        .expect("the session hands the record back");
 
     assert_eq!(
+        owner_returning_attachment.client_id,
+        owner_attachment.client_id
+    );
+    assert_eq!(
+        resumed_server.client_ids_awaiting_reconnect,
+        HashSet::from([booted_client_id])
+    );
+    assert_eq!(
+        resumed_server.session_by_id[&session_id]
+            .clients
+            .count_clients(),
+        4
+    );
+}
+
+#[test]
+fn after_a_swap_a_carried_client_with_no_token_hash_is_not_handed_back_by_its_id() {
+    // The booted client's attach minted no token, the same as every client of
+    // a body converted from format 4 or older. Its record waits for the grace
+    // window.
+    let (mut server, client_id) = boot_server();
+    let pty_size_by_pane_id = server.pty_size_by_pane_id.clone();
+    let (_header, body) = server.carry_out(&[]).expect("a session to carry");
+    let mut resumed_server = resume_carried_server(body, pty_size_by_pane_id);
+
+    let attachment = resumed_server
+        .handle_ipc_attach(
+            Some(client_id),
+            None,
+            TEST_VIEWPORT_SIZE,
+            None,
+            None,
+            SystemTime::now(),
+            false,
+            60,
+        )
+        .expect("the session mints a client");
+
+    assert_ne!(attachment.client_id, client_id);
+    assert_eq!(
+        resumed_server.client_ids_awaiting_reconnect,
+        HashSet::from([client_id])
+    );
+}
+
+#[test]
+fn a_view_filed_before_a_swap_comes_back_by_its_token_after_it() {
+    let (mut server, client_id) = boot_server();
+    let (session_id, _booted_tab_id, _root_pane_id) = get_booted_parts(&server, client_id);
+    let (additional_tab_id, additional_pane_id) = add_additional_tab(&mut server, session_id);
+    let leaving_attachment = attach_with_token(&mut server, None, SystemTime::now());
+    server
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the session")
+        .clients
+        .get_client_mut_by_id(leaving_attachment.client_id)
+        .expect("the client that is about to leave")
+        .update_active_tab_id(additional_tab_id);
+    let detached_at = SystemTime::now();
+    server.save_client_view(leaving_attachment.client_id, detached_at);
+    let _ = server.handle_client_detach(leaving_attachment.client_id);
+    let mut pty_size_by_pane_id = server.pty_size_by_pane_id.clone();
+    pty_size_by_pane_id.insert(
+        additional_pane_id,
+        PtySize {
+            column_count: 80,
+            row_count: 22,
+        },
+    );
+    let (_header, body) = server.carry_out(&[]).expect("a session to carry");
+    let mut resumed_server = resume_carried_server(body, pty_size_by_pane_id);
+
+    let returning_attachment = attach_with_token(
+        &mut resumed_server,
+        Some(leaving_attachment.resume_token),
+        detached_at,
+    );
+
+    assert_eq!(
+        resumed_server.session_by_id[&session_id]
+            .clients
+            .get_client_by_id(returning_attachment.client_id)
+            .expect("the client the token attached")
+            .get_active_tab_id(),
+        additional_tab_id
+    );
+}
+
+#[test]
+fn closing_the_grace_window_files_each_unclaimed_view_under_its_token() {
+    let (mut server, client_id) = boot_server();
+    let (session_id, _booted_tab_id, _root_pane_id) = get_booted_parts(&server, client_id);
+    let (additional_tab_id, additional_pane_id) = add_additional_tab(&mut server, session_id);
+    let away_attachment = attach_with_token(&mut server, None, SystemTime::now());
+    server
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the session")
+        .clients
+        .get_client_mut_by_id(away_attachment.client_id)
+        .expect("the client that does not come back")
+        .update_active_tab_id(additional_tab_id);
+    let mut pty_size_by_pane_id = server.pty_size_by_pane_id.clone();
+    pty_size_by_pane_id.insert(
+        additional_pane_id,
+        PtySize {
+            column_count: 80,
+            row_count: 22,
+        },
+    );
+    let (_header, body) = server.carry_out(&[]).expect("a session to carry");
+    let mut resumed_server = resume_carried_server(body, pty_size_by_pane_id);
+    let unclaimed_client_deadline = SystemTime::now();
+
+    resumed_server.handle_drop_unclaimed_clients(unclaimed_client_deadline);
+
+    assert_eq!(
+        resumed_server.session_by_id[&session_id]
+            .clients
+            .count_clients(),
+        0
+    );
+    let returning_attachment = attach_with_token(
+        &mut resumed_server,
+        Some(away_attachment.resume_token),
+        unclaimed_client_deadline,
+    );
+    assert_eq!(
+        resumed_server.session_by_id[&session_id]
+            .clients
+            .get_client_by_id(returning_attachment.client_id)
+            .expect("the client the token attached")
+            .get_active_tab_id(),
+        additional_tab_id
+    );
+}
+
+#[test]
+fn a_carried_client_whose_tab_is_gone_is_taken_over_by_its_token_and_keeps_its_view() {
+    // The client's tab was closed while it was away, and its record cannot be
+    // handed back. Its token takes the record over: the fresh client lands on
+    // the first tab with the zoom the record held there.
+    let (mut server, client_id) = boot_server();
+    let (session_id, booted_tab_id, root_pane_id) = get_booted_parts(&server, client_id);
+    let split_pane_id = split_booted_pane(&mut server, client_id, root_pane_id);
+    let (closed_tab_id, _) = add_additional_tab(&mut server, session_id);
+    {
+        let session = server
+            .session_by_id
+            .get_mut(&session_id)
+            .expect("the session");
+        let client = session
+            .clients
+            .get_client_mut_by_id(client_id)
+            .expect("the booted client");
+        client.zoom_pane(booted_tab_id, split_pane_id);
+        client.update_active_tab_id(closed_tab_id);
+        session.tabs.remove(&closed_tab_id);
+    }
+    let resume_token = server.saved_view_store.mint_resume_token(client_id);
+    server.client_ids_awaiting_reconnect.insert(client_id);
+
+    let attachment = server
+        .handle_ipc_attach(
+            Some(client_id),
+            Some(resume_token),
+            TEST_VIEWPORT_SIZE,
+            None,
+            None,
+            SystemTime::now(),
+            false,
+            60,
+        )
+        .expect("the session mints a client");
+
+    assert_ne!(attachment.client_id, client_id);
+    assert_eq!(server.client_ids_awaiting_reconnect, HashSet::new());
+    let clients = &server.session_by_id[&session_id].clients;
+    assert_eq!(clients.count_clients(), 1);
+    let client = clients
+        .get_client_by_id(attachment.client_id)
+        .expect("the minted client");
+    assert_eq!(client.get_active_tab_id(), booted_tab_id);
+    assert_eq!(
+        client.get_zoomed_pane_id(booted_tab_id),
+        Some(split_pane_id)
+    );
+}
+
+#[test]
+fn a_token_proven_claim_on_a_client_a_connection_is_streaming_for_takes_that_client_over() {
+    // A viewer on another machine dials again with its id and its token before
+    // the session read that its first link dropped. The dial takes the
+    // streaming record over and does not share its id.
+    let (mut server, client_id) = boot_server();
+    let (session_id, _booted_tab_id, _root_pane_id) = get_booted_parts(&server, client_id);
+    let first_attachment = attach_with_token(&mut server, None, SystemTime::now());
+
+    let second_attachment = server
+        .handle_ipc_attach(
+            Some(first_attachment.client_id),
+            Some(first_attachment.resume_token.clone()),
+            TEST_VIEWPORT_SIZE,
+            None,
+            None,
+            SystemTime::now(),
+            true,
+            60,
+        )
+        .expect("the session mints a client");
+
+    assert_ne!(second_attachment.client_id, first_attachment.client_id);
+    let clients = &server.session_by_id[&session_id].clients;
+    assert_eq!(clients.count_clients(), 2);
+    assert_eq!(
+        clients
+            .get_client_by_id(first_attachment.client_id)
+            .map(|client| client.get_client_id()),
+        None
+    );
+}
+
+#[test]
+fn a_session_switch_reaches_every_subscriber_that_views_the_client() {
+    let (mut server, client_id) = boot_server();
+    let (first_receiver, _) = server.subscribe(client_id, 60);
+    let (second_receiver, _) = server.subscribe(client_id, 60);
+    let (onlooker_receiver, _) = server.subscribe(ClientId::new(), 60);
+    let target_session_id = SessionId::new();
+
+    assert!(server.send_switch(client_id, target_session_id, Some(1001)));
+
+    let expected_delivery = Delivery::SwitchTo {
+        session_id: target_session_id,
+        owner_user_id: Some(1001),
+    };
+    assert_eq!(
         first_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::SwitchTo(target_session_id)]
+        vec![expected_delivery.clone()]
     );
     assert_eq!(
         second_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::SwitchTo(target_session_id)]
+        vec![expected_delivery]
     );
     assert_eq!(
         onlooker_receiver.try_iter().collect::<Vec<_>>(),
@@ -3075,9 +3384,9 @@ fn a_session_switch_reaches_every_subscriber_that_views_the_client() {
 #[test]
 fn a_session_switch_for_a_client_no_subscriber_views_is_held_by_nobody() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, _) = server.subscribe(client_id);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
 
-    assert!(!server.send_switch(ClientId::new(), SessionId::new()));
+    assert!(!server.send_switch(ClientId::new(), SessionId::new(), None));
 
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<_>>(),
@@ -3088,12 +3397,12 @@ fn a_session_switch_for_a_client_no_subscriber_views_is_held_by_nobody() {
 #[test]
 fn a_session_switch_offered_to_a_paused_subscriber_is_held_by_nobody() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, _) = server.subscribe(client_id);
-    let (subscriber_id, _) = server.subscriptions[0];
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
     let _backlog: Vec<Delivery> = delivery_receiver.try_iter().collect();
 
-    assert!(!server.send_switch(client_id, SessionId::new()));
+    assert!(!server.send_switch(client_id, SessionId::new(), None));
 
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<_>>(),
@@ -3128,7 +3437,7 @@ fn handing_the_inbox_over_keeps_the_receiver_the_panes_deliver_into() {
     };
 }
 
-/// A server resumed from `body` over a fake PTY backend whose output reaches
+/// A server resumed from `body` over a fake PTY backend whose output wakes
 /// the server's own inbox, with `pty_size_by_pane_id` as the carried PTY sizes,
 /// no startup config, and no exit status.
 fn resume_carried_server(
@@ -3535,7 +3844,7 @@ fn a_binary_only_others_may_execute_passes_the_binary_check() {
 
 /// Every delivery waiting on `delivery_receiver`, and whether its sender is
 /// gone once they are read.
-fn drain_deliveries(delivery_receiver: &mpsc::Receiver<Delivery>) -> (Vec<Delivery>, bool) {
+fn drain_deliveries(delivery_receiver: &DeliveryReceiver) -> (Vec<Delivery>, bool) {
     let mut waiting_deliveries = Vec::new();
     loop {
         match delivery_receiver.try_recv() {
@@ -3559,6 +3868,7 @@ fn boot_server_with_one_attached_client_under_auto_close() -> (Server, AttachAcc
 #[test]
 fn a_returning_client_leaves_its_view_filed_and_its_session_running_under_auto_close() {
     let (mut server, attachment) = boot_server_with_one_attached_client_under_auto_close();
+    let (_, booted_tab_id, root_pane_id) = get_booted_parts(&server, attachment.client_id);
     let detached_at = SystemTime::now();
 
     let control_flow = server.handle_runtime_event(RuntimeEvent::ClientDetached {
@@ -3579,11 +3889,15 @@ fn a_returning_client_leaves_its_view_filed_and_its_session_running_under_auto_c
         !server.is_quit_requested(),
         "a client that may attach again does not end the session"
     );
-    assert!(
+    assert_eq!(
         server
             .saved_view_store
-            .take_saved_view(&attachment.resume_token, detached_at)
-            .is_some(),
+            .take_saved_view(&attachment.resume_token, detached_at),
+        Some(build_booted_saved_view(
+            booted_tab_id,
+            root_pane_id,
+            HashMap::new()
+        )),
         "the view is filed under the token the attach minted"
     );
 }
@@ -3591,6 +3905,7 @@ fn a_returning_client_leaves_its_view_filed_and_its_session_running_under_auto_c
 #[test]
 fn a_client_that_does_not_return_ends_its_session_under_auto_close_and_still_files_its_view() {
     let (mut server, attachment) = boot_server_with_one_attached_client_under_auto_close();
+    let (_, booted_tab_id, root_pane_id) = get_booted_parts(&server, attachment.client_id);
     let detached_at = SystemTime::now();
 
     let _ = server.handle_runtime_event(RuntimeEvent::ClientDetached {
@@ -3607,10 +3922,16 @@ fn a_client_that_does_not_return_ends_its_session_under_auto_close_and_still_fil
         0
     );
     assert!(server.is_quit_requested());
-    assert!(server
-        .saved_view_store
-        .take_saved_view(&attachment.resume_token, detached_at)
-        .is_some());
+    assert_eq!(
+        server
+            .saved_view_store
+            .take_saved_view(&attachment.resume_token, detached_at),
+        Some(build_booted_saved_view(
+            booted_tab_id,
+            root_pane_id,
+            HashMap::new()
+        ))
+    );
 }
 
 #[test]
@@ -3699,10 +4020,13 @@ fn a_token_of_a_client_still_attached_takes_its_view_and_removes_that_client() {
     let third_attachment =
         attach_with_token(&mut server, Some(first_resume_token), SystemTime::now());
     let session = &server.session_by_id[&session_id];
-    assert!(session
-        .clients
-        .get_client_by_id(second_attachment.client_id)
-        .is_some());
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(second_attachment.client_id)
+            .map(|client| client.get_active_tab_id()),
+        Some(additional_tab_id)
+    );
     assert_eq!(
         session
             .clients
@@ -3716,6 +4040,7 @@ fn a_token_of_a_client_still_attached_takes_its_view_and_removes_that_client() {
 #[test]
 fn a_take_over_keeps_the_session_running_under_auto_close() {
     let (mut server, attachment) = boot_server_with_one_attached_client_under_auto_close();
+    let (_, booted_tab_id, _) = get_booted_parts(&server, attachment.client_id);
 
     let returning_attachment = attach_with_token(
         &mut server,
@@ -3725,9 +4050,12 @@ fn a_take_over_keeps_the_session_running_under_auto_close() {
 
     let session = &server.session_by_id[&attachment.session_id];
     assert_eq!(session.clients.count_clients(), 1);
-    assert!(session
-        .clients
-        .get_client_by_id(returning_attachment.client_id)
-        .is_some());
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(returning_attachment.client_id)
+            .map(|client| client.get_active_tab_id()),
+        Some(booted_tab_id)
+    );
     assert!(!server.is_quit_requested());
 }

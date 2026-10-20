@@ -57,21 +57,20 @@ version 2
 Missing versions, bad KDL, bad values, unknown keys, and unsupported versions
 fail the check. Errors from all files are reported together.
 
-A session server, a router, and `koshi resume-support` run config migration
-before they read the files. `koshi config migrate` runs the same migration on
-request. It applies each registered version step in order. A file that cannot
-be read, bad KDL, an unusable version, a missing step, or a step that adds a
-schema problem stops migration before any file is written. Before it writes,
-migration takes the lock file `.migration.lock` in the config directory. A
-start with every file already current takes no lock. A lock file that cannot
-be opened or locked also stops migration before any file is written. A
-session server, a router, or
-`koshi resume-support` whose migration fails prints the error on standard
-error and carries on with the files as they are; the next start migrates them
-again. A session server also writes the error to its log at warn level when
-`koshi.kdl` turns logging on. A running session asks the installed build which
-resume formats it reads before its restart; that question runs the migration,
-and the session restarts whether or not the migration succeeds.
+A session server and a router run config migration before they read the
+files. `koshi config migrate` runs the same migration on request. It applies
+each registered version step in order. A file that cannot be read, bad KDL, an
+unusable version, a missing step, or a step that adds a schema problem stops
+migration before any file is written. Before it writes, migration takes the
+lock file `.migration.lock` in the config directory. A start with every file
+already current takes no lock. A lock file that cannot be opened or locked
+also stops migration before any file is written. A session server or a router
+whose migration fails prints the error on standard error and carries on with
+the files as they are; the next start migrates them again. A session server
+also writes the error to its log at warn level when `koshi.kdl` turns logging
+on. A running session asks the installed build which resume formats it reads
+before its restart; that question changes no file, and the new session server
+that replaces the session migrates the files as it starts.
 
 Current schema version is `2`. Version `1` files migrate to version `2`.
 Version `2` files are reported as current and stay unchanged. For example,

@@ -3,7 +3,10 @@
 //!
 //! Three request protocols share one frame shape — a 4-byte big-endian length,
 //! then that many bytes of JSON: a client to a session server, a client to the
-//! router, and a session server to the supervisor holding its panes. Each opens
+//! router, and a session server to the supervisor holding its panes. A session
+//! server also sends its attached clients binary frames: bit 31 of the length
+//! marks one, and the first payload byte names its kind, `1` for a painted
+//! update and `2` for an image chunk. Each protocol opens
 //! with a Hello that settles the version both ends speak and presents a secret,
 //! and each refuses a request kind this build has no name for without closing
 //! the link.
@@ -27,12 +30,16 @@ pub mod endpoint;
 pub mod error;
 /// The events an attached client receives after the attach reply.
 pub mod event;
-/// One painted frame: the pane content a client draws.
+/// One painted frame: the structure of the picture a client draws.
 pub mod frame;
 /// Connection handshake checks.
 pub mod handshake;
+/// The binary frames that carry the raw RGBA bytes of each image record.
+pub mod image_chunk;
 /// One session's layout: each tab's split tree and the rectangles it solves to.
 pub mod layout;
+/// The binary frames that carry each attached client's screen changes.
+pub mod painted_update;
 /// Bounded read-only placement previews for attached clients.
 pub mod placement;
 /// What every server does the same way, on whichever protocol it speaks: the

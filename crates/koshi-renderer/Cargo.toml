@@ -13,3 +13,6 @@ ratatui.workspace = true
 
 [dev-dependencies]
 koshi-test-support.workspace = true
+
+[lints]
+workspace = true

@@ -7,6 +7,9 @@ version = "0.5.0"
 edition = "2021"
 license = "MIT"
 
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
 [workspace.dependencies]
 # Workspace crates
 koshi = { path = "crates/koshi" }
@@ -49,6 +52,7 @@ image = { version = "0.25.10", default-features = false }
 interprocess = "2.4.2"
 kdl = "6.7.1"
 libc = "0.2.189"
+memchr = "2.8.3"
 miette = "7.6.0"
 nix = "0.28.0"
 percent-encoding = "2.3.2"

@@ -9,7 +9,9 @@ use std::path::Path;
 use koshi_config::app_config::parse_app_config;
 use koshi_config::key::Leader;
 use koshi_config::keybinding::parse_keybindings;
-use koshi_config::layer::{merge_client, merge_server};
+use koshi_config::layer::{
+    merge_client, merge_server, PartialColorPalette, PartialKeybindingsConfig, PartialThemeConfig,
+};
 use koshi_config::profile::parse_profile;
 use koshi_config::theme::parse_theme;
 use koshi_config::types::{
@@ -81,68 +83,30 @@ fn theme_example_parses_without_warnings() {
             .expect("theme file parses");
     assert_eq!(parse_warnings, Vec::<String>::new());
 
-    // The page documents every color at its default value.
-    let parsed_colors = parsed_theme
-        .colors
-        .expect("the example sets a `colors` block");
+    // The page documents every color at its default value. `parse_theme`
+    // leaves `theme_name` unset.
     let default_palette = ColorPalette::default();
-    for (color_role, parsed_color, default_color) in [
-        (
-            "ramp-start",
-            parsed_colors.ramp_start,
-            default_palette.ramp_start,
-        ),
-        ("ramp-end", parsed_colors.ramp_end, default_palette.ramp_end),
-        ("on-ramp", parsed_colors.on_ramp, default_palette.on_ramp),
-        (
-            "on-ramp-dim",
-            parsed_colors.on_ramp_dim,
-            default_palette.on_ramp_dim,
-        ),
-        ("accent", parsed_colors.accent, default_palette.accent),
-        (
-            "on-accent",
-            parsed_colors.on_accent,
-            default_palette.on_accent,
-        ),
-        ("bar-bg", parsed_colors.bar_bg, default_palette.bar_bg),
-        (
-            "border-focused",
-            parsed_colors.border_focused,
-            default_palette.border_focused,
-        ),
-        (
-            "border-unfocused",
-            parsed_colors.border_unfocused,
-            default_palette.border_unfocused,
-        ),
-        (
-            "border-hover",
-            parsed_colors.border_hover,
-            default_palette.border_hover,
-        ),
-        (
-            "stack-header-fg",
-            parsed_colors.stack_header_fg,
-            default_palette.stack_header_fg,
-        ),
-        (
-            "stack-header-bg",
-            parsed_colors.stack_header_bg,
-            default_palette.stack_header_bg,
-        ),
-        (
-            "letterbox",
-            parsed_colors.letterbox,
-            default_palette.letterbox,
-        ),
-    ] {
-        assert_eq!(
-            parsed_color,
-            Some(default_color),
-            "documented `{color_role}`"
-        );
-    }
+    assert_eq!(
+        parsed_theme,
+        PartialThemeConfig {
+            theme_name: None,
+            colors: Some(PartialColorPalette {
+                ramp_start: Some(default_palette.ramp_start),
+                ramp_end: Some(default_palette.ramp_end),
+                on_ramp: Some(default_palette.on_ramp),
+                on_ramp_dim: Some(default_palette.on_ramp_dim),
+                accent: Some(default_palette.accent),
+                on_accent: Some(default_palette.on_accent),
+                border_focused: Some(default_palette.border_focused),
+                border_unfocused: Some(default_palette.border_unfocused),
+                border_hover: Some(default_palette.border_hover),
+                stack_header_fg: Some(default_palette.stack_header_fg),
+                stack_header_bg: Some(default_palette.stack_header_bg),
+                letterbox: Some(default_palette.letterbox),
+                bar_bg: Some(default_palette.bar_bg),
+            }),
+        }
+    );
 }
 
 #[test]
@@ -153,14 +117,16 @@ fn keybinding_example_parses() {
 
     // The page documents the complete built-in keymap: the layer it parses to
     // is the shipped default table, key for key.
-    assert_eq!(keybinding_layer.chord_timeout_ms, Some(500));
-    assert_eq!(keybinding_layer.which_key_delay_ms, Some(300));
-    assert_eq!(keybinding_layer.maximum_chord_depth, Some(4));
-    assert_eq!(keybinding_layer.leader, Some(Leader::default()));
-    assert_eq!(keybinding_layer.unlock_alternative, None);
     assert_eq!(
-        keybinding_layer.mode_bindings_by_name,
-        Some(build_default_mode_bindings(Leader::default()))
+        keybinding_layer,
+        PartialKeybindingsConfig {
+            chord_timeout_ms: Some(500),
+            which_key_delay_ms: Some(300),
+            maximum_chord_depth: Some(4),
+            leader: Some(Leader::default()),
+            mode_bindings_by_name: Some(build_default_mode_bindings(Leader::default())),
+            unlock_alternative: None,
+        }
     );
 }
 
@@ -219,30 +185,41 @@ fn every_shipped_example_theme_is_complete_and_warning_free() {
             "{theme_file_name} has warnings"
         );
 
-        let parsed_colors = parsed_theme
+        let PartialColorPalette {
+            ramp_start,
+            ramp_end,
+            on_ramp,
+            on_ramp_dim,
+            accent,
+            on_accent,
+            border_focused,
+            border_unfocused,
+            border_hover,
+            stack_header_fg,
+            stack_header_bg,
+            letterbox,
+            bar_bg,
+        } = parsed_theme
             .colors
             .unwrap_or_else(|| panic!("{theme_file_name} has no `colors` block"));
         for (color_role, is_set) in [
-            ("ramp-start", parsed_colors.ramp_start.is_some()),
-            ("ramp-end", parsed_colors.ramp_end.is_some()),
-            ("on-ramp", parsed_colors.on_ramp.is_some()),
-            ("on-ramp-dim", parsed_colors.on_ramp_dim.is_some()),
-            ("accent", parsed_colors.accent.is_some()),
-            ("on-accent", parsed_colors.on_accent.is_some()),
-            ("bar-bg", parsed_colors.bar_bg.is_some()),
-            ("border-focused", parsed_colors.border_focused.is_some()),
-            ("border-unfocused", parsed_colors.border_unfocused.is_some()),
-            ("border-hover", parsed_colors.border_hover.is_some()),
-            ("stack-header-fg", parsed_colors.stack_header_fg.is_some()),
-            ("stack-header-bg", parsed_colors.stack_header_bg.is_some()),
-            ("letterbox", parsed_colors.letterbox.is_some()),
+            ("ramp-start", ramp_start.is_some()),
+            ("ramp-end", ramp_end.is_some()),
+            ("on-ramp", on_ramp.is_some()),
+            ("on-ramp-dim", on_ramp_dim.is_some()),
+            ("accent", accent.is_some()),
+            ("on-accent", on_accent.is_some()),
+            ("bar-bg", bar_bg.is_some()),
+            ("border-focused", border_focused.is_some()),
+            ("border-unfocused", border_unfocused.is_some()),
+            ("border-hover", border_hover.is_some()),
+            ("stack-header-fg", stack_header_fg.is_some()),
+            ("stack-header-bg", stack_header_bg.is_some()),
+            ("letterbox", letterbox.is_some()),
         ] {
             assert!(is_set, "{theme_file_name} does not set `{color_role}`");
         }
         checked_theme_count += 1;
     }
-    assert!(
-        checked_theme_count >= 20,
-        "expected at least 20 shipped themes, found {checked_theme_count}"
-    );
+    assert_eq!(checked_theme_count, 25);
 }

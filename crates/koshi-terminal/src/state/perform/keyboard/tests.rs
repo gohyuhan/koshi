@@ -3,27 +3,15 @@
 //! split across alternate-screen entry and exit, and the resets.
 
 use super::*;
+use crate::state::perform::tests::build_terminal_state;
+use crate::state::tests::process_terminal_bytes;
 use crate::state::Screen;
 use koshi_core::process::PtySize;
-
-/// Build terminal state for one pane of `column_count × row_count`.
-fn build_terminal_state(column_count: u16, row_count: u16) -> TerminalState {
-    TerminalState::from_pty_size(PtySize {
-        column_count,
-        row_count,
-    })
-}
-
-/// Feed PTY output bytes through a fresh parser into `terminal_state`.
-fn advance_vte_parser(terminal_state: &mut TerminalState, pty_output_bytes: &[u8]) {
-    let mut vte_parser = vte::Parser::new();
-    vte_parser.advance(terminal_state, pty_output_bytes);
-}
 
 /// Feed PTY output bytes into a fresh 8×4 terminal state and return it.
 fn build_terminal_state_after(pty_output_bytes: &[u8]) -> TerminalState {
     let mut terminal_state = build_terminal_state(8, 4);
-    advance_vte_parser(&mut terminal_state, pty_output_bytes);
+    process_terminal_bytes(&mut terminal_state, pty_output_bytes);
     terminal_state
 }
 
@@ -33,7 +21,7 @@ fn bare_push_adds_an_all_off_entry() {
 
     assert_eq!(terminal_state.get_keyboard_flags(), 0);
 
-    advance_vte_parser(&mut terminal_state, b"\x1b[<u");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[<u");
 
     assert_eq!(terminal_state.get_keyboard_flags(), 1);
 }
@@ -60,7 +48,7 @@ fn push_past_the_depth_bound_drops_the_oldest_entry() {
 
     for expected_keyboard_flags in [9, 8, 7, 6, 5, 4, 3, 2] {
         assert_eq!(terminal_state.get_keyboard_flags(), expected_keyboard_flags);
-        advance_vte_parser(&mut terminal_state, b"\x1b[<u");
+        process_terminal_bytes(&mut terminal_state, b"\x1b[<u");
     }
 
     assert_eq!(terminal_state.get_keyboard_flags(), 0);
@@ -100,7 +88,7 @@ fn set_then_push_then_pop_restores_the_flags_the_push_covered() {
 
     assert_eq!(terminal_state.get_keyboard_flags(), 1);
 
-    advance_vte_parser(&mut terminal_state, b"\x1b[<u");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[<u");
 
     assert_eq!(terminal_state.get_keyboard_flags(), 0);
 }
@@ -111,7 +99,7 @@ fn set_on_an_empty_stack_creates_the_entry() {
 
     assert_eq!(terminal_state.get_keyboard_flags(), 4);
 
-    advance_vte_parser(&mut terminal_state, b"\x1b[<u");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[<u");
 
     assert_eq!(terminal_state.get_keyboard_flags(), 0);
 }
@@ -158,7 +146,7 @@ fn set_leaves_the_preceding_entries_as_they_are() {
 
     assert_eq!(terminal_state.get_keyboard_flags(), 8);
 
-    advance_vte_parser(&mut terminal_state, b"\x1b[<u");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[<u");
 
     assert_eq!(terminal_state.get_keyboard_flags(), 1);
 }
@@ -196,7 +184,7 @@ fn alternate_screen_flags_never_reach_the_primary() {
 fn an_alternate_buffer_reset_empties_the_alternate_stack() {
     let mut terminal_state = build_terminal_state_after(b"\x1b[>1u\x1b[?1049h\x1b[>8u\x1b[?1049l");
 
-    advance_vte_parser(&mut terminal_state, b"\x1b[?1049h");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?1049h");
 
     assert_eq!(terminal_state.get_active_screen(), Screen::Alternate);
     assert_eq!(terminal_state.get_keyboard_flags(), 0);
@@ -206,7 +194,7 @@ fn an_alternate_buffer_reset_empties_the_alternate_stack() {
 fn a_repeated_alternate_entry_leaves_the_alternate_stack_as_it_is() {
     let mut terminal_state = build_terminal_state_after(b"\x1b[?1049h\x1b[>8u");
 
-    advance_vte_parser(&mut terminal_state, b"\x1b[?1049h");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?1049h");
 
     assert_eq!(terminal_state.get_active_screen(), Screen::Alternate);
     assert_eq!(terminal_state.get_keyboard_flags(), 8);
@@ -218,7 +206,7 @@ fn a_buffer_switch_without_a_reset_keeps_each_screen_stack() {
 
     assert_eq!(terminal_state.get_keyboard_flags(), 1);
 
-    advance_vte_parser(&mut terminal_state, b"\x1b[?47h");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?47h");
 
     assert_eq!(terminal_state.get_keyboard_flags(), 8);
 }
@@ -230,7 +218,7 @@ fn hard_reset_empties_both_screen_stacks() {
     assert_eq!(terminal_state.get_active_screen(), Screen::Primary);
     assert_eq!(terminal_state.get_keyboard_flags(), 0);
 
-    advance_vte_parser(&mut terminal_state, b"\x1b[?47h");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?47h");
 
     assert_eq!(terminal_state.get_keyboard_flags(), 0);
 }
@@ -242,7 +230,7 @@ fn soft_reset_leaves_both_screen_stacks_as_they_are() {
     assert_eq!(terminal_state.get_active_screen(), Screen::Alternate);
     assert_eq!(terminal_state.get_keyboard_flags(), 8);
 
-    advance_vte_parser(&mut terminal_state, b"\x1b[?1049l");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?1049l");
 
     assert_eq!(terminal_state.get_keyboard_flags(), 1);
 }
@@ -258,7 +246,7 @@ fn a_resize_leaves_both_screen_stacks_as_they_are() {
 
     assert_eq!(terminal_state.get_keyboard_flags(), 8);
 
-    advance_vte_parser(&mut terminal_state, b"\x1b[?1049l");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?1049l");
 
     assert_eq!(terminal_state.get_keyboard_flags(), 1);
 }
@@ -266,7 +254,7 @@ fn a_resize_leaves_both_screen_stacks_as_they_are() {
 #[test]
 fn csi_u_with_no_intermediate_restores_the_saved_cursor() {
     let mut terminal_state = build_terminal_state(8, 4);
-    advance_vte_parser(
+    process_terminal_bytes(
         &mut terminal_state,
         b"\x1b[2;3H\x1b[s\x1b[1;1H\x1b[>8u\x1b[u",
     );

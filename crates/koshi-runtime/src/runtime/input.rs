@@ -51,7 +51,7 @@ impl Server {
         if let Some(session) = self.get_session_for_pane_mut(pane_id) {
             if session.is_recovery_notice_visible {
                 session.is_recovery_notice_visible = false;
-                self.render_scheduler.invalidate();
+                self.mark_every_view_changed();
             }
         }
     }

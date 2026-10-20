@@ -2,8 +2,9 @@
 //! environment-variable override precedence over koshi's own defaults.
 //!
 //! `build_environment_overlay` returns only koshi's *overlay*; parent-environment preservation and the
-//! Windows case-fold are properties of the spawn path (`portable-pty` applies
-//! the overlay over the un-cleared inherited environment) and are covered there.
+//! Windows case-fold are properties of the spawn path (`portable-pty` on Unix
+//! and the pane's pseudoconsole spawn on Windows apply the overlay over the
+//! un-cleared inherited environment) and are covered there.
 
 use super::*;
 use std::path::PathBuf;

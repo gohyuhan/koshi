@@ -80,16 +80,12 @@ fn listener_migration_preserves_certificate_access_mark_and_grant() {
         }
     );
 
-    let mut migrated_grants =
+    let migrated_grants =
         TokenStore::load_token_store_from_path(&token_store_path).expect("read migrated grants");
     let admitted_at = SystemTime::UNIX_EPOCH + Duration::from_secs(400);
     assert_eq!(
-        migrated_grants.admit_token_scope(&connection_token, admitted_at),
+        migrated_grants.find_token_scope(&connection_token, admitted_at),
         Some(TokenScope::HostWide)
-    );
-    assert_eq!(
-        migrated_grants.token_records[0].last_used_at,
-        Some(admitted_at)
     );
 
     let certificate_bytes = std::fs::read(&certificate_path).expect("read migrated certificate");

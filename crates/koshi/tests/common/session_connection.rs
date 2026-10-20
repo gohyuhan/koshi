@@ -5,7 +5,9 @@
 //! holds. [`wait_for_session_connection`] reads the endpoint file again until
 //! the session server answers. [`attach_client_on_connection`] joins the
 //! session as an attached client, and [`read_session_ending`] reads that
-//! client's event stream until a frame or a read failure ends it.
+//! client's event stream until a frame, a read failure, or a write failure ends
+//! it. [`read_next_session_event`] reads the next event on that stream and
+//! reports each painted update it passes.
 //! [`send_session_request`], [`submit_session_command`] and [`create_pane`]
 //! ask the session for something on a connection that carries no client's
 //! event stream.
@@ -27,8 +29,9 @@ use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{
     GraphicsCapabilities, IpcRequest, IpcRequestKind, IpcResponse, IpcResult,
 };
-use koshi_ipc::transport::Connection;
-use koshi_test_support::fixtures::send_committed_request;
+use koshi_ipc::transport::{Connection, FrameReader, FrameWriter};
+use koshi_runtime::runtime::painted_update::{PaintedUpdateReceiver, SessionFrame};
+use koshi_test_support::fixtures::{build_paint_report_request, send_committed_request};
 
 use super::{POLL_INTERVAL_DURATION, WAIT_DURATION};
 
@@ -63,6 +66,7 @@ pub fn build_attach_request() -> IpcRequest {
             graphics_capabilities: GraphicsCapabilities::default(),
             cell_size: None,
             link_timeout_ms: None,
+            max_frames_per_second: 60,
         },
     }
 }
@@ -249,25 +253,33 @@ pub fn create_pane(
         .expect("the new pane is announced")
 }
 
-/// Read `connection`'s event stream on a thread of its own, passing over every
-/// frame but [`SessionEvent::Detached`], [`SessionEvent::Quit`], and
-/// [`SessionEvent::SwitchTo`], and hand back the first of those or the read
-/// failure that came first.
+/// Read `connection`'s event stream on a thread of its own with
+/// [`read_next_session_event`], passing over every event but
+/// [`SessionEvent::Detached`], [`SessionEvent::Quit`], and
+/// [`SessionEvent::SwitchTo`], and hand back the first of those, or the read
+/// or write failure that came first.
 ///
 /// # Panics
-/// When neither arrives within [`WAIT_DURATION`].
-pub fn read_session_ending(mut connection: Connection) -> Result<SessionEvent, IpcError> {
+/// When neither arrives within [`WAIT_DURATION`], and on the reading thread
+/// when a painted update part does not apply.
+pub fn read_session_ending(connection: Connection) -> Result<SessionEvent, IpcError> {
     let (ending_sender, ending_receiver) = mpsc::channel();
     std::thread::spawn(move || {
+        let (mut session_frame_reader, mut client_frame_writer) = connection.split();
+        let mut painted_update_receiver = PaintedUpdateReceiver::new();
         let session_ending = loop {
-            match connection.recv::<SessionEvent>() {
-                Ok(SessionEvent::Detached) => break Ok(SessionEvent::Detached),
-                Ok(SessionEvent::Quit) => break Ok(SessionEvent::Quit),
-                Ok(SessionEvent::SwitchTo { session_id }) => {
-                    break Ok(SessionEvent::SwitchTo { session_id })
-                }
+            match read_next_session_event(
+                &mut session_frame_reader,
+                &mut client_frame_writer,
+                &mut painted_update_receiver,
+            ) {
+                Ok(
+                    ending_event @ (SessionEvent::Detached
+                    | SessionEvent::Quit
+                    | SessionEvent::SwitchTo { .. }),
+                ) => break Ok(ending_event),
                 Ok(_) => {}
-                Err(receive_error) => break Err(receive_error),
+                Err(stream_error) => break Err(stream_error),
             }
         };
         let _ = ending_sender.send(session_ending);
@@ -275,4 +287,35 @@ pub fn read_session_ending(mut connection: Connection) -> Result<SessionEvent, I
     ending_receiver
         .recv_timeout(WAIT_DURATION)
         .expect("the event stream ends")
+}
+
+/// Read `session_frame_reader` until it carries a JSON event, and hand that
+/// event back. `painted_update_receiver` applies each painted update part on
+/// the way, and each whole painted update is reported painted on
+/// `client_frame_writer`, as a client reports each update it paints.
+///
+/// # Errors
+/// The read of `session_frame_reader` or the report write that failed first.
+///
+/// # Panics
+/// When a painted update part does not apply.
+pub fn read_next_session_event(
+    session_frame_reader: &mut FrameReader,
+    client_frame_writer: &mut FrameWriter,
+    painted_update_receiver: &mut PaintedUpdateReceiver,
+) -> Result<SessionEvent, IpcError> {
+    loop {
+        let received_frame = session_frame_reader.recv_message_or_binary::<SessionEvent>()?;
+        match painted_update_receiver
+            .accept_session_frame(received_frame)
+            .expect("a painted update part that applies")
+        {
+            Some(SessionFrame::Event(session_event)) => return Ok(session_event),
+            Some(SessionFrame::Painted(received_painted_frame)) => {
+                let update_sequence = received_painted_frame.update_sequence;
+                client_frame_writer.send(&build_paint_report_request(update_sequence))?;
+            }
+            Some(SessionFrame::ImageChunk(_)) | None => {}
+        }
+    }
 }

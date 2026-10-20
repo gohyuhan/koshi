@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use koshi_core::process::SpawnSpec;
 use koshi_core::text::format_counted_noun;
@@ -29,6 +29,7 @@ use crate::cli::OutputFormat;
 use crate::output;
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
+use koshi_link::ipc_client::SERVER_ANSWER_TIMEOUT_DURATION;
 use koshi_link::router_client::{query_running_router_remote_connections, RemoteConnections};
 use koshi_observability::logging::resolve_session_log_path;
 use koshi_paths::RuntimeDirectoryRule;
@@ -237,7 +238,10 @@ impl DoctorContext {
             None => Err("this machine reports no home directory".to_string()),
         };
         let router_connections = match runtime_directory.as_deref() {
-            Some(runtime_directory) => query_running_router_remote_connections(runtime_directory),
+            Some(runtime_directory) => query_running_router_remote_connections(
+                runtime_directory,
+                Instant::now() + SERVER_ANSWER_TIMEOUT_DURATION,
+            ),
             None => RemoteConnections::NotRunning,
         };
         DoctorContext {

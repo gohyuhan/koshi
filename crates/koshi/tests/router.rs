@@ -14,8 +14,9 @@ use koshi_core::ids::SessionId;
 use koshi_ipc::endpoint::{compute_socket_address, EndpointFile, ServerProgramFile};
 use koshi_ipc::protocol::{IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::router::{
-    resolve_router_endpoint_path, resolve_router_program_file_path, RouterRequest,
-    RouterRequestKind, RouterResponse, RouterResult, SessionAddress, SessionSelector,
+    resolve_router_endpoint_path, resolve_router_lock_path, resolve_router_program_file_path,
+    RouterRequest, RouterRequestKind, RouterResponse, RouterResult, SessionAddress,
+    SessionSelector,
 };
 use koshi_ipc::transport::Connection;
 
@@ -24,16 +25,20 @@ mod common;
 #[cfg(windows)]
 use common::RunningProcess;
 use common::{
-    build_no_such_session_result, build_short_test_directory, connect_to_router, copy_koshi_binary,
-    create_session, send_attach_lookup, send_router_request, start_router_from_binary,
-    start_router_process, terminate_process, wait_for_session_lookup_refusal, RunningSessions,
-    POLL_INTERVAL_DURATION, WAIT_DURATION,
+    build_koshi_command_under_home, build_no_such_session_result, build_short_test_directory,
+    connect_to_router, copy_koshi_binary, create_session, resolve_runtime_directory_under_home,
+    send_attach_lookup, send_router_request, start_router_from_binary, start_router_process,
+    terminate_process, wait_for_session_lookup_refusal, RunningSessions, POLL_INTERVAL_DURATION,
+    WAIT_DURATION,
 };
 use koshi_test_support::fixtures::build_test_runtime_directory;
 
 /// How long a poll waits for the router to end once no session is left: 90
 /// seconds, longer than the router's own idle window.
 const ROUTER_EXIT_WAIT_DURATION: Duration = Duration::from_secs(90);
+
+/// How long the lock test holds the router lock before it lets go: 1 second.
+const HELD_ROUTER_LOCK_DURATION: Duration = Duration::from_secs(1);
 
 /// The build version the running router reports in its Hello answer, or
 /// `None` when no router answers.
@@ -219,6 +224,7 @@ fn a_restarted_router_rediscovers_a_session_server_that_outlived_it() {
         None,
         created_session.session_id,
         None,
+        None,
     )
     .expect("the session server describes itself");
     assert_eq!(
@@ -350,6 +356,42 @@ fn an_adopted_session_server_that_dies_is_dropped_by_the_next_lookup() {
     .exists());
     #[cfg(unix)]
     assert!(!Path::new(&created_session.socket_address).exists());
+}
+
+#[test]
+fn a_command_run_while_an_ending_router_holds_the_lock_reaches_the_router_started_after_it() {
+    // The test holds the router lock for 1 second with no endpoint file, as a
+    // router that is ending does. The first router the command starts finds
+    // the lock held and ends. The second one waits for the lock, takes it
+    // once the test lets go, and answers the command.
+    let test_home_directory = build_short_test_directory();
+    let runtime_directory = resolve_runtime_directory_under_home(test_home_directory.path());
+    std::fs::create_dir_all(&runtime_directory).expect("create the runtime folder");
+    let router_lock_file = std::fs::File::options()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(resolve_router_lock_path(&runtime_directory))
+        .expect("open the router lock file");
+    router_lock_file.try_lock().expect("take the router lock");
+    let lock_holder_thread = std::thread::spawn(move || {
+        std::thread::sleep(HELD_ROUTER_LOCK_DURATION);
+        drop(router_lock_file);
+    });
+
+    let process_output = build_koshi_command_under_home(test_home_directory.path())
+        .args(["share", "list", "--format", "json"])
+        .output()
+        .expect("the koshi binary runs");
+    lock_holder_thread.join().expect("the lock holder ends");
+    let router_endpoint =
+        EndpointFile::load_from_path(&resolve_router_endpoint_path(&runtime_directory))
+            .expect("a router advertises itself");
+    terminate_process(router_endpoint.process_id);
+
+    assert_eq!(String::from_utf8_lossy(&process_output.stderr), "");
+    assert_eq!(String::from_utf8_lossy(&process_output.stdout), "[]\n");
+    assert_eq!(process_output.status.code(), Some(0));
 }
 
 #[test]
@@ -542,6 +584,8 @@ fn a_session_server_the_restarted_router_does_not_list_is_reaped_once_it_exits()
     let session_unix_process_id =
         libc::pid_t::try_from(created_session.process_id).expect("a process id fits a pid");
     assert_eq!(
+        // SAFETY: `kill` takes the process id and the signal by value and
+        // reads no memory.
         unsafe { libc::kill(session_unix_process_id, libc::SIGKILL) },
         0,
         "the session server is ended"
@@ -550,6 +594,7 @@ fn a_session_server_the_restarted_router_does_not_list_is_reaped_once_it_exits()
     // `kill` with signal `0` answers `0` for a running process and for a
     // zombie, and `ESRCH` once the process is reaped.
     let reap_deadline = Instant::now() + WAIT_DURATION;
+    // SAFETY: signal `0` sends nothing and reads no memory.
     while unsafe { libc::kill(session_unix_process_id, 0) } == 0 {
         assert!(
             Instant::now() < reap_deadline,
@@ -619,6 +664,8 @@ fn a_restart_with_the_binary_gone_is_refused_and_the_old_router_keeps_serving() 
 #[cfg(unix)]
 #[test]
 fn a_failed_restart_leaves_the_router_serving_hung_up_clients() {
+    use koshi_ipc::router::ROUTER_RESTARTING_MESSAGE;
+
     let test_home_directory = build_short_test_directory();
     let runtime_directory = build_test_runtime_directory();
     let binary_path = copy_koshi_binary(runtime_directory.path());
@@ -643,11 +690,44 @@ fn a_failed_restart_leaves_the_router_serving_hung_up_clients() {
     );
     drop(connection);
 
-    // A lookup is answered by the dispatcher, and the dispatcher reads events
-    // again only once the exec it ended for has returned. The answer is
-    // therefore from the resumed router, the one the writes below reach.
-    let mut connection = connect_to_router(runtime_directory.path());
-    assert_router_finds_session(&mut connection, &created_session);
+    // Until the failed exec reopens the router's intake, a lookup is refused
+    // with the restarting sentence. Each attempt uses a new connection, and
+    // the first other answer comes from the resumed router.
+    let resume_wait_deadline = Instant::now() + WAIT_DURATION;
+    loop {
+        let mut connection = connect_to_router(runtime_directory.path());
+        match send_attach_lookup(
+            &mut connection,
+            &SessionSelector::SessionId(created_session.session_id),
+        ) {
+            RouterResult::Error(router_refusal)
+                if router_refusal.message == ROUTER_RESTARTING_MESSAGE =>
+            {
+                assert!(
+                    Instant::now() < resume_wait_deadline,
+                    "the router never served again after the failed restart"
+                );
+                drop(connection);
+                std::thread::sleep(POLL_INTERVAL_DURATION);
+            }
+            lookup_result => {
+                assert_eq!(lookup_result, RouterResult::Found(created_session.clone()));
+                break;
+            }
+        }
+    }
+
+    // The program file written again after the failed exec has an access time
+    // at least 29 days ahead of the clock.
+    let program_file_access_time =
+        std::fs::metadata(resolve_router_program_file_path(runtime_directory.path()))
+            .and_then(|program_file_metadata| program_file_metadata.accessed())
+            .expect("read the program file's access time");
+    assert!(
+        program_file_access_time
+            >= std::time::SystemTime::now() + common::EARLIEST_ACCESS_TIME_LEAD_DURATION,
+        "the program file has access time {program_file_access_time:?}"
+    );
 
     // The exec failed: the endpoint file is the one this router wrote when it
     // bound.
@@ -793,4 +873,91 @@ fn a_router_that_restarted_restarts_again() {
 
     // The session started before either restart is still registered.
     assert_router_finds_session(&mut connection, &created_session);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_running_router_and_session_lock_their_runtime_folder_and_set_access_times_ahead() {
+    use std::fs::{File, TryLockError};
+    use std::time::SystemTime;
+
+    use koshi_ipc::router::compute_router_socket_address;
+
+    let read_access_time = |timed_path: &Path| {
+        std::fs::symlink_metadata(timed_path)
+            .and_then(|timed_path_metadata| timed_path_metadata.accessed())
+            .unwrap_or_else(|read_error| {
+                panic!(
+                    "read the access time of {}: {read_error}",
+                    timed_path.display()
+                )
+            })
+    };
+    let test_home_directory = build_short_test_directory();
+    let runtime_directory = build_test_runtime_directory();
+    let _router_process =
+        start_router_process(test_home_directory.path(), runtime_directory.path());
+    let mut connection = connect_to_router(runtime_directory.path());
+    let created_session = create_session(&mut connection);
+    let _session_processes = RunningSessions {
+        session_server_process_ids: vec![created_session.process_id],
+    };
+
+    // Each server set its access times 30 days after its own start, and both
+    // started less than a day before `checked_at`.
+    let checked_at = SystemTime::now();
+    let earliest_access_time = checked_at + common::EARLIEST_ACCESS_TIME_LEAD_DURATION;
+    let latest_access_time = checked_at + Duration::from_secs(30 * 24 * 60 * 60);
+    let router_file_paths = [
+        resolve_router_endpoint_path(runtime_directory.path()),
+        resolve_router_program_file_path(runtime_directory.path()),
+        Path::new(&compute_router_socket_address(runtime_directory.path())).to_path_buf(),
+        resolve_router_lock_path(runtime_directory.path()),
+    ];
+    for router_file_path in &router_file_paths {
+        let access_time = read_access_time(router_file_path);
+        assert!(
+            (earliest_access_time..=latest_access_time).contains(&access_time),
+            "{} has access time {access_time:?}",
+            router_file_path.display()
+        );
+    }
+    let session_file_paths = [
+        EndpointFile::resolve_endpoint_file_path(
+            runtime_directory.path(),
+            created_session.session_id,
+        ),
+        ServerProgramFile::resolve_session_program_file_path(
+            runtime_directory.path(),
+            created_session.session_id,
+        ),
+        Path::new(&created_session.socket_address).to_path_buf(),
+    ];
+    // The session starts its keeper right after it prints its ready line, and
+    // the keeper's first pass sets the access time of one file after another.
+    let wait_deadline = Instant::now() + WAIT_DURATION;
+    for session_file_path in &session_file_paths {
+        while read_access_time(session_file_path) < earliest_access_time {
+            assert!(
+                Instant::now() < wait_deadline,
+                "the session never set the access time of {} ahead",
+                session_file_path.display()
+            );
+            std::thread::sleep(POLL_INTERVAL_DURATION);
+        }
+    }
+    for session_file_path in &session_file_paths {
+        let access_time = read_access_time(session_file_path);
+        assert!(
+            (earliest_access_time..=latest_access_time).contains(&access_time),
+            "{} has access time {access_time:?}",
+            session_file_path.display()
+        );
+    }
+
+    let runtime_folder = File::open(runtime_directory.path()).expect("open the runtime folder");
+    assert!(matches!(
+        runtime_folder.try_lock(),
+        Err(TryLockError::WouldBlock)
+    ));
 }

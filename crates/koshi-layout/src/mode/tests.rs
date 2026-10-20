@@ -1,6 +1,7 @@
 //! Tests for layout modes: fullscreen and tiled.
 
 use koshi_core::geometry::{Rect, Size, SplitDirection};
+use koshi_test_support::fixtures::build_cell_rect;
 
 use super::*;
 use crate::solver::{solve_layout, solve_layout_with_mode, LayoutSolve, PaneSizing};
@@ -17,13 +18,6 @@ fn solve_layout_in_mode(
 
 fn build_pane_leaf_node(pane_id: PaneId) -> LayoutNode {
     LayoutNode::Pane(pane_id)
-}
-
-fn build_test_tab_rect() -> Rect {
-    Rect::from_size_at_origin(Size {
-        column_count: 80,
-        row_count: 24,
-    })
 }
 
 /// Builds a test layout: a horizontal split with the first pane on the left
@@ -57,13 +51,13 @@ fn fullscreen_promotes_the_focused_pane_and_hides_the_rest() {
         LayoutMode::Fullscreen {
             focused_pane_id: second_pane_id,
         },
-        build_test_tab_rect(),
+        build_cell_rect(0, 0, 80, 24),
     );
     assert_eq!(
         layout_solve.pane_rects,
         [
             (first_pane_id, Rect::build_empty_at_origin()),
-            (second_pane_id, build_test_tab_rect()),
+            (second_pane_id, build_cell_rect(0, 0, 80, 24)),
             (third_pane_id, Rect::build_empty_at_origin()),
         ]
     );
@@ -78,8 +72,11 @@ fn leaving_fullscreen_restores_the_exact_prior_layout() {
     let (first_pane_id, second_pane_id, third_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
     let layout_tree = build_nested_layout(first_pane_id, second_pane_id, third_pane_id);
-    let tiled_layout_before_fullscreen =
-        solve_layout_in_mode(&layout_tree, LayoutMode::Tiled, build_test_tab_rect());
+    let tiled_layout_before_fullscreen = solve_layout_in_mode(
+        &layout_tree,
+        LayoutMode::Tiled,
+        build_cell_rect(0, 0, 80, 24),
+    );
 
     // Entering and leaving fullscreen does not modify the tree. The tiled
     // solve after toggling fullscreen must match the original solve.
@@ -89,11 +86,15 @@ fn leaving_fullscreen_restores_the_exact_prior_layout() {
         LayoutMode::Fullscreen {
             focused_pane_id: third_pane_id,
         },
-        build_test_tab_rect(),
+        build_cell_rect(0, 0, 80, 24),
     );
     assert_eq!(layout_tree, original_layout_tree);
     assert_eq!(
-        solve_layout_in_mode(&layout_tree, LayoutMode::Tiled, build_test_tab_rect()),
+        solve_layout_in_mode(
+            &layout_tree,
+            LayoutMode::Tiled,
+            build_cell_rect(0, 0, 80, 24)
+        ),
         tiled_layout_before_fullscreen
     );
 }
@@ -104,8 +105,12 @@ fn tiled_mode_matches_the_plain_solve() {
         (PaneId::new(), PaneId::new(), PaneId::new());
     let layout_tree = build_nested_layout(first_pane_id, second_pane_id, third_pane_id);
     assert_eq!(
-        solve_layout_in_mode(&layout_tree, LayoutMode::Tiled, build_test_tab_rect()),
-        solve_layout(&layout_tree, build_test_tab_rect())
+        solve_layout_in_mode(
+            &layout_tree,
+            LayoutMode::Tiled,
+            build_cell_rect(0, 0, 80, 24)
+        ),
+        solve_layout(&layout_tree, build_cell_rect(0, 0, 80, 24))
     );
 }
 
@@ -119,13 +124,16 @@ fn fullscreen_of_the_only_pane_matches_the_tiled_solve() {
         LayoutMode::Fullscreen {
             focused_pane_id: pane_id,
         },
-        build_test_tab_rect(),
+        build_cell_rect(0, 0, 80, 24),
     );
     assert_eq!(
         layout_solve,
-        solve_layout(&layout_tree, build_test_tab_rect())
+        solve_layout(&layout_tree, build_cell_rect(0, 0, 80, 24))
     );
-    assert_eq!(layout_solve.pane_rects, [(pane_id, build_test_tab_rect())]);
+    assert_eq!(
+        layout_solve.pane_rects,
+        [(pane_id, build_cell_rect(0, 0, 80, 24))]
+    );
 }
 
 #[test]
@@ -170,11 +178,11 @@ fn stale_fullscreen_focus_falls_back_to_tiled() {
         LayoutMode::Fullscreen {
             focused_pane_id: missing_pane_id,
         },
-        build_test_tab_rect(),
+        build_cell_rect(0, 0, 80, 24),
     );
     assert_eq!(
         layout_solve,
-        solve_layout(&layout_tree, build_test_tab_rect())
+        solve_layout(&layout_tree, build_cell_rect(0, 0, 80, 24))
     );
 }
 
@@ -199,14 +207,14 @@ fn fullscreen_promotes_a_collapsed_stack_member_without_touching_the_stack() {
         LayoutMode::Fullscreen {
             focused_pane_id: third_pane_id,
         },
-        build_test_tab_rect(),
+        build_cell_rect(0, 0, 80, 24),
     );
     assert_eq!(
         layout_solve.pane_rects,
         [
             (first_pane_id, Rect::build_empty_at_origin()),
             (second_pane_id, Rect::build_empty_at_origin()),
-            (third_pane_id, build_test_tab_rect()),
+            (third_pane_id, build_cell_rect(0, 0, 80, 24)),
         ]
     );
     assert!(layout_solve.stack_headers.is_empty());
@@ -215,8 +223,11 @@ fn fullscreen_promotes_a_collapsed_stack_member_without_touching_the_stack() {
     // Entering fullscreen does not modify the stack structure, so exiting
     // fullscreen restores all prior collapse state.
     assert_eq!(layout_tree, original_layout_tree);
-    let tiled_layout_after_fullscreen =
-        solve_layout_in_mode(&layout_tree, LayoutMode::Tiled, build_test_tab_rect());
+    let tiled_layout_after_fullscreen = solve_layout_in_mode(
+        &layout_tree,
+        LayoutMode::Tiled,
+        build_cell_rect(0, 0, 80, 24),
+    );
     let LayoutNode::Split(root_split_node) = &layout_tree else {
         panic!("root must stay a split");
     };
@@ -226,7 +237,7 @@ fn fullscreen_promotes_a_collapsed_stack_member_without_touching_the_stack() {
     assert_eq!(stack_split_node.active_child_index, 0);
     assert_eq!(
         tiled_layout_after_fullscreen,
-        solve_layout(&layout_tree, build_test_tab_rect())
+        solve_layout(&layout_tree, build_cell_rect(0, 0, 80, 24))
     );
     assert_eq!(tiled_layout_after_fullscreen.stack_headers.len(), 1);
     assert_eq!(
@@ -242,25 +253,29 @@ fn fullscreen_of_the_active_stack_member_round_trips_identically() {
         vec![first_pane_id, second_pane_id],
         1,
     ));
-    let original_layout_solve = solve_layout(&layout_tree, build_test_tab_rect());
+    let original_layout_solve = solve_layout(&layout_tree, build_cell_rect(0, 0, 80, 24));
 
     let fullscreen_layout_solve = solve_layout_in_mode(
         &layout_tree,
         LayoutMode::Fullscreen {
             focused_pane_id: second_pane_id,
         },
-        build_test_tab_rect(),
+        build_cell_rect(0, 0, 80, 24),
     );
     assert_eq!(
         fullscreen_layout_solve.pane_rects,
         [
             (first_pane_id, Rect::build_empty_at_origin()),
-            (second_pane_id, build_test_tab_rect())
+            (second_pane_id, build_cell_rect(0, 0, 80, 24))
         ]
     );
 
     assert_eq!(
-        solve_layout_in_mode(&layout_tree, LayoutMode::Tiled, build_test_tab_rect()),
+        solve_layout_in_mode(
+            &layout_tree,
+            LayoutMode::Tiled,
+            build_cell_rect(0, 0, 80, 24)
+        ),
         original_layout_solve
     );
 }

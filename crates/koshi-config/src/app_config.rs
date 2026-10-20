@@ -40,12 +40,14 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use kdl::KdlNode;
-use koshi_core::constant::MIN_LINK_TIMEOUT_MS;
+use koshi_core::constant::{
+    HIGHEST_MAX_FRAMES_PER_SECOND, LOWEST_MAX_FRAMES_PER_SECOND, MIN_LINK_TIMEOUT_MS,
+};
 use koshi_core::geometry::Direction;
 use koshi_core::key::ExtendedKeysMode;
 use koshi_core::log::{LogFormat, LogLevel};
 
-use crate::error::{build_validation_error, validate_config_schema_version, ConfigError};
+use crate::error::{build_validation_error, ConfigError};
 use crate::layer::{
     PartialCopyConfig, PartialKoshiConfig, PartialLayoutDefaults, PartialLoggingConfig,
     PartialMouseConfig, PartialPaneClipboardWriteConfig, PartialPaneConfig,
@@ -54,7 +56,7 @@ use crate::layer::{
 use crate::parser::{
     find_section_block, format_unknown_key, parse_boolean_kdl_value, parse_integer_kdl_value,
     parse_kdl, parse_nonempty_string_kdl_value, parse_string_kdl_value, parse_u16_kdl_value,
-    parse_u32_kdl_value, parse_version_argument, set_parsed_field,
+    parse_u32_kdl_value, set_parsed_field, validate_version_node,
 };
 use crate::types::WheelScroll;
 
@@ -76,6 +78,7 @@ const APP_CONFIG_SECTION_NAMES: &[&str] = &[
     "stay-in-pane-placement-mode-after-placement",
     "remote-reconnect",
     "remote-link-timeout-ms",
+    "max-frames-per-second",
     "allow-beta-features",
     "allow-other-users",
     "remote-listen",
@@ -140,15 +143,7 @@ pub fn parse_app_config(
             continue;
         }
         match config_section_name {
-            "version" => {
-                let declared_version =
-                    parse_version_argument(config_node).map_err(|(_, version_error_detail)| {
-                        build_validation_error("version", version_error_detail)
-                    })?;
-                validate_config_schema_version(declared_version).map_err(|diagnostic| {
-                    build_validation_error("version", &diagnostic.to_string())
-                })?;
-            }
+            "version" => validate_version_node(config_node)?,
             // `theme` names which `themes/<name>.kdl` supplies the colors; the
             // colors themselves are never spelled here.
             "theme" => set_top_level_field(
@@ -219,6 +214,12 @@ pub fn parse_app_config(
                 config_section_name,
                 &mut parse_warnings,
             ),
+            "max-frames-per-second" => set_top_level_field(
+                &mut partial_koshi_config.max_frames_per_second,
+                parse_max_frames_per_second(config_node),
+                config_section_name,
+                &mut parse_warnings,
+            ),
             "allow-beta-features" => set_top_level_field(
                 &mut partial_koshi_config.should_allow_beta_features,
                 parse_boolean_kdl_value(config_node),
@@ -243,7 +244,7 @@ pub fn parse_app_config(
                         .map_err(|_| {
                             format!(
                                 "`{remote_listen_text}` is not an IP address and port, such as \
-                                 `192.168.1.20:7654`"
+                                 `192.0.2.20:7654`"
                             )
                         })
                 }),
@@ -719,6 +720,25 @@ fn parse_remote_link_timeout_ms(config_node: &KdlNode) -> Result<u32, String> {
         return Err(format!("must be at least {MIN_LINK_TIMEOUT_MS}"));
     }
     u32::try_from(remote_link_timeout_ms).map_err(|_| "must be at most 4294967295".to_string())
+}
+
+/// Reads the most frames a second the session may send this viewer. A value
+/// outside [`LOWEST_MAX_FRAMES_PER_SECOND`]..=[`HIGHEST_MAX_FRAMES_PER_SECOND`]
+/// gives `must be between 30 and 120`. `max-frames-per-second 29` is an
+/// error, and `max-frames-per-second 30` yields `30`.
+fn parse_max_frames_per_second(config_node: &KdlNode) -> Result<u16, String> {
+    let max_frames_per_second = parse_integer_kdl_value(config_node)?;
+    match u16::try_from(max_frames_per_second) {
+        Ok(max_frames_per_second)
+            if (LOWEST_MAX_FRAMES_PER_SECOND..=HIGHEST_MAX_FRAMES_PER_SECOND)
+                .contains(&max_frames_per_second) =>
+        {
+            Ok(max_frames_per_second)
+        }
+        _ => Err(format!(
+            "must be between {LOWEST_MAX_FRAMES_PER_SECOND} and {HIGHEST_MAX_FRAMES_PER_SECOND}"
+        )),
+    }
 }
 
 /// Reads a scrollback cap. A negative value becomes `0` (no scrollback); a

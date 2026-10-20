@@ -5,9 +5,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use koshi_core::command::{NewPaneArgs, NewPanePlacement, NewTabArgs, ToggleLockModeArgs};
+use koshi_core::command::{NewPaneArgs, NewTabArgs, ToggleLockModeArgs};
 use koshi_core::discovery::SessionDiscovery;
-use koshi_core::geometry::Direction;
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_ipc::endpoint::{resolve_resume_file_path, RESTART_WINDOW_DURATION};
 use koshi_ipc::layout::TabLayout;
@@ -15,8 +14,9 @@ use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcResponse, MIN_PROTOC
 use koshi_ipc::transport::Listener;
 use koshi_layout::tree::LayoutNode;
 use koshi_test_support::fixtures::{
+    build_accepted_hello_result, build_new_pane_args, build_restarting_refusal,
     build_test_runtime_directory, close_connection_after_peer_hangs_up, connect_test_socket_pair,
-    spawn_previous_release_session, spawn_session_listening_before_it_advertises,
+    send_ipc_reply, spawn_previous_release_session, spawn_session_listening_before_it_advertises,
     write_koshi_0_1_0_window_endpoint_file, write_session_endpoint_file,
     KOSHI_0_2_0_HELLO_ANSWER_TEXT, KOSHI_0_2_0_RESTART_REFUSAL_TEXT, KOSHI_0_4_0_HELLO_ANSWER_TEXT,
     KOSHI_0_4_0_RESTARTING_ANSWER_TEXT, PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT,
@@ -24,20 +24,6 @@ use koshi_test_support::fixtures::{
 
 use super::*;
 use koshi_ipc::protocol::{IpcErrorPayload, PROTOCOL_VERSION};
-
-/// A `new-pane` request with nothing chosen: the focused pane splits rightward.
-fn build_default_new_pane_args() -> NewPaneArgs {
-    NewPaneArgs {
-        placement: NewPanePlacement::Split {
-            source_pane_id: None,
-            tab_id: None,
-            direction: Direction::Right,
-        },
-        working_directory: None,
-        spawn_spec: None,
-        client_id: None,
-    }
-}
 
 /// The in-session identity a test CLI presents.
 fn build_in_session_context(session_id: SessionId) -> InSessionContext {
@@ -71,6 +57,13 @@ enum SessionScript {
     /// result. Panics when any request arrives after the `Prepare` before the
     /// caller hangs up.
     AnswerPrepareWithResult,
+    /// Answer the Hello, then refuse the `Prepare` with
+    /// [`build_restarting_refusal`]. Panics when any request arrives after the
+    /// `Prepare` before the caller hangs up.
+    RefusePrepareWhileRestarting,
+    /// Answer the Hello, answer the `Prepare` with `Prepared`, then refuse the
+    /// `Commit` with [`build_restarting_refusal`].
+    RefuseCommitWhileRestarting,
 }
 
 /// The sentence a stand-in server refuses this build's protocol version with.
@@ -160,18 +153,14 @@ fn answer_scripted_connection(
 
     match session_script {
         SessionScript::AcceptAndApply => {
-            send_ipc_result(
+            send_ipc_reply(
                 session_connection,
                 hello_request.request_id,
-                IpcResult::Hello {
-                    protocol_version: PROTOCOL_VERSION,
-                    build_version: env!("CARGO_PKG_VERSION").to_string(),
-                    process_image_id: ProcessImageId::get_own(),
-                },
+                build_accepted_hello_result(),
             );
             let commit_request_id =
                 answer_prepare_and_read_commit(session_connection, prepare_request.request_id);
-            send_ipc_result(
+            send_ipc_reply(
                 session_connection,
                 commit_request_id,
                 IpcResult::CommandResult(CommandResult::Ok {
@@ -181,7 +170,7 @@ fn answer_scripted_connection(
             );
         }
         SessionScript::RefuseHello => {
-            send_ipc_result(
+            send_ipc_reply(
                 session_connection,
                 hello_request.request_id,
                 IpcResult::Error(IpcErrorPayload {
@@ -199,7 +188,7 @@ fn answer_scripted_connection(
             );
         }
         SessionScript::RefuseVersion => {
-            send_ipc_result(
+            send_ipc_reply(
                 session_connection,
                 hello_request.request_id,
                 IpcResult::Error(IpcErrorPayload {
@@ -217,18 +206,14 @@ fn answer_scripted_connection(
             );
         }
         SessionScript::RejectCommand => {
-            send_ipc_result(
+            send_ipc_reply(
                 session_connection,
                 hello_request.request_id,
-                IpcResult::Hello {
-                    protocol_version: PROTOCOL_VERSION,
-                    build_version: env!("CARGO_PKG_VERSION").to_string(),
-                    process_image_id: ProcessImageId::get_own(),
-                },
+                build_accepted_hello_result(),
             );
             let commit_request_id =
                 answer_prepare_and_read_commit(session_connection, prepare_request.request_id);
-            send_ipc_result(
+            send_ipc_reply(
                 session_connection,
                 commit_request_id,
                 IpcResult::CommandResult(CommandResult::Rejected {
@@ -239,14 +224,10 @@ fn answer_scripted_connection(
             );
         }
         SessionScript::HoldPrepareAnswer => {
-            send_ipc_result(
+            send_ipc_reply(
                 session_connection,
                 hello_request.request_id,
-                IpcResult::Hello {
-                    protocol_version: PROTOCOL_VERSION,
-                    build_version: env!("CARGO_PKG_VERSION").to_string(),
-                    process_image_id: ProcessImageId::get_own(),
-                },
+                build_accepted_hello_result(),
             );
             let next_request = session_connection.recv::<IpcRequest>();
             let Err(IpcError::Disconnected) = next_request else {
@@ -254,16 +235,12 @@ fn answer_scripted_connection(
             };
         }
         SessionScript::AnswerPrepareWithResult => {
-            send_ipc_result(
+            send_ipc_reply(
                 session_connection,
                 hello_request.request_id,
-                IpcResult::Hello {
-                    protocol_version: PROTOCOL_VERSION,
-                    build_version: env!("CARGO_PKG_VERSION").to_string(),
-                    process_image_id: ProcessImageId::get_own(),
-                },
+                build_accepted_hello_result(),
             );
-            send_ipc_result(
+            send_ipc_reply(
                 session_connection,
                 prepare_request.request_id,
                 IpcResult::CommandResult(CommandResult::Ok {
@@ -276,6 +253,36 @@ fn answer_scripted_connection(
                 panic!("a request followed the answered Prepare: {next_request:?}");
             };
         }
+        SessionScript::RefusePrepareWhileRestarting => {
+            send_ipc_reply(
+                session_connection,
+                hello_request.request_id,
+                build_accepted_hello_result(),
+            );
+            send_ipc_reply(
+                session_connection,
+                prepare_request.request_id,
+                build_restarting_refusal(),
+            );
+            let next_request = session_connection.recv::<IpcRequest>();
+            let Err(IpcError::Disconnected) = next_request else {
+                panic!("a request followed the refused Prepare: {next_request:?}");
+            };
+        }
+        SessionScript::RefuseCommitWhileRestarting => {
+            send_ipc_reply(
+                session_connection,
+                hello_request.request_id,
+                build_accepted_hello_result(),
+            );
+            let commit_request_id =
+                answer_prepare_and_read_commit(session_connection, prepare_request.request_id);
+            send_ipc_reply(
+                session_connection,
+                commit_request_id,
+                build_restarting_refusal(),
+            );
+        }
     }
 }
 
@@ -285,20 +292,10 @@ fn answer_prepare_and_read_commit(
     session_connection: &mut Connection,
     prepare_request_id: u64,
 ) -> u64 {
-    send_ipc_result(session_connection, prepare_request_id, IpcResult::Prepared);
+    send_ipc_reply(session_connection, prepare_request_id, IpcResult::Prepared);
     let commit_request: IpcRequest = session_connection.recv().expect("read the Commit");
     assert_eq!(commit_request.request_kind, IpcRequestKind::Commit);
     commit_request.request_id
-}
-
-/// Answer `request_id` with `ipc_result` on `connection`, requiring it to arrive.
-fn send_ipc_result(connection: &mut Connection, request_id: u64, ipc_result: IpcResult) {
-    connection
-        .send(&IpcResponse {
-            request_id: Some(request_id),
-            answer_result: ipc_result,
-        })
-        .expect("send scripted reply");
 }
 
 /// Answer `request_id` with `ipc_result`, ignoring a send that fails.
@@ -456,7 +453,7 @@ fn an_endpoint_file_that_holds_no_endpoint_reports_ipc_unavailable() {
     let endpoint_file_error = EndpointFile::load_from_path(&endpoint_file_path)
         .expect_err("the bytes hold no endpoint file");
 
-    let endpoint_error = load_session_endpoint(runtime_directory.path(), None, session_id)
+    let endpoint_error = load_session_endpoint(runtime_directory.path(), None, session_id, None)
         .expect_err("the endpoint file cannot be read");
 
     let CliError::IpcUnavailable { detail } = endpoint_error else {
@@ -471,7 +468,7 @@ fn the_endpoint_file_of_a_closed_koshi_0_1_0_window_names_no_running_session() {
     let session_id = SessionId::new();
     write_koshi_0_1_0_window_endpoint_file(runtime_directory.path(), session_id);
 
-    let endpoint_error = load_session_endpoint(runtime_directory.path(), None, session_id)
+    let endpoint_error = load_session_endpoint(runtime_directory.path(), None, session_id, None)
         .expect_err("a closed window is no running session");
 
     let CliError::SessionNotFound { session_name } = endpoint_error else {
@@ -496,7 +493,7 @@ fn the_endpoint_file_of_an_open_koshi_0_1_0_window_names_that_window() {
     let endpoint_file_path =
         write_koshi_0_1_0_window_endpoint_file(runtime_directory.path(), session_id);
 
-    let endpoint_error = load_session_endpoint(runtime_directory.path(), None, session_id)
+    let endpoint_error = load_session_endpoint(runtime_directory.path(), None, session_id, None)
         .expect_err("an open window speaks no wire this build reads");
 
     let CliError::IpcUnavailable { detail } = endpoint_error else {
@@ -556,6 +553,7 @@ fn a_command_refused_for_its_token_is_applied_once_the_session_advertises_anothe
         None,
         session_id,
         None,
+        None,
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
     .expect("the second hello presents the session's own token");
@@ -613,7 +611,7 @@ fn a_refused_command_carries_the_sessions_sentence() {
 }
 
 #[test]
-fn a_command_answered_with_another_reply_kind_names_that_kind() {
+fn a_commit_answered_with_another_reply_kind_leaves_the_command_unanswered_and_names_that_kind() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let (session_server_thread, _asked_requests) =
@@ -626,8 +624,8 @@ fn a_command_answered_with_another_reply_kind_names_that_kind() {
     )
     .expect_err("a Restarting does not answer a submitted command");
 
-    let CliError::IpcUnavailable { detail } = submit_error else {
-        panic!("expected IpcUnavailable naming the reply kind, got {submit_error:?}");
+    let CliError::CommittedRequestUnanswered { detail } = submit_error else {
+        panic!("expected CommittedRequestUnanswered naming the reply kind, got {submit_error:?}");
     };
     assert_eq!(
         detail,
@@ -676,21 +674,17 @@ fn spawn_answering_session(
         request_kind_sender
             .send(query_request.request_kind)
             .expect("report what was asked");
-        send_ipc_result(
+        send_ipc_reply(
             &mut session_connection,
             hello_request.request_id,
-            IpcResult::Hello {
-                protocol_version: PROTOCOL_VERSION,
-                build_version: env!("CARGO_PKG_VERSION").to_string(),
-                process_image_id: ProcessImageId::get_own(),
-            },
+            build_accepted_hello_result(),
         );
         let answered_request_id = if is_prepare_request {
             answer_prepare_and_read_commit(&mut session_connection, query_request.request_id)
         } else {
             query_request.request_id
         };
-        send_ipc_result(&mut session_connection, answered_request_id, ipc_result);
+        send_ipc_reply(&mut session_connection, answered_request_id, ipc_result);
         close_connection_after_peer_hangs_up(session_connection);
     });
     (session_server_thread, request_kind_receiver)
@@ -706,7 +700,8 @@ fn build_named_session_layout(session_name: &str, session_id: SessionId) -> Sess
     }
 }
 
-/// A layout of one session holding exactly `tab`, which no client views.
+/// A layout of one session holding only the tab `tab_id`, named `editor`,
+/// which no client views.
 fn build_session_layout_with_tab(
     session_name: &str,
     session_id: SessionId,
@@ -768,6 +763,56 @@ fn fetching_the_whole_layout_asks_for_no_tab() {
         request_kinds.recv().expect("the session read one request"),
         IpcRequestKind::Layout { tab_id: None },
     );
+
+    session_server_thread.join().expect("fake session exits");
+}
+
+#[test]
+fn fetching_a_layout_filters_the_session_name_and_every_tab_name() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let tab_id = TabId::new();
+    let mut answered_session_layout =
+        build_session_layout_with_tab("\u{1b}]0;title\u{7}workspace", session_id, tab_id);
+    answered_session_layout.tabs[0].tab_name = "\u{202E}editor\u{1b}[2J".to_string();
+    let mut expected_session_layout = answered_session_layout.clone();
+    expected_session_layout.session_name = "]0;titleworkspace".to_string();
+    expected_session_layout.tabs[0].tab_name = "editor[2J".to_string();
+    let (session_server_thread, _request_kinds) = spawn_answering_session(
+        runtime_directory.path(),
+        session_id,
+        IpcResult::Layout(answered_session_layout),
+    );
+
+    let session_layout = fetch_layout(runtime_directory.path(), None, session_id, None)
+        .expect("the session answers");
+
+    assert_eq!(session_layout, expected_session_layout);
+
+    session_server_thread.join().expect("fake session exits");
+}
+
+#[test]
+fn fetching_recent_events_filters_each_event_name() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let tab_id = TabId::new();
+    let mut answered_recent_event = koshi_core::recent_event::record_event(
+        &koshi_core::event::Event::TabCreated(koshi_core::event::TabCreated { tab_id }),
+        SystemTime::UNIX_EPOCH,
+    );
+    answered_recent_event.event_name = "Tab\u{1b}[2JCreated\u{2066}".to_string().into();
+    let (session_server_thread, _request_kinds) = spawn_answering_session(
+        runtime_directory.path(),
+        session_id,
+        IpcResult::RecentEvents(vec![answered_recent_event.clone()]),
+    );
+
+    let recent_events = fetch_recent_events(runtime_directory.path(), None, session_id)
+        .expect("the session answers");
+
+    answered_recent_event.event_name = "Tab[2JCreated".into();
+    assert_eq!(recent_events, vec![answered_recent_event]);
 
     session_server_thread.join().expect("fake session exits");
 }
@@ -964,11 +1009,7 @@ fn a_layout_request_answered_with_another_reply_kind_names_that_kind() {
     let (session_server_thread, _asked) = spawn_answering_session(
         runtime_directory.path(),
         session_id,
-        IpcResult::Hello {
-            protocol_version: PROTOCOL_VERSION,
-            build_version: env!("CARGO_PKG_VERSION").to_string(),
-            process_image_id: ProcessImageId::get_own(),
-        },
+        build_accepted_hello_result(),
     );
 
     let layout_error = fetch_layout(runtime_directory.path(), None, session_id, None)
@@ -999,7 +1040,7 @@ fn fetching_an_overview_returns_it_and_asks_for_a_discovery() {
     );
 
     let fetched_overview = fetch_session_overview_from_endpoint(
-        &load_session_endpoint(runtime_directory.path(), None, session_id)
+        &load_session_endpoint(runtime_directory.path(), None, session_id, None)
             .expect("the endpoint file"),
         session_id,
         None,
@@ -1010,6 +1051,39 @@ fn fetching_an_overview_returns_it_and_asks_for_a_discovery() {
     assert_eq!(
         asked_requests.recv().expect("the session read one request"),
         IpcRequestKind::Discovery,
+    );
+
+    session_server_thread.join().expect("fake session exits");
+}
+
+#[test]
+fn an_overview_of_another_session_is_refused_naming_both_ids() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let other_session_id = SessionId::new();
+    let (session_server_thread, _asked_requests) = spawn_answering_session(
+        runtime_directory.path(),
+        session_id,
+        IpcResult::Overview(build_named_session_overview(
+            "S-quiet-lake",
+            other_session_id,
+        )),
+    );
+
+    let overview_error = fetch_session_overview_from_endpoint(
+        &load_session_endpoint(runtime_directory.path(), None, session_id, None)
+            .expect("the endpoint file"),
+        session_id,
+        None,
+    )
+    .expect_err("an overview of another session does not describe this one");
+
+    let CliError::IpcUnavailable { detail } = overview_error else {
+        panic!("expected IpcUnavailable naming both ids, got {overview_error:?}");
+    };
+    assert_eq!(
+        detail,
+        format!("session {session_id} described another session, {other_session_id}")
     );
 
     session_server_thread.join().expect("fake session exits");
@@ -1029,7 +1103,7 @@ fn a_refused_overview_carries_the_sessions_sentence() {
     );
 
     let overview_error = fetch_session_overview_from_endpoint(
-        &load_session_endpoint(runtime_directory.path(), None, session_id)
+        &load_session_endpoint(runtime_directory.path(), None, session_id, None)
             .expect("the endpoint file"),
         session_id,
         None,
@@ -1052,7 +1126,7 @@ fn an_overview_request_answered_with_another_reply_kind_names_that_kind() {
         spawn_answering_session(runtime_directory.path(), session_id, IpcResult::Restarting);
 
     let overview_error = fetch_session_overview_from_endpoint(
-        &load_session_endpoint(runtime_directory.path(), None, session_id)
+        &load_session_endpoint(runtime_directory.path(), None, session_id, None)
             .expect("the endpoint file"),
         session_id,
         None,
@@ -1174,14 +1248,10 @@ fn a_restart_whose_commit_gets_no_answer_is_unanswered() {
         let prepare_request: IpcRequest = session_connection
             .recv()
             .expect("read the Prepare behind the Hello");
-        send_ipc_result(
+        send_ipc_reply(
             &mut session_connection,
             hello_request.request_id,
-            IpcResult::Hello {
-                protocol_version: PROTOCOL_VERSION,
-                build_version: env!("CARGO_PKG_VERSION").to_string(),
-                process_image_id: ProcessImageId::get_own(),
-            },
+            build_accepted_hello_result(),
         );
         let commit_request_id =
             answer_prepare_and_read_commit(&mut session_connection, prepare_request.request_id);
@@ -1328,7 +1398,7 @@ fn a_restart_refused_with_a_bad_token_carries_the_sessions_sentence() {
 }
 
 #[test]
-fn a_restart_answered_with_another_reply_kind_names_that_kind() {
+fn a_restart_commit_answered_with_another_reply_kind_is_unanswered_and_names_that_kind() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let (session_server_thread, _request_kinds) = spawn_answering_session(
@@ -1337,20 +1407,20 @@ fn a_restart_answered_with_another_reply_kind_names_that_kind() {
         IpcResult::Overview(build_named_session_overview("workspace", session_id)),
     );
 
-    let restart_error = restart_running_session(
+    let session_restart = restart_running_session(
         runtime_directory.path(),
         None,
         session_id,
         Instant::now() + TEST_RESTART_ANSWER_TIMEOUT_DURATION,
     )
-    .expect_err("an Overview does not answer a restart");
+    .expect("an Overview answering the Commit leaves the restart unanswered");
 
-    let CliError::IpcUnavailable { detail } = restart_error else {
-        panic!("expected IpcUnavailable naming the reply kind, got {restart_error:?}");
-    };
     assert_eq!(
-        detail,
-        "the session answered with an unexpected Overview reply",
+        session_restart,
+        SessionRestart::Unanswered {
+            failure_detail: "the session answered with an unexpected Overview reply".to_string(),
+            asked_process_image_id: Some(ProcessImageId::get_own()),
+        }
     );
 
     session_server_thread.join().expect("fake session exits");
@@ -1417,7 +1487,7 @@ fn a_running_session_reports_the_build_its_hello_named() {
     );
 
     assert_eq!(
-        find_running_session_version(runtime_directory.path(), None, session_id, None)
+        find_running_session_version(runtime_directory.path(), None, session_id, None, None)
             .expect("the session answers its Hello"),
         Some(env!("CARGO_PKG_VERSION").to_string()),
     );
@@ -1456,7 +1526,7 @@ fn a_session_refusing_its_old_token_reports_the_build_once_it_advertises_its_own
     );
 
     let session_version =
-        find_running_session_version(runtime_directory.path(), None, session_id, None)
+        find_running_session_version(runtime_directory.path(), None, session_id, None, None)
             .expect("the second Hello is answered");
 
     assert_eq!(session_version, Some("9.9.9".to_string()));
@@ -1469,7 +1539,7 @@ fn a_session_with_no_endpoint_file_reports_no_build() {
     let session_id = SessionId::new();
 
     assert_eq!(
-        find_running_session_version(runtime_directory.path(), None, session_id, None)
+        find_running_session_version(runtime_directory.path(), None, session_id, None, None)
             .expect("a missing session is not an error"),
         None
     );
@@ -1494,7 +1564,7 @@ fn a_session_nothing_listens_behind_reports_no_build() {
     .expect("write endpoint file");
 
     assert_eq!(
-        find_running_session_version(runtime_directory.path(), None, session_id, None)
+        find_running_session_version(runtime_directory.path(), None, session_id, None, None)
             .expect("a dead socket is not an error"),
         None
     );
@@ -1732,16 +1802,12 @@ fn spawn_foreign_session(
         presented_token_sender
             .send(presented_token)
             .expect("report the token presented");
-        send_ipc_result(
+        send_ipc_reply(
             &mut session_connection,
             hello_request.request_id,
-            IpcResult::Hello {
-                protocol_version: PROTOCOL_VERSION,
-                build_version: env!("CARGO_PKG_VERSION").to_string(),
-                process_image_id: ProcessImageId::get_own(),
-            },
+            build_accepted_hello_result(),
         );
-        send_ipc_result(
+        send_ipc_reply(
             &mut session_connection,
             discovery_request.request_id,
             IpcResult::Overview(session_overview),
@@ -1780,10 +1846,11 @@ fn a_session_missing_here_is_found_in_the_shared_directory_given() {
         runtime_directory.path(),
         Some(shared_sessions_base_directory.path()),
         session_id,
+        None,
     )
     .expect("the shared directory advertises the session");
     let lookup_without_shared_directory =
-        load_session_endpoint(runtime_directory.path(), None, session_id);
+        load_session_endpoint(runtime_directory.path(), None, session_id, None);
 
     assert_eq!(endpoint.socket_address, socket_path.display().to_string());
     assert_eq!(endpoint.connection_token.expose_secret(), "");
@@ -1792,6 +1859,113 @@ fn a_session_missing_here_is_found_in_the_shared_directory_given() {
         panic!("expected SessionNotFound, got {lookup_without_shared_directory:?}");
     };
     assert_eq!(session_name, session_id.to_string());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_session_named_with_this_users_id_is_refused_naming_its_id_alone() {
+    let runtime_directory = build_test_runtime_directory();
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let own_user_id = load_own_user_id(shared_sessions_base_directory.path());
+    let session_id = SessionId::new();
+
+    let lookup_result = load_session_endpoint(
+        runtime_directory.path(),
+        Some(shared_sessions_base_directory.path()),
+        session_id,
+        Some(own_user_id),
+    );
+
+    let Err(CliError::InvalidArgs { detail }) = lookup_result else {
+        panic!("expected InvalidArgs, got {lookup_result:?}");
+    };
+    assert_eq!(
+        detail,
+        format!(
+            "{own_user_id}/{session_id} names a session of yours; name it by its id alone: \
+             `{session_id}`"
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_session_named_with_its_owner_is_looked_up_in_the_folders_that_user_owns() {
+    // Every folder a test makes belongs to the user running it. With no
+    // runtime directory, that user's id names another user.
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let runtime_directory = shared_sessions_base_directory
+        .path()
+        .join("missing-runtime");
+    let (session_id, foreign_session_advertisement) =
+        plant_one_foreign_session_socket(shared_sessions_base_directory.path());
+    let folder_owner_user_id = foreign_session_advertisement.owner_user_id;
+    let folder_name_user_id = folder_owner_user_id + 1;
+
+    let owner_endpoint = load_session_endpoint(
+        &runtime_directory,
+        Some(shared_sessions_base_directory.path()),
+        session_id,
+        Some(folder_owner_user_id),
+    )
+    .expect("the folder that user owns advertises the session");
+    let folder_name_lookup = load_session_endpoint(
+        &runtime_directory,
+        Some(shared_sessions_base_directory.path()),
+        session_id,
+        Some(folder_name_user_id),
+    );
+    let lookup_without_shared_directory = load_session_endpoint(
+        &runtime_directory,
+        None,
+        session_id,
+        Some(folder_owner_user_id),
+    );
+
+    assert_eq!(
+        owner_endpoint,
+        build_foreign_session_endpoint(foreign_session_advertisement.socket_address)
+    );
+    let Err(CliError::SessionNotFound { session_name }) = folder_name_lookup else {
+        panic!("expected SessionNotFound, got {folder_name_lookup:?}");
+    };
+    assert_eq!(session_name, format!("{folder_name_user_id}/{session_id}"));
+    let Err(CliError::SessionNotFound { session_name }) = lookup_without_shared_directory else {
+        panic!("expected SessionNotFound, got {lookup_without_shared_directory:?}");
+    };
+    assert_eq!(session_name, format!("{folder_owner_user_id}/{session_id}"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lookup_naming_an_owner_reads_no_file_of_this_users() {
+    let runtime_directory = build_test_runtime_directory();
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let (session_id, foreign_session_advertisement) =
+        plant_one_foreign_session_socket(shared_sessions_base_directory.path());
+    write_own_endpoint_file(runtime_directory.path(), session_id);
+    write_aged_resume_file(runtime_directory.path(), session_id, Duration::ZERO);
+
+    assert_eq!(
+        find_foreign_session_advertisement(
+            shared_sessions_base_directory.path(),
+            runtime_directory.path(),
+            session_id,
+            Some(foreign_session_advertisement.owner_user_id),
+        )
+        .expect("the shared directory is read"),
+        Some(foreign_session_advertisement)
+    );
+    assert_eq!(
+        find_foreign_session_advertisement(
+            shared_sessions_base_directory.path(),
+            runtime_directory.path(),
+            session_id,
+            None,
+        )
+        .expect("the runtime directory is read"),
+        None
+    );
 }
 
 #[cfg(unix)]
@@ -1840,12 +2014,15 @@ fn the_shared_listing_holds_other_users_sockets_and_not_this_users() {
         ForeignSessionListing {
             foreign_sessions: vec![(
                 foreign_session_id,
-                shared_sessions_base_directory
-                    .path()
-                    .join(&other_user_directory_name)
-                    .join(format!("{foreign_session_id}.sock"))
-                    .display()
-                    .to_string(),
+                ForeignSessionAdvertisement {
+                    owner_user_id: own_user_id,
+                    socket_address: shared_sessions_base_directory
+                        .path()
+                        .join(&other_user_directory_name)
+                        .join(format!("{foreign_session_id}.sock"))
+                        .display()
+                        .to_string(),
+                },
             )],
             ..ForeignSessionListing::default()
         },
@@ -1935,10 +2112,13 @@ fn an_absent_runtime_directory_skips_no_shared_subdirectory() {
         ForeignSessionListing {
             foreign_sessions: vec![(
                 foreign_session_id,
-                koshi_ipc::endpoint::compute_socket_address(
-                    &foreign_user_directory,
-                    foreign_session_id
-                )
+                ForeignSessionAdvertisement {
+                    owner_user_id: own_user_id,
+                    socket_address: koshi_ipc::endpoint::compute_socket_address(
+                        &foreign_user_directory,
+                        foreign_session_id
+                    ),
+                },
             )],
             ..ForeignSessionListing::default()
         },
@@ -1989,10 +2169,11 @@ fn a_runtime_directory_that_cannot_be_read_lists_no_foreign_session_and_names_it
 
     let foreign_session_listing =
         list_foreign_sessions(shared_sessions_base_directory.path(), &runtime_directory);
-    let lookup_error = find_foreign_session_address(
+    let lookup_error = find_foreign_session_advertisement(
         shared_sessions_base_directory.path(),
         &runtime_directory,
         foreign_session_id,
+        None,
     );
 
     let _ = std::fs::set_permissions(
@@ -2054,10 +2235,13 @@ fn entries_another_user_planted_that_name_no_session_are_passed_over() {
         ForeignSessionListing {
             foreign_sessions: vec![(
                 foreign_session_id,
-                foreign_user_directory
-                    .join(format!("{foreign_session_id}.sock"))
-                    .display()
-                    .to_string(),
+                ForeignSessionAdvertisement {
+                    owner_user_id: own_user_id,
+                    socket_address: foreign_user_directory
+                        .join(format!("{foreign_session_id}.sock"))
+                        .display()
+                        .to_string(),
+                },
             )],
             ..ForeignSessionListing::default()
         },
@@ -2120,15 +2304,22 @@ fn build_entry_limit_unread_path(shared_sessions_base_directory: &Path) -> Unrea
 /// that folder. Hands back that session and the address a listing reports for
 /// it. The shared directory then holds 1 entry, and the folder holds 1.
 #[cfg(unix)]
-fn plant_one_foreign_session_socket(shared_sessions_base_directory: &Path) -> (SessionId, String) {
-    let other_user_directory = shared_sessions_base_directory
-        .join((load_own_user_id(shared_sessions_base_directory) + 1).to_string());
+fn plant_one_foreign_session_socket(
+    shared_sessions_base_directory: &Path,
+) -> (SessionId, ForeignSessionAdvertisement) {
+    let own_user_id = load_own_user_id(shared_sessions_base_directory);
+    let other_user_directory = shared_sessions_base_directory.join((own_user_id + 1).to_string());
     std::fs::create_dir(&other_user_directory).expect("create the other user's folder");
     let session_id = SessionId::new();
     plant_session_socket(&other_user_directory.join(format!("{session_id}.sock")));
-    let socket_address =
-        koshi_ipc::endpoint::compute_socket_address(&other_user_directory, session_id);
-    (session_id, socket_address)
+    let foreign_session_advertisement = ForeignSessionAdvertisement {
+        owner_user_id: own_user_id,
+        socket_address: koshi_ipc::endpoint::compute_socket_address(
+            &other_user_directory,
+            session_id,
+        ),
+    };
+    (session_id, foreign_session_advertisement)
 }
 
 /// The user id that owns `shared_sessions_base_directory`: the id of this
@@ -2183,7 +2374,7 @@ fn a_listing_that_reaches_the_entry_limit_at_a_session_socket_lists_that_session
     let shared_directory_guard = build_test_runtime_directory();
     let shared_sessions_base_directory = shared_directory_guard.path();
     let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
-    let (session_id, socket_address) =
+    let (session_id, foreign_session_advertisement) =
         plant_one_foreign_session_socket(shared_sessions_base_directory);
 
     let foreign_session_listing = list_foreign_sessions_with_scan(
@@ -2195,7 +2386,7 @@ fn a_listing_that_reaches_the_entry_limit_at_a_session_socket_lists_that_session
     assert_eq!(
         foreign_session_listing,
         ForeignSessionListing {
-            foreign_sessions: vec![(session_id, socket_address)],
+            foreign_sessions: vec![(session_id, foreign_session_advertisement)],
             ..ForeignSessionListing::default()
         }
     );
@@ -2238,18 +2429,19 @@ fn a_lookup_counts_the_shared_directory_alone_and_finds_a_session_at_the_entry_l
     let shared_directory_guard = build_test_runtime_directory();
     let shared_sessions_base_directory = shared_directory_guard.path();
     let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
-    let (session_id, socket_address) =
+    let (session_id, foreign_session_advertisement) =
         plant_one_foreign_session_socket(shared_sessions_base_directory);
 
-    let found_socket_address = find_foreign_session_address_with_scan(
+    let found_advertisement = find_foreign_session_advertisement_with_scan(
         shared_sessions_base_directory,
         &missing_runtime_directory,
         session_id,
+        None,
         build_shared_directory_scan(MAX_SHARED_DIRECTORY_ENTRY_COUNT - 1),
     )
     .expect("the lookup at the limit reads");
 
-    assert_eq!(found_socket_address, Some(socket_address));
+    assert_eq!(found_advertisement, Some(foreign_session_advertisement));
 }
 
 #[cfg(unix)]
@@ -2262,10 +2454,11 @@ fn a_lookup_past_the_entry_limit_keeps_the_shared_directory_unread() {
     let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
     let (session_id, _) = plant_one_foreign_session_socket(shared_sessions_base_directory);
 
-    let lookup_error = find_foreign_session_address_with_scan(
+    let lookup_error = find_foreign_session_advertisement_with_scan(
         shared_sessions_base_directory,
         &missing_runtime_directory,
         session_id,
+        None,
         build_shared_directory_scan(MAX_SHARED_DIRECTORY_ENTRY_COUNT),
     )
     .expect_err("the lookup stops past the limit");
@@ -2310,7 +2503,7 @@ fn a_scan_that_finds_the_256th_user_folder_lists_and_looks_up_its_session() {
     let shared_directory_guard = build_test_runtime_directory();
     let shared_sessions_base_directory = shared_directory_guard.path();
     let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
-    let (session_id, socket_address) =
+    let (session_id, foreign_session_advertisement) =
         plant_one_foreign_session_socket(shared_sessions_base_directory);
 
     let foreign_session_listing = list_foreign_sessions_with_scan(
@@ -2321,10 +2514,11 @@ fn a_scan_that_finds_the_256th_user_folder_lists_and_looks_up_its_session() {
             ..build_shared_directory_scan(0)
         },
     );
-    let found_socket_address = find_foreign_session_address_with_scan(
+    let found_advertisement = find_foreign_session_advertisement_with_scan(
         shared_sessions_base_directory,
         &missing_runtime_directory,
         session_id,
+        None,
         SharedDirectoryScan {
             found_user_directory_count: MAX_SHARED_USER_DIRECTORY_COUNT - 1,
             ..build_shared_directory_scan(0)
@@ -2335,11 +2529,11 @@ fn a_scan_that_finds_the_256th_user_folder_lists_and_looks_up_its_session() {
     assert_eq!(
         foreign_session_listing,
         ForeignSessionListing {
-            foreign_sessions: vec![(session_id, socket_address.clone())],
+            foreign_sessions: vec![(session_id, foreign_session_advertisement.clone())],
             ..ForeignSessionListing::default()
         }
     );
-    assert_eq!(found_socket_address, Some(socket_address));
+    assert_eq!(found_advertisement, Some(foreign_session_advertisement));
 }
 
 #[cfg(unix)]
@@ -2359,10 +2553,11 @@ fn a_scan_that_finds_a_user_folder_past_the_limit_keeps_the_shared_directory_unr
             ..build_shared_directory_scan(0)
         },
     );
-    let lookup_error = find_foreign_session_address_with_scan(
+    let lookup_error = find_foreign_session_advertisement_with_scan(
         shared_sessions_base_directory,
         &missing_runtime_directory,
         session_id,
+        None,
         SharedDirectoryScan {
             found_user_directory_count: MAX_SHARED_USER_DIRECTORY_COUNT,
             ..build_shared_directory_scan(0)
@@ -2395,7 +2590,7 @@ fn a_listing_checks_the_256th_session_of_one_owner() {
     let shared_directory_guard = build_test_runtime_directory();
     let shared_sessions_base_directory = shared_directory_guard.path();
     let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
-    let (session_id, socket_address) =
+    let (session_id, foreign_session_advertisement) =
         plant_one_foreign_session_socket(shared_sessions_base_directory);
 
     let foreign_session_listing = list_foreign_sessions_with_scan(
@@ -2413,7 +2608,7 @@ fn a_listing_checks_the_256th_session_of_one_owner() {
     assert_eq!(
         foreign_session_listing,
         ForeignSessionListing {
-            foreign_sessions: vec![(session_id, socket_address)],
+            foreign_sessions: vec![(session_id, foreign_session_advertisement)],
             ..ForeignSessionListing::default()
         }
     );
@@ -2457,7 +2652,7 @@ fn a_lookup_by_id_finds_a_session_the_listing_counts_past_its_cap() {
     let shared_directory_guard = build_test_runtime_directory();
     let shared_sessions_base_directory = shared_directory_guard.path();
     let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
-    let (session_id, socket_address) =
+    let (session_id, foreign_session_advertisement) =
         plant_one_foreign_session_socket(shared_sessions_base_directory);
     let own_user_id = load_own_user_id(shared_sessions_base_directory);
 
@@ -2472,10 +2667,11 @@ fn a_lookup_by_id_finds_a_session_the_listing_counts_past_its_cap() {
             ..build_shared_directory_scan(0)
         },
     );
-    let found_socket_address = find_foreign_session_address_with_scan(
+    let found_advertisement = find_foreign_session_advertisement_with_scan(
         shared_sessions_base_directory,
         &missing_runtime_directory,
         session_id,
+        None,
         SharedDirectoryScan {
             checked_session_count_by_owner: HashMap::from([(
                 own_user_id,
@@ -2493,7 +2689,7 @@ fn a_lookup_by_id_finds_a_session_the_listing_counts_past_its_cap() {
             ..ForeignSessionListing::default()
         }
     );
-    assert_eq!(found_socket_address, Some(socket_address));
+    assert_eq!(found_advertisement, Some(foreign_session_advertisement));
 }
 
 #[cfg(unix)]
@@ -2504,7 +2700,7 @@ fn an_entry_beside_the_user_folders_that_names_no_user_counts_as_no_user_folder(
     let shared_directory_guard = build_test_runtime_directory();
     let shared_sessions_base_directory = shared_directory_guard.path();
     let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
-    let (session_id, socket_address) =
+    let (session_id, foreign_session_advertisement) =
         plant_one_foreign_session_socket(shared_sessions_base_directory);
     std::fs::write(shared_sessions_base_directory.join("junk"), b"")
         .expect("plant a file beside the user folder");
@@ -2517,10 +2713,11 @@ fn an_entry_beside_the_user_folders_that_names_no_user_counts_as_no_user_folder(
             ..build_shared_directory_scan(0)
         },
     );
-    let found_socket_address = find_foreign_session_address_with_scan(
+    let found_advertisement = find_foreign_session_advertisement_with_scan(
         shared_sessions_base_directory,
         &missing_runtime_directory,
         session_id,
+        None,
         SharedDirectoryScan {
             found_user_directory_count: MAX_SHARED_USER_DIRECTORY_COUNT - 1,
             ..build_shared_directory_scan(0)
@@ -2531,11 +2728,11 @@ fn an_entry_beside_the_user_folders_that_names_no_user_counts_as_no_user_folder(
     assert_eq!(
         foreign_session_listing,
         ForeignSessionListing {
-            foreign_sessions: vec![(session_id, socket_address.clone())],
+            foreign_sessions: vec![(session_id, foreign_session_advertisement.clone())],
             ..ForeignSessionListing::default()
         }
     );
-    assert_eq!(found_socket_address, Some(socket_address));
+    assert_eq!(found_advertisement, Some(foreign_session_advertisement));
 }
 
 #[cfg(unix)]
@@ -2546,7 +2743,7 @@ fn an_entry_in_a_user_folder_that_names_no_session_counts_as_no_session() {
     let shared_directory_guard = build_test_runtime_directory();
     let shared_sessions_base_directory = shared_directory_guard.path();
     let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
-    let (session_id, socket_address) =
+    let (session_id, foreign_session_advertisement) =
         plant_one_foreign_session_socket(shared_sessions_base_directory);
     let own_user_id = load_own_user_id(shared_sessions_base_directory);
     std::fs::write(
@@ -2572,7 +2769,7 @@ fn an_entry_in_a_user_folder_that_names_no_session_counts_as_no_session() {
     assert_eq!(
         foreign_session_listing,
         ForeignSessionListing {
-            foreign_sessions: vec![(session_id, socket_address)],
+            foreign_sessions: vec![(session_id, foreign_session_advertisement)],
             ..ForeignSessionListing::default()
         }
     );
@@ -2593,7 +2790,7 @@ fn a_session_another_user_started_is_asked_with_an_empty_token() {
     let session_overview = fetch_foreign_session_overview(
         session_id,
         &socket_address,
-        Instant::now() + SESSION_ANSWER_TIMEOUT_DURATION,
+        Instant::now() + SERVER_ANSWER_TIMEOUT_DURATION,
     )
     .expect("the session answers");
 
@@ -2622,7 +2819,7 @@ fn a_shared_advert_nothing_listens_behind_reports_the_session_not_running() {
     let session_lookup_error = fetch_foreign_session_overview(
         session_id,
         &socket_address,
-        Instant::now() + SESSION_ANSWER_TIMEOUT_DURATION,
+        Instant::now() + SERVER_ANSWER_TIMEOUT_DURATION,
     )
     .expect_err("nothing listens at the address");
 
@@ -2656,7 +2853,7 @@ fn an_overview_ask_whose_answer_deadline_has_passed_connects_to_nothing() {
 #[test]
 fn a_pane_creating_command_gets_this_process_directory_at_send_time() {
     let command_with_current_directory =
-        apply_current_working_directory_to_command(Command::NewPane(build_default_new_pane_args()));
+        apply_current_working_directory_to_command(Command::NewPane(build_new_pane_args()));
     let Command::NewPane(new_pane_arguments) = command_with_current_directory else {
         panic!("the variant must not change");
     };
@@ -2680,7 +2877,7 @@ fn a_pane_creating_command_gets_this_process_directory_at_send_time() {
 fn an_explicit_working_directory_survives_command_preparation() {
     let command = Command::NewPane(NewPaneArgs {
         working_directory: Some(PathBuf::from("/explicit")),
-        ..build_default_new_pane_args()
+        ..build_new_pane_args()
     });
     let command_with_current_directory = apply_current_working_directory_to_command(command);
     let Command::NewPane(new_pane_arguments) = command_with_current_directory else {
@@ -2754,7 +2951,7 @@ fn spawn_settled_session(
             process_image_id: ProcessImageId::get_own(),
         };
         if matches!(timing, HelloTiming::AtOnce) {
-            send_ipc_result(
+            send_ipc_reply(
                 &mut session_connection,
                 hello_request.request_id,
                 hello_result.clone(),
@@ -2762,7 +2959,7 @@ fn spawn_settled_session(
         }
         let next_request: Option<IpcRequest> = session_connection.recv().ok();
         if matches!(timing, HelloTiming::AfterTheNextRequest) {
-            send_ipc_result(
+            send_ipc_reply(
                 &mut session_connection,
                 hello_request.request_id,
                 hello_result,
@@ -2793,7 +2990,7 @@ fn spawn_settled_session(
                     IpcResult::Prepared,
                 );
                 if let Ok(commit_request) = session_connection.recv::<IpcRequest>() {
-                    send_ipc_result(
+                    send_ipc_reply(
                         &mut session_connection,
                         commit_request.request_id,
                         IpcResult::CommandResult(CommandResult::Ok {
@@ -2834,6 +3031,7 @@ fn a_session_speaking_below_this_builds_floor_refuses_the_caller_and_answers_no_
         runtime_directory.path(),
         None,
         session_id,
+        None,
         Some(client_id),
         Command::TogglePaneFullscreen,
     )
@@ -2909,6 +3107,7 @@ fn a_named_client_command_reaches_a_session_that_answers_the_hello_last() {
         runtime_directory.path(),
         None,
         session_id,
+        None,
         Some(client_id),
         Command::TogglePaneFullscreen,
     )
@@ -2965,6 +3164,7 @@ fn a_named_client_reaches_a_session_that_speaks_this_builds_protocol() {
         runtime_directory.path(),
         None,
         session_id,
+        None,
         Some(client_id),
         Command::TogglePaneFullscreen,
     )
@@ -3021,6 +3221,7 @@ fn no_named_client_still_costs_two_round_trips() {
         runtime_directory.path(),
         None,
         session_id,
+        None,
         None,
         Command::TogglePaneFullscreen,
     )
@@ -3114,15 +3315,23 @@ fn an_id_sockets_in_two_folders_advertise_is_reached_through_neither() {
 
     let foreign_session_listing =
         list_foreign_sessions(shared_sessions_base_directory.path(), &runtime_directory);
-    let lookup_result = find_foreign_session_address(
+    let lookup_result = find_foreign_session_advertisement(
         shared_sessions_base_directory.path(),
         &runtime_directory,
         duplicated_session_id,
+        None,
     );
     let endpoint_lookup_result = load_session_endpoint(
         &runtime_directory,
         Some(shared_sessions_base_directory.path()),
         duplicated_session_id,
+        None,
+    );
+    let owned_endpoint_lookup_result = load_session_endpoint(
+        &runtime_directory,
+        Some(shared_sessions_base_directory.path()),
+        duplicated_session_id,
+        Some(own_user_id),
     );
 
     assert_eq!(
@@ -3132,6 +3341,7 @@ fn an_id_sockets_in_two_folders_advertise_is_reached_through_neither() {
                 session_id: duplicated_session_id,
                 advertisement_count: 2,
                 owner_user_ids: vec![own_user_id],
+                reachable_owner_user_id: None,
             }],
             ..ForeignSessionListing::default()
         }
@@ -3146,6 +3356,10 @@ fn an_id_sockets_in_two_folders_advertise_is_reached_through_neither() {
         panic!("expected IpcUnavailable, got {endpoint_lookup_result:?}");
     };
     assert_eq!(detail, expected_refusal_text);
+    let Err(CliError::IpcUnavailable { detail }) = owned_endpoint_lookup_result else {
+        panic!("expected IpcUnavailable, got {owned_endpoint_lookup_result:?}");
+    };
+    assert_eq!(detail, expected_refusal_text);
 }
 
 #[test]
@@ -3157,12 +3371,73 @@ fn a_duplicated_session_names_each_owner_once() {
             session_id,
             advertisement_count: 3,
             owner_user_ids: vec![1001, 1002],
+            reachable_owner_user_id: None,
         }
         .to_string(),
         format!(
             "session {session_id} is advertised 3 times in the shared directory, by user ids \
              1001, 1002; koshi reaches none of them"
         )
+    );
+}
+
+#[test]
+fn a_duplicated_session_names_how_to_reach_the_owner_advertising_it_once() {
+    let session_id = SessionId::new();
+
+    assert_eq!(
+        DuplicatedForeignSession {
+            session_id,
+            advertisement_count: 3,
+            owner_user_ids: vec![1001, 1002],
+            reachable_owner_user_id: Some(1002),
+        }
+        .to_string(),
+        format!(
+            "session {session_id} is advertised 3 times in the shared directory, by user ids \
+             1001, 1002; koshi reaches none of them; name the owner to reach one, such as \
+             1002/{session_id}"
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_duplicated_session_reaches_the_lowest_owner_advertising_it_once() {
+    let session_id = SessionId::new();
+    let build_advertisements = |owner_user_ids: &[u32]| -> Vec<ForeignSessionAdvertisement> {
+        owner_user_ids
+            .iter()
+            .map(|owner_user_id| ForeignSessionAdvertisement {
+                owner_user_id: *owner_user_id,
+                socket_address: format!("/tmp/koshi/{owner_user_id}/{session_id}.sock"),
+            })
+            .collect()
+    };
+
+    assert_eq!(
+        DuplicatedForeignSession::from_advertisements(
+            session_id,
+            &build_advertisements(&[1002, 1001, 1001, 1003])
+        ),
+        DuplicatedForeignSession {
+            session_id,
+            advertisement_count: 4,
+            owner_user_ids: vec![1001, 1002, 1003],
+            reachable_owner_user_id: Some(1002),
+        }
+    );
+    assert_eq!(
+        DuplicatedForeignSession::from_advertisements(
+            session_id,
+            &build_advertisements(&[1001, 1001])
+        ),
+        DuplicatedForeignSession {
+            session_id,
+            advertisement_count: 2,
+            owner_user_ids: vec![1001],
+            reachable_owner_user_id: None,
+        }
     );
 }
 
@@ -3200,21 +3475,24 @@ fn a_resume_file_of_this_users_keeps_a_foreign_socket_of_that_id_out() {
         shared_sessions_base_directory.path(),
         runtime_directory.path(),
     );
-    let dead_swap_lookup = find_foreign_session_address(
+    let dead_swap_lookup = find_foreign_session_advertisement(
         shared_sessions_base_directory.path(),
         runtime_directory.path(),
         dead_swap_session_id,
+        None,
     )
     .expect("the shared directory is read");
     let dead_swap_endpoint_lookup = load_session_endpoint(
         runtime_directory.path(),
         Some(shared_sessions_base_directory.path()),
         dead_swap_session_id,
+        None,
     );
     let restarting_endpoint_lookup = load_session_endpoint(
         runtime_directory.path(),
         Some(shared_sessions_base_directory.path()),
         restarting_session_id,
+        None,
     );
 
     assert_eq!(foreign_session_listing, ForeignSessionListing::default());
@@ -3223,8 +3501,8 @@ fn a_resume_file_of_this_users_keeps_a_foreign_socket_of_that_id_out() {
         panic!("expected SessionNotFound, got {dead_swap_endpoint_lookup:?}");
     };
     assert_eq!(session_name, dead_swap_session_id.to_string());
-    let Err(CliError::IpcUnavailable { detail }) = restarting_endpoint_lookup else {
-        panic!("expected IpcUnavailable, got {restarting_endpoint_lookup:?}");
+    let Err(CliError::SessionRestarting { detail }) = restarting_endpoint_lookup else {
+        panic!("expected SessionRestarting, got {restarting_endpoint_lookup:?}");
     };
     assert_eq!(
         detail,
@@ -3271,7 +3549,7 @@ fn every_session_is_answered_in_the_order_it_was_asked() {
 
     let session_answers = ask_sessions_at_once(
         &session_asks,
-        Instant::now() + SESSION_ANSWER_TIMEOUT_DURATION,
+        Some(Instant::now() + SERVER_ANSWER_TIMEOUT_DURATION),
         |session_ask| Ok(*session_ask * 10),
     );
 
@@ -3290,7 +3568,7 @@ fn every_session_is_answered_in_the_order_it_was_asked() {
 fn a_session_still_unasked_at_the_deadline_is_not_asked_and_answers_that_it_timed_out() {
     let asked_session_count = std::sync::atomic::AtomicUsize::new(0);
 
-    let session_answers = ask_sessions_at_once(&[1, 2, 3], Instant::now(), |_| {
+    let session_answers = ask_sessions_at_once(&[1, 2, 3], Some(Instant::now()), |_| {
         asked_session_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     });
@@ -3305,6 +3583,25 @@ fn a_session_still_unasked_at_the_deadline_is_not_asked_and_answers_that_it_time
 }
 
 #[test]
+fn every_session_is_asked_when_no_deadline_is_given() {
+    let asked_session_count = std::sync::atomic::AtomicUsize::new(0);
+
+    let session_answers = ask_sessions_at_once(&[1, 2, 3], None, |session_ask| {
+        asked_session_count.fetch_add(1, Ordering::SeqCst);
+        Ok(*session_ask)
+    });
+
+    assert_eq!(asked_session_count.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        session_answers
+            .into_iter()
+            .map(|session_answer| session_answer.expect("every ask answers"))
+            .collect::<Vec<i32>>(),
+        vec![1, 2, 3]
+    );
+}
+
+#[test]
 fn sixteen_sessions_are_asked_at_the_same_time() {
     // Each ask waits until all 16 have started, for at most 5 seconds.
     let started_ask_count = std::sync::Mutex::new(0_usize);
@@ -3313,7 +3610,7 @@ fn sixteen_sessions_are_asked_at_the_same_time() {
 
     let session_answers = ask_sessions_at_once(
         &session_asks,
-        Instant::now() + Duration::from_secs(10),
+        Some(Instant::now() + Duration::from_secs(10)),
         |_| {
             let mut started_count = started_ask_count.lock().expect("the count is not poisoned");
             *started_count += 1;
@@ -3347,7 +3644,7 @@ fn a_panic_in_an_ask_on_a_helper_thread_reaches_the_caller() {
     let ask_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ask_sessions_at_once(
             &[0_usize, 1],
-            Instant::now() + SESSION_ANSWER_TIMEOUT_DURATION,
+            Some(Instant::now() + SERVER_ANSWER_TIMEOUT_DURATION),
             |_| {
                 if std::thread::current().name() == Some("koshi-session-ask") {
                     *has_helper_ask_started
@@ -3484,37 +3781,44 @@ fn a_folder_its_owner_closed_to_other_users_advertises_nothing() {
         shared_sessions_base_directory.path(),
         runtime_directory.path(),
     );
-    let closed_session_lookup = find_foreign_session_address(
+    let closed_session_lookup = find_foreign_session_advertisement(
         shared_sessions_base_directory.path(),
         runtime_directory.path(),
         closed_session_id,
+        None,
     );
-    let open_session_lookup = find_foreign_session_address(
+    let open_session_lookup = find_foreign_session_advertisement(
         shared_sessions_base_directory.path(),
         runtime_directory.path(),
         open_session_id,
+        None,
     );
 
     let _ = std::fs::set_permissions(
         &closed_user_directory,
         std::fs::Permissions::from_mode(0o755),
     );
-    let open_socket_address =
-        koshi_ipc::endpoint::compute_socket_address(&open_user_directory, open_session_id);
+    let open_session_advertisement = ForeignSessionAdvertisement {
+        owner_user_id: own_user_id,
+        socket_address: koshi_ipc::endpoint::compute_socket_address(
+            &open_user_directory,
+            open_session_id,
+        ),
+    };
     assert_eq!(
         foreign_session_listing,
         ForeignSessionListing {
-            foreign_sessions: vec![(open_session_id, open_socket_address.clone())],
+            foreign_sessions: vec![(open_session_id, open_session_advertisement.clone())],
             ..ForeignSessionListing::default()
         }
     );
     let Ok(None) = closed_session_lookup else {
         panic!("expected Ok(None), got {closed_session_lookup:?}");
     };
-    let Ok(Some(found_socket_address)) = open_session_lookup else {
+    let Ok(Some(found_advertisement)) = open_session_lookup else {
         panic!("expected the open folder's socket, got {open_session_lookup:?}");
     };
-    assert_eq!(found_socket_address, open_socket_address);
+    assert_eq!(found_advertisement, open_session_advertisement);
 }
 
 #[cfg(unix)]
@@ -3532,10 +3836,11 @@ fn a_shared_directory_whose_read_fails_another_way_is_kept_and_refuses_a_lookup(
 
     let foreign_session_listing =
         list_foreign_sessions(&looping_shared_directory, runtime_directory.path());
-    let lookup_error = find_foreign_session_address(
+    let lookup_error = find_foreign_session_advertisement(
         &looping_shared_directory,
         runtime_directory.path(),
         SessionId::new(),
+        None,
     );
 
     assert_eq!(
@@ -3574,7 +3879,7 @@ fn wait_for_new_session_endpoint_takes_the_endpoint_file_the_moment_it_names_ano
         wait_for_new_session_endpoint(
             runtime_directory.path(),
             session_id,
-            &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+            Some(&ConnectionToken::from_secret(OLD_CONNECTION_TOKEN)),
             wait_deadline,
         ),
         Some(advertised_endpoint)
@@ -3611,7 +3916,7 @@ fn wait_for_new_session_endpoint_reads_the_endpoint_file_again_until_the_token_c
     let new_endpoint = wait_for_new_session_endpoint(
         runtime_directory.path(),
         session_id,
-        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        Some(&ConnectionToken::from_secret(OLD_CONNECTION_TOKEN)),
         wait_deadline,
     );
     let advertised_endpoint = endpoint_writer_thread
@@ -3641,7 +3946,7 @@ fn wait_for_new_session_endpoint_ignores_an_endpoint_file_still_naming_the_old_t
         wait_for_new_session_endpoint(
             runtime_directory.path(),
             session_id,
-            &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+            Some(&ConnectionToken::from_secret(OLD_CONNECTION_TOKEN)),
             Instant::now(),
         ),
         None
@@ -3656,7 +3961,7 @@ fn wait_for_new_session_endpoint_ends_at_its_deadline_when_the_session_advertise
         wait_for_new_session_endpoint(
             runtime_directory.path(),
             SessionId::new(),
-            &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+            Some(&ConnectionToken::from_secret(OLD_CONNECTION_TOKEN)),
             Instant::now(),
         ),
         None
@@ -3680,7 +3985,7 @@ fn wait_for_new_session_endpoint_with_a_deadline_already_past_still_takes_a_sess
         wait_for_new_session_endpoint(
             runtime_directory.path(),
             session_id,
-            &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+            Some(&ConnectionToken::from_secret(OLD_CONNECTION_TOKEN)),
             Instant::now() - Duration::from_secs(1),
         ),
         Some(advertised_endpoint)
@@ -3704,7 +4009,7 @@ fn wait_for_new_session_endpoint_reads_past_an_endpoint_file_this_build_cannot_r
         wait_for_new_session_endpoint(
             runtime_directory.path(),
             session_id,
-            &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+            Some(&ConnectionToken::from_secret(OLD_CONNECTION_TOKEN)),
             wait_deadline,
         ),
         None
@@ -3712,6 +4017,403 @@ fn wait_for_new_session_endpoint_reads_past_an_endpoint_file_this_build_cannot_r
     assert!(
         Instant::now() >= wait_deadline,
         "the wait sat out its whole window rather than giving up on the first read"
+    );
+}
+
+// --- Asking again across an image replacement --------------------------------
+
+#[test]
+fn an_exchange_end_is_an_image_replacement_for_a_restarting_refusal_or_a_lost_session_restarting() {
+    let runtime_directory = build_test_runtime_directory();
+    let replacing_session_id = SessionId::new();
+    let steady_session_id = SessionId::new();
+    write_aged_resume_file(
+        runtime_directory.path(),
+        replacing_session_id,
+        Duration::ZERO,
+    );
+    let build_peer_gone_error = || CliError::IpcUnavailable {
+        detail: "ipc peer disconnected".to_string(),
+    };
+
+    let image_replacement_cases = [
+        (
+            steady_session_id,
+            build_session_restarting_error(steady_session_id),
+            true,
+        ),
+        (replacing_session_id, build_peer_gone_error(), true),
+        (steady_session_id, build_peer_gone_error(), false),
+        (
+            replacing_session_id,
+            CliError::SessionNotFound {
+                session_name: replacing_session_id.to_string(),
+            },
+            true,
+        ),
+        (
+            replacing_session_id,
+            CliError::CommittedRequestUnanswered {
+                detail: "ipc peer disconnected".to_string(),
+            },
+            false,
+        ),
+        (replacing_session_id, CliError::SessionAnswerTimedOut, false),
+    ];
+
+    for (session_id, exchange_error, is_image_replacement) in image_replacement_cases {
+        assert_eq!(
+            is_ended_by_image_replacement(runtime_directory.path(), session_id, &exchange_error),
+            is_image_replacement,
+            "{exchange_error:?}"
+        );
+    }
+}
+
+#[test]
+fn an_exchange_refused_while_the_session_replaces_its_image_runs_once_more_over_the_new_endpoint() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        OLD_CONNECTION_TOKEN,
+        4321,
+    );
+    let mut presented_connection_tokens = Vec::new();
+
+    let exchange_result = run_session_exchange_across_restart(
+        runtime_directory.path(),
+        None,
+        session_id,
+        None,
+        Some(Instant::now() + Duration::from_secs(10)),
+        |session_endpoint| {
+            presented_connection_tokens.push(session_endpoint.connection_token.clone());
+            if presented_connection_tokens.len() > 1 {
+                return Ok("answered by the new image");
+            }
+            write_session_endpoint_file(
+                runtime_directory.path(),
+                session_id,
+                NEW_CONNECTION_TOKEN,
+                4321,
+            );
+            Err(build_session_restarting_error(session_id))
+        },
+    );
+
+    let Ok(exchange_answer) = exchange_result else {
+        panic!("expected the new image's answer, got {exchange_result:?}");
+    };
+    assert_eq!(exchange_answer, "answered by the new image");
+    assert_eq!(
+        presented_connection_tokens,
+        vec![
+            ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+            ConnectionToken::from_secret(NEW_CONNECTION_TOKEN),
+        ]
+    );
+}
+
+#[test]
+fn an_exchange_refused_while_restarting_gives_its_refusal_when_no_new_endpoint_comes_by_the_deadline(
+) {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        OLD_CONNECTION_TOKEN,
+        4321,
+    );
+    let answer_deadline = Instant::now() + Duration::from_millis(100);
+    let mut exchange_count = 0;
+
+    let exchange_result: Result<(), CliError> = run_session_exchange_across_restart(
+        runtime_directory.path(),
+        None,
+        session_id,
+        None,
+        Some(answer_deadline),
+        |_| {
+            exchange_count += 1;
+            Err(build_session_restarting_error(session_id))
+        },
+    );
+
+    assert_eq!(exchange_count, 1);
+    let Err(CliError::SessionRestarting { detail }) = exchange_result else {
+        panic!("expected SessionRestarting, got {exchange_result:?}");
+    };
+    assert_eq!(
+        detail,
+        format!("session {session_id} is restarting; ask again in a moment")
+    );
+    assert!(
+        Instant::now() >= answer_deadline,
+        "the wait sat out its window"
+    );
+}
+
+#[test]
+fn a_committed_request_left_unanswered_is_never_run_again_even_while_the_session_restarts() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        OLD_CONNECTION_TOKEN,
+        4321,
+    );
+    write_aged_resume_file(runtime_directory.path(), session_id, Duration::ZERO);
+    let mut exchange_count = 0;
+
+    let exchange_result: Result<(), CliError> = run_session_exchange_across_restart(
+        runtime_directory.path(),
+        None,
+        session_id,
+        None,
+        Some(Instant::now() + Duration::from_secs(10)),
+        |_| {
+            exchange_count += 1;
+            write_session_endpoint_file(
+                runtime_directory.path(),
+                session_id,
+                NEW_CONNECTION_TOKEN,
+                4321,
+            );
+            Err(CliError::CommittedRequestUnanswered {
+                detail: "ipc peer disconnected".to_string(),
+            })
+        },
+    );
+
+    assert_eq!(exchange_count, 1);
+    let Err(CliError::CommittedRequestUnanswered { detail }) = exchange_result else {
+        panic!("expected CommittedRequestUnanswered, got {exchange_result:?}");
+    };
+    assert_eq!(detail, "ipc peer disconnected");
+}
+
+#[test]
+fn a_restart_wait_after_another_users_session_ended_the_exchange_reads_no_endpoint_file_of_this_users(
+) {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        NEW_CONNECTION_TOKEN,
+        5000,
+    );
+
+    assert_eq!(
+        wait_for_restarted_session_endpoint(
+            runtime_directory.path(),
+            session_id,
+            Some(
+                &build_foreign_session_endpoint("/home/user/shared.sock".to_string())
+                    .connection_token
+            ),
+            &build_session_restarting_error(session_id),
+            None,
+        ),
+        None
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_session_named_with_its_owner_is_never_asked_through_this_users_restarting_session_of_that_id()
+{
+    let runtime_directory = build_test_runtime_directory();
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let other_user_id = load_own_user_id(shared_sessions_base_directory.path()) + 1;
+    let session_id = SessionId::new();
+    write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        OLD_CONNECTION_TOKEN,
+        4321,
+    );
+    write_aged_resume_file(runtime_directory.path(), session_id, Duration::ZERO);
+    let mut exchange_count = 0;
+
+    let exchange_result: Result<(), CliError> = run_session_exchange_across_restart(
+        runtime_directory.path(),
+        Some(shared_sessions_base_directory.path()),
+        session_id,
+        Some(other_user_id),
+        Some(Instant::now() + Duration::from_secs(10)),
+        |_| {
+            exchange_count += 1;
+            Ok(())
+        },
+    );
+
+    assert_eq!(exchange_count, 0);
+    let Err(CliError::SessionNotFound { session_name }) = exchange_result else {
+        panic!("expected SessionNotFound, got {exchange_result:?}");
+    };
+    assert_eq!(session_name, format!("{other_user_id}/{session_id}"));
+}
+
+#[test]
+fn a_command_refused_at_its_prepare_while_restarting_runs_once_through_the_new_image() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let (session_server_thread, submitted_envelopes) = spawn_fake_session(
+        runtime_directory.path(),
+        session_id,
+        vec![
+            SessionScript::RefusePrepareWhileRestarting,
+            SessionScript::AcceptAndApply,
+        ],
+    );
+
+    let command_result = submit_external_command_via_runtime_directory(
+        runtime_directory.path(),
+        None,
+        session_id,
+        None,
+        None,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
+    )
+    .expect("the new image runs the command");
+
+    session_server_thread.join().expect("fake session exits");
+    let submitted_envelopes: Vec<CommandEnvelope> = submitted_envelopes.try_iter().collect();
+    assert_eq!(submitted_envelopes.len(), 2);
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id: submitted_envelopes[1].command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+    assert_eq!(
+        submitted_envelopes[1].command,
+        Command::ToggleLockMode(ToggleLockModeArgs::default())
+    );
+}
+
+#[test]
+fn a_command_refused_at_its_commit_while_restarting_runs_once_through_the_new_image() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let (session_server_thread, submitted_envelopes) = spawn_fake_session(
+        runtime_directory.path(),
+        session_id,
+        vec![
+            SessionScript::RefuseCommitWhileRestarting,
+            SessionScript::AcceptAndApply,
+        ],
+    );
+
+    let command_result = submit_external_command_via_runtime_directory(
+        runtime_directory.path(),
+        None,
+        session_id,
+        None,
+        None,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
+    )
+    .expect("the new image runs the command");
+
+    session_server_thread.join().expect("fake session exits");
+    let submitted_envelopes: Vec<CommandEnvelope> = submitted_envelopes.try_iter().collect();
+    assert_eq!(submitted_envelopes.len(), 2);
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id: submitted_envelopes[1].command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn a_restart_refused_while_the_session_already_restarts_is_restarting_from_the_image_asked() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let (session_server_thread, _request_kinds) = spawn_answering_session(
+        runtime_directory.path(),
+        session_id,
+        build_restarting_refusal(),
+    );
+
+    let session_restart = restart_running_session(
+        runtime_directory.path(),
+        None,
+        session_id,
+        Instant::now() + TEST_RESTART_ANSWER_TIMEOUT_DURATION,
+    )
+    .expect("a session already restarting is restarting");
+
+    session_server_thread.join().expect("fake session exits");
+    assert_eq!(
+        session_restart,
+        SessionRestart::Restarting {
+            asked_process_image_id: Some(ProcessImageId::get_own()),
+        }
+    );
+}
+
+#[test]
+fn a_restart_asked_of_a_session_whose_endpoint_is_withdrawn_mid_swap_is_restarting() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    write_aged_resume_file(runtime_directory.path(), session_id, Duration::ZERO);
+
+    let session_restart = restart_running_session(
+        runtime_directory.path(),
+        None,
+        session_id,
+        Instant::now() + Duration::from_millis(100),
+    )
+    .expect("a session replacing its image is restarting");
+
+    assert_eq!(
+        session_restart,
+        SessionRestart::Restarting {
+            asked_process_image_id: None,
+        }
+    );
+}
+
+#[test]
+fn a_commit_answered_with_a_result_this_build_has_no_name_for_is_unanswered() {
+    let (client_connection, mut session_connection) = connect_test_socket_pair();
+    let (mut response_reader, mut request_writer) = client_connection.split();
+    let session_thread = std::thread::spawn(move || {
+        let commit_request: IpcRequest = session_connection.recv().expect("read the Commit");
+        session_connection
+            .send(&serde_json::json!({
+                "request_id": commit_request.request_id,
+                "answer_result": "Rehomed",
+            }))
+            .expect("send the answer");
+        close_connection_after_peer_hangs_up(session_connection);
+    });
+
+    let commit_error = commit_prepared_request(
+        &mut response_reader,
+        &mut request_writer,
+        3,
+        Some(Duration::from_secs(10)),
+    )
+    .expect_err("this build has no Rehomed result");
+    drop(response_reader);
+    drop(request_writer);
+    session_thread.join().expect("the session thread exits");
+
+    let CliError::CommittedRequestUnanswered { detail } = commit_error else {
+        panic!("expected CommittedRequestUnanswered, got {commit_error:?}");
+    };
+    assert_eq!(
+        detail,
+        "the session answered with an unexpected Rehomed reply"
     );
 }
 
@@ -3749,6 +4451,7 @@ fn a_session_of_koshi_0_4_0_names_restart_servers_without_waiting_for_a_restart(
         runtime_directory.path(),
         None,
         session_id,
+        None,
         None,
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
@@ -4012,6 +4715,7 @@ fn a_session_refusing_this_builds_protocol_version_is_asked_again_once_it_restar
         None,
         session_id,
         None,
+        None,
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
     .expect("the restarted session answers");
@@ -4066,6 +4770,66 @@ fn a_token_refusal_from_another_users_session_comes_back_at_once() {
     assert_eq!(exchanged_endpoint, foreign_endpoint);
     assert_eq!(exchange_count, 1);
     assert!(wait_started_at.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn a_token_refusal_from_another_users_session_comes_back_at_once_under_an_id_this_user_advertises()
+{
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        NEW_CONNECTION_TOKEN,
+        5000,
+    );
+    let foreign_endpoint = build_foreign_session_endpoint("/home/user/shared.sock".to_string());
+    let mut exchange_count = 0;
+
+    let (exchanged_endpoint, exchange_result) = run_session_exchange_with_token_wait(
+        runtime_directory.path(),
+        session_id,
+        foreign_endpoint.clone(),
+        None,
+        |_| -> Result<(), CliError> {
+            exchange_count += 1;
+            Err(build_connection_token_refusal())
+        },
+    );
+
+    let Err(CliError::ConnectionTokenRefused { detail }) = exchange_result else {
+        panic!("expected ConnectionTokenRefused, got {exchange_result:?}");
+    };
+    assert_eq!(detail, "the token presented does not match this Koshi's");
+    assert_eq!(exchanged_endpoint, foreign_endpoint);
+    assert_eq!(exchange_count, 1);
+}
+
+#[test]
+fn a_version_refusal_from_another_users_session_comes_back_at_once_under_an_id_this_user_advertises(
+) {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        OLD_CONNECTION_TOKEN,
+        5000,
+    );
+    let foreign_endpoint = build_foreign_session_endpoint("/home/user/shared.sock".to_string());
+
+    let wait_result = wait_for_refused_session_restart(
+        runtime_directory.path(),
+        session_id,
+        &foreign_endpoint,
+        VERSION_REFUSAL_SENTENCE.to_string(),
+        None,
+    );
+
+    let Err(CliError::ProtocolVersionRefused { detail }) = wait_result else {
+        panic!("expected ProtocolVersionRefused, got {wait_result:?}");
+    };
+    assert_eq!(detail, VERSION_REFUSAL_SENTENCE);
 }
 
 #[test]
@@ -4427,11 +5191,7 @@ struct CopyConnectionScript {
 /// requests get `copy_results` in order.
 fn build_accepting_copy_script(copy_results: Vec<IpcResult>) -> CopyConnectionScript {
     CopyConnectionScript {
-        hello_result: IpcResult::Hello {
-            protocol_version: PROTOCOL_VERSION,
-            build_version: env!("CARGO_PKG_VERSION").to_string(),
-            process_image_id: ProcessImageId::get_own(),
-        },
+        hello_result: build_accepted_hello_result(),
         copy_results,
     }
 }
@@ -4793,11 +5553,7 @@ fn a_later_part_the_session_never_answers_ends_at_its_answer_timeout() {
         send_ipc_result_best_effort(
             &mut session_connection,
             hello_request.request_id,
-            IpcResult::Hello {
-                protocol_version: PROTOCOL_VERSION,
-                build_version: env!("CARGO_PKG_VERSION").to_string(),
-                process_image_id: ProcessImageId::get_own(),
-            },
+            build_accepted_hello_result(),
         );
         send_ipc_result_best_effort(
             &mut session_connection,
@@ -4872,6 +5628,40 @@ fn a_copy_the_session_refuses_or_does_not_know_carries_the_sessions_sentence() {
         };
         assert_eq!(detail, refusal_sentence);
     }
+}
+
+#[test]
+fn a_last_part_whose_commit_is_answered_as_taken_leaves_the_copy_unanswered() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let (session_server_thread, _copy_requests) = spawn_copying_session(
+        runtime_directory.path(),
+        session_id,
+        vec![build_accepting_copy_script(vec![
+            IpcResult::Prepared,
+            IpcResult::ClipboardCopyPartTaken,
+        ])],
+    );
+
+    let Err(copy_error) = open_clipboard_copy_exchange(
+        runtime_directory.path(),
+        &build_in_session_context(session_id),
+        "c",
+        b"echo hi",
+        true,
+        TEST_COPY_ANSWER_TIMEOUT_DURATION,
+    ) else {
+        panic!("a ClipboardCopyPartTaken does not answer the Commit of the last part");
+    };
+
+    session_server_thread.join().expect("fake session exits");
+    let CliError::CommittedRequestUnanswered { detail } = copy_error else {
+        panic!("expected CommittedRequestUnanswered, got {copy_error:?}");
+    };
+    assert_eq!(
+        detail,
+        "the session answered with an unexpected ClipboardCopyPartTaken reply"
+    );
 }
 
 #[test]
@@ -5040,7 +5830,7 @@ fn a_copy_to_a_session_with_no_endpoint_file_reports_the_session_not_running() {
 
 // --- Running a request only once the session holds it -----------------------
 
-/// The endpoint file `spawn_fake_session` wrote for `session_id` in
+/// The endpoint file a stand-in session wrote for `session_id` in
 /// `runtime_directory`.
 fn load_fake_session_endpoint(runtime_directory: &Path, session_id: SessionId) -> EndpointFile {
     EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
@@ -5165,14 +5955,10 @@ fn a_copy_whose_commit_gets_no_answer_reports_it_may_still_be_routed() {
         let prepare_request: IpcRequest = session_connection
             .recv()
             .expect("read the Prepare behind the Hello");
-        send_ipc_result(
+        send_ipc_reply(
             &mut session_connection,
             hello_request.request_id,
-            IpcResult::Hello {
-                protocol_version: PROTOCOL_VERSION,
-                build_version: env!("CARGO_PKG_VERSION").to_string(),
-                process_image_id: ProcessImageId::get_own(),
-            },
+            build_accepted_hello_result(),
         );
         let commit_request_id =
             answer_prepare_and_read_commit(&mut session_connection, prepare_request.request_id);

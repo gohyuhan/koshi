@@ -7,6 +7,8 @@
 //! [`ViewerClient::build_viewer_chrome`].
 
 use super::*;
+use crate::runtime::delivery_queue::DeliveryReceiver;
+use koshi_test_support::fixtures::build_new_pane_args;
 
 use std::num::NonZeroU16;
 use std::sync::{mpsc, Arc};
@@ -40,28 +42,10 @@ fn build_runtime() -> (Server, ClientId) {
     (server, client_id)
 }
 
-/// A `new-pane` request with nothing chosen: the focused pane splits rightward.
-fn build_new_pane_args() -> NewPaneArgs {
-    NewPaneArgs {
-        placement: NewPanePlacement::Split {
-            source_pane_id: None,
-            tab_id: None,
-            direction: Direction::Right,
-        },
-        working_directory: None,
-        spawn_spec: None,
-        client_id: None,
-    }
-}
-
 /// The viewer from [`build_viewer`], with its `mouse.wheel` setting on
 /// `wheel_scroll`.
-fn build_viewer_with_wheel(
-    server: &mut Server,
-    client_id: ClientId,
-    wheel_scroll: WheelScroll,
-) -> ViewerClient {
-    let mut viewer = build_viewer(server, client_id);
+fn build_viewer_with_wheel(client_id: ClientId, wheel_scroll: WheelScroll) -> ViewerClient {
+    let mut viewer = build_viewer(client_id);
     viewer.load_startup_config(
         Some(PartialKoshiConfig {
             mouse: Some(PartialMouseConfig {
@@ -299,7 +283,7 @@ fn clicking_an_inactive_tab_focuses_it_and_clears_the_peek() {
     for _ in 0..30 {
         build_tab(&mut server, client_id); // overflow the 80-column strip
     }
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
 
     // Peek from tab 0, then click that (now inactive) tab. Tab 0 is on the
     // strip whatever width the generated session and tab names render at.
@@ -345,7 +329,7 @@ fn a_tab_switch_by_any_route_reveals_the_new_tab() {
     for _ in 0..30 {
         build_tab(&mut server, client_id);
     }
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     scroll_tabline_to_index(&mut server, &mut viewer, 3);
 
     let first_tab_id = server
@@ -380,7 +364,7 @@ fn clicking_the_right_scroll_arrow_peeks_one_tab_toward_the_end() {
     for _ in 0..30 {
         build_tab(&mut server, client_id); // overflow the 80-column strip
     }
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     scroll_tabline_to_index(&mut server, &mut viewer, 0);
 
     let pointer_column = find_tabline_pointer_column(&server, &viewer, 0, |region| {
@@ -402,7 +386,7 @@ fn wheel_over_the_tabline_steps_the_offset() {
     for _ in 0..30 {
         build_tab(&mut server, client_id);
     }
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     scroll_tabline_to_index(&mut server, &mut viewer, 0);
 
     let pointer_column = find_tabline_pointer_column(&server, &viewer, 0, |region| {
@@ -437,7 +421,7 @@ fn a_wheel_off_the_tabline_row_does_not_scroll_it() {
     for _ in 0..30 {
         build_tab(&mut server, client_id);
     }
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     scroll_tabline_to_index(&mut server, &mut viewer, 2);
 
     // Row 10 is pane content, not the tabline.
@@ -466,7 +450,7 @@ fn motion_and_non_left_buttons_leave_state_untouched() {
     for _ in 0..30 {
         build_tab(&mut server, client_id);
     }
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     scroll_tabline_to_index(&mut server, &mut viewer, 2);
 
     // Buttonless motion over the tabline scrolls nothing and begins no drag.
@@ -515,7 +499,7 @@ fn dragging_scrolls_from_the_anchor_and_release_ends_it() {
     for _ in 0..30 {
         build_tab(&mut server, client_id);
     }
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     scroll_tabline_to_index(&mut server, &mut viewer, 2);
 
     // Press a bare tabline cell far enough along the row that a two-step drag
@@ -686,7 +670,7 @@ fn compute_outward_edge_column(border_side: Direction, viewport_column_count: u1
 #[test]
 fn dragging_a_vertical_border_resizes_the_grabbed_pane_live() {
     let (mut server, client_id) = build_runtime();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     split_focused_pane(&mut server, client_id);
 
     let (border_cell, pane_id, border_side) = find_vertical_border(&server, client_id);
@@ -716,7 +700,7 @@ fn dragging_a_vertical_border_resizes_the_grabbed_pane_live() {
 #[test]
 fn a_shrink_drag_tracks_the_pointer_cell_for_cell() {
     let (mut server, client_id) = build_runtime();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     split_focused_pane(&mut server, client_id);
 
     let (border_cell, pane_id, border_side) = find_vertical_border(&server, client_id);
@@ -763,7 +747,7 @@ fn a_shrink_drag_tracks_the_pointer_cell_for_cell() {
 #[test]
 fn a_release_ends_the_resize_drag_so_a_new_drag_does_nothing() {
     let (mut server, client_id) = build_runtime();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     split_focused_pane(&mut server, client_id);
 
     let (border_cell, pane_id, border_side) = find_vertical_border(&server, client_id);
@@ -803,7 +787,7 @@ fn a_release_ends_the_resize_drag_so_a_new_drag_does_nothing() {
 #[test]
 fn a_fast_over_drag_fills_to_the_wall_then_reverses_at_once() {
     let (mut server, client_id) = build_runtime();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     split_focused_pane(&mut server, client_id);
 
     let (border_cell, pane_id, border_side) = find_vertical_border(&server, client_id);
@@ -997,7 +981,7 @@ fn find_outer_vertical_frame(server: &Server, client_id: ClientId) -> (Point, Pa
 #[test]
 fn dragging_a_horizontal_border_resizes_the_grabbed_pane_live() {
     let (mut server, client_id) = build_runtime();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     split_focused_downward(&mut server, client_id);
 
     let (border_cell, pane_id, border_side) = find_horizontal_border(&server, client_id);
@@ -1027,7 +1011,7 @@ fn dragging_a_horizontal_border_resizes_the_grabbed_pane_live() {
 #[test]
 fn grabbing_the_outer_frame_starts_no_resize() {
     let (mut server, client_id) = build_runtime();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     split_focused_pane(&mut server, client_id);
 
     let (border_cell, pane_id, border_side) = find_outer_vertical_frame(&server, client_id);
@@ -1062,7 +1046,7 @@ fn grabbing_the_outer_frame_starts_no_resize() {
 #[test]
 fn grabbing_the_frame_of_a_fullscreen_pane_starts_no_resize() {
     let (mut server, client_id) = build_runtime();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     split_focused_pane(&mut server, client_id);
     let (_, pane_id, _) = find_vertical_border(&server, client_id);
     let tiled_column_count = get_pane_column_count(&server, client_id, pane_id);
@@ -1124,7 +1108,7 @@ fn grabbing_the_frame_of_a_fullscreen_pane_starts_no_resize() {
 #[test]
 fn a_click_in_the_focused_pane_forwards_a_report_when_the_program_asks() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
     // The program turns on normal tracking with SGR encoding.
     server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
@@ -1148,7 +1132,7 @@ fn a_click_in_the_focused_pane_forwards_a_report_when_the_program_asks() {
 #[test]
 fn a_click_forwards_nothing_when_the_program_wants_no_mouse() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
 
@@ -1170,7 +1154,7 @@ fn a_click_forwards_nothing_when_the_program_wants_no_mouse() {
 #[test]
 fn a_press_drag_release_gesture_forwards_each_event() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
     // Button-event tracking reports drags; SGR encoding.
     server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
@@ -1216,7 +1200,7 @@ fn a_drag_reports_the_cell_it_moved_to_with_the_column_and_row_the_right_way_rou
     // columns across and one row down, where a swapped pair reads `4;2` as
     // `2;4`.
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
     // Button-event tracking reports drags; SGR encoding.
     server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
@@ -1248,12 +1232,12 @@ fn a_drag_reports_the_cell_it_moved_to_with_the_column_and_row_the_right_way_rou
 #[test]
 fn a_mouse_select_gesture_over_a_mouse_aware_program_forwards_nothing() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
     // Button-event tracking would report a bare drag; SGR encoding.
     server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
     // Grab the mouse for koshi selection, the way the binding does; the viewer
-    // takes the change off its subscription before the next event.
+    // reads the change off the frame it applies before the next event.
     let _ = server.submit_command(CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
@@ -1379,7 +1363,7 @@ fn a_click_from_a_starving_sole_viewer_forwards_nothing() {
         .get_client_mut_by_id(client_id)
         .expect("client")
         .update_pane_area(Some(PaneArea::Starving));
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
 
     dispatch_mouse_input_at_time(
         &mut server,
@@ -1399,7 +1383,7 @@ fn a_click_from_a_starving_sole_viewer_forwards_nothing() {
 #[test]
 fn a_bare_move_forwards_only_in_any_motion_mode() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
     let (screen_point, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
     let motion_input = MouseInput {
@@ -1434,7 +1418,7 @@ fn a_bare_move_forwards_only_in_any_motion_mode() {
 #[test]
 fn a_captured_release_is_re_stamped_to_the_pressed_button() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
     server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
     let (screen_point, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
@@ -1476,7 +1460,7 @@ fn a_captured_release_is_re_stamped_to_the_pressed_button() {
 #[test]
 fn a_drag_with_no_captured_press_is_dropped() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
     server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
@@ -1510,7 +1494,7 @@ fn a_drag_with_no_captured_press_is_dropped() {
 #[test]
 fn a_captured_drag_that_leaves_the_pane_clamps_to_its_edge() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
     server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
@@ -1540,7 +1524,7 @@ fn a_captured_drag_that_leaves_the_pane_clamps_to_its_edge() {
 fn border_resize_off_leaves_a_border_press_inert() {
     let (mut server, client_id) = build_runtime();
     // The setting is the viewer's own: the viewer is built on it.
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     viewer.load_startup_config(
         Some(PartialKoshiConfig {
             mouse: Some(PartialMouseConfig {
@@ -1581,7 +1565,7 @@ fn border_resize_off_leaves_a_border_press_inert() {
 #[test]
 fn a_click_on_an_unfocused_pane_focuses_it_rather_than_forwarding() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     split_focused_pane(&mut server, client_id);
     let focused_pane_id = server.find_typed_pane(client_id).expect("a focused pane");
 
@@ -1696,7 +1680,7 @@ fn a_wheel_over_a_plain_pane_scrolls_its_scrollback() {
     let pane_id = get_only_pane_id(&server);
     feed_pane_scrollback(&mut server, pane_id, 40);
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
 
     dispatch_mouse_input(
         &mut server,
@@ -1724,7 +1708,7 @@ fn a_wheel_down_returns_the_view_toward_live() {
     feed_pane_scrollback(&mut server, pane_id, 40);
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
 
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     dispatch_mouse_input(
         &mut server,
         &mut viewer,
@@ -1760,7 +1744,7 @@ fn a_wheel_with_a_highlight_up_scrolls_and_keeps_the_highlight() {
     feed_pane_scrollback(&mut server, pane_id, 40);
     set_pane_highlight(&mut server, client_id, pane_id);
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
 
     dispatch_mouse_input(
         &mut server,
@@ -1787,7 +1771,7 @@ fn a_wheel_over_a_mouse_reporting_pane_forwards_a_report() {
     // The program turns on normal tracking with SGR encoding.
     server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
     let (screen_point, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
 
     dispatch_mouse_input(
         &mut server,
@@ -1822,7 +1806,7 @@ fn a_wheel_on_the_alternate_screen_with_alternate_scroll_sends_arrow_keys() {
     // Enter the alternate screen and turn alternate-scroll on, with no mouse mode.
     server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h");
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
 
     dispatch_mouse_input(
         &mut server,
@@ -1861,7 +1845,7 @@ fn alternate_scroll_uses_application_cursor_keys_when_the_program_asks() {
     // Alternate screen, alternate-scroll on, application cursor keys on.
     server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h\x1b[?1h");
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
 
     dispatch_mouse_input(
         &mut server,
@@ -1885,7 +1869,7 @@ fn the_ignore_wheel_config_does_nothing_over_a_plain_pane() {
     feed_pane_scrollback(&mut server, pane_id, 40);
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
     // The setting is the viewer's own: the viewer is built on it.
-    let mut viewer = build_viewer_with_wheel(&mut server, client_id, WheelScroll::Ignore);
+    let mut viewer = build_viewer_with_wheel(client_id, WheelScroll::Ignore);
 
     dispatch_mouse_input(
         &mut server,
@@ -1914,7 +1898,7 @@ fn a_horizontal_wheel_does_not_scroll_the_scrollback() {
     feed_pane_scrollback(&mut server, pane_id, 40);
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
 
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
 
     dispatch_mouse_input(
         &mut server,
@@ -1932,7 +1916,7 @@ fn a_horizontal_wheel_does_not_scroll_the_scrollback() {
 #[test]
 fn a_move_marks_the_hovered_pane_and_clears_it_off_a_pane() {
     let (mut server, client_id) = build_runtime();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
 
@@ -1985,7 +1969,7 @@ fn a_wheel_scrolls_the_pane_under_the_pointer_not_the_focused_one() {
 
     feed_pane_scrollback(&mut server, other_pane_id, 40);
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, other_pane_id);
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
 
     dispatch_mouse_input(
         &mut server,
@@ -2015,7 +1999,7 @@ fn a_wheel_over_a_pane_border_scrolls_the_focused_pane() {
     // The divider between the two panes is chrome, not pane content: a wheel
     // there has no pane under the pointer and falls to the focused pane.
     let (border_cell, _, _) = find_vertical_border(&server, client_id);
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     dispatch_mouse_input(
         &mut server,
         &mut viewer,
@@ -2048,7 +2032,7 @@ fn a_wheel_over_an_unfocused_mouse_app_forwards_to_that_pane() {
     server.handle_pty_output(other_pane_id, b"\x1b[?1000h\x1b[?1006h");
     let (screen_point, pane_column, pane_row) =
         find_pane_content_cell(&server, client_id, other_pane_id);
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
 
     dispatch_mouse_input(
         &mut server,
@@ -2085,7 +2069,7 @@ fn a_highlight_holds_the_view_even_over_a_mouse_reporting_program() {
     server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
     set_pane_highlight(&mut server, client_id, pane_id);
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
 
     dispatch_mouse_input(
         &mut server,
@@ -2116,7 +2100,7 @@ fn a_forwarded_wheel_is_dropped_when_the_program_turned_the_mouse_off() {
     let pane_id = get_only_pane_id(&server);
     server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     let wheel_input = build_wheel_input(ScrollDirection::Up, screen_point);
     let mouse_frame = crate::runtime::tests::build_mouse_frame(
         server.build_snapshot(client_id).expect("render snapshot"),
@@ -2163,7 +2147,7 @@ fn alternate_scroll_arrows_follow_the_cursor_key_mode_at_the_moment_they_are_wri
     let pane_id = get_only_pane_id(&server);
     server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h");
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     let mouse_frame = crate::runtime::tests::build_mouse_frame(
         server.build_snapshot(client_id).expect("render snapshot"),
         &viewer,
@@ -2204,7 +2188,7 @@ fn arrow_keys_are_dropped_when_the_pane_left_the_alternate_screen_before_the_wri
     let pane_id = get_only_pane_id(&server);
     server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h");
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     let mouse_frame = crate::runtime::tests::build_mouse_frame(
         server.build_snapshot(client_id).expect("render snapshot"),
         &viewer,
@@ -2305,6 +2289,28 @@ fn a_zero_line_notch_sends_no_arrow_keys() {
 }
 
 #[test]
+fn arrows_whose_bytes_would_pass_the_pane_input_limit_write_nothing() {
+    // An arrow is 3 bytes here. A count that overflows the byte count, and the
+    // smallest count whose bytes pass the limit, are refused before anything is
+    // allocated for them.
+    let (mut server, fake_pty_backend, _client_id) = build_runtime_with_fake_pty_backend();
+    let pane_id = get_only_pane_id(&server);
+    server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h");
+
+    server.write_alternate_scroll_arrows(pane_id, true, usize::MAX);
+    server.write_alternate_scroll_arrows(pane_id, true, MAX_QUEUED_PANE_INPUT_BYTE_COUNT / 3 + 1);
+    server.write_alternate_scroll_arrows(pane_id, false, 768);
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![b"\x1b[B".repeat(768)],
+        "only the count inside the limit is written"
+    );
+}
+
+#[test]
 fn a_one_line_notch_sends_one_arrow() {
     let (mut server, fake_pty_backend, _client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
@@ -2378,7 +2384,7 @@ fn a_wheel_on_the_alternate_screen_without_alternate_scroll_stores_no_offset() {
     // a full-screen app that ignores the wheel.
     server.handle_pty_output(pane_id, b"\x1b[?1049h");
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
 
     dispatch_mouse_input(
         &mut server,
@@ -2429,7 +2435,7 @@ fn a_wheel_over_chrome_reaches_the_focused_mouse_app() {
     // A wheel over chrome (no pane under the pointer) goes to the focused pane,
     // clamped to its edge, instead of being dropped.
     let chrome_point = find_chrome_cell(&server, client_id);
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     dispatch_mouse_input(
         &mut server,
         &mut viewer,
@@ -2458,7 +2464,7 @@ fn a_forward_decided_from_a_stale_frame_writes_nothing_once_tracking_is_off() {
     // level at the moment of the write: the program that stopped asking gets
     // nothing.
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
     server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
@@ -2560,7 +2566,7 @@ fn grabbing_the_border_against_a_collapsed_stack_member_starts_no_resize() {
     // A collapsed stack member is drawn as a one-row header strip with no
     // content area. A press on the border against it begins no drag.
     let (mut server, client_id) = build_runtime();
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     stack_pane_onto_focused(&mut server, client_id);
 
     let border_cell = find_border_against_stack_header(&server, client_id);
@@ -2595,22 +2601,16 @@ fn grabbing_the_border_against_a_collapsed_stack_member_starts_no_resize() {
 
 /// The runtime, its fake PTY backend, a client, and that client's own
 /// subscriber queue — the queue a mouse round's answer lands on.
-fn build_server_with_mouse_event_queue() -> (
-    Server,
-    Arc<FakePtyBackend>,
-    ClientId,
-    mpsc::Receiver<Delivery>,
-) {
+fn build_server_with_mouse_event_queue() -> (Server, Arc<FakePtyBackend>, ClientId, DeliveryReceiver)
+{
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
-    let (mouse_event_queue, _) = server.subscribe(client_id);
+    let (mouse_event_queue, _) = server.subscribe(client_id, 60);
     (server, fake_pty_backend, client_id, mouse_event_queue)
 }
 
 /// Every mouse answer waiting on `mouse_event_queue`, in order, as its round id
 /// and its list. Render frames and other events are left out.
-fn list_mouse_answers(
-    mouse_event_queue: &mpsc::Receiver<Delivery>,
-) -> Vec<(u64, Vec<MouseAnswer>)> {
+fn list_mouse_answers(mouse_event_queue: &DeliveryReceiver) -> Vec<(u64, Vec<MouseAnswer>)> {
     mouse_event_queue
         .try_iter()
         .filter_map(|delivery| match delivery {
@@ -2909,7 +2909,7 @@ fn a_client_with_no_subscription_is_answered_nothing() {
     let pane_id = get_only_pane_id(&server);
     feed_pane_scrollback(&mut server, pane_id, 40);
     // Another client's queue, which would catch an answer sent to the wrong one.
-    let (unrelated_event_queue, _) = server.subscribe(ClientId::new());
+    let (unrelated_event_queue, _) = server.subscribe(ClientId::new(), 60);
 
     server.run_client_mouse(
         client_id,
@@ -3538,7 +3538,7 @@ fn a_pinned_floating_pane_drawn_pulled_in_shrinks_only_as_far_as_its_right_borde
         })),
         None,
     );
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     let render_snapshot = server.build_snapshot(client_id).expect("render snapshot");
     // Screen row 11 crosses the pane, drawn on pane-area rows 5 to 16.
     let border_row = 11;
@@ -3672,7 +3672,7 @@ fn a_handle_drag_moves_only_the_dragging_viewers_view_of_the_floating_pane() {
         false,
     );
     let bob_client_id = attach_second_client(&mut server, alice_client_id, None);
-    let mut alice_viewer = build_viewer(&mut server, alice_client_id);
+    let mut alice_viewer = build_viewer(alice_client_id);
     let bob_frame_before_the_drag = server.build_snapshot(bob_client_id).expect("bob's frame");
 
     // The grab handle sits on screen row 6, columns 12 and 13.
@@ -3951,6 +3951,7 @@ fn a_token_that_takes_a_client_over_releases_the_button_that_client_held() {
             None,
             SystemTime::UNIX_EPOCH,
             true,
+            60,
         )
         .expect("the first dial attaches");
     forward_mouse_at(
@@ -3971,6 +3972,7 @@ fn a_token_that_takes_a_client_over_releases_the_button_that_client_held() {
             None,
             SystemTime::UNIX_EPOCH,
             true,
+            60,
         )
         .expect("the second dial attaches");
 
@@ -4241,7 +4243,7 @@ fn a_click_in_a_press_only_mode_leaves_no_release_to_write_when_the_client_leave
     let pane_id = get_only_pane_id(&server);
     // X10 compatibility reports presses only.
     server.handle_pty_output(pane_id, b"\x1b[?9h\x1b[?1006h");
-    let mut viewer = build_viewer(&mut server, client_id);
+    let mut viewer = build_viewer(client_id);
     let (screen_point, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
     let mouse_gesture = |mouse_kind| MouseInput {
         mouse_kind,

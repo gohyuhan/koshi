@@ -1,6 +1,7 @@
 //! Server-level integration: the pieces the event loop wires together across
-//! the runtime submodules. A spawned pane's output reaches the inbox, the pane
-//! reports active, and the graceful quit teardown group-kills it.
+//! the runtime submodules. A spawned pane's output wakes the inbox and reaches
+//! the pane's grid in one turn, the pane reports active, and the graceful quit
+//! teardown group-kills it.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{mpsc, Arc};
@@ -21,7 +22,6 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 
 use koshi_renderer::snapshot::{CommittedRegions, MouseFrame, RenderSnapshot};
 
-use crate::runtime::event::RuntimeEvent;
 use crate::server::Server;
 
 /// The mouse frame `viewer` paints for `render_snapshot`: the compiled-in
@@ -38,37 +38,33 @@ pub(crate) fn build_mouse_frame(
 }
 
 /// The viewer half for `client_id` on an 80x24 viewport, on the stock
-/// settings, subscribed to `server`.
-pub(crate) fn build_viewer(server: &mut Server, client_id: ClientId) -> ViewerClient {
-    let (delivery_receiver, _) = server.subscribe(client_id);
+/// settings.
+pub(crate) fn build_viewer(client_id: ClientId) -> ViewerClient {
     ViewerClient::from_client_id_and_viewport_size(
         client_id,
         Size {
             column_count: 80,
             row_count: 24,
         },
-        delivery_receiver,
         TerminalCleanupGuard::new(),
     )
 }
 
 /// One mouse event at `event_time`, the way the running binary delivers it:
-/// the viewer takes its queued events, paints a frame and drops the gestures
-/// that frame ended, decides what the event means against that frame, and
-/// only what it decided reaches the session.
+/// the viewer applies the frame the session composes for it and drops the
+/// gestures that frame ended, decides what the event means against that
+/// frame, and only what it decided reaches the session.
 pub(crate) fn dispatch_mouse_input_at_time(
     server: &mut Server,
     viewer: &mut ViewerClient,
     mouse_input: MouseInput,
     event_time: Instant,
 ) {
-    viewer.apply_events();
-    let mouse_frame = build_mouse_frame(
-        server
-            .build_snapshot(viewer.get_client_id())
-            .expect("render snapshot"),
-        viewer,
-    );
+    let render_snapshot = server
+        .build_snapshot(viewer.get_client_id())
+        .expect("render snapshot");
+    viewer.apply_render_snapshot(&render_snapshot);
+    let mouse_frame = build_mouse_frame(render_snapshot, viewer);
     viewer.drop_gestures_the_frame_ended(&mouse_frame);
     let mouse_actions = viewer.handle_mouse(mouse_input, &mouse_frame, event_time);
     apply_mouse_actions(server, viewer, &mouse_frame, mouse_actions);
@@ -191,19 +187,26 @@ fn a_spawned_pane_forwards_output_reports_active_and_is_killed_on_graceful_shutd
     fake_pty_backend
         .push_output(pane_id, b"hi".to_vec())
         .expect("push");
-    match server
+    let readable_event = server
         .get_inbox_receiver()
         .recv_timeout(SERVER_TEST_DEADLINE_DURATION)
-    {
-        Ok(RuntimeEvent::PtyOutput {
-            pane_id: reported_pane_id,
-            output_bytes,
-        }) => {
-            assert_eq!(reported_pane_id, pane_id);
-            assert_eq!(output_bytes, b"hi");
-        }
-        received_event => panic!("expected PtyOutput, got {received_event:?}"),
-    }
+        .expect("the queue wakes the inbox");
+    assert!(server.handle_runtime_event(readable_event).is_continue());
+    assert_eq!(
+        server.serve_output_turn(),
+        None,
+        "one turn takes the whole chunk"
+    );
+    let active_grid = server.list_terminal_engines()[&pane_id]
+        .get_terminal_state()
+        .get_active_grid();
+    assert_eq!(
+        [0, 1].map(|column_index| active_grid
+            .get_cell(0, column_index)
+            .expect("cell in bounds")
+            .get_character()),
+        ['h', 'i']
+    );
 
     assert!(server.has_active_panes());
 

@@ -139,8 +139,7 @@ fn beta_feature_supports_function_shapes_and_gates_results() {
     assert_eq!(poll_future_once(run_asynchronous_task(1)), Ok(1));
 
     // The `&self` method re-checked where the two answers differ:
-    // `attachment_count` is
-    // 5 here, so it answers 0 only while it is blocked.
+    // `attachment_count` is 5 here, so it answers 0 only while it is blocked.
     koshi_beta::set_beta_features_allowed(false);
     assert_eq!(attachment_server.get_attachment_count(), 0);
 

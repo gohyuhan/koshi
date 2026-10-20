@@ -44,6 +44,19 @@ fn build_hello_request(request_id: u64) -> IpcRequest {
     }
 }
 
+/// The answer to the Hello request `request_id`, written out by hand: protocol
+/// [`PROTOCOL_VERSION`], this crate's version, and this process's image id.
+fn build_hello_answer(request_id: u64) -> IpcResponse {
+    IpcResponse {
+        request_id: Some(request_id),
+        answer_result: IpcResult::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            build_version: env!("CARGO_PKG_VERSION").to_string(),
+            process_image_id: ProcessImageId::get_own(),
+        },
+    }
+}
+
 // --- framing over in-memory buffers ---
 
 #[test]
@@ -466,6 +479,194 @@ fn waited_out_is_true_for_a_timeout_and_false_for_any_other_kind() {
     }
 }
 
+// --- binary frames ---
+
+#[test]
+fn a_binary_frame_is_the_length_with_bit_31_set_then_the_bytes() {
+    let mut frame_bytes: Vec<u8> = Vec::new();
+    write_binary_frame(&mut frame_bytes, &[0x01, 0x02, 0x03], &[]).expect("write");
+    assert_eq!(frame_bytes, [0x80, 0x00, 0x00, 0x03, 0x01, 0x02, 0x03]);
+}
+
+#[test]
+fn json_and_binary_frames_read_back_in_order_from_one_stream() {
+    let mut frame_bytes: Vec<u8> = Vec::new();
+    write_message(&mut frame_bytes, &"before").expect("write first");
+    write_binary_frame(&mut frame_bytes, &[0x00, 0xff], &[]).expect("write second");
+    write_binary_frame(&mut frame_bytes, &[], &[]).expect("write third");
+    write_message(&mut frame_bytes, &"after").expect("write fourth");
+
+    let mut reader = Cursor::new(frame_bytes);
+    assert_eq!(
+        read_message_or_binary::<String>(&mut reader).expect("read first"),
+        ReceivedFrame::Message("before".to_string())
+    );
+    assert_eq!(
+        read_message_or_binary::<String>(&mut reader).expect("read second"),
+        ReceivedFrame::Binary(vec![0x00, 0xff])
+    );
+    assert_eq!(
+        read_message_or_binary::<String>(&mut reader).expect("read third"),
+        ReceivedFrame::Binary(Vec::new())
+    );
+    assert_eq!(
+        read_message_or_binary::<String>(&mut reader).expect("read fourth"),
+        ReceivedFrame::Message("after".to_string())
+    );
+}
+
+#[test]
+fn a_json_reader_that_meets_a_binary_frame_stops_after_the_header() {
+    let mut frame_bytes: Vec<u8> = Vec::new();
+    write_binary_frame(&mut frame_bytes, b"\"text\"", &[]).expect("write");
+
+    let mut message_reader = Cursor::new(frame_bytes.clone());
+    let read_error = read_message::<String>(&mut message_reader).unwrap_err();
+    let IpcError::UnexpectedBinaryFrame = read_error else {
+        panic!("wrong error: {read_error}");
+    };
+    assert_eq!(message_reader.position(), 4);
+
+    let mut answer_reader = Cursor::new(frame_bytes);
+    let read_error = read_answer::<IpcResult>(&mut answer_reader).unwrap_err();
+    let IpcError::UnexpectedBinaryFrame = read_error else {
+        panic!("wrong error: {read_error}");
+    };
+    assert_eq!(answer_reader.position(), 4);
+}
+
+#[test]
+fn a_json_frame_that_does_not_parse_is_malformed_and_the_next_binary_frame_still_reads() {
+    let mut frame_bytes = build_frame_bytes("???");
+    write_binary_frame(&mut frame_bytes, &[0x07], &[]).expect("write");
+
+    let mut reader = Cursor::new(frame_bytes);
+    let read_error = read_message_or_binary::<String>(&mut reader).unwrap_err();
+    let IpcError::MalformedFrame { error_detail } = read_error else {
+        panic!("wrong error: {read_error}");
+    };
+    assert_eq!(error_detail, "expected value at line 1 column 1");
+    assert_eq!(reader.position(), 7);
+    assert_eq!(
+        read_message_or_binary::<String>(&mut reader).expect("read binary"),
+        ReceivedFrame::Binary(vec![0x07])
+    );
+}
+
+#[test]
+fn a_binary_frame_of_exactly_the_limit_reads() {
+    let payload_bytes = vec![0x5a; MAX_FRAME_BYTE_COUNT as usize];
+    let mut frame_bytes: Vec<u8> = Vec::new();
+    write_binary_frame(&mut frame_bytes, &payload_bytes, &[]).expect("write");
+    assert_eq!(frame_bytes[..4], [0x81, 0x00, 0x00, 0x00]);
+
+    let received_frame =
+        read_message_or_binary::<String>(&mut Cursor::new(frame_bytes)).expect("read");
+    assert_eq!(received_frame, ReceivedFrame::Binary(payload_bytes));
+}
+
+#[test]
+fn a_binary_length_one_past_the_limit_is_refused_after_only_the_header_is_read() {
+    let mut frame_bytes = ((MAX_FRAME_BYTE_COUNT + 1) | BINARY_FRAME_FLAG)
+        .to_be_bytes()
+        .to_vec();
+    frame_bytes.extend_from_slice(b"payload that must never be read");
+    let mut reader = Cursor::new(frame_bytes);
+
+    let read_error = read_message_or_binary::<String>(&mut reader).unwrap_err();
+    let IpcError::FrameTooLarge {
+        frame_byte_count,
+        maximum_frame_byte_count,
+    } = read_error
+    else {
+        panic!("wrong error: {read_error}");
+    };
+    assert_eq!(frame_byte_count, u64::from(MAX_FRAME_BYTE_COUNT) + 1);
+    assert_eq!(maximum_frame_byte_count, MAX_FRAME_BYTE_COUNT);
+    assert_eq!(reader.position(), 4);
+}
+
+#[test]
+fn a_binary_payload_one_past_the_limit_is_refused_with_nothing_written() {
+    let payload_bytes = vec![0x5a; MAX_FRAME_BYTE_COUNT as usize + 1];
+    let mut frame_bytes: Vec<u8> = Vec::new();
+
+    let write_error = write_binary_frame(&mut frame_bytes, &payload_bytes, &[]).unwrap_err();
+    let IpcError::FrameTooLarge {
+        frame_byte_count,
+        maximum_frame_byte_count,
+    } = write_error
+    else {
+        panic!("wrong error: {write_error}");
+    };
+    assert_eq!(frame_byte_count, u64::from(MAX_FRAME_BYTE_COUNT) + 1);
+    assert_eq!(maximum_frame_byte_count, MAX_FRAME_BYTE_COUNT);
+    assert_eq!(frame_bytes, Vec::<u8>::new());
+}
+
+/// A writer that keeps the bytes of each `write` call apart, in call order.
+#[derive(Default)]
+struct WriteCallRecorder {
+    written_byte_calls: Vec<Vec<u8>>,
+}
+
+impl Write for WriteCallRecorder {
+    fn write(&mut self, written_bytes: &[u8]) -> io::Result<usize> {
+        self.written_byte_calls.push(written_bytes.to_vec());
+        Ok(written_bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_binary_frame_with_a_head_writes_the_prefix_and_head_then_the_body_and_reads_as_one_payload() {
+    let mut write_call_recorder = WriteCallRecorder::default();
+
+    let frame_byte_count =
+        write_binary_frame(&mut write_call_recorder, &[0x02, 0x07], &[0x0a, 0x0b, 0x0c])
+            .expect("write");
+
+    assert_eq!(frame_byte_count, 9);
+    assert_eq!(
+        write_call_recorder.written_byte_calls,
+        [
+            vec![0x80, 0x00, 0x00, 0x05, 0x02, 0x07],
+            vec![0x0a, 0x0b, 0x0c]
+        ]
+    );
+    let frame_bytes = write_call_recorder.written_byte_calls.concat();
+    assert_eq!(
+        read_message_or_binary::<String>(&mut Cursor::new(frame_bytes)).expect("read"),
+        ReceivedFrame::Binary(vec![0x02, 0x07, 0x0a, 0x0b, 0x0c])
+    );
+}
+
+#[test]
+fn a_head_and_body_one_past_the_limit_together_are_refused_with_nothing_written() {
+    let frame_body = vec![0x5a; MAX_FRAME_BYTE_COUNT as usize - 1];
+    let mut write_call_recorder = WriteCallRecorder::default();
+
+    let write_error =
+        write_binary_frame(&mut write_call_recorder, &[0x02, 0x07], &frame_body).unwrap_err();
+
+    let IpcError::FrameTooLarge {
+        frame_byte_count,
+        maximum_frame_byte_count,
+    } = write_error
+    else {
+        panic!("wrong error: {write_error}");
+    };
+    assert_eq!(frame_byte_count, u64::from(MAX_FRAME_BYTE_COUNT) + 1);
+    assert_eq!(maximum_frame_byte_count, MAX_FRAME_BYTE_COUNT);
+    assert_eq!(
+        write_call_recorder.written_byte_calls,
+        Vec::<Vec<u8>>::new()
+    );
+}
+
 // --- the frame shape on a stream that is not a local socket ---
 
 /// An in-memory stream half that records the last deadline and the last idle
@@ -505,6 +706,44 @@ impl Deadlined for RecordedStream {
     fn set_idle_timeout(&mut self, idle_timeout: Option<Duration>) {
         *self.idle_timeout.lock().expect("idle timeout") = idle_timeout;
     }
+}
+
+#[test]
+fn a_frame_writer_counts_every_byte_of_each_whole_frame_it_wrote() {
+    let written_bytes = Arc::new(Mutex::new(Vec::new()));
+    let (_reader, mut writer) = build_frame_halves(
+        Box::new(RecordedStream {
+            read_cursor: Cursor::new(Vec::new()),
+            written_bytes: Arc::new(Mutex::new(Vec::new())),
+            deadline: Arc::new(Mutex::new(None)),
+            idle_timeout: Arc::new(Mutex::new(None)),
+        }),
+        Box::new(RecordedStream {
+            read_cursor: Cursor::new(Vec::new()),
+            written_bytes: Arc::clone(&written_bytes),
+            deadline: Arc::new(Mutex::new(None)),
+            idle_timeout: Arc::new(Mutex::new(None)),
+        }),
+    );
+    assert_eq!(writer.get_written_byte_count(), 0);
+
+    writer.send(&"hi").expect("send the JSON frame");
+    writer
+        .send_binary(&[1, 2, 3])
+        .expect("send the binary frame");
+    writer
+        .send_binary_with_head(&[4, 5], &[6])
+        .expect("send the binary frame with a head");
+    let oversized_payload = vec![0; MAX_FRAME_BYTE_COUNT as usize + 1];
+    writer
+        .send_binary(&oversized_payload)
+        .expect_err("a payload past the cap is refused");
+    writer
+        .send_binary_with_head(&[4], &oversized_payload[1..])
+        .expect_err("a head and body past the cap are refused");
+
+    assert_eq!(writer.get_written_byte_count(), 22);
+    assert_eq!(written_bytes.lock().expect("written_bytes").len(), 22);
 }
 
 #[test]
@@ -673,6 +912,8 @@ fn a_bound_pipe_grants_access_to_this_user_alone() {
     let pipe_handle =
         open_pipe_caller_end(&socket_address, CONNECT_WAIT_DURATION).expect("open the pipe");
     let mut pipe_security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `pipe_handle` is open, and each out pointer is a writable local
+    // or NULL.
     let lookup_status = unsafe {
         GetSecurityInfo(
             pipe_handle.as_raw_handle(),
@@ -688,6 +929,8 @@ fn a_bound_pipe_grants_access_to_this_user_alone() {
     assert_eq!(lookup_status, ERROR_SUCCESS);
     let _pipe_security_descriptor_allocation = LocalAllocation(pipe_security_descriptor);
     let access_selector = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    // SAFETY: `GetSecurityInfo` succeeded, so `pipe_security_descriptor` is a
+    // valid descriptor that `_pipe_security_descriptor_allocation` keeps alive.
     let pipe_access_text =
         unsafe { BorrowedSecurityDescriptor::from_ptr(pipe_security_descriptor) }
             .serialize(access_selector, U16CStr::to_string_lossy)
@@ -769,18 +1012,11 @@ fn request_and_response_cross_a_real_socket() {
     let socket_address = build_test_socket_address("roundtrip");
     let listener = Listener::bind(&socket_address).expect("bind");
 
-    let server = thread::spawn(move || {
+    let server_thread = thread::spawn(move || {
         let mut connection = listener.accept().expect("accept");
         let request: IpcRequest = connection.recv().expect("server recv");
         connection
-            .send(&IpcResponse {
-                request_id: Some(request.request_id),
-                answer_result: IpcResult::Hello {
-                    protocol_version: PROTOCOL_VERSION,
-                    build_version: env!("CARGO_PKG_VERSION").to_string(),
-                    process_image_id: ProcessImageId::get_own(),
-                },
-            })
+            .send(&build_hello_answer(request.request_id))
             .expect("server send");
         request
     });
@@ -792,18 +1028,11 @@ fn request_and_response_cross_a_real_socket() {
         .expect("client send");
     let response: IpcResponse = connection.recv().expect("client recv");
 
+    assert_eq!(response, build_hello_answer(7));
     assert_eq!(
-        response,
-        IpcResponse {
-            request_id: Some(7),
-            answer_result: IpcResult::Hello {
-                protocol_version: PROTOCOL_VERSION,
-                build_version: env!("CARGO_PKG_VERSION").to_string(),
-                process_image_id: ProcessImageId::get_own(),
-            },
-        }
+        server_thread.join().expect("server thread"),
+        hello_request_message
     );
-    assert_eq!(server.join().expect("server thread"), hello_request_message);
 }
 
 /// Connect to `listener` at `socket_address` through
@@ -811,7 +1040,7 @@ fn request_and_response_cross_a_real_socket() {
 /// assert the listener read that Hello and the caller read its answer,
 /// `Restarting` numbered 9.
 fn assert_own_server_connect_round_trip(listener: Listener, socket_address: &str) {
-    let server = thread::spawn(move || {
+    let server_thread = thread::spawn(move || {
         let mut connection = listener.accept().expect("accept");
         let request: IpcRequest = connection.recv().expect("server recv");
         connection
@@ -837,7 +1066,10 @@ fn assert_own_server_connect_round_trip(listener: Listener, socket_address: &str
             answer_result: IpcResult::Restarting,
         }
     );
-    assert_eq!(server.join().expect("server thread"), hello_request_message);
+    assert_eq!(
+        server_thread.join().expect("server thread"),
+        hello_request_message
+    );
 }
 
 #[test]
@@ -867,7 +1099,7 @@ fn a_write_the_peer_takes_no_byte_of_fails_once_its_idle_timeout_passes() {
     let socket_address = build_test_socket_address("write-idle-timeout");
     let listener = Listener::bind(&socket_address).expect("bind");
     let (test_done_sender, test_done_receiver) = std::sync::mpsc::channel::<()>();
-    let server = thread::spawn(move || {
+    let server_thread = thread::spawn(move || {
         let _connection = listener.accept().expect("accept");
         let _ = test_done_receiver.recv();
     });
@@ -880,13 +1112,13 @@ fn a_write_the_peer_takes_no_byte_of_fails_once_its_idle_timeout_passes() {
     let send_started_at = Instant::now();
     let send_result = writer.send(&"x".repeat(4 * 1024 * 1024));
 
-    assert!(send_started_at.elapsed() >= idle_timeout - MINIMUM_STEP_TIME_LEFT_DURATION);
+    assert!(send_started_at.elapsed() >= idle_timeout - MINIMUM_STEP_REMAINING_DURATION);
     let Err(IpcError::Transport { error_detail }) = &send_result else {
         panic!("a write the peer takes no byte of times out, got {send_result:?}");
     };
     assert_eq!(error_detail, "this step ran out of time");
     test_done_sender.send(()).expect("the server waits");
-    server.join().expect("server thread");
+    server_thread.join().expect("server thread");
 }
 
 /// On Windows the second caller is served only if the listener created the
@@ -896,19 +1128,12 @@ fn a_bind_serves_one_caller_after_another() {
     let socket_address = build_test_socket_address("one-after-another");
     let listener = Listener::bind(&socket_address).expect("bind");
 
-    let server = thread::spawn(move || {
+    let server_thread = thread::spawn(move || {
         for _ in 0..2 {
             let mut connection = listener.accept().expect("accept");
             let request: IpcRequest = connection.recv().expect("server recv");
             connection
-                .send(&IpcResponse {
-                    request_id: Some(request.request_id),
-                    answer_result: IpcResult::Hello {
-                        protocol_version: PROTOCOL_VERSION,
-                        build_version: env!("CARGO_PKG_VERSION").to_string(),
-                        process_image_id: ProcessImageId::get_own(),
-                    },
-                })
+                .send(&build_hello_answer(request.request_id))
                 .expect("server send");
         }
     });
@@ -919,19 +1144,9 @@ fn a_bind_serves_one_caller_after_another() {
             .send(&build_hello_request(request_id))
             .expect("client send");
         let response: IpcResponse = connection.recv().expect("client recv");
-        assert_eq!(
-            response,
-            IpcResponse {
-                request_id: Some(request_id),
-                answer_result: IpcResult::Hello {
-                    protocol_version: PROTOCOL_VERSION,
-                    build_version: env!("CARGO_PKG_VERSION").to_string(),
-                    process_image_id: ProcessImageId::get_own(),
-                },
-            }
-        );
+        assert_eq!(response, build_hello_answer(request_id));
     }
-    server.join().expect("server thread");
+    server_thread.join().expect("server thread");
 }
 
 #[test]
@@ -939,14 +1154,14 @@ fn a_caller_from_this_same_process_is_reported_as_the_same_user() {
     let socket_address = build_test_socket_address("peeruser");
     let listener = Listener::bind(&socket_address).expect("bind");
 
-    let server = thread::spawn(move || {
+    let server_thread = thread::spawn(move || {
         let connection = listener.accept().expect("accept");
         connection.is_peer_same_user().expect("peer creds")
     });
 
     // The caller stays connected until the server has read its credentials.
     let caller = Connection::connect(&socket_address).expect("connect");
-    assert!(server.join().expect("server thread"));
+    assert!(server_thread.join().expect("server thread"));
     drop(caller);
 }
 
@@ -955,7 +1170,7 @@ fn hello_and_request_sent_back_to_back_arrive_as_two_messages() {
     let socket_address = build_test_socket_address("backtoback");
     let listener = Listener::bind(&socket_address).expect("bind");
 
-    let server = thread::spawn(move || {
+    let server_thread = thread::spawn(move || {
         let mut connection = listener.accept().expect("accept");
         let first_received_request: IpcRequest = connection.recv().expect("server recv first");
         let second_received_request: IpcRequest = connection.recv().expect("server recv second");
@@ -971,7 +1186,39 @@ fn hello_and_request_sent_back_to_back_arrive_as_two_messages() {
     connection.send(&hello).expect("send hello");
     connection.send(&request).expect("send request");
 
-    assert_eq!(server.join().expect("server thread"), (hello, request));
+    assert_eq!(
+        server_thread.join().expect("server thread"),
+        (hello, request)
+    );
+}
+
+#[test]
+fn split_halves_carry_binary_frames_between_json_frames() {
+    let socket_address = build_test_socket_address("binary");
+    let listener = Listener::bind(&socket_address).expect("bind");
+
+    let server_thread = thread::spawn(move || {
+        let (_reader, mut writer) = listener.accept().expect("accept").split();
+        writer.send(&"first").expect("send first");
+        writer.send_binary(&[0x01, 0x02]).expect("send second");
+        writer.send(&"third").expect("send third");
+    });
+
+    let (mut reader, _writer) = Connection::connect(&socket_address)
+        .expect("connect")
+        .split();
+    let received_frames: Vec<ReceivedFrame<String>> = (0..3)
+        .map(|_| reader.recv_message_or_binary().expect("recv"))
+        .collect();
+    server_thread.join().expect("server thread");
+    assert_eq!(
+        received_frames,
+        vec![
+            ReceivedFrame::Message("first".to_string()),
+            ReceivedFrame::Binary(vec![0x01, 0x02]),
+            ReceivedFrame::Message("third".to_string()),
+        ]
+    );
 }
 
 #[test]
@@ -979,11 +1226,11 @@ fn split_halves_carry_frames_both_ways_from_two_threads() {
     let socket_address = build_test_socket_address("split");
     let listener = Listener::bind(&socket_address).expect("bind");
 
-    let server = thread::spawn(move || {
+    let server_thread = thread::spawn(move || {
         let (mut reader, mut writer) = listener.accept().expect("accept").split();
         // The reading half moves to its own thread and blocks there while the
         // writing half sends on this one.
-        let reading = thread::spawn(move || {
+        let reading_thread = thread::spawn(move || {
             let first_received_request: IpcRequest = reader.recv().expect("server recv first");
             let second_received_request: IpcRequest = reader.recv().expect("server recv second");
             vec![
@@ -993,23 +1240,16 @@ fn split_halves_carry_frames_both_ways_from_two_threads() {
         });
         for request_id in [11, 12] {
             writer
-                .send(&IpcResponse {
-                    request_id: Some(request_id),
-                    answer_result: IpcResult::Hello {
-                        protocol_version: PROTOCOL_VERSION,
-                        build_version: env!("CARGO_PKG_VERSION").to_string(),
-                        process_image_id: ProcessImageId::get_own(),
-                    },
-                })
+                .send(&build_hello_answer(request_id))
                 .expect("server send");
         }
-        reading.join().expect("server reading thread")
+        reading_thread.join().expect("server reading thread")
     });
 
     let (mut reader, mut writer) = Connection::connect(&socket_address)
         .expect("connect")
         .split();
-    let reading = thread::spawn(move || {
+    let reading_thread = thread::spawn(move || {
         let first_received_response: IpcResponse = reader.recv().expect("client recv first");
         let second_received_response: IpcResponse = reader.recv().expect("client recv second");
         vec![
@@ -1024,10 +1264,10 @@ fn split_halves_carry_frames_both_ways_from_two_threads() {
     }
 
     assert_eq!(
-        reading.join().expect("client reading thread"),
+        reading_thread.join().expect("client reading thread"),
         vec![Some(11), Some(12)]
     );
-    assert_eq!(server.join().expect("server thread"), vec![21, 22]);
+    assert_eq!(server_thread.join().expect("server thread"), vec![21, 22]);
 }
 
 /// A caller connected to a fresh listener at `test_case_tag`'s address, and
@@ -1102,14 +1342,7 @@ fn a_write_under_a_deadline_ends_at_the_deadline_while_the_peer_reads_nothing() 
 #[test]
 fn a_frame_the_peer_sent_before_hanging_up_is_read_under_a_deadline() {
     let (caller, mut answering_peer) = connect_caller_and_peer("answer-then-hang-up");
-    let sent_response = IpcResponse {
-        request_id: Some(7),
-        answer_result: IpcResult::Hello {
-            protocol_version: PROTOCOL_VERSION,
-            build_version: env!("CARGO_PKG_VERSION").to_string(),
-            process_image_id: ProcessImageId::get_own(),
-        },
-    };
+    let sent_response = build_hello_answer(7);
     answering_peer.send(&sent_response).expect("peer send");
     drop(answering_peer);
     let (mut reader, _writer) = caller.split();
@@ -1431,7 +1664,7 @@ fn one_listener_serves_two_callers_in_turn() {
     let socket_address = build_test_socket_address("twocallers");
     let listener = Listener::bind(&socket_address).expect("bind");
 
-    let server = thread::spawn(move || {
+    let server_thread = thread::spawn(move || {
         let mut request_ids = Vec::new();
         for _ in 0..2 {
             let mut connection = listener.accept().expect("accept");
@@ -1451,7 +1684,7 @@ fn one_listener_serves_two_callers_in_turn() {
             .expect("send");
     }
 
-    assert_eq!(server.join().expect("server thread"), vec![10, 20]);
+    assert_eq!(server_thread.join().expect("server thread"), vec![10, 20]);
 }
 
 #[test]
@@ -1461,24 +1694,24 @@ fn accept_until_shutdown_serves_each_caller_and_drops_the_wake_up_connection() {
     let is_shutting_down = Arc::new(AtomicBool::new(false));
     let (served_sender, served_receiver) = std::sync::mpsc::channel();
 
-    let server = {
+    let server_thread = {
         let is_shutting_down = Arc::clone(&is_shutting_down);
         thread::spawn(move || {
-            let mut served = 0;
+            let mut served_connection_count = 0;
             accept_until_shutdown(
                 &listener,
                 &is_shutting_down,
                 std::time::Duration::from_millis(1),
                 |accept_error| panic!("no accept fails: {accept_error}"),
                 |connection| {
-                    served += 1;
+                    served_connection_count += 1;
                     served_sender
                         .send(())
                         .expect("report the served connection");
                     drop(connection);
                 },
             );
-            served
+            served_connection_count
         })
     };
 
@@ -1489,7 +1722,7 @@ fn accept_until_shutdown_serves_each_caller_and_drops_the_wake_up_connection() {
     is_shutting_down.store(true, Ordering::SeqCst);
     let _wake_up = Connection::connect(&socket_address).expect("connect to wake the loop");
 
-    assert_eq!(server.join().expect("server thread"), 2);
+    assert_eq!(server_thread.join().expect("server thread"), 2);
 }
 
 #[test]
@@ -1497,12 +1730,12 @@ fn a_read_after_the_peer_hangs_up_reports_disconnected() {
     let socket_address = build_test_socket_address("peergone");
     let listener = Listener::bind(&socket_address).expect("bind");
 
-    let server = thread::spawn(move || {
+    let server_thread = thread::spawn(move || {
         drop(listener.accept().expect("accept"));
     });
 
     let mut caller = Connection::connect(&socket_address).expect("connect");
-    server.join().expect("server thread");
+    server_thread.join().expect("server thread");
 
     let receive_error = caller.recv::<IpcResponse>().unwrap_err();
     let IpcError::Disconnected = receive_error else {
@@ -1556,13 +1789,13 @@ fn a_closed_read_direction_reports_end_of_stream_on_the_next_read() {
     let listener = Listener::bind(&socket_address).expect("bind");
 
     let (sent_sender, sent_receiver) = std::sync::mpsc::channel();
-    let server = thread::spawn(move || {
+    let server_thread = thread::spawn(move || {
         let mut connection = listener.accept().expect("accept");
-        let closer = connection
+        let read_closer = connection
             .create_read_closer()
             .expect("take the read closer");
         sent_receiver.recv().expect("the caller sent its frame");
-        closer.close();
+        read_closer.close();
         // The caller's frame is on the socket by now, and the read still ends.
         connection.recv::<IpcRequest>()
     });
@@ -1571,7 +1804,7 @@ fn a_closed_read_direction_reports_end_of_stream_on_the_next_read() {
     caller.send(&build_hello_request(1)).expect("client send");
     sent_sender.send(()).expect("the closer is told");
 
-    let server_error = server.join().expect("server thread").unwrap_err();
+    let server_error = server_thread.join().expect("server thread").unwrap_err();
     let IpcError::Disconnected = server_error else {
         panic!("wrong error: {server_error}");
     };
@@ -1582,7 +1815,7 @@ fn a_second_read_closer_closes_the_same_read_direction() {
     let socket_address = build_test_socket_address("readclose-second");
     let listener = Listener::bind(&socket_address).expect("bind");
 
-    let server = thread::spawn(move || {
+    let server_thread = thread::spawn(move || {
         let mut connection = listener.accept().expect("accept");
         let _first_read_closer = connection
             .create_read_closer()
@@ -1596,7 +1829,7 @@ fn a_second_read_closer_closes_the_same_read_direction() {
 
     let _caller = Connection::connect(&socket_address).expect("connect");
 
-    let server_error = server.join().expect("server thread").unwrap_err();
+    let server_error = server_thread.join().expect("server thread").unwrap_err();
     let IpcError::Disconnected = server_error else {
         panic!("wrong error: {server_error}");
     };
@@ -1607,19 +1840,19 @@ fn closing_the_read_direction_twice_changes_nothing() {
     let socket_address = build_test_socket_address("readclose-twice");
     let listener = Listener::bind(&socket_address).expect("bind");
 
-    let server = thread::spawn(move || {
+    let server_thread = thread::spawn(move || {
         let mut connection = listener.accept().expect("accept");
-        let closer = connection
+        let read_closer = connection
             .create_read_closer()
             .expect("take the read closer");
-        closer.close();
-        closer.close();
+        read_closer.close();
+        read_closer.close();
         connection.recv::<IpcRequest>()
     });
 
     let _caller = Connection::connect(&socket_address).expect("connect");
 
-    let server_error = server.join().expect("server thread").unwrap_err();
+    let server_error = server_thread.join().expect("server thread").unwrap_err();
     let IpcError::Disconnected = server_error else {
         panic!("wrong error: {server_error}");
     };
@@ -1631,14 +1864,14 @@ fn a_read_closer_taken_before_the_split_closes_the_reading_half() {
     let listener = Listener::bind(&socket_address).expect("bind");
 
     let (sent_sender, sent_receiver) = std::sync::mpsc::channel();
-    let server = thread::spawn(move || {
+    let server_thread = thread::spawn(move || {
         let connection = listener.accept().expect("accept");
-        let closer = connection
+        let read_closer = connection
             .create_read_closer()
             .expect("take the read closer");
         let (mut reader, _writer) = connection.split();
         sent_receiver.recv().expect("the caller sent its frame");
-        closer.close();
+        read_closer.close();
         reader.recv::<IpcRequest>()
     });
 
@@ -1646,7 +1879,7 @@ fn a_read_closer_taken_before_the_split_closes_the_reading_half() {
     caller.send(&build_hello_request(2)).expect("client send");
     sent_sender.send(()).expect("the closer is told");
 
-    let server_error = server.join().expect("server thread").unwrap_err();
+    let server_error = server_thread.join().expect("server thread").unwrap_err();
     let IpcError::Disconnected = server_error else {
         panic!("wrong error: {server_error}");
     };
@@ -1656,17 +1889,10 @@ fn a_read_closer_taken_before_the_split_closes_the_reading_half() {
 fn a_closed_read_direction_leaves_the_writing_direction_open() {
     let socket_address = build_test_socket_address("readclose-write");
     let listener = Listener::bind(&socket_address).expect("bind");
-    let expected_response = IpcResponse {
-        request_id: Some(3),
-        answer_result: IpcResult::Hello {
-            protocol_version: PROTOCOL_VERSION,
-            build_version: env!("CARGO_PKG_VERSION").to_string(),
-            process_image_id: ProcessImageId::get_own(),
-        },
-    };
+    let expected_response = build_hello_answer(3);
     let response_to_send = expected_response.clone();
 
-    let server = thread::spawn(move || {
+    let server_thread = thread::spawn(move || {
         let mut connection = listener.accept().expect("accept");
         connection
             .create_read_closer()
@@ -1680,30 +1906,26 @@ fn a_closed_read_direction_leaves_the_writing_direction_open() {
         caller.recv::<IpcResponse>().expect("client recv"),
         expected_response
     );
-    server.join().expect("server thread");
+    server_thread.join().expect("server thread");
 }
 
-/// Unix only. A Windows named pipe has no half-close: a read already waiting
-/// on the pipe ends when its peer sends the next frame or hangs up.
-#[cfg(unix)]
 #[test]
 fn closing_the_read_direction_ends_a_read_the_reader_is_blocked_in() {
     use std::io::Write as _;
 
-    let socket_address = build_test_socket_address("readclose-blocked");
-    let listener = Listener::bind(&socket_address).expect("bind");
-
     // Half a length prefix: the reader waits inside the read for the rest of
     // the header, past the check it makes before reading.
-    let mut caller = std::os::unix::net::UnixStream::connect(&socket_address).expect("connect");
-    caller.write_all(&[0, 0]).expect("write half a header");
+    let (caller, mut connection) = connect_caller_and_peer("readclose-blocked");
+    let (caller_reader, mut caller_writer) = caller.split_raw();
+    caller_writer
+        .write_all(&[0, 0])
+        .expect("write half a header");
 
-    let mut connection = listener.accept().expect("accept");
-    let closer = connection
+    let read_closer = connection
         .create_read_closer()
         .expect("take the read closer");
     let (started_sender, started_receiver) = std::sync::mpsc::channel();
-    let reading = thread::spawn(move || {
+    let reading_thread = thread::spawn(move || {
         started_sender
             .send(())
             .expect("the reader reports it is starting");
@@ -1712,12 +1934,124 @@ fn closing_the_read_direction_ends_a_read_the_reader_is_blocked_in() {
 
     started_receiver.recv().expect("the reader started");
     thread::sleep(std::time::Duration::from_millis(50));
-    closer.close();
+    read_closer.close();
 
-    let read_error = reading.join().expect("reading thread").unwrap_err();
+    let read_error = reading_thread.join().expect("reading thread").unwrap_err();
     let IpcError::Disconnected = read_error else {
         panic!("wrong error: {read_error}");
     };
+    drop(caller_reader);
+    drop(caller_writer);
+}
+
+/// Split a connection whose caller wrote half a length prefix, give the
+/// reading half `idle_timeout`, close the read direction 50 ms after the
+/// reading thread starts, and hand back what that read gives.
+fn read_a_split_connection_closed_while_blocked(
+    test_case_tag: &str,
+    idle_timeout: Option<Duration>,
+) -> Result<IpcRequest, IpcError> {
+    use std::io::Write as _;
+
+    let (caller, connection) = connect_caller_and_peer(test_case_tag);
+    let (caller_reader, mut caller_writer) = caller.split_raw();
+    caller_writer
+        .write_all(&[0, 0])
+        .expect("write half a header");
+    let read_closer = connection
+        .create_read_closer()
+        .expect("take the read closer");
+    let (mut frame_reader, _frame_writer) = connection.split();
+    frame_reader.set_idle_timeout(idle_timeout);
+    let (started_sender, started_receiver) = std::sync::mpsc::channel();
+    let reading_thread = thread::spawn(move || {
+        started_sender
+            .send(())
+            .expect("the reader reports it is starting");
+        frame_reader.recv::<IpcRequest>()
+    });
+
+    started_receiver.recv().expect("the reader started");
+    thread::sleep(Duration::from_millis(50));
+    read_closer.close();
+
+    let read_outcome = reading_thread.join().expect("reading thread");
+    drop(caller_reader);
+    drop(caller_writer);
+    read_outcome
+}
+
+#[test]
+fn closing_the_read_direction_ends_a_split_read_the_reader_is_blocked_in() {
+    let read_error =
+        read_a_split_connection_closed_while_blocked("readclose-split-blocked", None).unwrap_err();
+    let IpcError::Disconnected = read_error else {
+        panic!("wrong error: {read_error}");
+    };
+}
+
+#[test]
+fn closing_the_read_direction_ends_a_split_read_under_an_idle_timeout() {
+    let read_error = read_a_split_connection_closed_while_blocked(
+        "readclose-split-idle",
+        Some(Duration::from_secs(60)),
+    )
+    .unwrap_err();
+    let IpcError::Disconnected = read_error else {
+        panic!("wrong error: {read_error}");
+    };
+}
+
+#[test]
+fn a_raw_read_after_the_read_direction_is_closed_gives_the_end_of_the_stream() {
+    use std::io::Read as _;
+
+    let (caller, connection) = connect_caller_and_peer("readclose-raw-after");
+    let read_closer = connection
+        .create_read_closer()
+        .expect("take the read closer");
+    let (mut raw_reader, _raw_writer) = connection.split_raw();
+    read_closer.close();
+
+    let mut read_buffer = [0u8; 4];
+    assert_eq!(
+        raw_reader
+            .read(&mut read_buffer)
+            .expect("the read ends with the end of the stream"),
+        0
+    );
+    drop(caller);
+}
+
+#[test]
+fn closing_the_read_direction_ends_a_raw_read_the_reader_is_blocked_in() {
+    use std::io::Read as _;
+
+    let (caller, connection) = connect_caller_and_peer("readclose-raw");
+    let read_closer = connection
+        .create_read_closer()
+        .expect("take the read closer");
+    let (mut raw_reader, _raw_writer) = connection.split_raw();
+    let (started_sender, started_receiver) = std::sync::mpsc::channel();
+    let reading_thread = thread::spawn(move || {
+        started_sender
+            .send(())
+            .expect("the reader reports it is starting");
+        let mut read_buffer = [0u8; 4];
+        raw_reader.read(&mut read_buffer)
+    });
+
+    started_receiver.recv().expect("the reader started");
+    thread::sleep(Duration::from_millis(50));
+    read_closer.close();
+
+    assert_eq!(
+        reading_thread
+            .join()
+            .expect("reading thread")
+            .expect("the read ends with the end of the stream"),
+        0
+    );
     drop(caller);
 }
 
@@ -1766,7 +2100,7 @@ fn raw_halves_carry_the_bytes_as_given_with_no_frame_around_them() {
     let socket_address = build_test_socket_address("rawsplit");
     let listener = Listener::bind(&socket_address).expect("bind");
 
-    let server = thread::spawn(move || {
+    let server_thread = thread::spawn(move || {
         let (mut reader, mut writer) = listener.accept().expect("accept").split_raw();
         let mut received_bytes = [0u8; 5];
         reader.read_exact(&mut received_bytes).expect("server read");
@@ -1784,5 +2118,5 @@ fn raw_halves_carry_the_bytes_as_given_with_no_frame_around_them() {
     reader.read_exact(&mut response_bytes).expect("client read");
 
     assert_eq!(&response_bytes, b"pong");
-    assert_eq!(&server.join().expect("server thread"), b"hello");
+    assert_eq!(&server_thread.join().expect("server thread"), b"hello");
 }

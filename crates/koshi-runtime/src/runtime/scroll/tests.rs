@@ -21,8 +21,11 @@ use koshi_session::session::state::{Session, Tab};
 use koshi_terminal::engine::TerminalEngine;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
+use crate::runtime::command::tests::attach_second_client;
 use crate::runtime::event::RuntimeEvent;
-use crate::runtime::render_schedule::FRAME_INTERVAL_DURATION;
+use crate::runtime::render_schedule::tests::{
+    get_frame_wait, subscribe_and_push_first_frame, DEFAULT_FRAME_INTERVAL_DURATION,
+};
 
 /// A runtime holding one session, one attached client, and one 1-row terminal
 /// engine for a pane — a 1-row screen so each fed newline pushes exactly one
@@ -431,23 +434,42 @@ fn erasing_the_scrollback_drops_a_highlight_that_lived_only_there() {
 }
 
 #[test]
-fn a_no_op_scroll_schedules_no_repaint() {
+fn a_no_op_scroll_marks_no_view_change() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
     runtime.handle_pty_output(pane_id, b"\n\n"); // two retained lines
     let now = Instant::now();
-    assert!(runtime.render_scheduler.claim_due_render(now)); // drain the output invalidation
+    let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, client_id, now);
 
     runtime.scroll_down(client_id, pane_id, 1); // already following live
     runtime.scroll_up(client_id, pane_id, 0); // zero-line move
     runtime.scroll_up(ClientId::new(), pane_id, 1); // unknown client
-                                                    // Nothing marked the frame stale: no wakeup is due.
-    assert_eq!(runtime.render_scheduler.compute_next_wakeup(now), None);
+    assert_eq!(get_frame_wait(&runtime, client_id, now), None);
 
-    runtime.scroll_up(client_id, pane_id, 1); // a real move marks the frame stale
+    runtime.scroll_up(client_id, pane_id, 1); // a real move marks the view changed
     assert_eq!(
-        runtime.render_scheduler.compute_next_wakeup(now),
-        Some(FRAME_INTERVAL_DURATION)
+        get_frame_wait(&runtime, client_id, now),
+        Some(DEFAULT_FRAME_INTERVAL_DURATION)
     );
+}
+
+#[test]
+fn a_scroll_marks_the_view_of_the_scrolling_client_and_of_no_other() {
+    let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
+    let other_client_id = attach_second_client(&mut runtime, client_id, None);
+    runtime.handle_pty_output(pane_id, b"\n\n");
+    let now = Instant::now();
+    let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, client_id, now);
+    let _other_delivery_receiver =
+        subscribe_and_push_first_frame(&mut runtime, other_client_id, now);
+
+    runtime.scroll_up(client_id, pane_id, 1);
+    runtime.scroll_down(client_id, pane_id, 1);
+
+    assert_eq!(
+        get_frame_wait(&runtime, client_id, now),
+        Some(DEFAULT_FRAME_INTERVAL_DURATION)
+    );
+    assert_eq!(get_frame_wait(&runtime, other_client_id, now), None);
 }
 
 #[test]
@@ -455,7 +477,7 @@ fn scrolling_a_pane_with_no_terminal_moves_nothing() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
     runtime.handle_pty_output(pane_id, b"\n\n");
     let now = Instant::now();
-    assert!(runtime.render_scheduler.claim_due_render(now)); // drain the output invalidation
+    let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, client_id, now);
 
     let engineless_pane_id = PaneId::new(); // never had a terminal engine
     runtime.scroll_up(client_id, engineless_pane_id, 3);
@@ -466,7 +488,7 @@ fn scrolling_a_pane_with_no_terminal_moves_nothing() {
         0
     );
     assert!(!is_view_held(&runtime, client_id, engineless_pane_id));
-    assert_eq!(runtime.render_scheduler.compute_next_wakeup(now), None);
+    assert_eq!(get_frame_wait(&runtime, client_id, now), None);
 }
 
 #[test]
@@ -475,13 +497,13 @@ fn scrolling_down_as_an_unknown_client_moves_nothing() {
     runtime.handle_pty_output(pane_id, b"\n\n\n");
     runtime.scroll_up(client_id, pane_id, 2);
     let now = Instant::now();
-    assert!(runtime.render_scheduler.claim_due_render(now));
+    let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, client_id, now);
 
     runtime.scroll_down(ClientId::new(), pane_id, 1);
     runtime.scroll_to_bottom(ClientId::new(), pane_id);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 2); // the attached client is untouched
     assert!(is_view_held(&runtime, client_id, pane_id));
-    assert_eq!(runtime.render_scheduler.compute_next_wakeup(now), None);
+    assert_eq!(get_frame_wait(&runtime, client_id, now), None);
 }
 
 #[test]
@@ -490,49 +512,48 @@ fn scrolling_by_zero_lines_leaves_a_scrolled_view_where_it_is() {
     runtime.handle_pty_output(pane_id, b"\n\n\n");
     runtime.scroll_up(client_id, pane_id, 2);
     let now = Instant::now();
-    assert!(runtime.render_scheduler.claim_due_render(now));
+    let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, client_id, now);
 
     runtime.scroll_up(client_id, pane_id, 0);
     runtime.scroll_down(client_id, pane_id, 0);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 2);
     assert!(is_view_held(&runtime, client_id, pane_id));
-    assert_eq!(runtime.render_scheduler.compute_next_wakeup(now), None);
+    assert_eq!(get_frame_wait(&runtime, client_id, now), None);
 }
 
 #[test]
 fn scroll_up_by_the_maximum_with_no_history_stays_at_the_newest_line() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
     let now = Instant::now();
+    let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, client_id, now);
 
     runtime.scroll_up(client_id, pane_id, usize::MAX); // nothing has scrolled off the screen yet
     assert_eq!(get_retained_line_count(&runtime, pane_id), 0);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 0);
     assert!(!is_view_held(&runtime, client_id, pane_id));
-    assert_eq!(runtime.render_scheduler.compute_next_wakeup(now), None);
+    assert_eq!(get_frame_wait(&runtime, client_id, now), None);
 }
 
 #[test]
-fn scrolling_to_the_bottom_twice_schedules_one_repaint() {
+fn scrolling_to_the_bottom_twice_gives_one_frame() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
     runtime.handle_pty_output(pane_id, b"\n\n\n");
     runtime.scroll_up(client_id, pane_id, 2);
     let now = Instant::now();
-    assert!(runtime.render_scheduler.claim_due_render(now));
+    let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, client_id, now);
 
     runtime.scroll_to_bottom(client_id, pane_id);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 0);
     assert_eq!(
-        runtime.render_scheduler.compute_next_wakeup(now),
-        Some(FRAME_INTERVAL_DURATION)
+        get_frame_wait(&runtime, client_id, now),
+        Some(DEFAULT_FRAME_INTERVAL_DURATION)
     );
-    let painted_at = now + FRAME_INTERVAL_DURATION;
-    assert!(runtime.render_scheduler.claim_due_render(painted_at));
+    let painted_at = now + DEFAULT_FRAME_INTERVAL_DURATION;
+    runtime.push_frames(painted_at);
+    assert_eq!(get_frame_wait(&runtime, client_id, painted_at), None);
 
     runtime.scroll_to_bottom(client_id, pane_id); // already at the newest line
-    assert_eq!(
-        runtime.render_scheduler.compute_next_wakeup(painted_at),
-        None
-    );
+    assert_eq!(get_frame_wait(&runtime, client_id, painted_at), None);
 }
 
 #[test]

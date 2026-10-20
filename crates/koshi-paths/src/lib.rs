@@ -2,7 +2,7 @@
 //! runtime files.
 //!
 //! The resolvers use platform conventions and return per-user paths, except
-//! [`resolve_shared_sessions_directory`], which returns a machine-wide path on Linux and macOS
+//! `resolve_shared_sessions_directory`, which returns a machine-wide path on Linux and macOS
 //! and does not exist on Windows. `KOSHI_RUNTIME_DIR`
 //! is the only `KOSHI_*` variable that changes a path; it names [`resolve_runtime_directory`]
 //! when it holds an absolute path. Other `KOSHI_*` variables are ignored:
@@ -13,7 +13,7 @@
 //! | [`resolve_data_directory`] | `~/.local/share/koshi` | `~/Library/Application Support/koshi` | `%APPDATA%\koshi\data` |
 //! | [`resolve_state_directory`] | `~/.local/state/koshi` | `~/Library/Application Support/koshi` | `%LOCALAPPDATA%\koshi\data` |
 //! | [`resolve_runtime_directory`] | `/tmp/koshi-<uid>` | `/tmp/koshi-<uid>` | `<data_directory>\run` |
-//! | [`resolve_shared_sessions_directory`] | `/tmp/koshi` | `/tmp/koshi` | none |
+//! | `resolve_shared_sessions_directory` | `/tmp/koshi` | `/tmp/koshi` | none |
 //! | [`resolve_previous_release_runtime_directories`] | `$XDG_RUNTIME_DIR/koshi` or `/run/user/<uid>/koshi`, `~/.local/share/koshi/run` | `~/Library/Application Support/koshi/run` | `%APPDATA%\koshi\data\run` |
 //!
 //! The [`directories`] crate resolves [`resolve_config_directory`], [`resolve_data_directory`], and
@@ -31,7 +31,7 @@
 //!
 //! Resolvers do not inspect the filesystem or create directories. Startup uses
 //! [`ensure_private_directory`] to create the directories it needs, and on Linux and macOS
-//! [`ensure_shared_base`] and [`ensure_shared_user_directory`].
+//! `ensure_shared_base` and `ensure_shared_user_directory`.
 
 use std::io;
 use std::path::{Path, PathBuf};

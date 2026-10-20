@@ -15,20 +15,20 @@ use std::time::{Duration, Instant};
 use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::cursor::SetCursorStyle;
-use ratatui::crossterm::execute;
+use ratatui::crossterm::queue;
 use ratatui::crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTitle};
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::Modifier;
 use ratatui::widgets::Widget;
-use ratatui::Terminal;
 
 use crate::attach::ViewerPaint;
+use crate::input::InputReadClock;
 use crate::{is_focused_pane_floating, Client};
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
+use koshi_core::constant::limit_viewport_size;
 use koshi_core::geometry::{PixelCellSize, Point, Rect as CoreRect, Size};
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_core::key::KeySequence;
-use koshi_core::mouse::MouseTracking;
 use koshi_input::host::{Event, WindowSize};
 use koshi_input::keyboard::decode_key_event;
 use koshi_input::mouse::decode_mouse;
@@ -46,14 +46,14 @@ use koshi_layout::placement::{place_pane_across_tabs, place_pane_within_tab, Pla
 use koshi_layout::solver::solve_layout_with_mode;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{
-    CommittedRegions, CursorSnapshot, CursorStyle, KeymapHints, PanePlacementPresentation,
-    PaneSlot, PaneSnapshot, PlacementPaneSnapshot, PlacementSnapshot, PlacementTabSnapshot,
-    RenderSnapshot, ScrollbackMetadata, TabSnapshot, ViewerChrome,
+    CommittedRegions, CursorStyle, KeymapHints, PanePlacementPresentation, PaneSlot, PaneSnapshot,
+    PlacementPaneSnapshot, PlacementSnapshot, PlacementTabSnapshot, RenderSnapshot, TabSnapshot,
+    ViewerChrome,
 };
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{
     build_image_cell_snapshot, build_image_paints, get_cursor_position, get_cursor_style,
-    render_frame, ImagePlacementKey, ImageRenderMode,
+    list_changed_screen_rows, render_frame, DrawnRows, ImagePlacementKey, ImageRenderMode,
 };
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_sixel::{PRIMARY_DEVICE_ATTRIBUTES_QUERY, SIXEL_GEOMETRY_QUERY, SIXEL_PALETTE_QUERY};
@@ -63,17 +63,20 @@ use self::platform::{PlatformWaker, TerminalDevice};
 use self::reader::InputReader;
 
 mod image_output;
+mod paint_driver;
 mod platform;
 mod reader;
 
-pub(crate) use self::image_output::{ImageCompatibility, ImageOutputKind, ImageOutputState};
+pub(crate) use self::image_output::{ImageOutputKind, ImageOutputState};
+pub(crate) use self::paint_driver::{PaintDriver, TerminalOutput, TerminalOutputBackend};
 
 const TERMINAL_QUERY_TIMEOUT_DURATION: Duration = Duration::from_millis(300);
 
 /// Request a terminal's current cell dimensions in pixels.
 const CELL_SIZE_QUERY_BYTES: &[u8] = b"\x1b[16t";
 
-/// Enter the alternate screen and enable keyboard, mouse, and paste reports.
+/// Enter the alternate screen and enable keyboard, mouse, paste, and focus
+/// reports.
 ///
 /// The keyboard push asks for flags `1|2|4|8|16`: disambiguate escape codes,
 /// report event types, report alternate keys, report all keys as escape codes,
@@ -85,8 +88,11 @@ const CELL_SIZE_QUERY_BYTES: &[u8] = b"\x1b[16t";
 ///
 /// A terminal that ignores the push keeps reporting legacy bytes, and every
 /// key reaches a pane as those legacy bytes.
+///
+/// Focus reports (`CSI ? 1004 h`) make the terminal send `CSI I` when its
+/// window gains focus and `CSI O` when it loses focus.
 const APPLICATION_MODE_SETUP_BYTES: &[u8] =
-    b"\x1b[?1049h\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h";
+    b"\x1b[?1049h\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h";
 
 const SHIFT_MOUSE_CAPTURE_REQUEST_BYTES: &[u8] = b"\x1b[>1s";
 const SHIFT_MOUSE_CAPTURE_RELEASE_BYTES: &[u8] = b"\x1b[>0s";
@@ -95,10 +101,10 @@ const SHIFT_MOUSE_CAPTURE_RELEASE_BYTES: &[u8] = b"\x1b[>0s";
 /// `ESC [ ? flags u`.
 const KEYBOARD_ENHANCEMENT_QUERY_BYTES: &[u8] = b"\x1b[?u";
 
-/// Reset Shift mouse capture, disable paste, mouse, keyboard, and alternate-screen
-/// modes, and restore cursor state.
+/// Reset Shift mouse capture, disable focus, paste, mouse, keyboard, and
+/// alternate-screen modes, and restore cursor state.
 const APPLICATION_MODE_CLEANUP_BYTES: &[u8] =
-    b"\x1b[>0s\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q";
+    b"\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q";
 
 /// Paints a render snapshot into ratatui's frame buffer with
 /// [`koshi_renderer::render_frame`]. With a placement
@@ -119,8 +125,9 @@ pub(crate) struct SnapshotWidget<'a> {
     pub(crate) committed_regions: &'a CommittedRegions,
     /// The image mode selected for this outer terminal.
     pub(crate) image_mode: ImageRenderMode,
-    /// The image placements whose native bytes are ready for this frame.
-    pub(crate) available_image_placement_keys: Option<&'a [ImagePlacementKey]>,
+    /// The image placements that show the unavailable-image text in native
+    /// image mode.
+    pub(crate) unavailable_image_placement_keys: &'a [ImagePlacementKey],
     /// The accepted read-only placement snapshot.
     pub(crate) placement_snapshot: Option<&'a PlacementSnapshot>,
     /// The placement snapshot at the current animation time.
@@ -129,6 +136,8 @@ pub(crate) struct SnapshotWidget<'a> {
     pub(crate) placement_target: Option<&'a PanePlacementTarget>,
     /// The whole-pane visual explanation for the viewer's placement.
     pub(crate) placement_presentation: Option<&'a PanePlacementPresentation>,
+    /// The rows of the buffer the frame draws.
+    pub(crate) drawn_rows: DrawnRows<'a>,
 }
 
 impl Widget for SnapshotWidget<'_> {
@@ -141,10 +150,11 @@ impl Widget for SnapshotWidget<'_> {
             self.pending_key_sequence,
             self.viewer_chrome,
             self.image_mode,
-            self.available_image_placement_keys,
+            self.unavailable_image_placement_keys,
             self.placement_presentation,
             self.placement_target,
             render_area,
+            self.drawn_rows,
             render_buffer,
         );
         if let Some(placement_display_snapshot) = self.placement_display_snapshot {
@@ -234,8 +244,7 @@ pub(crate) fn build_placement_render_snapshot(
         if !displayed_pane_snapshot_ids.insert(placement_pane_snapshot.pane_id) {
             continue;
         }
-        let mut pane_snapshot =
-            build_empty_placement_pane_snapshot(placement_pane_snapshot.pane_id);
+        let mut pane_snapshot = PaneSnapshot::from_empty_pane(placement_pane_snapshot.pane_id);
         pane_snapshot.terminal_grid_view = placement_pane_snapshot.terminal_grid_view.clone();
         pane_snapshot.image_placement_snapshots =
             placement_pane_snapshot.image_placement_snapshots.clone();
@@ -245,7 +254,7 @@ pub(crate) fn build_placement_render_snapshot(
         if !displayed_pane_snapshot_ids.insert(pane_slot.pane_id) {
             continue;
         }
-        displayed_pane_snapshots.push(build_empty_placement_pane_snapshot(pane_slot.pane_id));
+        displayed_pane_snapshots.push(PaneSnapshot::from_empty_pane(pane_slot.pane_id));
     }
     placement_render_snapshot.pane_snapshots = displayed_pane_snapshots;
     Some(placement_render_snapshot)
@@ -276,34 +285,6 @@ pub(crate) fn build_committed_placement_render_snapshot(
         .session_snapshot
         .active_tab_snapshot = animated_tab_snapshot;
     committed_placement_render_snapshot
-}
-
-/// Build empty frame metadata for a destination pane. `pane-123` gets no title,
-/// grid, cursor, selection, or images when its frame data is unavailable.
-fn build_empty_placement_pane_snapshot(pane_id: PaneId) -> PaneSnapshot {
-    PaneSnapshot {
-        pane_id,
-        pane_title: None,
-        cursor_snapshot: CursorSnapshot {
-            row_index: 0,
-            column_index: 0,
-            is_visible: false,
-            is_blinking: false,
-            shape: None,
-        },
-        terminal_grid_view: None,
-        image_placement_snapshots: Vec::new(),
-        is_reverse_video: false,
-        mouse_tracking: MouseTracking::Off,
-        is_alternate_scroll_enabled: false,
-        is_on_alternate_screen: false,
-        view_top_row_index: 0,
-        selection_spans: None,
-        has_selection: false,
-        scrollback_metadata: ScrollbackMetadata {
-            retained_line_count: 0,
-        },
-    }
 }
 
 /// Draw the target border at the destination pane's original slot. If
@@ -381,12 +362,7 @@ fn apply_placement_target_outline_style(
 
 /// Return whether one screen cell lies on a rectangle's border.
 fn is_point_on_rect_border(column_index: u16, row_index: u16, pane_rect: Rect) -> bool {
-    pane_rect.width > 0
-        && pane_rect.height > 0
-        && column_index >= pane_rect.left()
-        && column_index < pane_rect.right()
-        && row_index >= pane_rect.top()
-        && row_index < pane_rect.bottom()
+    pane_rect.contains(Position::new(column_index, row_index))
         && (column_index == pane_rect.left()
             || column_index + 1 == pane_rect.right()
             || row_index == pane_rect.top()
@@ -964,10 +940,12 @@ pub(crate) enum GraphicsSupport {
 /// A failure while painting a frame or emitting its native image data.
 #[derive(Debug)]
 pub(crate) enum PaintError<BackendError> {
-    /// The ratatui backend did not accept the frame buffer.
+    /// The paint driver's backend did not accept the frame's cells or cursor.
     Backend(BackendError),
-    /// The native image writer did not accept its output.
+    /// The native image output could not build or reset the frame's images.
     Image(io::Error),
+    /// The terminal output did not take the frame's bytes.
+    Output(io::Error),
 }
 
 impl GraphicsSupport {
@@ -1272,10 +1250,14 @@ impl TerminalOwner {
     }
 
     /// Enable terminal modes and start input delivery after Attach succeeds.
+    ///
+    /// The input thread sends each event it reads on `terminal_input_sender`,
+    /// stamped on `input_read_clock`.
     pub(crate) fn activate_terminal(
         &mut self,
-        runtime_event_sender: mpsc::SyncSender<RuntimeEvent>,
+        terminal_input_sender: mpsc::SyncSender<TerminalInput>,
         client_id: ClientId,
+        input_read_clock: Arc<InputReadClock>,
         should_read_input: bool,
     ) -> Result<(), String> {
         if self.is_activated {
@@ -1310,7 +1292,7 @@ impl TerminalOwner {
             .take()
             .ok_or_else(|| "terminal input reader is unavailable".to_string())?;
         let is_shutdown_requested = Arc::clone(&self.is_shutdown_requested);
-        let panic_event_sender = runtime_event_sender.clone();
+        let panic_input_sender = terminal_input_sender.clone();
         self.input_thread = Some(
             thread::Builder::new()
                 .name("koshi-terminal-input".to_string())
@@ -1318,13 +1300,17 @@ impl TerminalOwner {
                     let input_thread_result = catch_unwind(AssertUnwindSafe(|| {
                         run_terminal_input(
                             &mut input_reader,
-                            &runtime_event_sender,
+                            &terminal_input_sender,
                             client_id,
+                            &input_read_clock,
                             &is_shutdown_requested,
                         );
                     }));
                     if input_thread_result.is_err() {
-                        let _ = panic_event_sender.send(RuntimeEvent::Quit);
+                        let _ = panic_input_sender.send(TerminalInput {
+                            runtime_event: RuntimeEvent::Quit,
+                            read_at: input_read_clock.stamp_input_read(Instant::now()),
+                        });
                     }
                 })
                 .map_err(|thread_spawn_error| {
@@ -1498,7 +1484,11 @@ fn claim_image_cleanup(is_image_cleanup_claimed: &AtomicBool) -> bool {
     !is_image_cleanup_claimed.swap(true, Ordering::AcqRel)
 }
 
-/// Gather every capability reply available before one shared deadline.
+/// Gather the capability replies up to the reply to the primary device
+/// attributes query, which the probe asks last, or up to one shared deadline
+/// when that reply never comes. Example: a terminal that answers the Kitty
+/// query and then the device attributes query ends the probe at its second
+/// reply.
 fn probe_terminal<EventSourceType: reader::EventSource, OutputWriter: Write>(
     writer: &mut OutputWriter,
     reader: &mut InputReader<EventSourceType>,
@@ -1512,8 +1502,9 @@ fn probe_terminal<EventSourceType: reader::EventSource, OutputWriter: Write>(
             break;
         }
         let probe_event = reader.read_matching_event(is_probe_event)?;
+        let is_last_probe_reply = matches!(probe_event, Event::PrimaryDeviceAttributes(_));
         probe_replies.record_probe_event(probe_event);
-        if Instant::now() >= probe_deadline {
+        if is_last_probe_reply || Instant::now() >= probe_deadline {
             break;
         }
     }
@@ -1632,20 +1623,25 @@ impl ProbeReplies {
 fn write_terminal_probe_queries<W: Write>(writer: &mut W) -> io::Result<()> {
     write_kitty_support_query(writer).map_err(convert_kitty_output_error)?;
     writer.write_all(ITERM_CAPABILITIES_QUERY)?;
-    writer.write_all(PRIMARY_DEVICE_ATTRIBUTES_QUERY)?;
     writer.write_all(SIXEL_PALETTE_QUERY)?;
     writer.write_all(SIXEL_GEOMETRY_QUERY)?;
     writer.write_all(CELL_SIZE_QUERY_BYTES)?;
+    writer.write_all(PRIMARY_DEVICE_ATTRIBUTES_QUERY)?;
     writer.flush()
 }
 
 /// Return whether an event belongs to the capability probe.
 fn is_probe_event(probe_event: &Event) -> bool {
-    matches!(probe_event, Event::KittyGraphicsReply(kitty_reply) if kitty_reply.image_id == KITTY_QUERY_IMAGE_ID)
-        || matches!(probe_event, Event::TerminalFeatures(_))
-        || matches!(probe_event, Event::PrimaryDeviceAttributes(_))
-        || matches!(probe_event, Event::SixelGraphicsAttributeReply(_))
-        || matches!(probe_event, Event::CellSize(_))
+    matches!(
+        probe_event,
+        Event::KittyGraphicsReply(kitty_reply) if kitty_reply.image_id == KITTY_QUERY_IMAGE_ID
+    ) || matches!(
+        probe_event,
+        Event::TerminalFeatures(_)
+            | Event::PrimaryDeviceAttributes(_)
+            | Event::SixelGraphicsAttributeReply(_)
+            | Event::CellSize(_)
+    )
 }
 
 /// Request the terminal modes used by the attached viewer.
@@ -1745,11 +1741,14 @@ fn write_fallback_terminal_cleanup(
     );
 }
 
-/// Read semantic terminal events until shutdown or input failure.
-fn run_terminal_input(
-    input_reader: &mut InputReader,
-    runtime_event_sender: &mpsc::SyncSender<RuntimeEvent>,
+/// Read semantic terminal events until shutdown or input failure, and send
+/// each one on `terminal_input_sender` with the stamp `input_read_clock` gives
+/// it as it is read.
+fn run_terminal_input<EventSourceType: reader::EventSource>(
+    input_reader: &mut InputReader<EventSourceType>,
+    terminal_input_sender: &mpsc::SyncSender<TerminalInput>,
     client_id: ClientId,
+    input_read_clock: &InputReadClock,
     is_shutdown_requested: &AtomicBool,
 ) {
     while !is_shutdown_requested.load(Ordering::Acquire) {
@@ -1771,11 +1770,30 @@ fn run_terminal_input(
         };
         if let Some(runtime_event) = runtime_event {
             let is_quit_event = matches!(runtime_event, RuntimeEvent::Quit);
-            if runtime_event_sender.send(runtime_event).is_err() || is_quit_event {
+            let terminal_input = TerminalInput {
+                runtime_event,
+                read_at: input_read_clock.stamp_input_read(Instant::now()),
+            };
+            if terminal_input_sender.send(terminal_input).is_err() || is_quit_event {
                 break;
             }
         }
     }
+}
+
+/// One event from this terminal and the instant it was read: an event its
+/// input thread read, or this terminal hanging up as a termination signal or a
+/// console close reports it.
+#[derive(Debug)]
+pub(crate) struct TerminalInput {
+    /// The event: a key, a mouse event, a paste, a resize, a cell size reply,
+    /// a focus loss, or this terminal hanging up.
+    pub(crate) runtime_event: RuntimeEvent,
+    /// When the input thread read the event, as
+    /// [`InputReadClock::stamp_input_read`] stamped it, or when a hangup
+    /// report arrived. The attach loop runs every input timer due at this
+    /// instant before it handles the event, and ends at a hangup.
+    pub(crate) read_at: Instant,
 }
 
 /// Convert one host-terminal event into the runtime event the viewer consumes.
@@ -1840,6 +1858,28 @@ pub(crate) fn read_local_cell_size() -> Option<PixelCellSize> {
         .and_then(compute_pixel_cell_size)
 }
 
+/// `window_size` cut to at most
+/// [`MAX_VIEWPORT_CELL_COUNT`](koshi_core::constant::MAX_VIEWPORT_CELL_COUNT) cells, as
+/// [`limit_viewport_size`] cuts it. A cut size carries no pixel dimensions.
+/// `65535x65535` cells at `4096x4096` pixels → `65535x32` cells and no
+/// pixels; `200x50` cells keep their pixels.
+pub(crate) fn limit_window_size(window_size: WindowSize) -> WindowSize {
+    let viewport_size = Size {
+        column_count: window_size.column_count,
+        row_count: window_size.row_count,
+    };
+    let limited_viewport_size = limit_viewport_size(viewport_size);
+    if limited_viewport_size == viewport_size {
+        return window_size;
+    }
+    WindowSize {
+        column_count: limited_viewport_size.column_count,
+        row_count: limited_viewport_size.row_count,
+        pixel_width: None,
+        pixel_height: None,
+    }
+}
+
 /// Derive one cell's pixel dimensions from a host window report only when the
 /// complete pixel dimensions divide evenly across the reported grid.
 fn compute_pixel_cell_size(window_size: WindowSize) -> Option<PixelCellSize> {
@@ -1862,10 +1902,9 @@ fn compute_pixel_cell_size(window_size: WindowSize) -> Option<PixelCellSize> {
 /// one step.
 ///
 /// `client_id` is the id this viewer's input events and commands carry.
-/// `viewport_size` is this terminal's size in cells. `frame_delivery_receiver`
-/// is the frame feed: the receiver a client is handed has no sender, and its
-/// frames arrive over the connection. `terminal_cleanup_guard` is the guard
-/// that restores the outer terminal.
+/// `viewport_size` is this terminal's size in cells. `terminal_cleanup_guard`
+/// is the guard that restores the outer terminal. `input_read_clock` is the
+/// clock this terminal's input thread stamps each input event on.
 ///
 /// `loaded_config.app_config_layer` and `loaded_config.theme_config_layer`
 /// fold into the viewer's settings and chrome colors and always apply.
@@ -1876,22 +1915,21 @@ fn compute_pixel_cell_size(window_size: WindowSize) -> Option<PixelCellSize> {
 pub(crate) fn build_client_with_loaded_config(
     client_id: ClientId,
     viewport_size: Size,
-    frame_delivery_receiver: mpsc::Receiver<koshi_renderer::snapshot::Delivery>,
     terminal_cleanup_guard: TerminalCleanupGuard,
     loaded_config: koshi_link::config::LoadedConfig,
+    input_read_clock: Arc<InputReadClock>,
 ) -> Client {
-    let mut viewer_client = Client::from_client_id_and_viewport_size(
-        client_id,
-        viewport_size,
-        frame_delivery_receiver,
-        terminal_cleanup_guard,
-    );
+    let mut viewer_client =
+        Client::from_client_id_and_viewport_size(client_id, viewport_size, terminal_cleanup_guard);
+    viewer_client.input_read_clock = input_read_clock;
     match viewer_client.load_startup_config(
         loaded_config.app_config_layer,
         loaded_config.theme_config_layer,
         loaded_config.keybindings_config_layer,
     ) {
-        Some(report) if report.get_verdict() != koshi_config::conflict::KeymapVerdict::Apply => {
+        Some(conflict_report)
+            if conflict_report.get_verdict() != koshi_config::conflict::KeymapVerdict::Apply =>
+        {
             tracing::warn!("keybinding.kdl was not applied; run `koshi keys conflicts` to see why");
         }
         Some(_) => tracing::info!("keybinding.kdl applied"),
@@ -1900,16 +1938,98 @@ pub(crate) fn build_client_with_loaded_config(
     viewer_client
 }
 
+/// The inputs one frame of [`paint_frame_with_writer`] draws its cells from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FrameInputs {
+    /// The frame in the pane layout shown to the user.
+    render_snapshot: RenderSnapshot,
+    /// The region solve the frame is drawn with.
+    committed_regions: CommittedRegions,
+    /// The colors of koshi's chrome.
+    theme: Theme,
+    /// The hint bar's data.
+    keymap_hints: KeymapHints,
+    /// The multi-chord sequence the viewer has open.
+    pending_key_sequence: Option<KeySequence>,
+    /// The hovered pane, the tab strip's position and the reconnect state.
+    viewer_chrome: ViewerChrome,
+    /// The image mode of the outer terminal.
+    image_mode: ImageRenderMode,
+    /// The image placements that show the unavailable-image text with native
+    /// image output.
+    unavailable_image_placement_keys: Vec<ImagePlacementKey>,
+    /// The frame's size.
+    terminal_size: Size,
+    /// Whether the frame draws a placement preview, outline or explanation.
+    has_placement_state: bool,
+}
+
+impl FrameInputs {
+    /// The rows in which the cells of a frame drawn from `next_frame_inputs`
+    /// can differ from those of a frame drawn from these inputs, as
+    /// [`list_changed_screen_rows`] gives them. `None` when any input other
+    /// than the render snapshot differs, when either frame draws a placement
+    /// state, or when the render snapshots differ in anything other than pane
+    /// rows.
+    fn list_changed_screen_rows(&self, next_frame_inputs: &FrameInputs) -> Option<Vec<u16>> {
+        let FrameInputs {
+            render_snapshot,
+            committed_regions,
+            theme,
+            keymap_hints,
+            pending_key_sequence,
+            viewer_chrome,
+            image_mode,
+            unavailable_image_placement_keys,
+            terminal_size,
+            has_placement_state,
+        } = next_frame_inputs;
+        if self.has_placement_state
+            || *has_placement_state
+            || self.committed_regions != *committed_regions
+            || self.theme != *theme
+            || self.keymap_hints != *keymap_hints
+            || self.pending_key_sequence != *pending_key_sequence
+            || self.viewer_chrome != *viewer_chrome
+            || self.image_mode != *image_mode
+            || self.unavailable_image_placement_keys != *unavailable_image_placement_keys
+            || self.terminal_size != *terminal_size
+        {
+            return None;
+        }
+        list_changed_screen_rows(
+            &self.render_snapshot,
+            render_snapshot,
+            committed_regions,
+            *viewer_chrome,
+            Rect::new(0, 0, terminal_size.column_count, terminal_size.row_count),
+        )
+    }
+}
+
 /// Draw `displayed_snapshot`, the frame in the pane layout shown to the user,
-/// into `terminal`, keeping the outer terminal's window title
-/// and cursor style in step with the focused pane.
+/// through `paint_driver`, keeping the outer terminal's window title and
+/// cursor style in step with the focused pane.
 ///
-/// The theme comes from `client`, and so does the hint bar, built for the
-/// client's active base or placement input mode and
-/// `frame_paint.is_mouse_selection_enabled`. The hovered pane, the tab
+/// The frame is drawn at `client`'s viewport size, the size of the last resize
+/// event: no terminal size is read. The theme comes from `client`, and so does
+/// the hint bar, built for the client's active base or placement input mode
+/// and `frame_paint.is_mouse_selection_enabled`. The hovered pane, the tab
 /// strip's position and the open key sequence come from `frame_paint`.
 /// `committed_regions` is the geometry shared by the painter and cursor
 /// placement for this frame.
+///
+/// Every byte of the frame goes to `writer`, and the backend of
+/// `paint_driver` writes into the same held bytes, in this order: the
+/// synchronized-update start and the image reset of a native image frame, the
+/// changed cells and the cursor, the window title, the cursor style, the
+/// native image bytes, and the synchronized-update end. One flush of `writer`
+/// at the end writes the frame out.
+///
+/// `shown_frame_inputs` holds the inputs of the last frame drawn. A frame
+/// whose inputs differ from them only in pane rows draws and compares the
+/// changed rows alone ([`PaintDriver::draw_frame`]). A drawn frame stores its
+/// own inputs there, and a failed frame stores `None`.
 ///
 /// `last_window_title` and `last_cursor_style` store the title and cursor style used to
 /// decide whether the next frame needs a control write. Both are read before
@@ -1918,48 +2038,25 @@ pub(crate) fn build_client_with_loaded_config(
 /// that [`get_cursor_style`] names no style stores `None` and writes no style
 /// command.
 ///
+/// With native image output, the frame's text never waits for an image
+/// encode. Each image shows the pixels [`ImageOutputState::prepare_frame`]
+/// picks for it, and the frame writes native image bytes only when those
+/// pixels differ from the ones the outer terminal shows. Example: a key typed
+/// into one pane while a Sixel image in another pane encodes draws at once,
+/// and the image shows its older pixels, or none, until its encode ends.
+///
 /// # Errors
 ///
-/// Returns a backend or native-image error when the frame cannot be fully
-/// painted. A failed title or cursor-style write is ignored.
+/// Returns a backend, output or native-image error when the frame cannot be
+/// fully painted. After an error that follows the first written byte, the
+/// shown screen is unknown ([`PaintDriver::mark_shown_screen_unknown`]), and
+/// with native image output the image commit fails
+/// ([`ImageOutputState::fail_frame_commit`]): the next frame clears the screen
+/// and draws every cell and image again.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn paint_frame_with_displayed_snapshot<B: Backend>(
-    terminal: &mut Terminal<B>,
-    client: &Client,
-    displayed_snapshot: &RenderSnapshot,
-    committed_regions: &CommittedRegions,
-    frame_paint: &ViewerPaint,
-    image_mode: ImageRenderMode,
-    image_output_state: &mut ImageOutputState,
-    cell_size: Option<PixelCellSize>,
-    last_window_title: &mut String,
-    last_cursor_style: &mut Option<CursorStyle>,
-    placement_snapshot: Option<&PlacementSnapshot>,
-    placement_display_snapshot: Option<&PlacementSnapshot>,
-) -> Result<bool, PaintError<B::Error>> {
-    let mut stdout = io::stdout();
-    paint_frame_with_writer(
-        &mut stdout,
-        terminal,
-        client,
-        displayed_snapshot,
-        committed_regions,
-        frame_paint,
-        image_mode,
-        image_output_state,
-        cell_size,
-        last_window_title,
-        last_cursor_style,
-        placement_snapshot,
-        placement_display_snapshot,
-    )
-}
-
-/// Paint one frame and send terminal-control output to `writer`.
-#[allow(clippy::too_many_arguments)]
-fn paint_frame_with_writer<B: Backend, W: Write>(
+pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
     writer: &mut W,
-    terminal: &mut Terminal<B>,
+    paint_driver: &mut PaintDriver<B>,
     client: &Client,
     displayed_snapshot: &RenderSnapshot,
     committed_regions: &CommittedRegions,
@@ -1967,11 +2064,12 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
     image_mode: ImageRenderMode,
     image_output_state: &mut ImageOutputState,
     cell_size: Option<PixelCellSize>,
+    shown_frame_inputs: &mut Option<FrameInputs>,
     last_window_title: &mut String,
     last_cursor_style: &mut Option<CursorStyle>,
     placement_snapshot: Option<&PlacementSnapshot>,
     placement_display_snapshot: Option<&PlacementSnapshot>,
-) -> Result<bool, PaintError<B::Error>> {
+) -> Result<(), PaintError<B::Error>> {
     let window_title_text = build_window_title(displayed_snapshot);
     let is_window_title_changed = window_title_text != *last_window_title;
     let cursor_style = get_cursor_style(displayed_snapshot);
@@ -1984,8 +2082,8 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
             &displayed_snapshot.client_snapshot,
         ),
     );
-    let terminal_size = terminal.size().map_err(PaintError::Backend)?;
-    let mut render_area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
+    let terminal_size = client.get_viewport_size();
+    let render_area = Rect::new(0, 0, terminal_size.column_count, terminal_size.row_count);
     let is_focused_pane_softened = displayed_snapshot
         .client_snapshot
         .focused_pane_id
@@ -1997,7 +2095,7 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
                     placement_presentation.is_pane_affected(focused_pane_id)
                 })
         });
-    let mut hardware_cursor_position = get_cursor_position(
+    let hardware_cursor_position = get_cursor_position(
         displayed_snapshot,
         committed_regions,
         frame_paint.chrome,
@@ -2005,7 +2103,7 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
     )
     .filter(|_| !is_focused_pane_softened);
     let is_native_image_output = image_output_state.get_output_kind().is_some();
-    image_output_state.set_host_terminal_size(terminal_size.width, terminal_size.height);
+    image_output_state.set_host_terminal_size(terminal_size.column_count, terminal_size.row_count);
     let mut image_paint_commands = build_image_paints(
         displayed_snapshot,
         committed_regions,
@@ -2016,27 +2114,32 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
         image_paint_commands
             .retain(|image_paint| !placement_presentation.is_pane_affected(image_paint.pane_id));
     }
-    let image_cell_composition_snapshot = image_output_state
-        .get_output_kind()
-        .filter(|output_kind| {
-            output_kind.needs_cell_composition() && !image_paint_commands.is_empty()
-        })
-        .and_then(|_| {
-            Some(Arc::new(build_image_cell_snapshot(
-                displayed_snapshot,
-                committed_regions,
-                frame_paint.chrome,
-                render_area,
-            )?))
-        });
-    if is_native_image_output
-        && !image_output_state.prepare_frame(
+    let image_target_bounds = image_paint_commands
+        .iter()
+        .map(|image_paint| image_paint.target_area)
+        .reduce(Rect::union);
+    let image_cell_composition_snapshot =
+        match (image_output_state.get_output_kind(), image_target_bounds) {
+            (Some(output_kind), Some(image_target_bounds))
+                if output_kind.needs_cell_composition() =>
+            {
+                build_image_cell_snapshot(
+                    displayed_snapshot,
+                    committed_regions,
+                    frame_paint.chrome,
+                    render_area,
+                    image_target_bounds,
+                )
+                .map(Arc::new)
+            }
+            _ => None,
+        };
+    if is_native_image_output {
+        image_output_state.prepare_frame(
             &image_paint_commands,
             image_cell_composition_snapshot,
             cell_size,
-        )
-    {
-        return Ok(false);
+        );
     }
     let is_native_image_commit =
         is_native_image_output && image_output_state.is_native_commit_pending();
@@ -2051,144 +2154,109 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
     } else {
         Vec::new()
     };
-    if is_native_image_commit {
-        if let Err(synchronized_update_error) = execute!(writer, BeginSynchronizedUpdate) {
-            image_output_state.fail_frame_commit();
-            recover_synchronized_frame(writer);
-            return Err(PaintError::Image(synchronized_update_error));
-        }
-    }
+    let frame_inputs = FrameInputs {
+        render_snapshot: displayed_snapshot.clone(),
+        committed_regions: committed_regions.clone(),
+        theme: *client.get_theme(),
+        keymap_hints,
+        pending_key_sequence: frame_paint.pending_key_sequence.clone(),
+        viewer_chrome: frame_paint.chrome,
+        image_mode,
+        unavailable_image_placement_keys: image_output_state
+            .list_unavailable_placement_keys()
+            .to_vec(),
+        terminal_size,
+        has_placement_state: placement_snapshot.is_some()
+            || placement_display_snapshot.is_some()
+            || frame_paint.placement_target.is_some()
+            || frame_paint.placement_presentation.is_some(),
+    };
+    let changed_rows = shown_frame_inputs
+        .take()
+        .and_then(|last_frame_inputs| last_frame_inputs.list_changed_screen_rows(&frame_inputs));
     let paint_result = (|| {
-        if is_native_image_output {
-            if tracing::enabled!(tracing::Level::DEBUG) {
-                for image_placement_key in image_output_state
-                    .list_prepared_placement_keys()
-                    .iter()
-                    .copied()
-                {
-                    if let Some(image_compatibility) =
-                        image_output_state.get_image_compatibility(image_placement_key)
-                    {
-                        if image_compatibility != ImageCompatibility::default() {
-                            tracing::debug!(
-                                ?image_placement_key,
-                                ?image_compatibility,
-                                "native image output has host compatibility limits"
-                            );
-                        }
-                    }
-                }
-            }
-            if image_output_state
+        if is_native_image_commit {
+            queue!(writer, BeginSynchronizedUpdate).map_err(PaintError::Output)?;
+        }
+        if is_native_image_output
+            && image_output_state
                 .write_frame_reset(writer)
                 .map_err(PaintError::Image)?
-            {
-                // The host screen is blank after `ESC[2J`. Emptying both ratatui
-                // buffers makes the next draw write every cell again.
-                terminal.swap_buffers();
-            }
+        {
+            paint_driver.clear_shown_cells();
         }
-        let available_image_placement_keys =
-            is_native_image_output.then(|| image_output_state.list_prepared_placement_keys());
-        terminal
-            .draw(|render_frame| {
-                let frame_area = render_frame.area();
-                render_area = frame_area;
-                hardware_cursor_position = get_cursor_position(
-                    displayed_snapshot,
-                    committed_regions,
-                    frame_paint.chrome,
-                    frame_area,
-                )
-                .filter(|_| !is_focused_pane_softened);
-                render_frame.render_widget(
+        paint_driver
+            .draw_frame(
+                terminal_size,
+                changed_rows.as_deref(),
+                |frame_buffer, drawn_rows| {
                     SnapshotWidget {
-                        render_snapshot: displayed_snapshot,
-                        theme: client.get_theme(),
-                        keymap_hints: &keymap_hints,
-                        pending_key_sequence: frame_paint.pending_key_sequence.as_ref(),
-                        viewer_chrome: frame_paint.chrome,
-                        committed_regions,
+                        render_snapshot: &frame_inputs.render_snapshot,
+                        theme: &frame_inputs.theme,
+                        keymap_hints: &frame_inputs.keymap_hints,
+                        pending_key_sequence: frame_inputs.pending_key_sequence.as_ref(),
+                        viewer_chrome: frame_inputs.viewer_chrome,
+                        committed_regions: &frame_inputs.committed_regions,
                         image_mode,
-                        available_image_placement_keys,
+                        unavailable_image_placement_keys: &frame_inputs
+                            .unavailable_image_placement_keys,
                         placement_snapshot,
                         placement_display_snapshot,
                         placement_target: frame_paint.placement_target.as_ref(),
                         placement_presentation: frame_paint.placement_presentation.as_ref(),
-                    },
-                    frame_area,
-                );
-                if let Some(cursor_position) = hardware_cursor_position {
-                    render_frame.set_cursor_position(cursor_position);
-                }
-            })
+                        drawn_rows,
+                    }
+                    .render(render_area, frame_buffer);
+                    hardware_cursor_position
+                },
+            )
             .map_err(PaintError::Backend)?;
         if is_window_title_changed {
-            execute!(writer, SetTitle(&window_title_text)).map_err(PaintError::Image)?;
+            queue!(writer, SetTitle(&window_title_text)).map_err(PaintError::Output)?;
         }
         if is_cursor_style_changed {
             if let Some(cursor_command) = cursor_style.map(resolve_cursor_style_command) {
-                execute!(writer, cursor_command).map_err(PaintError::Image)?;
+                queue!(writer, cursor_command).map_err(PaintError::Output)?;
             }
         }
         if is_native_image_commit {
             writer
                 .write_all(&native_image_output_bytes)
-                .map_err(PaintError::Image)?;
+                .map_err(PaintError::Output)?;
+            queue!(writer, EndSynchronizedUpdate).map_err(PaintError::Output)?;
         }
-        Ok(())
+        writer.flush().map_err(PaintError::Output)
     })();
-    if is_native_image_commit {
-        if let Err(frame_paint_error) = paint_result {
+    if let Err(frame_paint_error) = paint_result {
+        paint_driver.mark_shown_screen_unknown();
+        if is_native_image_output {
             image_output_state.fail_frame_commit();
-            recover_synchronized_frame(writer);
-            return Err(frame_paint_error);
         }
-        if let Err(synchronized_flush_error) =
-            execute!(writer, EndSynchronizedUpdate).and_then(|()| writer.flush())
-        {
-            image_output_state.fail_frame_commit();
+        if is_native_image_commit {
             recover_synchronized_frame(writer);
-            return Err(PaintError::Image(synchronized_flush_error));
+        } else {
+            let _ = writer.flush();
         }
-        image_output_state.commit_frame();
-    } else {
-        paint_result?;
+        return Err(frame_paint_error);
     }
+    if is_native_image_commit {
+        image_output_state.commit_frame();
+    }
+    *shown_frame_inputs = Some(frame_inputs);
     if is_window_title_changed {
         *last_window_title = window_title_text;
     }
     if is_cursor_style_changed {
         *last_cursor_style = cursor_style;
     }
-    Ok(true)
+    Ok(())
 }
 
 /// Cancel an incomplete terminal control string and close synchronized output.
 fn recover_synchronized_frame<W: Write>(writer: &mut W) {
     let _ = image_output::write_image_abort(writer);
-    let _ = execute!(writer, EndSynchronizedUpdate);
+    let _ = queue!(writer, EndSynchronizedUpdate);
     let _ = writer.flush();
-}
-
-/// Write a CUP sequence that moves the cursor to `cursor_position` (sent as
-/// 1-based row and column), or `ESC [ ? 25 l` that hides it when
-/// `cursor_position` is `None`.
-fn restore_cursor_state<W: Write>(
-    writer: &mut W,
-    cursor_position: Option<ratatui::layout::Position>,
-) -> io::Result<()> {
-    if let Some(cursor_position) = cursor_position {
-        write!(
-            writer,
-            "\x1b[{};{}H",
-            u32::from(cursor_position.y) + 1,
-            u32::from(cursor_position.x) + 1
-        )?;
-    } else {
-        writer.write_all(b"\x1b[?25l")?;
-    }
-    Ok(())
 }
 
 fn convert_kitty_output_error(kitty_error: KittyOutputError) -> io::Error {

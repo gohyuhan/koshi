@@ -18,13 +18,38 @@ use koshi_core::resolve::{resolve_action, DispatchPlan, ResolveError};
 
 use crate::error::ColorParseError;
 use crate::key::{parse_chord, Leader};
+use crate::keymap_merge::tests::{
+    build_character_chord, build_single_chord_sequence, build_two_chord_sequence,
+};
 
 /// The binding of `core:<action_name>` with no arguments.
-fn build_bound_action(action_name: &str) -> BoundAction {
+pub(crate) fn build_bound_action(action_name: &str) -> BoundAction {
     BoundAction {
         action_reference: ActionReference::from_core_action_name(action_name)
-            .expect("expected action name is valid"),
+            .expect("a core action name satisfies the grammar"),
     }
+}
+
+/// The default prefix labels, written out by hand, for a modifier-run leader
+/// of `leader_modifier_flags`: `p` is `PANE`, `s` is `RESIZE`, and `t` is
+/// `TAB`.
+pub(crate) fn build_expected_prefix_labels(
+    leader_modifier_flags: BindingModifierFlags,
+) -> BTreeMap<KeyChord, String> {
+    BTreeMap::from([
+        (
+            build_character_chord(leader_modifier_flags, 'p'),
+            "PANE".to_string(),
+        ),
+        (
+            build_character_chord(leader_modifier_flags, 's'),
+            "RESIZE".to_string(),
+        ),
+        (
+            build_character_chord(leader_modifier_flags, 't'),
+            "TAB".to_string(),
+        ),
+    ])
 }
 
 #[test]
@@ -200,10 +225,6 @@ fn from_hex_rejects_color_text_with_wrong_length() {
 fn from_hex_rejects_empty_color_text() {
     assert_eq!(
         RgbColor::from_hex(""),
-        Err(ColorParseError::BadLength { character_count: 0 })
-    );
-    assert_eq!(
-        RgbColor::from_hex("#"),
         Err(ColorParseError::BadLength { character_count: 0 })
     );
 }
@@ -480,18 +501,14 @@ fn a_shift_modifier_leader_moves_every_leader_binding() {
 
     assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 24);
     assert_eq!(
-        normal_mode_bindings.bound_action_by_key_sequence[&KeySequence::from(
-            KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Char('q'))
-        )],
+        normal_mode_bindings.bound_action_by_key_sequence
+            [&build_single_chord_sequence(BindingModifierFlags::SHIFT, 'q')],
         build_bound_action("quit")
     );
     assert_eq!(
-        normal_mode_bindings.bound_action_by_key_sequence[&KeySequence::from_first_and_rest(
-            KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Char('p')),
-            vec![KeyChord::from_parts(
-                BindingModifierFlags::NONE,
-                Key::Char('n')
-            )],
+        normal_mode_bindings.bound_action_by_key_sequence[&build_two_chord_sequence(
+            build_character_chord(BindingModifierFlags::SHIFT, 'p'),
+            build_character_chord(BindingModifierFlags::NONE, 'n')
         )],
         build_bound_action("new-pane")
     );
@@ -511,10 +528,10 @@ fn a_chord_leader_prefixes_the_locked_bindings_and_leaves_the_unlock_chord() {
         KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Space));
     let mode_bindings_by_name = build_default_mode_bindings(Leader::Chord(space_leader_key_chord));
     let locked_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("locked")];
-    let build_sequence_after_leader = |key| {
-        KeySequence::from_first_and_rest(
+    let build_sequence_after_leader = |key_character| {
+        build_two_chord_sequence(
             space_leader_key_chord,
-            vec![KeyChord::from_parts(BindingModifierFlags::NONE, key)],
+            build_character_chord(BindingModifierFlags::NONE, key_character),
         )
     };
 
@@ -526,21 +543,19 @@ fn a_chord_leader_prefixes_the_locked_bindings_and_leaves_the_unlock_chord() {
         build_bound_action("unlock")
     );
     assert_eq!(
-        locked_mode_bindings.bound_action_by_key_sequence
-            [&build_sequence_after_leader(Key::Char('q'))],
+        locked_mode_bindings.bound_action_by_key_sequence[&build_sequence_after_leader('q')],
         build_bound_action("quit")
     );
     assert_eq!(
-        locked_mode_bindings.bound_action_by_key_sequence
-            [&build_sequence_after_leader(Key::Char('g'))],
+        locked_mode_bindings.bound_action_by_key_sequence[&build_sequence_after_leader('g')],
         build_bound_action("mouse-select")
     );
     assert_eq!(
         locked_mode_bindings.bound_action_by_key_sequence[&KeySequence::from_first_and_rest(
             space_leader_key_chord,
             vec![
-                KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('p')),
-                KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('m')),
+                build_character_chord(BindingModifierFlags::NONE, 'p'),
+                build_character_chord(BindingModifierFlags::NONE, 'm'),
             ],
         )],
         build_bound_action("begin-pane-placement")
@@ -552,7 +567,7 @@ fn a_leader_chord_that_is_also_a_binding_keeps_both() {
     // `<A-f>` is the fullscreen binding and, here, the leader as well. The
     // one-chord sequence and the sequences it opens are separate map keys:
     // the table holds all 24 normal-mode bindings.
-    let fullscreen_key_chord = KeyChord::from_parts(BindingModifierFlags::ALT, Key::Char('f'));
+    let fullscreen_key_chord = build_character_chord(BindingModifierFlags::ALT, 'f');
     let mode_bindings_by_name = build_default_mode_bindings(Leader::Chord(fullscreen_key_chord));
     let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
 
@@ -562,12 +577,9 @@ fn a_leader_chord_that_is_also_a_binding_keeps_both() {
         build_bound_action("toggle-pane-fullscreen")
     );
     assert_eq!(
-        normal_mode_bindings.bound_action_by_key_sequence[&KeySequence::from_first_and_rest(
+        normal_mode_bindings.bound_action_by_key_sequence[&build_two_chord_sequence(
             fullscreen_key_chord,
-            vec![KeyChord::from_parts(
-                BindingModifierFlags::NONE,
-                Key::Char('q')
-            )]
+            build_character_chord(BindingModifierFlags::NONE, 'q')
         )],
         build_bound_action("quit")
     );
@@ -1055,9 +1067,8 @@ fn default_keybindings_use_non_typeable_openers_and_avoid_ambiguous_ctrl_chords(
     let client_config = ClientConfig::default();
     // On unix terminals without the kitty keyboard protocol these four Ctrl
     // chords arrive as the Tab, Enter, Esc, and Backspace control bytes.
-    let ambiguous_control_chords = ['i', 'm', '[', 'h'].map(|key_character| {
-        KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char(key_character))
-    });
+    let ambiguous_control_chords = ['i', 'm', '[', 'h']
+        .map(|key_character| build_character_chord(BindingModifierFlags::CTRL, key_character));
     // The one exception to the non-typeable-opening rule: tab switching is the
     // bare Tab / Shift+Tab pair, and a shell sees a literal Tab only while the
     // client is locked.
@@ -1116,33 +1127,9 @@ fn reserved_unlock_is_the_locked_mode_binding() {
 #[test]
 fn prefix_labels_name_exactly_the_default_prefix_chords() {
     let default_prefix_labels = build_default_prefix_labels(Leader::default());
-    assert_eq!(default_prefix_labels.len(), 3);
     assert_eq!(
-        default_prefix_labels
-            .get(&KeyChord::from_parts(
-                BindingModifierFlags::CTRL,
-                Key::Char('p')
-            ))
-            .map(String::as_str),
-        Some("PANE")
-    );
-    assert_eq!(
-        default_prefix_labels
-            .get(&KeyChord::from_parts(
-                BindingModifierFlags::CTRL,
-                Key::Char('s')
-            ))
-            .map(String::as_str),
-        Some("RESIZE")
-    );
-    assert_eq!(
-        default_prefix_labels
-            .get(&KeyChord::from_parts(
-                BindingModifierFlags::CTRL,
-                Key::Char('t')
-            ))
-            .map(String::as_str),
-        Some("TAB")
+        default_prefix_labels,
+        build_expected_prefix_labels(BindingModifierFlags::CTRL)
     );
 
     // Every labeled chord opens at least one multi-chord default sequence,
@@ -1168,19 +1155,10 @@ fn default_bindings_follow_the_leader() {
             .bound_action_by_key_sequence
             .clone()
     };
-    let build_single_key_sequence = |modifier_flags, key_character| {
-        KeySequence::from(KeyChord::from_parts(
-            modifier_flags,
-            Key::Char(key_character),
-        ))
-    };
     let build_two_key_sequence = |modifier_flags, prefix_character, key_character| {
-        KeySequence::from_first_and_rest(
-            KeyChord::from_parts(modifier_flags, Key::Char(prefix_character)),
-            vec![KeyChord::from_parts(
-                BindingModifierFlags::NONE,
-                Key::Char(key_character),
-            )],
+        build_two_chord_sequence(
+            build_character_chord(modifier_flags, prefix_character),
+            build_character_chord(BindingModifierFlags::NONE, key_character),
         )
     };
 
@@ -1191,7 +1169,7 @@ fn default_bindings_follow_the_leader() {
         build_bound_action("new-pane")
     );
     assert_eq!(
-        control_leader_bindings[&build_single_key_sequence(BindingModifierFlags::CTRL, 'g')],
+        control_leader_bindings[&build_single_chord_sequence(BindingModifierFlags::CTRL, 'g')],
         build_bound_action("mouse-select")
     );
 
@@ -1204,7 +1182,7 @@ fn default_bindings_follow_the_leader() {
         build_bound_action("new-pane")
     );
     assert_eq!(
-        alternate_leader_bindings[&build_single_key_sequence(BindingModifierFlags::ALT, 'g')],
+        alternate_leader_bindings[&build_single_chord_sequence(BindingModifierFlags::ALT, 'g')],
         build_bound_action("mouse-select")
     );
     assert_eq!(
@@ -1224,8 +1202,8 @@ fn default_bindings_follow_the_leader() {
     let space_leader_pane_creation_sequence = KeySequence::from_first_and_rest(
         KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Space)),
         vec![
-            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('p')),
-            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('n')),
+            build_character_chord(BindingModifierFlags::NONE, 'p'),
+            build_character_chord(BindingModifierFlags::NONE, 'n'),
         ],
     );
     assert_eq!(
@@ -1235,7 +1213,7 @@ fn default_bindings_follow_the_leader() {
 
     // Explicit bindings never move: `<A-f>` and the reserved `<C-l>` are the
     // same under every leader.
-    let fullscreen_key_sequence = build_single_key_sequence(BindingModifierFlags::ALT, 'f');
+    let fullscreen_key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'f');
     let reserved_unlock_key_sequence = KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
     for mode_bindings in [
         &control_leader_bindings,
@@ -1267,20 +1245,10 @@ fn a_chord_leader_drops_the_ambiguous_prefix_labels() {
 
     // A modifier-run leader keeps `<leader>p`, `<leader>s`, and `<leader>t` at
     // distinct opening chords: all three labels stand, on Alt.
-    let alt_leader_prefix_labels =
-        build_default_prefix_labels(Leader::Modifiers(BindingModifierFlags::ALT));
-    let find_alt_prefix_label = |key_character| {
-        alt_leader_prefix_labels
-            .get(&KeyChord::from_parts(
-                BindingModifierFlags::ALT,
-                Key::Char(key_character),
-            ))
-            .map(String::as_str)
-    };
-    assert_eq!(alt_leader_prefix_labels.len(), 3);
-    assert_eq!(find_alt_prefix_label('p'), Some("PANE"));
-    assert_eq!(find_alt_prefix_label('s'), Some("RESIZE"));
-    assert_eq!(find_alt_prefix_label('t'), Some("TAB"));
+    assert_eq!(
+        build_default_prefix_labels(Leader::Modifiers(BindingModifierFlags::ALT)),
+        build_expected_prefix_labels(BindingModifierFlags::ALT)
+    );
 }
 
 #[test]

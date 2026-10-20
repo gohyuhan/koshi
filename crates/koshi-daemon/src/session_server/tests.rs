@@ -28,18 +28,34 @@ use koshi_core::ids::{ClientId, CommandId};
 use koshi_core::process::ExitStatus;
 #[cfg(unix)]
 use koshi_ipc::endpoint::EndpointFile;
+#[cfg(unix)]
+use koshi_ipc::event::SessionEvent;
+#[cfg(unix)]
+use koshi_ipc::protocol::{
+    GraphicsCapabilities, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
+    IpcResult, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+};
+#[cfg(unix)]
+use koshi_ipc::transport::{Connection, FrameReader, FrameWriter, ReceivedFrame};
+use koshi_pty::backend::state::CarriedPtyPane;
 use koshi_renderer::snapshot::Delivery;
+use koshi_runtime::runtime::delivery_queue::DeliveryReceiver;
 use koshi_runtime::runtime::event::AttachAccepted;
 #[cfg(unix)]
 use koshi_runtime::runtime::event::SessionEnding;
 use koshi_runtime::runtime::pty_inbox::InboxSink;
 #[cfg(unix)]
+use koshi_runtime::runtime::saved_view::SavedViewStore;
+#[cfg(unix)]
 use koshi_test_support::child_exit::wait_until_child_has_exited;
 use koshi_test_support::fake_pty::FakePtyBackend;
 #[cfg(unix)]
 use koshi_test_support::fixtures::{
-    BUSY_PROGRAM_RETRY_INTERVAL_DURATION, BUSY_PROGRAM_WAIT_DURATION,
+    build_accepted_hello_result, build_restarting_refusal, BUSY_PROGRAM_RETRY_INTERVAL_DURATION,
+    BUSY_PROGRAM_WAIT_DURATION,
 };
+#[cfg(unix)]
+use koshi_test_support::signal_disposition::lock_sigpipe_disposition;
 use tempfile::TempDir;
 
 /// A server built the way [`run_session_server`] builds it, on a fake backend,
@@ -89,7 +105,7 @@ fn list_command_arguments(process_command: &std::process::Command) -> Vec<String
 /// channel the dispatcher answers on.
 fn request_session_restart(
     runtime_event_sender: &mpsc::Sender<RuntimeEvent>,
-) -> mpsc::Receiver<Result<(), RestartRefusal>> {
+) -> mpsc::Receiver<()> {
     let (restart_response_sender, restart_response_receiver) = mpsc::channel();
     runtime_event_sender
         .send(RuntimeEvent::IpcRestart {
@@ -144,12 +160,18 @@ fn attach_test_client(server: &mut Server) -> AttachAccepted {
         cell_size: None,
         attached_at: SystemTime::now(),
         is_remote: false,
+        max_frames_per_second: 60,
         response_sender: attach_response_sender,
     });
     attach_response_receiver
         .try_recv()
         .expect("the loop answered the attach request")
         .expect("a session is running")
+}
+
+/// Take every delivery `delivery_receiver` holds now, oldest first.
+fn take_waiting_deliveries(delivery_receiver: &DeliveryReceiver) -> Vec<Delivery> {
+    std::iter::from_fn(|| delivery_receiver.try_recv().ok()).collect()
 }
 
 /// The clients the seeded session still holds a record for, in id order.
@@ -250,7 +272,7 @@ fn a_quit_command_arriving_on_the_socket_ends_the_loop() {
 #[test]
 fn the_last_childs_exit_ends_the_loop_with_no_quit_asked_for() {
     // Nothing queues a quit, and the sender stays alive.
-    let (mut server, _, runtime_event_sender) = build_test_server();
+    let (mut server, fake_pty_backend, _runtime_event_sender) = build_test_server();
     seed_test_session(&mut server);
     let pane_id = *server
         .list_terminal_engines()
@@ -258,11 +280,8 @@ fn the_last_childs_exit_ends_the_loop_with_no_quit_asked_for() {
         .next()
         .expect("the root pane holds a terminal engine");
 
-    runtime_event_sender
-        .send(RuntimeEvent::ChildExit {
-            pane_id,
-            exit_status: ExitStatus::ExitCode(0),
-        })
+    fake_pty_backend
+        .trigger_child_exit(pane_id, ExitStatus::ExitCode(0))
         .expect("the child's exit is queued");
 
     run_session_serve_loop(&mut server);
@@ -273,7 +292,7 @@ fn the_last_childs_exit_ends_the_loop_with_no_quit_asked_for() {
 
 #[test]
 fn a_due_render_hands_the_attached_client_its_frame() {
-    let (mut server, _, runtime_event_sender) = build_test_server();
+    let (mut server, fake_pty_backend, runtime_event_sender) = build_test_server();
     seed_test_session(&mut server);
     let attached_client = attach_test_client(&mut server);
     let pane_id = *server
@@ -282,11 +301,8 @@ fn a_due_render_hands_the_attached_client_its_frame() {
         .next()
         .expect("the root pane holds a terminal engine");
 
-    runtime_event_sender
-        .send(RuntimeEvent::PtyOutput {
-            pane_id,
-            output_bytes: b"hello".to_vec(),
-        })
+    fake_pty_backend
+        .push_output(pane_id, b"hello".to_vec())
         .expect("the child output is queued");
     runtime_event_sender
         .send(RuntimeEvent::Quit)
@@ -298,7 +314,7 @@ fn a_due_render_hands_the_attached_client_its_frame() {
         .build_snapshot(attached_client.client_id)
         .expect("the attached client has a frame");
     assert_eq!(
-        attached_client.deliveries.try_iter().collect::<Vec<_>>(),
+        take_waiting_deliveries(&attached_client.deliveries),
         vec![Delivery::Frame(Box::new(expected_snapshot))]
     );
 }
@@ -308,9 +324,14 @@ fn a_pass_with_no_render_due_pushes_no_frame() {
     let (mut server, _, runtime_event_sender) = build_test_server();
     seed_test_session(&mut server);
     let attached_client = attach_test_client(&mut server);
-    // Spend the render the seeding and the attach made due. The pass below
-    // starts with nothing pending.
-    assert!(server.poll_render(Instant::now()));
+    // Spend the first frame the attach owes the client. The pass below
+    // starts with no view change pending.
+    server.push_due_frames(Instant::now());
+    let first_frame_count = take_waiting_deliveries(&attached_client.deliveries)
+        .iter()
+        .filter(|delivery| matches!(delivery, Delivery::Frame(_)))
+        .count();
+    assert_eq!(first_frame_count, 1);
 
     runtime_event_sender
         .send(RuntimeEvent::Quit)
@@ -319,7 +340,7 @@ fn a_pass_with_no_render_due_pushes_no_frame() {
     run_session_serve_loop(&mut server);
 
     assert_eq!(
-        attached_client.deliveries.try_iter().collect::<Vec<_>>(),
+        take_waiting_deliveries(&attached_client.deliveries),
         Vec::<Delivery>::new()
     );
 }
@@ -330,99 +351,35 @@ fn an_accepted_restart_ends_the_loop_into_the_swap() {
     // the loop ends.
     let (mut server, _, runtime_event_sender) = build_test_server();
     seed_test_session(&mut server);
-    server.set_restart_check(Arc::new(|| Ok(())));
 
     let restart_response_receiver = request_session_restart(&runtime_event_sender);
 
     let serve_outcome = run_session_serve_loop(&mut server);
 
-    assert_eq!(
-        restart_response_receiver
-            .try_recv()
-            .expect("the loop answered the request"),
-        Ok(())
-    );
+    restart_response_receiver
+        .try_recv()
+        .expect("the loop answered the request");
     assert!(server.is_restart_requested());
     assert_eq!(serve_outcome, ServeOutcome::Restart);
 }
 
-#[test]
-fn a_restart_naming_a_binary_that_cannot_be_read_is_refused_and_the_session_keeps_serving() {
-    let runtime_directory_fixture = TempDir::new().expect("create runtime directory fixture");
-    let missing_executable_path = runtime_directory_fixture.path().join("koshi");
-    let (mut server, _, runtime_event_sender) = build_test_server();
-    seed_test_session(&mut server);
-    // The first thing the installed check runs, on a path with nothing at it.
-    let named_executable_path = missing_executable_path.clone();
-    server.set_restart_check(Arc::new(move || {
-        is_binary_runnable(&named_executable_path)
-            .map_err(|refusal_reason| RestartRefusal::UnfitProgramFile { refusal_reason })
-    }));
-
-    let restart_response_receiver = request_session_restart(&runtime_event_sender);
-    let (discovery_response_sender, discovery_response_receiver) = mpsc::channel();
-    runtime_event_sender
-        .send(RuntimeEvent::IpcDiscovery {
-            response_sender: discovery_response_sender,
-        })
-        .expect("the discovery request is queued");
-    runtime_event_sender
-        .send(RuntimeEvent::Quit)
-        .expect("the hangup is queued");
-
-    let serve_outcome = run_session_serve_loop(&mut server);
-
-    let unreadable_metadata_error =
-        std::fs::metadata(&missing_executable_path).expect_err("nothing is at that path");
-    assert_eq!(
-        restart_response_receiver
-            .try_recv()
-            .expect("the loop answered the request")
-            .expect_err("a binary that is not there is refused"),
-        RestartRefusal::UnfitProgramFile {
-            refusal_reason: format!(
-                "the binary at {} could not be read: {unreadable_metadata_error}",
-                missing_executable_path.display()
-            )
-        }
-    );
-    assert!(!server.is_restart_requested());
-    assert_eq!(serve_outcome, ServeOutcome::Ended);
-    let discovery_overview = discovery_response_receiver
-        .try_recv()
-        .expect("the loop answered the discovery request")
-        .expect("a session is running");
-    assert_eq!(discovery_overview.session.pane_count, 1);
-}
-
 #[cfg(unix)]
 #[test]
-fn the_check_installed_on_the_server_refuses_a_restart_naming_a_binary_that_is_not_there() {
-    // Every restart the socket answers runs the check `install_restart_check`
-    // built; that check runs `is_binary_runnable` first.
+fn the_restart_check_refuses_a_binary_that_is_not_there() {
+    // The check runs `is_binary_runnable` first.
     let runtime_directory_fixture = TempDir::new().expect("create runtime directory fixture");
     let missing_executable_path = runtime_directory_fixture.path().join("koshi");
-    let (mut server, _, runtime_event_sender) = build_test_server();
-    seed_test_session(&mut server);
+    let (runtime_event_sender, _runtime_event_receiver) = mpsc::channel();
     let portable_pty_backend = Arc::new(PortablePtyBackend::with_pty_sink(Arc::new(
-        InboxSink::from_event_sender(runtime_event_sender.clone()),
+        InboxSink::from_event_sender(runtime_event_sender),
     )));
 
-    install_restart_check(&mut server, &portable_pty_backend, &missing_executable_path);
-
-    let restart_response_receiver = request_session_restart(&runtime_event_sender);
-    runtime_event_sender
-        .send(RuntimeEvent::Quit)
-        .expect("the hangup is queued");
-
-    let serve_outcome = run_session_serve_loop(&mut server);
+    let restart_check = build_restart_check(&portable_pty_backend, &missing_executable_path);
 
     let unreadable_metadata_error =
         std::fs::metadata(&missing_executable_path).expect_err("nothing is at that path");
     assert_eq!(
-        restart_response_receiver
-            .try_recv()
-            .expect("the loop answered the request"),
+        restart_check(),
         Err(RestartRefusal::UnfitProgramFile {
             refusal_reason: format!(
                 "the binary at {} could not be read: {unreadable_metadata_error}",
@@ -430,8 +387,6 @@ fn the_check_installed_on_the_server_refuses_a_restart_naming_a_binary_that_is_n
             )
         })
     );
-    assert!(!server.is_restart_requested());
-    assert_eq!(serve_outcome, ServeOutcome::Ended);
 }
 
 #[test]
@@ -477,9 +432,8 @@ fn a_copy_applied_while_the_swap_runs_reaches_the_clients_own_terminal() {
     apply_queued_runtime_events(&mut server, DetachPolicy::Apply);
 
     // base64("hello") = aGVsbG8=
-    let host_write_wake_count = attached_client
-        .deliveries
-        .try_iter()
+    let host_write_wake_count = take_waiting_deliveries(&attached_client.deliveries)
+        .iter()
         .filter(|delivery| matches!(delivery, Delivery::HostWrite))
         .count();
     assert_eq!(host_write_wake_count, 1);
@@ -504,15 +458,11 @@ fn a_quit_applied_while_the_swap_runs_ends_the_session_instead_of_serving_it_aga
             None,
         )
         .expect("the session is seeded");
-    server.set_restart_check(Arc::new(|| Ok(())));
     let restart_response_receiver = request_session_restart(&runtime_event_sender);
     assert_eq!(run_session_serve_loop(&mut server), ServeOutcome::Restart);
-    assert_eq!(
-        restart_response_receiver
-            .try_recv()
-            .expect("the loop answered the request"),
-        Ok(())
-    );
+    restart_response_receiver
+        .try_recv()
+        .expect("the loop answered the request");
 
     runtime_event_sender
         .send(RuntimeEvent::Ipc {
@@ -555,15 +505,11 @@ fn a_swap_the_session_abandons_takes_the_accepted_restart_back() {
     // Every abandon path hands the same server back to the serve loop.
     let (mut server, _, runtime_event_sender) = build_test_server();
     seed_test_session(&mut server);
-    server.set_restart_check(Arc::new(|| Ok(())));
     let restart_response_receiver = request_session_restart(&runtime_event_sender);
     assert_eq!(run_session_serve_loop(&mut server), ServeOutcome::Restart);
-    assert_eq!(
-        restart_response_receiver
-            .try_recv()
-            .expect("the loop answered the request"),
-        Ok(())
-    );
+    restart_response_receiver
+        .try_recv()
+        .expect("the loop answered the request");
     assert!(server.is_restart_requested());
     let portable_pty_backend = Arc::new(PortablePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(runtime_event_sender.clone()),
@@ -627,8 +573,8 @@ fn the_record_of_a_client_the_swap_told_survives_the_pass_after_the_announce() {
 #[test]
 fn a_line_a_client_types_as_it_reads_the_restart_frame_reaches_its_pane() {
     // The client answers the frame on its socket after the announce returns.
-    // `IpcServer::close_intake` puts what crossed in the inbox before this pass
-    // runs.
+    // `IpcServer::start_refusing_requests` leaves what crossed before it in the
+    // inbox for this pass.
     let (mut server, fake_pty_backend, runtime_event_sender) = build_test_server();
     seed_test_session(&mut server);
     let client_id = attach_test_client(&mut server).client_id;
@@ -848,7 +794,7 @@ fn a_carried_descriptor_that_is_no_terminal_master_is_refused_and_left_open() {
         "the refused pane does not come back"
     );
     assert!(
-        unsafe { libc::fcntl(terminal_file_descriptor, libc::F_GETFD) } >= 0,
+        read_file_descriptor_flags(terminal_file_descriptor) >= 0,
         "the refused descriptor must be left open"
     );
 }
@@ -856,39 +802,13 @@ fn a_carried_descriptor_that_is_no_terminal_master_is_refused_and_left_open() {
 #[test]
 #[cfg(unix)]
 fn carried_panes_in_conflict_are_ended_and_reaped_and_their_shared_terminal_closed_once() {
-    use std::os::unix::process::CommandExt;
-
-    let mut child_command = std::process::Command::new("/bin/sh");
-    child_command
-        .arg("-c")
-        .arg("sleep 30")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    // The child leads its own process group, as `portable-pty` places a pane's
-    // child.
-    unsafe {
-        child_command.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    let child_process_id = child_command.spawn().expect("the child starts").id();
-    let terminal_master_file_descriptor =
-        unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
-    assert!(
-        terminal_master_file_descriptor >= 0,
-        "the pseudoterminal master opens"
-    );
+    let child_process_id = start_group_leading_child("sleep", &["30"]);
+    let terminal_master_file_descriptor = open_terminal_master();
     let carried_terminal_name = find_terminal_master_name(terminal_master_file_descriptor)
         .expect("the master names its terminal");
     // A second number on the same pseudoterminal, held to the end of the test,
     // keeps that terminal allocated to this test.
-    let held_terminal_file_descriptor = unsafe { libc::dup(terminal_master_file_descriptor) };
-    assert!(
-        held_terminal_file_descriptor >= 0,
-        "the master opens under a second number"
-    );
+    let held_terminal_file_descriptor = duplicate_file_descriptor(terminal_master_file_descriptor);
     let runtime_directory_fixture = TempDir::new().expect("create runtime directory fixture");
     let session_start = build_test_session_start(runtime_directory_fixture.path(), false);
     let build_carried_pane_record = |process_id| koshi_runtime::resume::CarriedPane {
@@ -930,7 +850,7 @@ fn carried_panes_in_conflict_are_ended_and_reaped_and_their_shared_terminal_clos
         "the shared terminal is closed"
     );
     assert_eq!(
-        unsafe { libc::close(held_terminal_file_descriptor) },
+        close_file_descriptor(held_terminal_file_descriptor),
         0,
         "the test still owns the second number it opened"
     );
@@ -962,9 +882,9 @@ fn a_swap_that_did_not_happen_leaves_every_terminal_closed_on_exec_again() {
     };
 
     keep_terminals_across_exec(&resume_header).expect("the flag is cleared");
-    let cleared_descriptor_flags = unsafe { libc::fcntl(terminal_file_descriptor, libc::F_GETFD) };
+    let cleared_descriptor_flags = read_file_descriptor_flags(terminal_file_descriptor);
     put_close_on_exec_back(&resume_header);
-    let restored_descriptor_flags = unsafe { libc::fcntl(terminal_file_descriptor, libc::F_GETFD) };
+    let restored_descriptor_flags = read_file_descriptor_flags(terminal_file_descriptor);
 
     assert_eq!(cleared_descriptor_flags & libc::FD_CLOEXEC, 0);
     assert_eq!(
@@ -1278,6 +1198,7 @@ fn a_binary_answering_a_range_that_misses_this_ones_is_refused_naming_both() {
 fn an_image_swap_that_could_not_start_hands_back_its_reason_and_keeps_ignoring_sigpipe() {
     // Replacing the image resets `SIGPIPE` to its default in this process
     // before the call. A swap that did not start puts the ignore back.
+    let _sigpipe_disposition_guard = lock_sigpipe_disposition();
     let runtime_directory_fixture = TempDir::new().expect("create runtime directory fixture");
     let mut session_start = build_test_session_start(runtime_directory_fixture.path(), false);
     session_start.executable_watch = Arc::new(ExecutableWatch::new(
@@ -1293,8 +1214,12 @@ fn an_image_swap_that_could_not_start_hands_back_its_reason_and_keeps_ignoring_s
     assert_eq!(restart_error.kind(), std::io::ErrorKind::NotFound);
     assert_eq!(restart_error.raw_os_error(), Some(libc::ENOENT));
 
+    // SAFETY: an all-zero `sigaction` is valid.
     let mut held_sigpipe_action: libc::sigaction = unsafe { std::mem::zeroed() };
     assert_eq!(
+        // SAFETY: a NULL new action changes nothing, and `sigaction` writes the
+        // current action only to `held_sigpipe_action`, which lives for the
+        // call.
         unsafe { libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut held_sigpipe_action,) },
         0,
         "the signal's handler is read back"
@@ -1543,6 +1468,7 @@ fn start_group_leading_child(program: &str, arguments: &[&str]) -> u32 {
 fn wait_until_child_is_reaped(child_process_id: u32) {
     let child_process_id = libc::pid_t::try_from(child_process_id).expect("a child id fits a pid");
     let reap_deadline = Instant::now() + CHILD_WAIT_DURATION;
+    // SAFETY: signal `0` sends nothing and reads no memory.
     while unsafe { libc::kill(child_process_id, 0) } == 0 {
         assert!(
             Instant::now() < reap_deadline,
@@ -1557,102 +1483,55 @@ fn wait_until_child_is_reaped(child_process_id: u32) {
     );
 }
 
-#[test]
-fn a_child_that_ends_after_the_header_is_built_still_carries_its_real_status() {
-    // The panes are read once to build the header and again just before it is
-    // written. A child reaped in between gets its exit status on the second
-    // read.
-    let settled_pane_id = PaneId::new();
-    let still_running_pane_id = PaneId::new();
-    let already_known_pane_id = PaneId::new();
-    let gone_from_backend_pane_id = PaneId::new();
-    let closed_before_swap_pane_id = PaneId::new();
-
-    // The refresh pairs records by pane id and never reads the process id.
-    // Every record carries the same one.
-    const PANE_CHILD_PROCESS_ID: u32 = 4821;
-
-    let build_carried_pane_record = |pane_id, exit_status| koshi_runtime::resume::CarriedPane {
-        pane_id,
-        process_id: PANE_CHILD_PROCESS_ID,
-        row_count: 24,
-        column_count: 80,
-        terminal_fd: None,
-        terminal_name: None,
-        exit_status,
-    };
-    let mut resume_header = ResumeHeader {
-        resume_format: RESUME_FORMAT,
-        session_id: SessionId::new(),
-        session_name: "main".to_string(),
-        carried_panes: vec![
-            build_carried_pane_record(settled_pane_id, None),
-            build_carried_pane_record(still_running_pane_id, None),
-            build_carried_pane_record(already_known_pane_id, Some(ExitStatus::ExitCode(3))),
-            build_carried_pane_record(gone_from_backend_pane_id, None),
-        ],
-    };
-
-    let build_current_carried_pty_pane = |pane_id, exit_status| CarriedPtyPane {
-        pane_id,
-        #[cfg(unix)]
-        terminal_fd: None,
-        process_id: PANE_CHILD_PROCESS_ID,
-        pty_size: PtySize {
-            row_count: 24,
-            column_count: 80,
-        },
-        exit_status,
-    };
-    refresh_carried_exits(
-        &mut resume_header,
-        &[
-            build_current_carried_pty_pane(settled_pane_id, Some(ExitStatus::ExitCode(7))),
-            build_current_carried_pty_pane(still_running_pane_id, None),
-            build_current_carried_pty_pane(already_known_pane_id, Some(ExitStatus::ExitCode(9))),
-            build_current_carried_pty_pane(
-                closed_before_swap_pane_id,
-                Some(ExitStatus::ExitCode(11)),
-            ),
-        ],
+/// Open a new pseudoterminal master that does not become this process's
+/// controlling terminal, and hand back its descriptor.
+///
+/// # Panics
+/// Panics when `posix_openpt` fails.
+#[cfg(unix)]
+fn open_terminal_master() -> std::os::fd::RawFd {
+    // SAFETY: `posix_openpt` takes its flags by value and reads no memory.
+    let terminal_master_file_descriptor =
+        unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+    assert!(
+        terminal_master_file_descriptor >= 0,
+        "the pseudoterminal master opens"
     );
+    terminal_master_file_descriptor
+}
 
-    let get_exit_status = |pane_id| {
-        resume_header
-            .carried_panes
-            .iter()
-            .find(|pane_record| pane_record.pane_id == pane_id)
-            .expect("the pane is in the header")
-            .exit_status
-    };
-    assert_eq!(
-        get_exit_status(settled_pane_id),
-        Some(ExitStatus::ExitCode(7))
+/// Open the file `file_descriptor` names under a second number, and hand back
+/// that number.
+///
+/// # Panics
+/// Panics when `dup` fails.
+#[cfg(unix)]
+fn duplicate_file_descriptor(file_descriptor: std::os::fd::RawFd) -> std::os::fd::RawFd {
+    // SAFETY: `dup` takes the descriptor by value and reads no memory.
+    let second_file_descriptor = unsafe { libc::dup(file_descriptor) };
+    assert!(
+        second_file_descriptor >= 0,
+        "the descriptor opens under a second number"
     );
-    assert_eq!(get_exit_status(still_running_pane_id), None);
-    // A status the header already carried is not written over.
-    assert_eq!(
-        get_exit_status(already_known_pane_id),
-        Some(ExitStatus::ExitCode(3))
-    );
-    // The live read walks the panes the backend still holds. A header record
-    // that read names no more is left as the header carried it.
-    assert_eq!(get_exit_status(gone_from_backend_pane_id), None);
-    // The header names which panes the next image takes back. A pane the live
-    // read reports but the header never named is left out of it.
-    assert_eq!(
-        resume_header
-            .carried_panes
-            .iter()
-            .map(|pane_record| pane_record.pane_id)
-            .collect::<Vec<PaneId>>(),
-        vec![
-            settled_pane_id,
-            still_running_pane_id,
-            already_known_pane_id,
-            gone_from_backend_pane_id,
-        ]
-    );
+    second_file_descriptor
+}
+
+/// The descriptor flags of `file_descriptor`, or `-1` when it names no open
+/// file.
+#[cfg(unix)]
+fn read_file_descriptor_flags(file_descriptor: std::os::fd::RawFd) -> libc::c_int {
+    // SAFETY: `F_GETFD` reads no memory, and a descriptor that is not open
+    // gives `-1`.
+    unsafe { libc::fcntl(file_descriptor, libc::F_GETFD) }
+}
+
+/// Close `file_descriptor`, and hand back what `close` answered: `0` when it
+/// was open.
+#[cfg(unix)]
+fn close_file_descriptor(file_descriptor: std::os::fd::RawFd) -> libc::c_int {
+    // SAFETY: every caller passes a number it opened with
+    // `duplicate_file_descriptor`, which no `OwnedFd` holds.
+    unsafe { libc::close(file_descriptor) }
 }
 
 #[cfg(unix)]
@@ -1731,6 +1610,7 @@ fn ending_a_carried_child_signals_only_a_running_child_of_this_process() {
         "a child that already exited is not signalled"
     );
     assert_eq!(
+        // SAFETY: signal `0` sends nothing and reads no memory.
         unsafe {
             libc::kill(
                 libc::pid_t::try_from(exited_child_process_id).expect("a child id fits a pid"),
@@ -1754,6 +1634,8 @@ fn ending_a_carried_child_signals_only_a_running_child_of_this_process() {
     );
     let mut wait_status: libc::c_int = 0;
     assert_eq!(
+        // SAFETY: `waitpid` writes only to `wait_status`, which lives for the
+        // call.
         unsafe { libc::waitpid(ended_child_process_id, &mut wait_status, 0) },
         ended_child_process_id
     );
@@ -1775,7 +1657,7 @@ fn build_short_runtime_directory() -> TempDir {
 
 /// The state a swap carried out of a session holding no pane: a header naming
 /// none, under the identity `session_start` was started with, and a body holding no
-/// session, no pane state and no quit.
+/// session, no pane state, no quit, no saved view and no child left running.
 #[cfg(unix)]
 fn build_empty_carried_state(session_start: &SessionStart) -> (ResumeHeader, ResumeBody) {
     let resume_header = ResumeHeader {
@@ -1788,6 +1670,8 @@ fn build_empty_carried_state(session_start: &SessionStart) -> (ResumeHeader, Res
         session_by_id: HashMap::new(),
         carried_pane_state_by_pane_id: HashMap::new(),
         carried_quit: None,
+        saved_view_store: SavedViewStore::default(),
+        left_running_child_process_ids: Vec::new(),
     };
     (resume_header, resume_body)
 }
@@ -1830,7 +1714,8 @@ fn a_rebuild_that_cannot_bind_its_socket_leaves_no_resume_file_behind() {
     // The address the rebuild binds is already held: the rebuild's own bind is
     // refused.
     let held_session_socket =
-        bind_session_socket(&session_start, &runtime_event_sender).expect("the address binds once");
+        bind_session_socket(&session_start, &portable_pty_backend, &runtime_event_sender)
+            .expect("the address binds once");
 
     // The file the swap wrote before it withdrew the socket.
     let resume_file_path =
@@ -1927,7 +1812,8 @@ fn a_session_that_keeps_its_socket_serves_the_same_address_under_a_fresh_token()
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
     let session_socket =
-        bind_session_socket(&session_start, &runtime_event_sender).expect("the address binds");
+        bind_session_socket(&session_start, &portable_pty_backend, &runtime_event_sender)
+            .expect("the address binds");
     let endpoint_file_path = EndpointFile::resolve_endpoint_file_path(
         &session_start.runtime_directory,
         session_start.session_id,
@@ -2008,7 +1894,8 @@ fn a_swap_whose_new_image_never_starts_hands_the_session_back_on_a_rebound_socke
         .expect("the session is seeded");
     let expected_tabs = server.list_sessions()[&session_id].tabs.clone();
     let session_socket =
-        bind_session_socket(&session_start, &runtime_event_sender).expect("the address binds");
+        bind_session_socket(&session_start, &portable_pty_backend, &runtime_event_sender)
+            .expect("the address binds");
     let resume_file_path =
         resolve_resume_file_path(&session_start.runtime_directory, session_start.session_id);
 
@@ -2038,6 +1925,439 @@ fn a_swap_whose_new_image_never_starts_hands_the_session_back_on_a_rebound_socke
     assert!(
         !resume_file_path.exists(),
         "the resume file must not be left on the disk"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_swap_that_holds_no_session_to_carry_keeps_serving_under_a_fresh_token() {
+    // The server holds no session, so nothing is carried. The session keeps
+    // its socket and advertises a fresh token: a client the swap told waits
+    // for one.
+    let runtime_directory_fixture = build_short_runtime_directory();
+    let session_start = build_test_session_start(runtime_directory_fixture.path(), false);
+    let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
+    let portable_pty_backend = Arc::new(PortablePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(runtime_event_sender.clone()),
+    )));
+    let pty_backend: Arc<dyn PtyBackend> = portable_pty_backend.clone();
+    let server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let session_socket =
+        bind_session_socket(&session_start, &portable_pty_backend, &runtime_event_sender)
+            .expect("the address binds");
+    let endpoint_file_path = EndpointFile::resolve_endpoint_file_path(
+        &session_start.runtime_directory,
+        session_start.session_id,
+    );
+    let initial_endpoint_file =
+        EndpointFile::load_from_path(&endpoint_file_path).expect("the socket is advertised");
+
+    let (kept_server, kept_session_socket) = swap_session_image(
+        server,
+        session_socket,
+        &portable_pty_backend,
+        &session_start,
+        &runtime_event_sender,
+    )
+    .expect("a swap with nothing to carry keeps the session")
+    .expect("the session runs in this process, not another one");
+
+    let refreshed_endpoint_file =
+        EndpointFile::load_from_path(&endpoint_file_path).expect("the socket is still advertised");
+    assert_eq!(
+        refreshed_endpoint_file.socket_address,
+        initial_endpoint_file.socket_address
+    );
+    assert_eq!(
+        kept_session_socket.get_socket_address(),
+        initial_endpoint_file.socket_address
+    );
+    assert_ne!(
+        refreshed_endpoint_file.connection_token, initial_endpoint_file.connection_token,
+        "a client that was told watches for a fresh token"
+    );
+    assert!(kept_server.list_sessions().is_empty());
+}
+
+/// How long a read on a connection [`connect_greeted_session`] opened waits
+/// before it gives up: 10 seconds.
+#[cfg(unix)]
+const GREETED_SESSION_READ_WAIT_DURATION: Duration = Duration::from_secs(10);
+
+/// The refusal a session that refuses requests while it replaces its image
+/// answers request `request_id` with.
+#[cfg(unix)]
+fn build_session_restarting_refusal(request_id: u64) -> IpcResponse {
+    IpcResponse {
+        request_id: Some(request_id),
+        answer_result: build_restarting_refusal(),
+    }
+}
+
+/// Connect to the control socket `session_start` advertises and send its
+/// Hello. Hands back both halves once the Hello is answered; each read on the
+/// reading half gives up [`GREETED_SESSION_READ_WAIT_DURATION`] after this
+/// call.
+#[cfg(unix)]
+fn connect_greeted_session(session_start: &SessionStart) -> (FrameReader, FrameWriter) {
+    let endpoint_file = EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
+        &session_start.runtime_directory,
+        session_start.session_id,
+    ))
+    .expect("the socket is advertised");
+    let (mut frame_reader, mut frame_writer) = Connection::connect(&endpoint_file.socket_address)
+        .expect("connect")
+        .split();
+    frame_reader.set_deadline(Some(Instant::now() + GREETED_SESSION_READ_WAIT_DURATION));
+    frame_writer
+        .send(&IpcRequest {
+            request_id: 1,
+            request_kind: IpcRequestKind::Hello {
+                minimum_protocol_version: MIN_PROTOCOL_VERSION,
+                maximum_protocol_version: PROTOCOL_VERSION,
+                connection_token: endpoint_file.connection_token,
+                is_remote: false,
+            },
+        })
+        .expect("send the Hello");
+    let hello_response: IpcResponse = frame_reader.recv().expect("the Hello is answered");
+    assert_eq!(hello_response.answer_result, build_accepted_hello_result());
+    (frame_reader, frame_writer)
+}
+
+/// Send a `Prepare` of `prepared_request_kind` under request id `2` on the
+/// greeted connection `frame_reader` and `frame_writer` hold, answer it with
+/// one event off `server`'s inbox, and assert the answer is `Prepared`.
+#[cfg(unix)]
+fn prepare_request(
+    server: &mut Server,
+    frame_reader: &mut FrameReader,
+    frame_writer: &mut FrameWriter,
+    prepared_request_kind: IpcRequestKind,
+) {
+    frame_writer
+        .send(&IpcRequest {
+            request_id: 2,
+            request_kind: IpcRequestKind::Prepare(Box::new(prepared_request_kind)),
+        })
+        .expect("send the Prepare");
+    let prepare_probe = server
+        .get_inbox_receiver()
+        .recv_timeout(GREETED_SESSION_READ_WAIT_DURATION)
+        .expect("the Prepare asks the dispatcher");
+    let _ = server.handle_runtime_event(prepare_probe);
+    let prepare_response: IpcResponse = frame_reader.recv().expect("the Prepare is answered");
+    assert_eq!(
+        prepare_response,
+        IpcResponse {
+            request_id: Some(2),
+            answer_result: IpcResult::Prepared,
+        }
+    );
+}
+
+/// Bind the control socket of a server that holds no session, and prepare
+/// `prepared_request_kind` on a greeted connection ([`prepare_request`]).
+/// Hands back the server, its socket, the backend, and both halves of the
+/// connection that holds the prepared request.
+#[cfg(unix)]
+fn start_session_with_a_prepared_request(
+    session_start: &SessionStart,
+    runtime_event_sender: &mpsc::Sender<RuntimeEvent>,
+    runtime_event_receiver: mpsc::Receiver<RuntimeEvent>,
+    prepared_request_kind: IpcRequestKind,
+) -> (
+    Server,
+    IpcServer,
+    Arc<PortablePtyBackend>,
+    FrameReader,
+    FrameWriter,
+) {
+    let portable_pty_backend = Arc::new(PortablePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(runtime_event_sender.clone()),
+    )));
+    let pty_backend: Arc<dyn PtyBackend> = portable_pty_backend.clone();
+    let mut server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let session_socket =
+        bind_session_socket(session_start, &portable_pty_backend, runtime_event_sender)
+            .expect("the address binds");
+    let (mut frame_reader, mut frame_writer) = connect_greeted_session(session_start);
+    prepare_request(
+        &mut server,
+        &mut frame_reader,
+        &mut frame_writer,
+        prepared_request_kind,
+    );
+    (
+        server,
+        session_socket,
+        portable_pty_backend,
+        frame_reader,
+        frame_writer,
+    )
+}
+
+/// A `SubmitCommand` carrying `core:quit` from the `koshi` command line.
+#[cfg(unix)]
+fn build_quit_submit_request_kind() -> IpcRequestKind {
+    IpcRequestKind::SubmitCommand(Box::new(CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::from_external_cli(None, None),
+        Command::Quit,
+    )))
+}
+
+#[cfg(unix)]
+#[test]
+fn a_restart_on_the_bound_socket_runs_the_restart_check_and_reaches_no_dispatcher() {
+    // The check runs `is_binary_runnable` first, on the program file the
+    // session started from, here a path with nothing at it.
+    let runtime_directory_fixture = build_short_runtime_directory();
+    let mut session_start = build_test_session_start(runtime_directory_fixture.path(), false);
+    let missing_executable_path = runtime_directory_fixture
+        .path()
+        .join("koshi-that-is-not-there");
+    session_start.executable_watch = Arc::new(ExecutableWatch::new(
+        missing_executable_path.clone(),
+        "1.0.0",
+    ));
+    let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
+    let (server, _session_socket, _portable_pty_backend, mut frame_reader, mut frame_writer) =
+        start_session_with_a_prepared_request(
+            &session_start,
+            &runtime_event_sender,
+            runtime_event_receiver,
+            IpcRequestKind::Restart,
+        );
+
+    frame_writer
+        .send(&IpcRequest {
+            request_id: 2,
+            request_kind: IpcRequestKind::Commit,
+        })
+        .expect("send the Commit");
+    let restart_response: IpcResponse = frame_reader.recv().expect("the Commit is answered");
+
+    let unreadable_metadata_error =
+        std::fs::metadata(&missing_executable_path).expect_err("nothing is at that path");
+    assert_eq!(
+        restart_response,
+        IpcResponse {
+            request_id: Some(2),
+            answer_result: IpcResult::Error(IpcErrorPayload {
+                code: IpcErrorCode::RequestFailed,
+                message: format!(
+                    "the binary at {} could not be read: {unreadable_metadata_error}",
+                    missing_executable_path.display()
+                ),
+            }),
+        }
+    );
+    assert_eq!(
+        server.get_inbox_receiver().try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_swap_waits_the_whole_answer_window_for_a_request_held_by_its_prepare() {
+    // The prepared request is never committed: it stays unanswered, and the
+    // swap waits `UNANSWERED_REQUESTS_WAIT_DURATION` for it.
+    let runtime_directory_fixture = build_short_runtime_directory();
+    let session_start = build_test_session_start(runtime_directory_fixture.path(), false);
+    let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
+    let (server, session_socket, portable_pty_backend, _frame_reader, _frame_writer) =
+        start_session_with_a_prepared_request(
+            &session_start,
+            &runtime_event_sender,
+            runtime_event_receiver,
+            build_quit_submit_request_kind(),
+        );
+
+    let swap_started_at = Instant::now();
+    let (_kept_server, _kept_session_socket) = swap_session_image(
+        server,
+        session_socket,
+        &portable_pty_backend,
+        &session_start,
+        &runtime_event_sender,
+    )
+    .expect("a swap with nothing to carry keeps the session")
+    .expect("the session runs in this process, not another one");
+
+    assert!(swap_started_at.elapsed() >= UNANSWERED_REQUESTS_WAIT_DURATION);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_commit_that_reaches_a_swap_after_its_last_pass_is_refused_as_restarting() {
+    // Each probe connection asks for an overview. While an inbox pass still
+    // answers, the server holds no session: the probe's connection ends with
+    // no answer, and the next probe connects again. The first refusal shows
+    // that the swap refuses every request. The prepared request's `Commit`,
+    // sent after that refusal, is refused too, and the swap's wait for
+    // answers ends.
+    let runtime_directory_fixture = build_short_runtime_directory();
+    let session_start = build_test_session_start(runtime_directory_fixture.path(), false);
+    let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
+    let (server, session_socket, portable_pty_backend, mut frame_reader, mut frame_writer) =
+        start_session_with_a_prepared_request(
+            &session_start,
+            &runtime_event_sender,
+            runtime_event_receiver,
+            build_quit_submit_request_kind(),
+        );
+
+    let commit_response = std::thread::scope(|thread_scope| {
+        let commit_answer = thread_scope.spawn(|| {
+            loop {
+                let (mut probe_frame_reader, mut probe_frame_writer) =
+                    connect_greeted_session(&session_start);
+                probe_frame_writer
+                    .send(&IpcRequest {
+                        request_id: 2,
+                        request_kind: IpcRequestKind::Discovery,
+                    })
+                    .expect("send the overview request");
+                match probe_frame_reader.recv::<IpcResponse>() {
+                    Err(IpcError::Disconnected) => continue,
+                    probe_answer => {
+                        assert_eq!(
+                            probe_answer.expect("the overview request is refused"),
+                            build_session_restarting_refusal(2)
+                        );
+                        break;
+                    }
+                }
+            }
+            frame_writer
+                .send(&IpcRequest {
+                    request_id: 2,
+                    request_kind: IpcRequestKind::Commit,
+                })
+                .expect("send the Commit");
+            frame_reader
+                .recv::<IpcResponse>()
+                .expect("the Commit is answered")
+        });
+        let _ = swap_session_image(
+            server,
+            session_socket,
+            &portable_pty_backend,
+            &session_start,
+            &runtime_event_sender,
+        )
+        .expect("a swap with nothing to carry keeps the session")
+        .expect("the session runs in this process, not another one");
+        commit_answer.join().expect("the Commit is answered")
+    });
+
+    assert_eq!(commit_response, build_session_restarting_refusal(2));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_line_a_client_sends_after_reading_the_restart_frame_reaches_its_pane_before_the_swap_ends() {
+    // The client attaches over the control socket. Once it reads the restart
+    // frame, it sends a carriage return for the session's pane and then
+    // `Leaving`. The new image is a path with nothing at it: the swap comes
+    // back in this process.
+    let runtime_directory_fixture = build_short_runtime_directory();
+    let mut session_start = build_test_session_start(runtime_directory_fixture.path(), false);
+    session_start.executable_watch = Arc::new(ExecutableWatch::new(
+        runtime_directory_fixture
+            .path()
+            .join("koshi-that-is-not-there"),
+        "1.0.0",
+    ));
+    let (mut server, fake_pty_backend, runtime_event_sender) = build_test_server();
+    seed_test_session(&mut server);
+    let pane_id = *server
+        .list_terminal_engines()
+        .keys()
+        .next()
+        .expect("the root pane holds a terminal engine");
+    let pty_owner = Arc::new(PortablePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(runtime_event_sender.clone()),
+    )));
+    let session_socket = bind_session_socket(&session_start, &pty_owner, &runtime_event_sender)
+        .expect("the address binds");
+    let (mut frame_reader, mut frame_writer) = connect_greeted_session(&session_start);
+    prepare_request(
+        &mut server,
+        &mut frame_reader,
+        &mut frame_writer,
+        IpcRequestKind::Attach {
+            viewport_size: STARTING_VIEWPORT,
+            resume_client_id: None,
+            resume_token: None,
+            pane_area: None,
+            graphics_capabilities: GraphicsCapabilities::default(),
+            cell_size: None,
+            link_timeout_ms: None,
+            max_frames_per_second: 60,
+        },
+    );
+    frame_writer
+        .send(&IpcRequest {
+            request_id: 2,
+            request_kind: IpcRequestKind::Commit,
+        })
+        .expect("send the Commit");
+    let attach_event = server
+        .get_inbox_receiver()
+        .recv_timeout(GREETED_SESSION_READ_WAIT_DURATION)
+        .expect("the Commit hands the attach to the dispatcher");
+    let _ = server.handle_runtime_event(attach_event);
+    let attach_response: IpcResponse = frame_reader.recv().expect("the attach is answered");
+    let IpcResult::Attached { client_id, .. } = attach_response.answer_result else {
+        panic!("the attach is accepted, got {attach_response:?}");
+    };
+
+    let swap_thread = std::thread::spawn(move || {
+        let (mut rebuilt_server, _rebound_session_socket) = swap_session_image(
+            server,
+            session_socket,
+            &pty_owner,
+            &session_start,
+            &runtime_event_sender,
+        )
+        .expect("a swap that could not start puts the session back")
+        .expect("the session runs in this process, not another one");
+        rebuilt_server.kill_all_panes();
+    });
+    while frame_reader
+        .recv_message_or_binary::<SessionEvent>()
+        .expect("the stream carries the restart frame")
+        != ReceivedFrame::Message(SessionEvent::Restarting)
+    {}
+    frame_writer
+        .send(&IpcRequest {
+            request_id: 3,
+            request_kind: IpcRequestKind::SubmitCommand(Box::new(CommandEnvelope::from_parts(
+                CommandId::new(),
+                CommandSource::from_key_binding(client_id),
+                Command::WriteToPane(WriteToPaneArgs {
+                    pane_id: Some(pane_id),
+                    pane_input_bytes: vec![b'\r'],
+                }),
+            ))),
+        })
+        .expect("send the line");
+    frame_writer
+        .send(&IpcRequest {
+            request_id: 4,
+            request_kind: IpcRequestKind::Leaving { is_returning: true },
+        })
+        .expect("send the Leaving");
+    swap_thread.join().expect("the swap thread ends");
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("the pane is open"),
+        vec![vec![b'\r']]
     );
 }
 
@@ -2117,11 +2437,11 @@ fn assert_swap_waits_for_the_held_kill_of_a_closed_pane(session_start: SessionSt
             should_kill_process_tree: false,
         }),
     ));
-    let session_socket =
-        bind_session_socket(&session_start, &runtime_event_sender).expect("the address binds");
     let pty_owner = Arc::new(PortablePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
+    let session_socket = bind_session_socket(&session_start, &pty_owner, &runtime_event_sender)
+        .expect("the address binds");
 
     let (kill_record_sender, kill_record_receiver) = mpsc::channel();
     let swap_fake_pty_backend = fake_pty_backend.clone();
@@ -2175,7 +2495,8 @@ fn a_swap_that_can_write_neither_its_state_nor_a_fresh_token_ends_every_pane() {
     seed_test_session(&mut server);
     let pane_child_process_id = get_only_pane_child_process_id(&portable_pty_backend);
     let session_socket =
-        bind_session_socket(&session_start, &runtime_event_sender).expect("the address binds");
+        bind_session_socket(&session_start, &portable_pty_backend, &runtime_event_sender)
+            .expect("the address binds");
     let endpoint_file_path = EndpointFile::resolve_endpoint_file_path(
         &session_start.runtime_directory,
         session_start.session_id,
@@ -2236,7 +2557,8 @@ fn a_swap_that_can_neither_start_nor_bind_its_socket_again_ends_every_pane() {
     seed_test_session(&mut server);
     let pane_child_process_id = get_only_pane_child_process_id(&portable_pty_backend);
     let session_socket =
-        bind_session_socket(&session_start, &runtime_event_sender).expect("the address binds");
+        bind_session_socket(&session_start, &portable_pty_backend, &runtime_event_sender)
+            .expect("the address binds");
     let endpoint_file_path = EndpointFile::resolve_endpoint_file_path(
         &session_start.runtime_directory,
         session_start.session_id,
@@ -2370,12 +2692,7 @@ fn a_resume_run_with_a_carried_pane_that_cannot_bind_its_socket_ends_every_pane(
     // start returns that failure, and the carried child is ended and reaped.
     let runtime_directory_fixture = build_short_runtime_directory();
     let mut session_start = build_test_session_start(runtime_directory_fixture.path(), false);
-    let terminal_master_file_descriptor =
-        unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
-    assert!(
-        terminal_master_file_descriptor >= 0,
-        "the pseudoterminal master opens"
-    );
+    let terminal_master_file_descriptor = open_terminal_master();
     let carried_terminal_name = find_terminal_master_name(terminal_master_file_descriptor)
         .expect("the master names its terminal");
     let carried_child_process_id = start_group_leading_child("/bin/sh", &["-c", "sleep 30"]);
@@ -2526,7 +2843,7 @@ fn carried_panes_in_conflict_leave_a_descriptor_that_is_no_terminal_master_open(
         "neither pane comes back"
     );
     assert!(
-        unsafe { libc::fcntl(log_file_descriptor, libc::F_GETFD) } >= 0,
+        read_file_descriptor_flags(log_file_descriptor) >= 0,
         "the ordinary file stays open"
     );
     let mut log_file_contents = String::new();
@@ -2545,12 +2862,7 @@ fn a_pane_that_cannot_be_taken_back_leaves_every_other_pane_taken_back() {
     let session_start = build_test_session_start(runtime_directory_fixture.path(), false);
     let ordinary_file = std::fs::File::open("/dev/null").expect("open an ordinary file");
     let ordinary_file_descriptor = ordinary_file.as_raw_fd();
-    let terminal_master_file_descriptor =
-        unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
-    assert!(
-        terminal_master_file_descriptor >= 0,
-        "the pseudoterminal master opens"
-    );
+    let terminal_master_file_descriptor = open_terminal_master();
     let carried_terminal_name = find_terminal_master_name(terminal_master_file_descriptor)
         .expect("the master names its terminal");
     let refused_pane_id = PaneId::new();
@@ -2607,7 +2919,7 @@ fn a_pane_that_cannot_be_taken_back_leaves_every_other_pane_taken_back() {
         vec![taken_back_pane_id]
     );
     assert!(
-        unsafe { libc::fcntl(ordinary_file_descriptor, libc::F_GETFD) } >= 0,
+        read_file_descriptor_flags(ordinary_file_descriptor) >= 0,
         "the refused pane's descriptor is left open"
     );
     // The backend owns the master from here, and closing the pane closes it.
@@ -2625,12 +2937,7 @@ fn a_pane_whose_terminal_name_changed_is_refused_and_its_master_closes() {
         InboxSink::from_event_sender(mpsc::channel().0),
     )));
 
-    let terminal_master_file_descriptor =
-        unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
-    assert!(
-        terminal_master_file_descriptor >= 0,
-        "the pseudoterminal master opens"
-    );
+    let terminal_master_file_descriptor = open_terminal_master();
     let carried_terminal_name = find_terminal_master_name(terminal_master_file_descriptor)
         .expect("the master names its terminal");
     let pane_id = PaneId::new();
@@ -2656,7 +2963,7 @@ fn a_pane_whose_terminal_name_changed_is_refused_and_its_master_closes() {
         )
     );
     assert_eq!(
-        unsafe { libc::fcntl(terminal_master_file_descriptor, libc::F_GETFD) },
+        read_file_descriptor_flags(terminal_master_file_descriptor),
         -1,
         "the refused terminal master is closed"
     );
@@ -2676,12 +2983,7 @@ fn a_pane_whose_terminal_is_the_one_the_header_recorded_is_taken_back() {
         InboxSink::from_event_sender(mpsc::channel().0),
     )));
 
-    let terminal_master_file_descriptor =
-        unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
-    assert!(
-        terminal_master_file_descriptor >= 0,
-        "the pseudoterminal master opens"
-    );
+    let terminal_master_file_descriptor = open_terminal_master();
     let carried_terminal_name = find_terminal_master_name(terminal_master_file_descriptor)
         .expect("the master names its terminal");
     let pane_id = PaneId::new();
@@ -2717,21 +3019,12 @@ fn a_pane_whose_terminal_is_the_one_the_header_recorded_is_taken_back() {
 fn two_carried_panes_naming_one_descriptor_are_neither_taken_back_and_it_is_closed_once() {
     let runtime_directory_fixture = TempDir::new().expect("create runtime directory fixture");
     let session_start = build_test_session_start(runtime_directory_fixture.path(), false);
-    let terminal_master_file_descriptor =
-        unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
-    assert!(
-        terminal_master_file_descriptor >= 0,
-        "the pseudoterminal master opens"
-    );
+    let terminal_master_file_descriptor = open_terminal_master();
     let carried_terminal_name = find_terminal_master_name(terminal_master_file_descriptor)
         .expect("the master names its terminal");
     // A second number on the same pseudoterminal, held to the end of the test,
     // keeps that terminal allocated to this test.
-    let held_terminal_file_descriptor = unsafe { libc::dup(terminal_master_file_descriptor) };
-    assert!(
-        held_terminal_file_descriptor >= 0,
-        "the master opens under a second number"
-    );
+    let held_terminal_file_descriptor = duplicate_file_descriptor(terminal_master_file_descriptor);
     // Two process ids: the descriptor is the only thing the two panes share.
     let build_carried_pane_record = |process_id| koshi_runtime::resume::CarriedPane {
         pane_id: PaneId::new(),
@@ -2771,7 +3064,7 @@ fn two_carried_panes_naming_one_descriptor_are_neither_taken_back_and_it_is_clos
         "the shared descriptor is closed"
     );
     assert_eq!(
-        unsafe { libc::close(held_terminal_file_descriptor) },
+        close_file_descriptor(held_terminal_file_descriptor),
         0,
         "the test still owns the second number it opened"
     );
@@ -2840,18 +3133,8 @@ fn a_header_naming_no_pane_has_no_conflict() {
 fn two_carried_records_naming_one_pane_are_neither_taken_back_and_both_terminals_close() {
     let runtime_directory_fixture = TempDir::new().expect("create runtime directory fixture");
     let session_start = build_test_session_start(runtime_directory_fixture.path(), false);
-    let first_terminal_master_file_descriptor =
-        unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
-    let second_terminal_master_file_descriptor =
-        unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
-    assert!(
-        first_terminal_master_file_descriptor >= 0,
-        "the first pseudoterminal master opens"
-    );
-    assert!(
-        second_terminal_master_file_descriptor >= 0,
-        "the second pseudoterminal master opens"
-    );
+    let first_terminal_master_file_descriptor = open_terminal_master();
+    let second_terminal_master_file_descriptor = open_terminal_master();
     let first_terminal_name = find_terminal_master_name(first_terminal_master_file_descriptor)
         .expect("the first master names its terminal");
     let second_terminal_name = find_terminal_master_name(second_terminal_master_file_descriptor)
@@ -2859,11 +3142,9 @@ fn two_carried_records_naming_one_pane_are_neither_taken_back_and_both_terminals
     // A second number on each pseudoterminal, held to the end of the test,
     // keeps both terminals allocated to this test.
     let first_held_terminal_file_descriptor =
-        unsafe { libc::dup(first_terminal_master_file_descriptor) };
+        duplicate_file_descriptor(first_terminal_master_file_descriptor);
     let second_held_terminal_file_descriptor =
-        unsafe { libc::dup(second_terminal_master_file_descriptor) };
-    assert!(first_held_terminal_file_descriptor >= 0);
-    assert!(second_held_terminal_file_descriptor >= 0);
+        duplicate_file_descriptor(second_terminal_master_file_descriptor);
     let repeated_pane_id = PaneId::new();
     let build_carried_pane_with_terminal =
         |terminal_file_descriptor, process_id| koshi_runtime::resume::CarriedPane {
@@ -2915,11 +3196,11 @@ fn two_carried_records_naming_one_pane_are_neither_taken_back_and_both_terminals
         "the second terminal is closed"
     );
     assert_eq!(
-        unsafe { libc::close(first_held_terminal_file_descriptor) },
+        close_file_descriptor(first_held_terminal_file_descriptor),
         0
     );
     assert_eq!(
-        unsafe { libc::close(second_held_terminal_file_descriptor) },
+        close_file_descriptor(second_held_terminal_file_descriptor),
         0
     );
 }
@@ -3025,9 +3306,8 @@ fn a_binary_naming_a_lowest_format_above_its_highest_is_refused() {
 #[test]
 fn a_restart_accepted_in_the_pass_that_loses_the_last_pane_ends_the_session() {
     // The loop's no-panes check runs before the restart check.
-    let (mut server, _, runtime_event_sender) = build_test_server();
+    let (mut server, fake_pty_backend, runtime_event_sender) = build_test_server();
     seed_test_session(&mut server);
-    server.set_restart_check(Arc::new(|| Ok(())));
     let pane_id = *server
         .list_terminal_engines()
         .keys()
@@ -3035,21 +3315,15 @@ fn a_restart_accepted_in_the_pass_that_loses_the_last_pane_ends_the_session() {
         .expect("the root pane holds a terminal engine");
 
     let restart_response_receiver = request_session_restart(&runtime_event_sender);
-    runtime_event_sender
-        .send(RuntimeEvent::ChildExit {
-            pane_id,
-            exit_status: ExitStatus::ExitCode(0),
-        })
+    fake_pty_backend
+        .trigger_child_exit(pane_id, ExitStatus::ExitCode(0))
         .expect("the child's exit is queued");
 
     let serve_outcome = run_session_serve_loop(&mut server);
 
-    assert_eq!(
-        restart_response_receiver
-            .try_recv()
-            .expect("the loop answered the request"),
-        Ok(())
-    );
+    restart_response_receiver
+        .try_recv()
+        .expect("the loop answered the request");
     assert!(server.is_restart_requested());
     assert!(!server.has_active_panes());
     assert_eq!(
@@ -3074,7 +3348,6 @@ fn a_quit_arriving_with_a_restart_in_one_pass_ends_the_session_instead_of_swappi
             None,
         )
         .expect("the session is seeded");
-    server.set_restart_check(Arc::new(|| Ok(())));
 
     let restart_response_receiver = request_session_restart(&runtime_event_sender);
     runtime_event_sender
@@ -3093,12 +3366,9 @@ fn a_quit_arriving_with_a_restart_in_one_pass_ends_the_session_instead_of_swappi
 
     let serve_outcome = run_session_serve_loop(&mut server);
 
-    assert_eq!(
-        restart_response_receiver
-            .try_recv()
-            .expect("the loop answered the request"),
-        Ok(())
-    );
+    restart_response_receiver
+        .try_recv()
+        .expect("the loop answered the request");
     assert!(server.is_quit_requested());
     assert!(server.is_restart_requested());
     assert_eq!(serve_outcome, ServeOutcome::Ended);
@@ -3111,25 +3381,18 @@ fn two_restart_requests_in_one_pass_are_both_answered_and_the_loop_swaps_once() 
     // swap.
     let (mut server, _, runtime_event_sender) = build_test_server();
     seed_test_session(&mut server);
-    server.set_restart_check(Arc::new(|| Ok(())));
 
     let first_restart_response_receiver = request_session_restart(&runtime_event_sender);
     let second_restart_response_receiver = request_session_restart(&runtime_event_sender);
 
     let serve_outcome = run_session_serve_loop(&mut server);
 
-    assert_eq!(
-        first_restart_response_receiver
-            .try_recv()
-            .expect("the loop answered the first"),
-        Ok(())
-    );
-    assert_eq!(
-        second_restart_response_receiver
-            .try_recv()
-            .expect("the loop answered the second"),
-        Ok(())
-    );
+    first_restart_response_receiver
+        .try_recv()
+        .expect("the loop answered the first");
+    second_restart_response_receiver
+        .try_recv()
+        .expect("the loop answered the second");
     assert_eq!(serve_outcome, ServeOutcome::Restart);
     assert!(server.is_restart_requested());
     assert!(!server.is_quit_requested());
@@ -3221,12 +3484,7 @@ fn build_plain_shell_config() -> PartialKoshiConfig {
 fn a_body_that_does_not_read_brings_each_carried_pane_back_in_a_tab_of_its_own() {
     let runtime_directory_fixture = build_short_runtime_directory();
     let mut session_start = build_test_session_start(runtime_directory_fixture.path(), false);
-    let terminal_master_file_descriptor =
-        unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
-    assert!(
-        terminal_master_file_descriptor >= 0,
-        "the pseudoterminal master opens"
-    );
+    let terminal_master_file_descriptor = open_terminal_master();
     let carried_terminal_name = find_terminal_master_name(terminal_master_file_descriptor)
         .expect("the master names its terminal");
     let carried_pane_id = PaneId::new();
@@ -3383,4 +3641,170 @@ fn a_last_carried_pane_exit_keeps_a_new_stream_live_and_a_carried_quit_ending() 
         );
         session_server.kill_all_panes();
     }
+}
+
+/// A sink that hands every call to an [`InboxSink`] and counts the output
+/// bytes that sink accepted.
+#[cfg(unix)]
+struct CountingInboxSink {
+    /// The sink every call goes to.
+    inbox_sink: InboxSink,
+    /// The output bytes `inbox_sink` accepted so far.
+    accepted_byte_count: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(unix)]
+impl PtySink for CountingInboxSink {
+    /// Hands the chunk on, and counts its bytes once the push returns `true`.
+    fn accept_output_bytes(&self, pane_id: PaneId, output_bytes: Vec<u8>) -> bool {
+        let output_byte_count = output_bytes.len();
+        let is_accepted = self.inbox_sink.accept_output_bytes(pane_id, output_bytes);
+        if is_accepted {
+            self.accepted_byte_count
+                .fetch_add(output_byte_count, std::sync::atomic::Ordering::SeqCst);
+        }
+        is_accepted
+    }
+
+    /// Hands the exit on.
+    fn accept_exit_status(&self, pane_id: PaneId, exit_status: ExitStatus) {
+        self.inbox_sink.accept_exit_status(pane_id, exit_status);
+    }
+}
+
+/// The text of every row on `terminal_engine`'s active grid, trailing blanks
+/// removed.
+#[cfg(unix)]
+fn list_active_row_texts(terminal_engine: &koshi_terminal::engine::TerminalEngine) -> Vec<String> {
+    let active_grid = terminal_engine.get_terminal_state().get_active_grid();
+    let (row_count, column_count) = active_grid.get_grid_dimensions();
+    (0..row_count)
+        .map(|row_index| {
+            (0..column_count)
+                .map(|column_index| {
+                    active_grid
+                        .get_cell(row_index, column_index)
+                        .expect("cell in bounds")
+                        .get_character()
+                })
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_swap_pause_over_a_full_output_queue_loses_no_byte_and_parses_none_twice() {
+    // The pane prints about 270 KB while no dispatcher runs: its reader fills
+    // the queue and waits. The swap's pause, drain, park and drain run, the
+    // readers resume, and the rest is served. The pane's screen and its
+    // scrolled line count equal an engine that read every byte once.
+    const PRINTED_LINE_COUNT: u32 = 40_000;
+    const PANE_PTY_SIZE: PtySize = PtySize {
+        column_count: 80,
+        row_count: 24,
+    };
+    let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
+    let counting_sink = Arc::new(CountingInboxSink {
+        inbox_sink: InboxSink::from_event_sender(runtime_event_sender),
+        accepted_byte_count: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let portable_pty_backend = Arc::new(PortablePtyBackend::with_pty_sink(counting_sink.clone()));
+    let pty_backend: Arc<dyn PtyBackend> = portable_pty_backend.clone();
+    let mut server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    server.load_startup_config(None);
+    let pane_id = PaneId::new();
+    portable_pty_backend
+        .spawn_pane(
+            pane_id,
+            koshi_core::process::SpawnSpec {
+                program: PathBuf::from("/bin/sh"),
+                arguments: vec![
+                    "-c".to_string(),
+                    format!(
+                        "awk 'BEGIN {{ for (i = 1; i <= {PRINTED_LINE_COUNT}; i++) print i }}'; \
+                         printf done; exec cat"
+                    ),
+                ],
+                working_directory: None,
+                environment_variables: std::collections::BTreeMap::new(),
+                shell_kind: koshi_core::process::ShellKind::Other("sh".to_string()),
+            },
+            PANE_PTY_SIZE,
+        )
+        .expect("the pane starts");
+    // The pane's engine shows the layout notice before any of its output.
+    server.restore_panes_without_layout(
+        SessionId::new(),
+        "quiet-lake".to_string(),
+        &[(pane_id, PANE_PTY_SIZE)],
+        SystemTime::now(),
+    );
+
+    let full_queue_deadline = Instant::now() + Duration::from_secs(10);
+    while counting_sink
+        .accepted_byte_count
+        .load(std::sync::atomic::Ordering::SeqCst)
+        < koshi_runtime::runtime::pty_inbox::PANE_OUTPUT_QUEUE_BYTE_LIMIT
+    {
+        assert!(
+            Instant::now() < full_queue_deadline,
+            "the reader never filled the queue"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let holding_backend = Arc::clone(&portable_pty_backend);
+    let (held_server_sender, held_server_receiver) = mpsc::channel::<Server>();
+    std::thread::spawn(move || {
+        let mut held_server = server;
+        hold_pane_readers(&mut held_server, &holding_backend).expect("every reader can park");
+        let _ = held_server_sender.send(held_server);
+    });
+    let mut server = held_server_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the reader parks once its full queue was drained");
+    assert!(!server.has_queued_pane_output());
+    portable_pty_backend.resume_readers();
+
+    let output_end_deadline = Instant::now() + Duration::from_secs(30);
+    while list_active_row_texts(&server.list_terminal_engines()[&pane_id])
+        .iter()
+        .all(|row_text| row_text != "done")
+    {
+        let remaining_duration = output_end_deadline.saturating_duration_since(Instant::now());
+        let runtime_event = server
+            .get_inbox_receiver()
+            .recv_timeout(remaining_duration)
+            .expect("the pane keeps printing until `done`");
+        assert!(server.handle_runtime_event(runtime_event).is_continue());
+        server.drain_pane_output_queues();
+    }
+
+    let mut reference_engine = koshi_terminal::engine::TerminalEngine::from_pty_size(PANE_PTY_SIZE);
+    let mut reference_output_bytes =
+        koshi_runtime::resume::LAYOUT_NOT_RESTORED_NOTICE_BYTES.to_vec();
+    for printed_number in 1..=PRINTED_LINE_COUNT {
+        reference_output_bytes.extend_from_slice(format!("{printed_number}\r\n").as_bytes());
+    }
+    reference_output_bytes.extend_from_slice(b"done");
+    let _ = reference_engine.process_pty_output(&reference_output_bytes);
+    let pane_engine = &server.list_terminal_engines()[&pane_id];
+    assert_eq!(
+        list_active_row_texts(pane_engine),
+        list_active_row_texts(&reference_engine)
+    );
+    assert_eq!(
+        pane_engine
+            .get_terminal_state()
+            .get_scrollback()
+            .get_total_pushed_line_count(),
+        reference_engine
+            .get_terminal_state()
+            .get_scrollback()
+            .get_total_pushed_line_count()
+    );
+    let _ = portable_pty_backend.kill_pane(pane_id, KillPolicy::Tree);
 }

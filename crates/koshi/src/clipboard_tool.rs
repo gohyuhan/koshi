@@ -34,6 +34,7 @@
 use std::ffi::{OsStr, OsString};
 use std::io::{IsTerminal, Read, StdinLock, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
 use koshi_host::clipboard_tool::{find_real_clipboard_tool, CLIPBOARD_TOOL_NAMES};
@@ -42,7 +43,8 @@ use koshi_ipc::protocol::MAX_CLIPBOARD_COPY_PART_BYTE_COUNT;
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client::{
-    open_clipboard_copy_exchange, ClipboardCopyAnswer, SESSION_ANSWER_TIMEOUT_DURATION,
+    is_ended_by_image_replacement, open_clipboard_copy_exchange, ClipboardCopyAnswer,
+    SERVER_ANSWER_TIMEOUT_DURATION,
 };
 use koshi_link::process::exec_and_keep_ignoring_sigpipe;
 
@@ -275,11 +277,11 @@ impl<InputReader: Read> CopyInput<InputReader> {
     ///
     /// The read goes on until [`MAX_CLIPBOARD_COPY_PART_BYTE_COUNT`] + 1 bytes
     /// wait behind the parts handed back before, or until the input ends.
-    /// While the input has not ended, the part is the first
-    /// [`MAX_CLIPBOARD_COPY_PART_BYTE_COUNT`] bytes that wait, and one byte or
-    /// more waits behind it. Once the input has ended, the part is every byte
-    /// that waits, less one `\n` that ends the input while
-    /// `should_trim_last_newline`, and it is the last part.
+    /// While more than [`MAX_CLIPBOARD_COPY_PART_BYTE_COUNT`] bytes wait, the
+    /// part is the first [`MAX_CLIPBOARD_COPY_PART_BYTE_COUNT`] of them.
+    /// Otherwise the input has ended, and the part is every byte that waits,
+    /// less one `\n` that ends the input while `should_trim_last_newline`, and
+    /// it is the last part.
     ///
     /// Example: the input `hi\n` with `should_trim_last_newline` gives the
     /// last part `hi`. An input of 12582775 bytes gives a part of 12582774
@@ -309,7 +311,7 @@ impl<InputReader: Read> CopyInput<InputReader> {
             Err(_) => return Ok(None),
         }
         let part_start_index = self.sent_byte_count;
-        if !self.is_input_ended {
+        if self.read_input_bytes.len() - part_start_index > MAX_CLIPBOARD_COPY_PART_BYTE_COUNT {
             self.sent_byte_count += MAX_CLIPBOARD_COPY_PART_BYTE_COUNT;
             let copy_part = &self.read_input_bytes[part_start_index..self.sent_byte_count];
             return Ok(Some((copy_part, false)));
@@ -320,6 +322,16 @@ impl<InputReader: Read> CopyInput<InputReader> {
             last_copy_part = last_copy_part.strip_suffix(b"\n").unwrap_or(last_copy_part);
         }
         Ok(Some((last_copy_part, true)))
+    }
+
+    /// Hand the parts out again from the first byte read: the next
+    /// [`read_next_copy_part`](Self::read_next_copy_part) gives the first part
+    /// again, from the bytes already read.
+    ///
+    /// Example: an input of 12582775 bytes whose first part went out gives
+    /// the part of 12582774 bytes again, then the last part of 1 byte.
+    fn rewind_copy_parts(&mut self) {
+        self.sent_byte_count = 0;
     }
 
     /// Write every byte read, then each byte that `input_reader` still gives
@@ -673,25 +685,13 @@ enum CopyRouting {
 /// session of the pane that the `KOSHI_*` variables name, and hand back what
 /// became of it ([`CopyRouting`]).
 ///
-/// 1. [`CopyRouting::RunsRealTool`] at once when the `KOSHI_*` variables of a
-///    pane are missing or broken ([`InSessionContext::from_env`]), or the
-///    runtime directory is unknown. Nothing is read.
-/// 2. The first part ([`CopyInput::read_next_copy_part`]) opens the exchange
-///    ([`open_clipboard_copy_exchange`]). Each later part goes out after the
-///    session took the part before it
-///    ([`ClipboardCopyExchange::send_copy_part`](koshi_link::ipc_client::ClipboardCopyExchange::send_copy_part)).
-///    The session has [`SESSION_ANSWER_TIMEOUT_DURATION`] to answer each
-///    part.
-/// 3. [`CopyRouting::RunsRealTool`] when the bytes read are not UTF-8, when
-///    asking the session fails before it took the whole copy, and when the
-///    session answers that the real tool runs. The exchange closes, and the
-///    session drops every part it holds.
-/// 4. [`CopyRouting::Unanswered`] when the session took the whole copy and
-///    its answer did not come ([`classify_copy_failure`]).
+/// [`CopyRouting::RunsRealTool`] at once when the `KOSHI_*` variables of a
+/// pane are missing or broken ([`InSessionContext::from_env`]), or the runtime
+/// directory is unknown. Nothing is read. Otherwise the copy goes as
+/// [`route_copy_input_to_session`] states.
 ///
 /// # Errors
-/// A read of the input that fails. The exchange closes, and the session
-/// drops every part it holds.
+/// What [`route_copy_input_to_session`] gives.
 fn route_copy_input(
     copy_input: &mut CopyInput<impl Read>,
     clipboard_targets: &str,
@@ -702,37 +702,92 @@ fn route_copy_input(
     let Some(runtime_directory) = koshi_paths::resolve_runtime_directory() else {
         return Ok(CopyRouting::RunsRealTool);
     };
-    let Some((first_copy_part, is_last_part)) = copy_input.read_next_copy_part()? else {
-        return Ok(CopyRouting::RunsRealTool);
-    };
-    let (mut copy_exchange, mut copy_answer) = match open_clipboard_copy_exchange(
+    route_copy_input_to_session(
+        copy_input,
+        clipboard_targets,
         &runtime_directory,
         &in_session_context,
-        clipboard_targets,
-        first_copy_part,
-        is_last_part,
-        SESSION_ANSWER_TIMEOUT_DURATION,
-    ) {
-        Ok(opened_exchange) => opened_exchange,
-        Err(copy_error) => return Ok(classify_copy_failure(copy_error)),
-    };
-    while copy_answer == ClipboardCopyAnswer::PartTaken {
-        let Some((copy_part, is_last_part)) = copy_input.read_next_copy_part()? else {
+    )
+}
+
+/// Hand the copy that `copy_input` reads, for `clipboard_targets`, to the
+/// session of the pane that `in_session_context` names, whose endpoint file
+/// is in `runtime_directory`, and hand back what became of it
+/// ([`CopyRouting`]).
+///
+/// 1. The first part ([`CopyInput::read_next_copy_part`]) opens the exchange
+///    ([`open_clipboard_copy_exchange`]). Each part after the first goes out
+///    after the session took the part before it
+///    ([`ClipboardCopyExchange::send_copy_part`](koshi_link::ipc_client::ClipboardCopyExchange::send_copy_part)).
+///    The session has [`SERVER_ANSWER_TIMEOUT_DURATION`] to answer each
+///    part.
+/// 2. A part after the first that meets the session while it replaces its
+///    process image ([`is_ended_by_image_replacement`]) leaves no part in the
+///    session.
+///    Once per copy, the parts go out again from the first one
+///    ([`CopyInput::rewind_copy_parts`]), over an exchange opened again as
+///    step 1 opens it.
+/// 3. [`CopyRouting::RunsRealTool`] when the bytes read are not UTF-8, when
+///    asking the session fails before it took the whole copy, and when the
+///    session answers that the real tool runs. The exchange closes, and the
+///    session drops every part it holds.
+/// 4. [`CopyRouting::Unanswered`] when the session took the whole copy and
+///    its answer did not come ([`classify_copy_failure`]).
+///
+/// # Errors
+/// A read of the input that fails. The exchange closes, and the session
+/// drops every part it holds.
+fn route_copy_input_to_session(
+    copy_input: &mut CopyInput<impl Read>,
+    clipboard_targets: &str,
+    runtime_directory: &Path,
+    in_session_context: &InSessionContext,
+) -> std::io::Result<CopyRouting> {
+    let mut has_reopened_after_restart = false;
+    'copy_exchange: loop {
+        let Some((first_copy_part, is_last_part)) = copy_input.read_next_copy_part()? else {
             return Ok(CopyRouting::RunsRealTool);
         };
-        copy_answer = match copy_exchange.send_copy_part(copy_part, is_last_part) {
-            Ok(next_copy_answer) => next_copy_answer,
+        let (mut copy_exchange, mut copy_answer) = match open_clipboard_copy_exchange(
+            runtime_directory,
+            in_session_context,
+            clipboard_targets,
+            first_copy_part,
+            is_last_part,
+            SERVER_ANSWER_TIMEOUT_DURATION,
+        ) {
+            Ok(opened_exchange) => opened_exchange,
             Err(copy_error) => return Ok(classify_copy_failure(copy_error)),
         };
-    }
-    if copy_answer
-        == (ClipboardCopyAnswer::Routed {
-            should_run_clipboard_tool: false,
-        })
-    {
-        Ok(CopyRouting::Routed)
-    } else {
-        Ok(CopyRouting::RunsRealTool)
+        while copy_answer == ClipboardCopyAnswer::PartTaken {
+            let Some((copy_part, is_last_part)) = copy_input.read_next_copy_part()? else {
+                return Ok(CopyRouting::RunsRealTool);
+            };
+            copy_answer = match copy_exchange.send_copy_part(copy_part, is_last_part) {
+                Ok(next_copy_answer) => next_copy_answer,
+                Err(copy_error)
+                    if !has_reopened_after_restart
+                        && is_ended_by_image_replacement(
+                            runtime_directory,
+                            in_session_context.session_id,
+                            &copy_error,
+                        ) =>
+                {
+                    has_reopened_after_restart = true;
+                    copy_input.rewind_copy_parts();
+                    continue 'copy_exchange;
+                }
+                Err(copy_error) => return Ok(classify_copy_failure(copy_error)),
+            };
+        }
+        if copy_answer
+            == (ClipboardCopyAnswer::Routed {
+                should_run_clipboard_tool: false,
+            })
+        {
+            return Ok(CopyRouting::Routed);
+        }
+        return Ok(CopyRouting::RunsRealTool);
     }
 }
 

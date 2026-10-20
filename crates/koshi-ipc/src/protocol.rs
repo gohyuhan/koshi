@@ -364,7 +364,7 @@ impl GraphicsCapabilities {
 /// On a connection already serving an attached client's event stream,
 /// [`Keyboard`](Self::Keyboard), [`Resize`](Self::Resize),
 /// [`Paste`](Self::Paste) and [`SubmitCommand`](Self::SubmitCommand) are
-/// answered by the next painted frame, not by an [`IpcResponse`].
+/// answered by the next painted update, not by an [`IpcResponse`].
 ///
 /// [`Mouse`](Self::Mouse) is answered by exactly one
 /// [`SessionEvent::MouseAnswer`](crate::event::SessionEvent::MouseAnswer)
@@ -413,7 +413,8 @@ pub enum IpcRequestKind {
         /// The client record to come back as, named by a caller re-attaching
         /// after the session replaced its own process image. The server hands
         /// that record back when it still holds it, the tab that record was
-        /// viewing still exists, and no connection is streaming for it, and
+        /// viewing still exists, no connection is streaming for it, and
+        /// `resume_token` is the token that record's last attach minted, and
         /// mints a fresh client in every other case. `None` on a first attach.
         resume_client_id: Option<ClientId>,
         /// The token the session handed this caller at its last attach,
@@ -422,8 +423,9 @@ pub enum IpcRequestKind {
         /// offset of each pane, and the view of the floating panes. `None` on a
         /// first attach. A token the session does not hold, and a token older
         /// than 24 hours, attach with a fresh view instead of failing. A token
-        /// minted for a client that is still attached takes that client's view
-        /// over, and the session removes that client.
+        /// minted for a client that is still attached, or for a record that
+        /// came across a swap and still waits for its client, takes that
+        /// client's view over, and the session removes that client.
         resume_token: Option<ConnectionToken>,
         /// The pane region the caller draws the tab's panes in, which the
         /// server records on the client. Absent, the server sizes the
@@ -449,6 +451,13 @@ pub enum IpcRequestKind {
         /// absent, it reads as `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         link_timeout_ms: Option<u32>,
+        /// The most frames a second the session sends this client, the
+        /// client's `max-frames-per-second`. The session sends the client a
+        /// frame at most once per second divided by this value, and the frame
+        /// after the client's own key, paste or mouse event goes without that
+        /// wait. A value outside `30..=120` is refused with
+        /// [`IpcErrorCode::RequestFailed`].
+        max_frames_per_second: u16,
     },
     /// One keyboard event an attached client sends for the pane it is typing
     /// into: its keymap bound nothing to the event, or no chord could name it.
@@ -547,6 +556,27 @@ pub enum IpcRequestKind {
     /// [`Commit`](Self::Commit): then the session reads the `Ping` and drops
     /// it.
     Ping,
+    /// The attached client painted after it applied the painted update
+    /// numbered `update_sequence`, and that update is the last one it applied.
+    /// The client sends it after each paint, and nothing answers it. The
+    /// session sends that client a new painted update while the bytes it sent
+    /// after the reported update stay within the client's byte window. A
+    /// report of an update the session has not sent closes the connection. On
+    /// a connection with no attached client, a `PaintedUpdate` closes the
+    /// connection.
+    ///
+    /// The session releases the image records of every placement preview it
+    /// sent before the reported update, except the preview that
+    /// `shown_placement_request_id` names.
+    PaintedUpdate {
+        /// The number of the last painted update the client applied.
+        update_sequence: u64,
+        /// The request whose placement preview the client holds when it sends
+        /// the report, or `None` when it holds no preview. A report without
+        /// this field is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        shown_placement_request_id: Option<u64>,
+    },
     /// One part of a clipboard copy that a stand-in clipboard tool in a pane
     /// sends before the last part, which goes as
     /// [`ClipboardCopy`](Self::ClipboardCopy).
@@ -692,6 +722,7 @@ impl IpcRequestKind {
             IpcRequestKind::Restart => "Restart",
             IpcRequestKind::Leaving { .. } => "Leaving",
             IpcRequestKind::Ping => "Ping",
+            IpcRequestKind::PaintedUpdate { .. } => "PaintedUpdate",
             IpcRequestKind::ClipboardCopyPart { .. } => "ClipboardCopyPart",
             IpcRequestKind::ClipboardCopy { .. } => "ClipboardCopy",
             IpcRequestKind::Prepare(_) => "Prepare",
@@ -817,7 +848,9 @@ pub enum IpcResult {
         /// What the session contains right now, built for this reply.
         session_structure: AttachedSessionStructureSnapshot,
         /// The fresh secret this attach minted, presented on the next attach
-        /// to get this attach's view back.
+        /// to get this attach's view back, and with `resume_client_id` to
+        /// claim this client's record after the session replaced its own
+        /// process image.
         resume_token: Option<ConnectionToken>,
         /// The pane region the server holds for this client, exactly as the
         /// attach reported it.
@@ -902,6 +935,10 @@ pub enum IpcErrorCode {
     /// the user who started it. The message names the `koshi.kdl` setting that
     /// lets other users in.
     OtherUsersOff,
+    /// The session is replacing its process image and runs no request in
+    /// this image. The request did not run. The same request, sent once the
+    /// session advertises the endpoint of its new image, runs there.
+    Restarting,
     /// A refusal this build has no name for, from a newer koshi. The
     /// [`message`](IpcErrorPayload::message) beside it still reads.
     #[default]
@@ -950,6 +987,7 @@ impl WireVariants for IpcRequestKind {
         "Restart",
         "Leaving",
         "Ping",
+        "PaintedUpdate",
         "ClipboardCopyPart",
         "ClipboardCopy",
         "Prepare",

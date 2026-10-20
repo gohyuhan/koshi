@@ -40,6 +40,14 @@ followed:
 4. A koshi built from source downloads nothing. A build is a release build only
    when the release workflow built it.
 
+The SHA-256 checksum that `koshi update` checks comes from `checksums.txt` of
+the same GitHub release. It finds an archive that changed on the way, such as
+a download that stopped part way. It does not find a release whose archive and
+`checksums.txt` were both replaced. `install.sh` and `install.ps1` check no
+checksum. Every way to install or update koshi downloads from the GitHub
+account `gohyuhan`: its releases, its Homebrew tap and its Scoop bucket. Each
+download is as safe as that account and the permissions to change it.
+
 When `koshi update` replaces the file in place, it first writes the new release
 beside it: `<name>.koshi-update-<process id>` on Linux and macOS, such as
 `koshi.koshi-update-5000`, and `koshi-staged-<process id>.exe` on Windows. Then
@@ -68,7 +76,7 @@ for the password at each command. If the check or the rename fails, also when
 there with `sudo rm -f`, which can ask for the password once more. If the copy
 stays, the error names it and the `sudo rm -f` command that deletes it.
 
-`install.sh` installs into `/usr/local/bin` the same way: it writes
+On Linux, `install.sh` installs into `/usr/local/bin` the same way: it writes
 `koshi.koshi-update-<process id of its shell>`, runs it with `--version`, then
 renames that copy to `koshi`. It reads the version from the first line on
 standard output, and what the copy writes on standard error shows on the
@@ -364,9 +372,9 @@ An unknown key exits 2 and suggests the nearest known key.
 `profile/*.kdl`. Current schema version is `2`. Version `1` files migrate to
 version `2`. Version `2` files stay unchanged. Migration does not repair bad
 fields: `version 1` followed by `made-up-key "x"` becomes `version 2` followed
-by `made-up-key "x"`, and `check` still rejects it. A session server, a router,
-and `koshi resume-support` run this migration before they read config; the
-command also lets you run it directly.
+by `made-up-key "x"`, and `check` still rejects it. A session server and a
+router run this migration before they read config; the command also lets you
+run it directly. `koshi resume-support` leaves the files as they are.
 
 Each path must be a regular file or a symlink to one. `check` reports every
 read and schema error. `migrate` reports every read, KDL, and version error
@@ -397,6 +405,18 @@ Session and tab flags that say `NAME_OR_ID` accept either their generated name
 or printed id. A value that reads as an id is always the id — it never falls
 back to a name lookup. A name several targets share is refused, and the error
 lists every matching id. Pane and client flags use printed ids.
+
+A session that another user of this machine started also takes the form
+`<user id>/<session id>`, as `koshi list-sessions` prints it in its `owner`
+column. Example: `koshi attach 1001/session-3f2a…` looks for that session only
+in the folders of the shared directory that user `1001` owns, and reads no file
+of yours. Text with a `/` in any other form, such as `1001/quiet-lake`, is
+refused with exit code 2 and ``expected `<user id>/session-<uuid>`, such as
+`1001/session-<uuid>` ``. Your own user id is refused with exit code 2:
+``1000/session-3f2a… names a session of yours; name it by its id alone:
+`session-3f2a…` ``. A session that the folders of that user do not advertise
+exits 3 and names the whole form, such as `1001/session-3f2a…`. On Windows no
+folder of another user exists, and every such form exits 3.
 
 ## Created ids
 
@@ -438,7 +458,11 @@ Every list and inspect command accepts `--format table` or `--format json`.
 Table is the default.
 
 `koshi list-sessions` names each session's machine in its `server` column:
-`local` for a session on this machine, else the saved server it runs on. A bare
+`local` for a session on this machine, else the saved server it runs on. Its
+`owner` column names the user id of another user whose folder of the shared
+directory advertises the session, such as `1001`, and `-` for every other
+session. `--format json` carries the same value as `owner_user_id`, and `null`
+for every other session. A bare
 `koshi list-sessions` sweeps every saved server and appends what answered;
 `koshi list-sessions --remote <server>` lists that one server's sessions alone.
 A server that refused the saved secret, and a server that did not answer, are
@@ -466,9 +490,10 @@ named the same way, for example `koshi: some sessions were not asked:
 /tmp/koshi could not be read: it holds more than 256 user folders`, and only
 the sessions read before the limit are listed.
 
-`kill-session` takes the session id or its exact generated name; an id goes
-straight to that session with no lookup. With no argument, it works only when
-exactly one session is running. An unknown name or id exits 3.
+`kill-session` takes the session id, `<user id>/<session id>`, or its exact
+generated name; an id goes straight to that session with no lookup. With no
+argument, it works only when exactly one session is running. An unknown name
+or id exits 3.
 
 `kill-session` ends a session of yours whatever koshi version it runs:
 
@@ -532,8 +557,9 @@ session does not answer, the command exits 4.
 `attach` run outside koshi opens that session in this terminal. Run inside a
 koshi pane, it moves this terminal to the named session instead. With no
 argument it lists the sessions running for this user and the sessions on every
-saved server that answered, numbers them, and reads your answer. A session on a
-saved server carries `(remote: <server>)`:
+saved server that answered, numbers them, and reads your answer. A session that
+another user of this machine started shows as `<user id>/<session id>`, and a
+session on a saved server carries `(remote: <server>)`:
 
 ```text
 koshi attach
@@ -549,7 +575,8 @@ reads `attach to which session? [1]`.
 `detach` leaves the session running with its panes untouched. Bare `koshi
 detach` works only inside a koshi pane and detaches that terminal. Outside one,
 name the target: `koshi detach session-3f2a…` takes a client id, a session id,
-or a session name. `--all` detaches every terminal of one session.
+`<user id>/<session id>`, or a session name. `--all` detaches every terminal of
+one session.
 
 A session left with no terminal keeps running unless `auto-close-session` is on
 in `koshi.kdl`, which ends it once the last terminal leaves.
@@ -658,6 +685,10 @@ Example: terminals `client-1a2b…` and `client-3c4d…` both watch session
 The three `share` verbs run on the machine holding the sessions. The rest run
 on the machine connecting to it.
 
+The `--session` of a `share` verb names one of your own sessions. A session
+that another user of this machine started is not found and exits 3, such as
+`koshi: session 1001/session-3f2a… is not running`.
+
 An absent `--session` reads one way on `grant` and another way on `revoke`.
 `koshi share grant alice` gives alice one token that reaches every session on
 this machine. `koshi share revoke alice` stops every grant alice holds: the one
@@ -685,6 +716,19 @@ session `quiet-lake` — the grants scoped to that session, and the grants that
 reach every session on this machine, whose `scope` column reads `host`. It
 answers "who can get into this session". `koshi share list` with no `--session`
 lists every grant this machine has made.
+
+A grant that was revoked or ran out 30 days ago or longer no longer shows in
+`koshi share list`. The next `koshi share grant`, `koshi share revoke`, or
+admitted remote connection removes it from the store. A grant revoked on
+1 March shows until 31 March.
+
+Two koshi programs never change the tokens at the same time. `koshi share
+grant` and `koshi share revoke` wait up to 5 seconds while another koshi
+changes them, then stop with:
+
+```text
+another koshi is changing the remote access tokens; try again
+```
 
 An identity holds at most one grant per scope. Granting the same identity on
 the same scope again hands out a fresh token and takes the place of the old
@@ -787,7 +831,7 @@ The `koshi share list` columns read:
 | `scope` | `host` when the grant reaches every session on this machine, else the id of the one session it reaches |
 | `issued` | When the grant was made |
 | `expires` | When the grant stops working on its own |
-| `last_used` | When a presented token last reached a session through this grant |
+| `last_used` | When a presented token last reached a session through this grant. The time is written to the store right after the connection opens |
 | `revoked` | When an operator stopped the grant |
 
 In table cells a time prints as whole seconds since the Unix epoch, and an
@@ -1008,6 +1052,12 @@ work` included, is refused:
 server this machine has not saved. Without `--remote`, koshi stops with a usage
 error that names `--remote <SERVER>`.
 
+`--remote` takes a session id or name. A session named `<user id>/<session id>`
+is a session in the shared directory of this machine, and `--remote` refuses it
+with exit code 2 before it dials anything, such as `koshi: invalid arguments:
+--remote takes a session id or name, not `1001/session-3f2a…`, which names a
+folder of this machine's shared directory`.
+
 `koshi share grant` prints the new token's secret, and `koshi share list`
 prints every identity holding one. Inside a koshi pane, the session paints that
 pane to every client viewing its tab, a client on another machine included.
@@ -1081,9 +1131,9 @@ koshi 0.5.0
 ```
 
 These two answers differ while an update rolls out. `koshi update` installs a
-new binary, each session server replaces its own image one at a time, and then
-the router restarts into it. Until every swap lands, the program your shell runs
-is a newer build than the process answering it:
+new binary, up to 16 session servers replace their own images at the same
+time, and then the router restarts into it. Until every swap lands, the program
+your shell runs is a newer build than the process answering it:
 
 ```text
 koshi server-version
@@ -1154,7 +1204,7 @@ The checks run in this order:
 | `terminal` | `TERM` and `COLORTERM` |
 | `runtime directory` | The runtime directory: which directory it is, that it can be read, that it is private, and which rule produced its path |
 | `log directory` | The log directory: that a file can be written there, and whether `koshi.kdl` turns logging on |
-| `router` | Whether a router answers on its control socket |
+| `router` | Whether a router answers on its control socket within 5 seconds |
 | `session directory` | Where sessions are advertised, and who may reach that directory |
 | `remote access` | `koshi.kdl`'s remote listen address, and how many access grants still stand |
 | `remote connections` | How many open connections the running router holds from another machine |
@@ -1190,6 +1240,14 @@ application data directory.
 On Linux and macOS, a session whose `pane-clipboard-writes` allows writes also
 keeps its folder of stand-in clipboard tools there:
 `session-<uuid>.clipboard-tools`. The folder goes when the session ends.
+
+On Linux and macOS, while the router and each session server run, each one
+holds a shared `flock` on the directory, and every hour sets the access time of
+each file it keeps there to 30 days after the clock. Modification times do not
+change. A session that other users of the machine may reach does the same for
+its socket and its folder under the shared sessions directory. Example: on
+1 March, `ls -lu /tmp/koshi-1000` lists `router.json` with an access date of
+31 March.
 
 `KOSHI_RUNTIME_DIR` names the directory instead, and koshi reads it only when
 it holds an absolute path. A relative value is ignored. Two koshi processes

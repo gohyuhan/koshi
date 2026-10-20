@@ -4,11 +4,12 @@
 //! It runs with no terminal of its own. Startup reads `koshi.kdl`, installs
 //! this session's log subscriber, builds the server, seeds the session under
 //! the id and name it was started with, binds the control socket, and prints
-//! one JSON line saying where that socket is — the only thing this process
-//! ever writes to standard output. Then it serves the runtime inbox — applying
-//! each event, timing renders, and handing every attached client its frame —
-//! until the last pane's child exits, or a `core:quit` command is applied and
-//! no client is still expected back from an image swap, and tears down.
+//! one JSON line saying where that socket is — the only thing this process ever
+//! writes to standard output. Then it serves the runtime inbox and each pane's
+//! output queue — applying each event, giving each pane with output its turn,
+//! timing renders, and handing every attached client its frame — until the last
+//! pane's child exits, or a `core:quit` command is applied and no client is
+//! still expected back from an image swap, and tears down.
 //!
 //! Startup fails, and every pane is ended first, when:
 //!
@@ -53,7 +54,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -71,13 +72,14 @@ use koshi_ipc::endpoint::{resolve_clipboard_tool_directory_path, resolve_resume_
 use koshi_ipc::error::IpcError;
 use koshi_ipc::router::{SessionServerReady, ROUTER_PROTOCOL_VERSION};
 use koshi_observability::logging::initialize_tracing;
-use koshi_pty::backend::state::{CarriedPtyPane, PtyBackend, PtySink};
+use koshi_pty::backend::state::{PtyBackend, PtySink};
 use koshi_runtime::executable_watch::{read_first_output_line, ExecutableWatch, OutputLineError};
-use koshi_runtime::ipc_server::IpcServer;
+use koshi_runtime::ipc_server::{ImageReplacement, IpcServer};
 use koshi_runtime::resume::{
     self, ResumeBody, ResumeHeader, RESUME_FORMAT, RESUME_FORMAT_MIN,
     SESSION_NOT_RESTORED_NOTICE_BYTES,
 };
+use koshi_runtime::runtime::driver::DispatchPassOutcome;
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::{
@@ -91,6 +93,10 @@ use koshi_link::router_client::RUNTIME_DIRECTORY_FLAG;
 
 #[cfg(unix)]
 use crate::process::{list_child_process_ids, wait_for_child_exit};
+#[cfg(unix)]
+use crate::runtime_file_keeper::RuntimeFileKeeper;
+#[cfg(unix)]
+use koshi_ipc::endpoint::{EndpointFile, ServerProgramFile};
 #[cfg(unix)]
 use koshi_pty::kill::PtyChildKillControl;
 #[cfg(unix)]
@@ -163,12 +169,12 @@ const SUPERVISOR_LINK_WAIT_DURATION: Duration = Duration::from_secs(10);
 const SUPERVISOR_LINK_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(50);
 
 /// How long a swap waits for every told client to send its `Leaving` request.
-/// The connections still open when it passes are closed.
+/// What a client still attached sends after it passes is refused.
 const CLIENTS_LEFT_WAIT_DURATION: Duration = Duration::from_secs(1);
 
-/// How long the wait for the told clients pauses between passes over the
-/// runtime inbox.
-const CLIENTS_LEFT_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(2);
+/// How long a swap waits, once it refuses requests, for every answer it gave
+/// to be written and for every `Prepared` request's `Commit` to be refused.
+const UNANSWERED_REQUESTS_WAIT_DURATION: Duration = Duration::from_secs(1);
 
 /// The directory listing every descriptor this process holds open, one entry
 /// per descriptor number.
@@ -292,6 +298,14 @@ enum ServeOutcome {
 /// folder, in each case listed above and on a resume run whose program path
 /// cannot be resolved. A session that moved to a new image keeps it.
 ///
+/// On Linux and macOS, from the moment the session serves its control socket
+/// until the socket stops, the session holds a shared `flock` on each folder
+/// that holds one of its runtime files, and every hour sets the access time of
+/// its endpoint file, program file, socket file, and folder of stand-in
+/// clipboard tools with every link in it, to 30 days after the clock. A swap
+/// that does not happen sets them again, with the socket the session serves
+/// after it.
+///
 /// The ready line is printed only once the session is seeded and the socket is
 /// bound. Any failure before that returns `Err` having printed nothing: a
 /// caller reading standard output sees end of stream.
@@ -357,12 +371,18 @@ pub fn run_session_server(
         );
     }
 
-    // This session's server. On Unix, each pane's PTY reader thread delivers
-    // its output into this inbox. On Windows, the thread reading the link to
-    // the process holding the panes delivers it.
+    // This session's server. On Unix, each pane's PTY reader thread queues
+    // its output on the pane's output queue, and waits while that queue is
+    // full. On Windows, the one thread reading the link to the process holding
+    // the panes queues every pane's output, and never waits.
     let (runtime_event_sender, runtime_event_receiver) = mpsc::channel::<RuntimeEvent>();
+    #[cfg(unix)]
     let pty_sink: Arc<dyn PtySink> =
         Arc::new(InboxSink::from_event_sender(runtime_event_sender.clone()));
+    #[cfg(windows)]
+    let pty_sink: Arc<dyn PtySink> = Arc::new(InboxSink::from_event_sender_without_queue_wait(
+        runtime_event_sender.clone(),
+    ));
 
     let program_path = match koshi_host::program_path::resolve_program_path() {
         Ok(program_path) => program_path,
@@ -438,11 +458,8 @@ pub fn run_session_server(
             return Err(start_error);
         }
     };
-    install_restart_check(
-        &mut session_server,
-        &pty_owner,
-        session_start.executable_watch.get_executable_path(),
-    );
+    #[cfg(unix)]
+    let mut runtime_file_keeper = start_session_file_keeper(&session_start, &ipc_server);
 
     loop {
         match run_session_serve_loop(&mut session_server) {
@@ -464,11 +481,11 @@ pub fn run_session_server(
                 Ok(Some((restored_session_server, restored_ipc_server))) => {
                     session_server = restored_session_server;
                     ipc_server = restored_ipc_server;
-                    install_restart_check(
-                        &mut session_server,
-                        &pty_owner,
-                        session_start.executable_watch.get_executable_path(),
-                    );
+                    #[cfg(unix)]
+                    {
+                        runtime_file_keeper =
+                            start_session_file_keeper(&session_start, &ipc_server);
+                    }
                     session_start.executable_watch.schedule_restart_retry();
                 }
                 // The swap ran `end_every_pane` before it returned this
@@ -491,6 +508,8 @@ pub fn run_session_server(
     session_server.announce_quit();
 
     // The socket stops before the panes are killed.
+    #[cfg(unix)]
+    drop(runtime_file_keeper);
     ipc_server.shutdown();
     session_server.shutdown();
     end_every_pane(&pty_owner);
@@ -532,6 +551,25 @@ fn refresh_session_clipboard_tools(
             "the stand-in clipboard tools could not be set up"
         );
     }
+}
+
+/// Start the keeper of the runtime files of `session_start`'s session, as
+/// [`RuntimeFileKeeper::start`] states: its endpoint file, its program file,
+/// the socket file `ipc_server` serves on, and its folder of stand-in
+/// clipboard tools with every link in it.
+#[cfg(unix)]
+fn start_session_file_keeper(
+    session_start: &SessionStart,
+    ipc_server: &IpcServer,
+) -> RuntimeFileKeeper {
+    let runtime_directory = session_start.runtime_directory.as_path();
+    let session_id = session_start.session_id;
+    RuntimeFileKeeper::start(vec![
+        EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id),
+        ServerProgramFile::resolve_session_program_file_path(runtime_directory, session_id),
+        PathBuf::from(ipc_server.get_socket_address()),
+        resolve_clipboard_tool_directory_path(runtime_directory, session_id),
+    ])
 }
 
 /// Remove the folder of stand-in clipboard tools of the session `session_id`
@@ -674,6 +712,8 @@ fn resume_from_file(
 /// [`resume_from_file`] hands them on.
 ///
 /// Every pane the header names is taken back on its own by [`take_panes_back`].
+/// On Unix, the PTY backend then waits on each child a body that reads names
+/// as left running, and reaps it when it ends.
 /// `resume_body` is what reading the carried body gave:
 ///
 /// 1. A body that reads comes back through [`Server::resume`]: each pane taken
@@ -724,6 +764,10 @@ fn build_from_carried_state(
             )?
         }
         Ok((pty_owner, pty_size_by_pane_id, exit_status_by_pane_id)) => {
+            #[cfg(unix)]
+            if let Ok(resume_body) = &resume_body {
+                pty_owner.watch_left_running_children(&resume_body.left_running_child_process_ids);
+            }
             let pty_backend: Arc<dyn PtyBackend> = pty_owner.clone();
             let recovery_app_config = app_config.clone();
             let has_carried_quit = resume_body
@@ -1042,7 +1086,7 @@ fn find_conflicting_carried_pane_indexes(resume_header: &ResumeHeader) -> HashSe
 ///    A header that recorded no name leaves step 1 to decide.
 ///
 /// Close-on-exec goes back on the descriptor once both steps pass. The exit
-/// status the header carried goes to the pane as well: a child the previous
+/// status the header carried goes to the pane as well: a child an earlier
 /// image reaped is reported with the code it ended with.
 ///
 /// Before → after: the header carries `terminal_fd = 7` and
@@ -1077,6 +1121,10 @@ fn take_one_pane_back(
         )
         .into());
     };
+    // SAFETY: `find_terminal_master_name` proved the descriptor open. Nothing
+    // else in this process owns it: it came across the exec, and
+    // `find_conflicting_carried_pane_indexes` keeps a descriptor that two panes
+    // carry away from this function.
     let terminal_file = unsafe { OwnedFd::from_raw_fd(terminal_file_descriptor) };
     if let Some(carried_terminal_name) = &carried_pane.terminal_name {
         if *carried_terminal_name != current_terminal_name {
@@ -1122,6 +1170,8 @@ fn close_carried_terminal(carried_pane: &resume::CarriedPane) {
         );
         return;
     }
+    // SAFETY: `find_terminal_master_name` proved the descriptor open. No pane
+    // owns it, and the caller closes each conflicting descriptor once.
     drop(unsafe { OwnedFd::from_raw_fd(terminal_file_descriptor) });
 }
 
@@ -1237,6 +1287,8 @@ fn release_panes_without_header(
             terminal_fd = open_file_descriptor,
             "a terminal the previous image carried is closed"
         );
+        // SAFETY: the descriptor is open, and this image has opened no terminal
+        // yet, so nothing in this process owns it.
         drop(unsafe { OwnedFd::from_raw_fd(open_file_descriptor) });
     }
     let ended_process_ids: Vec<libc::pid_t> = match list_child_process_ids() {
@@ -1304,31 +1356,6 @@ fn reap_ended_children(ended_process_ids: Vec<libc::pid_t>) {
     }
 }
 
-/// Record on `resume_header` the exit status each pane reports now.
-///
-/// The panes are read once to build the header and again just before it is
-/// written. A child that ends between the two is reaped by this image's
-/// watcher, and nothing else can answer for it afterwards. A status the header
-/// already carries is kept: this only fills in the ones that settled late.
-///
-/// Before → after: pane 3's shell exits with code 7 after the header was built
-/// → the header carries `exit_status: Some(ExitCode(7))` instead of `None`, and the
-/// next image reports 7 rather than `-1`.
-fn refresh_carried_exits(resume_header: &mut ResumeHeader, carried_pty_panes: &[CarriedPtyPane]) {
-    for carried_pty_pane in carried_pty_panes {
-        let Some(carried_pane_record) = resume_header
-            .carried_panes
-            .iter_mut()
-            .find(|carried_pane| carried_pane.pane_id == carried_pty_pane.pane_id)
-        else {
-            continue;
-        };
-        if carried_pane_record.exit_status.is_none() {
-            carried_pane_record.exit_status = carried_pty_pane.exit_status;
-        }
-    }
-}
-
 /// End the process group of one pane child the previous image left, and hand
 /// back its process id for [`reap_ended_children`].
 ///
@@ -1355,6 +1382,8 @@ fn end_carried_child(process_id: u32) -> Option<libc::pid_t> {
         }
     };
     let mut wait_status: libc::c_int = 0;
+    // SAFETY: `waitpid` writes only to `wait_status`, which lives for the
+    // call.
     let waited_process_id =
         unsafe { libc::waitpid(child_process_id, &mut wait_status, libc::WNOHANG) };
     if waited_process_id < 0 {
@@ -1480,6 +1509,7 @@ fn build_carried_pty_sizes(resume_header: &ResumeHeader) -> HashMap<PaneId, PtyS
 /// file that could not be written.
 fn bind_session_socket(
     session_start: &SessionStart,
+    pty_owner: &Arc<PtyOwner>,
     runtime_event_sender: &Sender<RuntimeEvent>,
 ) -> Result<IpcServer, IpcError> {
     #[cfg(unix)]
@@ -1498,7 +1528,13 @@ fn bind_session_socket(
         session_start.session_id,
         runtime_event_sender.clone(),
         other_users_policy,
-        Some(Arc::clone(&session_start.executable_watch)),
+        Some(ImageReplacement {
+            executable_watch: Arc::clone(&session_start.executable_watch),
+            restart_check: build_restart_check(
+                pty_owner,
+                session_start.executable_watch.get_executable_path(),
+            ),
+        }),
     )
 }
 
@@ -1510,13 +1546,13 @@ fn bind_session_socket(
 /// ready line that could not be written on a first run. Before either failure
 /// is returned, [`end_every_pane`] ends every pane `pty_owner` holds.
 fn start_serving_session(
-    pty_owner: &PtyOwner,
+    pty_owner: &Arc<PtyOwner>,
     session_start: &SessionStart,
     is_resumed: bool,
     runtime_event_sender: &Sender<RuntimeEvent>,
     ready_output: &mut dyn Write,
 ) -> Result<IpcServer, Box<dyn std::error::Error>> {
-    let ipc_server = match bind_session_socket(session_start, runtime_event_sender) {
+    let ipc_server = match bind_session_socket(session_start, pty_owner, runtime_event_sender) {
         Ok(ipc_server) => ipc_server,
         Err(bind_error) => {
             end_every_pane(pty_owner);
@@ -1560,19 +1596,11 @@ fn report_ready(
     }
 }
 
-/// Install what a restart request must promise before this session accepts it:
-/// the binary a swap would run can be run, that binary reads the resume file
-/// this build writes, every pane can cross the swap, and no pane is still being
-/// written to.
-///
-/// Installed again on every server this process serves with. A session that
-/// came back from a failed swap answers the next restart request with the same
-/// checks.
-fn install_restart_check(
-    session_server: &mut Server,
-    pty_owner: &Arc<PtyOwner>,
-    executable_path: &Path,
-) {
+/// What a restart request must promise before this session accepts it: the
+/// binary at `executable_path` can be run, that binary reads the resume file
+/// this build writes, every pane `pty_owner` holds can cross the swap, and no
+/// pane is still being written to.
+fn build_restart_check(pty_owner: &Arc<PtyOwner>, executable_path: &Path) -> RestartCheck {
     let executable_path = executable_path.to_path_buf();
     let pty_owner = Arc::clone(pty_owner);
     // The three checks this process makes on its own run first; the new binary
@@ -1580,7 +1608,7 @@ fn install_restart_check(
     // does not read this build's resume file, is an unfit program file; a pane
     // without a terminal descriptor or with a writer that does not settle is a
     // pane not ready.
-    let restart_check: RestartCheck = Arc::new(move || {
+    Arc::new(move || {
         is_binary_runnable(&executable_path)
             .map_err(|refusal_reason| RestartRefusal::UnfitProgramFile { refusal_reason })?;
         can_carry_panes(&pty_owner.list_carried_panes())
@@ -1595,8 +1623,7 @@ fn install_restart_check(
                 reads_the_format_this_build_writes(resume_support, &executable_path)
             })
             .map_err(|refusal_reason| RestartRefusal::UnfitProgramFile { refusal_reason })
-    });
-    session_server.set_restart_check(restart_check);
+    })
 }
 
 /// Which resume-file formats the binary at `executable_path` takes back, as
@@ -1608,8 +1635,8 @@ fn install_restart_check(
 /// The first line of the binary's standard output is read through
 /// [`read_first_output_line`]: a stream that ends before a newline gives
 /// whatever it held. The wait lasts at most [`RESUME_SUPPORT_WAIT_DURATION`],
-/// and the binary is ended either way. This runs on the thread serving the
-/// session, which every pane's output also passes through.
+/// and the binary is ended either way. This runs on the thread that asks for
+/// the restart.
 ///
 /// # Errors
 /// Returns the sentence naming the binary and what is wrong with it.
@@ -1684,7 +1711,7 @@ fn start_reconnect_deadline(runtime_event_sender: Sender<RuntimeEvent>) {
         .spawn(move || {
             std::thread::sleep(RECONNECT_GRACE_DURATION);
             let _ = runtime_event_sender.send(RuntimeEvent::DropUnclaimedClients {
-                unclaimed_client_deadline: Instant::now(),
+                unclaimed_client_deadline: SystemTime::now(),
             });
         });
 }
@@ -1707,26 +1734,27 @@ fn restore_session_serving(mut session_server: Server, pty_owner: &Arc<PtyOwner>
 ///
 /// The swap runs in this order:
 ///
-/// 1. Apply the inbox, hold every pane's reader still, apply the inbox again,
-///    then wait for every pane's writer to finish. Once the readers are parked,
-///    no byte has been read from a terminal without reaching an engine. Each
-///    inbox pass hands every client what it produced: the escape a copy
-///    queued for a client's own terminal goes out here. Both passes detach a
-///    client that hung up.
+/// 1. Apply the inbox, hold every pane's reader still and apply what the
+///    readers handed over ([`hold_pane_readers`]), then wait for every pane's
+///    writer to finish. Once the readers are parked, no byte has been read
+///    from a terminal without reaching an engine. Each pass hands every client
+///    what it produced: the escape a copy queued for a client's own terminal
+///    goes out here. Every pass detaches a client that hung up.
 /// 2. Tell every attached client, and wait until each one holds that frame,
 ///    for 1 second at most. From here every path ends with a socket carrying
 ///    a fresh token, or ends every pane and returns the failure.
 /// 3. Wait for every told client to leave, applying the inbox on each pass. A
-///    client that read the frame step 2 wrote sends `Leaving` and writes nothing
-///    after it: its connection ends once the session has read every key,
-///    paste, mouse round and command it sent. All of them are applied here.
-///    The wait ends after [`CLIENTS_LEFT_WAIT_DURATION`] even when a client
-///    that stopped reading its socket has not left. The intake then closes,
-///    ending the connections that are left, and a last pass applies what they
-///    had already handed over. Nothing arrives after that pass. Then wait for
-///    the kills of panes that left the session
-///    ([`Server::wait_for_pane_kills`]): every way out of the swap after this
-///    point holds no kill.
+///    client that read the frame step 2 wrote sends `Leaving` and writes
+///    nothing after it: its connection ends once the session has read every
+///    key, paste, mouse round and command it sent. All of them are applied
+///    here. The wait ends after [`CLIENTS_LEFT_WAIT_DURATION`] even when a
+///    client that stopped reading its socket has not left. The intake then
+///    refuses every request with `Restarting`, and a last pass applies what was
+///    handed over before. Nothing arrives after that pass. The serving threads
+///    get [`UNANSWERED_REQUESTS_WAIT_DURATION`] to write the answers that pass
+///    gave and the refusals. Then wait for the kills of panes that left the
+///    session ([`Server::wait_for_pane_kills`]): every way out of the swap
+///    after this point holds no kill.
 /// 4. Carry the state out, which first writes a release for every mouse
 ///    button a client still holds ([`Server::carry_out`]), and wait for every
 ///    pane's writer again: no byte the session took for a child — a typed key,
@@ -1764,7 +1792,7 @@ fn swap_session_image(
     // Nothing has been told and nothing has moved. A pane whose reader cannot
     // be held still leaves the session as it was, with every client still
     // streaming. So do the two checks below.
-    if let Err(pause_readers_error) = pty_owner.pause_readers() {
+    if let Err(pause_readers_error) = hold_pane_readers(&mut session_server, pty_owner) {
         tracing::warn!(
             %pause_readers_error,
             "the panes could not be held still; the session keeps serving"
@@ -1774,7 +1802,6 @@ fn swap_session_image(
             ipc_server,
         )));
     }
-    apply_queued_runtime_events(&mut session_server, DetachPolicy::Apply);
 
     // A `core:quit` applied by either pass above ends the session in this
     // process: the serve loop the caller returns to reads the quit and ends on
@@ -1805,30 +1832,53 @@ fn swap_session_image(
     // Every told client sends `Leaving` and writes nothing after it: its
     // connection ends once the session has read every key, paste, mouse round
     // and command it sent while the frame above was on its way. Each pass
-    // applies what those connections handed over. The wait ends after
-    // CLIENTS_LEFT_WAIT_DURATION.
+    // applies what those connections handed over, then sleeps until the inbox
+    // holds the next event: a client's input, its detach, which arrives after
+    // its connection left the attached count, or a pane's output. The wait ends
+    // after CLIENTS_LEFT_WAIT_DURATION.
     let client_leave_deadline = Instant::now() + CLIENTS_LEFT_WAIT_DURATION;
     loop {
-        drain_runtime_event_inbox(&mut session_server, DetachPolicy::Skip);
+        drain_held_runtime_events(&mut session_server, DetachPolicy::Skip);
         let attached_client_count = ipc_server.count_attached_connections();
         if attached_client_count == 0 {
             break;
         }
-        if Instant::now() >= client_leave_deadline {
+        let remaining_duration = client_leave_deadline.saturating_duration_since(Instant::now());
+        if remaining_duration.is_zero() {
             tracing::warn!(
                 clients = attached_client_count,
                 "a client did not leave within the wait; what it sends now is not read"
             );
             break;
         }
-        std::thread::sleep(CLIENTS_LEFT_POLL_INTERVAL_DURATION);
+        match session_server
+            .get_inbox_receiver()
+            .recv_timeout(remaining_duration)
+        {
+            Ok(runtime_event) => {
+                handle_held_runtime_event(&mut session_server, runtime_event, DetachPolicy::Skip);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            // No sender is left: no client can hand over anything more.
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
     }
 
-    // Nothing a client sends reaches the session from here. The pass below is
-    // the last one, and it applies what a cut connection had already handed
-    // over.
-    ipc_server.close_intake();
-    apply_queued_runtime_events(&mut session_server, DetachPolicy::Skip);
+    // Nothing a client sends reaches the session from here: each request that
+    // needs the session is refused with `Restarting`, and did not run. The
+    // pass below is the last one, and it applies what was handed over before.
+    // The wait after it lets each serving thread write the answer that pass
+    // gave, and the refusal of each `Commit` a `Prepared` request waits for.
+    ipc_server.start_refusing_requests();
+    apply_held_runtime_events(&mut session_server, DetachPolicy::Skip);
+    let unanswered_request_count =
+        ipc_server.wait_until_requests_answered(Instant::now() + UNANSWERED_REQUESTS_WAIT_DURATION);
+    if unanswered_request_count > 0 {
+        tracing::warn!(
+            unanswered_request_count,
+            "a request still waits for its answer to be written; its connection ends with the swap"
+        );
+    }
 
     // Every kill of a pane that left the session ends here. No command is
     // applied after the pass above: no kill starts after this wait, and no
@@ -1845,13 +1895,22 @@ fn swap_session_image(
     }
 
     let carried_pty_panes = pty_owner.list_carried_panes();
-    let Some((mut resume_header, resume_body)) = session_server.carry_out(&carried_pty_panes)
-    else {
+    let Some((resume_header, resume_body)) = session_server.carry_out(&carried_pty_panes) else {
         tracing::error!("this process holds no session to carry; the session keeps serving");
-        return Ok(Some((
-            restore_session_serving(session_server, pty_owner),
-            ipc_server,
-        )));
+        let restored_session_server = restore_session_serving(session_server, pty_owner);
+        if let Err(token_rotation_error) = ipc_server.rotate_token() {
+            end_every_pane(pty_owner);
+            return Err(token_rotation_error.into());
+        }
+        return Ok(Some((restored_session_server, ipc_server)));
+    };
+
+    #[cfg(unix)]
+    let resume_body = {
+        let mut resume_body = resume_body;
+        resume_body.left_running_child_process_ids =
+            pty_owner.list_left_running_child_process_ids();
+        resume_body
     };
 
     let resume_file_path =
@@ -1879,10 +1938,6 @@ fn swap_session_image(
         )
         .map(Some);
     }
-
-    // A child that ended after the header was built was reaped by this image's
-    // watcher. Its exit status goes into the header here.
-    refresh_carried_exits(&mut resume_header, &pty_owner.list_carried_panes());
 
     // Written before the socket is released. A session that cannot write it
     // keeps the socket it is serving on.
@@ -1977,7 +2032,44 @@ fn start_replacement_image(
     }
 }
 
-/// What [`apply_queued_runtime_events`] does with a `ClientDetached` it drains.
+/// Hold every pane's reader still, and apply everything it handed over, in
+/// this order:
+///
+/// 1. Tell every reader to park (`pause_readers`).
+/// 2. Apply the inbox and every pane's queued output
+///    ([`apply_held_runtime_events`]). On Unix, each reader queues at most one
+///    more chunk before it parks, and a reader waiting for room in a full
+///    queue finishes its push during this pass. On Windows, `pause_readers`
+///    returns once every frame the supervisor wrote is queued, and nothing is
+///    queued after it.
+/// 3. On Unix, wait until every reader has parked.
+/// 4. Apply the inbox and every pane's queued output again.
+///
+/// Afterwards no byte has been read from a terminal without reaching an
+/// engine. Both passes detach a client that hung up.
+///
+/// # Errors
+/// Returns the error of `pause_readers`. Nothing is applied then.
+fn hold_pane_readers(
+    session_server: &mut Server,
+    pty_owner: &PtyOwner,
+) -> Result<(), koshi_pty::error::PtyError> {
+    pty_owner.pause_readers()?;
+    apply_held_runtime_events(session_server, DetachPolicy::Apply);
+    #[cfg(unix)]
+    pty_owner.wait_until_readers_parked();
+    apply_held_runtime_events(session_server, DetachPolicy::Apply);
+    Ok(())
+}
+
+/// What a pass over the runtime inbox does with a `ClientDetached` it takes.
+///
+/// Every pass before the restart is announced takes [`DetachPolicy::Apply`]:
+/// the session keeps serving without that client whether the swap starts or
+/// is abandoned. The passes after the announce take [`DetachPolicy::Skip`]:
+/// the swap carries each told client's record across, and the client attaches
+/// again onto it. The grace window after the swap drops a record nobody
+/// claims.
 #[derive(Clone, Copy)]
 enum DetachPolicy {
     /// Apply it: a client that hung up leaves the session's records.
@@ -1986,33 +2078,61 @@ enum DetachPolicy {
     Skip,
 }
 
-/// Apply everything already waiting in the runtime inbox, then hand every
-/// client what applying it produced.
-///
-/// `detach_policy` says what a queued `ClientDetached` does. Every pass before the
-/// restart is announced takes [`DetachPolicy::Apply`]: the session keeps
-/// serving without that client whether the swap starts or is abandoned. The
-/// passes after the announce take [`DetachPolicy::Skip`]: the swap carries each
-/// told client's record across, and the client attaches again onto it. The
-/// grace window after the swap drops a record nobody claims. The last of those
-/// passes runs after [`IpcServer::close_intake`]: nothing arrives after it.
+/// Apply everything already waiting in the runtime inbox
+/// ([`handle_inbox_events`]), then hand every client whose frame is due what
+/// applying it produced ([`Server::push_due_frames`]). A wake for a pane's
+/// output queue is taken in, and the output it names waits for that pane's
+/// turn in the serve loop.
 fn apply_queued_runtime_events(session_server: &mut Server, detach_policy: DetachPolicy) {
-    drain_runtime_event_inbox(session_server, detach_policy);
-    session_server.push_frames();
+    handle_inbox_events(session_server, detach_policy);
+    session_server.push_due_frames(Instant::now());
 }
 
-/// Apply every event the runtime inbox holds, on the terms [`apply_queued_runtime_events`]
-/// states, and push no frames.
-fn drain_runtime_event_inbox(session_server: &mut Server, detach_policy: DetachPolicy) {
-    while let Ok(runtime_event) = session_server.get_inbox_receiver().try_recv() {
-        if matches!(
-            (detach_policy, &runtime_event),
-            (DetachPolicy::Skip, RuntimeEvent::ClientDetached { .. })
-        ) {
-            continue;
+/// Apply everything already waiting in the runtime inbox and in every pane's
+/// output queue ([`drain_held_runtime_events`]), then hand every client whose
+/// frame is due what applying it produced ([`Server::push_due_frames`]).
+fn apply_held_runtime_events(session_server: &mut Server, detach_policy: DetachPolicy) {
+    drain_held_runtime_events(session_server, detach_policy);
+    session_server.push_due_frames(Instant::now());
+}
+
+/// Apply every event the runtime inbox holds and every chunk and exit the
+/// output queues hold, inbox first, until the inbox and every queue are empty.
+/// Pushes no frames. Called only after the readers were told to park
+/// (`pause_readers`): each reader then queues at most one more chunk, and the
+/// loop ends.
+fn drain_held_runtime_events(session_server: &mut Server, detach_policy: DetachPolicy) {
+    loop {
+        handle_inbox_events(session_server, detach_policy);
+        if !session_server.has_queued_pane_output() {
+            return;
         }
-        let _ = session_server.handle_runtime_event(runtime_event);
+        session_server.drain_pane_output_queues();
     }
+}
+
+/// Apply every event the runtime inbox holds, each through
+/// [`handle_held_runtime_event`], and push no frames.
+fn handle_inbox_events(session_server: &mut Server, detach_policy: DetachPolicy) {
+    while let Ok(runtime_event) = session_server.get_inbox_receiver().try_recv() {
+        handle_held_runtime_event(session_server, runtime_event, detach_policy);
+    }
+}
+
+/// Apply `runtime_event`, unless it is a [`RuntimeEvent::ClientDetached`] and
+/// `detach_policy` is [`DetachPolicy::Skip`].
+fn handle_held_runtime_event(
+    session_server: &mut Server,
+    runtime_event: RuntimeEvent,
+    detach_policy: DetachPolicy,
+) {
+    if matches!(
+        (detach_policy, &runtime_event),
+        (DetachPolicy::Skip, RuntimeEvent::ClientDetached { .. })
+    ) {
+        return;
+    }
+    let _ = session_server.handle_runtime_event(runtime_event);
 }
 
 /// Put the session back on its feet in this process after a swap that did not
@@ -2047,7 +2167,7 @@ fn resume_readers_and_rebuild(
         session_start.config_directory.as_deref(),
     );
 
-    let bound_session_socket = bind_session_socket(session_start, runtime_event_sender);
+    let bound_session_socket = bind_session_socket(session_start, pty_owner, runtime_event_sender);
     let _ = std::fs::remove_file(resolve_resume_file_path(
         &session_start.runtime_directory,
         session_start.session_id,
@@ -2251,11 +2371,12 @@ fn hand_over_session_to_new_image(
     .map(|_| ())
 }
 
-/// Serve the runtime inbox until the session ends: block until an event is due
-/// (bounded by the next render deadline), apply it and any others already
-/// queued, hand a fresh snapshot to any subscriber that lost a critical event,
-/// push every attached client its frame when a render is due, and stop once the
-/// inbox loses its last sender, a [`RuntimeEvent::Quit`] arrives, a `core:quit`
+/// Serve the runtime inbox until the session ends, one
+/// [`Server::run_dispatch_pass`] at a time: apply the events the inbox holds,
+/// give one pane with queued output its turn, hand a fresh snapshot to any
+/// subscriber that lost a critical event, push each attached client whose view
+/// changed its frame once its frame pace lets it go, and stop once the inbox
+/// loses its last sender, a [`RuntimeEvent::Quit`] arrives, a `core:quit`
 /// command is applied — in this loop or before it was entered, the swap
 /// included — no pane is left running, or a restart is due.
 ///
@@ -2279,34 +2400,11 @@ fn run_session_serve_loop(session_server: &mut Server) -> ServeOutcome {
         if session_server.is_quit_requested() && !session_server.is_awaiting_client() {
             return ServeOutcome::Ended;
         }
-        let current_time = Instant::now();
-        let runtime_event = match session_server.compute_next_render_wakeup(current_time) {
-            Some(render_wakeup_timeout) => match session_server
-                .get_inbox_receiver()
-                .recv_timeout(render_wakeup_timeout)
-            {
-                Ok(runtime_event) => Some(runtime_event),
-                Err(mpsc::RecvTimeoutError::Timeout) => None,
-                Err(mpsc::RecvTimeoutError::Disconnected) => return ServeOutcome::Ended,
-            },
-            None => match session_server.get_inbox_receiver().recv() {
-                Ok(runtime_event) => Some(runtime_event),
-                Err(_) => return ServeOutcome::Ended,
-            },
+        let should_quit = match session_server.run_dispatch_pass() {
+            DispatchPassOutcome::InboxClosed => return ServeOutcome::Ended,
+            DispatchPassOutcome::QuitEventHandled => true,
+            DispatchPassOutcome::Served => false,
         };
-        let mut should_quit = false;
-        if let Some(runtime_event) = runtime_event {
-            should_quit |= session_server
-                .handle_runtime_event(runtime_event)
-                .is_break();
-        }
-        // Apply anything else already queued before building one frame.
-        while let Ok(runtime_event) = session_server.get_inbox_receiver().try_recv() {
-            should_quit |= session_server
-                .handle_runtime_event(runtime_event)
-                .is_break();
-        }
-        session_server.push_due_frames(Instant::now());
         if (should_quit || session_server.is_quit_requested())
             && !session_server.is_awaiting_client()
         {

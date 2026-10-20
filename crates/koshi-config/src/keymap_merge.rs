@@ -4,14 +4,14 @@
 //! Bindings arrive in the same layers conflict detection reads — the
 //! built-in defaults, then the user's own surfaces (user file, session,
 //! layout), lowest precedence first. [`merge_keymaps`] folds them per key:
-//! a higher-precedence layer's entry on a key replaces a lower layer's on the same key,
-//! and every other key is untouched. The result splits each mode into two
-//! maps, and a keypress checks the user map before the default map:
+//! a higher-precedence layer's entry on a key replaces a lower layer's on the
+//! same key, and every other key is untouched. The result splits each mode
+//! into two maps, and a keypress checks the user map before the default map:
 //!
-//! - **`user_bindings_by_key_sequence`** — the winning user-authored entries, each tagged with
-//!   the layer that authored it.
-//! - **`default_bindings_by_key_sequence`** — the surviving built-in entries: shipped defaults
-//!   whose key no user surface took or removed.
+//! - **`user_bindings_by_key_sequence`** — the winning user-authored entries,
+//!   each tagged with the layer that authored it.
+//! - **`default_bindings_by_key_sequence`** — the surviving built-in entries:
+//!   shipped defaults whose key no user surface took or removed.
 //!
 //! Merging and detection read one shared firing predicate in the conflict
 //! module: a binding the resolver refuses, or one a keypress cannot reach,
@@ -42,7 +42,7 @@ use crate::types::{BoundAction, KeybindingsConfig, ModeName};
 /// it. `koshi keys describe` reports that layer as the binding's source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergedBinding {
-    /// The action and preset arguments the key triggers.
+    /// The action the key triggers.
     pub bound_action: BoundAction,
     /// The user-authored surface the winning entry came from.
     pub layer_origin: LayerOrigin,
@@ -102,13 +102,10 @@ pub fn merge_keymaps(
     registry: &ActionRegistry,
 ) -> MergedKeymap {
     let known_mode_names = &list_builtin_mode_names();
-    let reserved_unlock_chord = unlock_alternative.unwrap_or(KeybindingsConfig::RESERVED_UNLOCK);
-    let locked_mode_name = ModeName::from_text("locked");
     let removal_layer_index_by_mode_and_key = build_removal_layer_index(layers, known_mode_names);
     let firing_rules = FiringRules {
         registry,
-        reserved_unlock_chord,
-        locked_mode_name: &locked_mode_name,
+        reserved_unlock_chord: KeybindingsConfig::resolve_unlock_chord(unlock_alternative),
         maximum_chord_depth,
     };
 
@@ -183,4 +180,4 @@ pub fn merge_keymaps(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

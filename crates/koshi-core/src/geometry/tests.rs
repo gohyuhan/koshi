@@ -1,11 +1,10 @@
 //! Unit tests for rectangular geometry operations and layout enums.
 //!
 //! Tests `Rect` containment, intersection, insetting, moving inside a
-//! container, and serde round-trips;
-//! the `Size` fit check; the `RequiredSize` sum and fit check; `Direction` and
-//! `SplitDirection` enum serialization; the range `AxisPercent` and
-//! `FloatingPaneDimension` accept and their encoding; and the cell count of a
-//! percent of an axis.
+//! container, and serde round-trips; the `Size` fit check and cell count; the
+//! `RequiredSize` sum and fit check; `Direction` and `SplitDirection` enum
+//! serialization; the range `AxisPercent` and `FloatingPaneDimension` accept
+//! and their encoding; and the cell count of a percent of an axis.
 
 use super::*;
 
@@ -562,6 +561,20 @@ fn direction_opposite_pairs_each_cardinal() {
     );
     assert_eq!(Direction::Up.compute_opposite_direction(), Direction::Down);
     assert_eq!(Direction::Down.compute_opposite_direction(), Direction::Up);
+}
+
+#[test]
+fn compute_cell_count_multiplies_the_columns_by_the_rows() {
+    let build_size = |column_count: u16, row_count: u16| Size {
+        column_count,
+        row_count,
+    };
+    assert_eq!(build_size(200, 50).compute_cell_count(), 10_000);
+    assert_eq!(build_size(0, 50).compute_cell_count(), 0);
+    assert_eq!(
+        build_size(65_535, 65_535).compute_cell_count(),
+        4_294_836_225
+    );
 }
 
 #[test]

@@ -110,7 +110,6 @@ pub fn run_share_command(
     in_session_context: Option<&InSessionContext>,
 ) -> Result<(), CliError> {
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
-    let shared_sessions_base_directory = ipc_client::resolve_shared_sessions_base_directory();
     if let Some(in_session_context) = in_session_context {
         // The pane's own session advertises in this user's runtime directory.
         refuse_while_watched_from_another_machine(in_session_context, |session_id| {
@@ -118,6 +117,7 @@ pub fn run_share_command(
                 &runtime_directory,
                 None,
                 session_id,
+                None,
                 None,
             )
         })?;
@@ -128,12 +128,8 @@ pub fn run_share_command(
             session_reference,
             token_expiry,
         } => {
-            let token_scope = resolve_token_scope(
-                &runtime_directory,
-                shared_sessions_base_directory.as_deref(),
-                session_reference.as_ref(),
-            )?
-            .unwrap_or(TokenScope::HostWide);
+            let token_scope = resolve_token_scope(&runtime_directory, session_reference.as_ref())?
+                .unwrap_or(TokenScope::HostWide);
             let expiration_duration = match token_expiry {
                 Expiry::After(expiration_duration) => Some(*expiration_duration),
                 Expiry::Never => None,
@@ -178,11 +174,7 @@ pub fn run_share_command(
             identity,
             session_reference,
         } => {
-            let token_scope = resolve_token_scope(
-                &runtime_directory,
-                shared_sessions_base_directory.as_deref(),
-                session_reference.as_ref(),
-            )?;
+            let token_scope = resolve_token_scope(&runtime_directory, session_reference.as_ref())?;
             revoke_share_grants(
                 identity,
                 token_scope.as_ref(),
@@ -196,11 +188,7 @@ pub fn run_share_command(
             session_reference,
             output_format,
         } => {
-            let token_scope = resolve_token_scope(
-                &runtime_directory,
-                shared_sessions_base_directory.as_deref(),
-                session_reference.as_ref(),
-            )?;
+            let token_scope = resolve_token_scope(&runtime_directory, session_reference.as_ref())?;
             match router_client::submit_router_request(
                 &runtime_directory,
                 RouterRequestKind::ListTokens { scope: token_scope },
@@ -515,8 +503,8 @@ fn resolve_remote_access_ready(
 /// none and does not call `list_machine_addresses`. The command passes
 /// [`host_addresses::list_host_addresses`].
 ///
-/// Example: `0.0.0.0:7654` on a machine with `192.168.1.20` and `2001:db8::20`
-/// gives `192.168.1.20`.
+/// Example: `0.0.0.0:7654` on a machine with `192.0.2.20` and `2001:db8::20`
+/// gives `192.0.2.20`.
 fn list_host_addresses_for_listen_address(
     remote_listen_address: SocketAddr,
     list_machine_addresses: impl FnOnce() -> Vec<HostAddress>,
@@ -535,20 +523,19 @@ fn list_host_addresses_for_listen_address(
 ///
 /// A name matching no running session, or two of them, comes back as the
 /// targeting layer's own refusal. The running sessions are those
-/// `runtime_directory` and `shared_sessions_base_directory` advertise.
+/// `runtime_directory` advertises: a session another user of this machine
+/// started is not found. `<user id>/<session id>` is
+/// [`CliError::SessionNotFound`] naming it, or [`CliError::InvalidArgs`] when
+/// the user id is this user's.
 fn resolve_token_scope(
     runtime_directory: &Path,
-    shared_sessions_base_directory: Option<&Path>,
     session_reference: Option<&SessionReference>,
 ) -> Result<Option<TokenScope>, CliError> {
     let Some(session_reference) = session_reference else {
         return Ok(None);
     };
-    let discovered_sessions = targeting::resolve_session_scope(
-        runtime_directory,
-        shared_sessions_base_directory,
-        Some(session_reference),
-    )?;
+    let discovered_sessions =
+        targeting::resolve_session_scope(runtime_directory, None, Some(session_reference))?;
     let session_overview =
         discovered_sessions
             .sessions

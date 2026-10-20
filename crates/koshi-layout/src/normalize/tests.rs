@@ -1,6 +1,7 @@
 //! Tests for layout normalization: cleanup after edits and snapshot restore.
 
 use koshi_core::geometry::{Rect, Size};
+use koshi_test_support::fixtures::build_cell_rect;
 
 use super::*;
 use crate::solver::solve_layout;
@@ -15,7 +16,7 @@ fn build_live_pane_set(pane_ids: &[PaneId]) -> HashSet<PaneId> {
     pane_ids.iter().copied().collect()
 }
 
-/// A plain flex weight of `share` with no overlays and no resize offset.
+/// A plain flex weight of `weight_share` with no overlays and no resize offset.
 fn build_flex_weight(weight_share: FlexWeight) -> SizeWeight {
     SizeWeight::from_primary_constraint(SizeConstraint::Flex(weight_share))
 }
@@ -30,14 +31,6 @@ fn build_horizontal_split(
         children: split_children,
         weights: child_size_weights,
         active_child_index: 0,
-    })
-}
-
-/// Returns a standard 80×24 tab rectangle for test layouts.
-fn build_test_tab_rect() -> Rect {
-    Rect::from_size_at_origin(Size {
-        column_count: 80,
-        row_count: 24,
     })
 }
 
@@ -87,13 +80,14 @@ fn same_direction_splits_merge_and_preserve_solved_shares() {
         vec![build_pane_leaf(first_pane_id), inner_split],
     ));
 
-    let original_layout_solve = solve_layout(&layout_tree, build_test_tab_rect());
+    let original_layout_solve = solve_layout(&layout_tree, build_cell_rect(0, 0, 80, 24));
     let normalized_layout_tree = normalize_layout_tree(
         &layout_tree,
         &build_live_pane_set(&[first_pane_id, second_pane_id, third_pane_id]),
     )
     .unwrap();
-    let normalized_layout_solve = solve_layout(&normalized_layout_tree, build_test_tab_rect());
+    let normalized_layout_solve =
+        solve_layout(&normalized_layout_tree, build_cell_rect(0, 0, 80, 24));
     assert_eq!(
         original_layout_solve.pane_rects,
         normalized_layout_solve.pane_rects
@@ -533,9 +527,9 @@ fn merge_is_skipped_when_a_kept_siblings_rescale_overflows_u128() {
 
 #[test]
 fn merge_is_skipped_when_the_slot_weight_carries_a_min_overlay() {
-    // The nested split's own weights are plain build_flex_weight, but the slot that
-    // holds the split in the outer split carries a min overlay — not a
-    // plain build_flex_weight share — so `plain_flex` rejects it and the merge aborts.
+    // The nested split's own weights are plain flex shares, but the slot that
+    // holds the split in the outer split carries a minimum overlay, so
+    // `get_plain_flex_weight` rejects it and the merge aborts.
     let (first_pane_id, second_pane_id, third_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
     let inner_split = LayoutNode::Split(SplitNode::with_equal_weights(
@@ -778,14 +772,14 @@ fn three_nested_same_direction_splits_flatten_into_one() {
         vec![build_pane_leaf(first_pane_id), middle_split],
     ));
 
-    let original_layout_solve = solve_layout(&layout_tree, build_test_tab_rect());
+    let original_layout_solve = solve_layout(&layout_tree, build_cell_rect(0, 0, 80, 24));
     let normalized_layout_tree = normalize_layout_tree(
         &layout_tree,
         &build_live_pane_set(&[first_pane_id, second_pane_id, third_pane_id, fourth_pane_id]),
     )
     .unwrap();
     assert_eq!(
-        solve_layout(&normalized_layout_tree, build_test_tab_rect()).pane_rects,
+        solve_layout(&normalized_layout_tree, build_cell_rect(0, 0, 80, 24)).pane_rects,
         original_layout_solve.pane_rects
     );
     assert_eq!(
@@ -858,7 +852,7 @@ fn merged_shares_keep_unequal_proportions() {
 
 #[test]
 fn merge_is_skipped_when_a_kept_sibling_is_not_a_plain_flex_share() {
-    // The nested pair is plain build_flex_weight, but the first sibling claims a percentage.
+    // The nested pair holds plain flex shares, but the first sibling claims a percentage.
     let (first_pane_id, second_pane_id, third_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
     let inner_split = LayoutNode::Split(SplitNode::with_equal_weights(

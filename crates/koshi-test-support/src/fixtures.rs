@@ -1,28 +1,34 @@
 //! Shared test fixtures.
 
+use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use koshi_core::geometry::{Point, Rect, Size};
+use koshi_core::command::{NewPaneArgs, NewPanePlacement};
+use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::SessionId;
 use koshi_core::key::{
     BindingModifierFlags, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
 };
+use koshi_core::process::{ShellKind, SpawnSpec};
 use koshi_ipc::endpoint::{
     compute_socket_address, resolve_clipboard_tool_directory_path, EndpointFile,
 };
 use koshi_ipc::handshake::{Handshake, Peer};
+use koshi_ipc::image_chunk::{build_image_chunk_frame_head, ImageChunkFrame};
+use koshi_ipc::painted_update::{decode_session_binary_frame, SessionBinaryFrame};
 use koshi_ipc::protocol::{
     ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
-    IpcResult, ProcessImageId,
+    IpcResult, ProcessImageId, PROTOCOL_VERSION,
 };
 use koshi_ipc::router::{compute_router_socket_address, resolve_router_endpoint_path};
 use koshi_ipc::transport::{Connection, FrameReader, FrameWriter, Listener};
 use serde_json::value::RawValue;
 use tempfile::TempDir;
+use uuid::Uuid;
 
 /// How long [`start_program_process`] keeps trying while the operating system
 /// reports the program file as held open for writing: 20 seconds.
@@ -64,6 +70,51 @@ pub fn build_cell_rect(
     )
 }
 
+/// The UUID `00000000-0000-0000-0000-0000000000NN`, where `NN` is
+/// `suffix_number` in two decimal digits: `4` gives
+/// `00000000-0000-0000-0000-000000000004`, and `12` gives
+/// `00000000-0000-0000-0000-000000000012`.
+///
+/// # Panics
+///
+/// Panics when `suffix_number` is above `99`.
+#[must_use]
+pub fn build_test_uuid_with_suffix(suffix_number: u8) -> Uuid {
+    Uuid::parse_str(&format!(
+        "00000000-0000-0000-0000-0000000000{suffix_number:02}"
+    ))
+    .expect("literal UUID parses")
+}
+
+/// A `new-pane` request with nothing chosen: the focused pane splits
+/// rightward and runs the default shell.
+#[must_use]
+pub fn build_new_pane_args() -> NewPaneArgs {
+    NewPaneArgs {
+        placement: NewPanePlacement::Split {
+            source_pane_id: None,
+            tab_id: None,
+            direction: Direction::Right,
+        },
+        working_directory: None,
+        spawn_spec: None,
+        client_id: None,
+    }
+}
+
+/// The spawn spec a fake child launches with: `/bin/zsh`, no arguments, no
+/// working directory, and no environment variables.
+#[must_use]
+pub fn build_spawn_spec() -> SpawnSpec {
+    SpawnSpec {
+        program: PathBuf::from("/bin/zsh"),
+        arguments: Vec::new(),
+        working_directory: None,
+        environment_variables: BTreeMap::new(),
+        shell_kind: ShellKind::Zsh,
+    }
+}
+
 /// `byte_count` bytes that count from `0` to `250` and then start again at
 /// `0`: the byte at index `n` is `n % 251`. `build_counting_bytes(253)` ends
 /// with `249, 250, 0, 1`.
@@ -72,6 +123,30 @@ pub fn build_counting_bytes(byte_count: usize) -> Vec<u8> {
     (0..byte_count)
         .map(|byte_index| u8::try_from(byte_index % 251).expect("a value below 251 fits in u8"))
         .collect()
+}
+
+/// The image chunk frame of `chunk_bytes` at `byte_offset` of the image
+/// `image_transfer_id`, read back through
+/// [`decode_session_binary_frame`] as a client reads it.
+///
+/// # Panics
+/// When the built frame does not decode as an image chunk.
+#[must_use]
+pub fn build_image_chunk_frame(
+    image_transfer_id: u64,
+    byte_offset: u64,
+    is_last_chunk: bool,
+    chunk_bytes: &[u8],
+) -> ImageChunkFrame {
+    let mut frame_payload =
+        build_image_chunk_frame_head(image_transfer_id, byte_offset, is_last_chunk).to_vec();
+    frame_payload.extend_from_slice(chunk_bytes);
+    let Ok(SessionBinaryFrame::ImageChunk(image_chunk_frame)) =
+        decode_session_binary_frame(frame_payload)
+    else {
+        panic!("an image chunk frame built from its own head decodes");
+    };
+    image_chunk_frame
 }
 
 /// The complete key event a terminal reports for one chord: a press, with no
@@ -426,6 +501,98 @@ pub fn spawn_session_listening_before_it_advertises(
     })
 }
 
+/// Serve the session `session_id` in `runtime_directory` as a session that
+/// replaces its process image while its first caller waits, on a thread of
+/// its own:
+///
+/// 1. Bind the session's socket, and write its endpoint file under the token
+///    made from `replaced_connection_secret`. Both are done before this
+///    returns.
+/// 2. Serve the first caller with `answer_before_replacement`: an accepted
+///    Hello gets build `9.9.9` and this process's image, a `Prepare` is
+///    answered `Prepared`, a `Commit` gets what the answer function gives for
+///    the held request's kind, and every other request gets what it gives for
+///    its own kind.
+/// 3. Once that caller hangs up, write the endpoint file under the token made
+///    from `connection_secret`, as the new image does when it binds.
+/// 4. Serve each caller after it with `answer_after_replacement`, the same
+///    way, until one presents that token in an accepted Hello. A caller that
+///    read the endpoint file before step 3 presents the old token and is
+///    refused.
+///
+/// The thread ends after the caller with the accepted Hello hangs up. The
+/// endpoint file names this test process.
+///
+/// Example: an `answer_before_replacement` that gives
+/// [`build_restarting_refusal`] for a `SubmitCommand` refuses the first
+/// caller's `Commit`, and the second caller's command runs.
+///
+/// # Panics
+///
+/// Panics when the socket cannot be bound, an endpoint file cannot be
+/// written, or a caller cannot be accepted.
+pub fn spawn_session_replacing_its_image(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    replaced_connection_secret: &str,
+    connection_secret: &str,
+    mut answer_before_replacement: impl FnMut(&IpcRequestKind) -> IpcResult + Send + 'static,
+    mut answer_after_replacement: impl FnMut(&IpcRequestKind) -> IpcResult + Send + 'static,
+) -> JoinHandle<()> {
+    let session_listener = Listener::bind(&compute_socket_address(runtime_directory, session_id))
+        .expect("bind the stand-in session");
+    write_session_endpoint_file(
+        runtime_directory,
+        session_id,
+        replaced_connection_secret,
+        std::process::id(),
+    );
+    let advertising_runtime_directory = runtime_directory.to_path_buf();
+    let replaced_connection_token = ConnectionToken::from_secret(replaced_connection_secret);
+    let connection_secret = connection_secret.to_string();
+    std::thread::spawn(move || {
+        answer_session_requests(
+            &session_listener,
+            replaced_connection_token,
+            &mut answer_before_replacement,
+        );
+        write_session_endpoint_file(
+            &advertising_runtime_directory,
+            session_id,
+            &connection_secret,
+            std::process::id(),
+        );
+        while !answer_session_requests(
+            &session_listener,
+            ConnectionToken::from_secret(&connection_secret),
+            &mut answer_after_replacement,
+        ) {}
+    })
+}
+
+/// The refusal a session answers a request with once it has started to
+/// replace its process image: `Restarting`, reading `the session is
+/// restarting; ask again in a moment`.
+#[must_use]
+pub fn build_restarting_refusal() -> IpcResult {
+    IpcResult::Error(IpcErrorPayload {
+        code: IpcErrorCode::Restarting,
+        message: "the session is restarting; ask again in a moment".to_string(),
+    })
+}
+
+/// The answer an accepted session Hello gets: [`PROTOCOL_VERSION`], the
+/// workspace build version, and this process's image, as
+/// [`ProcessImageId::get_own`] gives it.
+#[must_use]
+pub fn build_accepted_hello_result() -> IpcResult {
+    IpcResult::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        build_version: env!("CARGO_PKG_VERSION").to_string(),
+        process_image_id: ProcessImageId::get_own(),
+    }
+}
+
 /// Accept one caller on `session_listener` and answer each request it sends
 /// until it hangs up, behind the gate a session holding
 /// `session_connection_token` keeps for a caller of its own user. An accepted
@@ -435,11 +602,13 @@ pub fn spawn_session_listening_before_it_advertises(
 /// `Commit` gets what `answer_request` gives for the held request's kind, and
 /// a `RequestFailed` refusal when nothing is held. Every other request gets
 /// what `answer_request` gives for its kind.
+///
+/// Gives whether the caller's Hello was accepted.
 fn answer_session_requests(
     session_listener: &Listener,
     session_connection_token: ConnectionToken,
     answer_request: &mut impl FnMut(&IpcRequestKind) -> IpcResult,
-) {
+) -> bool {
     let mut session_connection = session_listener.accept().expect("accept the caller");
     let mut session_handshake = Handshake::from_expected_token_and_peer(
         session_connection_token,
@@ -482,6 +651,7 @@ fn answer_session_requests(
             answer_result,
         });
     }
+    session_handshake.get_agreed_protocol_version().is_some()
 }
 
 /// Advertise a router in `runtime_directory` under the token made from
@@ -510,6 +680,21 @@ pub fn write_router_endpoint_file(runtime_directory: &Path, connection_secret: &
 pub fn close_connection_after_peer_hangs_up(connection: Connection) {
     let (mut raw_reader, _raw_writer) = connection.split_raw();
     let _ = std::io::copy(&mut raw_reader, &mut std::io::sink());
+}
+
+/// Send `ipc_result` on `connection` as the answer to the request numbered
+/// `request_id`.
+///
+/// # Panics
+///
+/// Panics when the answer cannot be written.
+pub fn send_ipc_reply(connection: &mut Connection, request_id: u64, ipc_result: IpcResult) {
+    connection
+        .send(&IpcResponse {
+            request_id: Some(request_id),
+            answer_result: ipc_result,
+        })
+        .expect("send scripted reply");
 }
 
 /// Send `ipc_request`'s kind inside a `Prepare` on `connection`, under
@@ -603,6 +788,19 @@ pub fn send_committed_request_through_halves(
             request_kind: IpcRequestKind::Commit,
         })
         .expect("send the Commit");
+}
+
+/// The report that a client painted update `update_sequence` and shows no
+/// placement preview, under request id `update_sequence`.
+#[must_use]
+pub fn build_paint_report_request(update_sequence: u64) -> IpcRequest {
+    IpcRequest {
+        request_id: update_sequence,
+        request_kind: IpcRequestKind::PaintedUpdate {
+            update_sequence,
+            shown_placement_request_id: None,
+        },
+    }
 }
 
 /// Open one local socket connection at a fresh address and return its two

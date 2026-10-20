@@ -3,6 +3,7 @@
 use super::*;
 
 use koshi_test_support::child_exit::wait_until_child_has_exited;
+use koshi_test_support::signal_disposition::lock_sigpipe_disposition;
 
 /// A serving thread's SIGPIPE block must hold while the process-wide
 /// disposition sits at its default, the state a running exec puts it in. The
@@ -11,10 +12,17 @@ use koshi_test_support::child_exit::wait_until_child_has_exited;
 /// signal dies with the thread.
 #[test]
 fn a_serving_threads_sigpipe_block_holds_under_the_default_disposition() {
+    let _sigpipe_disposition_guard = lock_sigpipe_disposition();
     let is_serving_thread_alive_after_sigpipe = std::thread::spawn(|| {
         block_sigpipe_on_this_thread();
+        // SAFETY: `SIG_DFL` installs no handler code, and `SIGPIPE` is a
+        // signal whose action can be set.
         let prior_sigpipe_disposition = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+        // SAFETY: `raise` reads no memory, and this thread blocks `SIGPIPE`,
+        // so the signal stays pending.
         let sigpipe_raise_result = unsafe { libc::raise(libc::SIGPIPE) };
+        // SAFETY: `prior_sigpipe_disposition` is the action `signal` handed
+        // back above.
         unsafe { libc::signal(libc::SIGPIPE, prior_sigpipe_disposition) };
         sigpipe_raise_result == 0
     })

@@ -6,60 +6,21 @@
 //! front.
 
 use std::collections::VecDeque;
+use std::fmt::{self, Formatter};
+use std::sync::Arc;
 
-use serde::de::Deserializer as DeserializerTrait;
+use serde::de::{self, Deserializer as DeserializerTrait, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
-use crate::grid::state::{count_row_content_cells, Cell, RowEnd, RowMetadata};
+use crate::grid::row_snapshot::RowSnapshot;
+use crate::grid::state::{Cell, RowMetadata};
+use crate::state::crop_columns;
+use crate::style::Style;
 
 /// Default scrollback line cap: 10 000 lines per pane.
 const DEFAULT_MAX_LINE_COUNT: usize = 10_000;
 /// Default scrollback byte cap: 32 MiB of retained text per pane.
 const DEFAULT_MAX_BYTE_COUNT: usize = 32 * 1024 * 1024;
-
-/// The cells history keeps of `row_cells`: a [`RowEnd::Hard`] row without the
-/// trailing run of fully-default blanks, every other row whole.
-///
-/// A 200-column hard row reading `README.md` keeps 9 cells. A styled blank —
-/// a background-colored prompt segment — is not a default blank and is kept.
-/// A [`RowEnd::Soft`] row keeps every cell. A [`RowEnd::SoftWide`] row keeps
-/// every cell, including the final blank spacer that stands in for the wide
-/// glyph on the next row.
-fn list_retained_line_cells(row_cells: &[Cell], row_end: RowEnd) -> &[Cell] {
-    if row_end == RowEnd::Hard {
-        &row_cells[..count_row_content_cells(row_cells)]
-    } else {
-        row_cells
-    }
-}
-
-/// The byte size of one row: the UTF-8 length of every cell's base character
-/// plus its combining marks, summed over the cells whose width is not `0`. The
-/// byte cap is measured in this unit.
-///
-/// A width-0 cell is the placeholder right half of a wide glyph and adds
-/// nothing; the glyph's text is counted in its width-2 base cell.
-fn compute_line_byte_count(line_cells: &[Cell]) -> usize {
-    line_cells
-        .iter()
-        .filter(|cell| cell.get_display_width() != 0)
-        .map(|cell| {
-            cell.get_character().len_utf8()
-                + cell
-                    .list_combining_characters()
-                    .iter()
-                    .map(|combining| combining.len_utf8())
-                    .sum::<usize>()
-        })
-        .sum()
-}
-
-/// Truncate owned `row_cells` to what [`list_retained_line_cells`] keeps of it and
-/// release the spare capacity.
-fn truncate_retained_line_cells(row_cells: &mut Vec<Cell>, row_end: RowEnd) {
-    row_cells.truncate(list_retained_line_cells(row_cells, row_end).len());
-    row_cells.shrink_to_fit();
-}
 
 /// The line- and byte-count caps bounding one pane's [`Scrollback`].
 #[derive(Debug, Clone, Copy)]
@@ -88,22 +49,22 @@ impl Default for ScrollbackLimit {
     }
 }
 
-/// The scrollback buffer for one pane: a `VecDeque` of rows (oldest at the
-/// front), bounded by a line-count cap and a byte-count cap.
+/// The scrollback buffer for one pane: a `VecDeque` of row snapshots (oldest
+/// at the front), bounded by a line-count cap and a byte-count cap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Scrollback {
-    /// Retained rows, oldest at the front and newest at the back, each paired
-    /// with its row metadata. A row holds what [`list_retained_line_cells`] keeps of it: a
-    /// hard-ended row stops at its last content cell and reads as blank right
-    /// of that.
-    retained_lines: VecDeque<(Vec<Cell>, RowMetadata)>,
+    /// Retained rows, oldest at the front and newest at the back. Each is the
+    /// row's snapshot, with its row end and prompt mark, encoded at the
+    /// primary screen's width.
+    retained_lines: VecDeque<Arc<RowSnapshot>>,
     /// Maximum rows retained before the oldest are dropped.
     maximum_line_count: usize,
     /// Maximum total bytes (UTF-8 text payload) retained before the oldest rows
     /// are dropped.
     maximum_byte_count: usize,
-    /// The sum of [`compute_line_byte_count`] over every retained row, updated on every
-    /// push, replacement, eviction and clear.
+    /// The sum of every retained row's text byte count
+    /// ([`RowSnapshot::get_text_byte_count`]), updated on every push,
+    /// replacement, eviction and clear.
     retained_byte_count: usize,
     /// Count of rows ever pushed into the buffer. It only grows:
     /// [`clear_scrollback`](Self::clear_scrollback) does not reset it.
@@ -122,85 +83,69 @@ impl Scrollback {
         }
     }
 
-    /// Append `row_cells` as the newest line with `row_metadata`, then drop the oldest rows
-    /// from the front until both caps hold. The byte cap
-    /// never drops the sole remaining row: a single row larger than
-    /// `maximum_byte_count` is retained on arrival. The line cap has no such guard; the
-    /// row count always ends at or under `maximum_line_count`.
+    /// When the buffer holds `maximum_line_count` rows or more, drop the oldest
+    /// one now — the row the next push drops at the line cap — and give back
+    /// its encoded bytes for the next row to encode into. `evicted_line_callback`
+    /// sees the dropped row. Gives back an empty buffer when the buffer is under
+    /// the line cap, and when a frame still shares the dropped row.
     ///
-    /// A hard-ended row is stored without its trailing run of fully-default
-    /// blanks: a 200-column row reading `README.md` keeps 9 cells. A
-    /// soft-wrapped row keeps every cell. One allocation, at the stored size.
-    pub(crate) fn push_row(&mut self, row_cells: &[Cell], row_metadata: RowMetadata) {
-        self.push_row_with_evicted(row_cells, row_metadata, |_| {});
+    /// The next [`push_row_with_evicted`](Self::push_row_with_evicted) then
+    /// keeps the same rows that it keeps without this call.
+    pub(crate) fn evict_oldest_line_for_next_push(
+        &mut self,
+        evicted_line_callback: &mut impl FnMut(&RowSnapshot),
+    ) -> Vec<u8> {
+        if self.retained_lines.len() < self.maximum_line_count {
+            return Vec::new();
+        }
+        let Some(oldest_line) = self.retained_lines.pop_front() else {
+            return Vec::new();
+        };
+        evicted_line_callback(&oldest_line);
+        self.retained_byte_count -= oldest_line.get_text_byte_count();
+        Arc::try_unwrap(oldest_line)
+            .map_or_else(|_| Vec::new(), RowSnapshot::into_encoded_row_bytes)
     }
 
+    /// Append `row_snapshot` as the newest line, then drop the oldest rows
+    /// from the front until both caps hold, calling `evicted_line_callback` on
+    /// each dropped row, oldest first. The byte cap never drops the sole
+    /// remaining row: a single row larger than `maximum_byte_count` is
+    /// retained on arrival. The line cap has no such guard; the row count
+    /// always ends at or under `maximum_line_count`.
     pub(crate) fn push_row_with_evicted(
         &mut self,
-        row_cells: &[Cell],
-        row_metadata: RowMetadata,
-        mut evicted_line_cells_callback: impl FnMut(&[Cell]),
+        row_snapshot: Arc<RowSnapshot>,
+        mut evicted_line_callback: impl FnMut(&RowSnapshot),
     ) {
-        let retained_line_cells =
-            list_retained_line_cells(row_cells, row_metadata.row_end).to_vec();
-        let new_line_byte_count = compute_line_byte_count(&retained_line_cells);
-        self.retained_lines
-            .push_back((retained_line_cells, row_metadata));
-        self.retained_byte_count += new_line_byte_count;
+        self.retained_byte_count += row_snapshot.get_text_byte_count();
+        self.retained_lines.push_back(row_snapshot);
         self.total_pushed_line_count += 1;
-        self.evict_oldest_lines_to_limits(&mut evicted_line_cells_callback);
+        self.evict_oldest_lines_to_limits(&mut evicted_line_callback);
     }
 
-    /// Remove and return every retained row with its metadata, oldest at the
-    /// front, leaving the buffer empty with a zero byte total. The caps and
+    /// Remove and return every retained row, oldest at the front, leaving the
+    /// buffer empty with a zero byte total. The caps and
     /// [`total_pushed_line_count`](Self::total_pushed_line_count) keep their
     /// values. The caller passes the returned rows' count to
     /// [`replace_retained_lines`](Self::replace_retained_lines) as `retained_line_count_before`.
-    pub(crate) fn take_retained_lines(&mut self) -> VecDeque<(Vec<Cell>, RowMetadata)> {
+    pub(crate) fn take_retained_lines(&mut self) -> VecDeque<Arc<RowSnapshot>> {
         self.retained_byte_count = 0;
         std::mem::take(&mut self.retained_lines)
     }
 
-    /// Replace every retained row with `retained_lines`, each keeping its own metadata,
-    /// then apply both caps.
+    /// Replace every retained row with `retained_lines`, then apply both caps.
     /// [`total_pushed_line_count`](Self::total_pushed_line_count) grows by the count of retained
     /// rows (counted after eviction) exceeding `retained_line_count_before` and never
     /// decreases.
-    ///
-    /// Each row is stored the way [`push_row`](Self::push_row) stores one,
-    /// shortened in place: a hard-ended row without its trailing default
-    /// blanks, a soft-wrapped row whole.
     pub(crate) fn replace_retained_lines(
         &mut self,
-        retained_lines: Vec<(Vec<Cell>, RowMetadata)>,
+        retained_lines: Vec<Arc<RowSnapshot>>,
         retained_line_count_before: u64,
     ) {
-        self.replace_retained_lines_with_evicted(
-            retained_lines,
-            retained_line_count_before,
-            |_| {},
-        );
-    }
-
-    pub(crate) fn replace_retained_lines_with_evicted(
-        &mut self,
-        retained_lines: Vec<(Vec<Cell>, RowMetadata)>,
-        retained_line_count_before: u64,
-        mut evicted_line_cells_callback: impl FnMut(&[Cell]),
-    ) {
-        self.retained_lines = retained_lines
-            .into_iter()
-            .map(|(mut line_cells, row_metadata)| {
-                truncate_retained_line_cells(&mut line_cells, row_metadata.row_end);
-                (line_cells, row_metadata)
-            })
-            .collect();
-        self.retained_byte_count = self
-            .retained_lines
-            .iter()
-            .map(|(line_cells, _)| compute_line_byte_count(line_cells))
-            .sum();
-        self.evict_oldest_lines_to_limits(&mut evicted_line_cells_callback);
+        self.retained_lines = VecDeque::from(retained_lines);
+        self.retained_byte_count = compute_retained_byte_count(&self.retained_lines);
+        self.evict_oldest_lines_to_limits(&mut |_| {});
         let retained_line_count_after = self.retained_lines.len() as u64;
         self.total_pushed_line_count +=
             retained_line_count_after.saturating_sub(retained_line_count_before);
@@ -211,15 +156,16 @@ impl Scrollback {
     /// exceeds `maximum_byte_count` and more than one row remains.
     fn evict_oldest_lines_to_limits(
         &mut self,
-        evicted_line_cells_callback: &mut impl FnMut(&[Cell]),
+        evicted_line_callback: &mut impl FnMut(&RowSnapshot),
     ) {
         while self.retained_lines.len() > self.maximum_line_count
             || (self.retained_byte_count > self.maximum_byte_count && self.retained_lines.len() > 1)
         {
-            let (oldest_line_cells, _) = self.retained_lines.pop_front().unwrap();
-            let oldest_line_byte_count = compute_line_byte_count(&oldest_line_cells);
-            evicted_line_cells_callback(&oldest_line_cells);
-            self.retained_byte_count -= oldest_line_byte_count;
+            let Some(oldest_line) = self.retained_lines.pop_front() else {
+                return;
+            };
+            evicted_line_callback(&oldest_line);
+            self.retained_byte_count -= oldest_line.get_text_byte_count();
         }
     }
 
@@ -241,8 +187,8 @@ impl Scrollback {
         self.retained_lines.is_empty()
     }
 
-    /// The retained rows with their metadata, oldest at the front.
-    pub fn list_retained_lines(&self) -> &VecDeque<(Vec<Cell>, RowMetadata)> {
+    /// The retained rows, oldest at the front.
+    pub fn list_retained_lines(&self) -> &VecDeque<Arc<RowSnapshot>> {
         &self.retained_lines
     }
 
@@ -255,16 +201,81 @@ impl Scrollback {
 
 /// The stored form of a [`Scrollback`], as [`Deserialize`] reads it.
 ///
-/// `retained_byte_count` is not read: it is derived from `retained_lines` instead, so a stored
-/// total that does not match the rows cannot underflow the first eviction.
-/// The caps are applied to the rows that were read, so a stored buffer holding
-/// more than `maximum_line_count` rows loses its oldest ones at load.
+/// `retained_byte_count` is not read: the loaded buffer's byte total is the
+/// sum of the text byte counts of `retained_lines`. The caps apply to the rows
+/// that were read: a stored buffer holding more than `maximum_line_count` rows
+/// loses its oldest ones at load.
 #[derive(Deserialize)]
 struct ScrollbackFields {
-    retained_lines: VecDeque<(Vec<Cell>, RowMetadata)>,
+    retained_lines: VecDeque<Arc<RowSnapshot>>,
     maximum_line_count: usize,
     maximum_byte_count: usize,
     total_pushed_line_count: u64,
+}
+
+/// The sum of the text byte counts ([`RowSnapshot::get_text_byte_count`]) of
+/// every row of `retained_lines`.
+fn compute_retained_byte_count(retained_lines: &VecDeque<Arc<RowSnapshot>>) -> usize {
+    retained_lines
+        .iter()
+        .map(|retained_line| retained_line.get_text_byte_count())
+        .sum()
+}
+
+impl Scrollback {
+    /// The buffer holding `retained_lines` under both caps, with the byte
+    /// total derived from the lines. A buffer holding more lines than the caps
+    /// allow loses its oldest ones.
+    fn from_stored_lines(
+        retained_lines: VecDeque<Arc<RowSnapshot>>,
+        maximum_line_count: usize,
+        maximum_byte_count: usize,
+        total_pushed_line_count: u64,
+    ) -> Self {
+        let retained_byte_count = compute_retained_byte_count(&retained_lines);
+        let mut scrollback = Scrollback {
+            retained_lines,
+            maximum_line_count,
+            maximum_byte_count,
+            retained_byte_count,
+            total_pushed_line_count,
+        };
+        scrollback.evict_oldest_lines_to_limits(&mut |_| {});
+        scrollback
+    }
+
+    /// Bring each line that holds another count of cells than `column_count`
+    /// to exactly `column_count` cells: default blanks pad a shorter line, and
+    /// a longer line loses its cells past `column_count`. A wide glyph whose
+    /// right half falls past `column_count` becomes a default blank. Each line
+    /// keeps its row metadata, and the byte total is counted again.
+    ///
+    /// Example — at `column_count` 5, the hard line `abc` becomes `abc` and
+    /// two default blanks, the soft line `abcdefg` becomes `abcde`, and the
+    /// soft line `abcd漢` becomes `abcd` and one default blank.
+    pub(crate) fn fit_lines_to_column_count(&mut self, column_count: u16) {
+        for retained_line in &mut self.retained_lines {
+            if retained_line.get_encoded_row_shape().column_count == column_count {
+                continue;
+            }
+            let row_metadata = retained_line.get_row_metadata();
+            let mut row_cells = retained_line.decode_row_cells();
+            crop_columns(&mut row_cells, column_count, Style::default());
+            *retained_line = Arc::new(RowSnapshot::from_row_cells(
+                &row_cells,
+                row_metadata,
+                Vec::new(),
+            ));
+        }
+        self.retained_byte_count = compute_retained_byte_count(&self.retained_lines);
+    }
+
+    /// Whether every line holds exactly `column_count` cells.
+    pub(crate) fn has_only_lines_of_column_count(&self, column_count: u16) -> bool {
+        self.retained_lines
+            .iter()
+            .all(|retained_line| retained_line.get_encoded_row_shape().column_count == column_count)
+    }
 }
 
 impl<'de> Deserialize<'de> for Scrollback {
@@ -273,22 +284,92 @@ impl<'de> Deserialize<'de> for Scrollback {
         Deserializer: DeserializerTrait<'de>,
     {
         let serialized_fields = ScrollbackFields::deserialize(deserializer)?;
-        let mut scrollback = Scrollback {
-            retained_lines: serialized_fields.retained_lines,
-            maximum_line_count: serialized_fields.maximum_line_count,
-            maximum_byte_count: serialized_fields.maximum_byte_count,
-            retained_byte_count: 0,
-            total_pushed_line_count: serialized_fields.total_pushed_line_count,
-        };
-        scrollback.retained_byte_count = scrollback
-            .retained_lines
-            .iter()
-            .map(|(line_cells, _)| compute_line_byte_count(line_cells))
-            .sum();
-        scrollback.evict_oldest_lines_to_limits(&mut |_| {});
-        Ok(scrollback)
+        Ok(Scrollback::from_stored_lines(
+            serialized_fields.retained_lines,
+            serialized_fields.maximum_line_count,
+            serialized_fields.maximum_byte_count,
+            serialized_fields.total_pushed_line_count,
+        ))
+    }
+}
+
+/// A history stored with each line as a pair of its JSON cells and its row
+/// metadata, as resume format 4 writes it. Each line is encoded as it is read.
+pub(crate) struct CellRowScrollback(pub(crate) Scrollback);
+
+/// The stored form of a [`CellRowScrollback`]. The fields mean what the
+/// fields of [`ScrollbackFields`] mean.
+#[derive(Deserialize)]
+struct CellRowScrollbackFields {
+    retained_lines: CellRowLines,
+    maximum_line_count: usize,
+    maximum_byte_count: usize,
+    total_pushed_line_count: u64,
+}
+
+/// History lines read from pairs of JSON cells and row metadata, oldest first,
+/// each encoded as it is read. A line of more than 65 535 cells does not
+/// read.
+struct CellRowLines(VecDeque<Arc<RowSnapshot>>);
+
+impl<'de> Deserialize<'de> for CellRowLines {
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: DeserializerTrait<'de>,
+    {
+        struct CellRowLinesVisitor;
+
+        impl<'de> Visitor<'de> for CellRowLinesVisitor {
+            type Value = CellRowLines;
+
+            fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a list of history lines")
+            }
+
+            fn visit_seq<LineAccess>(
+                self,
+                mut line_access: LineAccess,
+            ) -> Result<Self::Value, LineAccess::Error>
+            where
+                LineAccess: SeqAccess<'de>,
+            {
+                let mut retained_lines = VecDeque::new();
+                while let Some((row_cells, row_metadata)) =
+                    line_access.next_element::<(Vec<Cell>, RowMetadata)>()?
+                {
+                    if row_cells.len() > usize::from(u16::MAX) {
+                        return Err(de::Error::custom(
+                            "a history line holds more than 65 535 cells",
+                        ));
+                    }
+                    retained_lines.push_back(Arc::new(RowSnapshot::from_row_cells(
+                        &row_cells,
+                        row_metadata,
+                        Vec::new(),
+                    )));
+                }
+                Ok(CellRowLines(retained_lines))
+            }
+        }
+
+        deserializer.deserialize_seq(CellRowLinesVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for CellRowScrollback {
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: DeserializerTrait<'de>,
+    {
+        let serialized_fields = CellRowScrollbackFields::deserialize(deserializer)?;
+        Ok(CellRowScrollback(Scrollback::from_stored_lines(
+            serialized_fields.retained_lines.0,
+            serialized_fields.maximum_line_count,
+            serialized_fields.maximum_byte_count,
+            serialized_fields.total_pushed_line_count,
+        )))
     }
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

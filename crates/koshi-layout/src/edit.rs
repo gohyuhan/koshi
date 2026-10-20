@@ -10,7 +10,7 @@ use koshi_core::ids::PaneId;
 use thiserror::Error;
 
 use crate::size::SizeWeight;
-use crate::solver::{compute_cell_area, is_content_visible, solve_layout_with_sizing, PaneSizing};
+use crate::solver::{is_content_visible, solve_layout_with_sizing, PaneSizing};
 use crate::tree::{compute_split_direction, LayoutNode, SplitNode};
 
 /// A rejected split or stack edit.
@@ -199,7 +199,7 @@ pub fn remove_pane(
     // Solve again after the edit and collect every surviving, visible pane
     // that either grew into the freed space or simply changed size.
     let layout_after_removal = solve_layout_with_sizing(&edited_layout_tree, tab_rect, pane_sizing);
-    let mut affected_pane_absorbed_areas: Vec<(PaneId, u64)> = layout_after_removal
+    let mut affected_pane_absorbed_areas: Vec<(PaneId, u32)> = layout_after_removal
         .pane_rects
         .iter()
         .filter(|&&(pane_id, pane_rect)| {
@@ -208,7 +208,7 @@ pub fn remove_pane(
         .filter_map(|&(pane_id, pane_rect)| {
             let absorbed_cell_area = pane_rect
                 .compute_intersection(removed_pane_rect)
-                .map_or(0, compute_cell_area);
+                .map_or(0, |overlap_rect| overlap_rect.size.compute_cell_count());
             let is_resized = layout_before_removal.pane_rects.iter().any(
                 |&(before_pane_id, before_pane_rect)| {
                     before_pane_id == pane_id && before_pane_rect.size != pane_rect.size

@@ -6,8 +6,9 @@ mod parser;
 
 pub use capabilities::{write_kitty_support_query, KITTY_QUERY_IMAGE_ID};
 pub use encoder::{
-    write_kitty_abort, write_kitty_delete_all, write_kitty_image_delete, write_kitty_placement,
-    write_kitty_visible_placement_delete, KittyOutputError, KittyPlacement, KittyUpload,
+    compress_kitty_image, write_kitty_abort, write_kitty_delete_all, write_kitty_image_delete,
+    write_kitty_placement, write_kitty_transmit, write_kitty_visible_placement_delete,
+    KittyOutputError, KittyPlacement,
 };
 pub use parser::{
     parse_kitty_command, parse_reply_display, KittyAnimationChunk, KittyAnimationCommand,

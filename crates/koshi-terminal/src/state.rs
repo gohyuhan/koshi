@@ -32,8 +32,9 @@ use koshi_sixel::{SixelGraphic, SixelPalette};
 use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 
-use crate::grid::state::{Cell, Grid, RowMetadata};
-use crate::scrollback::{Scrollback, ScrollbackLimit};
+use crate::grid::row_snapshot::RowSnapshot;
+use crate::grid::state::{Cell, CellRowGrid, Grid, RowMetadata};
+use crate::scrollback::{CellRowScrollback, Scrollback, ScrollbackLimit};
 use crate::selection::TextView;
 use crate::style::Style;
 
@@ -51,6 +52,7 @@ pub(crate) use cursor::{Cursor, SavedCursor};
 pub(crate) use images::SixelImageSource;
 pub use images::{ImagePlacement, ImagePlacementError, ImagePlacementId};
 pub(crate) use keyboard::KeyboardStack;
+use modes::ResumeFormat4TerminalModes;
 pub(crate) use modes::TerminalModes;
 pub use modes::{CursorShape, MouseEncoding, MouseTracking};
 pub(crate) use render::{Charset, RenderState};
@@ -78,20 +80,67 @@ pub enum ShellIntegrationFact {
     CommandFinished { exit_code: Option<i32> },
 }
 
+/// The cells of the alternate screen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum AlternateScreen {
+    /// No grid is held. Every cell is
+    /// [`Cell::build_blank_with_style`]`(fill_style)`, every row has a hard
+    /// end and no prompt mark, and the size is the primary screen's. The
+    /// primary screen is active.
+    Blank { fill_style: Style },
+    /// The alternate screen's grid.
+    Allocated(Grid),
+}
+
+impl AlternateScreen {
+    /// The grid, or `None` at [`AlternateScreen::Blank`].
+    fn get_allocated_grid(&self) -> Option<&Grid> {
+        match self {
+            AlternateScreen::Blank { .. } => None,
+            AlternateScreen::Allocated(alternate_grid) => Some(alternate_grid),
+        }
+    }
+
+    /// The grid of the active alternate screen.
+    ///
+    /// # Panics
+    /// Panics at [`AlternateScreen::Blank`]. Every switch to the alternate
+    /// screen allocates its grid first, and a stored state with an active
+    /// alternate screen and no grid does not load.
+    fn get_active_grid(&self) -> &Grid {
+        match self {
+            AlternateScreen::Blank { .. } => panic!("the active alternate screen holds no grid"),
+            AlternateScreen::Allocated(alternate_grid) => alternate_grid,
+        }
+    }
+
+    /// The grid of the active alternate screen, to change.
+    ///
+    /// # Panics
+    /// Panics at [`AlternateScreen::Blank`], as
+    /// [`get_active_grid`](Self::get_active_grid) does.
+    fn get_active_grid_mut(&mut self) -> &mut Grid {
+        match self {
+            AlternateScreen::Blank { .. } => panic!("the active alternate screen holds no grid"),
+            AlternateScreen::Allocated(alternate_grid) => alternate_grid,
+        }
+    }
+}
+
 /// The full emulation state of one terminal pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalState {
     /// The shared pixel-to-cell measurement retained while no viewer is attached.
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
-    /// The primary (normal, scrolling) screen buffer, including row metadata,
-    /// reference-counted: a render snapshot shares it without copying, and a
-    /// write clones it once on demand (copy-on-write via `Arc::make_mut` in
-    /// `get_active_grid_mut`).
-    primary: Arc<Grid>,
+    /// The primary (normal, scrolling) screen buffer, including row metadata.
+    /// A frame shares each row's snapshot, and a write to a row takes that
+    /// row's snapshot away.
+    primary: Grid,
     /// The alternate screen buffer used by full-screen apps, including row
     /// metadata; swapped in via DEC mode `?1049`/`?47` and never appended to the
-    /// `scrollback`. Reference-counted like `primary`.
-    alternate: Arc<Grid>,
+    /// `scrollback`. [`AlternateScreen::Blank`] holds no grid; the screen is
+    /// always [`AlternateScreen::Allocated`] while it is active.
+    alternate: AlternateScreen,
     /// Which buffer — `primary` or `alternate` — output currently writes to and
     /// the renderer displays.
     active_screen: Screen,
@@ -178,8 +227,8 @@ pub struct TerminalState {
 #[derive(Serialize)]
 struct TerminalStateSerializeFields<'a> {
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
-    primary: &'a Arc<Grid>,
-    alternate: &'a Arc<Grid>,
+    primary: &'a Grid,
+    alternate: &'a AlternateScreen,
     active_screen: Screen,
     primary_cursor: &'a Cursor,
     alternate_cursor: &'a Cursor,
@@ -294,8 +343,8 @@ impl Serialize for TerminalState {
 
 struct TerminalStateFields {
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
-    primary: Arc<Grid>,
-    alternate: Arc<Grid>,
+    primary: Grid,
+    alternate: AlternateScreen,
     active_screen: Screen,
     primary_cursor: Cursor,
     alternate_cursor: Cursor,
@@ -328,8 +377,8 @@ struct TerminalStateFields {
 
 struct RawTerminalStateFields {
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
-    primary: Arc<Grid>,
-    alternate: Arc<Grid>,
+    primary: Grid,
+    alternate: AlternateScreen,
     active_screen: Screen,
     primary_cursor: Cursor,
     alternate_cursor: Cursor,
@@ -520,8 +569,20 @@ impl<'de> Deserialize<'de> for RawTerminalStateField {
     }
 }
 
+/// How a stored terminal state holds its grid rows, history lines and modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoredStateShape {
+    /// Each row and line in the row encoding, and every mode, as [`Grid`],
+    /// [`Scrollback`] and [`TerminalModes`] write them.
+    Current,
+    /// Each row and line as a list of JSON cells, and the modes without
+    /// insert mode, as resume format 4 writes them.
+    ResumeFormat4,
+}
+
 struct RawTerminalStateVisitor<'a> {
     budget: &'a mut images::ImageStateBudget,
+    stored_state_shape: StoredStateShape,
 }
 
 impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
@@ -540,7 +601,7 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
     {
         let mut cell_size = None;
         let mut primary_grid = None;
-        let mut alternate_grid = None;
+        let mut alternate_screen = None;
         let mut active_screen = None;
         let mut primary_cursor = None;
         let mut alternate_cursor = None;
@@ -583,13 +644,23 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                     if primary_grid.is_some() {
                         return Err(serde::de::Error::duplicate_field("primary"));
                     }
-                    primary_grid = Some(map_access.next_value()?);
+                    primary_grid = Some(match self.stored_state_shape {
+                        StoredStateShape::Current => map_access.next_value()?,
+                        StoredStateShape::ResumeFormat4 => {
+                            map_access.next_value::<CellRowGrid>()?.0
+                        }
+                    });
                 }
                 RawTerminalStateField::Alternate => {
-                    if alternate_grid.is_some() {
+                    if alternate_screen.is_some() {
                         return Err(serde::de::Error::duplicate_field("alternate"));
                     }
-                    alternate_grid = Some(map_access.next_value()?);
+                    alternate_screen = Some(match self.stored_state_shape {
+                        StoredStateShape::Current => map_access.next_value()?,
+                        StoredStateShape::ResumeFormat4 => {
+                            AlternateScreen::Allocated(map_access.next_value::<CellRowGrid>()?.0)
+                        }
+                    });
                 }
                 RawTerminalStateField::Active => {
                     if active_screen.is_some() {
@@ -679,7 +750,12 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                     if modes.is_some() {
                         return Err(serde::de::Error::duplicate_field("modes"));
                     }
-                    modes = Some(map_access.next_value()?);
+                    modes = Some(match self.stored_state_shape {
+                        StoredStateShape::Current => map_access.next_value()?,
+                        StoredStateShape::ResumeFormat4 => map_access
+                            .next_value::<ResumeFormat4TerminalModes>()?
+                            .into_terminal_modes(),
+                    });
                 }
                 RawTerminalStateField::SixelPalette => {
                     if sixel_palette.is_some() {
@@ -723,7 +799,12 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                     if scrollback.is_some() {
                         return Err(serde::de::Error::duplicate_field("scrollback"));
                     }
-                    scrollback = Some(map_access.next_value()?);
+                    scrollback = Some(match self.stored_state_shape {
+                        StoredStateShape::Current => map_access.next_value()?,
+                        StoredStateShape::ResumeFormat4 => {
+                            map_access.next_value::<CellRowScrollback>()?.0
+                        }
+                    });
                 }
                 RawTerminalStateField::PrimaryScrollRegion => {
                     if primary_scroll_region.is_some() {
@@ -794,7 +875,7 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
         Ok(RawTerminalStateFields {
             cell_size: cell_size.ok_or_else(|| serde::de::Error::missing_field("cell_size"))?,
             primary: primary_grid.ok_or_else(|| serde::de::Error::missing_field("primary"))?,
-            alternate: alternate_grid
+            alternate: alternate_screen
                 .ok_or_else(|| serde::de::Error::missing_field("alternate"))?,
             active_screen: active_screen
                 .ok_or_else(|| serde::de::Error::missing_field("active_screen"))?,
@@ -853,34 +934,36 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
     }
 }
 
-impl<'de> Deserialize<'de> for RawTerminalStateFields {
-    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
-    where
-        Deserializer: serde::Deserializer<'de>,
-    {
-        let mut budget = images::ImageStateBudget::new();
-        Self::deserialize_with_budget(deserializer, &mut budget)
-    }
-}
-
 impl RawTerminalStateFields {
     fn deserialize_with_budget<'de, Deserializer>(
         deserializer: Deserializer,
         budget: &mut images::ImageStateBudget,
+        stored_state_shape: StoredStateShape,
     ) -> Result<Self, Deserializer::Error>
     where
         Deserializer: serde::Deserializer<'de>,
     {
-        deserializer.deserialize_map(RawTerminalStateVisitor { budget })
+        deserializer.deserialize_map(RawTerminalStateVisitor {
+            budget,
+            stored_state_shape,
+        })
     }
 }
 
-impl<'de> Deserialize<'de> for TerminalStateFields {
-    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+impl TerminalStateFields {
+    fn deserialize_with_state_shape<'de, Deserializer>(
+        deserializer: Deserializer,
+        stored_state_shape: StoredStateShape,
+    ) -> Result<Self, Deserializer::Error>
     where
         Deserializer: serde::Deserializer<'de>,
     {
-        let serialized_terminal_state = RawTerminalStateFields::deserialize(deserializer)?;
+        let mut budget = images::ImageStateBudget::new();
+        let serialized_terminal_state = RawTerminalStateFields::deserialize_with_budget(
+            deserializer,
+            &mut budget,
+            stored_state_shape,
+        )?;
         let is_declrmm_enabled = serialized_terminal_state
             .modes
             .is_left_right_margin_mode_enabled;
@@ -892,7 +975,10 @@ impl<'de> Deserialize<'de> for TerminalStateFields {
         )
         .map_err(serde::de::Error::custom)?;
         let alternate_horizontal_margins = normalize_restored_horizontal_margins(
-            &serialized_terminal_state.alternate,
+            serialized_terminal_state
+                .alternate
+                .get_allocated_grid()
+                .unwrap_or(&serialized_terminal_state.primary),
             serialized_terminal_state.alternate_horizontal_margins,
             is_declrmm_enabled,
             "alternate",
@@ -944,11 +1030,80 @@ impl<'de> Deserialize<'de> for TerminalStateFields {
 }
 
 impl<'de> Deserialize<'de> for TerminalState {
+    /// Reads a stored state of the current format. A state whose history
+    /// holds a line of another column count than the primary screen does not
+    /// load, and names that rule.
     fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
     where
         Deserializer: serde::Deserializer<'de>,
     {
-        let fields = TerminalStateFields::deserialize(deserializer)?;
+        let terminal_state =
+            Self::deserialize_with_state_shape(deserializer, StoredStateShape::Current)?;
+        let (_, primary_column_count) = terminal_state.primary.get_grid_dimensions();
+        if !terminal_state
+            .scrollback
+            .has_only_lines_of_column_count(primary_column_count)
+        {
+            return Err(serde::de::Error::custom(
+                "a history line holds another column count than the primary screen",
+            ));
+        }
+        Ok(terminal_state)
+    }
+}
+
+/// A terminal state stored as resume format 4 writes it: every grid row and
+/// history line as a list of JSON cells, and the modes without insert mode.
+/// Reading one encodes each row and line, then brings each history line to
+/// the primary screen's column count: default blanks pad a shorter line, a
+/// longer line loses its cells past that count, and a wide glyph whose right
+/// half falls past that count becomes a default blank. Insert mode reads back
+/// off. The alternate grid is freed when the primary screen is active, the
+/// alternate screen holds no image, and the grid equals a blank grid at the
+/// primary screen's size in the alternate pen's background fill. Any other
+/// alternate grid stays.
+#[derive(Debug)]
+pub struct ResumeFormat4TerminalState(TerminalState);
+
+impl ResumeFormat4TerminalState {
+    /// The terminal state that was read.
+    #[must_use]
+    pub fn into_terminal_state(self) -> TerminalState {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ResumeFormat4TerminalState {
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        let mut terminal_state = TerminalState::deserialize_with_state_shape(
+            deserializer,
+            StoredStateShape::ResumeFormat4,
+        )?;
+        terminal_state.release_blank_alternate_grid();
+        Ok(ResumeFormat4TerminalState(terminal_state))
+    }
+}
+
+impl TerminalState {
+    fn deserialize_with_state_shape<'de, Deserializer>(
+        deserializer: Deserializer,
+        stored_state_shape: StoredStateShape,
+    ) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        let mut fields =
+            TerminalStateFields::deserialize_with_state_shape(deserializer, stored_state_shape)?;
+        if stored_state_shape == StoredStateShape::ResumeFormat4 {
+            let (_, primary_column_count) = fields.primary.get_grid_dimensions();
+            fields
+                .scrollback
+                .fit_lines_to_column_count(primary_column_count);
+        }
+        validate_alternate_screen(&fields).map_err(serde::de::Error::custom)?;
         images::validate_image_state(&fields).map_err(serde::de::Error::custom)?;
 
         let mut terminal_state = TerminalState {
@@ -993,7 +1148,53 @@ impl<'de> Deserialize<'de> for TerminalState {
     }
 }
 
+/// Checks that a stored alternate screen with no grid is not the active
+/// screen and holds no image placement.
+///
+/// # Errors
+/// `"the active alternate screen holds no grid"` and `"an alternate screen
+/// with no grid holds an image placement"` name the broken rule.
+fn validate_alternate_screen(fields: &TerminalStateFields) -> Result<(), &'static str> {
+    let AlternateScreen::Blank { .. } = fields.alternate else {
+        return Ok(());
+    };
+    if fields.active_screen == Screen::Alternate {
+        return Err("the active alternate screen holds no grid");
+    }
+    if !fields.alternate_image_placements.is_empty() {
+        return Err("an alternate screen with no grid holds an image placement");
+    }
+    Ok(())
+}
+
 impl TerminalState {
+    /// Frees the alternate grid when the primary screen is active, the
+    /// alternate screen holds no image placement, and the grid equals a blank
+    /// grid at the primary screen's size in the alternate pen's background
+    /// fill: every cell [`Cell::build_blank_with_style`] of that style, and
+    /// every row hard-ended with no prompt mark. The alternate screen then
+    /// becomes [`AlternateScreen::Blank`] in that style. Any other alternate
+    /// screen stays as it is.
+    fn release_blank_alternate_grid(&mut self) {
+        let AlternateScreen::Allocated(alternate_grid) = &self.alternate else {
+            return;
+        };
+        let alternate_fill_style = self.alternate_render.style.get_background_fill_style();
+        let (row_count, column_count) = self.primary.get_grid_dimensions();
+        let is_blank_grid =
+            *alternate_grid == Grid::build_blank(row_count, column_count, alternate_fill_style);
+        let has_alternate_image = !self.alternate_image_placements.is_empty()
+            || self
+                .native_images
+                .iter()
+                .any(|native_image| native_image.screen == Screen::Alternate);
+        if self.active_screen == Screen::Primary && is_blank_grid && !has_alternate_image {
+            self.alternate = AlternateScreen::Blank {
+                fill_style: alternate_fill_style,
+            };
+        }
+    }
+
     /// Set the shared pixel measurement used by new images and size reports.
     pub fn set_cell_size(&mut self, pixel_cell_size: koshi_core::geometry::PixelCellSize) {
         self.cell_size = Some(pixel_cell_size);
@@ -1072,8 +1273,9 @@ impl TerminalState {
         Ok(Some(image_record))
     }
 
-    /// Create per-pane state for a terminal of `pty_size`: both screen buffers
-    /// blank, the cursor at the top-left and visible, default pen, no title.
+    /// Create per-pane state for a terminal of `pty_size`: the primary screen
+    /// blank, the alternate screen with no grid and blanks in the default
+    /// style, the cursor at the top-left and visible, default pen, no title.
     pub fn from_pty_size(pty_size: PtySize) -> Self {
         Self::with_scrollback(pty_size, ScrollbackLimit::default())
     }
@@ -1092,8 +1294,10 @@ impl TerminalState {
         };
         TerminalState {
             cell_size: None,
-            primary: Arc::new(blank_screen.clone()),
-            alternate: Arc::new(blank_screen),
+            primary: blank_screen,
+            alternate: AlternateScreen::Blank {
+                fill_style: Style::default(),
+            },
             active_screen: Screen::Primary,
             primary_cursor: home_cursor,
             alternate_cursor: home_cursor,
@@ -1152,7 +1356,8 @@ impl TerminalState {
     /// and after regrowing the cursor restarts on the first logical line.
     /// The alternate screen has no history: each row crops on the right or
     /// pads with the screen's own background (a wide glyph whose right half is
-    /// cut off is blanked), and a height shrink crops off the top. Both
+    /// cut off is blanked), and a height shrink crops off the top. An
+    /// alternate screen that holds no grid stays with no grid. Both
     /// screens' vertical and horizontal margins are dropped until the app
     /// issues DECSTBM or DECSLRM again.
     /// Primary image anchors follow their row's reflowed text and remain in the
@@ -1162,47 +1367,57 @@ impl TerminalState {
     /// cleared, and an in-progress grapheme cluster is dropped.
     pub fn resize_terminal_state(&mut self, pty_size: PtySize) {
         let alternate_fill = self.alternate_render.style.get_background_fill_style();
+        let (previous_row_count, _) = self.primary.get_grid_dimensions();
 
         self.resize_tab_stops(pty_size.column_count);
         self.reflow_primary(pty_size);
 
         // The alternate screen keeps what fits: crop off the top, pad at the
         // bottom, no history on either side. Row metadata follows each row.
-        let mut alternate_rows: Vec<(Vec<Cell>, RowMetadata)> = self
-            .alternate
-            .list_rows()
-            .iter()
-            .enumerate()
-            .map(|(row_index, row_cells)| {
-                (
-                    row_cells.clone(),
-                    self.alternate.get_row_metadata(row_index as u16),
-                )
-            })
-            .collect();
-        for (row_cells, _) in &mut alternate_rows {
-            crop_columns(row_cells, pty_size.column_count, alternate_fill);
-        }
-        let dropped_top_row_count = alternate_rows
-            .len()
-            .saturating_sub(pty_size.row_count as usize);
-        alternate_rows.drain(..dropped_top_row_count);
+        let dropped_top_row_count = match &self.alternate {
+            AlternateScreen::Blank { .. } => {
+                usize::from(previous_row_count).saturating_sub(usize::from(pty_size.row_count))
+            }
+            AlternateScreen::Allocated(alternate_grid) => {
+                let mut alternate_rows: Vec<(Vec<Cell>, RowMetadata)> = alternate_grid
+                    .list_row_cells()
+                    .enumerate()
+                    .map(|(row_index, row_cells)| {
+                        (
+                            row_cells.to_vec(),
+                            alternate_grid.get_row_metadata(row_index as u16),
+                        )
+                    })
+                    .collect();
+                for (row_cells, _) in &mut alternate_rows {
+                    crop_columns(row_cells, pty_size.column_count, alternate_fill);
+                }
+                let dropped_top_row_count = alternate_rows
+                    .len()
+                    .saturating_sub(pty_size.row_count as usize);
+                alternate_rows.drain(..dropped_top_row_count);
+                alternate_rows.resize(
+                    pty_size.row_count as usize,
+                    (
+                        vec![
+                            Cell::build_blank_with_style(alternate_fill);
+                            pty_size.column_count as usize
+                        ],
+                        RowMetadata::default(),
+                    ),
+                );
+                self.alternate = AlternateScreen::Allocated(Grid::from_rows_with_metadata(
+                    alternate_rows,
+                    pty_size.column_count,
+                    alternate_fill,
+                ));
+                dropped_top_row_count
+            }
+        };
         self.alternate_cursor.row = self
             .alternate_cursor
             .row
             .saturating_sub(u16::try_from(dropped_top_row_count).unwrap_or(u16::MAX));
-        alternate_rows.resize(
-            pty_size.row_count as usize,
-            (
-                vec![Cell::build_blank_with_style(alternate_fill); pty_size.column_count as usize],
-                RowMetadata::default(),
-            ),
-        );
-        self.alternate = Arc::new(Grid::from_rows_with_metadata(
-            alternate_rows,
-            pty_size.column_count,
-            alternate_fill,
-        ));
 
         self.remap_alternate_image_placements(|row_index, column_index| {
             Some((
@@ -1261,29 +1476,27 @@ impl TerminalState {
     /// `alternate`, per the active screen.
     pub fn get_active_grid(&self) -> &Grid {
         match self.active_screen {
-            Screen::Primary => self.primary.as_ref(),
-            Screen::Alternate => self.alternate.as_ref(),
+            Screen::Primary => &self.primary,
+            Screen::Alternate => self.alternate.get_active_grid(),
         }
     }
 
-    /// Mutable access to the active screen buffer, for writing cells. Clones the
-    /// buffer once (copy-on-write) if a render snapshot still shares it; the
-    /// snapshot keeps the pre-write contents.
+    /// The alternate screen's `(row_count, column_count)`: its grid's, or the
+    /// primary screen's at [`AlternateScreen::Blank`].
+    fn get_alternate_grid_dimensions(&self) -> (u16, u16) {
+        self.alternate
+            .get_allocated_grid()
+            .unwrap_or(&self.primary)
+            .get_grid_dimensions()
+    }
+
+    /// Mutable access to the active screen buffer, for writing cells. A frame
+    /// that shares a row's snapshot keeps the contents the row had when the
+    /// frame took it.
     pub(crate) fn get_active_grid_mut(&mut self) -> &mut Grid {
         match self.active_screen {
-            Screen::Primary => Arc::make_mut(&mut self.primary),
-            Screen::Alternate => Arc::make_mut(&mut self.alternate),
-        }
-    }
-
-    /// A reference-counted handle to the active screen buffer for the render
-    /// snapshot: clones the `Arc`, not the grid. The next write to this screen
-    /// clones the buffer once, leaving this handle pointing at the frozen
-    /// contents.
-    pub fn get_active_grid_arc(&self) -> Arc<Grid> {
-        match self.active_screen {
-            Screen::Primary => Arc::clone(&self.primary),
-            Screen::Alternate => Arc::clone(&self.alternate),
+            Screen::Primary => &mut self.primary,
+            Screen::Alternate => self.alternate.get_active_grid_mut(),
         }
     }
 
@@ -1320,63 +1533,46 @@ impl TerminalState {
         offset.min(self.scrollback.get_retained_line_count())
     }
 
-    /// The active screen buffer the renderer should draw at scrollback view
-    /// `offset` — lines scrolled up from the live bottom, `0` following live
-    /// output — paired with the *effective* offset actually shown.
+    /// The rows the renderer should draw at scrollback view `offset` — lines
+    /// scrolled up from the live bottom, `0` following live output — top to
+    /// bottom, paired with the *effective* offset actually shown.
     ///
     /// The effective offset is the single source of truth for how far the view is
-    /// scrolled: it is `0` (and the buffer travels by reference, no copy) when
-    /// `offset` is `0`, on the alternate screen (which keeps no scrollback), or
-    /// with empty history. In every other case it is `offset` clamped to the
+    /// scrolled: it is `0` — the rows are the active screen's — when `offset`
+    /// is `0`, on the alternate screen (which keeps no scrollback), or with
+    /// empty history. In every other case it is `offset` clamped to the
     /// retained line count: an over-scrolled or stale value stops at the oldest
-    /// line. The composed grid, the scroll indicator, and cursor suppression all
+    /// line. The composed rows, the scroll indicator, and cursor suppression all
     /// read the returned value.
     ///
-    /// A non-zero effective offset composes a fresh window `row_count` tall from the
+    /// A non-zero effective offset lists a window `row_count` tall from the
     /// primary screen: its top rows are the newest scrollback lines, its lower
     /// rows the top of the live grid. A view scrolled that many lines up shows
-    /// that much history with the rest of the live screen below.
+    /// that much history with the rest of the live screen below. Each row is a
+    /// shared snapshot: no cell is copied.
     ///
-    /// History stores a row's text without the default blanks that padded it out
-    /// to the screen width; composing the window pads each history row back out
-    /// with default blanks, not the running program's current background. Live
-    /// rows already span the full width.
-    pub fn get_scrolled_view(&self, offset: usize) -> (Arc<Grid>, usize) {
+    /// Every history row holds the primary screen's column count, with the
+    /// default blanks that padded it out to that width.
+    pub fn get_scrolled_view(&self, offset: usize) -> (Vec<Arc<RowSnapshot>>, usize) {
         let scrolled = self.compute_effective_view_offset(offset);
         if scrolled == 0 {
-            return (self.get_active_grid_arc(), 0);
+            return (self.get_active_grid().list_row_snapshots().collect(), 0);
         }
 
-        let grid = self.primary.as_ref();
-        let (row_count, column_count) = grid.get_grid_dimensions();
+        let (row_count, _) = self.primary.get_grid_dimensions();
         let history = self.scrollback.list_retained_lines();
         let retained_line_count = history.len();
 
         // The visible window: the `scrolled` newest history rows, then the live
-        // rows, capped at the screen height. The live grid alone is `row_count` tall;
-        // the chain always yields a full window and keeps row metadata.
-        let window: Vec<(Vec<Cell>, RowMetadata)> = history
+        // rows, capped at the screen height.
+        let window_row_snapshots = history
             .iter()
             .skip(retained_line_count - scrolled)
-            .map(|(row_cells, row_metadata)| (row_cells.clone(), *row_metadata))
-            .chain(
-                grid.list_rows()
-                    .iter()
-                    .enumerate()
-                    .map(|(row_index, row_cells)| {
-                        (row_cells.clone(), grid.get_row_metadata(row_index as u16))
-                    }),
-            )
+            .cloned()
+            .chain(self.primary.list_row_snapshots())
             .take(row_count as usize)
             .collect();
-        (
-            Arc::new(Grid::from_rows_with_metadata(
-                window,
-                column_count,
-                Style::default(),
-            )),
-            scrolled,
-        )
+        (window_row_snapshots, scrolled)
     }
 
     /// The window/tab title set by OSC 0/1/2, or `None` if the app has not set
@@ -1586,7 +1782,7 @@ fn rebuild_cell_with_width(terminal_cell: &Cell, cell_width: u8) -> Cell {
 /// Normalize `row_cells` to exactly `column_count` cells: truncate on the right or pad with
 /// blanks in `fill_style`. A wide glyph whose right (width-0) half falls past the new
 /// edge leaves its base as the last cell; that dangling base is blanked.
-fn crop_columns(row_cells: &mut Vec<Cell>, column_count: u16, fill_style: Style) {
+pub(crate) fn crop_columns(row_cells: &mut Vec<Cell>, column_count: u16, fill_style: Style) {
     row_cells.resize(
         column_count as usize,
         Cell::build_blank_with_style(fill_style),
@@ -1599,4 +1795,4 @@ fn crop_columns(row_cells: &mut Vec<Cell>, column_count: u16, fill_style: Style)
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

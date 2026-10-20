@@ -23,6 +23,8 @@ pub fn exec_and_keep_ignoring_sigpipe(command: &mut Command) -> std::io::Error {
     use std::os::unix::process::CommandExt;
 
     let exec_error = command.exec();
+    // SAFETY: `SIG_IGN` installs no handler code, and `SIGPIPE` is a signal
+    // that can be ignored.
     let _ = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
     exec_error
 }

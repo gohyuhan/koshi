@@ -47,6 +47,13 @@ pub enum CliError {
     /// this build writes. `detail` is the sentence the read failure gave.
     #[error("IPC unavailable: {detail}; the user who started it runs: koshi restart-servers")]
     PreviousReleaseServer { detail: String },
+    /// The session is replacing its process image: it refused the request with
+    /// [`IpcErrorCode::Restarting`](koshi_ipc::protocol::IpcErrorCode::Restarting),
+    /// or no endpoint file advertises it while its resume file is young. The
+    /// request did not run. `detail` is the session's own sentence, or
+    /// `session session-<uuid> is restarting; ask again in a moment`.
+    #[error("IPC unavailable: {detail}")]
+    SessionRestarting { detail: String },
     /// The session did not finish answering by the deadline the caller gave
     /// the exchange.
     #[error("IPC unavailable: the session did not answer in time")]
@@ -104,10 +111,10 @@ fn format_rejection_message(reason: RejectReason, help: Option<&str>) -> String 
 /// [`CliExitCode`] the binary reports to the OS. A usage or config problem
 /// exits 2, a session that is not running exits 3, an unreachable IPC
 /// endpoint, a refused protocol version, a refused connection token, a server
-/// that koshi 0.1.0 to 0.4.0 started, a session or a router that did not
-/// answer in time, or a session that took a request and gave no answer exits
-/// 4, and a runtime error, a rejected command, or a failed update exits
-/// 1.
+/// that koshi 0.1.0 to 0.4.0 started, a session that is restarting, a session
+/// or a router that did not answer in time, or a session that took a request
+/// and gave no answer exits 4, and a runtime error, a rejected command, or a
+/// failed update exits 1.
 impl From<&CliError> for CliExitCode {
     fn from(cli_error: &CliError) -> Self {
         match cli_error {
@@ -121,6 +128,7 @@ impl From<&CliError> for CliExitCode {
             | CliError::ProtocolVersionRefused { .. }
             | CliError::ConnectionTokenRefused { .. }
             | CliError::PreviousReleaseServer { .. }
+            | CliError::SessionRestarting { .. }
             | CliError::SessionAnswerTimedOut
             | CliError::RouterAnswerTimedOut
             | CliError::CommittedRequestUnanswered { .. } => CliExitCode::IpcUnavailable,

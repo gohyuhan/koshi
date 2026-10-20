@@ -15,7 +15,7 @@ use koshi_core::{
     ids::{ClientId, PaneId, SessionId, TabId},
 };
 use koshi_layout::tree::LayoutNode;
-use koshi_pane::{pane::lifecycle::PaneLifecycle, registry::PaneRegistry};
+use koshi_pane::registry::PaneRegistry;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -622,16 +622,8 @@ impl Session {
                     .or_default()
                     .push(tab.tab_id);
 
-                let Some(pane_record) = self.panes.get_pane_record_by_id(pane_id) else {
+                if self.panes.get_pane_record_by_id(pane_id).is_none() {
                     consistency_violations.push(SessionConsistencyError::PaneNotInRegistry {
-                        tab_id: tab.tab_id,
-                        pane_id,
-                    });
-                    continue;
-                };
-                // A `Removed` pane still in a layout is a violation.
-                if *pane_record.get_lifecycle() == PaneLifecycle::Removed {
-                    consistency_violations.push(SessionConsistencyError::RemovedPaneInLayout {
                         tab_id: tab.tab_id,
                         pane_id,
                     });
@@ -675,17 +667,12 @@ impl Session {
                 .or_insert(0) += 1;
         }
 
-        // A floating member is a registry pane that is not `Removed`, listed
-        // once, and a leaf of no layout.
+        // A floating member is a registry pane, listed once, and a leaf of no
+        // layout.
         for (&pane_id, &member_count) in &floating_member_count_by_pane_id {
-            match self.panes.get_pane_record_by_id(pane_id) {
-                None => consistency_violations
-                    .push(SessionConsistencyError::FloatingPaneNotInRegistry { pane_id }),
-                Some(pane_record) if *pane_record.get_lifecycle() == PaneLifecycle::Removed => {
-                    consistency_violations
-                        .push(SessionConsistencyError::RemovedPaneInFloatingSet { pane_id });
-                }
-                Some(_) => {}
+            if self.panes.get_pane_record_by_id(pane_id).is_none() {
+                consistency_violations
+                    .push(SessionConsistencyError::FloatingPaneNotInRegistry { pane_id });
             }
             if member_count > 1 {
                 consistency_violations
@@ -699,20 +686,14 @@ impl Session {
             }
         }
 
-        // Every live or `Exited` record must be a leaf somewhere or a floating
-        // member; a `Removed` record must not linger in the registry at all.
+        // Every record is a leaf somewhere or a floating member.
         for pane_record in self.panes.list_pane_records() {
-            if *pane_record.get_lifecycle() == PaneLifecycle::Removed {
-                consistency_violations.push(SessionConsistencyError::LingeringRemovedRecord {
-                    pane_id: pane_record.get_pane_id(),
-                });
-            } else if !tab_ids_by_pane_id.contains_key(&pane_record.get_pane_id())
-                && !floating_member_count_by_pane_id.contains_key(&pane_record.get_pane_id())
+            let pane_id = pane_record.get_pane_id();
+            if !tab_ids_by_pane_id.contains_key(&pane_id)
+                && !floating_member_count_by_pane_id.contains_key(&pane_id)
             {
-                consistency_violations.push(SessionConsistencyError::OrphanedPaneRecord {
-                    pane_id: pane_record.get_pane_id(),
-                    pane_lifecycle: *pane_record.get_lifecycle(),
-                });
+                consistency_violations
+                    .push(SessionConsistencyError::OrphanedPaneRecord { pane_id });
             }
         }
 

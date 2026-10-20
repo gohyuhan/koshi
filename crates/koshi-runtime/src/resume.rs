@@ -42,6 +42,8 @@ use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 
+use crate::runtime::saved_view::SavedViewStore;
+
 mod migration;
 
 /// The resume-file format this build writes: the `maximum_version` of
@@ -92,12 +94,13 @@ pub struct CarriedPane {
     ///
     /// `None` makes the next image check the descriptor's kind alone.
     pub terminal_name: Option<String>,
-    /// How the pane's child ended, when the writing process reaped it before it
-    /// wrote this file. The next image reports this status and does not wait on
-    /// the process id.
+    /// How the pane's child ended, when the next image cannot wait for it: an
+    /// earlier image reaped the child before this file was written, or its end
+    /// could not be waited on. The next image reports this status, and neither
+    /// waits on the process id nor reaps it.
     ///
-    /// `None` says the child was still running and the next image waits on it
-    /// itself.
+    /// `None` says the child is running, or ended and stays a zombie of the
+    /// writing process, and the next image waits on it itself.
     pub exit_status: Option<ExitStatus>,
 }
 
@@ -147,6 +150,17 @@ pub struct ResumeBody {
     /// The kind travels with it: a caller that asked for a zero-grace teardown
     /// gets one from the next image too.
     pub carried_quit: Option<CarriedQuit>,
+    /// The views detached clients left behind, and the resume-token hash
+    /// minted for each attached client. The next image takes a filed view back
+    /// for the token that filed it, and hands a carried client's record back
+    /// only to an attach that presents that client's token. A body converted
+    /// from format 4 or older carries an empty store.
+    pub saved_view_store: SavedViewStore,
+    /// The process IDs of the children that closed panes left running and
+    /// the writing process had not reaped, in ascending order. The next image
+    /// waits on each one and reaps it when it ends. Empty on Windows, and in a
+    /// body converted from format 4 or older.
+    pub left_running_child_process_ids: Vec<u32>,
 }
 
 /// One pane's terminal, as the writing process left it.
@@ -234,6 +248,8 @@ struct EncodedResumeBody {
     session_by_id: HashMap<SessionId, Session>,
     carried_pane_state_by_pane_id: EncodedPaneStates,
     carried_quit: Option<CarriedQuit>,
+    saved_view_store: SavedViewStore,
+    left_running_child_process_ids: Vec<u32>,
 }
 
 fn deserialize_unique_sessions<'de, D>(
@@ -292,7 +308,9 @@ struct ResumeFileReference<'a> {
 
 /// Write `header` and `resume_body` to `resume_file_path`, replacing whatever is there.
 ///
-/// The bytes land through [`koshi_storage::atomic::write_atomic`]: a reader
+/// The JSON is encoded straight into the staging file of
+/// [`koshi_storage::atomic::write_atomic_streamed`], through its
+/// 64 KiB buffer: no copy of the whole file is held in memory, and a reader
 /// finds the whole old file or the whole new one, never a half-written middle.
 ///
 /// # Errors
@@ -303,17 +321,16 @@ pub fn write_resume_file(
     header: &ResumeHeader,
     resume_body: &ResumeBody,
 ) -> Result<(), StorageError> {
-    let resume_file_bytes = serde_json::to_vec(&ResumeFileReference {
-        header,
-        raw_body: resume_body,
+    koshi_storage::atomic::write_atomic_streamed(resume_file_path, |file_writer| {
+        serde_json::to_writer(
+            file_writer,
+            &ResumeFileReference {
+                header,
+                raw_body: resume_body,
+            },
+        )
+        .map_err(std::io::Error::from)
     })
-    .map_err(|serialization_error| StorageError::Io {
-        detail: format!(
-            "encode resume state for {}: {serialization_error}",
-            resume_file_path.display()
-        ),
-    })?;
-    koshi_storage::atomic::write_atomic(resume_file_path, &resume_file_bytes)
 }
 
 /// Read the resume file at `resume_file_path`: its header, and its body as raw JSON for
@@ -447,6 +464,8 @@ pub fn read_resume_body(
         session_by_id: encoded_resume_body.session_by_id,
         carried_pane_state_by_pane_id,
         carried_quit: encoded_resume_body.carried_quit,
+        saved_view_store: encoded_resume_body.saved_view_store,
+        left_running_child_process_ids: encoded_resume_body.left_running_child_process_ids,
     })
 }
 

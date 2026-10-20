@@ -6,8 +6,9 @@ use koshi_test_support::fixtures::build_cell_rect;
 use koshi_test_support::layout_assert::check_exact_tiling;
 
 use super::*;
+use crate::solver::tests::build_pane_sizing;
 
-use crate::solver::{solve_layout, solve_layout_with_sizing, MIN_PANE_SIZE};
+use crate::solver::{solve_layout, solve_layout_with_sizing};
 use crate::tree::{LayoutNode, SplitNode};
 
 /// [`resize_layout_with_sizing`] with [`PaneSizing::default`].
@@ -28,13 +29,6 @@ fn resize_layout(
     )
 }
 
-fn build_layout_area() -> Rect {
-    Rect::from_size_at_origin(Size {
-        column_count: 80,
-        row_count: 24,
-    })
-}
-
 /// `true` when [`find_resize_border`] finds a border to move for `pane_id` toward
 /// `direction`: the pane is in the layout tree and an ancestor split on the
 /// matching axis, above any collapsed stack member, has a sibling on that
@@ -51,15 +45,6 @@ fn has_adjacent_border(layout_tree: &LayoutNode, pane_id: PaneId, direction: Dir
         direction,
     )
     .is_some()
-}
-
-/// The default content floor with the given gap between kept children of a
-/// directional split.
-fn build_pane_sizing(gap_cell_count: u16) -> PaneSizing {
-    PaneSizing {
-        minimum_size: MIN_PANE_SIZE,
-        gap_cell_count,
-    }
 }
 
 /// Solves the layout under `pane_sizing` and returns the rect of the given pane.
@@ -120,23 +105,31 @@ fn growing_right_by_one_cell_moves_one_column() {
 
     let resized_layout_tree = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Right,
         1,
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_size(&resized_layout_tree, build_layout_area(), left_pane_id)
-            .column_count,
+        compute_solved_pane_size(
+            &resized_layout_tree,
+            build_cell_rect(0, 0, 80, 24),
+            left_pane_id
+        )
+        .column_count,
         41
     );
     assert_eq!(
-        compute_solved_pane_size(&resized_layout_tree, build_layout_area(), right_pane_id)
-            .column_count,
+        compute_solved_pane_size(
+            &resized_layout_tree,
+            build_cell_rect(0, 0, 80, 24),
+            right_pane_id
+        )
+        .column_count,
         39
     );
-    assert_tiles(&resized_layout_tree, build_layout_area());
+    assert_tiles(&resized_layout_tree, build_cell_rect(0, 0, 80, 24));
 }
 
 #[test]
@@ -146,20 +139,28 @@ fn growing_left_takes_from_the_left_neighbor() {
 
     let resized_layout_tree = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         right_pane_id,
         Direction::Left,
         1,
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_size(&resized_layout_tree, build_layout_area(), left_pane_id)
-            .column_count,
+        compute_solved_pane_size(
+            &resized_layout_tree,
+            build_cell_rect(0, 0, 80, 24),
+            left_pane_id
+        )
+        .column_count,
         39
     );
     assert_eq!(
-        compute_solved_pane_size(&resized_layout_tree, build_layout_area(), right_pane_id)
-            .column_count,
+        compute_solved_pane_size(
+            &resized_layout_tree,
+            build_cell_rect(0, 0, 80, 24),
+            right_pane_id
+        )
+        .column_count,
         41
     );
 }
@@ -171,21 +172,25 @@ fn growing_down_and_up_move_rows() {
 
     let resized_down_layout_tree = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         top_pane_id,
         Direction::Down,
         1,
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_size(&resized_down_layout_tree, build_layout_area(), top_pane_id,)
-            .row_count,
+        compute_solved_pane_size(
+            &resized_down_layout_tree,
+            build_cell_rect(0, 0, 80, 24),
+            top_pane_id,
+        )
+        .row_count,
         13
     );
     assert_eq!(
         compute_solved_pane_size(
             &resized_down_layout_tree,
-            build_layout_area(),
+            build_cell_rect(0, 0, 80, 24),
             bottom_pane_id,
         )
         .row_count,
@@ -194,20 +199,28 @@ fn growing_down_and_up_move_rows() {
 
     let resized_up_layout_tree = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         bottom_pane_id,
         Direction::Up,
         2,
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_size(&resized_up_layout_tree, build_layout_area(), top_pane_id,)
-            .row_count,
+        compute_solved_pane_size(
+            &resized_up_layout_tree,
+            build_cell_rect(0, 0, 80, 24),
+            top_pane_id,
+        )
+        .row_count,
         10
     );
     assert_eq!(
-        compute_solved_pane_size(&resized_up_layout_tree, build_layout_area(), bottom_pane_id,)
-            .row_count,
+        compute_solved_pane_size(
+            &resized_up_layout_tree,
+            build_cell_rect(0, 0, 80, 24),
+            bottom_pane_id,
+        )
+        .row_count,
         14
     );
 }
@@ -219,23 +232,31 @@ fn shrinking_right_gives_the_cells_to_the_right_neighbor() {
 
     let resized_layout_tree = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Right,
         -3,
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_size(&resized_layout_tree, build_layout_area(), left_pane_id)
-            .column_count,
+        compute_solved_pane_size(
+            &resized_layout_tree,
+            build_cell_rect(0, 0, 80, 24),
+            left_pane_id
+        )
+        .column_count,
         37
     );
     assert_eq!(
-        compute_solved_pane_size(&resized_layout_tree, build_layout_area(), right_pane_id)
-            .column_count,
+        compute_solved_pane_size(
+            &resized_layout_tree,
+            build_cell_rect(0, 0, 80, 24),
+            right_pane_id
+        )
+        .column_count,
         43
     );
-    assert_tiles(&resized_layout_tree, build_layout_area());
+    assert_tiles(&resized_layout_tree, build_cell_rect(0, 0, 80, 24));
 }
 
 #[test]
@@ -245,20 +266,28 @@ fn shrinking_left_gives_the_cells_to_the_left_neighbor() {
 
     let resized_layout_tree = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         right_pane_id,
         Direction::Left,
         -2,
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_size(&resized_layout_tree, build_layout_area(), left_pane_id)
-            .column_count,
+        compute_solved_pane_size(
+            &resized_layout_tree,
+            build_cell_rect(0, 0, 80, 24),
+            left_pane_id
+        )
+        .column_count,
         42
     );
     assert_eq!(
-        compute_solved_pane_size(&resized_layout_tree, build_layout_area(), right_pane_id)
-            .column_count,
+        compute_solved_pane_size(
+            &resized_layout_tree,
+            build_cell_rect(0, 0, 80, 24),
+            right_pane_id
+        )
+        .column_count,
         38
     );
 }
@@ -270,7 +299,7 @@ fn a_shrink_mirrors_the_neighbors_grow_on_the_same_border() {
 
     let shrunk_layout_tree = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Right,
         -3,
@@ -278,7 +307,7 @@ fn a_shrink_mirrors_the_neighbors_grow_on_the_same_border() {
     .unwrap();
     let grown_layout_tree = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         right_pane_id,
         Direction::Left,
         3,
@@ -377,7 +406,7 @@ fn shrink_on_a_tab_edge_has_no_border_either() {
 
     let resize_error = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Left,
         -1,
@@ -399,7 +428,7 @@ fn zero_size_returns_the_tree_unchanged() {
 
     let resized = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Right,
         0,
@@ -416,7 +445,7 @@ fn resizes_accumulate_across_transactions() {
 
     layout_tree = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Right,
         1,
@@ -424,18 +453,20 @@ fn resizes_accumulate_across_transactions() {
     .unwrap();
     layout_tree = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Right,
         1,
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_size(&layout_tree, build_layout_area(), left_pane_id).column_count,
+        compute_solved_pane_size(&layout_tree, build_cell_rect(0, 0, 80, 24), left_pane_id)
+            .column_count,
         42
     );
     assert_eq!(
-        compute_solved_pane_size(&layout_tree, build_layout_area(), right_pane_id).column_count,
+        compute_solved_pane_size(&layout_tree, build_cell_rect(0, 0, 80, 24), right_pane_id)
+            .column_count,
         38
     );
 }
@@ -461,46 +492,46 @@ fn nested_pane_resizes_at_the_level_that_owns_the_border() {
 
     let wider = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         upper_pane_id,
         Direction::Left,
         2,
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_size(&wider, build_layout_area(), left_pane_id).column_count,
+        compute_solved_pane_size(&wider, build_cell_rect(0, 0, 80, 24), left_pane_id).column_count,
         38
     );
     assert_eq!(
-        compute_solved_pane_size(&wider, build_layout_area(), upper_pane_id).column_count,
+        compute_solved_pane_size(&wider, build_cell_rect(0, 0, 80, 24), upper_pane_id).column_count,
         42
     );
     assert_eq!(
-        compute_solved_pane_size(&wider, build_layout_area(), lower_pane_id).column_count,
+        compute_solved_pane_size(&wider, build_cell_rect(0, 0, 80, 24), lower_pane_id).column_count,
         42
     );
 
     let taller = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         upper_pane_id,
         Direction::Down,
         3,
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_size(&taller, build_layout_area(), upper_pane_id).row_count,
+        compute_solved_pane_size(&taller, build_cell_rect(0, 0, 80, 24), upper_pane_id).row_count,
         15
     );
     assert_eq!(
-        compute_solved_pane_size(&taller, build_layout_area(), lower_pane_id).row_count,
+        compute_solved_pane_size(&taller, build_cell_rect(0, 0, 80, 24), lower_pane_id).row_count,
         9
     );
     assert_eq!(
-        compute_solved_pane_size(&taller, build_layout_area(), left_pane_id).row_count,
+        compute_solved_pane_size(&taller, build_cell_rect(0, 0, 80, 24), left_pane_id).row_count,
         24
     );
-    assert_tiles(&taller, build_layout_area());
+    assert_tiles(&taller, build_cell_rect(0, 0, 80, 24));
 }
 
 #[test]
@@ -519,18 +550,20 @@ fn pane_inside_a_stack_resizes_the_stack_as_a_unit() {
     // Resizing the collapsed member moves the stack's outer border too.
     let resized = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         second_stack_pane_id,
         Direction::Left,
         5,
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_size(&resized, build_layout_area(), left_pane_id).column_count,
+        compute_solved_pane_size(&resized, build_cell_rect(0, 0, 80, 24), left_pane_id)
+            .column_count,
         35
     );
     assert_eq!(
-        compute_solved_pane_size(&resized, build_layout_area(), first_stack_pane_id).column_count,
+        compute_solved_pane_size(&resized, build_cell_rect(0, 0, 80, 24), first_stack_pane_id)
+            .column_count,
         45
     );
 }
@@ -655,7 +688,7 @@ fn resize_inside_an_active_stack_subtree_sees_the_header_carved_rect() {
     // whole stack rect.
     let resize_error = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         lower_pane_id,
         Direction::Up,
         11,
@@ -671,20 +704,28 @@ fn resize_inside_an_active_stack_subtree_sees_the_header_carved_rect() {
 
     let allowed_layout_tree = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         lower_pane_id,
         Direction::Up,
         8,
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_size(&allowed_layout_tree, build_layout_area(), upper_pane_id)
-            .row_count,
+        compute_solved_pane_size(
+            &allowed_layout_tree,
+            build_cell_rect(0, 0, 80, 24),
+            upper_pane_id
+        )
+        .row_count,
         3
     );
     assert_eq!(
-        compute_solved_pane_size(&allowed_layout_tree, build_layout_area(), lower_pane_id)
-            .row_count,
+        compute_solved_pane_size(
+            &allowed_layout_tree,
+            build_cell_rect(0, 0, 80, 24),
+            lower_pane_id
+        )
+        .row_count,
         20
     );
 }
@@ -706,18 +747,24 @@ fn resize_inside_a_collapsed_member_moves_the_stack_border() {
 
     let resized = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         lower_pane_id,
         Direction::Left,
         5,
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_size(&resized, build_layout_area(), left_pane_id).column_count,
+        compute_solved_pane_size(&resized, build_cell_rect(0, 0, 80, 24), left_pane_id)
+            .column_count,
         35
     );
     assert_eq!(
-        compute_solved_pane_size(&resized, build_layout_area(), active_stack_pane_id).column_count,
+        compute_solved_pane_size(
+            &resized,
+            build_cell_rect(0, 0, 80, 24),
+            active_stack_pane_id
+        )
+        .column_count,
         45
     );
 }
@@ -740,18 +787,20 @@ fn missing_weights_are_repaired_before_a_resize() {
 
     let resized = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Right,
         1,
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_size(&resized, build_layout_area(), left_pane_id).column_count,
+        compute_solved_pane_size(&resized, build_cell_rect(0, 0, 80, 24), left_pane_id)
+            .column_count,
         41
     );
     assert_eq!(
-        compute_solved_pane_size(&resized, build_layout_area(), right_pane_id).column_count,
+        compute_solved_pane_size(&resized, build_cell_rect(0, 0, 80, 24), right_pane_id)
+            .column_count,
         39
     );
 }
@@ -810,7 +859,7 @@ fn pane_on_the_tab_edge_has_no_border_on_that_side() {
 
     let resize_error = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Left,
         1,
@@ -826,7 +875,7 @@ fn pane_on_the_tab_edge_has_no_border_on_that_side() {
     // No vertical border exists in a purely horizontal split either.
     let resize_error = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Down,
         1,
@@ -850,7 +899,7 @@ fn missing_pane_is_reported_and_the_input_is_unchanged() {
     let missing_pane_id = PaneId::new();
     let resize_error = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         missing_pane_id,
         Direction::Right,
         1,
@@ -878,8 +927,14 @@ fn resizing_the_only_pane_in_the_tree_has_no_border_anywhere() {
         Direction::Up,
         Direction::Down,
     ] {
-        let resize_error =
-            resize_layout(&layout_tree, build_layout_area(), pane_id, direction, 1).unwrap_err();
+        let resize_error = resize_layout(
+            &layout_tree,
+            build_cell_rect(0, 0, 80, 24),
+            pane_id,
+            direction,
+            1,
+        )
+        .unwrap_err();
         assert_eq!(
             resize_error,
             ResizeError::NoAdjacentBorder { pane_id, direction }
@@ -903,47 +958,53 @@ fn middle_pane_in_a_three_way_split_resizes_either_border() {
     // Baseline three-way split of 80 columns: 26 / 27 / 27.
     let grown_right = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         middle_pane_id,
         Direction::Right,
         2,
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_size(&grown_right, build_layout_area(), left_pane_id).column_count,
+        compute_solved_pane_size(&grown_right, build_cell_rect(0, 0, 80, 24), left_pane_id)
+            .column_count,
         26
     );
     assert_eq!(
-        compute_solved_pane_size(&grown_right, build_layout_area(), middle_pane_id).column_count,
+        compute_solved_pane_size(&grown_right, build_cell_rect(0, 0, 80, 24), middle_pane_id)
+            .column_count,
         29
     );
     assert_eq!(
-        compute_solved_pane_size(&grown_right, build_layout_area(), right_pane_id).column_count,
+        compute_solved_pane_size(&grown_right, build_cell_rect(0, 0, 80, 24), right_pane_id)
+            .column_count,
         25
     );
-    assert_tiles(&grown_right, build_layout_area());
+    assert_tiles(&grown_right, build_cell_rect(0, 0, 80, 24));
 
     let grown_left = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         middle_pane_id,
         Direction::Left,
         2,
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_size(&grown_left, build_layout_area(), left_pane_id).column_count,
+        compute_solved_pane_size(&grown_left, build_cell_rect(0, 0, 80, 24), left_pane_id)
+            .column_count,
         24
     );
     assert_eq!(
-        compute_solved_pane_size(&grown_left, build_layout_area(), middle_pane_id).column_count,
+        compute_solved_pane_size(&grown_left, build_cell_rect(0, 0, 80, 24), middle_pane_id)
+            .column_count,
         29
     );
     assert_eq!(
-        compute_solved_pane_size(&grown_left, build_layout_area(), right_pane_id).column_count,
+        compute_solved_pane_size(&grown_left, build_cell_rect(0, 0, 80, 24), right_pane_id)
+            .column_count,
         27
     );
-    assert_tiles(&grown_left, build_layout_area());
+    assert_tiles(&grown_left, build_cell_rect(0, 0, 80, 24));
 }
 
 #[test]
@@ -956,7 +1017,7 @@ fn resize_amount_far_exceeding_available_reports_the_exact_spare() {
     // figure, not an overflow or a panic.
     let resize_error = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Right,
         i16::MAX,
@@ -991,7 +1052,7 @@ fn a_pane_still_resizes_after_a_sibling_was_closed() {
 
     let (after_close, _) = remove_pane(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         closed_pane_id,
         build_pane_sizing(0),
     )
@@ -1002,32 +1063,36 @@ fn a_pane_still_resizes_after_a_sibling_was_closed() {
     );
     // The two survivors share the layout area evenly with no leftover delta.
     assert_eq!(
-        compute_solved_pane_size(&after_close, build_layout_area(), left_pane_id).column_count,
+        compute_solved_pane_size(&after_close, build_cell_rect(0, 0, 80, 24), left_pane_id)
+            .column_count,
         40
     );
     assert_eq!(
-        compute_solved_pane_size(&after_close, build_layout_area(), right_pane_id).column_count,
+        compute_solved_pane_size(&after_close, build_cell_rect(0, 0, 80, 24), right_pane_id)
+            .column_count,
         40
     );
 
     // Growing the left pane's right border by five moves exactly five columns.
     let resized = resize_layout(
         &after_close,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Right,
         5,
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_size(&resized, build_layout_area(), left_pane_id).column_count,
+        compute_solved_pane_size(&resized, build_cell_rect(0, 0, 80, 24), left_pane_id)
+            .column_count,
         45
     );
     assert_eq!(
-        compute_solved_pane_size(&resized, build_layout_area(), right_pane_id).column_count,
+        compute_solved_pane_size(&resized, build_cell_rect(0, 0, 80, 24), right_pane_id)
+            .column_count,
         35
     );
-    assert_tiles(&resized, build_layout_area());
+    assert_tiles(&resized, build_cell_rect(0, 0, 80, 24));
 }
 
 #[test]
@@ -1082,19 +1147,26 @@ fn a_request_exactly_at_the_spare_boundary_succeeds_one_past_it_fails() {
 fn a_resize_moves_the_border_by_its_cell_count_with_a_gap_reserved() {
     let (left_pane_id, right_pane_id) = (PaneId::new(), PaneId::new());
     let layout_tree = build_two_pane_split(SplitDirection::Horizontal, left_pane_id, right_pane_id);
-    let sizing = PaneSizing {
-        minimum_size: MIN_PANE_SIZE,
-        gap_cell_count: 2,
-    };
+    let sizing = build_pane_sizing(2);
 
     // The two-column gap comes off the 80-column axis first, so the two
     // panes share 78 cells as 39 each.
     assert_eq!(
-        compute_solved_pane_rect(&layout_tree, build_layout_area(), sizing, left_pane_id),
+        compute_solved_pane_rect(
+            &layout_tree,
+            build_cell_rect(0, 0, 80, 24),
+            sizing,
+            left_pane_id
+        ),
         build_cell_rect(0, 0, 39, 24)
     );
     assert_eq!(
-        compute_solved_pane_rect(&layout_tree, build_layout_area(), sizing, right_pane_id),
+        compute_solved_pane_rect(
+            &layout_tree,
+            build_cell_rect(0, 0, 80, 24),
+            sizing,
+            right_pane_id
+        ),
         build_cell_rect(41, 0, 39, 24)
     );
 
@@ -1102,7 +1174,7 @@ fn a_resize_moves_the_border_by_its_cell_count_with_a_gap_reserved() {
     // across; the gap keeps its two cells.
     let resized = resize_layout_with_sizing(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Right,
         1,
@@ -1110,11 +1182,21 @@ fn a_resize_moves_the_border_by_its_cell_count_with_a_gap_reserved() {
     )
     .unwrap();
     assert_eq!(
-        compute_solved_pane_rect(&resized, build_layout_area(), sizing, left_pane_id),
+        compute_solved_pane_rect(
+            &resized,
+            build_cell_rect(0, 0, 80, 24),
+            sizing,
+            left_pane_id
+        ),
         build_cell_rect(0, 0, 40, 24)
     );
     assert_eq!(
-        compute_solved_pane_rect(&resized, build_layout_area(), sizing, right_pane_id),
+        compute_solved_pane_rect(
+            &resized,
+            build_cell_rect(0, 0, 80, 24),
+            sizing,
+            right_pane_id
+        ),
         build_cell_rect(42, 0, 38, 24)
     );
 }
@@ -1123,10 +1205,7 @@ fn a_resize_moves_the_border_by_its_cell_count_with_a_gap_reserved() {
 fn the_spare_across_a_gap_comes_from_the_donor_rect_the_gap_left() {
     let (left_pane_id, right_pane_id) = (PaneId::new(), PaneId::new());
     let layout_tree = build_two_pane_split(SplitDirection::Horizontal, left_pane_id, right_pane_id);
-    let sizing = PaneSizing {
-        minimum_size: MIN_PANE_SIZE,
-        gap_cell_count: 2,
-    };
+    let sizing = build_pane_sizing(2);
 
     // The right pane holds 39 of the 78 columns past the gap and floors at four, so it
     // can give exactly 35. Taking all 35 leaves the right pane at its floor two
@@ -1134,7 +1213,7 @@ fn the_spare_across_a_gap_comes_from_the_donor_rect_the_gap_left() {
     // that same spare.
     let allowed_layout_tree = resize_layout_with_sizing(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Right,
         35,
@@ -1144,7 +1223,7 @@ fn the_spare_across_a_gap_comes_from_the_donor_rect_the_gap_left() {
     assert_eq!(
         compute_solved_pane_rect(
             &allowed_layout_tree,
-            build_layout_area(),
+            build_cell_rect(0, 0, 80, 24),
             sizing,
             left_pane_id,
         ),
@@ -1153,7 +1232,7 @@ fn the_spare_across_a_gap_comes_from_the_donor_rect_the_gap_left() {
     assert_eq!(
         compute_solved_pane_rect(
             &allowed_layout_tree,
-            build_layout_area(),
+            build_cell_rect(0, 0, 80, 24),
             sizing,
             right_pane_id,
         ),
@@ -1162,7 +1241,7 @@ fn the_spare_across_a_gap_comes_from_the_donor_rect_the_gap_left() {
 
     let resize_error = resize_layout_with_sizing(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Right,
         36,
@@ -1186,7 +1265,7 @@ fn a_minimum_signed_shrink_reports_its_full_magnitude() {
     // On a shrink the left pane is the donor: 40 columns above its floor of 4 leave 36.
     let resize_error = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Right,
         i16::MIN,
@@ -1209,7 +1288,7 @@ fn a_zero_resize_still_reports_a_missing_pane_or_border() {
 
     let resize_error = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         missing_pane_id,
         Direction::Right,
         0,
@@ -1223,7 +1302,7 @@ fn a_zero_resize_still_reports_a_missing_pane_or_border() {
     );
     let resize_error = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Left,
         0,
@@ -1333,7 +1412,7 @@ fn a_collapsed_member_of_a_root_stack_has_no_border() {
 
     let resize_error = resize_layout(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         collapsed_pane_id,
         Direction::Left,
         1,
@@ -1369,7 +1448,7 @@ fn a_larger_content_minimum_raises_the_donor_floor() {
     // minimum plus the two border columns: 28 are spare.
     let resize_error = resize_layout_with_sizing(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Right,
         29,
@@ -1386,7 +1465,7 @@ fn a_larger_content_minimum_raises_the_donor_floor() {
 
     let allowed_layout_tree = resize_layout_with_sizing(
         &layout_tree,
-        build_layout_area(),
+        build_cell_rect(0, 0, 80, 24),
         left_pane_id,
         Direction::Right,
         28,
@@ -1396,7 +1475,7 @@ fn a_larger_content_minimum_raises_the_donor_floor() {
     assert_eq!(
         compute_solved_pane_rect(
             &allowed_layout_tree,
-            build_layout_area(),
+            build_cell_rect(0, 0, 80, 24),
             sizing,
             right_pane_id,
         ),

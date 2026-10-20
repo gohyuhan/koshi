@@ -6,34 +6,19 @@
 //! under either leader shape, sequence matching, empty modes, and the
 //! per-frame `Arc` sharing.
 
-use super::*;
-
 use koshi_core::key::{BindingModifierFlags, Key, NamedKey};
 
+use super::*;
+use crate::keymap_merge::tests::{
+    build_character_chord, build_single_chord_sequence, build_two_chord_sequence,
+};
+use crate::types::tests::{build_bound_action, build_expected_prefix_labels};
 use crate::types::ModeBindings;
 
 /// The catalog resolved from a fresh registry — the built-in defaults over
 /// the built-in action table, exactly what a stock runtime holds.
 fn build_default_hint_catalog() -> KeymapHintCatalog {
     KeymapHintCatalog::from_registry(&ActionRegistry::new())
-}
-
-/// A `Ctrl`-modified character chord.
-fn build_control_chord(key_character: char) -> KeyChord {
-    KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char(key_character))
-}
-
-/// An `Alt`-modified character chord.
-fn build_alt_chord(key_character: char) -> KeyChord {
-    KeyChord::from_parts(BindingModifierFlags::ALT, Key::Char(key_character))
-}
-
-/// A binding to the core action `action_name`.
-fn build_bound_action(action_name: &str) -> BoundAction {
-    BoundAction {
-        action_reference: ActionReference::from_core_action_name(action_name)
-            .expect("a core action name satisfies the grammar"),
-    }
 }
 
 /// The catalog for a user layer holding `bound_action_by_key_sequence` and
@@ -75,12 +60,9 @@ fn normal_mode_joins_defaults_to_display_names() {
     // All 24 shipped normal-mode bindings fire in this build.
     assert_eq!(hints.hint_bindings.len(), 24);
 
-    let new_pane_key_sequence = KeySequence::from_first_and_rest(
-        build_control_chord('p'),
-        vec![KeyChord::from_parts(
-            BindingModifierFlags::NONE,
-            Key::Char('n'),
-        )],
+    let new_pane_key_sequence = build_two_chord_sequence(
+        build_character_chord(BindingModifierFlags::CTRL, 'p'),
+        build_character_chord(BindingModifierFlags::NONE, 'n'),
     );
     let hint_binding = hints
         .hint_bindings
@@ -95,7 +77,7 @@ fn normal_mode_joins_defaults_to_display_names() {
 #[test]
 fn quit_binding_surfaces_in_both_modes() {
     let hint_catalog = build_default_hint_catalog();
-    let quit_key_sequence = KeySequence::from(build_control_chord('q'));
+    let quit_key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'q');
     for lock_mode in [LockMode::Normal, LockMode::Locked] {
         let hints = hint_catalog.build_hints_for_mode(lock_mode);
         let hint_binding = hints
@@ -213,34 +195,16 @@ fn pane_placement_mode_hints_expose_every_rebindable_placement_action() {
 fn prefix_labels_carry_the_shipped_names() {
     let hints = build_default_hint_catalog().build_hints_for_mode(LockMode::Normal);
     assert_eq!(
-        hints
-            .prefix_labels
-            .get(&build_control_chord('p'))
-            .map(String::as_str),
-        Some("PANE")
+        *hints.prefix_labels,
+        build_expected_prefix_labels(BindingModifierFlags::CTRL)
     );
-    assert_eq!(
-        hints
-            .prefix_labels
-            .get(&build_control_chord('s'))
-            .map(String::as_str),
-        Some("RESIZE")
-    );
-    assert_eq!(
-        hints
-            .prefix_labels
-            .get(&build_control_chord('t'))
-            .map(String::as_str),
-        Some("TAB")
-    );
-    assert_eq!(hints.prefix_labels.len(), 3);
 }
 
 #[test]
 fn a_complete_binding_reports_an_exact_match_and_no_longer_sequence() {
     let sequence_match = build_default_hint_catalog().match_sequence(
         LockMode::Normal,
-        &KeySequence::from(build_control_chord('q')),
+        &build_single_chord_sequence(BindingModifierFlags::CTRL, 'q'),
     );
     assert_eq!(
         sequence_match.exact_bound_action,
@@ -259,7 +223,7 @@ fn a_complete_binding_reports_an_exact_match_and_no_longer_sequence() {
 fn a_prefix_chord_reports_no_exact_match() {
     let sequence_match = build_default_hint_catalog().match_sequence(
         LockMode::Normal,
-        &KeySequence::from(build_control_chord('p')),
+        &build_single_chord_sequence(BindingModifierFlags::CTRL, 'p'),
     );
     assert_eq!(sequence_match.exact_bound_action, None);
     assert!(sequence_match.has_longer_key_sequence);
@@ -271,7 +235,7 @@ fn an_unbound_sequence_matches_nothing() {
     assert_eq!(
         hint_catalog.match_sequence(
             LockMode::Normal,
-            &KeySequence::from(build_control_chord('y'))
+            &build_single_chord_sequence(BindingModifierFlags::CTRL, 'y')
         ),
         KeyMatch::default()
     );
@@ -279,7 +243,7 @@ fn an_unbound_sequence_matches_nothing() {
     assert_eq!(
         hint_catalog.match_sequence(
             LockMode::Resize,
-            &KeySequence::from(build_control_chord('q'))
+            &build_single_chord_sequence(BindingModifierFlags::CTRL, 'q')
         ),
         KeyMatch::default()
     );
@@ -287,7 +251,7 @@ fn an_unbound_sequence_matches_nothing() {
 
 #[test]
 fn the_configured_unlock_alternative_becomes_the_escape_chord() {
-    let alternative_unlock_chord = KeyChord::from_parts(BindingModifierFlags::ALT, Key::Char('u'));
+    let alternative_unlock_chord = build_character_chord(BindingModifierFlags::ALT, 'u');
     let keybindings_config = KeybindingsConfig {
         chord_timeout_ms: 1234,
         unlock_alternative: Some(alternative_unlock_chord),
@@ -334,16 +298,9 @@ fn a_rebound_leader_moves_the_prefix_labels() {
     .build_hints_for_mode(LockMode::Normal);
 
     assert_eq!(
-        hints
-            .prefix_labels
-            .get(&KeyChord::from_parts(
-                BindingModifierFlags::ALT,
-                Key::Char('p')
-            ))
-            .map(String::as_str),
-        Some("PANE")
+        *hints.prefix_labels,
+        build_expected_prefix_labels(BindingModifierFlags::ALT)
     );
-    assert_eq!(hints.prefix_labels.get(&build_control_chord('p')), None);
 }
 
 #[test]
@@ -391,7 +348,7 @@ fn frames_share_the_per_mode_data_by_reference() {
 
 #[test]
 fn a_user_binding_takes_the_default_key_and_shows_as_user_set() {
-    let fullscreen_key_sequence = KeySequence::from(build_alt_chord('f'));
+    let fullscreen_key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'f');
     let hint_catalog = build_hint_catalog_with_user(
         "normal",
         BTreeMap::from([(fullscreen_key_sequence.clone(), build_bound_action("quit"))]),
@@ -419,7 +376,7 @@ fn a_user_binding_takes_the_default_key_and_shows_as_user_set() {
 
 #[test]
 fn a_user_removal_drops_the_hint_and_matches_nothing() {
-    let fullscreen_key_sequence = KeySequence::from(build_alt_chord('f'));
+    let fullscreen_key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'f');
     let hint_catalog = build_hint_catalog_with_user(
         "normal",
         BTreeMap::new(),
@@ -456,7 +413,7 @@ fn a_user_removal_drops_the_hint_and_matches_nothing() {
 fn a_binding_the_resolver_refuses_yields_no_hint() {
     // `core:copy-selection` is not a registered action. The merge drops the
     // binding, and no hint carries it.
-    let key_sequence = KeySequence::from(build_control_chord('y'));
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
     let hint_catalog = build_hint_catalog_with_user(
         "normal",
         BTreeMap::from([(key_sequence.clone(), build_bound_action("copy-selection"))]),
@@ -480,13 +437,10 @@ fn a_binding_the_resolver_refuses_yields_no_hint() {
 
 #[test]
 fn a_sequence_that_both_fires_and_opens_a_longer_one_reports_both() {
-    let opening_sequence = KeySequence::from(build_control_chord('y'));
-    let longer_sequence = KeySequence::from_first_and_rest(
-        build_control_chord('y'),
-        vec![KeyChord::from_parts(
-            BindingModifierFlags::NONE,
-            Key::Char('a'),
-        )],
+    let opening_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
+    let longer_sequence = build_two_chord_sequence(
+        build_character_chord(BindingModifierFlags::CTRL, 'y'),
+        build_character_chord(BindingModifierFlags::NONE, 'a'),
     );
     let hint_catalog = build_hint_catalog_with_user(
         "normal",
@@ -518,7 +472,7 @@ fn every_locked_entry_firing_unlock_is_pinned() {
     let hint_catalog = build_hint_catalog_with_user(
         "locked",
         BTreeMap::from([(
-            KeySequence::from(build_alt_chord('u')),
+            build_single_chord_sequence(BindingModifierFlags::ALT, 'u'),
             build_bound_action("unlock"),
         )]),
         BTreeSet::new(),
@@ -557,7 +511,7 @@ fn a_chord_depth_cap_of_one_drops_every_multi_chord_default() {
     assert_eq!(
         hint_catalog.match_sequence(
             LockMode::Normal,
-            &KeySequence::from(build_control_chord('p'))
+            &build_single_chord_sequence(BindingModifierFlags::CTRL, 'p')
         ),
         KeyMatch::default()
     );
@@ -628,7 +582,7 @@ fn mark_reverted_to_defaults_changes_only_the_flag() {
         reverted_hint_catalog.get_chord_timeout(),
         base_hint_catalog.get_chord_timeout()
     );
-    let quit_key_sequence = KeySequence::from(build_control_chord('q'));
+    let quit_key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'q');
     assert_eq!(
         reverted_hint_catalog.match_sequence(LockMode::Normal, &quit_key_sequence),
         base_hint_catalog.match_sequence(LockMode::Normal, &quit_key_sequence)
@@ -637,7 +591,7 @@ fn mark_reverted_to_defaults_changes_only_the_flag() {
 
 #[test]
 fn a_binding_in_a_mode_the_build_does_not_register_yields_no_hint() {
-    let key_sequence = KeySequence::from(build_alt_chord('u'));
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'u');
     let hint_catalog = build_hint_catalog_with_user(
         "vim",
         BTreeMap::from([(key_sequence.clone(), build_bound_action("quit"))]),
@@ -686,7 +640,7 @@ fn a_chord_depth_cap_of_zero_drops_every_binding_and_keeps_the_escape_chord() {
     assert_eq!(
         hint_catalog.match_sequence(
             LockMode::Normal,
-            &KeySequence::from(build_control_chord('q'))
+            &build_single_chord_sequence(BindingModifierFlags::CTRL, 'q')
         ),
         KeyMatch::default()
     );
@@ -700,7 +654,7 @@ fn a_chord_depth_cap_of_zero_drops_every_binding_and_keeps_the_escape_chord() {
 
 #[test]
 fn a_removal_of_a_key_nothing_binds_is_still_listed_as_removed() {
-    let unbound_key_sequence = KeySequence::from(build_alt_chord('z'));
+    let unbound_key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'z');
     let hint_catalog = build_hint_catalog_with_user(
         "normal",
         BTreeMap::new(),
@@ -721,12 +675,9 @@ fn a_removal_of_a_key_nothing_binds_is_still_listed_as_removed() {
 
 #[test]
 fn a_locked_sequence_holding_the_unlock_chord_yields_no_hint() {
-    let key_sequence = KeySequence::from_first_and_rest(
+    let key_sequence = build_two_chord_sequence(
         KeybindingsConfig::RESERVED_UNLOCK,
-        vec![KeyChord::from_parts(
-            BindingModifierFlags::NONE,
-            Key::Char('x'),
-        )],
+        build_character_chord(BindingModifierFlags::NONE, 'x'),
     );
     let hint_catalog = build_hint_catalog_with_user(
         "locked",

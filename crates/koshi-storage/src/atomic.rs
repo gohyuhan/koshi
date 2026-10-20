@@ -24,7 +24,7 @@
 //! sibling. A hard kill on Unix can leave that private sibling behind.
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use tempfile::NamedTempFile;
@@ -34,7 +34,31 @@ use crate::error::StorageError;
 #[cfg(test)]
 mod tests;
 
-/// Writes `file_bytes` to `destination_path`, replacing any existing file atomically.
+/// The capacity of the buffer between the writer that
+/// [`write_atomic_streamed`] hands out and the staging file: 64 KiB.
+pub const STAGED_WRITE_BUFFER_BYTE_COUNT: usize = 64 * 1024;
+
+/// Writes `file_bytes` to `destination_path`, replacing any existing file
+/// atomically, as [`write_atomic_streamed`] does with a writer that receives
+/// `file_bytes` in one piece.
+///
+/// # Errors
+///
+/// The errors of [`write_atomic_streamed`].
+pub fn write_atomic(destination_path: &Path, file_bytes: &[u8]) -> Result<(), StorageError> {
+    write_atomic_streamed(destination_path, |file_writer| {
+        file_writer.write_all(file_bytes)
+    })
+}
+
+/// Writes the bytes `write_file_contents` produces to `destination_path`,
+/// replacing any existing file atomically.
+///
+/// `write_file_contents` writes into a buffered writer over the staging file.
+/// The writer holds at most [`STAGED_WRITE_BUFFER_BYTE_COUNT`] bytes before it
+/// passes them to the staging file. An error from
+/// `write_file_contents` removes the staging file and leaves
+/// `destination_path` unchanged.
 ///
 /// Resolves a relative `destination_path` against the current directory once at entry. An
 /// empty `destination_path` returns [`StorageError::Io`] with detail `empty destination
@@ -42,7 +66,7 @@ mod tests;
 /// [`StorageError::Io`] with detail `no parent directory for /`, and stages
 /// nothing.
 ///
-/// Stages `file_bytes` in a private staging file beside `destination_path`.
+/// Stages the bytes in a private staging file beside `destination_path`.
 /// On Unix, an existing regular file gives the staging file its mode; a
 /// missing or non-regular target leaves the staging file at private mode
 /// `0600`. Syncs the staging file, replaces `destination_path`, and syncs the
@@ -64,7 +88,10 @@ mod tests;
 ///
 /// Example: overwriting `cfg.kdl` that contains `a=1` with `a=2` leaves it
 /// containing exactly `a=2`; a crash before replacement leaves exactly `a=1`.
-pub fn write_atomic(destination_path: &Path, file_bytes: &[u8]) -> Result<(), StorageError> {
+pub fn write_atomic_streamed(
+    destination_path: &Path,
+    write_file_contents: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
+) -> Result<(), StorageError> {
     // Resolves a relative path against the current directory once. Staging-file
     // creation and replacement both use the resolved path.
     if destination_path.as_os_str().is_empty() {
@@ -95,16 +122,25 @@ pub fn write_atomic(destination_path: &Path, file_bytes: &[u8]) -> Result<(), St
 
     // Errors through `persist` drop `NamedTempFile` and remove its staging file. Every
     // earlier error leaves `destination_path` unchanged.
-    let mut staged_file = NamedTempFile::new_in(parent_directory_path).map_err(|io_error| {
+    let staged_file = NamedTempFile::new_in(parent_directory_path).map_err(|io_error| {
         build_storage_io_error(format!(
             "create temp in {}: {io_error}",
             parent_directory_path.display()
         ))
     })?;
-    staged_file.write_all(file_bytes).map_err(|io_error| {
+    let mut staged_file_writer =
+        BufWriter::with_capacity(STAGED_WRITE_BUFFER_BYTE_COUNT, staged_file);
+    write_file_contents(&mut staged_file_writer).map_err(|io_error| {
         build_storage_io_error(format!(
             "write temp for {}: {io_error}",
             destination_path.display()
+        ))
+    })?;
+    let staged_file = staged_file_writer.into_inner().map_err(|flush_error| {
+        build_storage_io_error(format!(
+            "write temp for {}: {}",
+            destination_path.display(),
+            flush_error.error()
         ))
     })?;
     // Set the mode on the open staging file before syncing it. The replaced inode

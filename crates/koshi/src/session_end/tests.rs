@@ -1,9 +1,10 @@
 //! Tests for ending a session: which process counts as the session's, which
-//! processes hold its panes, when a quit refused for its connection token is
-//! sent again, how a session that does not quit is ended, how a session that
-//! exits while its quit runs is ended, how a pane holder that still runs after
-//! its session quit is ended, and which processes listed under a pane holder
-//! are ended and counted once the session quit.
+//! processes hold its panes, which sentence a failed quit reports, when a quit
+//! refused for its connection token or while the session replaces its process
+//! image is sent again, how a session that does not quit is ended, how a
+//! session that exits while its quit runs is ended, how a pane holder that
+//! still runs after its session quit is ended, and which processes listed
+//! under a pane holder are ended and counted once the session quit.
 
 use std::path::PathBuf;
 use std::process::{Child, Command as ProcessCommand, Stdio};
@@ -14,7 +15,8 @@ use koshi_ipc::protocol::{ConnectionToken, IpcRequestKind, IpcResult};
 use koshi_ipc::supervisor::compute_supervisor_socket_address;
 use koshi_ipc::transport::{Connection, Listener};
 use koshi_test_support::fixtures::{
-    spawn_session_listening_before_it_advertises, start_program_process, NO_SUCH_PROCESS_ID,
+    build_restarting_refusal, spawn_session_listening_before_it_advertises,
+    spawn_session_replacing_its_image, start_program_process, NO_SUCH_PROCESS_ID,
 };
 use tempfile::TempDir;
 
@@ -304,6 +306,38 @@ fn a_quit_refused_for_the_old_token_is_sent_again_once_the_session_advertises_it
 }
 
 #[test]
+fn a_quit_refused_while_the_session_replaces_its_image_is_sent_again_to_the_new_image() {
+    let runtime_directory = build_short_runtime_directory();
+    let session_id = SessionId::new();
+    let session_thread = spawn_session_replacing_its_image(
+        runtime_directory.path(),
+        session_id,
+        "the token of the image replaced",
+        "the token of the new image",
+        |_| build_restarting_refusal(),
+        |request_kind| {
+            let IpcRequestKind::SubmitCommand(command_envelope) = request_kind else {
+                panic!("expected a SubmitCommand, got {request_kind:?}");
+            };
+            assert_eq!(command_envelope.command, Command::Quit);
+            IpcResult::CommandResult(CommandResult::Ok {
+                command_id: command_envelope.command_id,
+                emitted_events: Vec::new(),
+            })
+        },
+    );
+    let asked_endpoint_file = EndpointFile::load_from_path(
+        &EndpointFile::resolve_endpoint_file_path(runtime_directory.path(), session_id),
+    )
+    .expect("the endpoint file is read");
+
+    submit_quit(runtime_directory.path(), &asked_endpoint_file, session_id)
+        .expect("the new image applies the Quit");
+
+    session_thread.join().expect("the stand-in session exits");
+}
+
+#[test]
 fn format_process_kill_command_names_the_command_of_this_platform() {
     let expected_kill_command = if cfg!(windows) {
         "taskkill /PID 5000 /T /F"
@@ -323,7 +357,13 @@ fn find_server_process_record_refuses_this_process() {
         std::process::id(),
     );
 
-    assert!(find_endpoint_process_record(&endpoint_file_path, std::process::id()).is_some());
+    assert_eq!(
+        find_endpoint_process_record(&endpoint_file_path, std::process::id()),
+        Some(
+            process_tree::find_process_record(std::process::id())
+                .expect("this process has a record")
+        )
+    );
     assert_eq!(
         find_server_process_record(&endpoint_file_path, std::process::id()),
         None
@@ -423,7 +463,7 @@ fn end_session_leaves_an_unconfirmed_process_running_and_names_it() {
         start_stand_in_session(runtime_directory.path(), format_stand_in_file_name(false));
     write_endpoint_file_naming_process(runtime_directory.path(), session_id, child.id());
 
-    let end_error = end_session(runtime_directory.path(), None, session_id)
+    let end_error = end_session(runtime_directory.path(), None, session_id, None)
         .expect_err("an unconfirmed process is not ended");
 
     assert_eq!(
@@ -449,7 +489,7 @@ fn end_session_gives_the_quit_failure_for_an_endpoint_naming_no_running_process(
     let session_id = SessionId::new();
     write_endpoint_file_naming_process(runtime_directory.path(), session_id, NO_SUCH_PROCESS_ID);
 
-    let end_error = end_session(runtime_directory.path(), None, session_id)
+    let end_error = end_session(runtime_directory.path(), None, session_id, None)
         .expect_err("nothing listens for the session");
 
     let CliError::SessionNotFound { session_name } = end_error else {
@@ -466,8 +506,8 @@ fn end_session_ends_a_confirmed_session_that_cannot_quit_and_every_process_under
         start_stand_in_session(runtime_directory.path(), format_stand_in_file_name(true));
     write_endpoint_file_naming_process(runtime_directory.path(), session_id, child.id());
 
-    let session_ending =
-        end_session(runtime_directory.path(), None, session_id).expect("the session is ended");
+    let session_ending = end_session(runtime_directory.path(), None, session_id, None)
+        .expect("the session is ended");
 
     assert_eq!(
         session_ending,
@@ -541,7 +581,7 @@ fn end_session_ends_the_processes_under_a_session_that_exits_while_its_quit_runs
         drop(quit_connection);
     });
 
-    let session_ending = end_session(runtime_directory.path(), None, session_id);
+    let session_ending = end_session(runtime_directory.path(), None, session_id, None);
 
     let _ = Connection::connect(&socket_address);
     exiting_session_thread
@@ -681,7 +721,7 @@ fn end_session_ends_a_pane_holder_that_still_runs_after_its_session_quit_on_wind
         drop(quit_connection);
     });
 
-    let session_ending = end_session(runtime_directory.path(), None, session_id);
+    let session_ending = end_session(runtime_directory.path(), None, session_id, None);
 
     let _ = Connection::connect(&socket_address);
     exiting_session_thread
@@ -703,7 +743,10 @@ fn end_session_ends_a_pane_holder_that_still_runs_after_its_session_quit_on_wind
     let _ = pane_holder_child.kill();
     let _ = pane_holder_child.wait();
     assert!(is_address_bound);
-    assert!(pane_holder_record.is_some());
+    assert_eq!(
+        pane_holder_record.map(|pane_holder_record| pane_holder_record.process_id),
+        Some(pane_holder_child.id())
+    );
     let expected_stopped_process_count = if cfg!(windows) {
         STAND_IN_CHILD_COUNT + 1
     } else {

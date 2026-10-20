@@ -502,8 +502,7 @@ pub fn detect_conflicts(
 ) -> ConflictReport {
     let known_mode_names = &list_builtin_mode_names();
     let mut conflict_diagnostics = Vec::new();
-    let reserved_unlock_chord = unlock_alternative.unwrap_or(KeybindingsConfig::RESERVED_UNLOCK);
-    let locked_mode_name = ModeName::from_text("locked");
+    let reserved_unlock_chord = KeybindingsConfig::resolve_unlock_chord(unlock_alternative);
 
     if is_leader_typeable(leader) {
         conflict_diagnostics.push(ConflictDiagnostic::TypeableLeader { leader });
@@ -520,7 +519,6 @@ pub fn detect_conflicts(
     let firing_rules = FiringRules {
         registry,
         reserved_unlock_chord,
-        locked_mode_name: &locked_mode_name,
         maximum_chord_depth,
     };
 
@@ -557,7 +555,6 @@ pub fn detect_conflicts(
     validate_reserved_unlock_binding(
         &effective_bindings_by_mode,
         reserved_unlock_chord,
-        &locked_mode_name,
         &mut conflict_diagnostics,
     );
     validate_mode_cancel_bindings(&effective_bindings_by_mode, &mut conflict_diagnostics);
@@ -640,23 +637,20 @@ fn is_sequence_dead_under_reserved_unlock(
     mode_name: &ModeName,
     key_sequence: &KeySequence,
     reserved_unlock_chord: KeyChord,
-    locked_mode_name: &ModeName,
 ) -> bool {
-    mode_name == locked_mode_name
+    mode_name.get_name() == LockMode::Locked.get_keymap_name()
         && key_sequence.list_chords().len() > 1
         && key_sequence.list_chords().contains(&reserved_unlock_chord)
 }
 
 /// The inputs the firing judgment reads: the live action table, the
-/// reserved unlock chord, the locked mode's name, and the chord-depth cap.
-/// One value serves a whole detection or merge run.
+/// reserved unlock chord, and the chord-depth cap. One value serves a whole
+/// detection or merge run.
 pub(crate) struct FiringRules<'a> {
     /// The live action table each binding is resolved against.
     pub(crate) registry: &'a ActionRegistry,
     /// The reserved unlock chord.
     pub(crate) reserved_unlock_chord: KeyChord,
-    /// The locked mode's name.
-    pub(crate) locked_mode_name: &'a ModeName,
     /// The chord-depth cap a firing sequence must fit.
     pub(crate) maximum_chord_depth: u8,
 }
@@ -678,7 +672,6 @@ pub(crate) fn is_bound_action_firing(
             mode_name,
             key_sequence,
             firing_rules.reserved_unlock_chord,
-            firing_rules.locked_mode_name,
         )
         && !is_over_chord_depth_limit(key_sequence, firing_rules.maximum_chord_depth)
 }
@@ -760,7 +753,6 @@ fn scan_layer_bindings(
                 mode_name,
                 key_sequence,
                 firing_rules.reserved_unlock_chord,
-                firing_rules.locked_mode_name,
             ) {
                 conflict_diagnostics.push(ConflictDiagnostic::DeadUnderReservedUnlock {
                     layer_origin: layer.origin,
@@ -942,15 +934,15 @@ fn validate_reserved_unlock_binding(
         BTreeMap<&KeySequence, (LayerOrigin, &BoundAction)>,
     >,
     reserved_unlock_chord: KeyChord,
-    locked_mode_name: &ModeName,
     conflict_diagnostics: &mut Vec<ConflictDiagnostic>,
 ) {
     let unlock_action_reference = ActionReference::from_core_action_name("unlock")
         .expect("the built-in unlock action name satisfies the action-name grammar");
     let reserved_unlock_sequence = KeySequence::from(reserved_unlock_chord);
+    let locked_mode_name = ModeName::from_text(LockMode::Locked.get_keymap_name());
 
     match effective_bindings_by_mode
-        .get(locked_mode_name)
+        .get(&locked_mode_name)
         .and_then(|mode_bindings| mode_bindings.get(&reserved_unlock_sequence))
     {
         Some((layer_origin, bound_action))
@@ -970,14 +962,14 @@ fn validate_reserved_unlock_binding(
 
 /// The viewer-local modes that own the keyboard until cancelled, each with
 /// the action that cancels it.
-const CANCELLED_MODE_ACTION_NAMES: [(&str, &str); 3] = [
-    ("pane-placement", "cancel-pane-placement"),
-    ("pane-move-choice", "cancel-pane-move-choice"),
-    ("floating-pane-move", "cancel-floating-pane-move"),
+const CANCEL_ACTION_NAME_BY_MODE: [(LockMode, &str); 3] = [
+    (LockMode::PanePlacement, "cancel-pane-placement"),
+    (LockMode::PaneMoveChoice, "cancel-pane-move-choice"),
+    (LockMode::FloatingPaneMove, "cancel-floating-pane-move"),
 ];
 
 /// Push one [`ConflictDiagnostic::ModeCancelBindingMissing`] for each mode in
-/// [`CANCELLED_MODE_ACTION_NAMES`] whose effective map binds no key to its
+/// [`CANCEL_ACTION_NAME_BY_MODE`] whose effective map binds no key to its
 /// cancel action, in that list's order.
 fn validate_mode_cancel_bindings(
     effective_bindings_by_mode: &BTreeMap<
@@ -986,8 +978,8 @@ fn validate_mode_cancel_bindings(
     >,
     conflict_diagnostics: &mut Vec<ConflictDiagnostic>,
 ) {
-    for (mode_name, cancel_action_name) in CANCELLED_MODE_ACTION_NAMES {
-        let mode_name = ModeName::from_text(mode_name);
+    for (lock_mode, cancel_action_name) in CANCEL_ACTION_NAME_BY_MODE {
+        let mode_name = ModeName::from_text(lock_mode.get_keymap_name());
         let cancel_action_reference = ActionReference::from_core_action_name(cancel_action_name)
             .expect("a built-in cancel action name satisfies the action-name grammar");
         let has_cancel_binding =

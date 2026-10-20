@@ -4,6 +4,7 @@
 //! alternate); [`Cell`](state::Cell) is a single position — a character, its
 //! display width, and its style.
 
+pub mod row_snapshot;
 pub mod state;
 
 #[cfg(test)]

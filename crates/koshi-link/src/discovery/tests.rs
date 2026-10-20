@@ -11,11 +11,12 @@ use koshi_core::discovery::{
 use koshi_core::event::RejectReason;
 use koshi_core::geometry::Size;
 use koshi_core::lock::LockMode;
-use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcResponse, IpcResult, ProcessImageId};
-use koshi_ipc::transport::{Connection, Listener};
+use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcRequestKind, IpcResult, ProcessImageId};
+use koshi_ipc::transport::Listener;
 use koshi_test_support::fixtures::{
-    build_test_runtime_directory, close_connection_after_peer_hangs_up,
-    write_clipboard_tool_directory, NO_SUCH_PROCESS_ID,
+    build_restarting_refusal, build_test_runtime_directory, close_connection_after_peer_hangs_up,
+    send_ipc_reply, spawn_session_replacing_its_image, write_clipboard_tool_directory,
+    NO_SUCH_PROCESS_ID,
 };
 
 use super::*;
@@ -26,11 +27,12 @@ fn build_complete_discovery(session_overviews: Vec<SessionOverview>) -> Discover
         sessions: session_overviews,
         unasked_session_count: 0,
         unread_path_count: 0,
+        owner_user_id_by_session_id: HashMap::new(),
     }
 }
 
-/// A partial discovery missing `unasked_session_count` sessions: running and listening, but unable to
-/// say what they hold.
+/// A partial discovery missing `unasked_session_count` sessions: running and
+/// listening, but unable to say what they hold.
 fn build_partial_discovery(
     session_overviews: Vec<SessionOverview>,
     unasked_session_count: usize,
@@ -39,6 +41,7 @@ fn build_partial_discovery(
         sessions: session_overviews,
         unasked_session_count,
         unread_path_count: 0,
+        owner_user_id_by_session_id: HashMap::new(),
     }
 }
 
@@ -95,7 +98,7 @@ fn spawn_overview_server(
         let hello_request: IpcRequest = session_connection.recv().expect("read hello");
         let discovery_request: IpcRequest =
             session_connection.recv().expect("read discovery request");
-        send_ipc_response(
+        send_ipc_reply(
             &mut session_connection,
             hello_request.request_id,
             IpcResult::Hello {
@@ -104,23 +107,13 @@ fn spawn_overview_server(
                 process_image_id: ProcessImageId::get_own(),
             },
         );
-        send_ipc_response(
+        send_ipc_reply(
             &mut session_connection,
             discovery_request.request_id,
             IpcResult::Overview(session_overview),
         );
         close_connection_after_peer_hangs_up(session_connection);
     })
-}
-
-/// Answer `request_id` with `ipc_result` on `connection`.
-fn send_ipc_response(connection: &mut Connection, request_id: u64, ipc_result: IpcResult) {
-    connection
-        .send(&IpcResponse {
-            request_id: Some(request_id),
-            answer_result: ipc_result,
-        })
-        .expect("send scripted reply");
 }
 
 /// A session overview with `tab_descriptions` (name, panes-per-tab), one
@@ -183,12 +176,19 @@ fn build_session_overview(
 }
 
 #[test]
-fn session_rows_are_one_row_per_session() {
+fn session_rows_are_one_row_per_session_carrying_the_owner_of_another_users_session() {
     let session_overviews = vec![
         build_session_overview("quiet-lake", &[]),
         build_session_overview("amber-fox", &[]),
     ];
-    let session_rows = build_session_rows(&session_overviews);
+    let discovered_sessions = Discovered {
+        owner_user_id_by_session_id: HashMap::from([(
+            session_overviews[1].session.session_id,
+            1001,
+        )]),
+        ..build_complete_discovery(session_overviews.clone())
+    };
+    let session_rows = build_session_rows(&discovered_sessions);
     assert_eq!(
         session_rows,
         vec![
@@ -196,11 +196,13 @@ fn session_rows_are_one_row_per_session() {
                 session_id: session_overviews[0].session.session_id,
                 session_name: "quiet-lake".to_string(),
                 server_name_or_address: None,
+                owner_user_id: None,
             },
             SessionRow {
                 session_id: session_overviews[1].session.session_id,
                 session_name: "amber-fox".to_string(),
                 server_name_or_address: None,
+                owner_user_id: Some(1001),
             },
         ]
     );
@@ -342,7 +344,10 @@ fn a_session_with_no_client_attached_contributes_no_client_row() {
 #[test]
 fn every_listing_over_no_sessions_is_empty() {
     let empty_session_overviews: [SessionOverview; 0] = [];
-    assert_eq!(build_session_rows(&empty_session_overviews), Vec::new());
+    assert_eq!(
+        build_session_rows(&build_complete_discovery(Vec::new())),
+        Vec::new()
+    );
     assert_eq!(build_tab_rows(&empty_session_overviews), Vec::new());
     assert_eq!(build_pane_rows(&empty_session_overviews), Vec::new());
     assert_eq!(build_client_rows(&empty_session_overviews), Vec::new());
@@ -554,11 +559,27 @@ fn a_session_missed_while_one_went_unasked_reports_the_gap_not_a_miss() {
 fn one_session_asked_directly_is_a_complete_census_of_itself() {
     let only_session_overview = build_session_overview("quiet-lake", &[("editor", 1)]);
 
-    let discovery = Discovered::from_overview(only_session_overview.clone());
+    let discovery = Discovered::from_overview(only_session_overview.clone(), None);
 
     assert_eq!(discovery.unasked_session_count, 0);
     assert!(discovery.is_complete());
     assert_eq!(discovery.sessions, vec![only_session_overview]);
+}
+
+#[test]
+fn a_session_asked_directly_keeps_the_owner_it_was_read_from() {
+    let only_session_overview = build_session_overview("quiet-lake", &[("editor", 1)]);
+    let session_id = only_session_overview.session.session_id;
+
+    assert_eq!(
+        Discovered::from_overview(only_session_overview.clone(), Some(1001))
+            .find_owner_user_id(session_id),
+        Some(1001)
+    );
+    assert_eq!(
+        Discovered::from_overview(only_session_overview, None).find_owner_user_id(session_id),
+        None
+    );
 }
 
 #[test]
@@ -630,7 +651,7 @@ fn an_endpoint_nobody_listens_behind_is_kept_and_counted_while_its_process_runs(
     assert_eq!(discovery.sessions, Vec::new());
     assert_eq!(discovery.unasked_session_count, 1);
     assert_eq!(
-        fetch_session_overview(runtime_directory.path(), None, session_id, None)
+        fetch_session_overview(runtime_directory.path(), None, session_id, None, None)
             .map_err(|lookup_error| lookup_error.to_string()),
         Err(format!(
             "IPC unavailable: process {} runs but accepts no connection",
@@ -831,6 +852,7 @@ fn an_overview_ask_stops_rechecking_a_refusing_session_at_its_answer_deadline() 
         runtime_directory.path(),
         None,
         session_id,
+        None,
         Some(ask_started_at + Duration::from_millis(200)),
     )
     .map_err(|lookup_error| lookup_error.to_string())
@@ -1004,17 +1026,19 @@ fn two_running_sessions_merge_into_one_listing() {
     // Sorted by session name: `amber-fox` comes before `quiet-lake` whatever
     // order the runtime directory listed the endpoint files in.
     assert_eq!(
-        build_session_rows(&discovery.sessions),
+        build_session_rows(&discovery),
         vec![
             SessionRow {
                 session_id: amber_session_id,
                 session_name: "amber-fox".to_string(),
                 server_name_or_address: None,
+                owner_user_id: None,
             },
             SessionRow {
                 session_id: quiet_session_id,
                 session_name: "quiet-lake".to_string(),
                 server_name_or_address: None,
+                owner_user_id: None,
             },
         ]
     );
@@ -1041,7 +1065,7 @@ fn one_session_can_be_fetched_on_its_own() {
         spawn_overview_server(runtime_directory.path(), quiet_session_overview);
 
     let fetched_session_overview =
-        fetch_session_overview(runtime_directory.path(), None, quiet_session_id, None)
+        fetch_session_overview(runtime_directory.path(), None, quiet_session_id, None, None)
             .expect("the session answers");
     overview_server_thread
         .join()
@@ -1067,8 +1091,9 @@ fn fetching_one_live_session_that_cannot_answer_is_not_reported_as_gone() {
         let _ = listener.accept();
     });
 
-    let discovery_error = fetch_session_overview(runtime_directory.path(), None, session_id, None)
-        .expect_err("the exchange cannot finish");
+    let discovery_error =
+        fetch_session_overview(runtime_directory.path(), None, session_id, None, None)
+            .expect_err("the exchange cannot finish");
     overview_server_thread
         .join()
         .expect("the stand-in session thread finishes");
@@ -1086,14 +1111,54 @@ fn fetching_one_live_session_that_cannot_answer_is_not_reported_as_gone() {
 fn fetching_one_session_that_is_gone_reports_it_as_not_running() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
-    let discovery_error = fetch_session_overview(runtime_directory.path(), None, session_id, None)
-        .expect_err("nothing advertises it");
+    let discovery_error =
+        fetch_session_overview(runtime_directory.path(), None, session_id, None, None)
+            .expect_err("nothing advertises it");
     match discovery_error {
         CliError::SessionNotFound { session_name } => {
             assert_eq!(session_name, session_id.to_string());
         }
         unexpected_error => panic!("unexpected error: {unexpected_error}"),
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn another_users_session_is_asked_once_and_this_users_files_of_its_id_stay() {
+    use std::os::unix::fs::MetadataExt;
+
+    let runtime_directory = build_test_runtime_directory();
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let other_user_id = std::fs::metadata(runtime_directory.path())
+        .expect("read the runtime directory")
+        .uid()
+        + 1;
+    let session_id = SessionId::new();
+    let endpoint_path = write_endpoint_file_for_process(
+        runtime_directory.path(),
+        session_id,
+        koshi_ipc::endpoint::compute_socket_address(runtime_directory.path(), session_id),
+        std::process::id(),
+    );
+    let fetch_started_at = Instant::now();
+
+    let fetch_result = fetch_session_overview(
+        runtime_directory.path(),
+        Some(shared_sessions_base_directory.path()),
+        session_id,
+        Some(other_user_id),
+        None,
+    );
+
+    let Err(CliError::SessionNotFound { session_name }) = fetch_result else {
+        panic!("expected SessionNotFound, got {fetch_result:?}");
+    };
+    assert_eq!(session_name, format!("{other_user_id}/{session_id}"));
+    assert!(fetch_started_at.elapsed() < REFUSED_SESSION_RECHECK_WINDOW_DURATION);
+    assert!(
+        endpoint_path.exists(),
+        "this user's endpoint file of that id stays"
+    );
 }
 
 /// Write an empty resume file for `session_id` in `runtime_directory`, stamped
@@ -1204,8 +1269,8 @@ fn a_sweep_keeps_an_endpoint_file_rewritten_since_the_session_was_asked() {
     let sweep_result =
         delete_stale_session_files(runtime_directory.path(), session_id, &asked_endpoint_file);
 
-    let Err(CliError::IpcUnavailable { detail }) = sweep_result else {
-        panic!("expected IpcUnavailable, got {sweep_result:?}");
+    let Err(CliError::SessionRestarting { detail }) = sweep_result else {
+        panic!("expected SessionRestarting, got {sweep_result:?}");
     };
     assert_eq!(
         detail,
@@ -1286,11 +1351,15 @@ fn a_sweep_after_asking_another_users_session_removes_nothing() {
 fn a_census_plan_asks_own_sessions_first_and_keeps_what_the_foreign_listing_leaves_unasked() {
     let own_session_id = SessionId::new();
     let foreign_session_id = SessionId::new();
-    let foreign_socket_address = format!("/tmp/koshi/1002/{foreign_session_id}.sock");
+    let foreign_session_advertisement = ForeignSessionAdvertisement {
+        owner_user_id: 1002,
+        socket_address: format!("/tmp/koshi/1002/{foreign_session_id}.sock"),
+    };
     let duplicated_session = DuplicatedForeignSession {
         session_id: SessionId::new(),
         advertisement_count: 2,
         owner_user_ids: vec![1001, 1002],
+        reachable_owner_user_id: Some(1001),
     };
     let shared_unread_path = UnreadPath {
         looked_up_path: PathBuf::from("/tmp/koshi"),
@@ -1300,7 +1369,7 @@ fn a_census_plan_asks_own_sessions_first_and_keeps_what_the_foreign_listing_leav
     let census_plan = SessionCensusPlan::from_session_listings(
         Ok(vec![own_session_id]),
         Some(ForeignSessionListing {
-            foreign_sessions: vec![(foreign_session_id, foreign_socket_address.clone())],
+            foreign_sessions: vec![(foreign_session_id, foreign_session_advertisement.clone())],
             duplicated_sessions: vec![duplicated_session.clone()],
             unlisted_session_count: 2,
             unread_path: Some(shared_unread_path.clone()),
@@ -1312,7 +1381,7 @@ fn a_census_plan_asks_own_sessions_first_and_keeps_what_the_foreign_listing_leav
         SessionCensusPlan {
             session_asks: vec![
                 (own_session_id, None),
-                (foreign_session_id, Some(foreign_socket_address)),
+                (foreign_session_id, Some(foreign_session_advertisement)),
             ],
             duplicated_sessions: vec![duplicated_session],
             unlisted_session_count: 2,
@@ -1329,6 +1398,7 @@ fn the_census_counts_an_id_two_folders_advertise() {
             session_id: SessionId::new(),
             advertisement_count: 2,
             owner_user_ids: vec![1001, 1002],
+            reachable_owner_user_id: Some(1001),
         }],
         ..SessionCensusPlan::default()
     };
@@ -1336,7 +1406,7 @@ fn the_census_counts_an_id_two_folders_advertise() {
     let discovery = fetch_planned_session_overviews(
         runtime_directory.path(),
         census_plan,
-        Instant::now() + ipc_client::SESSION_ANSWER_TIMEOUT_DURATION,
+        Instant::now() + ipc_client::SERVER_ANSWER_TIMEOUT_DURATION,
     );
 
     assert_eq!(discovery.sessions, Vec::new());
@@ -1355,7 +1425,7 @@ fn the_census_counts_each_session_past_the_listing_cap() {
     let discovery = fetch_planned_session_overviews(
         runtime_directory.path(),
         census_plan,
-        Instant::now() + ipc_client::SESSION_ANSWER_TIMEOUT_DURATION,
+        Instant::now() + ipc_client::SERVER_ANSWER_TIMEOUT_DURATION,
     );
 
     assert_eq!(discovery.sessions, Vec::new());
@@ -1525,7 +1595,7 @@ fn redacting_pane_commands_reaches_every_pane_of_every_session() {
     session_overviews[0].panes[1].command_argv =
         Some(vec!["psql".to_string(), "postgres://u:p@db".to_string()]);
     session_overviews[1].panes[0].command_argv =
-        Some(vec!["ssh".to_string(), "root@10.0.0.1".to_string()]);
+        Some(vec!["ssh".to_string(), "root@192.0.2.1".to_string()]);
 
     redact_pane_commands(&mut session_overviews);
 
@@ -1625,7 +1695,10 @@ fn display_rows_filter_names_while_the_overview_keeps_them_raw() {
     );
     assert_eq!(unfiltered_session_overview.tabs[0].tab_name, "ta\u{202e}b");
 
-    let session_rows = build_session_rows(std::slice::from_ref(&unfiltered_session_overview));
+    let session_rows = build_session_rows(&Discovered::from_overview(
+        unfiltered_session_overview.clone(),
+        None,
+    ));
     assert_eq!(session_rows[0].session_name, "websrv");
 
     let tab_rows = build_tab_rows(std::slice::from_ref(&unfiltered_session_overview));
@@ -1650,7 +1723,10 @@ fn a_display_row_name_is_bounded() {
         "the session overview keeps it whole"
     );
     assert_eq!(
-        build_session_rows(std::slice::from_ref(&unfiltered_session_overview))[0]
+        build_session_rows(&Discovered::from_overview(
+            unfiltered_session_overview.clone(),
+            None,
+        ))[0]
             .session_name
             .len(),
         koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT
@@ -1761,7 +1837,7 @@ fn a_session_that_answers_with_escapes_is_filtered_before_the_caller_sees_it() {
         spawn_overview_server(runtime_directory.path(), hostile_session_overview);
 
     let fetched_session_overview =
-        fetch_session_overview(runtime_directory.path(), None, session_id, None)
+        fetch_session_overview(runtime_directory.path(), None, session_id, None, None)
             .expect("the session answers");
     overview_server_thread
         .join()
@@ -1780,4 +1856,38 @@ fn a_session_that_answers_with_escapes_is_filtered_before_the_caller_sees_it() {
         fetched_session_overview.panes[0].working_directory,
         Some(PathBuf::from("/tmp/[2J"))
     );
+}
+
+#[test]
+fn a_session_that_refuses_its_overview_while_it_replaces_its_image_is_asked_through_the_new_image()
+{
+    let runtime_directory = build_test_runtime_directory();
+    let session_overview = build_session_overview("quiet-lake", &[("main", 1)]);
+    let session_id = session_overview.session.session_id;
+    let answered_session_overview = session_overview.clone();
+    let session_thread = spawn_session_replacing_its_image(
+        runtime_directory.path(),
+        session_id,
+        "the token of the image replaced",
+        "the token of the new image",
+        |_| build_restarting_refusal(),
+        move |request_kind| {
+            let IpcRequestKind::Discovery = request_kind else {
+                panic!("expected a Discovery, got {request_kind:?}");
+            };
+            IpcResult::Overview(answered_session_overview.clone())
+        },
+    );
+
+    let fetched_session_overview = fetch_session_overview(
+        runtime_directory.path(),
+        None,
+        session_id,
+        None,
+        Some(Instant::now() + Duration::from_secs(10)),
+    )
+    .expect("the new image describes the session");
+
+    session_thread.join().expect("the stand-in session exits");
+    assert_eq!(fetched_session_overview, session_overview);
 }

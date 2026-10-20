@@ -8,3 +8,6 @@ license.workspace = true
 base64.workspace = true
 image = { workspace = true, features = ["png"] }
 koshi-image.workspace = true
+
+[lints]
+workspace = true

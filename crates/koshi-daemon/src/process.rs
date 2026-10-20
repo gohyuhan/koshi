@@ -15,7 +15,10 @@ mod tests;
 /// write to a hung-up peer returns an `EPIPE` error under every process-wide
 /// disposition.
 pub(crate) fn block_sigpipe_on_this_thread() {
+    // SAFETY: an all-zero `sigset_t` is valid.
     let mut signal_set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `signal_set` is a writable `sigset_t` that lives for the three
+    // calls, and `pthread_sigmask` accepts a NULL old mask.
     unsafe {
         libc::sigemptyset(&mut signal_set);
         libc::sigaddset(&mut signal_set, libc::SIGPIPE);
@@ -86,6 +89,7 @@ pub(crate) fn list_child_process_ids() -> std::io::Result<Vec<u32>> {
 /// with twice the room. Returns an error when the OS refuses the read.
 #[cfg(target_os = "macos")]
 pub(crate) fn list_child_process_ids() -> std::io::Result<Vec<u32>> {
+    // SAFETY: `getpid` takes no arguments and always succeeds.
     let this_process_id = unsafe { libc::getpid() };
     let mut child_process_ids: Vec<libc::pid_t> = vec![0; FIRST_CHILD_PROCESS_ID_BUFFER_COUNT];
     loop {

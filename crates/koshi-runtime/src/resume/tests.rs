@@ -4,16 +4,18 @@
 //! image, what the header still yields when the body cannot be read, what a
 //! body format this build does not know is answered with, what a body written
 //! in the older client format reads back as, what a carried pane's size, exit
-//! status and applied quit read back as, and what a write over an existing
-//! file and a write into a directory that is not there each do.
+//! status and applied quit read back as, what the saved views and
+//! resume-token hashes the body carries read back as, and what a write over an
+//! existing file and a write into a directory that is not there each do.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{mpsc, Arc};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::runtime::event::RuntimeEvent;
 use crate::runtime::pty_inbox::InboxSink;
+use crate::runtime::saved_view::SavedView;
 use crate::server::Server;
 use koshi_config::layer::{PartialKoshiConfig, PartialScrollbackConfig};
 use koshi_core::command::{
@@ -106,6 +108,10 @@ fn migrate_format_four_restores_the_session_with_no_floating_panes_and_empty_cli
     assert_eq!(resume_header.carried_panes.len(), 4);
     assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 4);
     assert_eq!(resume_body.carried_quit, None);
+    assert_eq!(
+        resume_body.left_running_child_process_ids,
+        Vec::<u32>::new()
+    );
     let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
     let session = &resumed_server.session_by_id[&resume_header.session_id];
     assert_eq!(session.tabs.len(), 2);
@@ -956,7 +962,7 @@ fn format_pane_state_parse_error(pane_state_json: &serde_json::Value) -> String 
 /// of one JSON object, as the map of pane states.
 fn build_raw_resume_body(pane_states_text: &str) -> Box<serde_json::value::RawValue> {
     serde_json::value::RawValue::from_string(format!(
-        r#"{{"session_by_id":{{}},"carried_pane_state_by_pane_id":{pane_states_text},"carried_quit":null}}"#
+        r#"{{"session_by_id":{{}},"carried_pane_state_by_pane_id":{pane_states_text},"carried_quit":null,"saved_view_store":{{"connection_token_hash_by_client_id":{{}},"saved_view_records":[]}},"left_running_child_process_ids":[]}}"#
     ))
     .expect("the body is json")
 }
@@ -1223,6 +1229,8 @@ fn build_resume_body_with_quit(carried_quit: Option<CarriedQuit>) -> ResumeBody 
         session_by_id: HashMap::new(),
         carried_pane_state_by_pane_id: HashMap::new(),
         carried_quit,
+        saved_view_store: SavedViewStore::default(),
+        left_running_child_process_ids: Vec::new(),
     }
 }
 
@@ -1538,12 +1546,17 @@ fn a_report_the_swap_cut_in_half_finishes_in_the_next_image() {
 }
 
 #[test]
-fn a_body_missing_any_field_the_writer_emits_is_refused() {
+fn a_body_missing_any_required_field_the_writer_emits_is_refused() {
     let (_populated_server, _carried_pty_panes, _resume_header, resume_body) =
         carry_out_populated_server();
     let body_json = serde_json::to_value(&resume_body).expect("the body encodes");
 
-    for field_name in ["session_by_id", "carried_pane_state_by_pane_id"] {
+    for field_name in [
+        "session_by_id",
+        "carried_pane_state_by_pane_id",
+        "saved_view_store",
+        "left_running_child_process_ids",
+    ] {
         let mut incomplete_body_json = body_json.clone();
         incomplete_body_json
             .as_object_mut()
@@ -1871,6 +1884,29 @@ fn a_body_leaves_out_a_pane_key_named_twice_and_a_key_naming_no_pane() {
             .collect::<Vec<PaneId>>(),
         vec![readable_pane_id]
     );
+}
+
+#[test]
+fn the_children_left_running_read_back_from_the_body() {
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("session.resume");
+    let resume_header = ResumeHeader {
+        resume_format: RESUME_FORMAT,
+        session_id: SessionId::new(),
+        session_name: "carried".to_string(),
+        carried_panes: vec![build_test_carried_pane(None)],
+    };
+    let mut resume_body = build_resume_body_with_quit(None);
+    resume_body.left_running_child_process_ids = vec![5000, 5001];
+    write_resume_file(&resume_file_path, &resume_header, &resume_body)
+        .expect("write the resume file");
+
+    let (read_header, raw_body) =
+        read_resume_header(&resume_file_path).expect("read the header back");
+    let read_body =
+        read_resume_body(read_header.resume_format, &raw_body).expect("read the body back");
+
+    assert_eq!(read_body.left_running_child_process_ids, vec![5000, 5001]);
 }
 
 #[test]
@@ -2480,10 +2516,9 @@ fn a_pane_a_session_holds_that_nothing_drives_closes_and_the_others_stay() {
         1,
         "the carried exit is published once"
     );
-    let _ = resumed_server.handle_runtime_event(RuntimeEvent::ChildExit {
-        pane_id: undriven_pane_id,
-        exit_status: ExitStatus::ExitCode(7),
-    });
+    let child_exit_events =
+        resumed_server.handle_child_exit(undriven_pane_id, ExitStatus::ExitCode(7));
+    resumed_server.publish_events(&child_exit_events);
     assert_eq!(
         count_undriven_pane_exit_events(),
         1,
@@ -2646,6 +2681,60 @@ fn an_applied_quit_crosses_the_file_with_the_kind_it_was_asked_for() {
 }
 
 #[test]
+fn a_saved_view_store_crosses_the_file_with_its_waiting_hash_and_its_filed_view() {
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("saved-view.resume");
+    let waiting_client_id = ClientId::new();
+    let filed_tab_id = TabId::new();
+    let filed_client = Client::from_attachment(
+        ClientId::new(),
+        SessionId::new(),
+        SystemTime::UNIX_EPOCH,
+        FIRST_CLIENT_VIEWPORT_SIZE,
+        None,
+        filed_tab_id,
+        ClientOrigin::Local,
+        "C-swift-otter".to_string(),
+        3,
+    );
+    let mut saved_view_store = SavedViewStore::default();
+    let waiting_resume_token = saved_view_store.mint_resume_token(waiting_client_id);
+    let filed_resume_token = saved_view_store.mint_resume_token(filed_client.get_client_id());
+    let filed_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    saved_view_store.save_client_view(&filed_client, filed_at);
+    let resume_header = build_resume_header(SessionId::new(), Vec::new());
+    let resume_body = ResumeBody {
+        saved_view_store,
+        ..build_resume_body_with_quit(None)
+    };
+    write_resume_file(&resume_file_path, &resume_header, &resume_body)
+        .expect("write the resume file");
+
+    let (read_header, raw_body) =
+        read_resume_header(&resume_file_path).expect("read the header back");
+    let mut read_saved_view_store = read_resume_body(read_header.resume_format, &raw_body)
+        .expect("read the body back")
+        .saved_view_store;
+
+    assert_eq!(
+        read_saved_view_store.find_client_id_by_resume_token(&waiting_resume_token),
+        Some(waiting_client_id)
+    );
+    assert_eq!(
+        read_saved_view_store.take_saved_view(&filed_resume_token, filed_at),
+        Some(SavedView {
+            active_tab_id: filed_tab_id,
+            focused_pane_id_by_tab_id: HashMap::new(),
+            zoomed_pane_id_by_tab_id: HashMap::new(),
+            scroll_offset_by_pane_id: HashMap::new(),
+            floating_pane_view_by_pane_id: HashMap::new(),
+            floating_pane_focus_order: Vec::new(),
+            focused_floating_pane_id: None,
+        })
+    );
+}
+
+#[test]
 fn a_body_written_without_a_quit_reads_back_with_none() {
     let resume_test_directory = TempDir::new().expect("create temp dir");
     let resume_file_path = resume_test_directory.path().join("session.resume");
@@ -2751,5 +2840,81 @@ fn writing_into_a_directory_that_is_not_there_is_an_io_failure_naming_it() {
     assert!(
         !missing_parent_directory.exists(),
         "and the directory must not be created"
+    );
+}
+
+/// A writer that keeps every byte it receives and the byte count of the
+/// largest single piece.
+#[derive(Default)]
+struct PieceRecordingWriter {
+    received_bytes: Vec<u8>,
+    largest_piece_byte_count: usize,
+}
+
+impl std::io::Write for PieceRecordingWriter {
+    fn write(&mut self, file_piece: &[u8]) -> std::io::Result<usize> {
+        self.largest_piece_byte_count = self.largest_piece_byte_count.max(file_piece.len());
+        self.received_bytes.extend_from_slice(file_piece);
+        Ok(file_piece.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn ten_panes_with_full_history_encode_as_a_stream_of_small_pieces() {
+    let carried_pane_state_by_pane_id: HashMap<PaneId, CarriedPaneState> = (0..10)
+        .map(|_| {
+            let mut terminal_engine =
+                koshi_terminal::engine::TerminalEngine::from_pty_size(PtySize {
+                    column_count: 80,
+                    row_count: 24,
+                });
+            for line_number in 0..2_000 {
+                let _ = terminal_engine.process_pty_output(
+                    format!("line {line_number} of a pane carried across an update\r\n").as_bytes(),
+                );
+            }
+            (
+                PaneId::new(),
+                CarriedPaneState {
+                    terminal_state: terminal_engine.into_terminal_state(),
+                    undecoded_bytes: Vec::new(),
+                    graphics_events: Vec::new(),
+                    graphics_transport: None,
+                    synchronized_output: None,
+                },
+            )
+        })
+        .collect();
+    let resume_body = ResumeBody {
+        session_by_id: HashMap::new(),
+        carried_pane_state_by_pane_id,
+        carried_quit: None,
+        saved_view_store: SavedViewStore::default(),
+        left_running_child_process_ids: Vec::new(),
+    };
+    let resume_header = build_resume_header(SessionId::new(), Vec::new());
+    let resume_file_reference = ResumeFileReference {
+        header: &resume_header,
+        raw_body: &resume_body,
+    };
+    let mut piece_recording_writer = PieceRecordingWriter::default();
+
+    serde_json::to_writer(&mut piece_recording_writer, &resume_file_reference)
+        .expect("the resume file encodes");
+
+    assert_eq!(
+        piece_recording_writer.received_bytes,
+        serde_json::to_vec(&resume_file_reference).expect("the resume file encodes")
+    );
+    assert!(piece_recording_writer.received_bytes.len() > 1024 * 1024);
+    assert!(
+        piece_recording_writer.largest_piece_byte_count
+            <= koshi_storage::atomic::STAGED_WRITE_BUFFER_BYTE_COUNT,
+        "a piece of {} bytes",
+        piece_recording_writer.largest_piece_byte_count
     );
 }

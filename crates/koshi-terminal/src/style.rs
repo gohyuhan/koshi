@@ -7,7 +7,7 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// The visual style of a single cell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct Style {
     /// Foreground (text) color.
     foreground_color: Color,
@@ -126,10 +126,25 @@ impl Style {
     pub fn get_underline_color(&self) -> Option<Color> {
         self.underline_color
     }
+
+    /// The style with exactly these four parts.
+    pub(crate) fn from_style_parts(
+        foreground_color: Color,
+        background_color: Color,
+        attributes: AttributeFlags,
+        underline_color: Option<Color>,
+    ) -> Self {
+        Style {
+            foreground_color,
+            background_color,
+            attributes,
+            underline_color,
+        }
+    }
 }
 
 /// A foreground or background color.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum Color {
     /// The terminal's configured default color.
     #[default]
@@ -149,7 +164,7 @@ pub enum Color {
 /// Reading one back keeps only what the getters read: the five spare bits are
 /// dropped, and an underline code of `6` or `7` — which names no style —
 /// becomes `0`. Two words that every getter reads the same way are equal.
-#[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct AttributeFlags(#[serde(deserialize_with = "deserialize_defined_attribute_bits")] u16);
 
 /// Deserialize an attribute word, keeping only the bits the getters read.
@@ -159,13 +174,7 @@ pub struct AttributeFlags(#[serde(deserialize_with = "deserialize_defined_attrib
 fn deserialize_defined_attribute_bits<'de, DeserializerType: Deserializer<'de>>(
     deserializer: DeserializerType,
 ) -> Result<u16, DeserializerType::Error> {
-    let attribute_word = u16::deserialize(deserializer)? & AttributeFlags::DEFINED_MASK;
-    let underline_code =
-        (attribute_word & AttributeFlags::UNDERLINE_MASK) >> AttributeFlags::UNDERLINE_SHIFT;
-    if UnderlineStyle::from_underline_code(underline_code) == UnderlineStyle::None {
-        return Ok(attribute_word & !AttributeFlags::UNDERLINE_MASK);
-    }
-    Ok(attribute_word)
+    Ok(AttributeFlags::from_attribute_word(u16::deserialize(deserializer)?).0)
 }
 
 impl AttributeFlags {
@@ -192,6 +201,25 @@ impl AttributeFlags {
     /// The eleven bits the getters read: the eight boolean attributes and the
     /// underline code. The five above them are spare.
     const DEFINED_MASK: u16 = 0x07FF;
+
+    /// The flags an attribute word gives, keeping only the bits the getters
+    /// read: `1 << 15` gives no flag, `0b110 << 8` (underline code `6`) gives
+    /// no flag, and `0b001 << 8 | 1` (single underline and bold) is kept
+    /// whole.
+    pub(crate) fn from_attribute_word(attribute_word: u16) -> Self {
+        let attribute_word = attribute_word & Self::DEFINED_MASK;
+        let underline_code = (attribute_word & Self::UNDERLINE_MASK) >> Self::UNDERLINE_SHIFT;
+        if UnderlineStyle::from_underline_code(underline_code) == UnderlineStyle::None {
+            return AttributeFlags(attribute_word & !Self::UNDERLINE_MASK);
+        }
+        AttributeFlags(attribute_word)
+    }
+
+    /// The attribute word: the eight boolean attributes in bits 0-7 and the
+    /// underline code in bits 8-10.
+    pub(crate) fn get_attribute_word(self) -> u16 {
+        self.0
+    }
 
     /// Whether `attribute_flag_bit` is set.
     fn has_attribute_bit(self, attribute_flag_bit: u16) -> bool {

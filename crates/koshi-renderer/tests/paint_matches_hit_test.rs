@@ -9,8 +9,6 @@
 //! glyph, a stack header carries the header background, and every unclassified
 //! cell carries the letterbox backdrop.
 
-use std::sync::Arc;
-
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as RatatuiRect;
 
@@ -28,8 +26,8 @@ use koshi_renderer::snapshot::{
 };
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{
-    find_pane_content_rect, get_cursor_position, render_frame, resolve_hit_region, HitRegion,
-    ImageRenderMode,
+    find_pane_content_rect, get_cursor_position, render_frame, resolve_hit_region, DrawnRows,
+    HitRegion, ImageRenderMode,
 };
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::Style as CellStyle;
@@ -51,7 +49,7 @@ const EFFECTIVE_LAYOUT_SIZE: Size = Size {
 /// The names of the three tabs every frame here carries, the first active.
 const TAB_NAMES: [&str; 3] = ["one", "two", "three"];
 
-/// The glyphs `Block` draws a full border ring with.
+/// The glyphs a tiled pane's border ring is drawn with.
 const BORDER_GLYPHS: [&str; 6] = ["┌", "┐", "└", "┘", "─", "│"];
 
 /// A visible pane slot whose content area is `outer_rect` inset by its one-cell
@@ -68,21 +66,16 @@ fn build_pane_slot(pane_id: PaneId, outer_rect: Rect) -> PaneSlot {
 
 /// A pane whose every cell holds `fill_character`, sized `column_count x row_count`.
 fn build_filled_grid(column_count: u16, row_count: u16, fill_character: char) -> GridView {
-    let cell_rows = vec![
-        vec![
-            Cell::from_character(fill_character, 1, CellStyle::default());
-            column_count as usize
-        ];
-        row_count as usize
-    ];
-    GridView {
-        grid: Arc::new(Grid::from_rows(
-            cell_rows,
-            column_count,
-            CellStyle::default(),
-        )),
-        view_row_offset: 0,
+    let mut terminal_grid = Grid::build_blank(row_count, column_count, CellStyle::default());
+    for row_index in 0..row_count {
+        for column_index in 0..column_count {
+            *terminal_grid
+                .get_cell_mut(row_index, column_index)
+                .expect("the cell is in the grid") =
+                Cell::from_character(fill_character, 1, CellStyle::default());
+        }
     }
+    GridView::from_grid(&terminal_grid, 0)
 }
 
 /// One pane's content with the cursor at `(cursor_row_index, cursor_column_index)` of its content
@@ -238,10 +231,11 @@ fn paint_render_snapshot(
         None,
         viewer_chrome,
         ImageRenderMode::Placeholder,
-        None,
+        &[],
         None,
         None,
         viewport_area,
+        DrawnRows::Every,
         &mut screen_buffer,
     );
     screen_buffer

@@ -557,7 +557,7 @@ fn schema_version_newer_than_supported_is_rejected() {
         migration_error,
         MigrationError::Version {
             config_path: "koshi.kdl".to_string(),
-            version_error_detail: "schema version 3 is newer than this koshi supports (2)"
+            version_error_detail: "config schema version 3 is newer than this koshi supports (2)"
                 .to_string(),
         }
     );
@@ -683,7 +683,7 @@ fn validation_names_a_newer_schema_version_against_the_running_schema() {
         migration_error,
         MigrationError::Version {
             config_path: "koshi.kdl".to_string(),
-            version_error_detail: "schema version 3 is newer than this koshi supports (2)"
+            version_error_detail: "config schema version 3 is newer than this koshi supports (2)"
                 .to_string(),
         }
     );

@@ -38,13 +38,14 @@ use koshi_ipc::remote_wire::{
     REMOTE_PROTOCOL_VERSION, REMOTE_REFUSED,
 };
 use koshi_ipc::router::RouterRequest;
+use koshi_link::ipc_client::ForeignSessionAdvertisement;
 use koshi_link::remote_client::{self, DIAL_TIMEOUT_DURATION};
 #[cfg(unix)]
 use koshi_test_support::child_exit::wait_until_child_has_exited;
 use koshi_test_support::fixtures::{
-    build_test_runtime_directory, count_program_runs, spawn_session_listening_before_it_advertises,
-    write_clipboard_tool_directory, write_koshi_0_1_0_window_endpoint_file, write_printing_program,
-    NO_SUCH_PROCESS_ID,
+    build_accepted_hello_result, build_test_runtime_directory, count_program_runs,
+    spawn_session_listening_before_it_advertises, write_clipboard_tool_directory,
+    write_koshi_0_1_0_window_endpoint_file, write_printing_program, NO_SUCH_PROCESS_ID,
 };
 
 #[test]
@@ -1450,11 +1451,7 @@ fn spawn_session_server_answering_once_released(
         let discovery_responses = [
             IpcResponse {
                 request_id: Some(hello_request.request_id),
-                answer_result: IpcResult::Hello {
-                    protocol_version: PROTOCOL_VERSION,
-                    build_version: env!("CARGO_PKG_VERSION").to_string(),
-                    process_image_id: ProcessImageId::get_own(),
-                },
+                answer_result: build_accepted_hello_result(),
             },
             IpcResponse {
                 request_id: Some(overview_request.request_id),
@@ -1646,6 +1643,7 @@ fn run_queued_dispatch_loop(
             None,
             &router_events_sender,
             &router_events_receiver,
+            &RouterRequestGate::default(),
             TEST_IDLE_EXIT_DURATION,
             liveness_check_interval,
             &mut router_sessions,
@@ -1680,6 +1678,7 @@ fn spawn_dispatch_loop(
             None,
             &router_events_sender,
             &router_events_receiver,
+            &RouterRequestGate::default(),
             TEST_IDLE_EXIT_DURATION,
             TEST_LIVENESS_CHECK_INTERVAL_DURATION,
             &mut router_sessions,
@@ -1719,6 +1718,7 @@ fn build_no_remote_state() -> RemoteState {
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
+        token_use_writer: None,
     }
 }
 
@@ -1965,6 +1965,104 @@ fn a_request_inside_the_idle_window_is_served_and_the_loop_goes_on() {
     );
     assert_eq!(router_exit, RouterExit::Idle);
     assert_eq!(remaining_session_registry, SessionRegistry::new());
+}
+
+#[test]
+fn an_idle_window_that_passes_with_a_connection_open_keeps_the_loop_running() {
+    // Ten idle windows pass with the connection open, and the loop is still
+    // running. Once the connection ends, the next window ends the loop and
+    // the gate admits no connection.
+    let runtime_directory = build_test_runtime_directory();
+    let router_request_gate = Arc::new(RouterRequestGate::default());
+    let admitted_connection = router_request_gate
+        .admit_connection()
+        .expect("an open gate admits the connection");
+    let held_runtime_directory = runtime_directory.path().to_path_buf();
+    let loop_request_gate = Arc::clone(&router_request_gate);
+    let loop_thread = std::thread::spawn(move || {
+        let (router_events_sender, router_events_receiver) = mpsc::channel();
+        let mut router_sessions = RouterSessions::from_session_registry(SessionRegistry::new());
+        run_dispatch_loop(
+            &held_runtime_directory,
+            None,
+            &build_test_executable_watch(),
+            None,
+            &router_events_sender,
+            &router_events_receiver,
+            &loop_request_gate,
+            TEST_IDLE_EXIT_DURATION,
+            TEST_LIVENESS_CHECK_INTERVAL_DURATION,
+            &mut router_sessions,
+            &mut build_no_remote_state(),
+        )
+    });
+
+    std::thread::sleep(TEST_IDLE_EXIT_DURATION * 10);
+    assert!(!loop_thread.is_finished());
+
+    drop(admitted_connection);
+
+    assert_eq!(join_dispatch_loop_thread(loop_thread), RouterExit::Idle);
+    assert!(router_request_gate.admit_connection().is_none());
+}
+
+#[test]
+fn a_due_restart_answers_each_request_already_queued_and_refuses_the_next_ones() {
+    // The restart and then a status request are queued before the loop
+    // starts. The loop answers the status request before it ends, and a
+    // request read after that is refused by the gate.
+    let runtime_directory = build_test_runtime_directory();
+    let router_request_gate = Arc::new(RouterRequestGate::default());
+    let admitted_connection = router_request_gate
+        .admit_connection()
+        .expect("an open gate admits the connection");
+    let (router_events_sender, router_events_receiver) = mpsc::channel();
+    let (status_sender, status_receiver) = mpsc::channel();
+    router_events_sender
+        .send(RouterEvent::RestartDue)
+        .expect("the restart is queued");
+    router_events_sender
+        .send(RouterEvent::Request {
+            request_kind: RouterRequestKind::RemoteStatus,
+            response_sender: status_sender,
+        })
+        .expect("the status request is queued");
+    let mut router_sessions = RouterSessions::from_session_registry(SessionRegistry::new());
+
+    let router_exit = run_dispatch_loop(
+        runtime_directory.path(),
+        None,
+        &build_test_executable_watch(),
+        None,
+        &router_events_sender,
+        &router_events_receiver,
+        &router_request_gate,
+        TEST_IDLE_EXIT_DURATION,
+        TEST_LIVENESS_CHECK_INTERVAL_DURATION,
+        &mut router_sessions,
+        &mut build_no_remote_state(),
+    );
+
+    assert_eq!(router_exit, RouterExit::Restart);
+    assert_eq!(
+        status_receiver.try_recv(),
+        Ok(RouterResult::RemoteStatus {
+            remote_listen_address: None,
+            is_remote_access_enabled: false,
+            is_listening: false,
+            certificate_fingerprint: None,
+            remote_connection_count: 0,
+        })
+    );
+    assert_eq!(
+        admitted_connection.ask_dispatcher(&router_events_sender, RouterRequestKind::RemoteStatus),
+        Some(build_refused_result(ROUTER_RESTARTING_MESSAGE.to_string()))
+    );
+    assert_eq!(
+        router_events_receiver.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
+    );
+    assert!(!router_sessions.is_restart_pending);
 }
 
 #[test]
@@ -3177,9 +3275,10 @@ fn an_unwatched_session_that_is_gone_leaves_the_list_and_the_loop_ends_idle() {
 fn a_full_event_queue_does_not_hold_off_a_probe_that_is_due() {
     // The probe interval is zero, so a probe is due on the first turn. The
     // restart and then 1 000 row requests are queued before the loop starts.
-    // The loop serves the restart on its first turn and ends on its second,
-    // with every row request still queued: the probe reaches the session's
-    // listener, and no row request is answered.
+    // The loop starts the probe and serves the restart on its first turn. On
+    // its second it answers every row request still queued and ends: the
+    // probe reaches the session's listener, and all 1 000 row requests are
+    // answered.
     const QUEUED_ROW_REQUEST_COUNT: usize = 1_000;
     let probed_session_id = SessionId::new();
     let runtime_directory = build_test_runtime_directory();
@@ -3202,11 +3301,13 @@ fn a_full_event_queue_does_not_hold_off_a_probe_that_is_due() {
         })
         .collect();
     let held_runtime_directory = runtime_directory.path().to_path_buf();
+    let session_registry = SessionRegistry::from([(
+        probed_session_id,
+        build_unwatched_session_record(socket_address),
+    )]);
+    let expected_rows = list_remote_session_rows(&session_registry, &TokenScope::HostWide);
     let loop_thread = std::thread::spawn(move || {
-        let mut router_sessions = RouterSessions::from_session_registry(SessionRegistry::from([(
-            probed_session_id,
-            build_unwatched_session_record(socket_address),
-        )]));
+        let mut router_sessions = RouterSessions::from_session_registry(session_registry);
         run_dispatch_loop(
             &held_runtime_directory,
             None,
@@ -3214,6 +3315,7 @@ fn a_full_event_queue_does_not_hold_off_a_probe_that_is_due() {
             None,
             &router_events_sender,
             &router_events_receiver,
+            &RouterRequestGate::default(),
             TEST_IDLE_EXIT_DURATION,
             Duration::ZERO,
             &mut router_sessions,
@@ -3232,12 +3334,11 @@ fn a_full_event_queue_does_not_hold_off_a_probe_that_is_due() {
         .recv_timeout(LOOP_END_TIMEOUT_DURATION)
         .expect("the probe reaches the session");
     assert_eq!(join_dispatch_loop_thread(loop_thread), RouterExit::Restart);
-    // The loop's receiver is gone, and every event still queued went with it.
     let answered_row_request_count = rows_receivers
         .iter()
-        .filter(|rows_receiver| rows_receiver.try_recv() != Err(mpsc::TryRecvError::Disconnected))
+        .filter(|rows_receiver| rows_receiver.try_recv().as_ref() == Ok(&expected_rows))
         .count();
-    assert_eq!(answered_row_request_count, 0);
+    assert_eq!(answered_row_request_count, QUEUED_ROW_REQUEST_COUNT);
 }
 
 #[test]
@@ -3311,9 +3412,9 @@ fn a_probe_starts_without_waiting_for_the_endpoint_file_it_reads() {
         EndpointFile::resolve_endpoint_file_path(runtime_directory.path(), probed_session_id);
     let endpoint_path_text = std::ffi::CString::new(endpoint_path.as_os_str().as_encoded_bytes())
         .expect("the path holds no NUL byte");
-    // SAFETY: `endpoint_path_text` is a NUL-terminated path that lives for the
-    // call.
     assert_eq!(
+        // SAFETY: `endpoint_path_text` is a NUL-terminated path that lives for
+        // the call.
         unsafe { libc::mkfifo(endpoint_path_text.as_ptr(), 0o600) },
         0,
         "the FIFO is made"
@@ -4471,6 +4572,7 @@ fn a_listing_that_could_not_read_a_path_asks_no_other_users_session() {
         session_id: duplicated_foreign_session_id,
         advertisement_count: 2,
         owner_user_ids: vec![1001, 1002],
+        reachable_owner_user_id: None,
     };
 
     let surveyed_session_ids = start_unlisted_session_descriptions(
@@ -4481,7 +4583,10 @@ fn a_listing_that_could_not_read_a_path_asks_no_other_users_session() {
         ForeignSessionListing {
             foreign_sessions: vec![(
                 listed_foreign_session_id,
-                build_foreign_socket_address(listed_foreign_session_id),
+                ForeignSessionAdvertisement {
+                    owner_user_id: 1001,
+                    socket_address: build_foreign_socket_address(listed_foreign_session_id),
+                },
             )],
             duplicated_sessions: vec![duplicated_session],
             unlisted_session_count: 0,
@@ -4547,11 +4652,17 @@ fn an_other_users_session_found_past_the_description_limit_is_not_asked() {
             foreign_sessions: vec![
                 (
                     unasked_foreign_session_id,
-                    build_foreign_socket_address(unasked_foreign_session_id),
+                    ForeignSessionAdvertisement {
+                        owner_user_id: 1001,
+                        socket_address: build_foreign_socket_address(unasked_foreign_session_id),
+                    },
                 ),
                 (
                     running_foreign_session_id,
-                    build_foreign_socket_address(running_foreign_session_id),
+                    ForeignSessionAdvertisement {
+                        owner_user_id: 1001,
+                        socket_address: build_foreign_socket_address(running_foreign_session_id),
+                    },
                 ),
             ],
             ..ForeignSessionListing::default()
@@ -4883,10 +4994,10 @@ fn a_remote_locate_request_registers_a_session_the_list_did_not_hold() {
 
     assert_eq!(
         endpoint_receiver.try_recv(),
-        Ok(Ok(EndpointFile::resolve_endpoint_file_path(
-            runtime_directory.path(),
-            unlisted_session_id
-        )))
+        Ok(Ok(LocatedSession {
+            runtime_directory: runtime_directory.path().to_path_buf(),
+            session_id: unlisted_session_id,
+        }))
     );
     let listener = session_server_thread
         .join()
@@ -5018,10 +5129,10 @@ fn a_remote_locate_request_for_a_listed_name_waits_for_every_unlisted_session_to
 
     assert_eq!(
         endpoint_receiver.try_recv(),
-        Ok(Ok(EndpointFile::resolve_endpoint_file_path(
-            runtime_directory.path(),
-            listed_session_id
-        )))
+        Ok(Ok(LocatedSession {
+            runtime_directory: runtime_directory.path().to_path_buf(),
+            session_id: listed_session_id,
+        }))
     );
     drop(session_listener);
 }
@@ -5498,6 +5609,7 @@ fn the_dispatcher_restarts_once_the_waiting_lookup_is_answered_after_a_due_resta
             None,
             &router_events_sender,
             &router_events_receiver,
+            &RouterRequestGate::default(),
             TEST_IDLE_EXIT_DURATION,
             TEST_LIVENESS_CHECK_INTERVAL_DURATION,
             &mut router_sessions,
@@ -5548,6 +5660,7 @@ fn the_dispatcher_restarts_once_the_starting_session_server_is_settled_after_a_d
             None,
             &router_events_sender,
             &router_events_receiver,
+            &RouterRequestGate::default(),
             TEST_IDLE_EXIT_DURATION,
             TEST_LIVENESS_CHECK_INTERVAL_DURATION,
             &mut router_sessions,
@@ -6337,6 +6450,7 @@ fn a_running_unwaited_child_does_not_keep_an_empty_loop_past_the_idle_window() {
         None,
         &router_events_sender,
         &router_events_receiver,
+        &RouterRequestGate::default(),
         TEST_IDLE_EXIT_DURATION,
         TEST_LIVENESS_CHECK_INTERVAL_DURATION,
         &mut router_sessions,
@@ -6376,6 +6490,7 @@ fn a_running_inherited_child_does_not_keep_an_empty_loop_past_the_idle_window() 
         None,
         &router_events_sender,
         &router_events_receiver,
+        &RouterRequestGate::default(),
         TEST_IDLE_EXIT_DURATION,
         TEST_LIVENESS_CHECK_INTERVAL_DURATION,
         &mut router_sessions,
@@ -6438,6 +6553,7 @@ fn a_liveness_round_reaps_an_exited_unwaited_child_while_a_session_is_listed() {
         None,
         &router_events_sender,
         &router_events_receiver,
+        &RouterRequestGate::default(),
         TEST_IDLE_EXIT_DURATION,
         TEST_LIVENESS_CHECK_INTERVAL_DURATION,
         &mut router_sessions,
@@ -6463,13 +6579,6 @@ fn a_liveness_round_reaps_an_exited_unwaited_child_while_a_session_is_listed() {
     );
 }
 
-/// The router hands its place over by starting the new binary with this
-/// argument, the one [`crate::cli`] parses into `wait_for_lock`.
-#[test]
-fn the_handover_carries_the_argument_that_waits() {
-    assert_eq!(WAIT_FOR_LOCK_FLAG, "--wait-for-lock");
-}
-
 /// A restart whose `execvp` fails leaves SIGPIPE at `SIG_IGN`.
 ///
 /// The file the restart names is readable and not executable: `fs::metadata`
@@ -6480,6 +6589,10 @@ fn the_handover_carries_the_argument_that_waits() {
 fn a_restart_that_cannot_exec_leaves_the_write_to_a_hung_up_client_ignored() {
     use std::os::unix::fs::PermissionsExt;
 
+    use koshi_test_support::signal_disposition::lock_sigpipe_disposition;
+
+    let _sigpipe_disposition_guard = lock_sigpipe_disposition();
+
     let runtime_directory = build_test_runtime_directory();
     let executable_path = runtime_directory.path().join("koshi");
     std::fs::write(&executable_path, b"").expect("the stand-in binary is written");
@@ -6489,6 +6602,8 @@ fn a_restart_that_cannot_exec_leaves_the_write_to_a_hung_up_client_ignored() {
     let restart_error = restart_by_exec(&executable_path, runtime_directory.path());
 
     assert_eq!(restart_error.kind(), std::io::ErrorKind::PermissionDenied);
+    // SAFETY: `SIG_IGN` installs no handler code, and `SIGPIPE` is a signal
+    // that can be ignored.
     let prior_sigpipe_disposition = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
     assert_eq!(prior_sigpipe_disposition, libc::SIG_IGN);
 }
@@ -6523,6 +6638,7 @@ fn a_connection_to_a_router_whose_program_file_holds_another_version_makes_the_r
             &router_events_sender,
             &accept_loop_shutdown_flag,
             &executable_watch,
+            &Arc::new(RouterRequestGate::default()),
         );
     });
 
@@ -6566,6 +6682,7 @@ fn a_hello_refused_for_its_version_makes_the_restart_due_when_the_program_file_h
             &router_events_sender,
             &accept_loop_shutdown_flag,
             &executable_watch,
+            &Arc::new(RouterRequestGate::default()),
         );
     });
     let mut caller_connection =
@@ -6629,6 +6746,7 @@ fn the_accept_loop_serves_a_connection_this_user_opened() {
             &router_events_sender,
             &accept_loop_shutdown_flag,
             &build_unread_executable_watch(),
+            &Arc::new(RouterRequestGate::default()),
         );
     });
 
@@ -7094,6 +7212,57 @@ fn revoking_an_identity_that_holds_nothing_stops_nothing_and_writes_nothing() {
 }
 
 #[test]
+fn a_listing_leaves_out_grants_that_stopped_working_thirty_or_more_days_ago() {
+    // bob's grant was revoked at second 1_000 after the Unix epoch, decades
+    // ago. grace's grant was revoked one second ago. The listing answers ada's
+    // working grant and grace's grant, and not bob's.
+    let runtime_directory = build_test_runtime_directory();
+    let token_store_path = resolve_token_store_path(&runtime_directory.path().join("data"));
+    let mut token_store = TokenStore::new();
+    for identity in ["ada", "bob", "grace"] {
+        let _ = token_store.grant_token(
+            identity.to_string(),
+            TokenScope::HostWide,
+            UNIX_EPOCH + Duration::from_secs(500),
+            None,
+        );
+    }
+    let _ = token_store.revoke_token_grants("bob", None, UNIX_EPOCH + Duration::from_secs(1_000));
+    let grace_revoked_at = SystemTime::now() - Duration::from_secs(1);
+    let _ = token_store.revoke_token_grants("grace", None, grace_revoked_at);
+    token_store
+        .write_token_store_to_path(&token_store_path)
+        .expect("the token store is written");
+
+    let listing_result = answer_token_request(
+        Some(&token_store_path),
+        RouterRequestKind::ListTokens { scope: None },
+    );
+
+    assert_eq!(
+        listing_result,
+        RouterResult::Tokens(vec![
+            TokenEntry {
+                identity: "ada".to_string(),
+                scope: TokenScope::HostWide,
+                issued_at: UNIX_EPOCH + Duration::from_secs(500),
+                expires_at: None,
+                last_used_at: None,
+                revoked_at: None,
+            },
+            TokenEntry {
+                identity: "grace".to_string(),
+                scope: TokenScope::HostWide,
+                issued_at: UNIX_EPOCH + Duration::from_secs(500),
+                expires_at: None,
+                last_used_at: None,
+                revoked_at: Some(grace_revoked_at),
+            },
+        ])
+    );
+}
+
+#[test]
 fn listing_answers_every_grant_without_its_hash_and_narrows_to_one_scope() {
     let runtime_directory = build_test_runtime_directory();
     let token_store_path = resolve_token_store_path(runtime_directory.path());
@@ -7405,11 +7574,7 @@ fn spawn_bridged_session_server(
         connection
             .send(&IpcResponse {
                 request_id: Some(hello_request.request_id),
-                answer_result: IpcResult::Hello {
-                    protocol_version: PROTOCOL_VERSION,
-                    build_version: env!("CARGO_PKG_VERSION").to_string(),
-                    process_image_id: ProcessImageId::get_own(),
-                },
+                answer_result: build_accepted_hello_result(),
             })
             .expect("answer the hello");
         let _ = stop_receiver.recv();
@@ -7457,6 +7622,8 @@ fn raise_router_test_file_descriptor_limit() {
             rlim_cur: 0,
             rlim_max: 0,
         };
+        // SAFETY: `getrlimit` writes one `rlimit` to `resource_limit`, which
+        // lives for the call.
         let getrlimit_result = unsafe {
             libc::getrlimit(
                 libc::RLIMIT_NOFILE,
@@ -7470,6 +7637,8 @@ fn raise_router_test_file_descriptor_limit() {
 
         if resource_limit.rlim_cur < resource_limit.rlim_max {
             resource_limit.rlim_cur = resource_limit.rlim_max;
+            // SAFETY: `setrlimit` reads one `rlimit` from `resource_limit`, which
+            // lives for the call.
             let setrlimit_result = unsafe {
                 libc::setrlimit(libc::RLIMIT_NOFILE, &resource_limit as *const libc::rlimit)
             };
@@ -7533,6 +7702,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
             admitted_remote_connections: Vec::new(),
             next_remote_connection_id: 0,
             full_capacity_warning: WarningRateLimiter::new(),
+            token_use_writer: None,
         };
         run_dispatch_loop(
             &held_runtime_directory,
@@ -7541,6 +7711,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
             Some(&held_token_store_path),
             &router_events_sender,
             &router_events_receiver,
+            &RouterRequestGate::default(),
             TEST_IDLE_EXIT_DURATION,
             TEST_LIVENESS_CHECK_INTERVAL_DURATION,
             &mut RouterSessions::from_session_registry(session_registry),
@@ -7818,10 +7989,10 @@ fn an_attach_that_arrives_after_the_cut_is_refused_rather_than_bridged() {
 
     assert_eq!(
         remote_session_before_close,
-        Some(EndpointFile::resolve_endpoint_file_path(
-            runtime_directory.path(),
-            session_id
-        )),
+        Some(LocatedSession {
+            runtime_directory: runtime_directory.path().to_path_buf(),
+            session_id,
+        }),
         "the same attach reached the session while the connection stood"
     );
     assert_eq!(
@@ -7940,10 +8111,10 @@ fn an_attach_to_a_session_the_secret_does_not_reach_is_refused() {
             &TokenScope::Session(reached_session_id),
             &SessionSelector::SessionId(reached_session_id)
         ),
-        Some(EndpointFile::resolve_endpoint_file_path(
-            runtime_directory.path(),
-            reached_session_id
-        )),
+        Some(LocatedSession {
+            runtime_directory: runtime_directory.path().to_path_buf(),
+            session_id: reached_session_id,
+        }),
         "the session the grant names is reached"
     );
     assert_eq!(
@@ -7967,10 +8138,10 @@ fn an_attach_to_a_session_the_secret_does_not_reach_is_refused() {
             &TokenScope::HostWide,
             &SessionSelector::SessionId(other_session_id)
         ),
-        Some(EndpointFile::resolve_endpoint_file_path(
-            runtime_directory.path(),
-            other_session_id
-        )),
+        Some(LocatedSession {
+            runtime_directory: runtime_directory.path().to_path_buf(),
+            session_id: other_session_id,
+        }),
         "a host-wide grant reaches both"
     );
 }
@@ -8019,10 +8190,10 @@ fn an_attach_naming_a_session_this_machine_does_not_run_reaches_nothing() {
     );
     assert_eq!(
         locate_session(&SessionSelector::SessionId(running_session_id)),
-        Some(EndpointFile::resolve_endpoint_file_path(
-            runtime_directory.path(),
-            running_session_id
-        )),
+        Some(LocatedSession {
+            runtime_directory: runtime_directory.path().to_path_buf(),
+            session_id: running_session_id,
+        }),
         "and the session that is running is still reached"
     );
 }
@@ -8090,10 +8261,10 @@ fn a_session_another_local_user_started_is_neither_listed_nor_reached_from_a_rem
     );
     assert_eq!(
         locate_session(&SessionSelector::SessionId(own_session_id)),
-        Some(EndpointFile::resolve_endpoint_file_path(
-            runtime_directory.path(),
-            own_session_id
-        )),
+        Some(LocatedSession {
+            runtime_directory: runtime_directory.path().to_path_buf(),
+            session_id: own_session_id,
+        }),
         "while the session this router started is still reached"
     );
 }
@@ -8215,6 +8386,7 @@ fn a_caller_whose_remote_protocol_range_covers_this_build_settles_on_what_both_s
             admitted_remote_connections: Vec::new(),
             next_remote_connection_id: 0,
             full_capacity_warning: WarningRateLimiter::new(),
+            token_use_writer: None,
         };
         run_dispatch_loop(
             &held_runtime_directory,
@@ -8223,6 +8395,7 @@ fn a_caller_whose_remote_protocol_range_covers_this_build_settles_on_what_both_s
             Some(&held_token_store_path),
             &router_events_sender,
             &router_events_receiver,
+            &RouterRequestGate::default(),
             TEST_IDLE_EXIT_DURATION,
             TEST_LIVENESS_CHECK_INTERVAL_DURATION,
             &mut RouterSessions::from_session_registry(session_registry),
@@ -8262,11 +8435,13 @@ fn a_caller_whose_remote_protocol_range_covers_this_build_settles_on_what_both_s
 #[test]
 fn an_admitted_secret_is_registered_with_its_scope_and_stamped_in_the_store() {
     // The admit registers the connection with its scope and the hash of its
-    // secret, and stamps `last_used_at` on the token record.
+    // secret. The token use writer stamps `last_used_at` on the token record
+    // with the clock reading the admit took.
     let runtime_directory = build_test_runtime_directory();
     let token_store_path = resolve_token_store_path(&runtime_directory.path().join("data"));
     let connection_token = build_token_store_with_alice_grant(&token_store_path);
     let mut remote_state = build_no_remote_state();
+    remote_state.token_use_writer = TokenUseWriter::start(token_store_path.clone());
     let (caller_stream, _served_stream) = build_loopback_connection_pair();
 
     let admit_started_at = SystemTime::now();
@@ -8299,16 +8474,185 @@ fn an_admitted_secret_is_registered_with_its_scope_and_stamped_in_the_store() {
         hash_connection_token(&connection_token),
         "the connection is registered against the hash of the secret that opened it"
     );
+    remote_state
+        .token_use_writer
+        .take()
+        .expect("the token use writer started")
+        .finish();
     let written_token_store =
         TokenStore::load_token_store_from_path(&token_store_path).expect("the store reads back");
     assert_eq!(written_token_store.token_records.len(), 1);
     let last_used_at = written_token_store.token_records[0]
         .last_used_at
-        .expect("the admit stamped the token record");
+        .expect("the token use writer stamped the token record");
     assert!(
         last_used_at >= admit_started_at && last_used_at <= admit_finished_at,
         "the stamp is the clock reading the admit took"
     );
+}
+
+#[test]
+fn an_admission_reads_the_store_and_does_not_write_it() {
+    // With no token use writer, an admitted secret leaves the store file's
+    // bytes as they were.
+    let runtime_directory = build_test_runtime_directory();
+    let token_store_path = resolve_token_store_path(&runtime_directory.path().join("data"));
+    let connection_token = build_token_store_with_alice_grant(&token_store_path);
+    let token_store_bytes_before_admission = rewrite_token_store_with_spacing(&token_store_path);
+    let mut remote_state = build_no_remote_state();
+    let (caller_stream, _served_stream) = build_loopback_connection_pair();
+
+    assert_eq!(
+        admit_remote_token(
+            Some(&token_store_path),
+            &mut remote_state,
+            &connection_token,
+            caller_stream
+        ),
+        Some(RemoteConnectionAdmission {
+            scope: TokenScope::HostWide,
+            remote_connection_id: 0,
+        })
+    );
+
+    assert_eq!(
+        std::fs::read(&token_store_path).expect("the store file is still there"),
+        token_store_bytes_before_admission,
+        "the admission wrote nothing"
+    );
+}
+
+#[test]
+fn grants_and_revokes_that_run_at_the_same_time_keep_every_change() {
+    // Eight revokes of grants made before and eight new grants run at the
+    // same time against one store. The store ends with every revoke and every
+    // grant.
+    let runtime_directory = build_test_runtime_directory();
+    let token_store_path = resolve_token_store_path(&runtime_directory.path().join("data"));
+    for identity_index in 0..8 {
+        let _ = grant_token_for_test(
+            &token_store_path,
+            &format!("revoked-{identity_index}"),
+            TokenScope::HostWide,
+        );
+    }
+    let mut token_request_kinds = Vec::new();
+    for identity_index in 0..8 {
+        token_request_kinds.push(build_grant_request(
+            &format!("granted-{identity_index}"),
+            TokenScope::HostWide,
+            None,
+        ));
+        token_request_kinds.push(RouterRequestKind::RevokeToken {
+            identity: format!("revoked-{identity_index}"),
+            scope: None,
+        });
+    }
+
+    let request_threads: Vec<_> = token_request_kinds
+        .into_iter()
+        .map(|token_request_kind| {
+            let request_thread_store_path = token_store_path.clone();
+            std::thread::spawn(move || {
+                answer_token_request(Some(&request_thread_store_path), token_request_kind)
+            })
+        })
+        .collect();
+    for request_thread in request_threads {
+        match request_thread.join().expect("the request thread ends") {
+            RouterResult::Granted {
+                has_replaced_active_grant: false,
+                ..
+            } => {}
+            RouterResult::Revoked(revoked_scopes) => {
+                assert_eq!(revoked_scopes, vec![TokenScope::HostWide]);
+            }
+            unexpected_router_result => panic!("a request got {unexpected_router_result:?}"),
+        }
+    }
+
+    let token_store =
+        TokenStore::load_token_store_from_path(&token_store_path).expect("the store reads back");
+    let mut standing_identities: Vec<&str> = token_store
+        .token_records
+        .iter()
+        .filter(|token_record| token_record.revoked_at.is_none())
+        .map(|token_record| token_record.identity.as_str())
+        .collect();
+    standing_identities.sort_unstable();
+    let mut revoked_identities: Vec<&str> = token_store
+        .token_records
+        .iter()
+        .filter(|token_record| token_record.revoked_at.is_some())
+        .map(|token_record| token_record.identity.as_str())
+        .collect();
+    revoked_identities.sort_unstable();
+    let expected_granted_identities: Vec<String> = (0..8)
+        .map(|identity_index| format!("granted-{identity_index}"))
+        .collect();
+    let expected_revoked_identities: Vec<String> = (0..8)
+        .map(|identity_index| format!("revoked-{identity_index}"))
+        .collect();
+    assert_eq!(standing_identities, expected_granted_identities);
+    assert_eq!(revoked_identities, expected_revoked_identities);
+}
+
+#[test]
+fn a_grant_and_a_revoke_wait_while_another_koshi_holds_the_store_lock() {
+    // While the lock beside the store is held, neither request changes the
+    // store. Once the lock is let go, each request takes it and is answered.
+    for (token_request_kind, request_label) in [
+        (
+            build_grant_request("ada", TokenScope::HostWide, None),
+            "grant",
+        ),
+        (
+            RouterRequestKind::RevokeToken {
+                identity: "alice".to_string(),
+                scope: None,
+            },
+            "revoke",
+        ),
+    ] {
+        let runtime_directory = build_test_runtime_directory();
+        let token_store_path = resolve_token_store_path(&runtime_directory.path().join("data"));
+        let _ = build_token_store_with_alice_grant(&token_store_path);
+        let token_store_bytes_before_request = rewrite_token_store_with_spacing(&token_store_path);
+        let held_store_lock_file = acquire_store_lock(
+            &resolve_token_store_lock_path(&token_store_path),
+            Duration::ZERO,
+            "the test holds the lock",
+        )
+        .expect("the test takes the store lock");
+        let request_thread_store_path = token_store_path.clone();
+        let request_thread = std::thread::spawn(move || {
+            answer_token_request(Some(&request_thread_store_path), token_request_kind)
+        });
+        std::thread::sleep(Duration::from_millis(200));
+
+        assert_eq!(
+            std::fs::read(&token_store_path).expect("the store file is still there"),
+            token_store_bytes_before_request,
+            "the {request_label} changed nothing while the lock was held"
+        );
+        drop(held_store_lock_file);
+        let token_request_result = request_thread.join().expect("the request thread ends");
+        match (request_label, token_request_result) {
+            (
+                "grant",
+                RouterResult::Granted {
+                    has_replaced_active_grant: false,
+                    ..
+                },
+            ) => {}
+            ("revoke", RouterResult::Revoked(revoked_scopes)) => {
+                assert_eq!(revoked_scopes, vec![TokenScope::HostWide]);
+            }
+            (_, unexpected_router_result) => {
+                panic!("the {request_label} got {unexpected_router_result:?}")
+            }
+        }
+    }
 }
 
 #[test]
@@ -8577,6 +8921,7 @@ fn switching_remote_access_on_while_this_router_serves_answers_with_the_served_c
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
+        token_use_writer: None,
     };
 
     let enable_result = enable_remote_access(
@@ -8640,6 +8985,7 @@ fn the_start_up_open_takes_no_port_until_the_operator_has_said_yes() {
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
+        token_use_writer: None,
     };
 
     open_remote_listener(
@@ -8680,6 +9026,7 @@ fn the_start_up_open_takes_the_port_again_once_the_answer_is_written_down() {
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
+        token_use_writer: None,
     };
 
     for _ in 0..MAX_ADDRESS_ATTEMPT_COUNT {
@@ -8694,16 +9041,13 @@ fn the_start_up_open_takes_the_port_again_once_the_answer_is_written_down() {
         }
     }
 
-    assert!(
-        remote_state.served_certificate_fingerprint.is_some(),
-        "no loopback port could be opened in {MAX_ADDRESS_ATTEMPT_COUNT} tries"
-    );
     let (_certificate_file, disk_certificate_fingerprint) =
         load_or_create_certificate(&data_directory).expect("this machine's certificate");
     assert_eq!(
         remote_state.served_certificate_fingerprint,
         Some(disk_certificate_fingerprint),
-        "the listener serves the certificate this machine holds"
+        "the listener serves the certificate this machine holds; `None` means no loopback port \
+         opened in {MAX_ADDRESS_ATTEMPT_COUNT} tries"
     );
     let remote_listen_address = remote_state
         .remote_listen_address
@@ -8737,6 +9081,7 @@ fn an_address_that_cannot_be_taken_writes_no_record_of_the_answer() {
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
+        token_use_writer: None,
     };
 
     let bind_error =
@@ -8785,6 +9130,7 @@ fn a_certificate_that_cannot_be_read_refuses_the_switch_on_and_names_the_address
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
+        token_use_writer: None,
     };
 
     let enable_result = enable_remote_access(
@@ -8823,6 +9169,7 @@ fn taking_the_address_writes_the_record_and_serves_on_it() {
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
+        token_use_writer: None,
     };
 
     let enable_result = enable_remote_on_a_free_port(&mut remote_state, &router_events_sender);
@@ -8883,6 +9230,7 @@ fn the_status_separates_the_answer_given_from_the_port_being_open() {
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
+        token_use_writer: None,
     };
 
     let RouterResult::RemoteStatus {
@@ -8917,6 +9265,7 @@ fn the_status_names_the_served_certificate_and_how_many_connections_it_holds() {
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
+        token_use_writer: None,
     };
     let _served_streams: Vec<TcpStream> = (0..3u64)
         .map(|remote_connection_id| {
@@ -9077,6 +9426,7 @@ fn the_description_scan_records_an_id_two_sockets_advertise_without_asking_eithe
                 session_id: duplicated_session_id,
                 advertisement_count: 2,
                 owner_user_ids: vec![1001, 1002],
+                reachable_owner_user_id: None,
             }],
             ..ForeignSessionListing::default()
         },
@@ -9501,4 +9851,27 @@ fn a_lookup_the_list_already_answers_reads_no_folder_of_the_shared_directory() {
         )
     );
     assert_eq!(name_listing.duplicated_sessions.len(), 1);
+}
+
+#[test]
+fn a_description_refused_while_the_session_restarts_records_it_as_restarting() {
+    let description_failure_reasons = [
+        build_description_failure_reason(CliError::SessionRestarting {
+            detail: "the session is restarting; ask again in a moment".to_string(),
+        }),
+        build_description_failure_reason(CliError::SessionAnswerTimedOut),
+        build_description_failure_reason(CliError::IpcUnavailable {
+            detail: "the token presented does not match this Koshi's".to_string(),
+        }),
+    ]
+    .map(|description_failure_reason| description_failure_reason.to_string());
+
+    assert_eq!(
+        description_failure_reasons,
+        [
+            "it is restarting".to_string(),
+            "it did not answer within 5 seconds".to_string(),
+            "IPC unavailable: the token presented does not match this Koshi's".to_string(),
+        ]
+    );
 }

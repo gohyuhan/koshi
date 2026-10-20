@@ -7,6 +7,8 @@
 
 use super::*;
 
+use std::sync::atomic::AtomicBool;
+
 #[cfg(unix)]
 use koshi_core::process::ShellKind;
 #[cfg(unix)]
@@ -79,74 +81,10 @@ fn disarming_leaves_the_child_running() {
     let _ = child_process.kill(); // clean up the still-running child
 }
 
-// `parse_signal_number`, `parse_portable_exit_status`, and
-// `build_portable_pty_size` make no platform syscalls. The tests
-// below run on every platform.
+// `build_portable_pty_size` makes no platform syscalls. The Unix backend
+// opens and resizes every terminal through it.
 
-#[test]
-fn parse_signal_number_parses_the_macos_colon_number_form() {
-    // macOS/BSD `strsignal(3)` text: "<description>: <n>".
-    assert_eq!(parse_signal_number("Terminated: 15"), 15);
-    assert_eq!(parse_signal_number("Hangup: 1"), 1);
-}
-
-#[test]
-fn parse_signal_number_parses_the_null_strsignal_fallback_form() {
-    // portable-pty's own fallback when `strsignal` returns null.
-    assert_eq!(parse_signal_number("Signal 23"), 23);
-    assert_eq!(parse_signal_number("Signal 0"), 0);
-}
-
-#[test]
-fn parse_signal_number_maps_every_known_glibc_bare_description() {
-    // Linux/glibc `strsignal(3)` text carries no trailing number at all.
-    let signal_cases: &[(&str, i32)] = &[
-        ("Hangup", 1),
-        ("Interrupt", 2),
-        ("Quit", 3),
-        ("Illegal instruction", 4),
-        ("Trace/breakpoint trap", 5),
-        ("Aborted", 6),
-        ("Bus error", 7),
-        ("Floating point exception", 8),
-        ("Killed", 9),
-        ("User defined signal 1", 10),
-        ("Segmentation fault", 11),
-        ("User defined signal 2", 12),
-        ("Broken pipe", 13),
-        ("Alarm clock", 14),
-        ("Terminated", 15),
-    ];
-    for (signal_description, expected_signal_number) in signal_cases {
-        assert_eq!(
-            parse_signal_number(signal_description),
-            *expected_signal_number,
-            "parse_signal_number({signal_description:?})"
-        );
-    }
-}
-
-#[test]
-fn parse_signal_number_does_not_greedily_misparse_a_trailing_ordinal_as_a_signal_number() {
-    // "User defined signal 1" ends in the digit `1` and "User defined signal
-    // 2" ends in `2`. Neither has a `": "` separator or the `"Signal "`
-    // prefix. Both resolve through the exact-match table: SIGUSR1 is 10 and
-    // SIGUSR2 is 12.
-    assert_eq!(parse_signal_number("User defined signal 1"), 10);
-    assert_eq!(parse_signal_number("User defined signal 2"), 12);
-}
-
-#[test]
-fn parse_signal_number_returns_zero_for_an_unrecognized_description() {
-    assert_eq!(parse_signal_number("Unknown Signal Foo"), 0);
-    assert_eq!(parse_signal_number(""), 0);
-    // The "Signal " prefix with no number behind it: `strip_prefix` succeeds,
-    // `parse::<i32>` fails, and the exact-match table has no entry.
-    assert_eq!(parse_signal_number("Signal abc"), 0);
-    // A ": " separator with no number behind it takes the same path.
-    assert_eq!(parse_signal_number("foo: bar"), 0);
-}
-
+#[cfg(unix)]
 #[test]
 fn build_portable_pty_size_carries_columns_and_rows_and_zeroes_pixels() {
     let portable_pty_size = build_portable_pty_size(PtySize {
@@ -159,6 +97,7 @@ fn build_portable_pty_size_carries_columns_and_rows_and_zeroes_pixels() {
     assert_eq!(portable_pty_size.pixel_height, 0);
 }
 
+#[cfg(unix)]
 #[test]
 fn build_portable_pty_size_carries_boundary_dimensions_unchanged() {
     let portable_pty_size = build_portable_pty_size(PtySize {
@@ -177,64 +116,79 @@ fn build_portable_pty_size_carries_boundary_dimensions_unchanged() {
     );
 }
 
-#[test]
-fn parse_portable_exit_status_maps_a_clean_exit_code() {
-    assert_eq!(
-        parse_portable_exit_status(portable_pty::ExitStatus::with_exit_code(0)),
-        ExitStatus::ExitCode(0)
-    );
-    assert_eq!(
-        parse_portable_exit_status(portable_pty::ExitStatus::with_exit_code(137)),
-        ExitStatus::ExitCode(137)
-    );
+/// An [`ObservedChildExit`] for `exit_status` that keeps no zombie.
+fn build_observed_exit(exit_status: ExitStatus) -> ObservedChildExit {
+    ObservedChildExit {
+        exit_status,
+        #[cfg(unix)]
+        is_zombie_kept: false,
+    }
 }
 
-#[test]
-fn parse_portable_exit_status_wraps_an_exit_code_above_i32_max_instead_of_panicking() {
-    // `s.exit_code() as i32` wraps: `u32::MAX` (0xFFFF_FFFF) is `-1`, and
-    // `i32::MAX as u32 + 1` is `i32::MIN`.
-    assert_eq!(
-        parse_portable_exit_status(portable_pty::ExitStatus::with_exit_code(u32::MAX)),
-        ExitStatus::ExitCode(-1)
-    );
-    assert_eq!(
-        parse_portable_exit_status(portable_pty::ExitStatus::with_exit_code(
-            i32::MAX as u32 + 1
-        )),
-        ExitStatus::ExitCode(i32::MIN)
-    );
+/// A [`ChildExit`] that records an exit with code `0`.
+fn build_ended_child_exit() -> ChildExit {
+    let child_exit = ChildExit::default();
+    child_exit.publish_observed_exit(build_observed_exit(ExitStatus::ExitCode(0)));
+    child_exit
 }
 
-#[test]
-fn parse_portable_exit_status_maps_a_signal_through_parse_signal_number() {
-    assert_eq!(
-        parse_portable_exit_status(portable_pty::ExitStatus::with_signal("Terminated")),
-        ExitStatus::Signaled(15)
-    );
-    assert_eq!(
-        parse_portable_exit_status(portable_pty::ExitStatus::with_signal("Terminated: 15")),
-        ExitStatus::Signaled(15)
-    );
-    assert_eq!(
-        parse_portable_exit_status(portable_pty::ExitStatus::with_signal(
-            "User defined signal 1"
-        )),
-        ExitStatus::Signaled(10)
-    );
-    assert_eq!(
-        parse_portable_exit_status(portable_pty::ExitStatus::with_signal("nonsense")),
-        ExitStatus::Signaled(0)
+/// What `waitid` with `WEXITED | WNOWAIT | WNOHANG` answers for
+/// `child_process_id`, collecting nothing: `Ok(child_process_id)` for an ended
+/// child that is still a zombie, `Ok(0)` for a child that still runs, and
+/// `Err(errno)` otherwise, such as `ECHILD` once the child is reaped.
+#[cfg(unix)]
+fn read_child_wait_state(child_process_id: u32) -> Result<libc::pid_t, libc::c_int> {
+    // SAFETY: an all-zero `siginfo_t` is valid, and `waitid` writes only into it.
+    let mut child_signal_information: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `WNOHANG` returns at once, and `WNOWAIT` collects nothing.
+    let wait_result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child_process_id,
+            &mut child_signal_information,
+            libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+        )
+    };
+    if wait_result != 0 {
+        return Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .expect("waitid sets errno"));
+    }
+    // SAFETY: a successful `waitid` filled the fields it reports.
+    Ok(unsafe { child_signal_information.si_pid() })
+}
+
+/// Wait until `is_condition_met` answers `true`, asking every 5 ms. Fails the
+/// test with `failure_message` once [`HANG_GUARD_DURATION`] has passed.
+#[cfg(unix)]
+fn wait_for_condition(mut is_condition_met: impl FnMut() -> bool, failure_message: &str) {
+    let deadline = Instant::now() + HANG_GUARD_DURATION;
+    while !is_condition_met() {
+        assert!(Instant::now() < deadline, "{failure_message}");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Wait up to [`HANG_GUARD_DURATION`] until child `child_process_id` has
+/// ended, leaving it a zombie.
+#[cfg(unix)]
+fn wait_until_child_is_zombie(child_process_id: u32) {
+    let expected_process_id =
+        libc::pid_t::try_from(child_process_id).expect("a child process id fits pid_t");
+    wait_for_condition(
+        || read_child_wait_state(child_process_id) == Ok(expected_process_id),
+        &format!("child {child_process_id} did not end"),
     );
 }
 
 /// Nothing received the stop request. The 3-second window is not spent.
 #[test]
 fn is_child_stopped_within_grace_returns_false_for_an_undelivered_stop_request() {
-    let has_child_exited = AtomicBool::new(false);
+    let child_exit = ChildExit::default();
     let wait_started_at = Instant::now();
     let is_stopped = is_child_stopped_within_grace(
         StopRequest::NotDelivered,
-        &has_child_exited,
+        &child_exit,
         Duration::from_secs(3),
     );
     let elapsed_duration = wait_started_at.elapsed();
@@ -252,17 +206,17 @@ fn is_child_stopped_within_grace_returns_false_for_an_undelivered_stop_request()
 /// while the child stays alive.
 #[test]
 fn is_child_stopped_within_grace_waits_when_a_delivered_child_stays() {
-    let has_child_exited = AtomicBool::new(false);
+    let child_exit = ChildExit::default();
     let wait_started_at = Instant::now();
     let is_stopped = is_child_stopped_within_grace(
         StopRequest::Delivered,
-        &has_child_exited,
+        &child_exit,
         Duration::from_millis(200),
     );
     let elapsed_duration = wait_started_at.elapsed();
     assert!(
         !is_stopped,
-        "a child that never sets the exited flag must report as still running"
+        "a child whose exit is never recorded must report as still running"
     );
     assert!(
         elapsed_duration >= Duration::from_millis(200),
@@ -274,17 +228,17 @@ fn is_child_stopped_within_grace_waits_when_a_delivered_child_stays() {
 /// while the leader stays alive.
 #[test]
 fn is_child_stopped_within_grace_waits_for_a_partly_delivered_stop_request() {
-    let has_child_exited = AtomicBool::new(false);
+    let child_exit = ChildExit::default();
     let wait_started_at = Instant::now();
     let is_stopped = is_child_stopped_within_grace(
         StopRequest::Unknown,
-        &has_child_exited,
+        &child_exit,
         Duration::from_millis(200),
     );
     let elapsed_duration = wait_started_at.elapsed();
     assert!(
         !is_stopped,
-        "a group that never sets the exited flag must report as still running"
+        "a group whose leader's exit is never recorded must report as still running"
     );
     assert!(
         elapsed_duration >= Duration::from_millis(200),
@@ -296,16 +250,13 @@ fn is_child_stopped_within_grace_waits_for_a_partly_delivered_stop_request() {
 /// out the 3-second window.
 #[test]
 fn is_child_stopped_within_grace_returns_true_for_an_exited_child() {
-    let has_child_exited = AtomicBool::new(true);
+    let child_exit = build_ended_child_exit();
     let wait_started_at = Instant::now();
-    let is_stopped = is_child_stopped_within_grace(
-        StopRequest::Delivered,
-        &has_child_exited,
-        Duration::from_secs(3),
-    );
+    let is_stopped =
+        is_child_stopped_within_grace(StopRequest::Delivered, &child_exit, Duration::from_secs(3));
     assert!(
         is_stopped,
-        "a child whose exited flag is set must report as stopped"
+        "a child whose exit is recorded must report as stopped"
     );
     assert!(
         wait_started_at.elapsed() < Duration::from_millis(100),
@@ -314,27 +265,24 @@ fn is_child_stopped_within_grace_returns_true_for_an_exited_child() {
     );
 }
 
-/// A child that exits inside the window ends the wait at the next poll, not at
-/// the end of the window.
+/// A child that exits inside the window ends the wait when its exit is
+/// recorded, not at the end of the window.
 #[test]
 fn is_child_stopped_within_grace_ends_when_the_child_exits_during_the_window() {
-    let has_child_exited = Arc::new(AtomicBool::new(false));
-    let child_exit_flag = Arc::clone(&has_child_exited);
-    let child_exit_flag_thread = thread::spawn(move || {
+    let child_exit = Arc::new(ChildExit::default());
+    let watcher_child_exit = Arc::clone(&child_exit);
+    let exit_publisher_thread = thread::spawn(move || {
         thread::sleep(Duration::from_millis(100));
-        child_exit_flag.store(true, Ordering::SeqCst);
+        watcher_child_exit.publish_observed_exit(build_observed_exit(ExitStatus::ExitCode(0)));
     });
 
     let wait_started_at = Instant::now();
-    let is_stopped = is_child_stopped_within_grace(
-        StopRequest::Delivered,
-        &has_child_exited,
-        Duration::from_secs(3),
-    );
+    let is_stopped =
+        is_child_stopped_within_grace(StopRequest::Delivered, &child_exit, Duration::from_secs(3));
     let elapsed_duration = wait_started_at.elapsed();
-    child_exit_flag_thread
+    exit_publisher_thread
         .join()
-        .expect("child exit flag thread");
+        .expect("the exit publisher thread ends");
 
     assert!(
         is_stopped,
@@ -423,28 +371,22 @@ fn should_publish_exit_after_wait(
     )
 }
 
-/// [`ReaderSignals`] over `reader_waker`, `has_child_exited` and `reader_gate`.
+/// [`ReaderSignals`] over `reader_waker`, `child_exit` and `reader_gate`.
 #[cfg(unix)]
 fn build_reader_signals<'a>(
     reader_waker: &'a Waker,
-    has_child_exited: &'a AtomicBool,
+    child_exit: &'a ChildExit,
     reader_gate: &'a ReaderGate,
 ) -> ReaderSignals<'a> {
     ReaderSignals {
         reader_waker,
-        has_child_exited,
+        child_exit,
         reader_gate,
     }
 }
 
-/// A gate holding nobody.
-#[cfg(unix)]
-fn build_reader_gate() -> ReaderGate {
-    ReaderGate::new()
-}
-
-/// A sink-route [`Delivery`] over `pty_sink`, and the [`ExitHandover`] it shares with
-/// the watcher. The exit sender is dropped.
+/// A [`Delivery`] over `pty_sink`, and the [`ExitHandover`] it shares with the
+/// watcher. The exit sender is dropped.
 fn build_sink_delivery(pty_sink: Arc<dyn PtySink>) -> (Delivery, Arc<Mutex<ExitHandover>>) {
     let (_exit_sender, exit_receiver) = channel::<ExitStatus>();
     let exit_handover_state = Arc::new(Mutex::new(ExitHandover::default()));
@@ -550,8 +492,9 @@ fn a_refused_chunk_settles_the_pane() {
 
 #[test]
 fn a_settled_pane_finishes_without_waiting_for_the_exit_status() {
-    // `exit_sender` is held for the whole test and never sent on. `finish` on
-    // a settled pane returns without reading the status channel.
+    // `exit_sender` is held for the whole test and never sent on.
+    // `publish_exit_status` on a settled pane returns without reading the
+    // status channel.
     let (exit_sender, exit_receiver) = channel::<ExitStatus>();
     let delivery = Delivery {
         pty_sink: CountingSink::new(),
@@ -579,8 +522,8 @@ fn a_settled_pane_finishes_without_waiting_for_the_exit_status() {
 
 #[test]
 fn a_reader_at_the_end_of_its_terminal_hands_the_watchers_status_over_once() {
-    // The watcher's status is already on the channel. `finish` hands it to the
-    // consumer once and settles the pane.
+    // The watcher's status is already on the channel. `publish_exit_status`
+    // hands it to the consumer once and settles the pane.
     let pty_sink = CountingSink::new();
     let (exit_sender, exit_receiver) = channel::<ExitStatus>();
     let exit_handover_state = Arc::new(Mutex::new(ExitHandover::default()));
@@ -615,8 +558,8 @@ fn a_reader_at_the_end_of_its_terminal_hands_the_watchers_status_over_once() {
 
 #[test]
 fn a_watcher_that_ends_without_a_status_tells_the_consumer_nothing() {
-    // The status channel closes with nothing on it. `finish` returns and the
-    // consumer is handed no exit.
+    // The status channel closes with nothing on it. `publish_exit_status`
+    // returns and the consumer is handed no exit.
     let pty_sink = CountingSink::new();
     let (exit_sender, exit_receiver) = channel::<ExitStatus>();
     drop(exit_sender);
@@ -996,34 +939,15 @@ fn a_terminal_carries_both_directions_over_the_one_descriptor() {
 #[cfg(unix)]
 #[test]
 fn a_writer_that_stops_sends_the_terminal_nothing() {
-    // After `Stop`, the writer loop writes nothing more to the terminal. This
-    // test drives its own copy of the loop in [`start_writer`], joined once
-    // it stops.
-    let (peer_socket, terminal_socket) =
+    // `typed` is queued before the `Stop` and `late` after it. The writer
+    // thread holds the terminal's only descriptor, which closes when the thread
+    // ends: the far end reads `typed` and then the end of the terminal.
+    let (mut peer_socket, terminal_socket) =
         std::os::unix::net::UnixStream::pair().expect("terminal pair");
-    let terminal_fd = Arc::new(std::os::fd::OwnedFd::from(terminal_socket));
-    let (writer_sender, writer_receiver) = channel::<WriterMessage>();
-
-    let write_side = WriteSide::Owned(Arc::clone(&terminal_fd));
-    let writer_thread = thread::spawn(move || {
-        let mut write_side = write_side;
-        while let Ok(writer_message) = writer_receiver.recv() {
-            match writer_message {
-                WriterMessage::Bytes(input_bytes) => match &mut write_side {
-                    WriteSide::Owned(terminal_fd) => {
-                        let _ = write_terminal(terminal_fd, &input_bytes);
-                    }
-                    WriteSide::Crate(pty_writer) => {
-                        let _ = pty_writer.write_all(&input_bytes);
-                    }
-                },
-                WriterMessage::Barrier(barrier_sender) => {
-                    let _ = barrier_sender.send(());
-                }
-                WriterMessage::Stop => break,
-            }
-        }
-    });
+    let writer_sender = start_writer(
+        WriteSide::Owned(Arc::new(std::os::fd::OwnedFd::from(terminal_socket))),
+        Arc::new(AtomicUsize::new(b"typedlate".len())),
+    );
 
     writer_sender
         .send(WriterMessage::Bytes(b"typed".to_vec()))
@@ -1031,24 +955,18 @@ fn a_writer_that_stops_sends_the_terminal_nothing() {
     writer_sender
         .send(WriterMessage::Stop)
         .expect("stop the writer");
-    writer_thread.join().expect("writer thread");
+    let _ = writer_sender.send(WriterMessage::Bytes(b"late".to_vec()));
 
-    peer_socket.set_nonblocking(true).expect("nonblocking");
-    let mut input_buffer = [0u8; 32];
-    let input_byte_count = (&peer_socket)
-        .read(&mut input_buffer)
-        .expect("the child reads its input");
+    peer_socket
+        .set_read_timeout(Some(HANG_GUARD_DURATION))
+        .expect("bound the read");
+    let mut terminal_input_bytes = Vec::new();
+    peer_socket
+        .read_to_end(&mut terminal_input_bytes)
+        .expect("the writer thread ends and closes the terminal");
     assert_eq!(
-        &input_buffer[..input_byte_count],
-        b"typed",
-        "the terminal received something the writer was never asked to send"
-    );
-    assert_eq!(
-        (&peer_socket)
-            .read(&mut input_buffer)
-            .map_err(|io_error| io_error.kind()),
-        Err(ErrorKind::WouldBlock),
-        "a writer that stops must send the terminal nothing of its own"
+        terminal_input_bytes, b"typed",
+        "a writer that stops must send the terminal nothing after the `Stop`"
     );
 }
 
@@ -1057,7 +975,7 @@ fn a_writer_that_stops_sends_the_terminal_nothing() {
 fn only_a_pseudoterminal_master_is_named_as_one() {
     // `find_terminal_master_name` answers for a pseudoterminal master only: an
     // ordinary file, a pipe, and a closed number all give `None`.
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::FileTypeExt;
 
     let pty_pair = native_pty_system()
@@ -1085,14 +1003,7 @@ fn only_a_pseudoterminal_master_is_named_as_one() {
         "an ordinary file must not be named as a pseudoterminal master"
     );
 
-    let mut pipe_file_descriptors = [0 as libc::c_int; 2];
-    assert_eq!(
-        unsafe { libc::pipe(pipe_file_descriptors.as_mut_ptr()) },
-        0,
-        "the pipe opens"
-    );
-    let reading_end = unsafe { OwnedFd::from_raw_fd(pipe_file_descriptors[0]) };
-    let writing_end = unsafe { OwnedFd::from_raw_fd(pipe_file_descriptors[1]) };
+    let (reading_end, writing_end) = std::io::pipe().expect("the pipe opens");
     assert_eq!(
         find_terminal_master_name(reading_end.as_raw_fd()),
         None,
@@ -1116,6 +1027,8 @@ fn pane_descriptors_are_never_handed_to_a_subsequent_child() {
     use std::os::fd::{AsFd, AsRawFd, FromRawFd};
 
     fn is_close_on_exec(terminal_file_descriptor: std::os::fd::BorrowedFd<'_>) -> bool {
+        // SAFETY: `F_GETFD` reads no memory, and the borrowed descriptor is
+        // open.
         let descriptor_flags =
             unsafe { libc::fcntl(terminal_file_descriptor.as_raw_fd(), libc::F_GETFD) };
         assert!(descriptor_flags >= 0, "read the descriptor's flags");
@@ -1142,8 +1055,11 @@ fn pane_descriptors_are_never_handed_to_a_subsequent_child() {
     );
 
     // The control: a plain `dup` of the terminal carries no `FD_CLOEXEC`.
+    // SAFETY: `dup` takes the descriptor by value and reads no memory.
     let inherited_terminal_descriptor = unsafe { libc::dup(terminal_fd.as_raw_fd()) };
     assert!(inherited_terminal_descriptor >= 0, "duplicate the terminal");
+    // SAFETY: `dup` just opened `inherited_terminal_descriptor`, and nothing
+    // else owns it.
     let inherited_terminal_fd =
         unsafe { std::os::fd::OwnedFd::from_raw_fd(inherited_terminal_descriptor) };
     assert!(
@@ -1205,13 +1121,13 @@ fn a_woken_reader_hands_over_the_last_output_then_stops() {
     let waker = Waker::new().expect("waker");
     let pty_sink = CountingSink::new();
     let (delivery, _exit_handover_state) = build_sink_delivery(pty_sink.clone());
-    let reader_gate = build_reader_gate();
+    let reader_gate = ReaderGate::new();
 
     (&peer_socket)
         .write_all(b"bye")
         .expect("child prints on the way out");
-    // The watcher's order: the flag first, then the ring.
-    let has_child_exited = AtomicBool::new(true);
+    // The watcher's order: the exit record first, then the ring.
+    let child_exit = build_ended_child_exit();
     waker.wake_reader();
 
     let pump_started_at = Instant::now();
@@ -1219,7 +1135,7 @@ fn a_woken_reader_hands_over_the_last_output_then_stops() {
         &delivery,
         PaneId::new(),
         &terminal_fd,
-        build_reader_signals(&waker, &has_child_exited, &reader_gate),
+        build_reader_signals(&waker, &child_exit, &reader_gate),
         EXIT_PUBLISH_GRACE_DURATION,
         EXIT_PUBLISH_LIMIT_DURATION,
     );
@@ -1253,10 +1169,10 @@ fn a_closed_pane_brings_its_reader_straight_back() {
     let (delivery, exit_handover_state) = build_sink_delivery(CountingSink::new());
 
     // Rounds far longer than any scheduling delay.
-    let grace = Duration::from_secs(2);
-    let limit = Duration::from_secs(10);
+    let grace_duration = Duration::from_secs(2);
+    let limit_duration = Duration::from_secs(10);
 
-    // `kill`'s order: settle, then ring.
+    // `kill_pane`'s order: settle, then ring.
     exit_handover_state
         .lock()
         .expect("exit handover state")
@@ -1265,26 +1181,26 @@ fn a_closed_pane_brings_its_reader_straight_back() {
 
     let (completion_sender, completion_receiver) = channel::<Instant>();
     thread::spawn(move || {
-        let has_child_exited = AtomicBool::new(false);
-        let reader_gate = build_reader_gate();
+        let child_exit = ChildExit::default();
+        let reader_gate = ReaderGate::new();
         pump_waited(
             &delivery,
             PaneId::new(),
             &terminal_fd,
-            build_reader_signals(&waker, &has_child_exited, &reader_gate),
-            grace,
-            limit,
+            build_reader_signals(&waker, &child_exit, &reader_gate),
+            grace_duration,
+            limit_duration,
         );
         let _ = completion_sender.send(Instant::now());
     });
 
     let pump_started_at = Instant::now();
-    let pump_ended_at = completion_receiver.recv_timeout(limit).expect(
+    let pump_ended_at = completion_receiver.recv_timeout(limit_duration).expect(
         "a closed pane must not leave its reader waiting on a \
                  descendant that holds the terminal open",
     );
     assert!(
-        pump_ended_at.duration_since(pump_started_at) < grace,
+        pump_ended_at.duration_since(pump_started_at) < grace_duration,
         "a closed pane must release its reader at once, not after a round"
     );
     drop(peer_socket);
@@ -1301,13 +1217,13 @@ fn a_reader_waits_on_a_live_terminal_with_no_timer() {
 
     let (completion_sender, completion_receiver) = channel::<()>();
     thread::spawn(move || {
-        let has_child_exited = AtomicBool::new(false);
-        let reader_gate = build_reader_gate();
+        let child_exit = ChildExit::default();
+        let reader_gate = ReaderGate::new();
         pump_waited(
             &delivery,
             PaneId::new(),
             &terminal_fd,
-            build_reader_signals(&waker, &has_child_exited, &reader_gate),
+            build_reader_signals(&waker, &child_exit, &reader_gate),
             EXIT_PUBLISH_GRACE_DURATION,
             EXIT_PUBLISH_LIMIT_DURATION,
         );
@@ -1342,10 +1258,10 @@ fn output_arriving_after_the_child_has_gone_is_still_handed_over() {
     let (delivery, _exit_handover_state) = build_sink_delivery(pty_sink.clone());
 
     // Rounds twice the gap between writes.
-    let grace = Duration::from_millis(400);
-    let limit = Duration::from_secs(5);
+    let grace_duration = Duration::from_millis(400);
+    let limit_duration = Duration::from_secs(5);
 
-    let has_child_exited = AtomicBool::new(true);
+    let child_exit = build_ended_child_exit();
     waker.wake_reader(); // the child has gone
     let printer_thread = thread::spawn(move || {
         for output_byte in [b'a', b'b', b'c'] {
@@ -1357,14 +1273,14 @@ fn output_arriving_after_the_child_has_gone_is_still_handed_over() {
         peer_socket // hold the terminal open until the pump has stopped
     });
 
-    let reader_gate = build_reader_gate();
+    let reader_gate = ReaderGate::new();
     pump_waited(
         &delivery,
         PaneId::new(),
         &terminal_fd,
-        build_reader_signals(&waker, &has_child_exited, &reader_gate),
-        grace,
-        limit,
+        build_reader_signals(&waker, &child_exit, &reader_gate),
+        grace_duration,
+        limit_duration,
     );
 
     // Two writes landing close together come back as one chunk. The bytes are
@@ -1391,14 +1307,15 @@ fn a_descendant_that_never_stops_printing_still_ends_the_reader() {
     let waker = Waker::new().expect("waker");
     let (delivery, _exit_handover_state) = build_sink_delivery(CountingSink::new());
 
-    let grace = Duration::from_millis(200);
-    let limit = Duration::from_secs(1);
+    let grace_duration = Duration::from_millis(200);
+    let limit_duration = Duration::from_secs(1);
 
-    let has_child_exited = AtomicBool::new(true);
+    let child_exit = build_ended_child_exit();
     waker.wake_reader(); // the child has gone
-                         // The printer never sleeps: the socket buffer always holds something
-                         // between the pump's reads. `far` is nonblocking: a full buffer refuses
-                         // the write instead of parking the printer.
+
+    // The printer never sleeps: the socket buffer always holds something
+    // between the pump's reads. `peer_socket` is nonblocking: a full buffer
+    // refuses the write instead of parking the printer.
     peer_socket.set_nonblocking(true).expect("nonblocking");
     let is_printing = Arc::new(AtomicBool::new(true));
     let should_keep_printing = Arc::clone(&is_printing);
@@ -1410,15 +1327,15 @@ fn a_descendant_that_never_stops_printing_still_ends_the_reader() {
         peer_socket
     });
 
-    let reader_gate = build_reader_gate();
+    let reader_gate = ReaderGate::new();
     let pump_started_at = Instant::now();
     pump_waited(
         &delivery,
         PaneId::new(),
         &terminal_fd,
-        build_reader_signals(&waker, &has_child_exited, &reader_gate),
-        grace,
-        limit,
+        build_reader_signals(&waker, &child_exit, &reader_gate),
+        grace_duration,
+        limit_duration,
     );
     let elapsed_duration = pump_started_at.elapsed();
 
@@ -1426,11 +1343,11 @@ fn a_descendant_that_never_stops_printing_still_ends_the_reader() {
     drop(printer_thread.join().expect("printer thread"));
 
     assert!(
-        elapsed_duration >= limit,
+        elapsed_duration >= limit_duration,
         "the reader must keep handing output over until the limit"
     );
     assert!(
-        elapsed_duration < limit * 3,
+        elapsed_duration < limit_duration * 3,
         "and must stop there rather than running for as long as the \
          descendant does"
     );
@@ -1474,10 +1391,10 @@ fn a_blocking_reader_hands_over_every_chunk_until_the_terminal_ends() {
     let (delivery, _exit_handover_state) = build_sink_delivery(pty_sink.clone());
     let mut reader = ScriptedTerminal::from_output_chunks(vec![b"one", b"two"]);
 
-    let reached_the_end = pump_blocking(&mut reader, &delivery, PaneId::new());
+    let is_terminal_ended = pump_blocking(&mut reader, &delivery, PaneId::new());
 
     assert!(
-        reached_the_end,
+        is_terminal_ended,
         "the terminal ended, so the caller may report the child's exit"
     );
     assert_eq!(
@@ -1506,10 +1423,10 @@ fn a_blocking_reader_stops_when_the_consumer_lets_the_pane_go() {
 
     let (delivery, exit_handover_state) = build_sink_delivery(Arc::new(RefusingSink));
 
-    let reached_the_end = pump_blocking(&mut Endless, &delivery, PaneId::new());
+    let is_terminal_ended = pump_blocking(&mut Endless, &delivery, PaneId::new());
 
     assert!(
-        !reached_the_end,
+        !is_terminal_ended,
         "the terminal is still open, so no exit may be reported behind it"
     );
     assert!(
@@ -1528,10 +1445,10 @@ fn a_reader_told_to_stop_leaves_the_rest_of_the_terminal_unread() {
     let (delivery, _exit_handover_state) = build_sink_delivery(Arc::new(RefusingSink));
     let mut reader = ScriptedTerminal::from_output_chunks(vec![b"one", b"two", b"three"]);
 
-    let reached_the_end = pump_blocking(&mut reader, &delivery, PaneId::new());
+    let is_terminal_ended = pump_blocking(&mut reader, &delivery, PaneId::new());
 
     assert!(
-        !reached_the_end,
+        !is_terminal_ended,
         "the pump reported an end it never reached"
     );
     assert_eq!(
@@ -1567,9 +1484,9 @@ fn draining_a_terminal_reads_it_to_the_end() {
 
 #[test]
 fn resizing_a_terminal_that_is_already_closed_changes_nothing() {
-    // A `Crate` terminal whose master has been taken out takes a resize as
+    // A `Master` terminal whose master has been taken out takes a resize as
     // `Ok(())`.
-    let terminal = Terminal::Crate(Arc::new(Mutex::new(None)));
+    let terminal = Terminal::Master(Arc::new(Mutex::new(None)));
 
     assert_eq!(
         terminal.resize(PtySize {
@@ -1631,7 +1548,7 @@ const STANDARD_PTY_SIZE: PtySize = PtySize {
 #[cfg(unix)]
 static PTY_GATE: Mutex<()> = Mutex::new(());
 
-/// A spawn spec running `script` under `/bin/sh`.
+/// A spawn spec running `shell_script` under `/bin/sh`.
 #[cfg(unix)]
 fn build_shell_spawn_spec(shell_script: &str) -> SpawnSpec {
     SpawnSpec {
@@ -1686,14 +1603,18 @@ fn read_output_until_contains(pty_sink: &CountingSink, expected_output_bytes: &[
     }
 }
 
-/// Pause `backend`'s readers on a thread of its own. A pause that has not
-/// settled after `HANG_GUARD_DURATION` fails the test.
+/// Pause `pty_backend`'s readers and wait until they park, on a thread of its
+/// own. A pause that has not settled after `HANG_GUARD_DURATION` fails the
+/// test.
 #[cfg(unix)]
 fn pause_readers_or_fail(pty_backend: &Arc<PortablePtyBackend>) -> Result<(), PtyError> {
     let (pause_result_sender, pause_result_receiver) = channel::<Result<(), PtyError>>();
-    let backend_clone = Arc::clone(pty_backend);
+    let pausing_backend = Arc::clone(pty_backend);
     thread::spawn(move || {
-        let _ = pause_result_sender.send(backend_clone.pause_readers());
+        let pause_result = pausing_backend
+            .pause_readers()
+            .map(|()| pausing_backend.wait_until_readers_parked());
+        let _ = pause_result_sender.send(pause_result);
     });
     pause_result_receiver
         .recv_timeout(HANG_GUARD_DURATION)
@@ -1724,11 +1645,14 @@ fn duplicate_terminal_for_process_swap(
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     set_terminal_cloexec(terminal_file_descriptor, false).expect("clear close-on-exec");
+    // SAFETY: `dup` takes the descriptor by value and reads no memory.
     let carried_file_descriptor = unsafe { libc::dup(terminal_file_descriptor) };
     assert!(
         carried_file_descriptor >= 0,
         "the descriptor must survive the swap"
     );
+    // SAFETY: `dup` just opened `carried_file_descriptor`, and nothing else
+    // owns it.
     let carried_terminal_fd = unsafe { OwnedFd::from_raw_fd(carried_file_descriptor) };
     set_terminal_cloexec(carried_terminal_fd.as_raw_fd(), true).expect("set close-on-exec");
     carried_terminal_fd
@@ -1807,7 +1731,7 @@ fn a_resumed_reader_is_not_left_in_its_exit_rounds() {
 #[test]
 fn pausing_settles_when_a_panes_child_has_already_ended() {
     // The pane's child has ended and its reader has left its pump. The pause
-    // settles with `live` at 0.
+    // settles with `reader_count` at 0.
     let pty_sink = CountingSink::new();
     let (backend, pane_id) = start_backend_with_shell_script(pty_sink.clone(), "printf bye");
 
@@ -1839,8 +1763,9 @@ fn pausing_settles_when_a_panes_child_has_already_ended() {
 #[test]
 fn a_reader_waiting_for_an_exit_that_never_comes_is_no_longer_counted() {
     // The terminal ends while the pane is unsettled and no exit is published.
-    // The reader waits inside `finish`, and leaves the gate before that wait:
-    // `reader_count` drops to 0 and `parked_reader_count` stays 0.
+    // The reader waits inside `publish_exit_status`, and leaves the gate
+    // before that wait: `reader_count` drops to 0 and `parked_reader_count`
+    // stays 0.
     let (peer_socket, terminal_fd) = build_fake_terminal();
     let reader_gate = Arc::new(ReaderGate::new());
 
@@ -1868,26 +1793,23 @@ fn a_reader_waiting_for_an_exit_that_never_comes_is_no_longer_counted() {
         PaneId::new(),
         Arc::new(terminal_fd),
         Arc::new(Waker::new().expect("waker")),
-        Arc::new(AtomicBool::new(false)),
+        Arc::new(ChildExit::default()),
         reader_ticket,
     );
 
     drop(peer_socket); // the terminal reports an end
 
-    let reader_count_deadline = Instant::now() + HANG_GUARD_DURATION;
-    while reader_gate
-        .gate_state
-        .lock()
-        .expect("reader gate")
-        .reader_count
-        != 0
-    {
-        assert!(
-            Instant::now() < reader_count_deadline,
-            "a reader past its pump is still counted, so a pause would never settle"
-        );
-        thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_condition(
+        || {
+            reader_gate
+                .gate_state
+                .lock()
+                .expect("reader gate")
+                .reader_count
+                == 0
+        },
+        "a reader past its pump is still counted, so a pause would never settle",
+    );
     assert_eq!(
         reader_gate
             .gate_state
@@ -1904,22 +1826,26 @@ fn a_reader_waiting_for_an_exit_that_never_comes_is_no_longer_counted() {
 #[cfg(unix)]
 #[test]
 fn a_pane_whose_reader_cannot_park_refuses_the_pause() {
-    // A pane with no doorbell (`reader_wake: None`) refuses the pause by name,
+    // A pane with no doorbell (`reader_waker: None`) refuses the pause by name,
     // and the gate stays open.
     let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
     let pane_id = PaneId::new();
     let (writer_sender, _writer_receiver) = channel::<WriterMessage>();
     backend.pane_by_id.lock().expect("panes").insert(
         pane_id,
-        build_pane_entry(Terminal::Crate(Arc::new(Mutex::new(None))), writer_sender),
+        build_pane_entry(
+            Terminal::Master(Arc::new(Mutex::new(None))),
+            writer_sender,
+            Arc::new(AtomicUsize::new(0)),
+        ),
     );
 
-    let refused = backend
+    let pause_error = backend
         .pause_readers()
         .expect_err("a reader that cannot park must refuse the pause");
 
     assert_eq!(
-        refused,
+        pause_error,
         PtyError::Io {
             detail: format!("pane {pane_id} has no terminal descriptor, so its reader cannot park"),
         },
@@ -1937,18 +1863,18 @@ fn a_pane_whose_reader_cannot_park_refuses_the_pause() {
 }
 
 /// A terminal that takes no write until it is let go: each write waits for one
-/// `release`.
+/// value on `release_receiver`.
 struct HeldTerminal {
     /// One value here lets one write land.
     release_receiver: Receiver<()>,
     /// Everything the writes have landed, in order.
-    written: Arc<Mutex<Vec<u8>>>,
+    written_bytes: Arc<Mutex<Vec<u8>>>,
 }
 
 impl Write for HeldTerminal {
     fn write(&mut self, input_bytes: &[u8]) -> std::io::Result<usize> {
         let _ = self.release_receiver.recv();
-        self.written
+        self.written_bytes
             .lock()
             .expect("written bytes")
             .extend_from_slice(input_bytes);
@@ -1965,10 +1891,13 @@ fn a_writer_answers_a_barrier_only_after_writing_what_came_before() {
     // A barrier queued behind a write is answered only after that write lands.
     let written_bytes = Arc::new(Mutex::new(Vec::new()));
     let (release_sender, release_receiver) = channel::<()>();
-    let writer_sender = start_writer(WriteSide::Crate(Box::new(HeldTerminal {
-        release_receiver,
-        written: Arc::clone(&written_bytes),
-    })));
+    let writer_sender = start_writer(
+        WriteSide::Blocking(Box::new(HeldTerminal {
+            release_receiver,
+            written_bytes: Arc::clone(&written_bytes),
+        })),
+        Arc::new(AtomicUsize::new(b"typed".len())),
+    );
 
     writer_sender
         .send(WriterMessage::Bytes(b"typed".to_vec()))
@@ -1998,20 +1927,25 @@ fn a_writer_answers_a_barrier_only_after_writing_what_came_before() {
     let _ = writer_sender.send(WriterMessage::Stop);
 }
 
-/// A pane entry around `terminal` and `writer_sender` with no child of its own. Its
-/// process id is this test process, its child is marked exited, and its size
-/// is [`STANDARD_PTY_SIZE`].
+/// A pane entry around `terminal` and `writer_sender`, whose writer thread
+/// counts its queued input in `queued_input_byte_count`, with no child of its
+/// own. Its process id is this test process, its child is marked exited, and
+/// its size is [`STANDARD_PTY_SIZE`].
 #[cfg(unix)]
-fn build_pane_entry(terminal: Terminal, writer_sender: Sender<WriterMessage>) -> PaneEntry {
+fn build_pane_entry(
+    terminal: Terminal,
+    writer_sender: Sender<WriterMessage>,
+    queued_input_byte_count: Arc<AtomicUsize>,
+) -> PaneEntry {
     let (exit_wait_cancel_sender, _exit_wait_cancel_receiver) = channel::<()>();
     PaneEntry {
         terminal,
         pty_size: STANDARD_PTY_SIZE,
         writer_sender,
+        queued_input_byte_count,
         // This test process's own id.
         kill_control: PtyChildKillControl::from_process_id(std::process::id()),
-        has_child_exited: Arc::new(AtomicBool::new(true)),
-        child_exit_status: Arc::new(OnceLock::new()),
+        child_exit: Arc::new(build_ended_child_exit()),
         exit_handover_state: Arc::new(Mutex::new(ExitHandover::default())),
         exit_wait_cancel_sender,
         reader_thread: spawn_pty_thread("koshi-pty-read", || {}),
@@ -2030,10 +1964,18 @@ fn a_flush_answers_only_once_the_terminal_holds_every_byte_the_backend_took() {
     let terminal_fd = Arc::new(std::os::fd::OwnedFd::from(terminal_socket));
     let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
     let pane_id = PaneId::new();
-    let writer_sender = start_writer(WriteSide::Owned(Arc::clone(&terminal_fd)));
+    let queued_input_byte_count = Arc::new(AtomicUsize::new(0));
+    let writer_sender = start_writer(
+        WriteSide::Owned(Arc::clone(&terminal_fd)),
+        Arc::clone(&queued_input_byte_count),
+    );
     backend.pane_by_id.lock().expect("panes").insert(
         pane_id,
-        build_pane_entry(Terminal::Owned(terminal_fd), writer_sender),
+        build_pane_entry(
+            Terminal::Owned(terminal_fd),
+            writer_sender,
+            queued_input_byte_count,
+        ),
     );
 
     backend
@@ -2061,24 +2003,32 @@ fn a_pane_whose_writer_cannot_finish_refuses_the_flush() {
     let (release_sender, release_receiver) = channel::<()>();
     let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
     let pane_id = PaneId::new();
-    let writer_sender = start_writer(WriteSide::Crate(Box::new(HeldTerminal {
-        release_receiver,
-        written: Arc::new(Mutex::new(Vec::new())),
-    })));
+    let queued_input_byte_count = Arc::new(AtomicUsize::new(0));
+    let writer_sender = start_writer(
+        WriteSide::Blocking(Box::new(HeldTerminal {
+            release_receiver,
+            written_bytes: Arc::new(Mutex::new(Vec::new())),
+        })),
+        Arc::clone(&queued_input_byte_count),
+    );
     backend.pane_by_id.lock().expect("panes").insert(
         pane_id,
-        build_pane_entry(Terminal::Crate(Arc::new(Mutex::new(None))), writer_sender),
+        build_pane_entry(
+            Terminal::Master(Arc::new(Mutex::new(None))),
+            writer_sender,
+            queued_input_byte_count,
+        ),
     );
 
     backend
         .write_pane_input(pane_id, b"typed")
         .expect("write to the pane");
-    let refused = backend
+    let flush_error = backend
         .flush_writers()
         .expect_err("a writer that cannot finish must refuse the flush");
 
     assert_eq!(
-        refused,
+        flush_error,
         PtyError::Io {
             detail: format!(
                 "pane {pane_id} is still writing what it was handed, so it cannot settle"
@@ -2092,6 +2042,95 @@ fn a_pane_whose_writer_cannot_finish_refuses_the_flush() {
 
 #[cfg(unix)]
 #[test]
+fn a_pane_whose_child_takes_no_input_refuses_input_past_its_queue_limit() {
+    // The writer holds its first write until it is let go: no write finishes
+    // before the asserts, and the count keeps every queued byte.
+    let (release_sender, release_receiver) = channel::<()>();
+    let written_bytes = Arc::new(Mutex::new(Vec::new()));
+    let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
+    let pane_id = PaneId::new();
+    let queued_input_byte_count = Arc::new(AtomicUsize::new(0));
+    let writer_sender = start_writer(
+        WriteSide::Blocking(Box::new(HeldTerminal {
+            release_receiver,
+            written_bytes: Arc::clone(&written_bytes),
+        })),
+        Arc::clone(&queued_input_byte_count),
+    );
+    backend.pane_by_id.lock().expect("panes").insert(
+        pane_id,
+        build_pane_entry(
+            Terminal::Master(Arc::new(Mutex::new(None))),
+            writer_sender,
+            Arc::clone(&queued_input_byte_count),
+        ),
+    );
+    let input_one_byte_short_of_the_limit = vec![b'a'; MAX_QUEUED_PANE_INPUT_BYTE_COUNT - 1];
+
+    backend
+        .write_pane_input(pane_id, &input_one_byte_short_of_the_limit)
+        .expect("input up to the limit is queued");
+    backend
+        .write_pane_input(pane_id, b"b")
+        .expect("the byte that reaches the limit is queued");
+    assert_eq!(
+        backend.write_pane_input(pane_id, b"c"),
+        Err(PtyError::InputQueueFull {
+            pane_id,
+            queued_byte_count: MAX_QUEUED_PANE_INPUT_BYTE_COUNT,
+        })
+    );
+    assert_eq!(
+        queued_input_byte_count.load(Ordering::SeqCst),
+        MAX_QUEUED_PANE_INPUT_BYTE_COUNT,
+        "refused input is not counted"
+    );
+
+    release_sender.send(()).expect("let the first write land");
+    release_sender.send(()).expect("let the second write land");
+    backend.flush_writers().expect("the flush answers");
+    assert_eq!(queued_input_byte_count.load(Ordering::SeqCst), 0);
+    release_sender.send(()).expect("let the next write land");
+    backend
+        .write_pane_input(pane_id, b"d")
+        .expect("input written out frees its room");
+    backend.flush_writers().expect("the flush answers");
+    let written_bytes = written_bytes.lock().expect("written bytes");
+    assert_eq!(written_bytes.len(), MAX_QUEUED_PANE_INPUT_BYTE_COUNT + 1);
+    assert_eq!(
+        &written_bytes[MAX_QUEUED_PANE_INPUT_BYTE_COUNT - 1..],
+        b"bd"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn input_for_a_writer_that_has_ended_is_refused_and_not_counted() {
+    let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
+    let pane_id = PaneId::new();
+    let queued_input_byte_count = Arc::new(AtomicUsize::new(0));
+    let (writer_sender, writer_receiver) = channel::<WriterMessage>();
+    drop(writer_receiver);
+    backend.pane_by_id.lock().expect("panes").insert(
+        pane_id,
+        build_pane_entry(
+            Terminal::Master(Arc::new(Mutex::new(None))),
+            writer_sender,
+            Arc::clone(&queued_input_byte_count),
+        ),
+    );
+
+    assert_eq!(
+        backend.write_pane_input(pane_id, b"typed"),
+        Err(PtyError::Io {
+            detail: "sending on a closed channel".to_string(),
+        })
+    );
+    assert_eq!(queued_input_byte_count.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(unix)]
+#[test]
 fn setting_close_on_exec_touches_only_that_one_flag() {
     // `FD_CLOEXEC` is the only descriptor flag; the whole flag word is read
     // back.
@@ -2101,6 +2140,8 @@ fn setting_close_on_exec_touches_only_that_one_flag() {
         std::os::unix::net::UnixStream::pair().expect("terminal pair");
     let terminal_fd = std::os::fd::OwnedFd::from(terminal_socket);
     let terminal_file_descriptor = terminal_fd.as_raw_fd();
+    // SAFETY: `F_GETFD` reads no memory, and `terminal_fd` keeps the
+    // descriptor open for the whole test.
     let descriptor_flags = || unsafe { libc::fcntl(terminal_file_descriptor, libc::F_GETFD) };
 
     set_terminal_cloexec(terminal_file_descriptor, false).expect("clear close-on-exec");
@@ -2163,7 +2204,10 @@ fn a_carried_pane_reports_the_size_its_terminal_was_last_set_to() {
     let terminal_file_descriptor = carried_panes[0]
         .terminal_fd
         .expect("a real pty exposes a descriptor");
+    // SAFETY: an all-zero `winsize` is valid.
     let mut window_size: libc::winsize = unsafe { std::mem::zeroed() };
+    // SAFETY: `TIOCGWINSZ` writes one `winsize` to `window_size`, which lives
+    // for the call.
     let read_window_result = unsafe {
         libc::ioctl(
             terminal_file_descriptor,
@@ -2181,7 +2225,7 @@ fn a_carried_pane_reports_the_size_its_terminal_was_last_set_to() {
         terminal_file_descriptor,
         match &backend.pane_by_id.lock().expect("panes")[&pane_id].terminal {
             Terminal::Owned(owned) => owned.as_raw_fd(),
-            Terminal::Crate(_) => panic!("a real pty must own its descriptor"),
+            Terminal::Master(_) => panic!("a real pty must own its descriptor"),
         },
         "the record must carry the pane's own descriptor"
     );
@@ -2251,7 +2295,8 @@ fn a_paused_panes_terminal_can_be_taken_back_by_another_backend() {
 #[test]
 fn a_pane_taken_back_after_its_child_ended_still_publishes_the_exit() {
     // The child has ended, unreaped, before the pane is taken back. The
-    // taken-back pane's watcher reaps it and publishes `ExitCode(7)`.
+    // taken-back pane's watcher reads `ExitCode(7)` from the zombie and keeps
+    // it, and closing the pane reaps it.
     let (terminal_fd, child_process_id) = {
         let _pty_gate_guard = PTY_GATE.lock().expect("pty gate");
         let pty_pair = native_pty_system()
@@ -2294,14 +2339,30 @@ fn a_pane_taken_back_after_its_child_ended_still_publishes_the_exit() {
         ExitStatus::ExitCode(7),
         "the exit the child really ended with must reach the consumer"
     );
+    let child_wait_process_id =
+        libc::pid_t::try_from(child_process_id).expect("a child process id fits pid_t");
+    assert_eq!(
+        read_child_wait_state(child_process_id),
+        Ok(child_wait_process_id),
+        "the ended child stays a zombie while the pane is open"
+    );
+
+    backend
+        .kill_pane(pane_id, KillPolicy::Force)
+        .expect("close the pane");
+    assert_eq!(
+        read_child_wait_state(child_process_id),
+        Err(libc::ECHILD),
+        "closing the pane reaps the child"
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn a_child_that_ends_while_the_readers_are_held_keeps_the_code_it_ended_with() {
     // The child ends while the readers are held. The old backend's watcher
-    // reaps it, the carried record holds `ExitCode(3)`, and the taken-back
-    // pane publishes that status once.
+    // keeps it a zombie, the carried record holds no status, and the
+    // taken-back pane reads `ExitCode(3)` from the zombie and publishes it once.
     let old_pty_sink = CountingSink::new();
     // The child prints, then ends after one second.
     let (old_backend, pane_id) =
@@ -2310,28 +2371,25 @@ fn a_child_that_ends_while_the_readers_are_held_keeps_the_code_it_ended_with() {
     read_output_until_contains(&old_pty_sink, b"ready");
     pause_readers_or_fail(&old_backend).expect("hold the readers still");
 
-    // The old backend's watcher reaps the child while its reader is held.
-    let carried_pane_deadline = Instant::now() + HANG_GUARD_DURATION;
-    let carried_pane = loop {
-        let carried_panes = old_backend.list_carried_panes();
-        assert_eq!(carried_panes.len(), 1, "one live pane must give one record");
-        if carried_panes[0].exit_status.is_some() {
-            break carried_panes[0];
-        }
-        assert!(
-            Instant::now() < carried_pane_deadline,
-            "the held pane's child was never reaped"
-        );
-        thread::sleep(Duration::from_millis(5));
-    };
+    // The old backend's watcher sees the child end while its reader is held.
+    wait_for_condition(
+        || {
+            old_backend.pane_by_id.lock().expect("panes")[&pane_id]
+                .child_exit
+                .is_zombie_kept()
+        },
+        "the held pane's watcher never saw its child end",
+    );
+    let carried_panes = old_backend.list_carried_panes();
+    assert_eq!(carried_panes.len(), 1, "one live pane must give one record");
+    let carried_pane = carried_panes[0];
     assert_eq!(
         carried_pane.pane_id, pane_id,
         "the record must name the pane"
     );
     assert_eq!(
-        carried_pane.exit_status,
-        Some(ExitStatus::ExitCode(3)),
-        "a carried pane must report the exit its own watcher observed"
+        carried_pane.exit_status, None,
+        "a child kept as a zombie carries no status: the next image reads it"
     );
 
     let carried_terminal_fd = duplicate_terminal_for_process_swap(
@@ -2513,20 +2571,14 @@ fn a_child_that_ends_while_its_reader_is_held_publishes_its_exit_once_on_release
         "the reader parks well before its child's two-second sleep runs out"
     );
 
-    let child_exit_deadline = Instant::now() + HANG_GUARD_DURATION;
-    loop {
-        let has_child_exited = backend.pane_by_id.lock().expect("panes")[&pane_id]
-            .has_child_exited
-            .load(Ordering::SeqCst);
-        if has_child_exited {
-            break;
-        }
-        assert!(
-            Instant::now() < child_exit_deadline,
-            "the pane's child never ended while its reader was held"
-        );
-        thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_condition(
+        || {
+            backend.pane_by_id.lock().expect("panes")[&pane_id]
+                .child_exit
+                .has_exited()
+        },
+        "the pane's child never ended while its reader was held",
+    );
 
     assert_eq!(
         pty_sink.get_exit_status_count(),
@@ -2678,7 +2730,7 @@ fn every_byte_a_child_is_printing_crosses_the_hand_over_once_and_in_order() {
         .expect("take the pane back");
 
     // The two sinks end to end are everything the consumer was handed.
-    // `before` never grows.
+    // `output_before_swap` never grows.
     let final_output_line = format!("{BURST_LINE_COUNT:04}");
     let combined_output_bytes = {
         let output_deadline = Instant::now() + HANG_GUARD_DURATION * 4;
@@ -2732,7 +2784,7 @@ fn a_pane_taken_back_on_a_terminal_already_at_its_end_reports_its_child_gone() {
     let backend = PortablePtyBackend::with_pty_sink(pty_sink.clone());
     let pane_id = PaneId::new();
 
-    // A process id this process has no child under: `waitpid` answers
+    // A process id this process has no child under: `waitid` answers
     // `ECHILD`.
     backend
         .adopt(
@@ -2770,23 +2822,25 @@ fn a_descriptor_this_process_does_not_hold_refuses_the_close_on_exec_change() {
     // A descriptor number this process does not hold refuses both the set and
     // the clear with `EBADF`.
     let unopened_file_descriptor = libc::c_int::MAX;
+    // SAFETY: `F_GETFD` reads no memory, and a descriptor that is not open
+    // gives `-1`.
     let descriptor_flags = unsafe { libc::fcntl(unopened_file_descriptor, libc::F_GETFD) };
     assert_eq!(
         descriptor_flags, -1,
         "the descriptor under test must not be open"
     );
 
-    let refused = set_terminal_cloexec(unopened_file_descriptor, true)
+    let set_cloexec_error = set_terminal_cloexec(unopened_file_descriptor, true)
         .expect_err("a descriptor this process does not hold must refuse the change");
     assert_eq!(
-        refused.raw_os_error(),
+        set_cloexec_error.raw_os_error(),
         Some(libc::EBADF),
         "and must name the descriptor as bad"
     );
 
-    let refused = set_terminal_cloexec(unopened_file_descriptor, false)
+    let clear_cloexec_error = set_terminal_cloexec(unopened_file_descriptor, false)
         .expect_err("clearing the flag must refuse it the same way");
-    assert_eq!(refused.raw_os_error(), Some(libc::EBADF));
+    assert_eq!(clear_cloexec_error.raw_os_error(), Some(libc::EBADF));
 }
 
 // --- the terminal's opening cursor question ---
@@ -2827,9 +2881,14 @@ impl Read for ChunkedTerminal {
 /// Read `output_chunks` through the reader that takes the request out, and hand back
 /// what it delivered as output.
 fn read_output_without_cursor_request(output_chunks: &[&[u8]]) -> Vec<u8> {
-    let mut reader =
-        RemovesCursorRequest::from_inner_reader(ChunkedTerminal::from_output_chunks(output_chunks));
+    read_delivered_output_to_end(&mut RemovesCursorRequest::from_inner_reader(
+        ChunkedTerminal::from_output_chunks(output_chunks),
+    ))
+}
 
+/// Read `reader` through 64-byte reads until a read gives `0`, and hand back
+/// every byte it delivered.
+fn read_delivered_output_to_end(reader: &mut impl Read) -> Vec<u8> {
     let mut delivered_output_bytes = Vec::new();
     let mut read_buffer = [0u8; 64];
     loop {
@@ -2858,18 +2917,7 @@ fn an_empty_destination_buffer_does_not_end_the_request_watch() {
 
     assert_eq!(reader.read(&mut []).expect("no room reads nothing"), 0);
 
-    let mut delivered = Vec::new();
-    let mut read_buffer = [0u8; 64];
-    loop {
-        match reader
-            .read(&mut read_buffer)
-            .expect("the terminal hands back its bytes")
-        {
-            0 => break,
-            read_byte_count => delivered.extend_from_slice(&read_buffer[..read_byte_count]),
-        }
-    }
-    assert_eq!(delivered, b"hello");
+    assert_eq!(read_delivered_output_to_end(&mut reader), b"hello");
 }
 
 #[test]
@@ -3144,15 +3192,405 @@ fn a_reader_that_leaves_its_pump_settles_a_pause_waiting_for_it() {
 
 #[cfg(unix)]
 #[test]
-// `wait_for_child` is the reap under test.
+// `reap_child` is the reap under test.
 #[expect(clippy::zombie_processes)]
-fn wait_for_child_reports_the_code_the_child_ended_with() {
+fn wait_for_child_exit_reports_the_code_and_keeps_the_child_until_it_is_reaped() {
     let child_process = std::process::Command::new("/bin/sh")
         .args(["-c", "exit 5"])
         .spawn()
         .expect("spawn");
+    let child_process_id = child_process.id();
+    let child_wait_process_id =
+        libc::pid_t::try_from(child_process_id).expect("a child process id fits pid_t");
 
-    assert_eq!(wait_for_child(child_process.id()), ExitStatus::ExitCode(5));
+    assert_eq!(
+        wait_for_child_exit(child_process_id),
+        ObservedChildExit {
+            exit_status: ExitStatus::ExitCode(5),
+            is_zombie_kept: true,
+        }
+    );
+    assert_eq!(
+        read_child_wait_state(child_process_id),
+        Ok(child_wait_process_id),
+        "the ended child stays a zombie"
+    );
+
+    reap_child(child_process_id);
+    assert_eq!(
+        read_child_wait_state(child_process_id),
+        Err(libc::ECHILD),
+        "a reaped child is gone"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+// `reap_child` is the reap under test.
+#[expect(clippy::zombie_processes)]
+fn wait_for_child_exit_reports_the_number_of_the_signal_that_ended_the_child() {
+    let child_process = std::process::Command::new("/bin/sh")
+        .args(["-c", "kill -TERM $$"])
+        .spawn()
+        .expect("spawn");
+    let child_process_id = child_process.id();
+
+    assert_eq!(
+        wait_for_child_exit(child_process_id),
+        ObservedChildExit {
+            exit_status: ExitStatus::Signaled(libc::SIGTERM),
+            is_zombie_kept: true,
+        }
+    );
+    reap_child(child_process_id);
+}
+
+#[cfg(unix)]
+#[test]
+fn wait_for_child_exit_reports_an_unobserved_exit_for_a_process_that_is_not_a_child() {
+    assert_eq!(
+        wait_for_child_exit(std::process::id()),
+        ObservedChildExit {
+            exit_status: UNOBSERVED_EXIT,
+            is_zombie_kept: false,
+        }
+    );
+}
+
+#[test]
+fn a_child_left_running_hands_the_reap_of_its_zombie_to_the_watcher() {
+    let child_exit = ChildExit::default();
+
+    assert!(
+        child_exit.leave_child_running(),
+        "a child with no recorded exit is left running"
+    );
+    assert!(
+        child_exit.publish_observed_exit(build_observed_exit(ExitStatus::ExitCode(0))),
+        "the exit published afterwards tells the watcher to reap"
+    );
+}
+
+#[test]
+fn a_child_whose_exit_was_recorded_first_is_not_left_running() {
+    let child_exit = ChildExit::default();
+
+    assert!(
+        !child_exit.publish_observed_exit(build_observed_exit(ExitStatus::ExitCode(0))),
+        "the watcher does not reap a child the closing call waits for"
+    );
+    assert!(
+        !child_exit.leave_child_running(),
+        "a recorded exit stays with the closing call"
+    );
+    assert_eq!(
+        *child_exit.lock_exit_record(),
+        ChildExitRecord {
+            observed_exit: Some(build_observed_exit(ExitStatus::ExitCode(0))),
+            is_left_running: false,
+        }
+    );
+}
+
+/// A [`WatchRelease`] for the child `child_process_id` that `child_exit`
+/// records, whose status and writer channels have no receiver, and whose
+/// backend's set of children left running is `left_running_child_process_ids`.
+#[cfg(unix)]
+fn build_watch_release(
+    child_exit: &Arc<ChildExit>,
+    child_process_id: u32,
+    left_running_child_process_ids: &Arc<Mutex<BTreeSet<u32>>>,
+) -> WatchRelease {
+    let (exit_status_sender, _) = channel();
+    let (writer_stop_sender, _) = channel();
+    WatchRelease {
+        child_exit: Arc::clone(child_exit),
+        exit_status_sender,
+        writer_stop_sender,
+        reader_waker: None,
+        child_process_id,
+        left_running_child_process_ids: Arc::clone(left_running_child_process_ids),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+// The zombie is reaped by the watcher's `publish_exit_status`.
+#[expect(clippy::zombie_processes)]
+fn the_watcher_reaps_the_zombie_of_a_child_left_running() {
+    let child_process = std::process::Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .expect("spawn");
+    let child_process_id = child_process.id();
+    let left_running_child_process_ids = Arc::new(Mutex::new(BTreeSet::from([child_process_id])));
+    let child_exit = Arc::new(ChildExit::default());
+    assert!(child_exit.leave_child_running());
+    let observed_exit = wait_for_child_exit(child_process_id);
+
+    build_watch_release(
+        &child_exit,
+        child_process_id,
+        &left_running_child_process_ids,
+    )
+    .publish_exit_status(observed_exit);
+
+    assert_eq!(
+        read_child_wait_state(child_process_id),
+        Err(libc::ECHILD),
+        "the watcher reaped the child"
+    );
+    assert_eq!(
+        *left_running_child_process_ids.lock().unwrap(),
+        BTreeSet::new(),
+        "the reaped child left the set"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+// The zombie is reaped by the closing `reap_child` call.
+#[expect(clippy::zombie_processes)]
+fn the_watcher_keeps_the_zombie_of_a_child_the_closing_call_waits_for() {
+    let child_process = std::process::Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .expect("spawn");
+    let child_process_id = child_process.id();
+    let child_wait_process_id =
+        libc::pid_t::try_from(child_process_id).expect("a child process id fits pid_t");
+    let child_exit = Arc::new(ChildExit::default());
+    let observed_exit = wait_for_child_exit(child_process_id);
+    let left_running_child_process_ids = Arc::new(Mutex::new(BTreeSet::new()));
+
+    build_watch_release(
+        &child_exit,
+        child_process_id,
+        &left_running_child_process_ids,
+    )
+    .publish_exit_status(observed_exit);
+
+    assert_eq!(
+        read_child_wait_state(child_process_id),
+        Ok(child_wait_process_id),
+        "the zombie stays for the closing call"
+    );
+    reap_child(child_process_id);
+}
+
+#[cfg(unix)]
+#[test]
+// The zombie is reaped by the thread `watch_left_running_children` starts.
+#[expect(clippy::zombie_processes)]
+fn a_child_an_earlier_image_left_running_is_listed_until_it_is_reaped() {
+    let child_process = std::process::Command::new("/bin/sh")
+        .args(["-c", "read line"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let child_process_id = child_process.id();
+    let child_stdin = child_process.stdin.expect("the child's stdin is piped");
+    let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
+
+    backend.watch_left_running_children(&[child_process_id]);
+
+    assert_eq!(
+        backend.list_left_running_child_process_ids(),
+        vec![child_process_id],
+        "a running child is listed for the next image"
+    );
+    drop(child_stdin);
+    wait_until_no_child_is_left_running(&backend);
+    assert_eq!(
+        read_child_wait_state(child_process_id),
+        Err(libc::ECHILD),
+        "the child was reaped"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_id_that_names_no_child_leaves_the_list_of_children_left_running() {
+    let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
+
+    backend.watch_left_running_children(&[1]);
+
+    wait_until_no_child_is_left_running(&backend);
+}
+
+/// Wait until `backend` lists no child left running. Fails the test once
+/// [`HANG_GUARD_DURATION`] has passed.
+#[cfg(unix)]
+fn wait_until_no_child_is_left_running(backend: &PortablePtyBackend) {
+    wait_for_condition(
+        || backend.list_left_running_child_process_ids().is_empty(),
+        "a child is still listed as left running",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+// The zombie is reaped by the second `reap_child` call.
+#[expect(clippy::zombie_processes)]
+fn reap_child_passes_over_zero_and_leaves_every_zombie_of_this_process_group() {
+    let child_process = std::process::Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .expect("spawn");
+    let child_process_id = child_process.id();
+    let child_wait_process_id =
+        libc::pid_t::try_from(child_process_id).expect("a child process id fits pid_t");
+    wait_until_child_is_zombie(child_process_id);
+
+    reap_child(0);
+    assert_eq!(
+        read_child_wait_state(child_process_id),
+        Ok(child_wait_process_id),
+        "`0` names this process group and reaps none of its children"
+    );
+
+    reap_child(child_process_id);
+    assert_eq!(read_child_wait_state(child_process_id), Err(libc::ECHILD));
+}
+
+/// A pane taken back with a carried exit status, on the live terminal of a
+/// pane `old_backend` runs, for the process `process_id`.
+#[cfg(unix)]
+fn adopt_pane_with_carried_exit(
+    old_backend: &Arc<PortablePtyBackend>,
+    old_pane_id: PaneId,
+    process_id: u32,
+) -> (PortablePtyBackend, PaneId) {
+    let carried_pane = old_backend
+        .list_carried_panes()
+        .into_iter()
+        .find(|carried_pane| carried_pane.pane_id == old_pane_id)
+        .expect("the old pane is carried");
+    let carried_terminal_fd = duplicate_terminal_for_process_swap(
+        carried_pane
+            .terminal_fd
+            .expect("a real pty exposes a descriptor"),
+    );
+    let new_pty_sink = CountingSink::new();
+    let new_backend = PortablePtyBackend::with_pty_sink(new_pty_sink.clone());
+    let new_pane_id = PaneId::new();
+    new_backend
+        .adopt(
+            new_pane_id,
+            carried_terminal_fd,
+            process_id,
+            STANDARD_PTY_SIZE,
+            Some(ExitStatus::ExitCode(3)),
+        )
+        .expect("take the pane back");
+    assert_eq!(
+        new_backend.pane_by_id.lock().expect("panes")[&new_pane_id]
+            .child_exit
+            .get_exit_status(),
+        Some(ExitStatus::ExitCode(3)),
+        "the carried status is recorded before the take-back returns"
+    );
+    assert_eq!(
+        read_exit_status_or_fail(&new_pty_sink, "the carried exit was never published"),
+        ExitStatus::ExitCode(3)
+    );
+    (new_backend, new_pane_id)
+}
+
+#[cfg(unix)]
+#[test]
+// The zombie is reaped at the end of the test.
+#[expect(clippy::zombie_processes)]
+fn closing_a_pane_whose_carried_child_an_earlier_image_reaped_reaps_nothing() {
+    let old_pty_sink = CountingSink::new();
+    let (old_backend, old_pane_id) =
+        start_backend_with_shell_script(old_pty_sink.clone(), "printf ready; sleep 30");
+    read_output_until_contains(&old_pty_sink, b"ready");
+    // A zombie of this process stands in for a process id the carried status
+    // names: closing the pane must leave it alone.
+    let unrelated_process = std::process::Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .expect("spawn");
+    let unrelated_process_id = unrelated_process.id();
+    let unrelated_wait_process_id =
+        libc::pid_t::try_from(unrelated_process_id).expect("a child process id fits pid_t");
+    wait_until_child_is_zombie(unrelated_process_id);
+
+    let (new_backend, new_pane_id) =
+        adopt_pane_with_carried_exit(&old_backend, old_pane_id, unrelated_process_id);
+    new_backend
+        .kill_pane(new_pane_id, KillPolicy::Force)
+        .expect("close the taken-back pane");
+
+    assert_eq!(
+        read_child_wait_state(unrelated_process_id),
+        Ok(unrelated_wait_process_id),
+        "a pane whose child an earlier image reaped reaps nothing"
+    );
+    reap_child(unrelated_process_id);
+    old_backend
+        .kill_pane(old_pane_id, KillPolicy::Tree)
+        .expect("close the old pane");
+}
+
+#[cfg(unix)]
+#[test]
+fn closing_a_pane_whose_carried_child_an_earlier_image_reaped_signals_no_process_group() {
+    for kill_policy in [
+        KillPolicy::Tree,
+        KillPolicy::GracefulTree {
+            timeout_duration: Duration::from_secs(3),
+        },
+    ] {
+        close_pane_with_carried_exit_beside_a_running_process_group(kill_policy);
+    }
+}
+
+/// Close, with `kill_policy`, a pane taken back with a carried exit status
+/// whose process id names a running process that leads its own process group,
+/// and check that the group took no signal.
+#[cfg(unix)]
+fn close_pane_with_carried_exit_beside_a_running_process_group(kill_policy: KillPolicy) {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+    let old_pty_sink = CountingSink::new();
+    let (old_backend, old_pane_id) =
+        start_backend_with_shell_script(old_pty_sink.clone(), "printf ready; sleep 30");
+    read_output_until_contains(&old_pty_sink, b"ready");
+    // A running process that leads its own process group stands in for a
+    // process id that a stranger took after the earlier image reaped the child.
+    let mut unrelated_process = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()
+        .expect("spawn");
+    let unrelated_process_id = unrelated_process.id();
+
+    let (new_backend, new_pane_id) =
+        adopt_pane_with_carried_exit(&old_backend, old_pane_id, unrelated_process_id);
+    new_backend
+        .kill_pane(new_pane_id, kill_policy)
+        .expect("close the taken-back pane");
+
+    let unrelated_signal_process_id =
+        libc::pid_t::try_from(unrelated_process_id).expect("a child process id fits pid_t");
+    // SAFETY: `kill` reads only its two integer arguments.
+    let kill_result = unsafe { libc::kill(unrelated_signal_process_id, libc::SIGTERM) };
+    assert_eq!(
+        kill_result, 0,
+        "the stand-in is still a process of this test"
+    );
+    let stand_in_exit_status = unrelated_process.wait().expect("reap the stand-in");
+    assert_eq!(
+        stand_in_exit_status.signal(),
+        Some(libc::SIGTERM),
+        "the stand-in ends by this test's SIGTERM: {kill_policy:?} did not signal the \
+         process group the carried process id names"
+    );
+    old_backend
+        .kill_pane(old_pane_id, KillPolicy::Tree)
+        .expect("close the old pane");
 }
 
 #[cfg(unix)]
@@ -3163,7 +3601,11 @@ fn get_child_process_id_returns_the_panes_child_process_id() {
     let (writer_sender, _writer_receiver) = channel::<WriterMessage>();
     backend.pane_by_id.lock().expect("panes").insert(
         pane_id,
-        build_pane_entry(Terminal::Crate(Arc::new(Mutex::new(None))), writer_sender),
+        build_pane_entry(
+            Terminal::Master(Arc::new(Mutex::new(None))),
+            writer_sender,
+            Arc::new(AtomicUsize::new(0)),
+        ),
     );
 
     assert_eq!(
@@ -3182,7 +3624,7 @@ fn resizing_through_the_crates_master_retunes_the_terminal() {
             .expect("openpty")
     };
     let pty_master_slot = Arc::new(Mutex::new(Some(pty_pair.master)));
-    let terminal = Terminal::Crate(Arc::clone(&pty_master_slot));
+    let terminal = Terminal::Master(Arc::clone(&pty_master_slot));
 
     assert_eq!(
         terminal.resize(PtySize {
@@ -3219,17 +3661,21 @@ fn a_resize_the_kernel_refuses_leaves_the_pane_at_its_old_size() {
     drop(writer_receiver);
     backend.pane_by_id.lock().expect("panes").insert(
         pane_id,
-        build_pane_entry(Terminal::Owned(Arc::clone(&terminal_fd)), writer_sender),
+        build_pane_entry(
+            Terminal::Owned(Arc::clone(&terminal_fd)),
+            writer_sender,
+            Arc::new(AtomicUsize::new(0)),
+        ),
     );
 
     // The kernel's own error text on this system.
-    let refused = resize_terminal(&terminal_fd, requested_pty_size)
+    let resize_error = resize_terminal(&terminal_fd, requested_pty_size)
         .expect_err("a socket is not a terminal and takes no window size");
 
     assert_eq!(
         backend.resize_pane(pane_id, requested_pty_size),
         Err(PtyError::Io {
-            detail: refused.to_string(),
+            detail: resize_error.to_string(),
         }),
         "the kernel's refusal must reach the caller as it stands"
     );
@@ -3237,7 +3683,7 @@ fn a_resize_the_kernel_refuses_leaves_the_pane_at_its_old_size() {
         backend
             .list_carried_panes()
             .first()
-            .map(|carried| carried.pty_size),
+            .map(|carried_pane| carried_pane.pty_size),
         Some(STANDARD_PTY_SIZE),
         "a pane whose child was never told the new size must still report the old one"
     );
@@ -3268,15 +3714,17 @@ fn a_pane_whose_writer_has_already_ended_does_not_hold_up_the_flush() {
         pane_entries_by_id.insert(
             closed_pane_id,
             build_pane_entry(
-                Terminal::Crate(Arc::new(Mutex::new(None))),
+                Terminal::Master(Arc::new(Mutex::new(None))),
                 closed_writer_sender,
+                Arc::new(AtomicUsize::new(0)),
             ),
         );
         pane_entries_by_id.insert(
             ending_pane_id,
             build_pane_entry(
-                Terminal::Crate(Arc::new(Mutex::new(None))),
+                Terminal::Master(Arc::new(Mutex::new(None))),
                 ending_writer_sender,
+                Arc::new(AtomicUsize::new(0)),
             ),
         );
     }
@@ -3292,8 +3740,9 @@ fn a_pane_whose_writer_has_already_ended_does_not_hold_up_the_flush() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn only_a_pane_with_a_live_child_answers_a_directory() {
-    // `live_working_directory` answers `None` for an unknown pane and for a pane whose child
-    // is marked exited, and the child's directory for a live one.
+    // `find_live_working_directory` answers `None` for an unknown pane and for
+    // a pane whose child is marked exited, and the child's directory for a
+    // live one.
     let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
     let pane_id = PaneId::new();
     let (writer_sender, writer_receiver) = channel::<WriterMessage>();
@@ -3301,7 +3750,11 @@ fn only_a_pane_with_a_live_child_answers_a_directory() {
     // The entry names this test process, whose directory is known here.
     backend.pane_by_id.lock().expect("panes").insert(
         pane_id,
-        build_pane_entry(Terminal::Crate(Arc::new(Mutex::new(None))), writer_sender),
+        build_pane_entry(
+            Terminal::Master(Arc::new(Mutex::new(None))),
+            writer_sender,
+            Arc::new(AtomicUsize::new(0)),
+        ),
     );
 
     assert_eq!(
@@ -3312,17 +3765,16 @@ fn only_a_pane_with_a_live_child_answers_a_directory() {
     assert_eq!(
         backend.find_live_working_directory(pane_id),
         None,
-        "a pane whose child was reaped must answer nothing"
+        "a pane whose child ended must answer nothing"
     );
 
     backend
         .pane_by_id
         .lock()
         .expect("panes")
-        .get(&pane_id)
+        .get_mut(&pane_id)
         .expect("the pane just inserted")
-        .has_child_exited
-        .store(false, Ordering::SeqCst);
+        .child_exit = Arc::new(ChildExit::default());
 
     let current_working_directory =
         std::fs::canonicalize(std::env::current_dir().expect("this process has a directory"))
@@ -3390,12 +3842,12 @@ fn a_pane_taken_back_after_its_child_was_signalled_reports_the_signal() {
 #[cfg(unix)]
 #[test]
 fn spawning_a_pane_id_the_backend_already_holds_is_refused() {
-    // The live entry keeps its terminal and its threads: replacing it would
-    // detach them and leave the first child with nothing that can kill it.
+    // The refused spawn leaves the live entry in place: the first pane still
+    // resizes and closes.
     let pty_sink = CountingSink::new();
     let (backend, pane_id) = start_backend_with_shell_script(pty_sink.clone(), "sleep 30");
 
-    let refused = {
+    let spawn_error = {
         let _gate = PTY_GATE.lock().expect("pty gate");
         backend
             .spawn_pane(
@@ -3407,7 +3859,7 @@ fn spawning_a_pane_id_the_backend_already_holds_is_refused() {
     };
 
     assert_eq!(
-        refused.to_string(),
+        spawn_error.to_string(),
         format!("failed to spawn pty: pane {pane_id} is already open")
     );
     backend
@@ -3421,8 +3873,8 @@ fn spawning_a_pane_id_the_backend_already_holds_is_refused() {
 #[cfg(unix)]
 #[test]
 fn taking_back_a_pane_id_the_backend_already_holds_is_refused() {
-    // The live entry keeps its terminal and its threads: replacing it would
-    // detach them and leave the first child with nothing that can kill it.
+    // The refused take-back leaves the live entry in place, and the second
+    // child keeps running: the first pane still resizes and closes.
     let pty_sink = CountingSink::new();
     let (backend, pane_id) = start_backend_with_shell_script(pty_sink.clone(), "sleep 30");
 
@@ -3447,7 +3899,7 @@ fn taking_back_a_pane_id_the_backend_already_holds_is_refused() {
         (child_guard, terminal_fd, child_process_id)
     };
 
-    let refused = backend
+    let adopt_error = backend
         .adopt(
             pane_id,
             terminal_fd,
@@ -3458,7 +3910,7 @@ fn taking_back_a_pane_id_the_backend_already_holds_is_refused() {
         .expect_err("the id is already open");
 
     assert_eq!(
-        refused.to_string(),
+        adopt_error.to_string(),
         format!("failed to spawn pty: pane {pane_id} is already open")
     );
     assert!(
