@@ -162,7 +162,8 @@ pub struct ClientConfig {
     pub supports_image_protocols: bool,
     /// Whether this viewer skips placement interpolation while retaining its
     /// placement highlight and confirmation state. `true` also draws another
-    /// viewer's accepted placement at its committed rectangles at once.
+    /// viewer's accepted placement at its committed rectangles, and a pane
+    /// this viewer undocks at its floating rectangle, at once.
     pub should_reduce_motion: bool,
     /// Whether pane placement mode stays on after the session accepts a
     /// placement confirmed with Enter or a mouse drop. `true` keeps the mode on,
@@ -507,6 +508,11 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
         (
             parse_default_key_sequence("<leader>p m"),
             build_bound_action("begin-pane-placement"),
+        ),
+        // `u` makes the focused tiled or stacked pane a floating pane.
+        (
+            parse_default_key_sequence("<leader>p u"),
+            build_bound_action("undock-or-dock-pane"),
         ),
         // The close key kills the pane's whole process group.
         (

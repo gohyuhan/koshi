@@ -5,7 +5,9 @@
 //! `Debug` and from [`Event::get_event_name`].
 
 use super::*;
-use crate::command::{GridPosition, PanePlacementAnchor, PanePlacementTarget, SelectionKind};
+use crate::command::{
+    GridPosition, PanePlacementAnchor, PanePlacementTarget, SelectionKind, TiledPlacementTarget,
+};
 use crate::geometry::{Direction, PaneArea, Point, Size};
 use crate::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use crate::process::PtySize;
@@ -121,7 +123,7 @@ fn an_event_missing_a_tab_id_field_is_refused() {
                 "command_id": wire_identifier,
                 "source_pane_id": wire_identifier,
                 "destination_tab_id": null,
-                "placement_target": { "Swap": { "target_pane_id": wire_identifier } }
+                "placement_target": { "Tiled": { "Swap": { "target_pane_id": wire_identifier } } }
             } }),
             "source_tab_id",
         ),
@@ -130,7 +132,7 @@ fn an_event_missing_a_tab_id_field_is_refused() {
                 "command_id": wire_identifier,
                 "source_pane_id": wire_identifier,
                 "source_tab_id": null,
-                "placement_target": { "Swap": { "target_pane_id": wire_identifier } }
+                "placement_target": { "Tiled": { "Swap": { "target_pane_id": wire_identifier } } }
             } }),
             "destination_tab_id",
         ),
@@ -264,11 +266,11 @@ fn remaining_event_variants_survive_a_json_round_trip() {
         source_pane_id: PaneId::new(),
         source_tab_id: Some(TabId::new()),
         destination_tab_id: Some(destination_tab_id),
-        placement_target: PanePlacementTarget::Split {
+        placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
             destination_tab_id,
             anchor: PanePlacementAnchor::Pane(PaneId::new()),
             direction: Direction::Down,
-        },
+        }),
     }));
     assert_json_roundtrip(&Event::TabCreated(TabCreated {
         tab_id: TabId::new(),
@@ -416,9 +418,9 @@ pub(crate) fn list_event_cases() -> [(Event, &'static str); 24] {
                 source_pane_id: PaneId::new(),
                 source_tab_id: Some(TabId::new()),
                 destination_tab_id: Some(TabId::new()),
-                placement_target: PanePlacementTarget::Swap {
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
                     target_pane_id: PaneId::new(),
-                },
+                }),
             }),
             "PanePlacementCommitted",
         ),

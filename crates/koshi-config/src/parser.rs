@@ -284,7 +284,7 @@ pub(crate) fn parse_u32_kdl_value(field_node: &KdlNode) -> Result<u32, String> {
 ///   when that value is not an integer or falls outside `0..=4294967295`.
 ///
 /// A declared `0` is returned as `Ok(0)`;
-/// [`validate_config_schema_version`](crate::error::validate_config_schema_version) rejects it.
+/// [`validate_config_schema_version`] rejects it.
 pub(crate) fn parse_version_argument(
     version_node: &KdlNode,
 ) -> Result<u32, (SourceSpan, &'static str)> {

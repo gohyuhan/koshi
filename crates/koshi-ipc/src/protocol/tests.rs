@@ -18,7 +18,8 @@ use crate::router::RouterRequestKind;
 use crate::wire::{MaybeKnown, WireName, WireVariants};
 use koshi_core::command::{
     Command, CommandSource, MoveFloatingPaneArgs, MovePaneArgs, NewPaneArgs, NewPanePlacement,
-    PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, ScrollPaneArgs, ToggleLockModeArgs,
+    PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, ScrollPaneArgs, TiledPlacementTarget,
+    ToggleLockModeArgs,
 };
 use koshi_core::discovery::{
     ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, TabDiscovery,
@@ -88,11 +89,11 @@ fn build_populated_test_command_envelope() -> CommandEnvelope {
 fn build_populated_place_pane_command_envelope() -> CommandEnvelope {
     build_command_envelope_with_fixed_in_session_source(Command::PlacePane(PlacePaneArgs {
         source_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
-        placement_target: PanePlacementTarget::Split {
+        placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
             destination_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
             anchor: PanePlacementAnchor::Tab,
             direction: Direction::Down,
-        },
+        }),
         expected_placement_revision: None,
     }))
 }
@@ -738,11 +739,45 @@ fn the_place_pane_command_wire_shape_belongs_to_this_protocol_version() {
             "PlacePane": {
                 "source_pane_id": "00000000-0000-0000-0000-000000000001",
                 "placement_target": {
-                    "Split": {
-                        "destination_tab_id": "00000000-0000-0000-0000-000000000001",
-                        "anchor": "Tab",
-                        "direction": "Down"
+                    "Tiled": {
+                        "Split": {
+                            "destination_tab_id": "00000000-0000-0000-0000-000000000001",
+                            "anchor": "Tab",
+                            "direction": "Down"
+                        }
                     }
+                },
+                "expected_placement_revision": null
+            }
+        })
+    );
+}
+
+#[test]
+fn the_undock_command_wire_shape_belongs_to_this_protocol_version() {
+    let ipc_request = IpcRequest {
+        request_id: 6,
+        request_kind: IpcRequestKind::SubmitCommand(Box::new(
+            build_command_envelope_with_fixed_in_session_source(Command::PlacePane(
+                PlacePaneArgs {
+                    source_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+                    placement_target: PanePlacementTarget::Floating {
+                        top_left_cell: Some(Point { column: 7, row: 3 }),
+                    },
+                    expected_placement_revision: None,
+                },
+            )),
+        )),
+    };
+    let encoded_request = serde_json::to_value(&ipc_request).expect("request encodes");
+
+    assert_eq!(
+        encoded_request["request_kind"]["SubmitCommand"]["command"],
+        json!({
+            "PlacePane": {
+                "source_pane_id": "00000000-0000-0000-0000-000000000001",
+                "placement_target": {
+                    "Floating": { "top_left_cell": { "column": 7, "row": 3 } }
                 },
                 "expected_placement_revision": null
             }
@@ -1725,11 +1760,11 @@ fn pane_commands_round_trip_inside_a_submit_command_request() {
         }),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
-            placement_target: PanePlacementTarget::Split {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                 destination_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
                 anchor: PanePlacementAnchor::Tab,
                 direction: Direction::Down,
-            },
+            }),
             expected_placement_revision: None,
         }),
         Command::ScrollPane(ScrollPaneArgs {

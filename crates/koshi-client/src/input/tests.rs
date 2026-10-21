@@ -10,7 +10,7 @@ use std::sync::Arc;
 use koshi_config::conflict::{KeymapLayer, LayerOrigin};
 use koshi_config::hints::KeymapHintCatalog;
 use koshi_config::types::{KeybindingsConfig, ModeBindings, ModeName};
-use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
+use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget, TiledPlacementTarget};
 use koshi_core::geometry::{Direction, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::mouse::{MouseButton, MouseKind, MouseTracking};
@@ -275,7 +275,7 @@ fn submitted_placement_consumes_placement_keys_and_keeps_its_command() {
     let source_pane_id = PaneId::new();
     let source_tab_id = TabId::new();
     let destination_tab_id = TabId::new();
-    let placement_target = PanePlacementTarget::Split {
+    let placement_target = TiledPlacementTarget::Split {
         destination_tab_id,
         anchor: PanePlacementAnchor::Pane(PaneId::new()),
         direction: Direction::Right,
@@ -312,7 +312,7 @@ fn submitted_placement_consumes_placement_keys_and_keeps_its_command() {
             &client,
             Command::PlacePane(PlacePaneArgs {
                 source_pane_id,
-                placement_target: placement_target.clone(),
+                placement_target: PanePlacementTarget::Tiled(placement_target.clone()),
                 expected_placement_revision: Some(PlacementRevision {
                     session_revision: 0,
                     client_revision: 0,
@@ -349,7 +349,7 @@ fn submitted_mouse_placement_returns_to_the_base_mode_and_ignores_cancel() {
         source_tab_id: TabId::new(),
         destination_tab_id: TabId::new(),
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap {
+        placement_target: Some(TiledPlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
         pending_placement_command: Some(crate::tests::build_pending_placement_command(
@@ -377,7 +377,7 @@ fn submitted_keyboard_placement_keeps_pane_placement_mode_and_ignores_cancel() {
         source_tab_id: TabId::new(),
         destination_tab_id: TabId::new(),
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap {
+        placement_target: Some(TiledPlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
         pending_placement_command: Some(crate::tests::build_pending_placement_command(
@@ -404,7 +404,7 @@ fn changing_input_owner_cancels_an_unconfirmed_placement() {
         source_tab_id: TabId::new(),
         destination_tab_id: TabId::new(),
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap {
+        placement_target: Some(TiledPlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
         pending_placement_command: None,
@@ -420,7 +420,7 @@ fn changing_input_owner_cancels_an_unconfirmed_placement() {
         source_tab_id: TabId::new(),
         destination_tab_id: TabId::new(),
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap {
+        placement_target: Some(TiledPlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
         pending_placement_command: None,
@@ -485,7 +485,7 @@ fn a_new_frame_owner_cancels_an_unconfirmed_placement() {
         source_tab_id,
         destination_tab_id: source_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap {
+        placement_target: Some(TiledPlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
         pending_placement_command: None,
@@ -587,7 +587,7 @@ fn next_placement_tab_selects_insertion_right_of_that_whole_tab_and_enter_places
         source_tab_id,
         destination_tab_id,
     );
-    let whole_tab_insertion_target = PanePlacementTarget::Split {
+    let whole_tab_insertion_target = TiledPlacementTarget::Split {
         destination_tab_id,
         anchor: PanePlacementAnchor::Tab,
         direction: Direction::Right,
@@ -605,7 +605,7 @@ fn next_placement_tab_selects_insertion_right_of_that_whole_tab_and_enter_places
             &client,
             Command::PlacePane(PlacePaneArgs {
                 source_pane_id,
-                placement_target: whole_tab_insertion_target,
+                placement_target: PanePlacementTarget::Tiled(whole_tab_insertion_target),
                 expected_placement_revision: Some(PlacementRevision {
                     session_revision: 0,
                     client_revision: 0,
@@ -691,7 +691,7 @@ fn shift_arrow_on_the_whole_tab_target_selects_that_edge_of_the_tab() {
 
     assert_eq!(
         client.get_placement_target(),
-        Some(PanePlacementTarget::Split {
+        Some(TiledPlacementTarget::Split {
             destination_tab_id,
             anchor: PanePlacementAnchor::Tab,
             direction: Direction::Left,
@@ -722,7 +722,7 @@ fn arrow_on_the_whole_tab_target_selects_a_swap_in_the_previewed_tab() {
 
     assert_eq!(
         client.get_placement_target(),
-        Some(PanePlacementTarget::Swap {
+        Some(TiledPlacementTarget::Swap {
             target_pane_id: destination_pane_id,
         })
     );
@@ -740,7 +740,7 @@ fn a_rejected_whole_tab_placement_selects_the_whole_tab_target_again_after_the_r
         source_tab_id,
         destination_tab_id,
     );
-    let whole_tab_insertion_target = PanePlacementTarget::Split {
+    let whole_tab_insertion_target = TiledPlacementTarget::Split {
         destination_tab_id,
         anchor: PanePlacementAnchor::Tab,
         direction: Direction::Right,
@@ -752,7 +752,7 @@ fn a_rejected_whole_tab_placement_selects_the_whole_tab_target_again_after_the_r
             &client,
             Command::PlacePane(PlacePaneArgs {
                 source_pane_id,
-                placement_target: whole_tab_insertion_target.clone(),
+                placement_target: PanePlacementTarget::Tiled(whole_tab_insertion_target.clone()),
                 expected_placement_revision: Some(PlacementRevision {
                     session_revision: 0,
                     client_revision: 0,
@@ -925,21 +925,21 @@ fn arrows_from_the_open_stack_member_walk_the_collapsed_members_above_it() {
     client.apply_client_action(ClientActionKind::SelectPaneTarget(Direction::Up), None);
     assert_eq!(
         client.get_placement_target(),
-        Some(PanePlacementTarget::Swap {
+        Some(TiledPlacementTarget::Swap {
             target_pane_id: stack_layout.second_stack_pane_id,
         })
     );
     client.apply_client_action(ClientActionKind::SelectPaneTarget(Direction::Up), None);
     assert_eq!(
         client.get_placement_target(),
-        Some(PanePlacementTarget::Swap {
+        Some(TiledPlacementTarget::Swap {
             target_pane_id: stack_layout.first_stack_pane_id,
         })
     );
     client.apply_client_action(ClientActionKind::SelectPaneTarget(Direction::Down), None);
     assert_eq!(
         client.get_placement_target(),
-        Some(PanePlacementTarget::Swap {
+        Some(TiledPlacementTarget::Swap {
             target_pane_id: stack_layout.second_stack_pane_id,
         })
     );
@@ -958,9 +958,9 @@ fn arrow_right_from_a_stack_member_selects_the_plain_pane_and_enter_swaps_them()
             &client,
             Command::PlacePane(PlacePaneArgs {
                 source_pane_id: stack_layout.open_stack_pane_id,
-                placement_target: PanePlacementTarget::Swap {
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
                     target_pane_id: stack_layout.plain_pane_id,
-                },
+                }),
                 expected_placement_revision: Some(PlacementRevision {
                     session_revision: 0,
                     client_revision: 0,
@@ -978,7 +978,7 @@ fn a_plain_pane_reaches_a_collapsed_stack_member_and_enter_swaps_them() {
     client.apply_client_action(ClientActionKind::SelectPaneTarget(Direction::Left), None);
     assert_eq!(
         client.get_placement_target(),
-        Some(PanePlacementTarget::Swap {
+        Some(TiledPlacementTarget::Swap {
             target_pane_id: stack_layout.open_stack_pane_id,
         })
     );
@@ -990,9 +990,9 @@ fn a_plain_pane_reaches_a_collapsed_stack_member_and_enter_swaps_them() {
             &client,
             Command::PlacePane(PlacePaneArgs {
                 source_pane_id: stack_layout.plain_pane_id,
-                placement_target: PanePlacementTarget::Swap {
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
                     target_pane_id: stack_layout.second_stack_pane_id,
-                },
+                }),
                 expected_placement_revision: Some(PlacementRevision {
                     session_revision: 0,
                     client_revision: 0,
@@ -1014,7 +1014,7 @@ fn shift_arrow_toward_a_stack_selects_insertion_beside_the_whole_stack() {
 
     assert_eq!(
         client.get_placement_target(),
-        Some(PanePlacementTarget::Split {
+        Some(TiledPlacementTarget::Split {
             destination_tab_id: tab_id,
             anchor: PanePlacementAnchor::Group(vec![
                 stack_layout.first_stack_pane_id,
@@ -2979,4 +2979,58 @@ fn a_selected_pane_that_cannot_move_hands_the_selection_to_the_first_or_last_mov
             Some(expected_pane_id)
         );
     }
+}
+
+#[test]
+fn undock_sends_place_pane_floating_for_the_pane_holding_the_input() {
+    let mut client = build_test_client();
+    let tab_id = TabId::new();
+    let tiled_pane_id = PaneId::new();
+    let floating_pane_id = PaneId::new();
+    let build_undock_command = |source_pane_id| {
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id,
+            placement_target: PanePlacementTarget::Floating {
+                top_left_cell: None,
+            },
+            expected_placement_revision: None,
+        })
+    };
+
+    client.set_frame_view(
+        tab_id,
+        Some(tiled_pane_id),
+        Some(tiled_pane_id),
+        vec![tab_id],
+    );
+    let PlacementInputAction::SubmitCommand { command, .. } =
+        client.apply_client_action(ClientActionKind::UndockOrDockPane, None)
+    else {
+        panic!("a focused tiled pane sends an undock");
+    };
+    assert_eq!(command, build_undock_command(tiled_pane_id));
+
+    client.set_frame_view(
+        tab_id,
+        Some(floating_pane_id),
+        Some(tiled_pane_id),
+        vec![tab_id],
+    );
+    let PlacementInputAction::SubmitCommand { command, .. } =
+        client.apply_client_action(ClientActionKind::UndockOrDockPane, None)
+    else {
+        panic!("a focused floating pane sends an undock the session refuses");
+    };
+    assert_eq!(command, build_undock_command(floating_pane_id));
+}
+
+#[test]
+fn undock_with_no_focused_pane_sends_nothing() {
+    let mut client = build_test_client();
+    client.set_frame_view(TabId::new(), None, None, Vec::new());
+
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::UndockOrDockPane, None),
+        PlacementInputAction::Consumed
+    );
 }

@@ -21,7 +21,7 @@ use std::time::{Instant, SystemTime};
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::command::{
     ClosePaneArgs, Command, CommandSource, NewPaneArgs, NewPanePlacement, PanePlacementAnchor,
-    PanePlacementTarget, PlacePaneArgs, ToggleLockModeArgs,
+    PanePlacementTarget, PlacePaneArgs, TiledPlacementTarget, ToggleLockModeArgs,
 };
 use koshi_core::event::{
     InputModeChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved, PtyResized,
@@ -1922,11 +1922,11 @@ fn a_token_whose_focused_pane_moved_to_another_tab_keeps_the_focus_the_attach_ga
         CommandSource::KeyBinding { client_id },
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: split_pane_id,
-            placement_target: PanePlacementTarget::Split {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                 destination_tab_id: additional_tab_id,
                 anchor: PanePlacementAnchor::Tab,
                 direction: Direction::Right,
-            },
+            }),
             expected_placement_revision: None,
         }),
     ));

@@ -2681,11 +2681,11 @@ fn action_subcommands_map_to_their_exact_commands() {
             "place-pane",
             Command::PlacePane(PlacePaneArgs {
                 source_pane_id: pane_id,
-                placement_target: PanePlacementTarget::Split {
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                     destination_tab_id: tab_id,
                     anchor: PanePlacementAnchor::Tab,
                     direction: Direction::Left,
-                },
+                }),
                 expected_placement_revision: None,
             }),
         ),
@@ -3777,11 +3777,11 @@ fn place_pane_with_a_named_tab_is_classified_before_routing_resolves_the_tab() {
         mapped_command,
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: pane_id,
-            placement_target: PanePlacementTarget::Split {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                 destination_tab_id,
                 anchor: PanePlacementAnchor::Tab,
                 direction: Direction::Left,
-            },
+            }),
             expected_placement_revision: None,
         })
     );

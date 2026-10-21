@@ -32,8 +32,9 @@ const CLI_ONLY: [&str; 9] = [
 
 /// The viewer-local actions. They are resolved to [`DispatchPlan::ClientAction`]
 /// and therefore do not belong to the command table below.
-const CLIENT_ACTIONS: [&str; 26] = [
+const CLIENT_ACTIONS: [&str; 27] = [
     "begin-pane-placement",
+    "undock-or-dock-pane",
     "select-pane-target-left",
     "select-pane-target-down",
     "select-pane-target-up",

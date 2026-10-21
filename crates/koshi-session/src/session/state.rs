@@ -514,6 +514,27 @@ impl Session {
             .reduce(Size::compute_minimum_axes)
     }
 
+    /// The outer size a new floating pane that asks for `desired_size` takes
+    /// in this session: [`solve_floating_pane_size`] against
+    /// [`Session::get_shared_floating_viewport`], or the floating minimum
+    /// ([`compute_floating_pane_minimum_size`]) of `pane_minimum_size` while no
+    /// attached client has a floating viewport. `Percent(60)` by
+    /// `Percent(60)` with an `80x22` shared viewport → `48x13`; with no client
+    /// attached and a `2x1` pane minimum → `4x5`.
+    #[must_use]
+    pub fn compute_new_floating_pane_size(
+        &self,
+        desired_size: FloatingPaneSize,
+        pane_minimum_size: Size,
+    ) -> Size {
+        match self.get_shared_floating_viewport() {
+            Some(shared_floating_viewport) => {
+                solve_floating_pane_size(desired_size, shared_floating_viewport, pane_minimum_size)
+            }
+            None => compute_floating_pane_minimum_size(pane_minimum_size),
+        }
+    }
+
     /// The rectangle the session places the floating pane `pane_id` in for
     /// `client`, counted in its pane-area cells: [`place_floating_pane`] of
     /// the client's position for the pane, the pane's solved size and cascade

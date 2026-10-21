@@ -285,7 +285,7 @@ pub struct Server {
     /// resets.
     pub(crate) is_quit_requested: bool,
     /// True once the dispatcher took a
-    /// [`RuntimeEvent::IpcRestart`](crate::runtime::event::RuntimeEvent::IpcRestart),
+    /// [`RuntimeEvent::IpcRestart`],
     /// which a restart request sends once its restart check passed. The event
     /// loop polls it after each event batch and exits into the swap.
     /// [`cancel_restart`](Self::cancel_restart) puts it back to false when the

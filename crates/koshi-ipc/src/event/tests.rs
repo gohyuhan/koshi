@@ -4,7 +4,7 @@
 //! a frame this build has no name for reads as unknown, and a host write frame
 //! of [`MAX_HOST_WRITE_BYTE_COUNT`] bytes fits one frame.
 
-use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
+use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget, TiledPlacementTarget};
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::mouse::MouseAnswer;
@@ -74,11 +74,11 @@ fn list_test_events() -> Vec<SessionEvent> {
             source_pane_id: pane_id,
             source_tab_id: Some(tab_id),
             destination_tab_id: Some(tab_id),
-            placement_target: PanePlacementTarget::Split {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                 destination_tab_id: tab_id,
                 anchor: PanePlacementAnchor::Pane(pane_id),
                 direction: Direction::Right,
-            },
+            }),
         },
         SessionEvent::TabCreated { tab_id },
         SessionEvent::TabClosed { tab_id },
@@ -374,10 +374,12 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
                 "source_tab_id": wire_identifier,
                 "destination_tab_id": wire_identifier,
                 "placement_target": {
-                    "Split": {
-                        "destination_tab_id": wire_identifier,
-                        "anchor": { "Pane": wire_identifier },
-                        "direction": "Right"
+                    "Tiled": {
+                        "Split": {
+                            "destination_tab_id": wire_identifier,
+                            "anchor": { "Pane": wire_identifier },
+                            "direction": "Right"
+                        }
                     }
                 }
             } }),
@@ -756,11 +758,11 @@ fn a_floating_pane_event_writes_a_null_tab_id_and_reads_it_back() {
                 source_pane_id: pane_id,
                 source_tab_id: None,
                 destination_tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
-                placement_target: PanePlacementTarget::Split {
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                     destination_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
                     anchor: PanePlacementAnchor::Tab,
                     direction: Direction::Right,
-                },
+                }),
             },
             json!({ "PanePlacementCommitted": {
                 "command_id": wire_identifier,
@@ -768,10 +770,12 @@ fn a_floating_pane_event_writes_a_null_tab_id_and_reads_it_back() {
                 "source_tab_id": null,
                 "destination_tab_id": wire_identifier,
                 "placement_target": {
-                    "Split": {
-                        "destination_tab_id": wire_identifier,
-                        "anchor": "Tab",
-                        "direction": "Right"
+                    "Tiled": {
+                        "Split": {
+                            "destination_tab_id": wire_identifier,
+                            "anchor": "Tab",
+                            "direction": "Right"
+                        }
                     }
                 }
             } }),
@@ -815,7 +819,7 @@ fn an_event_missing_a_tab_id_field_is_refused() {
                 "command_id": wire_identifier,
                 "source_pane_id": wire_identifier,
                 "destination_tab_id": null,
-                "placement_target": { "Swap": { "target_pane_id": wire_identifier } }
+                "placement_target": { "Tiled": { "Swap": { "target_pane_id": wire_identifier } } }
             } }),
             "source_tab_id",
         ),
@@ -824,7 +828,7 @@ fn an_event_missing_a_tab_id_field_is_refused() {
                 "command_id": wire_identifier,
                 "source_pane_id": wire_identifier,
                 "source_tab_id": null,
-                "placement_target": { "Swap": { "target_pane_id": wire_identifier } }
+                "placement_target": { "Tiled": { "Swap": { "target_pane_id": wire_identifier } } }
             } }),
             "destination_tab_id",
         ),

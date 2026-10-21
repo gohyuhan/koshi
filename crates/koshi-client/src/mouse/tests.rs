@@ -2974,7 +2974,7 @@ fn submitted_mouse_placement_consumes_mouse_input_until_the_frame_reconciles() {
         source_tab_id: active_tab_id,
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap {
+        placement_target: Some(TiledPlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
         pending_placement_command: Some(crate::tests::build_pending_placement_command(
@@ -3857,11 +3857,11 @@ fn plain_drag_swaps_and_shift_drag_inserts_at_the_same_pane() {
     );
     assert_eq!(
         client.find_placement_target_at(target_point, &mouse_frame),
-        Some(PanePlacementTarget::Swap { target_pane_id })
+        Some(TiledPlacementTarget::Swap { target_pane_id })
     );
     assert_eq!(
         client.find_placement_target_at(target_border_point, &mouse_frame),
-        Some(PanePlacementTarget::Swap { target_pane_id }),
+        Some(TiledPlacementTarget::Swap { target_pane_id }),
         "the target pane border names the same pane as its content"
     );
     assert_eq!(
@@ -3892,7 +3892,7 @@ fn plain_drag_swaps_and_shift_drag_inserts_at_the_same_pane() {
     );
     assert_eq!(
         client.find_placement_target_at(target_point, &mouse_frame),
-        Some(PanePlacementTarget::Split {
+        Some(TiledPlacementTarget::Split {
             destination_tab_id: active_tab_id,
             anchor: PanePlacementAnchor::Pane(target_pane_id),
             direction: Direction::Up,
@@ -3971,7 +3971,7 @@ fn placement_target_uses_fixed_base_geometry_while_the_preview_moves_panes() {
 
     assert_eq!(
         client.find_placement_target_at(target_point, &moved_preview_frame),
-        Some(PanePlacementTarget::Swap { target_pane_id })
+        Some(TiledPlacementTarget::Swap { target_pane_id })
     );
 }
 
@@ -4011,7 +4011,7 @@ fn cross_tab_mouse_target_uses_the_destination_pane_under_the_pointer() {
 
     assert_eq!(
         client.find_placement_target_at(target_point, &mouse_frame),
-        Some(PanePlacementTarget::Swap {
+        Some(TiledPlacementTarget::Swap {
             target_pane_id: destination_second_pane_id,
         })
     );
@@ -4103,7 +4103,7 @@ fn shifted_drag_across_a_tab_submits_insertion_when_drop_matches_press_position(
         ),
         Some(PlacementInputAction::Consumed)
     );
-    let placement_target = PanePlacementTarget::Split {
+    let placement_target = TiledPlacementTarget::Split {
         destination_tab_id,
         anchor: PanePlacementAnchor::Pane(destination_second_pane_id),
         direction: Direction::Up,
@@ -4128,7 +4128,7 @@ fn shifted_drag_across_a_tab_submits_insertion_when_drop_matches_press_position(
             &client,
             Command::PlacePane(koshi_core::command::PlacePaneArgs {
                 source_pane_id,
-                placement_target,
+                placement_target: koshi_core::command::PanePlacementTarget::Tiled(placement_target),
                 expected_placement_revision: Some(koshi_core::command::PlacementRevision {
                     session_revision: 0,
                     client_revision: 0,
@@ -4221,7 +4221,7 @@ fn stack_header_drag_selects_group_for_insertion_and_pane_for_swap() {
 
     assert_eq!(
         client.find_placement_target_at(stack_header_point, &mouse_frame),
-        Some(PanePlacementTarget::Split {
+        Some(TiledPlacementTarget::Split {
             destination_tab_id: active_tab_id,
             anchor: PanePlacementAnchor::Group(vec![
                 expanded_stack_pane_id,
@@ -4254,7 +4254,7 @@ fn stack_header_drag_selects_group_for_insertion_and_pane_for_swap() {
 
     assert_eq!(
         client.find_placement_target_at(stack_header_point, &mouse_frame),
-        Some(PanePlacementTarget::Swap {
+        Some(TiledPlacementTarget::Swap {
             target_pane_id: collapsed_stack_pane_id,
         })
     );
@@ -4330,7 +4330,7 @@ fn build_client_previewing_mouse_frame_tab(
     mouse_frame: &MouseFrame,
     active_tab_id: TabId,
     source_pane_id: PaneId,
-    placement_target: Option<PanePlacementTarget>,
+    placement_target: Option<TiledPlacementTarget>,
 ) -> Client {
     let previewed_tab_id = mouse_frame.client_snapshot.active_tab_id;
     let mut client = build_test_client();
@@ -4395,7 +4395,7 @@ fn a_press_on_the_source_pane_in_a_previewed_tab_keeps_its_tab_and_target() {
         ],
         Some(source_pane_id),
     );
-    let placement_target = PanePlacementTarget::Split {
+    let placement_target = TiledPlacementTarget::Split {
         destination_tab_id: mouse_frame.client_snapshot.active_tab_id,
         anchor: PanePlacementAnchor::Tab,
         direction: Direction::Right,
@@ -4542,7 +4542,7 @@ fn shift_drag_into_a_group_gap_selects_the_group_anchor() {
             },
             &mouse_frame,
         ),
-        Some(PanePlacementTarget::Split {
+        Some(TiledPlacementTarget::Split {
             destination_tab_id: active_tab_id,
             anchor: PanePlacementAnchor::Group(vec![group_left_pane_id, group_right_pane_id,]),
             direction: Direction::Up,

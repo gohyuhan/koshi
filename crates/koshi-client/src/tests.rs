@@ -19,7 +19,7 @@ use koshi_core::action::{
     ActionReference, MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT, MOVE_FLOATING_PANE_HINT,
     MOVE_FOCUSED_PANE_HINT, MOVE_TILED_PANE_HINT,
 };
-use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
+use koshi_core::command::{PanePlacementAnchor, TiledPlacementTarget};
 use koshi_core::geometry::{Direction, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey};
@@ -165,7 +165,7 @@ fn a_same_tab_insertion_that_preserves_the_layout_sends_no_command() {
                 LayoutNode::Pane(source_pane_id),
             ],
         ));
-    let placement_target = PanePlacementTarget::Split {
+    let placement_target = TiledPlacementTarget::Split {
         destination_tab_id: source_tab_id,
         anchor: PanePlacementAnchor::Pane(target_pane_id),
         direction: Direction::Right,
@@ -534,7 +534,7 @@ fn clearing_unconfirmed_placement_read_discards_the_selected_target() {
         source_tab_id,
         destination_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Split {
+        placement_target: Some(TiledPlacementTarget::Split {
             destination_tab_id,
             anchor: PanePlacementAnchor::Pane(destination_pane_id),
             direction: Direction::Right,
@@ -563,7 +563,7 @@ fn clearing_placement_read_keeps_a_submitted_target_pending() {
     let destination_pane_id = PaneId::new();
     let destination_tab_id = TabId::new();
     let command_id = CommandId::new();
-    let placement_target = PanePlacementTarget::Split {
+    let placement_target = TiledPlacementTarget::Split {
         destination_tab_id,
         anchor: PanePlacementAnchor::Pane(destination_pane_id),
         direction: Direction::Right,
@@ -591,7 +591,7 @@ fn an_unchanged_revision_frame_keeps_a_submitted_placement_target_pending() {
     let mut client = build_test_client();
     let destination_tab_id = TabId::new();
     let command_id = CommandId::new();
-    let placement_target = PanePlacementTarget::Split {
+    let placement_target = TiledPlacementTarget::Split {
         destination_tab_id,
         anchor: PanePlacementAnchor::Pane(PaneId::new()),
         direction: Direction::Right,
@@ -623,7 +623,7 @@ fn a_committed_placement_frame_clears_the_submitted_placement_target() {
         source_tab_id: TabId::new(),
         destination_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Split {
+        placement_target: Some(TiledPlacementTarget::Split {
             destination_tab_id,
             anchor: PanePlacementAnchor::Pane(PaneId::new()),
             direction: Direction::Right,
@@ -701,7 +701,7 @@ fn the_next_submitted_placement_waits_for_its_own_commit() {
         .placement_mode
         .as_mut()
         .expect("pane placement mode stays on after the accepted placement");
-    placement_mode.placement_target = Some(PanePlacementTarget::Swap { target_pane_id });
+    placement_mode.placement_target = Some(TiledPlacementTarget::Swap { target_pane_id });
     placement_mode.pending_placement_command =
         Some(build_pending_placement_command(CommandId::new()));
 
@@ -710,7 +710,7 @@ fn the_next_submitted_placement_waits_for_its_own_commit() {
     assert!(client.is_placement_confirmation_pending());
     assert_eq!(
         client.get_placement_target(),
-        Some(PanePlacementTarget::Swap { target_pane_id })
+        Some(TiledPlacementTarget::Swap { target_pane_id })
     );
 }
 
@@ -745,7 +745,7 @@ fn a_committed_placement_frame_keeps_keyboard_placement_mode_and_requests_one_pr
         source_tab_id,
         destination_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap {
+        placement_target: Some(TiledPlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
         pending_placement_command: Some(build_pending_placement_command(CommandId::new())),
@@ -777,7 +777,7 @@ fn a_changed_revision_frame_refreshes_an_unconfirmed_keyboard_placement() {
         source_tab_id,
         destination_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap {
+        placement_target: Some(TiledPlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
         pending_placement_command: None,
@@ -805,7 +805,7 @@ fn a_changed_revision_frame_refreshes_an_unconfirmed_mouse_placement() {
         source_tab_id,
         destination_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap {
+        placement_target: Some(TiledPlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
         pending_placement_command: None,
@@ -839,7 +839,7 @@ fn a_reconciled_keyboard_placement_keeps_pane_placement_mode_when_the_active_tab
         source_tab_id,
         destination_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Split {
+        placement_target: Some(TiledPlacementTarget::Split {
             destination_tab_id,
             anchor: PanePlacementAnchor::Tab,
             direction: Direction::Right,
@@ -923,7 +923,7 @@ fn closing_the_former_tab_after_a_cross_tab_placement_keeps_pane_placement_mode(
         source_tab_id: former_tab_id,
         destination_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Split {
+        placement_target: Some(TiledPlacementTarget::Split {
             destination_tab_id,
             anchor: PanePlacementAnchor::Tab,
             direction: Direction::Right,
@@ -967,7 +967,7 @@ fn reconnect_clears_unconfirmed_target_and_reconciles_confirmation() {
         source_tab_id: TabId::new(),
         destination_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Split {
+        placement_target: Some(TiledPlacementTarget::Split {
             destination_tab_id,
             anchor: PanePlacementAnchor::Pane(PaneId::new()),
             direction: Direction::Right,
@@ -978,7 +978,7 @@ fn reconnect_clears_unconfirmed_target_and_reconciles_confirmation() {
     assert_eq!(client.get_placement_target(), None);
 
     let command_id = CommandId::new();
-    let submitted_placement_target = PanePlacementTarget::Split {
+    let submitted_placement_target = TiledPlacementTarget::Split {
         destination_tab_id,
         anchor: PanePlacementAnchor::Pane(PaneId::new()),
         direction: Direction::Right,
@@ -1034,7 +1034,7 @@ fn build_client_with_submitted_placement(
         source_tab_id: TabId::new(),
         destination_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap {
+        placement_target: Some(TiledPlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
         pending_placement_command: Some(build_pending_placement_command(CommandId::new())),
@@ -1102,7 +1102,7 @@ fn a_revision_change_during_a_placement_drag_keeps_the_drag_and_refreshes_the_pr
         source_tab_id,
         destination_tab_id: source_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap {
+        placement_target: Some(TiledPlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
         pending_placement_command: None,
@@ -1343,7 +1343,7 @@ fn rejected_keyboard_placement_clears_target_and_requests_a_fresh_preview() {
         source_tab_id,
         destination_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap {
+        placement_target: Some(TiledPlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
         pending_placement_command: Some(build_pending_placement_command(command_id)),
@@ -1371,7 +1371,7 @@ fn rejected_mouse_placement_returns_to_the_base_mode() {
         source_tab_id: TabId::new(),
         destination_tab_id: TabId::new(),
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap {
+        placement_target: Some(TiledPlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
         pending_placement_command: Some(build_pending_placement_command(command_id)),
@@ -1388,7 +1388,7 @@ fn rejected_mouse_placement_returns_to_the_base_mode() {
 fn a_stale_placement_rejection_does_not_clear_a_new_confirmation() {
     let mut client = build_test_client();
     let current_command_id = CommandId::new();
-    let submitted_placement_target = PanePlacementTarget::Swap {
+    let submitted_placement_target = TiledPlacementTarget::Swap {
         target_pane_id: PaneId::new(),
     };
     client.placement_state.placement_mode = Some(PlacementMode {
@@ -2402,6 +2402,7 @@ fn frame_hints_follow_the_viewers_own_mode() {
             "Resize Pane Right",
             "Resize Pane Up",
             "Toggle Pane Fullscreen",
+            "Undock Or Dock Pane",
         ]
         .map(|hint_label| (hint_label.to_string(), false))
     );

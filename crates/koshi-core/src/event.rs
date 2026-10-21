@@ -268,7 +268,8 @@ pub struct PanePlacementCommitted {
     /// floats. A message without `destination_tab_id` is refused.
     #[serde(deserialize_with = "Option::deserialize")]
     pub destination_tab_id: Option<TabId>,
-    /// The checked swap or insertion target used by the committed transaction.
+    /// The checked swap, insertion or undock target used by the committed
+    /// transaction.
     pub placement_target: PanePlacementTarget,
 }
 

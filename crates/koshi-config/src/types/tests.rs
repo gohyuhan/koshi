@@ -499,7 +499,7 @@ fn a_shift_modifier_leader_moves_every_leader_binding() {
         build_default_mode_bindings(Leader::Modifiers(BindingModifierFlags::SHIFT));
     let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
 
-    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 24);
+    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 25);
     assert_eq!(
         normal_mode_bindings.bound_action_by_key_sequence
             [&build_single_chord_sequence(BindingModifierFlags::SHIFT, 'q')],
@@ -566,12 +566,12 @@ fn a_chord_leader_prefixes_the_locked_bindings_and_leaves_the_unlock_chord() {
 fn a_leader_chord_that_is_also_a_binding_keeps_both() {
     // `<A-f>` is the fullscreen binding and, here, the leader as well. The
     // one-chord sequence and the sequences it opens are separate map keys:
-    // the table holds all 24 normal-mode bindings.
+    // the table holds all 25 normal-mode bindings.
     let fullscreen_key_chord = build_character_chord(BindingModifierFlags::ALT, 'f');
     let mode_bindings_by_name = build_default_mode_bindings(Leader::Chord(fullscreen_key_chord));
     let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
 
-    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 24);
+    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 25);
     assert_eq!(
         normal_mode_bindings.bound_action_by_key_sequence[&KeySequence::from(fullscreen_key_chord)],
         build_bound_action("toggle-pane-fullscreen")
@@ -713,6 +713,12 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
             "<C-p> m",
             "begin-pane-placement",
             ClientActionKind::BeginPanePlacement,
+        ),
+        build_expected_client_binding(
+            "normal",
+            "<C-p> u",
+            "undock-or-dock-pane",
+            ClientActionKind::UndockOrDockPane,
         ),
         build_expected_binding(
             "normal",

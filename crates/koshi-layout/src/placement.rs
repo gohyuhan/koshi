@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use koshi_core::command::PanePlacementAnchor;
+use koshi_core::command::{PanePlacementAnchor, TiledPlacementTarget};
 use koshi_core::geometry::{Direction, Point, Rect, RequiredSize, Size, SplitDirection};
 use koshi_core::ids::PaneId;
 use thiserror::Error;
@@ -49,6 +49,26 @@ pub enum PlacementTarget {
         /// The side of `anchor` the source lands on.
         direction: Direction,
     },
+}
+
+impl PlacementTarget {
+    /// The layout edit a tiled placement command names: `Swap` stays `Swap`,
+    /// and `Split` becomes `Insert` with the same anchor and direction. The
+    /// destination tab of a `Split` is the caller's to resolve.
+    #[must_use]
+    pub fn from_tiled_placement_target(tiled_placement_target: &TiledPlacementTarget) -> Self {
+        match tiled_placement_target {
+            TiledPlacementTarget::Swap { target_pane_id } => PlacementTarget::Swap {
+                target_pane_id: *target_pane_id,
+            },
+            TiledPlacementTarget::Split {
+                anchor, direction, ..
+            } => PlacementTarget::Insert {
+                anchor: anchor.clone(),
+                direction: *direction,
+            },
+        }
+    }
 }
 
 /// A rejected placement. The caller's trees are unchanged in every case.

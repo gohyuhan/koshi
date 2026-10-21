@@ -1,17 +1,25 @@
-//! Session-state commit for checked cross-tab pane placement.
+//! Session-state commit for checked cross-tab pane placement and for undock.
 //!
 //! The layout crate builds the proposed trees without touching live state.
 //! This module installs those trees, repairs per-client references, and removes
-//! an empty source tab without removing the transferred pane record.
+//! an empty source tab without removing the transferred pane record. An undock
+//! takes the pane's leaf out of its tab and adds the pane to the session's
+//! floating panes.
 
 use std::collections::HashSet;
 
 use koshi_core::event::{Event, LayoutChanged, PaneFocused, TabFocused};
+use koshi_core::geometry::Rect;
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_layout::placement::CrossTabPlacement;
+use koshi_layout::solver::{solve_layout_with_sizing, PaneSizing};
 use thiserror::Error;
 
-use crate::session::state::{Session, Tab};
+use crate::client::{FloatingPanePosition, FloatingPaneView};
+use crate::error::FloatingSetError;
+use crate::session::cascade::{remove_pane_from_tab, repair_focus_after_pane_left};
+use crate::session::focus::build_pane_focused_event;
+use crate::session::state::{FloatingMember, Session};
 use crate::session::tab_ops::close_and_refocus_tab;
 
 /// A checked placement could not be installed because its tabs or source pane
@@ -36,6 +44,104 @@ pub enum PlacementCommitError {
     /// The client that should follow the placed pane is absent.
     #[error("acting client is not attached")]
     ActingClientNotFound,
+    /// An undock source is the only pane of the session's only tab.
+    #[error("the last pane of the last tab cannot be undocked; a session needs one tiled pane")]
+    LastTiledPane,
+    /// The floating set refused the undocked pane.
+    #[error(transparent)]
+    FloatingMemberRefused(#[from] FloatingSetError),
+}
+
+/// Undock `floating_member.pane_id`, a leaf of `source_tab_id`: add
+/// `floating_member` to the session's floating panes, take the pane's leaf
+/// out of the tab, and give the acting client the pane's input. Returns the
+/// ordered events.
+///
+/// The pane's registry record, PTY and every per-pane view stay attached to
+/// its id. The pane is never closed: no [`Event::PaneClosing`] and no
+/// [`Event::PaneRemoved`] is emitted.
+///
+/// 1. The member joins the floating set as its newest member.
+/// 2. The leaf leaves the tab as a closed pane's leaf does in
+///    [`remove_pane_cascade`](crate::session::cascade::remove_pane_cascade),
+///    ranking focus against `source_tab_rect` with `pane_sizing`: the tab's
+///    tree collapses and normalizes, every zoom on the pane ends, and every
+///    client focused on the pane in the tab takes the inheriting focus. A tab
+///    left with no pane closes, and its viewers move to the nearest surviving
+///    tab.
+/// 3. `acting_view`'s client stores the position as its view of the pane,
+///    focuses the pane and draws it above its other floating panes. No other
+///    client stores a view or focuses the pane.
+///
+/// Events: step 2's [`Event::LayoutChanged`] and focus events, or its
+/// [`Event::TabClosed`] and the events of the viewers that move, then the
+/// acting client's [`Event::PaneFocused`] with `tab_id: None`, naming the pane
+/// that took its input after step 2 as `previous_pane_id`.
+///
+/// # Errors
+///
+/// Checked in this order, before any change:
+/// - [`PlacementCommitError::SourceTabNotFound`]: the session holds no
+///   `source_tab_id`;
+/// - [`PlacementCommitError::SourcePaneNotFound`]: the pane is not a leaf of
+///   that tab;
+/// - [`PlacementCommitError::LastTiledPane`]: the pane is the only pane of the
+///   session's only tab;
+/// - [`PlacementCommitError::ActingClientNotFound`]: `acting_view`'s client is
+///   not attached;
+/// - [`PlacementCommitError::FloatingMemberRefused`]: the floating set
+///   refuses the member ([`FloatingSet::add_member`](crate::session::state::FloatingSet::add_member)).
+pub fn commit_undock_placement(
+    session: &mut Session,
+    source_tab_id: TabId,
+    floating_member: FloatingMember,
+    acting_view: (ClientId, FloatingPanePosition),
+    source_tab_rect: Rect,
+    pane_sizing: PaneSizing,
+) -> Result<Vec<Event>, PlacementCommitError> {
+    let source_pane_id = floating_member.pane_id;
+    let (acting_client_id, acting_position) = acting_view;
+    let source_leaf_pane_ids = session
+        .tabs
+        .get(&source_tab_id)
+        .ok_or(PlacementCommitError::SourceTabNotFound)?
+        .get_layout_tree()
+        .list_leaf_pane_ids();
+    if !source_leaf_pane_ids.contains(&source_pane_id) {
+        return Err(PlacementCommitError::SourcePaneNotFound);
+    }
+    if session.tabs.len() == 1 && source_leaf_pane_ids == vec![source_pane_id] {
+        return Err(PlacementCommitError::LastTiledPane);
+    }
+    if session.clients.get_client_by_id(acting_client_id).is_none() {
+        return Err(PlacementCommitError::ActingClientNotFound);
+    }
+    session.floating_set.add_member(floating_member)?;
+
+    let mut emitted_events = remove_pane_from_tab(
+        session,
+        source_tab_id,
+        source_pane_id,
+        source_tab_rect,
+        pane_sizing,
+        None,
+    );
+    if let Some(acting_client) = session.clients.get_client_mut_by_id(acting_client_id) {
+        acting_client.set_floating_pane_view(
+            source_pane_id,
+            FloatingPaneView {
+                position: acting_position,
+                is_minimized: false,
+            },
+        );
+        let previous_focused_pane_id = acting_client.get_active_focused_pane_id();
+        let _ = acting_client.focus_floating_pane(source_pane_id);
+        emitted_events.extend(build_pane_focused_event(
+            acting_client,
+            previous_focused_pane_id,
+        ));
+    }
+    Ok(emitted_events)
 }
 
 /// Install a prepared cross-tab placement and return its ordered events.
@@ -50,6 +156,21 @@ pub enum PlacementCommitError {
 /// which takes its input: no floating pane stays focused for it. Its
 /// [`Event::PaneFocused`] names as `previous_pane_id` the floating pane that
 /// held its input, else the pane it focused in the destination tab before.
+///
+/// Every client zoomed on a pane that left its tab returns to its tiled view.
+/// Every client focused on such a pane in the tab it left takes the pane that
+/// [`repair_focus`](crate::session::focus::repair_focus) picks from the tab's
+/// current tree solved in `source_tab_rect` or `destination_tab_rect` with
+/// `pane_sizing`, ranked against the rect the departed pane held. That pane
+/// becomes the tab's most recent focus, and an [`Event::PaneFocused`] names
+/// it. With no eligible pane, the client's focus in that tab ends and an
+/// [`Event::TerminalTooSmallEntered`] is emitted.
+// Carries one placement: the tabs and the pane it moves (`source_tab_id`,
+// `destination_tab_id`, `source_pane_id`), the trees the layout crate built
+// (`prepared_placement`), the client that follows the pane
+// (`acting_client_id`), and the geometry focus repair ranks against
+// (`source_tab_rect`, `destination_tab_rect`, `pane_sizing`).
+#[allow(clippy::too_many_arguments)]
 pub fn commit_cross_tab_placement(
     session: &mut Session,
     source_tab_id: TabId,
@@ -57,6 +178,9 @@ pub fn commit_cross_tab_placement(
     source_pane_id: PaneId,
     prepared_placement: CrossTabPlacement,
     acting_client_id: ClientId,
+    source_tab_rect: Rect,
+    destination_tab_rect: Rect,
+    pane_sizing: PaneSizing,
 ) -> Result<Vec<Event>, PlacementCommitError> {
     if source_tab_id == destination_tab_id {
         return Err(PlacementCommitError::SameTab);
@@ -141,20 +265,25 @@ pub fn commit_cross_tab_placement(
         return Err(PlacementCommitError::PaneOwnershipConflict);
     }
     let is_source_tab_closing = prepared_placement.source_tree.is_none();
-
-    let affected_client_ids: Vec<ClientId> = session
-        .clients
-        .list_attached_clients()
-        .filter(|client| {
-            client.get_client_id() == acting_client_id
-                || client.get_active_tab_id() == source_tab_id
-                || client.get_active_tab_id() == destination_tab_id
-                || client.get_focused_pane_id(source_tab_id).is_some()
-                || client.get_focused_pane_id(destination_tab_id).is_some()
-                || client.get_zoomed_pane_id(source_tab_id).is_some()
-                || client.get_zoomed_pane_id(destination_tab_id).is_some()
+    let source_pane_rect = find_solved_pane_rect(
+        session,
+        source_tab_id,
+        source_pane_id,
+        source_tab_rect,
+        pane_sizing,
+    );
+    let destination_departures: Vec<(PaneId, Rect)> = destination_moved_pane_ids
+        .iter()
+        .map(|&pane_id| {
+            let pane_rect = find_solved_pane_rect(
+                session,
+                destination_tab_id,
+                pane_id,
+                destination_tab_rect,
+                pane_sizing,
+            );
+            (pane_id, pane_rect)
         })
-        .map(|client| client.get_client_id())
         .collect();
 
     // Destination installation is the first live tree write. All fallible
@@ -213,36 +342,31 @@ pub fn commit_cross_tab_placement(
         destination_tab.record_focus_mru(source_pane_id);
     }
 
-    if !is_source_tab_closing {
-        repair_client_tab_focus(
-            session,
-            acting_client_id,
-            source_tab_id,
-            &source_pane_ids_after,
-            &mut emitted_events,
-        );
+    for client in session.clients.list_attached_clients_mut() {
+        client.clear_zoom_of_pane(source_pane_id);
+        for &(departed_pane_id, _) in &destination_departures {
+            client.clear_zoom_of_pane(departed_pane_id);
+        }
     }
-
-    for client_id in affected_client_ids {
-        if client_id == acting_client_id {
-            continue;
-        }
-        repair_client_tab_focus(
+    if !is_source_tab_closing {
+        emitted_events.extend(repair_focus_after_pane_left(
             session,
-            client_id,
+            source_tab_id,
+            source_pane_id,
+            source_pane_rect,
+            source_tab_rect,
+            pane_sizing,
+        ));
+    }
+    for (departed_pane_id, departed_pane_rect) in destination_departures {
+        emitted_events.extend(repair_focus_after_pane_left(
+            session,
             destination_tab_id,
-            &destination_pane_ids_after,
-            &mut emitted_events,
-        );
-        if !is_source_tab_closing {
-            repair_client_tab_focus(
-                session,
-                client_id,
-                source_tab_id,
-                &source_pane_ids_after,
-                &mut emitted_events,
-            );
-        }
+            departed_pane_id,
+            departed_pane_rect,
+            destination_tab_rect,
+            pane_sizing,
+        ));
     }
 
     if is_source_tab_closing {
@@ -252,79 +376,24 @@ pub fn commit_cross_tab_placement(
     Ok(emitted_events)
 }
 
-fn repair_client_tab_focus(
-    session: &mut Session,
-    client_id: ClientId,
+/// The rect `pane_id` holds in `tab_id`'s current tree solved against
+/// `tab_rect` with `pane_sizing`. An empty rect at the origin when the tab is
+/// absent or holds no leaf for `pane_id`.
+fn find_solved_pane_rect(
+    session: &Session,
     tab_id: TabId,
-    valid_pane_ids: &HashSet<PaneId>,
-    emitted_events: &mut Vec<Event>,
-) {
-    clear_invalid_client_zoom(session, client_id, tab_id, valid_pane_ids);
-    let Some(previous_pane_id) = session
-        .clients
-        .get_client_by_id(client_id)
-        .and_then(|client| client.get_focused_pane_id(tab_id))
-    else {
-        return;
-    };
-    if valid_pane_ids.contains(&previous_pane_id) {
-        return;
-    }
+    pane_id: PaneId,
+    tab_rect: Rect,
+    pane_sizing: PaneSizing,
+) -> Rect {
     let Some(tab) = session.tabs.get(&tab_id) else {
-        return;
+        return Rect::build_empty_at_origin();
     };
-    let next_pane_id = select_valid_focus_pane(tab, valid_pane_ids);
-    let selected_pane_id = if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
-        match next_pane_id {
-            Some(next_pane_id) => {
-                client.update_focused_pane(tab_id, next_pane_id);
-                emitted_events.push(Event::PaneFocused(PaneFocused {
-                    client_id,
-                    tab_id: Some(tab_id),
-                    pane_id: next_pane_id,
-                    previous_pane_id: Some(previous_pane_id),
-                }));
-                Some(next_pane_id)
-            }
-            None => {
-                client.remove_focused_pane(tab_id);
-                None
-            }
-        }
-    } else {
-        None
-    };
-    if let Some(selected_pane_id) = selected_pane_id {
-        if let Some(tab) = session.tabs.get_mut(&tab_id) {
-            tab.record_focus_mru(selected_pane_id);
-        }
-    }
-}
-
-fn select_valid_focus_pane(tab: &Tab, valid_pane_ids: &HashSet<PaneId>) -> Option<PaneId> {
-    tab.list_focus_mru()
-        .iter()
-        .copied()
-        .chain(tab.get_layout_tree().list_leaf_pane_ids())
-        .find(|pane_id| valid_pane_ids.contains(pane_id))
-}
-
-fn clear_invalid_client_zoom(
-    session: &mut Session,
-    client_id: ClientId,
-    tab_id: TabId,
-    valid_pane_ids: &HashSet<PaneId>,
-) {
-    let should_clear_zoom = session
-        .clients
-        .get_client_by_id(client_id)
-        .and_then(|client| client.get_zoomed_pane_id(tab_id))
-        .is_some_and(|pane_id| !valid_pane_ids.contains(&pane_id));
-    if should_clear_zoom {
-        if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
-            client.clear_zoom(tab_id);
-        }
-    }
+    solve_layout_with_sizing(tab.get_layout_tree(), tab_rect, pane_sizing)
+        .pane_rects
+        .into_iter()
+        .find(|&(solved_pane_id, _)| solved_pane_id == pane_id)
+        .map_or_else(Rect::build_empty_at_origin, |(_, pane_rect)| pane_rect)
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@
 
 use super::*;
 
-use koshi_core::command::PanePlacementTarget;
+use koshi_core::command::{PanePlacementTarget, TiledPlacementTarget};
 use koshi_core::event::{
     ConfigReloaded, FloatingPaneMoved, InputModeChanged, LayoutChanged, MouseSelectChanged,
     PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneFocused,
@@ -957,9 +957,9 @@ fn a_placement_from_a_floating_pane_logs_only_its_destination_tab() {
         source_pane_id,
         source_tab_id: None,
         destination_tab_id: Some(destination_tab_id),
-        placement_target: PanePlacementTarget::Swap {
+        placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
             target_pane_id: PaneId::new(),
-        },
+        }),
     })]);
 
     assert_eq!(

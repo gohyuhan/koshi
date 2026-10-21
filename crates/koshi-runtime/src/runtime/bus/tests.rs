@@ -24,7 +24,7 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
-use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
+use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget, TiledPlacementTarget};
 use koshi_core::event::{
     ConfigReloaded, Event, FloatingPaneMoved, InputModeChanged, LayoutChanged, MouseSelectChanged,
     PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneFocused,
@@ -1649,11 +1649,11 @@ fn every_structure_event_converts_to_its_wire_frame() {
         Some(SessionEvent::LayoutChanged { tab_id })
     );
     let placement_command_id = CommandId::new();
-    let placement_target = PanePlacementTarget::Split {
+    let placement_target = PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
         destination_tab_id: other_tab_id,
         anchor: PanePlacementAnchor::Pane(other_pane_id),
         direction: Direction::Down,
-    };
+    });
     assert_eq!(
         build_wire_event(&Delivery::Event(Event::PanePlacementCommitted(
             PanePlacementCommitted {

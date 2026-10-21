@@ -1,5 +1,5 @@
-//! Tests for pane placement: swaps, insertions, anchor validation and
-//! destination listing.
+//! Tests for pane placement: swaps, insertions, anchor validation,
+//! destination listing and the conversion of a tiled placement target.
 //!
 //! The main fixture is the four-pane screen `A | B B` above `A | C D` over
 //! 120 by 40 cells, encoded as `H[A, V[B, H[C, D]]]` with the outer weights
@@ -7,6 +7,7 @@
 //! C `(40, 20, 40, 20)`, D `(80, 20, 40, 20)`.
 
 use koshi_core::geometry::Point;
+use koshi_core::ids::TabId;
 use koshi_test_support::fixtures::build_cell_rect;
 use koshi_test_support::layout_assert::check_exact_tiling;
 
@@ -1698,5 +1699,29 @@ fn a_group_rectangle_near_u16_max_saturates_instead_of_overflowing() {
                 span_rect: tab_rect
             },
         ]
+    );
+}
+
+#[test]
+fn a_tiled_placement_target_becomes_the_layout_edit_it_names() {
+    let target_pane_id = PaneId::new();
+    let anchor_pane_id = PaneId::new();
+
+    assert_eq!(
+        PlacementTarget::from_tiled_placement_target(&TiledPlacementTarget::Swap {
+            target_pane_id
+        }),
+        PlacementTarget::Swap { target_pane_id }
+    );
+    assert_eq!(
+        PlacementTarget::from_tiled_placement_target(&TiledPlacementTarget::Split {
+            destination_tab_id: TabId::new(),
+            anchor: PanePlacementAnchor::Pane(anchor_pane_id),
+            direction: Direction::Left,
+        }),
+        PlacementTarget::Insert {
+            anchor: PanePlacementAnchor::Pane(anchor_pane_id),
+            direction: Direction::Left,
+        }
     );
 }

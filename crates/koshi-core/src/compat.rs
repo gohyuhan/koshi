@@ -64,6 +64,11 @@ pub struct Surface {
 /// - `PaneCreated`, `PaneRemoved` and `PaneFocused` carry a `tab_id` that is
 ///   `null` for a floating pane, and `PanePlacementCommitted` carries a
 ///   `source_tab_id` and a `destination_tab_id` that are `null` for one.
+/// - The `placement_target` of a `PlacePane` command and of a
+///   `PanePlacementCommitted` event is `{"Tiled": {"Swap": …}}`,
+///   `{"Tiled": {"Split": …}}`, or `{"Floating": {"top_left_cell": …}}`,
+///   which makes a tiled or stacked pane a floating pane. 4 carried the swap
+///   or split target with no `Tiled` wrapper, and had no `Floating` target.
 /// - A frame's two revisions, an image placement's `is_available`, a close
 ///   command's `should_kill_process_tree`, and a terminal-too-small event's
 ///   cause are required. 4 read a message without them.

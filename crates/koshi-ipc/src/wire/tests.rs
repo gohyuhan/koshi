@@ -709,7 +709,7 @@ fn sample_supervisor_events() -> Vec<SupervisorEvent> {
 
 /// One value per [`SessionEvent`] variant.
 fn sample_events() -> Vec<SessionEvent> {
-    use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
+    use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget, TiledPlacementTarget};
     use koshi_core::geometry::Direction;
     use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 
@@ -754,11 +754,11 @@ fn sample_events() -> Vec<SessionEvent> {
             source_pane_id,
             source_tab_id: Some(source_tab_id),
             destination_tab_id: Some(destination_tab_id),
-            placement_target: PanePlacementTarget::Split {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                 destination_tab_id,
                 anchor: PanePlacementAnchor::Pane(target_pane_id),
                 direction: Direction::Right,
-            },
+            }),
         },
         SessionEvent::PaneCreated {
             pane_id: PaneId::new(),
