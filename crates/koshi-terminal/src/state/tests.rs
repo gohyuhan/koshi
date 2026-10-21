@@ -73,10 +73,30 @@ fn build_image_record(
     }
 }
 
-/// Feed `input_bytes` through a fresh parser into `terminal_state`.
+/// Feed `input_bytes` through a fresh parser into `terminal_state` as the
+/// engine does: each run of printed characters goes to
+/// [`TerminalState::print_text`] at once. A clone fed the same bytes one
+/// printed character at a time through `print` must end equal to
+/// `terminal_state`, and the call panics when it does not.
 pub(crate) fn process_terminal_bytes(terminal_state: &mut TerminalState, input_bytes: &[u8]) {
+    let mut single_character_state = terminal_state.clone();
+    let mut single_character_parser =
+        vte::Parser::<{ crate::engine::OSC_BUFFER_BYTE_CAPACITY }>::new_with_size();
+    single_character_parser.advance(&mut single_character_state, input_bytes);
+
     let mut parser = vte::Parser::<{ crate::engine::OSC_BUFFER_BYTE_CAPACITY }>::new_with_size();
-    parser.advance(terminal_state, input_bytes);
+    crate::engine::advance_terminal_parser(
+        &mut parser,
+        terminal_state,
+        &mut String::new(),
+        input_bytes,
+    );
+
+    assert!(
+        *terminal_state == single_character_state,
+        "printed runs and single-character prints of {:?} leave different states",
+        String::from_utf8_lossy(input_bytes)
+    );
 }
 
 #[test]

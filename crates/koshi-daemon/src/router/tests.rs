@@ -1692,7 +1692,7 @@ fn spawn_dispatch_loop(
 /// A watch of this test binary, which a test hands the loop as the program a
 /// restart would start. No test here starts it.
 fn build_test_executable_watch() -> Arc<ExecutableWatch> {
-    Arc::new(ExecutableWatch::new(
+    Arc::new(ExecutableWatch::from_executable_path(
         std::env::current_exe().expect("this test binary's own path"),
         BUILD_VERSION,
     ))
@@ -1701,7 +1701,7 @@ fn build_test_executable_watch() -> Arc<ExecutableWatch> {
 /// A watch of a program file that does not exist: no connection it checks
 /// runs a version read.
 fn build_unread_executable_watch() -> Arc<ExecutableWatch> {
-    Arc::new(ExecutableWatch::new(
+    Arc::new(ExecutableWatch::from_executable_path(
         PathBuf::from("/home/user/absent/koshi"),
         BUILD_VERSION,
     ))
@@ -6036,7 +6036,10 @@ fn a_restart_request_is_answered_from_the_binary_on_disk() {
 
     let router_result = answer_router_request(
         runtime_directory.path(),
-        &Arc::new(ExecutableWatch::new(executable_path.clone(), BUILD_VERSION)),
+        &Arc::new(ExecutableWatch::from_executable_path(
+            executable_path.clone(),
+            BUILD_VERSION,
+        )),
         None,
         RouterRequestKind::Restart,
     );
@@ -6054,7 +6057,10 @@ fn a_restart_request_naming_a_binary_that_cannot_be_read_is_refused() {
 
     let router_result = answer_router_request(
         runtime_directory.path(),
-        &Arc::new(ExecutableWatch::new(executable_path.clone(), BUILD_VERSION)),
+        &Arc::new(ExecutableWatch::from_executable_path(
+            executable_path.clone(),
+            BUILD_VERSION,
+        )),
         None,
         RouterRequestKind::Restart,
     );
@@ -6083,7 +6089,10 @@ fn a_restart_request_naming_a_non_executable_binary_is_refused() {
 
     let router_result = answer_router_request(
         runtime_directory.path(),
-        &Arc::new(ExecutableWatch::new(executable_path.clone(), BUILD_VERSION)),
+        &Arc::new(ExecutableWatch::from_executable_path(
+            executable_path.clone(),
+            BUILD_VERSION,
+        )),
         None,
         RouterRequestKind::Restart,
     );
@@ -6617,7 +6626,10 @@ fn a_connection_to_a_router_whose_program_file_holds_another_version_makes_the_r
         &runtime_directory.path().join("started_runs"),
         "koshi 1.0.0",
     );
-    let executable_watch = Arc::new(ExecutableWatch::new(program_path.clone(), "1.0.0"));
+    let executable_watch = Arc::new(ExecutableWatch::from_executable_path(
+        program_path.clone(),
+        "1.0.0",
+    ));
     let replacement_path = write_printing_program(
         runtime_directory.path(),
         "replacement",
@@ -6666,7 +6678,7 @@ fn a_hello_refused_for_its_version_makes_the_restart_due_when_the_program_file_h
         &run_log_path,
         "koshi 9.9.9",
     );
-    let executable_watch = Arc::new(ExecutableWatch::new(program_path, "1.0.0"));
+    let executable_watch = Arc::new(ExecutableWatch::from_executable_path(program_path, "1.0.0"));
     let router_socket_address = compute_router_socket_address(runtime_directory.path());
     let router_listener =
         Listener::bind(&router_socket_address).expect("the router socket is bound");

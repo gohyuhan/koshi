@@ -625,7 +625,9 @@ impl Server {
         self.subscriptions.push(FrameSubscription {
             subscriber_id,
             client_id,
-            frame_pace: FramePace::new(compute_frame_interval(max_frames_per_second)),
+            frame_pace: FramePace::with_frame_interval(compute_frame_interval(
+                max_frames_per_second,
+            )),
         });
         (delivery_receiver, writer_handoff)
     }

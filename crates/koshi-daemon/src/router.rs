@@ -865,7 +865,10 @@ pub fn run_router(
     // at this path. The watch takes the file at that path, as it is now, as the
     // one this router runs.
     let executable_path = koshi_host::program_path::resolve_program_path()?;
-    let executable_watch = Arc::new(ExecutableWatch::new(executable_path.clone(), BUILD_VERSION));
+    let executable_watch = Arc::new(ExecutableWatch::from_executable_path(
+        executable_path.clone(),
+        BUILD_VERSION,
+    ));
 
     // Where this machine's remote access tokens live, resolved once here. A
     // machine with no resolvable data directory has no store and holds no

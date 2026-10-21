@@ -910,6 +910,66 @@ fn a_returning_image_waits_for_its_new_connection_identity() {
 }
 
 #[test]
+fn a_replaced_image_paints_after_its_frame_the_old_release_and_the_new_record() {
+    // The session replaces record 1 with record 2 in this order: the frame
+    // that names record 2, the release of record 1, and record 2.
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
+        build_content_pane_snapshot_with_image(PaneId::new()),
+        PaneSnapshot::from_empty_pane(PaneId::new()),
+    ]);
+    let initial_painted_frame = build_wire_frame(&expected_render_snapshot);
+    let mut replacing_painted_frame = initial_painted_frame.clone();
+    replacing_painted_frame.pane_snapshots[0].image_placement_snapshots[0].image_content_id = 2;
+    let mut image_cache = ImageCache::new();
+    image_cache
+        .adopt_painted_frame(Box::new(carry_first_painted_frame(
+            &expected_render_snapshot,
+            &initial_painted_frame,
+        )))
+        .expect("the first frame reads");
+    image_cache
+        .start_image_transfer(build_image_transfer(1))
+        .expect("the first transfer starts");
+    image_cache
+        .accept_image_chunk(&build_image_chunk(1))
+        .expect("the first transfer reads")
+        .expect("the first image completes the frame");
+
+    assert_eq!(
+        image_cache
+            .adopt_painted_frame(Box::new(carry_first_painted_frame(
+                &expected_render_snapshot,
+                &replacing_painted_frame,
+            )))
+            .expect("the replacing frame reads"),
+        None
+    );
+    image_cache
+        .release_image_contents(&[1])
+        .expect("the record the replacing frame stops showing is released");
+    image_cache
+        .start_image_transfer(build_image_transfer(2))
+        .expect("the replacing transfer starts");
+    let replaced_snapshot = image_cache
+        .accept_image_chunk(&build_image_chunk(2))
+        .expect("the replacing transfer reads")
+        .expect("the replacing image completes the frame");
+
+    assert_eq!(
+        image_cache
+            .image_record_by_content_id
+            .keys()
+            .collect::<Vec<_>>(),
+        vec![&2]
+    );
+    assert_eq!(image_cache.retained_image_byte_count, 8);
+    assert_eq!(
+        replaced_snapshot.pane_snapshots[0].image_placement_snapshots[0].get_image_content_id(),
+        2
+    );
+}
+
+#[test]
 fn each_malformed_chunk_gives_its_typed_error_closes_its_transfer_and_allows_an_exact_restart() {
     let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),

@@ -2371,7 +2371,7 @@ fn compute_image_byte_count(decoded_image: &DecodedImage) -> u64 {
 struct PreparedImageFrame {
     /// Whether the client must discard every record before this frame.
     should_reset_image_cache: bool,
-    /// The records the client drops before this frame, in ascending order.
+    /// The records the client drops after this frame, in ascending order.
     released_image_content_ids: Vec<u64>,
     /// Placement geometry and connection-local content identities.
     painted_frame: PaintedFrame,
@@ -2443,15 +2443,16 @@ fn record_sent_painted_update(
 
 /// Send one painted update and each new image record after it.
 ///
-/// In this order: an `ImageCacheReset` when one is due, the
+/// In this order: an `ImageCacheReset` when one is due, the update, the
 /// `ImageContentReleased` frames of the records the client no longer keeps,
-/// the update, and the records the update shows that the client does not
-/// hold, as [`ConnectionImageCache::prepare_image_frame`] chooses them.
+/// and the records the update shows that the client does not hold, as
+/// [`ConnectionImageCache::prepare_image_frame`] chooses them.
 ///
 /// The update turns what `painted_update_sender` sent last into
 /// `render_snapshot`, as [`PaintedUpdateSender::build_update_frames`] builds
 /// it. An update that changes nothing is not sent, unless it follows an
-/// image cache reset or image records follow it.
+/// image cache reset or image records follow it. An update over the frame
+/// cap is not sent, and no release or record follows it.
 ///
 /// A client whose terminal has no native image protocol receives every image
 /// placement through [`hide_image_records`], and no image record.
@@ -2494,12 +2495,6 @@ fn send_painted_frame(
             );
         }
     }
-    send_image_releases(
-        frame_writer,
-        image_cache,
-        client_id,
-        &prepared_image_frame.released_image_content_ids,
-    )?;
     let is_update_required = prepared_image_frame.should_reset_image_cache
         || !prepared_image_frame.image_uploads.is_empty();
     let is_update_held = send_painted_update(
@@ -2514,6 +2509,12 @@ fn send_painted_frame(
     if !is_update_held {
         return Ok(());
     }
+    send_image_releases(
+        frame_writer,
+        image_cache,
+        client_id,
+        &prepared_image_frame.released_image_content_ids,
+    )?;
     send_image_uploads(
         frame_writer,
         image_cache,

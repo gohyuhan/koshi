@@ -83,7 +83,7 @@ fn build_test_session_start(
         session_id: SessionId::new(),
         session_name: "quiet-lake".to_string(),
         is_other_user_access_allowed,
-        executable_watch: Arc::new(ExecutableWatch::new(
+        executable_watch: Arc::new(ExecutableWatch::from_executable_path(
             PathBuf::from("/opt/koshi/bin/koshi"),
             "1.0.0",
         )),
@@ -1201,7 +1201,7 @@ fn an_image_swap_that_could_not_start_hands_back_its_reason_and_keeps_ignoring_s
     let _sigpipe_disposition_guard = lock_sigpipe_disposition();
     let runtime_directory_fixture = TempDir::new().expect("create runtime directory fixture");
     let mut session_start = build_test_session_start(runtime_directory_fixture.path(), false);
-    session_start.executable_watch = Arc::new(ExecutableWatch::new(
+    session_start.executable_watch = Arc::new(ExecutableWatch::from_executable_path(
         runtime_directory_fixture
             .path()
             .join("koshi-that-is-not-there"),
@@ -1868,7 +1868,7 @@ fn a_swap_whose_new_image_never_starts_hands_the_session_back_on_a_rebound_socke
     // gone from the disk.
     let runtime_directory_fixture = build_short_runtime_directory();
     let mut session_start = build_test_session_start(runtime_directory_fixture.path(), false);
-    session_start.executable_watch = Arc::new(ExecutableWatch::new(
+    session_start.executable_watch = Arc::new(ExecutableWatch::from_executable_path(
         runtime_directory_fixture
             .path()
             .join("koshi-that-is-not-there"),
@@ -2117,7 +2117,7 @@ fn a_restart_on_the_bound_socket_runs_the_restart_check_and_reaches_no_dispatche
     let missing_executable_path = runtime_directory_fixture
         .path()
         .join("koshi-that-is-not-there");
-    session_start.executable_watch = Arc::new(ExecutableWatch::new(
+    session_start.executable_watch = Arc::new(ExecutableWatch::from_executable_path(
         missing_executable_path.clone(),
         "1.0.0",
     ));
@@ -2265,7 +2265,7 @@ fn a_line_a_client_sends_after_reading_the_restart_frame_reaches_its_pane_before
     // back in this process.
     let runtime_directory_fixture = build_short_runtime_directory();
     let mut session_start = build_test_session_start(runtime_directory_fixture.path(), false);
-    session_start.executable_watch = Arc::new(ExecutableWatch::new(
+    session_start.executable_watch = Arc::new(ExecutableWatch::from_executable_path(
         runtime_directory_fixture
             .path()
             .join("koshi-that-is-not-there"),
@@ -2368,7 +2368,7 @@ fn a_swap_starts_no_new_image_before_the_kill_of_a_pane_closed_earlier_ends() {
     // this process once the held kill has ended.
     let runtime_directory_fixture = build_short_runtime_directory();
     let mut session_start = build_test_session_start(runtime_directory_fixture.path(), false);
-    session_start.executable_watch = Arc::new(ExecutableWatch::new(
+    session_start.executable_watch = Arc::new(ExecutableWatch::from_executable_path(
         runtime_directory_fixture
             .path()
             .join("koshi-that-is-not-there"),
@@ -2541,7 +2541,7 @@ fn a_swap_that_can_neither_start_nor_bind_its_socket_again_ends_every_pane() {
     // returns that failure, and the pane's child is ended and reaped.
     let runtime_directory_fixture = build_short_runtime_directory();
     let mut session_start = build_test_session_start(runtime_directory_fixture.path(), false);
-    session_start.executable_watch = Arc::new(ExecutableWatch::new(
+    session_start.executable_watch = Arc::new(ExecutableWatch::from_executable_path(
         runtime_directory_fixture
             .path()
             .join("koshi-that-is-not-there"),

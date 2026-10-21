@@ -408,7 +408,7 @@ pub fn run_session_server(
         session_id,
         session_name: session_name.clone(),
         is_other_user_access_allowed: should_allow_other_users_override == Some(true),
-        executable_watch: Arc::new(ExecutableWatch::new(
+        executable_watch: Arc::new(ExecutableWatch::from_executable_path(
             program_path,
             env!("CARGO_PKG_VERSION"),
         )),

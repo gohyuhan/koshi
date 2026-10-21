@@ -1818,6 +1818,82 @@ fn printing_wraps_at_the_right_horizontal_margin() {
 }
 
 #[test]
+fn a_printed_run_with_side_margins_leaves_the_state_single_character_prints_leave() {
+    // Margins at columns 2 to 6 of 10. From column 0, `abcdefg` fills columns
+    // 0 to 6, and `hij` wraps to columns 2 to 4 of the next row.
+    let mut terminal_state = build_terminal_state(10, 3);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[3;7s\x1b[1;1H");
+    terminal_state.print_text("abcdefghij");
+    assert_eq!(get_row_text(&terminal_state, 0), "abcdefg   ");
+    assert_eq!(get_row_text(&terminal_state, 1), "  hij     ");
+    assert_eq!(terminal_state.get_active_cursor_position(), (1, 5));
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
+
+    for cursor_column_index in 0..10 {
+        for printed_text in ["a", "ab", "abcdefghij", "abcdefghijklmnopqrst"] {
+            let mut run_state = build_terminal_state(10, 3);
+            process_terminal_bytes(&mut run_state, b"\x1b[?69h\x1b[3;7s");
+            run_state.move_cursor_to(0, cursor_column_index);
+            let mut single_character_state = run_state.clone();
+
+            run_state.print_text(printed_text);
+            print_text(&mut single_character_state, printed_text);
+
+            assert_eq!(
+                run_state, single_character_state,
+                "cursor column {cursor_column_index}, text {printed_text:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn printed_runs_leave_the_state_single_character_prints_leave_in_every_setup_and_cell() {
+    // `process_terminal_bytes` panics when the printed runs and the
+    // single-character prints of its bytes leave different states.
+    let setup_byte_sequences: [&[u8]; 9] = [
+        b"",
+        b"\x1b[?69h\x1b[3;7s",
+        b"\x1b[?7l",
+        b"\x1b[?69h\x1b[3;7s\x1b[?7l",
+        b"\x1b[4h",
+        b"\x1b(0",
+        b"\x1b[2;3r",
+        "\x1b[1;1H\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}"
+            .as_bytes(),
+        "\x1b[?69h\x1b[3;7s\x1b[1;1H\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}".as_bytes(),
+    ];
+    let printed_texts = [
+        "a",
+        "ab",
+        "abcde",
+        "abcdefghijklmnopqrstuvwxy",
+        "ab\u{301}c",
+        "a\u{4E2D}b",
+        "abc\u{2764}\u{FE0F}d",
+    ];
+    for setup_bytes in setup_byte_sequences {
+        for row_number in 1..=3 {
+            for column_number in 1..=10 {
+                for printed_text in printed_texts {
+                    let mut terminal_state = build_terminal_state(10, 3);
+                    let cursor_position_bytes = format!("\x1b[{row_number};{column_number}H");
+                    process_terminal_bytes(
+                        &mut terminal_state,
+                        &[
+                            setup_bytes,
+                            cursor_position_bytes.as_bytes(),
+                            printed_text.as_bytes(),
+                        ]
+                        .concat(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn printing_outside_horizontal_margins_wraps_at_the_grid_edge() {
     let mut terminal_state = build_terminal_state(8, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[3;6s\x1b[1;8HXY");

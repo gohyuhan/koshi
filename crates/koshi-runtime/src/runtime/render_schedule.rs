@@ -63,7 +63,7 @@ impl FramePace {
     /// A pace whose frames go at most once per `frame_interval`, owed its
     /// first frame, which may go at once. `frame_interval` is at least 1 ns:
     /// [`find_grid_frame_time`](Self::find_grid_frame_time) divides by it.
-    pub fn new(frame_interval: Duration) -> Self {
+    pub fn with_frame_interval(frame_interval: Duration) -> Self {
         FramePace {
             frame_interval,
             next_frame_allowed_at: None,

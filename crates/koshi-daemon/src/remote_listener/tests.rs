@@ -1283,7 +1283,10 @@ fn a_remote_connection_makes_the_restart_due_when_the_program_file_holds_another
         &program_directory.path().join("started_runs"),
         "koshi 1.0.0",
     );
-    let executable_watch = Arc::new(ExecutableWatch::new(program_path.clone(), "1.0.0"));
+    let executable_watch = Arc::new(ExecutableWatch::from_executable_path(
+        program_path.clone(),
+        "1.0.0",
+    ));
     let replacement_path = write_printing_program(
         program_directory.path(),
         "replacement",
@@ -1428,7 +1431,7 @@ mod admission_answers {
             .to_string();
         let dispatcher_events_sender = spawn_test_admission_dispatcher(should_admit_connection);
         let program_directory = build_test_runtime_directory();
-        let executable_watch = Arc::new(ExecutableWatch::new(
+        let executable_watch = Arc::new(ExecutableWatch::from_executable_path(
             program_directory.path().join("koshi-that-is-not-there"),
             "1.0.0",
         ));

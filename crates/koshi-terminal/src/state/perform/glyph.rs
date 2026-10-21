@@ -38,8 +38,10 @@ impl TerminalState {
 
     /// Print the leading printable ASCII characters (`0x20`–`0x7E`) of
     /// `text_bytes` that fit on the cursor row up to the right wrap bound, and
-    /// return how many it printed. Each cell, the cursor, the wrap latch and the
-    /// grapheme cluster end as `print` leaves them for the same characters.
+    /// return how many it printed. A run that starts left of the left margin
+    /// stops at the column before the left margin. Each cell, the cursor, the
+    /// wrap latch and the grapheme cluster end as `print` leaves them for the
+    /// same characters.
     ///
     /// Prints nothing and returns `0` when the first byte is not printable
     /// ASCII, the wrap latch is armed, insert mode (IRM) is on, the active
@@ -65,7 +67,18 @@ impl TerminalState {
         let (_, last_column_index) = self.get_horizontal_wrap_bounds();
         let cursor_row_index = self.get_active_cursor().row;
         let first_column_index = self.get_active_cursor().column;
-        let row_room_count = usize::from(last_column_index.saturating_sub(first_column_index)) + 1;
+        // A run that starts left of the left margin ends at the column before
+        // it. From the left margin on, the margins are the wrap bounds.
+        let last_run_column_index = match self.get_horizontal_margins() {
+            Some((left_margin_column_index, _))
+                if first_column_index < left_margin_column_index =>
+            {
+                left_margin_column_index - 1
+            }
+            _ => last_column_index,
+        };
+        let row_room_count =
+            usize::from(last_run_column_index.saturating_sub(first_column_index)) + 1;
         let ascii_byte_count = text_bytes[..text_bytes.len().min(row_room_count)]
             .iter()
             .take_while(|text_byte| is_printable_ascii_byte(**text_byte))

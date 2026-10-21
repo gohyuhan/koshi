@@ -88,9 +88,11 @@ pub enum SessionEvent {
         image_transfer: FrameImageTransfer,
     },
     /// Drop the image records with these connection-local identities. The
-    /// session sends it after the last painted update or placement preview
-    /// that shows those records, and names at most
-    /// [`MAX_RELEASED_IMAGE_CONTENT_COUNT`] identities in one frame.
+    /// newest painted update and the placement preview the client may hold
+    /// show none of them. After a painted update that stops showing a
+    /// record, the release of that record follows the update and goes
+    /// before the records that follow the update. One frame names at most
+    /// [`MAX_RELEASED_IMAGE_CONTENT_COUNT`] identities.
     ImageContentReleased {
         /// The identities of the records the client drops.
         image_content_ids: Vec<u64>,

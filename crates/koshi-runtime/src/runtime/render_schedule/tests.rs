@@ -56,7 +56,8 @@ fn build_instant_after_milliseconds(seed_instant: Instant, offset_milliseconds: 
 /// A pace at the default 60 frames a second whose first frame went at
 /// `first_frame_sent_at`.
 fn build_pace_after_first_frame(first_frame_sent_at: Instant) -> FramePace {
-    let mut frame_pace = FramePace::new(compute_frame_interval(DEFAULT_MAX_FRAMES_PER_SECOND));
+    let mut frame_pace =
+        FramePace::with_frame_interval(compute_frame_interval(DEFAULT_MAX_FRAMES_PER_SECOND));
     frame_pace.record_frame_sent(first_frame_sent_at);
     frame_pace
 }
@@ -71,7 +72,8 @@ fn list_frame_milliseconds_over_one_second(
     allow_now_at_millisecond: Option<u64>,
 ) -> Vec<u64> {
     let timeline_start_time = Instant::now();
-    let mut frame_pace = FramePace::new(compute_frame_interval(max_frames_per_second));
+    let mut frame_pace =
+        FramePace::with_frame_interval(compute_frame_interval(max_frames_per_second));
     let mut frame_milliseconds = Vec::new();
     for elapsed_milliseconds in 0..1000 {
         let current_time =
@@ -91,7 +93,8 @@ fn list_frame_milliseconds_over_one_second(
 #[test]
 fn a_new_pace_owes_its_first_frame_at_once_and_nothing_after_it() {
     let timeline_start_time = Instant::now();
-    let mut frame_pace = FramePace::new(compute_frame_interval(DEFAULT_MAX_FRAMES_PER_SECOND));
+    let mut frame_pace =
+        FramePace::with_frame_interval(compute_frame_interval(DEFAULT_MAX_FRAMES_PER_SECOND));
 
     assert_eq!(
         frame_pace.compute_frame_wait(timeline_start_time),
@@ -261,7 +264,8 @@ fn a_cleared_change_owes_no_frame_and_keeps_the_grid() {
 #[test]
 fn a_grid_frame_time_is_the_allowed_time_plus_whole_intervals() {
     let timeline_start_time = Instant::now();
-    let new_frame_pace = FramePace::new(compute_frame_interval(DEFAULT_MAX_FRAMES_PER_SECOND));
+    let new_frame_pace =
+        FramePace::with_frame_interval(compute_frame_interval(DEFAULT_MAX_FRAMES_PER_SECOND));
     assert_eq!(
         new_frame_pace.find_grid_frame_time(timeline_start_time),
         timeline_start_time

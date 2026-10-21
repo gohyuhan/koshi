@@ -1504,7 +1504,7 @@ impl TerminalEngine {
 /// Feed `terminal_bytes` through `parser` into `terminal_state`, handing each
 /// run of printed characters to the state at once. `printed_text` holds a run
 /// until it ends, and is empty again on return.
-fn advance_terminal_parser(
+pub(crate) fn advance_terminal_parser(
     parser: &mut vte::Parser<OSC_BUFFER_BYTE_CAPACITY>,
     terminal_state: &mut TerminalState,
     printed_text: &mut String,

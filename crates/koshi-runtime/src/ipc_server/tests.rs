@@ -1575,6 +1575,104 @@ impl AttachedFrameStream {
     }
 }
 
+/// Read every frame the client of `frame_stream` receives through
+/// `end_event`, and keep what the client shows: the available image
+/// placements of the newest painted update, and of the newest placement
+/// preview. Each paint report names that preview as held. An
+/// `ImageCacheReset` clears both. Returns every identity the
+/// `ImageContentReleased` frames name, in order.
+///
+/// # Panics
+/// When an `ImageContentReleased` names an identity that the newest painted
+/// update or the held preview shows.
+fn read_frames_checking_image_releases(
+    frame_stream: &mut AttachedFrameStream,
+    end_event: &SessionEvent,
+) -> Vec<u64> {
+    let mut painted_image_content_ids: HashSet<u64> = HashSet::new();
+    let mut preview_image_content_ids: HashSet<u64> = HashSet::new();
+    let mut held_placement_request_id = None;
+    let mut released_image_content_ids = Vec::new();
+    loop {
+        let received_frame = frame_stream
+            .connection
+            .recv_message_or_binary::<SessionEvent>()
+            .expect("the client is told");
+        let Some(session_frame) = frame_stream
+            .painted_update_receiver
+            .accept_session_frame(received_frame)
+            .expect("a painted update part that applies")
+        else {
+            continue;
+        };
+        match session_frame {
+            SessionFrame::Painted(received_painted_frame) => {
+                painted_image_content_ids = received_painted_frame
+                    .painted_frame
+                    .pane_snapshots
+                    .iter()
+                    .flat_map(|pane_snapshot| &pane_snapshot.image_placement_snapshots)
+                    .filter(|image_placement| image_placement.is_available)
+                    .map(|image_placement| image_placement.image_content_id)
+                    .collect();
+                let update_sequence = received_painted_frame.update_sequence;
+                frame_stream
+                    .connection
+                    .send(&IpcRequest {
+                        request_id: update_sequence,
+                        request_kind: IpcRequestKind::PaintedUpdate {
+                            update_sequence,
+                            shown_placement_request_id: held_placement_request_id,
+                        },
+                    })
+                    .expect("the paint report is written");
+            }
+            SessionFrame::ImageChunk(_) => {}
+            SessionFrame::Event(session_event) if session_event == *end_event => {
+                return released_image_content_ids;
+            }
+            SessionFrame::Event(SessionEvent::ImageCacheReset) => {
+                painted_image_content_ids.clear();
+                preview_image_content_ids.clear();
+                held_placement_request_id = None;
+            }
+            SessionFrame::Event(SessionEvent::PanePlacementSnapshot {
+                request_id,
+                snapshot,
+            }) => {
+                preview_image_content_ids = [
+                    Some(&snapshot.source_tab_snapshot),
+                    snapshot.destination_tab_snapshot.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                .flat_map(|placement_tab_snapshot| &placement_tab_snapshot.pane_snapshots)
+                .flat_map(|placement_pane_snapshot| {
+                    &placement_pane_snapshot.image_placement_snapshots
+                })
+                .filter(|image_placement| image_placement.is_available)
+                .map(|image_placement| image_placement.image_content_id)
+                .collect();
+                held_placement_request_id = Some(request_id);
+            }
+            SessionFrame::Event(SessionEvent::ImageContentReleased { image_content_ids }) => {
+                for image_content_id in &image_content_ids {
+                    assert!(
+                        !painted_image_content_ids.contains(image_content_id),
+                        "release of record {image_content_id}, which the newest painted update shows"
+                    );
+                    assert!(
+                        !preview_image_content_ids.contains(image_content_id),
+                        "release of record {image_content_id}, which the held preview shows"
+                    );
+                }
+                released_image_content_ids.extend(image_content_ids);
+            }
+            SessionFrame::Event(_) => {}
+        }
+    }
+}
+
 /// The `ImageContentStart` frame and the one image chunk frame that carry
 /// `image_record` under `image_content_id`.
 fn build_image_transfer_frames(
@@ -1840,7 +1938,7 @@ fn image_scroll_return_uses_a_new_identity_and_complete_transfer() {
     }
     let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
 
-    // A frame that stops showing the image follows the release of its record.
+    // The release of a record follows the frame that stops showing it.
     for (released_image_content_id, render_snapshot, image_content_id, image_record) in [
         (None, &visible_image_snapshot, 1, Some(&first_image_record)),
         (Some(1), &absent_image_snapshot, 0, None),
@@ -1853,14 +1951,6 @@ fn image_scroll_return_uses_a_new_identity_and_complete_transfer() {
             Some(&changed_image_record),
         ),
     ] {
-        if let Some(released_image_content_id) = released_image_content_id {
-            assert_eq!(
-                frame_stream.read_session_event(),
-                SessionEvent::ImageContentReleased {
-                    image_content_ids: vec![released_image_content_id]
-                }
-            );
-        }
         let mut expected_painted_frame = build_wire_frame(render_snapshot);
         if let Some(expected_image_placement) = expected_painted_frame
             .pane_snapshots
@@ -1870,6 +1960,14 @@ fn image_scroll_return_uses_a_new_identity_and_complete_transfer() {
             expected_image_placement.image_content_id = image_content_id;
         }
         assert_eq!(frame_stream.read_painted_frame(), expected_painted_frame);
+        if let Some(released_image_content_id) = released_image_content_id {
+            assert_eq!(
+                frame_stream.read_session_event(),
+                SessionEvent::ImageContentReleased {
+                    image_content_ids: vec![released_image_content_id]
+                }
+            );
+        }
         let Some(image_record) = image_record else {
             continue;
         };
@@ -2646,7 +2744,7 @@ fn an_image_shown_again_after_its_release_gets_a_new_identity() {
 }
 
 #[test]
-fn an_image_the_next_frame_stops_showing_is_released_ahead_of_that_frame() {
+fn an_image_the_next_frame_stops_showing_is_released_after_that_frame_and_before_its_records() {
     let mut frame_stream = AttachedFrameStream::attach_frame_stream(
         "image-release-order",
         KITTY_GRAPHICS_CAPABILITIES,
@@ -2671,21 +2769,121 @@ fn an_image_the_next_frame_stops_showing_is_released_ahead_of_that_frame() {
 
     frame_stream.send_delivery(Delivery::Frame(Box::new(second_snapshot.clone())));
 
+    let mut expected_painted_frame = build_wire_frame(&second_snapshot);
+    expected_painted_frame.pane_snapshots[0].image_placement_snapshots[0].image_content_id = 2;
+    assert_eq!(frame_stream.read_painted_frame(), expected_painted_frame);
     assert_eq!(
         frame_stream.read_session_event(),
         SessionEvent::ImageContentReleased {
             image_content_ids: vec![1]
         }
     );
-    let mut expected_painted_frame = build_wire_frame(&second_snapshot);
-    expected_painted_frame.pane_snapshots[0].image_placement_snapshots[0].image_content_id = 2;
-    assert_eq!(frame_stream.read_painted_frame(), expected_painted_frame);
     for expected_session_frame in build_image_transfer_frames(2, &second_image_record) {
         assert_eq!(
             frame_stream.read_next_session_frame(),
             expected_session_frame
         );
     }
+    frame_stream.close_frame_stream();
+}
+
+#[test]
+fn an_update_over_the_frame_cap_sends_no_release_and_the_next_update_resets_the_records() {
+    // Update 2 stops showing record 1, and its session name alone is as long
+    // as the frame cap: the update is not sent, and no release of record 1
+    // follows it. The next update follows an image cache reset.
+    let mut frame_stream = AttachedFrameStream::attach_frame_stream(
+        "image-release-over-cap",
+        KITTY_GRAPHICS_CAPABILITIES,
+    );
+    let image_record = build_image_record(1);
+    let image_snapshot = build_image_snapshot(frame_stream.client_id, Arc::clone(&image_record));
+    let empty_snapshot = build_snapshot_showing_records(&image_snapshot, &[]);
+    let mut oversized_snapshot = empty_snapshot.clone();
+    oversized_snapshot.session_snapshot.session_name =
+        "a".repeat(transport::MAX_FRAME_BYTE_COUNT as usize);
+    frame_stream.send_delivery(Delivery::Frame(Box::new(image_snapshot.clone())));
+    assert_eq!(
+        frame_stream.read_painted_frame(),
+        build_wire_frame(&image_snapshot)
+    );
+    for expected_session_frame in build_image_transfer_frames(1, &image_record) {
+        assert_eq!(
+            frame_stream.read_next_session_frame(),
+            expected_session_frame
+        );
+    }
+
+    frame_stream.send_delivery(Delivery::Frame(Box::new(oversized_snapshot)));
+    frame_stream.send_delivery(Delivery::Frame(Box::new(empty_snapshot.clone())));
+    let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
+
+    assert_eq!(
+        frame_stream.read_session_event(),
+        SessionEvent::ImageCacheReset
+    );
+    assert_eq!(
+        frame_stream.read_painted_frame(),
+        build_wire_frame(&empty_snapshot)
+    );
+    assert_eq!(
+        frame_stream.read_session_event(),
+        rejected_placement_command_event
+    );
+    frame_stream.close_frame_stream();
+}
+
+#[test]
+fn every_image_release_names_no_record_the_newest_update_or_the_held_preview_shows() {
+    // Images 1 to 6 take content ids 1 to 6 in the order they first show.
+    // The third update shows no image, and the release of id 3, which only
+    // the second update showed, follows it.
+    let mut frame_stream =
+        AttachedFrameStream::attach_frame_stream("image-release-rule", KITTY_GRAPHICS_CAPABILITIES);
+    let image_records: Vec<Arc<ImageRecord>> = (1..=6).map(build_image_record).collect();
+    let base_snapshot = build_image_snapshot(frame_stream.client_id, Arc::clone(&image_records[0]));
+    let list_image_records = |image_indexes: &[usize]| -> Vec<Arc<ImageRecord>> {
+        image_indexes
+            .iter()
+            .map(|image_index| Arc::clone(&image_records[*image_index]))
+            .collect()
+    };
+    let build_frame_delivery = |image_indexes: &[usize]| {
+        Delivery::Frame(Box::new(build_snapshot_showing_records(
+            &base_snapshot,
+            &list_image_records(image_indexes),
+        )))
+    };
+    let build_preview_delivery =
+        |request_id: u64, image_indexes: &[usize]| Delivery::PanePlacementSnapshot {
+            request_id,
+            snapshot: Box::new(build_placement_snapshot_showing_records(
+                &base_snapshot,
+                &list_image_records(image_indexes),
+            )),
+        };
+    for delivery in [
+        build_frame_delivery(&[0]),
+        build_preview_delivery(5, &[0, 1]),
+        build_frame_delivery(&[2]),
+        build_preview_delivery(6, &[3]),
+        build_frame_delivery(&[]),
+        build_frame_delivery(&[3, 4]),
+        build_preview_delivery(7, &[5]),
+        build_frame_delivery(&[4]),
+        build_frame_delivery(&[]),
+    ] {
+        frame_stream.send_delivery(delivery);
+    }
+    let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
+
+    let released_image_content_ids =
+        read_frames_checking_image_releases(&mut frame_stream, &rejected_placement_command_event);
+
+    assert!(
+        released_image_content_ids.contains(&3),
+        "released {released_image_content_ids:?}"
+    );
     frame_stream.close_frame_stream();
 }
 
@@ -4911,7 +5109,10 @@ fn build_test_image_replacement(
     restart_check: RestartCheck,
 ) -> ImageReplacement {
     ImageReplacement {
-        executable_watch: Arc::new(ExecutableWatch::new(executable_path, "1.0.0")),
+        executable_watch: Arc::new(ExecutableWatch::from_executable_path(
+            executable_path,
+            "1.0.0",
+        )),
         restart_check,
     }
 }
