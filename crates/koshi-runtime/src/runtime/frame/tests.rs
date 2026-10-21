@@ -1,10 +1,8 @@
-//! Tests for [`build_wire_frame`]: a cell travels with its character, its combining
-//! marks, its width and every style field; equal neighbouring cells fold into
-//! one run; a row travels the grid's full width and carries how its line ends;
-//! rows travel top to bottom; a pane with no terminal content sends no window;
-//! every color, underline style and cursor shape maps to its wire form; and the
+//! Tests for [`build_wire_frame`] and the placement preview builder: the
 //! session, tab, slot, floating pane slot, client and per-pane scalars come
-//! across unchanged.
+//! across unchanged; an image placement and its record travel apart; a large
+//! image's frames stay under the frame cap; and a preview pane's rows travel
+//! in the row encoding.
 
 use std::sync::Arc;
 
@@ -13,7 +11,8 @@ use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::frame::{FrameImageChunk, FrameRun, MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT};
+use koshi_ipc::frame::MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT;
+use koshi_ipc::image_chunk::build_image_chunk_frame_head;
 use koshi_ipc::transport::MAX_FRAME_BYTE_COUNT;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
@@ -26,8 +25,13 @@ use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
     SixelBackground,
 };
+use koshi_terminal::grid::row_snapshot::RowSnapshot;
+use koshi_terminal::grid::state::{Cell, Grid, RowEnd};
+use koshi_terminal::state::CursorShape;
+use koshi_terminal::style::{Color, Style, UnderlineStyle};
 
 use super::*;
+use crate::runtime::painted_update::PaintedUpdateSender;
 
 /// The style the one written cell carries: every field set away from its
 /// default.
@@ -58,56 +62,6 @@ fn build_test_grid() -> Grid {
     *written_cell = Cell::from_character('e', 1, build_test_style());
     written_cell.push_combining('\u{301}');
     test_grid
-}
-
-/// The cell [`build_test_grid`] writes at (0, 0), as it travels.
-fn build_written_frame_cell() -> FrameCell {
-    FrameCell {
-        character: 'e',
-        combining_characters: vec!['\u{301}'],
-        cell_width: 1,
-        style: FrameStyle {
-            foreground_color: FrameColor::Indexed(4),
-            background_color: FrameColor::Rgb(10, 20, 30),
-            underline_color: Some(FrameColor::Indexed(9)),
-            text_attributes: FrameAttributes {
-                is_bold: true,
-                is_italic: true,
-                is_reverse: true,
-                is_faint: true,
-                is_blinking: true,
-                is_concealed: true,
-                is_struck_through: true,
-                is_overlined: true,
-                underline_style: FrameUnderline::Curly,
-            },
-        },
-    }
-}
-
-/// The two blank cells [`build_test_grid`] leaves at (0, 1) and (0, 2), as they travel.
-fn build_blank_frame_cell() -> FrameCell {
-    FrameCell {
-        character: ' ',
-        combining_characters: Vec::new(),
-        cell_width: 1,
-        style: FrameStyle {
-            foreground_color: FrameColor::Default,
-            background_color: FrameColor::Default,
-            underline_color: None,
-            text_attributes: FrameAttributes {
-                is_bold: false,
-                is_italic: false,
-                is_reverse: false,
-                is_faint: false,
-                is_blinking: false,
-                is_concealed: false,
-                is_struck_through: false,
-                is_overlined: false,
-                underline_style: FrameUnderline::None,
-            },
-        },
-    }
 }
 
 /// One 2×1 Kitty placement with pixels that make byte and field mistakes easy
@@ -171,10 +125,7 @@ fn build_pane_snapshot(pane_id: PaneId) -> PaneSnapshot {
             is_blinking: true,
             shape: Some(CursorShape::Bar),
         },
-        terminal_grid_view: Some(GridView {
-            grid: Arc::new(build_test_grid()),
-            view_row_offset: 7,
-        }),
+        terminal_grid_view: Some(GridView::from_grid(&build_test_grid(), 7)),
         image_placement_snapshots: vec![build_image_placement_snapshot()],
         is_reverse_video: true,
         mouse_tracking: MouseTracking::AnyMotion,
@@ -191,36 +142,11 @@ fn build_pane_snapshot(pane_id: PaneId) -> PaneSnapshot {
     }
 }
 
-/// A pane with no terminal content: no window, a hidden cursor, nothing
-/// highlighted.
-fn build_empty_pane_snapshot(pane_id: PaneId) -> PaneSnapshot {
-    PaneSnapshot {
-        pane_id,
-        pane_title: None,
-        cursor_snapshot: CursorSnapshot {
-            row_index: 0,
-            column_index: 0,
-            is_visible: false,
-            is_blinking: false,
-            shape: None,
-        },
-        terminal_grid_view: None,
-        image_placement_snapshots: Vec::new(),
-        is_reverse_video: false,
-        mouse_tracking: MouseTracking::Off,
-        is_alternate_scroll_enabled: false,
-        is_on_alternate_screen: false,
-        view_top_row_index: 0,
-        selection_spans: None,
-        has_selection: false,
-        scrollback_metadata: ScrollbackMetadata {
-            retained_line_count: 0,
-        },
-    }
-}
-
 /// A frame with one tab, two slots, and the two panes above.
-fn build_render_snapshot(content_pane_id: PaneId, empty_pane_id: PaneId) -> RenderSnapshot {
+pub(crate) fn build_render_snapshot(
+    content_pane_id: PaneId,
+    empty_pane_id: PaneId,
+) -> RenderSnapshot {
     let tab_id = TabId::new();
     let other_tab_id = TabId::new();
     let client_id = ClientId::new();
@@ -297,7 +223,7 @@ fn build_render_snapshot(content_pane_id: PaneId, empty_pane_id: PaneId) -> Rend
         },
         pane_snapshots: vec![
             build_pane_snapshot(content_pane_id),
-            build_empty_pane_snapshot(empty_pane_id),
+            PaneSnapshot::from_empty_pane(empty_pane_id),
         ],
         client_snapshot: ClientSnapshot {
             client_id,
@@ -315,21 +241,6 @@ fn build_render_snapshot(content_pane_id: PaneId, empty_pane_id: PaneId) -> Rend
             is_mouse_selection_enabled: true,
         },
     }
-}
-
-#[test]
-fn a_cell_travels_with_its_character_marks_width_and_every_style_field() {
-    let source_pane_id = PaneId::new();
-    let painted_frame = build_wire_frame(&build_render_snapshot(source_pane_id, PaneId::new()));
-
-    let terminal_window = painted_frame.pane_snapshots[0]
-        .terminal_window
-        .as_ref()
-        .expect("the pane carries a grid");
-    assert_eq!(
-        terminal_window.row_snapshots[0].expand_cells()[0],
-        build_written_frame_cell()
-    );
 }
 
 #[test]
@@ -354,15 +265,12 @@ fn an_oversized_image_frame_splits_into_bounded_wire_events() {
             .expect("test image placement is valid");
     let painted_frame = build_wire_frame(&render_snapshot);
 
-    let painted_event = SessionEvent::Painted {
-        frame: Box::new(painted_frame.clone()),
-    };
-    assert!(
-        serde_json::to_vec(&painted_event)
-            .expect("the placement frame encodes")
-            .len()
-            <= MAX_FRAME_BYTE_COUNT as usize
-    );
+    let part_payloads = PaintedUpdateSender::new()
+        .build_update_frames(&render_snapshot, &painted_frame, false)
+        .expect("the painted update fits the frame cap")
+        .expect("a first update is sent");
+    assert_eq!(part_payloads.len(), 1);
+    assert!(part_payloads[0].len() <= MAX_FRAME_BYTE_COUNT as usize);
 
     let image_transfer = build_wire_image_transfer(1, &image_record);
     assert_eq!(image_transfer.image_content_id, 1);
@@ -377,213 +285,58 @@ fn an_oversized_image_frame_splits_into_bounded_wire_events() {
     let image_chunks: Vec<(u64, bool, usize)> = build_wire_image_chunk_sources(&image_record)
         .map(|(byte_offset, is_last, chunk_bytes)| (byte_offset, is_last, chunk_bytes.len()))
         .collect();
-    assert_eq!(image_chunks.len(), 16);
-    assert_eq!(
-        image_chunks[0],
-        (0, false, MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT)
-    );
-    assert_eq!(
-        image_chunks[15],
-        (15 * 1024 * 1024, true, MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT)
-    );
-    for (byte_offset, is_last, chunk_byte_count) in image_chunks {
-        let image_chunk_event = SessionEvent::ImageContentChunk {
-            image_chunk: FrameImageChunk {
-                image_transfer_id: 1,
-                byte_offset,
-                is_last,
-                chunk_bytes: vec![0; chunk_byte_count],
-            },
-        };
-        assert!(
-            serde_json::to_vec(&image_chunk_event)
-                .expect("the chunk encodes")
-                .len()
-                <= MAX_FRAME_BYTE_COUNT as usize
-        );
+    let expected_image_chunks: Vec<(u64, bool, usize)> = (0..16u64)
+        .map(|chunk_index| {
+            (
+                chunk_index * 1024 * 1024,
+                chunk_index == 15,
+                MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT,
+            )
+        })
+        .collect();
+    assert_eq!(image_chunks, expected_image_chunks);
+    for (byte_offset, is_last_chunk, chunk_bytes) in build_wire_image_chunk_sources(&image_record) {
+        let chunk_frame_head = build_image_chunk_frame_head(1, byte_offset, is_last_chunk);
+        assert!(chunk_frame_head.len() + chunk_bytes.len() <= MAX_FRAME_BYTE_COUNT as usize);
     }
 }
 
 #[test]
-fn equal_neighbouring_cells_fold_into_one_run() {
-    let source_pane_id = PaneId::new();
-    let painted_frame = build_wire_frame(&build_render_snapshot(source_pane_id, PaneId::new()));
-
-    // "e" then two default blanks: one run of 1, then one run of 2.
-    let terminal_window = painted_frame.pane_snapshots[0]
-        .terminal_window
-        .as_ref()
-        .expect("the pane carries a grid");
-    assert_eq!(terminal_window.column_count, 3);
-    assert_eq!(terminal_window.row_snapshots.len(), 1);
-    assert_eq!(
-        terminal_window.row_snapshots[0].cell_runs,
-        vec![
-            FrameRun {
-                repeat_count: 1,
-                cell: build_written_frame_cell(),
-            },
-            FrameRun {
-                repeat_count: 2,
-                cell: build_blank_frame_cell(),
-            },
-        ]
-    );
-}
-
-#[test]
-fn a_wire_row_is_as_wide_as_the_grid() {
-    let test_grid = build_test_grid();
-    let (_, column_count) = test_grid.get_grid_dimensions();
-
-    let expanded_cells = build_wire_row(&test_grid, 0, column_count).expand_cells();
-
-    assert_eq!(expanded_cells.len(), column_count as usize);
-    assert_eq!(
-        expanded_cells,
-        vec![
-            build_written_frame_cell(),
-            build_blank_frame_cell(),
-            build_blank_frame_cell()
-        ]
-    );
-}
-
-#[test]
-fn a_wire_row_carries_how_its_line_ends() {
-    let mut grid = Grid::build_blank(3, 1, Style::default());
-    grid.set_row_end(0, RowEnd::Hard);
-    grid.set_row_end(1, RowEnd::Soft);
-    grid.set_row_end(2, RowEnd::SoftWide);
-
-    assert_eq!(build_wire_row(&grid, 0, 1).row_end, FrameRowEnd::Hard);
-    assert_eq!(build_wire_row(&grid, 1, 1).row_end, FrameRowEnd::Soft);
-    assert_eq!(build_wire_row(&grid, 2, 1).row_end, FrameRowEnd::SoftWide);
-}
-
-#[test]
-fn a_cell_travels_with_its_display_width() {
-    let mut grid = Grid::build_blank(1, 2, Style::default());
-    let wide_cell = grid
-        .get_cell_mut(0, 0)
-        .expect("the grid has a cell at (0, 0)");
-    *wide_cell = Cell::from_character('世', 2, Style::default());
-
-    let expanded_cells = build_wire_row(&grid, 0, 2).expand_cells();
-
-    assert_eq!(expanded_cells[0].character, '世');
-    assert_eq!(expanded_cells[0].cell_width, 2);
-    assert_eq!(expanded_cells[1], build_blank_frame_cell());
-}
-
-#[test]
-fn a_window_carries_every_grid_row_top_to_bottom() {
-    let mut grid = Grid::build_blank(2, 1, Style::default());
+fn a_placement_window_carries_each_row_in_the_row_encoding() {
+    let mut grid = Grid::build_blank(2, 3, Style::default());
     *grid
         .get_cell_mut(0, 0)
         .expect("the grid has a cell at (0, 0)") = Cell::from_character('a', 1, Style::default());
-    *grid
-        .get_cell_mut(1, 0)
-        .expect("the grid has a cell at (1, 0)") = Cell::from_character('b', 1, Style::default());
-    let grid_view = GridView {
-        grid: Arc::new(grid),
-        view_row_offset: 4,
-    };
+    grid.set_row_end(1, RowEnd::Soft);
+    let grid_view = GridView::from_grid(&grid, 0);
 
-    let terminal_window = build_wire_window(&grid_view);
+    let placement_window = build_wire_placement_window(&grid_view);
 
-    assert_eq!(terminal_window.column_count, 1);
-    assert_eq!(terminal_window.view_row_offset, 4);
-    assert_eq!(terminal_window.row_snapshots.len(), 2);
+    assert_eq!(placement_window.column_count, 3);
     assert_eq!(
-        terminal_window.row_snapshots[0].expand_cells()[0].character,
-        'a'
+        placement_window.encoded_rows,
+        vec![
+            EncodedRow {
+                encoded_row_bytes: grid_view.row_snapshots[0].get_encoded_row_bytes().to_vec(),
+            },
+            EncodedRow {
+                encoded_row_bytes: grid_view.row_snapshots[1].get_encoded_row_bytes().to_vec(),
+            },
+        ]
     );
+    let decoded_rows: Vec<RowSnapshot> = placement_window
+        .encoded_rows
+        .into_iter()
+        .map(|encoded_row| {
+            RowSnapshot::from_encoded_row_bytes(encoded_row.encoded_row_bytes, 3)
+                .expect("an encoded row decodes at its own width")
+        })
+        .collect();
     assert_eq!(
-        terminal_window.row_snapshots[1].expand_cells()[0].character,
-        'b'
+        decoded_rows[0].list_row_cells(),
+        grid_view.row_snapshots[0].list_row_cells()
     );
-}
-
-#[test]
-fn a_grid_with_no_rows_travels_as_a_window_with_no_rows() {
-    let view = GridView {
-        grid: Arc::new(Grid::build_blank(0, 0, Style::default())),
-        view_row_offset: 0,
-    };
-
-    let terminal_window = build_wire_window(&view);
-
-    assert_eq!(terminal_window.column_count, 0);
-    assert_eq!(terminal_window.row_snapshots, Vec::new());
-    assert_eq!(terminal_window.view_row_offset, 0);
-}
-
-#[test]
-fn every_color_travels_as_its_wire_form() {
-    assert_eq!(build_wire_color(Color::Default), FrameColor::Default);
-    assert_eq!(build_wire_color(Color::Indexed(0)), FrameColor::Indexed(0));
-    assert_eq!(
-        build_wire_color(Color::Indexed(255)),
-        FrameColor::Indexed(255)
-    );
-    assert_eq!(
-        build_wire_color(Color::Rgb(0, 128, 255)),
-        FrameColor::Rgb(0, 128, 255)
-    );
-}
-
-#[test]
-fn every_underline_style_travels_as_its_wire_form() {
-    assert_eq!(
-        build_wire_underline(UnderlineStyle::None),
-        FrameUnderline::None
-    );
-    assert_eq!(
-        build_wire_underline(UnderlineStyle::Single),
-        FrameUnderline::Single
-    );
-    assert_eq!(
-        build_wire_underline(UnderlineStyle::Double),
-        FrameUnderline::Double
-    );
-    assert_eq!(
-        build_wire_underline(UnderlineStyle::Curly),
-        FrameUnderline::Curly
-    );
-    assert_eq!(
-        build_wire_underline(UnderlineStyle::Dotted),
-        FrameUnderline::Dotted
-    );
-    assert_eq!(
-        build_wire_underline(UnderlineStyle::Dashed),
-        FrameUnderline::Dashed
-    );
-}
-
-#[test]
-fn every_cursor_shape_travels_as_its_wire_form() {
-    assert_eq!(
-        build_wire_cursor_shape(CursorShape::Block),
-        FrameCursorShape::Block
-    );
-    assert_eq!(
-        build_wire_cursor_shape(CursorShape::Underline),
-        FrameCursorShape::Underline
-    );
-    assert_eq!(
-        build_wire_cursor_shape(CursorShape::Bar),
-        FrameCursorShape::Bar
-    );
-}
-
-#[test]
-fn a_pane_with_no_grid_travels_with_no_window() {
-    let empty_pane_id = PaneId::new();
-    let painted_frame = build_wire_frame(&build_render_snapshot(PaneId::new(), empty_pane_id));
-
-    assert_eq!(painted_frame.pane_snapshots[1].pane_id, empty_pane_id);
-    assert_eq!(painted_frame.pane_snapshots[1].terminal_window, None);
+    assert_eq!(decoded_rows[1].get_row_metadata().row_end, RowEnd::Soft);
 }
 
 #[test]
@@ -592,49 +345,25 @@ fn a_pane_with_no_grid_travels_with_its_remaining_fields_at_rest() {
     let painted_frame = build_wire_frame(&build_render_snapshot(PaneId::new(), empty_pane_id));
 
     let pane_snapshot = &painted_frame.pane_snapshots[1];
+    assert_eq!(pane_snapshot.pane_id, empty_pane_id);
     assert_eq!(pane_snapshot.pane_title, None);
-    assert_eq!(
-        pane_snapshot.cursor_snapshot,
-        FrameCursor {
-            row_index: 0,
-            column_index: 0,
-            is_visible: false,
-            is_blinking: false,
-            shape: None,
-        }
-    );
+    assert_eq!(pane_snapshot.image_placement_snapshots, Vec::new());
     assert_eq!(pane_snapshot.mouse_tracking, MouseTracking::Off);
     assert!(!pane_snapshot.is_reverse_video);
     assert!(!pane_snapshot.is_alternate_scroll_enabled);
     assert!(!pane_snapshot.is_on_alt_screen);
-    assert_eq!(pane_snapshot.view_top_row_index, 0);
     assert_eq!(pane_snapshot.selection_spans, None);
     assert!(!pane_snapshot.has_selection);
-    assert_eq!(
-        pane_snapshot.scrollback_metadata,
-        FrameScrollback {
-            retained_line_count: 0,
-        }
-    );
 }
 
 #[test]
-fn the_view_offset_mouse_mode_and_scrollback_scalars_come_through_unchanged() {
+fn the_title_mode_and_selection_scalars_come_through_unchanged() {
     let source_pane_id = PaneId::new();
     let painted_frame = build_wire_frame(&build_render_snapshot(source_pane_id, PaneId::new()));
 
     let pane_snapshot = &painted_frame.pane_snapshots[0];
-    assert_eq!(
-        pane_snapshot
-            .terminal_window
-            .as_ref()
-            .expect("the pane carries a grid")
-            .view_row_offset,
-        7
-    );
+    assert_eq!(pane_snapshot.pane_id, source_pane_id);
     assert_eq!(pane_snapshot.mouse_tracking, MouseTracking::AnyMotion);
-    assert_eq!(pane_snapshot.scrollback_metadata.retained_line_count, 500);
-    assert_eq!(pane_snapshot.view_top_row_index, 493);
     assert_eq!(pane_snapshot.pane_title, Some(String::from("~/work")));
     assert!(pane_snapshot.is_reverse_video);
     assert!(pane_snapshot.is_alternate_scroll_enabled);
@@ -645,16 +374,6 @@ fn the_view_offset_mouse_mode_and_scrollback_scalars_come_through_unchanged() {
         Some(FrameSelection {
             row_spans: vec![(0, 1, 2)],
         })
-    );
-    assert_eq!(
-        pane_snapshot.cursor_snapshot,
-        FrameCursor {
-            row_index: 0,
-            column_index: 2,
-            is_visible: true,
-            is_blinking: true,
-            shape: Some(FrameCursorShape::Bar),
-        }
     );
 }
 
@@ -850,6 +569,7 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
         painted_frame.session_snapshot.session_id,
         render_snapshot.session_snapshot.session_id
     );
+    assert_eq!(painted_frame.session_snapshot.session_revision, 17);
     assert_eq!(
         painted_frame.session_snapshot.session_name,
         String::from("session")

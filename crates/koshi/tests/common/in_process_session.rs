@@ -20,12 +20,14 @@ use koshi_core::event::Event;
 use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::EndpointFile;
-use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{IpcResponse, IpcResult};
+use koshi_ipc::transport::{FrameReader, FrameWriter};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_runtime::ipc_server::IpcServer;
+use koshi_runtime::runtime::driver::DispatchPassOutcome;
 use koshi_runtime::runtime::event::RuntimeEvent;
+use koshi_runtime::runtime::painted_update::PaintedUpdateReceiver;
 use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -33,7 +35,7 @@ use koshi_test_support::fixtures::{build_test_runtime_directory, send_committed_
 use tempfile::TempDir;
 
 use super::session_connection::{
-    build_attach_request, open_session_connection, ATTACH_VIEWPORT_SIZE,
+    build_attach_request, open_session_connection, read_next_session_event, ATTACH_VIEWPORT_SIZE,
 };
 use super::WAIT_DURATION;
 
@@ -131,6 +133,7 @@ impl RunningSession {
             None,
             self.session_id,
             None,
+            None,
         )
         .expect("the session server describes itself")
     }
@@ -197,50 +200,18 @@ fn serve_session(
     session_server.shutdown();
 }
 
-/// Serve the runtime inbox until the session ends: block until an event is due
-/// (bounded by the next render deadline), apply it and any others already
-/// queued, hand a fresh snapshot to any subscriber that lost a critical event,
-/// push every attached client its frame when a render is due, and stop once the
-/// inbox loses its last sender, a hangup arrives, a quit is applied, or no pane
-/// is left running.
+/// Serve the runtime inbox with [`Server::run_dispatch_pass`] until the
+/// session ends: a pass handles a [`RuntimeEvent::Quit`], the inbox loses its
+/// last sender, a quit is applied, or no pane is left running. Each pass waits
+/// for an event at most until the next render wakeup, applies it and every
+/// event already queued, hands a fresh snapshot to each subscriber whose queue
+/// an event did not fit, and pushes each attached client's frame once it is
+/// due.
 fn run_session_event_loop(session_server: &mut Server) {
-    loop {
-        let current_time = Instant::now();
-        let pending_runtime_event = match session_server.compute_next_render_wakeup(current_time) {
-            Some(timeout_duration) => {
-                match session_server
-                    .get_inbox_receiver()
-                    .recv_timeout(timeout_duration)
-                {
-                    Ok(runtime_event) => Some(runtime_event),
-                    Err(mpsc::RecvTimeoutError::Timeout) => None,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            }
-            None => match session_server.get_inbox_receiver().recv() {
-                Ok(runtime_event) => Some(runtime_event),
-                Err(_) => break,
-            },
-        };
-        let mut is_quit_requested = false;
-        if let Some(runtime_event) = pending_runtime_event {
-            is_quit_requested |= session_server
-                .handle_runtime_event(runtime_event)
-                .is_break();
-        }
-        while let Ok(runtime_event) = session_server.get_inbox_receiver().try_recv() {
-            is_quit_requested |= session_server
-                .handle_runtime_event(runtime_event)
-                .is_break();
-        }
-        session_server.push_due_frames(Instant::now());
-        if is_quit_requested
-            || session_server.is_quit_requested()
-            || !session_server.has_active_panes()
-        {
-            break;
-        }
-    }
+    while session_server.run_dispatch_pass() == DispatchPassOutcome::Served
+        && !session_server.is_quit_requested()
+        && session_server.has_active_panes()
+    {}
 }
 
 /// A client attached over the control socket, with its event stream drained by
@@ -288,22 +259,34 @@ pub fn attach_test_client(session: &RunningSession) -> AttachedClient {
     AttachedClient {
         client_id,
         session_structure,
-        session_events: forward_session_events(move || connection.recv::<SessionEvent>()),
+        session_events: {
+            let (session_frame_reader, client_frame_writer) = connection.split();
+            forward_session_events(session_frame_reader, client_frame_writer)
+        },
     }
 }
 
-/// Call `receive_session_event` on a thread of its own until it fails, and
-/// forward every event but [`SessionEvent::Painted`] into the queue this
-/// returns. The thread also ends once the queue's receiver is dropped.
+/// Read `session_frame_reader` on a thread of its own with
+/// [`read_next_session_event`] until a read fails, and forward every JSON
+/// event into the queue this returns. Painted updates are reported painted on
+/// `client_frame_writer` and are not forwarded. The thread also ends once the
+/// queue's receiver is dropped or a report cannot be written, and
+/// `client_frame_writer` stays open until it ends.
+///
+/// # Panics
+/// On the reading thread, when a painted update part does not apply.
 pub fn forward_session_events(
-    mut receive_session_event: impl FnMut() -> Result<SessionEvent, IpcError> + Send + 'static,
+    mut session_frame_reader: FrameReader,
+    mut client_frame_writer: FrameWriter,
 ) -> mpsc::Receiver<SessionEvent> {
     let (session_event_sender, session_events) = mpsc::channel();
     std::thread::spawn(move || {
-        while let Ok(session_event) = receive_session_event() {
-            if let SessionEvent::Painted { .. } = session_event {
-                continue;
-            }
+        let mut painted_update_receiver = PaintedUpdateReceiver::new();
+        while let Ok(session_event) = read_next_session_event(
+            &mut session_frame_reader,
+            &mut client_frame_writer,
+            &mut painted_update_receiver,
+        ) {
             if session_event_sender.send(session_event).is_err() {
                 break;
             }

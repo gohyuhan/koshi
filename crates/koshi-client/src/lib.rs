@@ -31,7 +31,6 @@ pub(crate) mod terminal;
 
 pub mod theme;
 
-use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -53,7 +52,6 @@ use koshi_core::key::PendingKeySequence;
 use koshi_core::lock::LockMode;
 use koshi_core::registry::ActionRegistry;
 use koshi_core::{
-    event::Event,
     geometry::{PaneArea, Point, Size},
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
 };
@@ -61,11 +59,10 @@ use koshi_ipc::placement::PanePlacementSnapshot;
 use koshi_ipc::protocol::IpcErrorCode;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::region::solve_core_regions;
-use koshi_renderer::snapshot::{
-    ClientSnapshot, Delivery, Reconnecting, RenderSnapshot, SessionSnapshot,
-};
+use koshi_renderer::snapshot::{ClientSnapshot, Reconnecting, RenderSnapshot, SessionSnapshot};
 use koshi_renderer::theme::Theme;
 
+use crate::input::InputReadClock;
 use crate::mouse::{LastPress, LeftButtonGesture, MouseCapture, SentFloatingPaneMove, TablinePeek};
 
 #[cfg(test)]
@@ -327,14 +324,6 @@ pub struct Client {
     /// events and reported to the session, which reconciles tab sizes from
     /// every viewer's report; this copy is the client's alone.
     viewport_size: Size,
-    /// Receiving end of this client's event subscription, read by
-    /// [`apply_events`](Self::apply_events). A viewer subscribed to a session in
-    /// this process is fed by that session's bounded fan-out: live events, and
-    /// the fresh frame the session sends after this subscriber's queue
-    /// overflowed. A viewer attached over a connection is handed a receiver with
-    /// no sender — its frames arrive on the connection — so nothing is ever
-    /// delivered here.
-    delivery_receiver: Receiver<Delivery>,
     /// This viewer's stored config overrides, one layer per config file, as
     /// [`load_startup_config`](Self::load_startup_config) last left them. A
     /// refused `keybinding.kdl` leaves its layer empty.
@@ -372,6 +361,10 @@ pub struct Client {
     /// The multi-chord binding being typed, if any. Held chords belong to
     /// koshi and never reach a pane.
     pending_key_sequence: Option<PendingKeySequence>,
+    /// The read times of this terminal's input events, shared with its input
+    /// thread: no input timer is judged at the clock while an event the thread
+    /// read is still on its way.
+    input_read_clock: Arc<InputReadClock>,
     /// The most recent mouse press, compared with the next press to tell a
     /// double click from two separate clicks. `None` before this viewer has
     /// pressed anything.
@@ -449,8 +442,8 @@ pub struct Client {
 }
 
 impl Client {
-    /// Build a client from its id, its terminal's current size, the receiver
-    /// the session handed out for it, and the outer-terminal cleanup guard.
+    /// Build a client from its id, its terminal's current size, and the
+    /// outer-terminal cleanup guard.
     ///
     /// It starts on the built-in defaults: no stored config layers, the stock
     /// palette, and the shipped keymap. The files the user wrote arrive
@@ -459,8 +452,7 @@ impl Client {
     pub fn from_client_id_and_viewport_size(
         client_id: ClientId,
         viewport_size: Size,
-        delivery_receiver: Receiver<Delivery>,
-        cleanup_guard: TerminalCleanupGuard,
+        terminal_cleanup_guard: TerminalCleanupGuard,
     ) -> Self {
         let config_layers = ConfigLayers::default();
         let client_config = config_layers.resolve_effective_client_config();
@@ -471,7 +463,6 @@ impl Client {
             client_id,
             session_id: None,
             viewport_size,
-            delivery_receiver,
             config_layers,
             client_config,
             theme,
@@ -481,6 +472,7 @@ impl Client {
             pending_lock_command_id: None,
             is_mouse_selection_enabled: false,
             pending_key_sequence: None,
+            input_read_clock: Arc::default(),
             last_mouse_press: None,
             mouse_capture: None,
             unreleased_mouse_capture: None,
@@ -497,15 +489,15 @@ impl Client {
             active_tab_focused_pane_id: None,
             visible_tab_ids: Vec::new(),
             pane_move_mode: None,
-            _terminal_cleanup_guard: cleanup_guard,
+            _terminal_cleanup_guard: terminal_cleanup_guard,
         }
     }
 
     /// Apply the config files this viewer read at startup: `koshi.kdl`'s
     /// viewer-owned sections, the color theme, and `keybinding.kdl`. Each is
     /// `None` when its file is absent or failed to load, and its defaults then
-    /// stand — a `None` `keybindings` puts the keymap back on the built-ins
-    /// and drops any sequence being typed.
+    /// stand — a `None` `keybindings_config_layer` puts the keymap back on the
+    /// built-ins and drops any sequence being typed.
     ///
     /// App settings and colors are typed values and always apply. Keybindings
     /// are all-or-nothing: conflict detection runs over the candidate against
@@ -516,58 +508,67 @@ impl Client {
     /// finding keeps the running keymap unmarked. Both put the stored layer
     /// and the folded keybinding settings back on the built-ins.
     ///
-    /// Returns the conflict report when `keybindings` is `Some`, and `None`
-    /// when it is `None`.
+    /// Returns the conflict report when `keybindings_config_layer` is `Some`,
+    /// and `None` when it is `None`.
     pub fn load_startup_config(
         &mut self,
-        app: Option<PartialKoshiConfig>,
-        theme: Option<PartialThemeConfig>,
-        keybindings: Option<PartialKeybindingsConfig>,
+        app_config_layer: Option<PartialKoshiConfig>,
+        theme_config_layer: Option<PartialThemeConfig>,
+        keybindings_config_layer: Option<PartialKeybindingsConfig>,
     ) -> Option<ConflictReport> {
-        self.config_layers =
-            ConfigLayers::from_config_file_layers(app.clone(), theme.clone(), None);
+        self.config_layers = ConfigLayers::from_config_file_layers(
+            app_config_layer.clone(),
+            theme_config_layer.clone(),
+            None,
+        );
         self.client_config = self.config_layers.resolve_effective_client_config();
         self.theme = theme::resolve_theme(&self.client_config.theme);
 
-        let Some(candidate) = keybindings else {
+        let Some(keybindings_config_layer) = keybindings_config_layer else {
             self.keymap_catalog = KeymapHintCatalog::from_registry(&self.registry);
             self.pending_key_sequence = None;
             return None;
         };
-        let user_mode_bindings_by_name = candidate.mode_bindings_by_name.clone();
-        let tentative_layers = ConfigLayers::from_config_file_layers(app, theme, Some(candidate));
-        let tentative = tentative_layers.resolve_effective_client_config();
-        let key_layers =
-            build_keymap_layers(user_mode_bindings_by_name, tentative.keybindings.leader);
-        let report = detect_conflicts(
-            &key_layers,
-            tentative.keybindings.leader,
-            tentative.keybindings.unlock_alternative,
-            tentative.keybindings.maximum_chord_depth,
+        let user_mode_bindings_by_name = keybindings_config_layer.mode_bindings_by_name.clone();
+        let tentative_config_layers = ConfigLayers::from_config_file_layers(
+            app_config_layer,
+            theme_config_layer,
+            Some(keybindings_config_layer),
+        );
+        let tentative_client_config = tentative_config_layers.resolve_effective_client_config();
+        let keymap_layers = build_keymap_layers(
+            user_mode_bindings_by_name,
+            tentative_client_config.keybindings.leader,
+        );
+        let conflict_report = detect_conflicts(
+            &keymap_layers,
+            tentative_client_config.keybindings.leader,
+            tentative_client_config.keybindings.unlock_alternative,
+            tentative_client_config.keybindings.maximum_chord_depth,
             &self.registry,
         );
-        if report.get_verdict() != KeymapVerdict::Apply {
+        if conflict_report.get_verdict() != KeymapVerdict::Apply {
             // A collision reverts to the built-in defaults with the revert
             // marker in the hint bar; a fatal finding keeps the running
             // keymap unmarked.
-            if report.get_verdict() == KeymapVerdict::RevertToDefaults {
+            if conflict_report.get_verdict() == KeymapVerdict::RevertToDefaults {
                 self.keymap_catalog =
                     KeymapHintCatalog::from_registry(&self.registry).mark_reverted_to_defaults();
                 self.pending_key_sequence = None;
             }
-            return Some(report);
+            return Some(conflict_report);
         }
-        self.config_layers = tentative_layers;
-        self.client_config = tentative;
+        self.config_layers = tentative_config_layers;
+        self.client_config = tentative_client_config;
         self.keymap_catalog = KeymapHintCatalog::from_keymap_layers_config_and_registry(
-            &key_layers,
+            &keymap_layers,
             &self.client_config.keybindings,
             &self.registry,
         );
         // The new keymap drops the sequence being typed: it resolves to
         // nothing.
         self.pending_key_sequence = None;
-        Some(report)
+        Some(conflict_report)
     }
 
     /// This client's identifier.
@@ -624,18 +625,15 @@ impl Client {
 
     /// Apply the viewer state `render_snapshot` carries, in this order: the
     /// placement revisions, whether the snapshot settles a sent floating pane
-    /// move by naming it
-    /// ([`settle_floating_pane_move`](Self::settle_floating_pane_move)), the
-    /// active tab with its focused pane and tab list, the lock mode, the
-    /// tab-strip peek, and whether mouse-select is on. A tab-strip peek made
-    /// on another tab is dropped. The placement revisions, the active tab, the
-    /// lock mode, and mouse-select can end pane placement mode or clear its
-    /// target. The settled move can end floating pane move mode, and a lock
-    /// mode or mouse-select change ends the move chooser and floating pane
-    /// move mode that waits for no move, as
-    /// [`settle_floating_pane_move`](Self::settle_floating_pane_move),
-    /// [`set_placement_revisions`](Self::set_placement_revisions),
-    /// [`set_frame_view`](Self::set_frame_view),
+    /// move by naming it (`settle_floating_pane_move`), the active tab with its
+    /// focused pane and tab list, the lock mode, the tab-strip peek, and
+    /// whether mouse-select is on. A tab-strip peek made on another tab is
+    /// dropped. The placement revisions, the active tab, the lock mode, and
+    /// mouse-select can end pane placement mode or clear its target. The
+    /// settled move can end floating pane move mode, and a lock mode or
+    /// mouse-select change ends the move chooser and floating pane move mode
+    /// that waits for no move, as `settle_floating_pane_move`,
+    /// `set_placement_revisions`, `set_frame_view`,
     /// [`set_lock_mode`](Self::set_lock_mode), and
     /// [`set_mouse_selection_enabled`](Self::set_mouse_selection_enabled)
     /// describe.
@@ -646,7 +644,7 @@ impl Client {
     /// command `A` and shows `Locked`, a snapshot with `Normal` that names no
     /// lock command leaves `Locked`, and the next snapshot that names `A` sets
     /// its own lock mode.
-    pub(crate) fn apply_render_snapshot(&mut self, render_snapshot: &RenderSnapshot) {
+    pub fn apply_render_snapshot(&mut self, render_snapshot: &RenderSnapshot) {
         self.set_placement_revisions(
             render_snapshot.session_snapshot.session_revision,
             render_snapshot.client_snapshot.client_revision,
@@ -1017,12 +1015,18 @@ impl Client {
         }
     }
 
-    /// Return the time until the current placement tab hover may request a preview.
+    /// Return the time until the current placement tab hover may request a
+    /// preview. While an input event this terminal's input thread read has not
+    /// reached the loop ([`InputReadClock::has_untaken_input`]), the answer is
+    /// `None`: that event's arrival wakes the loop.
     #[must_use]
     pub(crate) fn compute_next_placement_tab_hover_wakeup(
         &self,
         current_time: Instant,
     ) -> Option<Duration> {
+        if self.input_read_clock.has_untaken_input() {
+            return None;
+        }
         let placement_tab_hover = self.placement_state.placement_tab_hover?;
         (!placement_tab_hover.is_preview_requested).then(|| {
             placement_tab_hover
@@ -1222,15 +1226,7 @@ impl Client {
             return false;
         }
         self.placement_state.placement_read_request = None;
-        let is_current_placement_request =
-            self.placement_state
-                .placement_mode
-                .as_ref()
-                .is_none_or(|placement_mode| {
-                    placement_mode.source_pane_id == placement_read_request.source_pane_id
-                        && placement_mode.destination_tab_id
-                            == placement_read_request.destination_tab_id
-                });
+        let is_current_placement_request = self.is_placement_read_current(placement_read_request);
         if !is_current_placement_request
             || placement_snapshot.source_pane_id != placement_read_request.source_pane_id
             || placement_snapshot.destination_tab_id != placement_read_request.destination_tab_id
@@ -1250,6 +1246,19 @@ impl Client {
         self.placement_state.placement_snapshot = Some(Arc::new(placement_snapshot));
         self.select_whole_tab_insertion_target();
         true
+    }
+
+    /// Whether `placement_read_request` still names the source pane and the
+    /// destination tab of pane placement mode. `true` with no placement mode.
+    fn is_placement_read_current(&self, placement_read_request: PlacementReadRequest) -> bool {
+        self.placement_state
+            .placement_mode
+            .as_ref()
+            .is_none_or(|placement_mode| {
+                placement_mode.source_pane_id == placement_read_request.source_pane_id
+                    && placement_mode.destination_tab_id
+                        == placement_read_request.destination_tab_id
+            })
     }
 
     /// Consume a refusal for the current placement preview request.
@@ -1273,15 +1282,7 @@ impl Client {
         if placement_read_request.expires_at <= current_time {
             return false;
         }
-        let is_current_placement_request =
-            self.placement_state
-                .placement_mode
-                .as_ref()
-                .is_none_or(|placement_mode| {
-                    placement_mode.source_pane_id == placement_read_request.source_pane_id
-                        && placement_mode.destination_tab_id
-                            == placement_read_request.destination_tab_id
-                });
+        let is_current_placement_request = self.is_placement_read_current(placement_read_request);
         if placement_error_code == IpcErrorCode::NotFound
             && is_current_placement_request
             && self.is_placement_mode_active()
@@ -1527,91 +1528,13 @@ impl Client {
         };
         relabel_hints(keymap_hints, MOVE_FOCUSED_PANE_HINT, move_focused_pane_hint)
     }
-
-    /// Take everything the subscription has delivered and apply what the
-    /// viewer must react to, returning how many deliveries were seen.
-    ///
-    /// The events that matter are the session's reports that this
-    /// viewer's input mode changed — which happens when `koshi lock --client`
-    /// names it, or when its own lock binding fires — and that its mouse-select
-    /// mode changed, which happens when its own `core:mouse-select` binding
-    /// fires. Both decide what an input means before anything is sent, and
-    /// applying them here keeps the viewer's copies agreeing with the
-    /// session's. An event naming another client is skipped.
-    ///
-    /// A fresh frame arrives when this subscriber's queue overflowed and the
-    /// session dropped events it cannot replay. It carries the session's own
-    /// copies of both, and the tab this viewer is on. The viewer takes all
-    /// three from the frame — a tab-strip peek made on another tab is thrown
-    /// away with the last of them — and logs how many events were dropped. The
-    /// frame names this viewer, checked by a debug assertion.
-    ///
-    /// A [`Delivery::Frame`] is the picture composed for a client in another
-    /// process. It is counted, and nothing is taken from it. So is a
-    /// [`Delivery::MouseAnswer`], which answers that client's mouse round, a
-    /// [`Delivery::HostWrite`], which wakes the thread that writes that
-    /// client's connection, and a [`Delivery::SwitchTo`], which moves that
-    /// client to another session. A [`Delivery::PlacementCommandRejected`]
-    /// clears the matching sent floating pane move, or else the matching
-    /// pending placement command. A [`Delivery::Snapshot`] also drops a sent
-    /// floating pane move.
-    pub fn apply_events(&mut self) -> usize {
-        let mut delivery_count = 0;
-        while let Ok(delivery) = self.delivery_receiver.try_recv() {
-            delivery_count += 1;
-            match delivery {
-                Delivery::Event(event) => match &event {
-                    Event::InputModeChanged(mode_change)
-                        if mode_change.client_id == self.client_id =>
-                    {
-                        self.set_lock_mode(mode_change.lock_mode);
-                    }
-                    Event::MouseSelectChanged(mouse_selection_change)
-                        if mouse_selection_change.client_id == self.client_id =>
-                    {
-                        self.set_mouse_selection_enabled(mouse_selection_change.is_enabled);
-                    }
-                    _ => {}
-                },
-                // A frame, a placement preview or its refusal, a mouse round's
-                // answers, a host-write wake, and a session move all serve a
-                // client in another process.
-                Delivery::Frame(_)
-                | Delivery::PanePlacementSnapshot { .. }
-                | Delivery::PanePlacementRefused { .. }
-                | Delivery::MouseAnswer { .. }
-                | Delivery::HostWrite
-                | Delivery::SwitchTo(_) => {}
-                Delivery::PlacementCommandRejected(command_id) => {
-                    self.reject_placement_command(command_id);
-                }
-                Delivery::Snapshot {
-                    render_snapshot,
-                    lag_report,
-                } => {
-                    debug_assert_eq!(
-                        render_snapshot.client_snapshot.client_id, self.client_id,
-                        "a frame names the client its subscriber views"
-                    );
-                    tracing::warn!(
-                        dropped_event_count = lag_report.dropped_event_count,
-                        "events were dropped; resuming from a fresh frame"
-                    );
-                    self.forget_sent_floating_pane_move();
-                    self.apply_render_snapshot(&render_snapshot);
-                    self.clear_placement_read();
-                }
-            }
-        }
-        delivery_count
-    }
 }
 
 /// `keymap_hints` with every entry labelled `current_label` relabelled
 /// `replacement_label`, and nothing else changed. Matching is on the label, so
 /// a rebound or duplicated binding is relabelled too: `Mouse Select` becomes
-/// `Mouse Unselect` on every key bound to `core:mouse-select`. With no entry labelled `current_label`, it returns
-/// `keymap_hints` as it is.
+/// `Mouse Unselect` on every key bound to `core:mouse-select`. With no entry
+/// labelled `current_label`, it returns `keymap_hints` as it is.
 fn relabel_hints(
     keymap_hints: KeymapHints,
     current_label: &str,

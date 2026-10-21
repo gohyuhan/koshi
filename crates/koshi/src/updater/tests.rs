@@ -3,7 +3,8 @@
 //! - version comparison, check scheduling, and release list parsing;
 //! - archive URL construction, bounded downloads, checksum verification, and
 //!   archive extraction;
-//! - state serialization;
+//! - state serialization, the release a check leaves for the next launch, and
+//!   which release a launch offers;
 //! - the restart confirmation wait, the bounded call to a peer, the router
 //!   restart, the walk that restarts every running session, a peer that
 //!   refuses this build's protocol version, and the end of a router that
@@ -14,8 +15,8 @@
 //!   names, a swap whose copy or version check fails, the staged copy names,
 //!   and the deletion of the staged copies that ended updates left;
 //! - the scripts that write and rename the staged copy through `sudo`, and the
-//!   install lines of `install.sh`: their copy, mode change, version check,
-//!   rename, and cleanup;
+//!   install lines of `install.sh`: their copy, mode change, flush to the disk,
+//!   version check, rename, and cleanup;
 //! - the install lock held while the staged copy replaces the program file and
 //!   while backups are deleted, the lock calls that `install.ps1` makes on the
 //!   same lock file, and the staged copy and version check of `install.ps1`;
@@ -27,7 +28,7 @@
 use super::*;
 
 use std::io::Write;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Barrier};
 use std::thread::JoinHandle;
 
 use koshi_ipc::endpoint::{compute_socket_address, is_update_restarting_servers, EndpointFile};
@@ -839,6 +840,23 @@ fn bind_advertised_session(
     (listener, connection_token)
 }
 
+/// Serve `connection_count` callers as a session would, as
+/// [`spawn_fake_session_holding_its_first_answer`] does with no barrier.
+fn spawn_fake_session(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    session_script: SessionRestartScript,
+    connection_count: usize,
+) -> JoinHandle<()> {
+    spawn_fake_session_holding_its_first_answer(
+        runtime_directory,
+        session_id,
+        session_script,
+        connection_count,
+        None,
+    )
+}
+
 /// Serve `connection_count` callers as a session would: bind the session's address,
 /// write the endpoint file advertising it, then answer that many callers.
 ///
@@ -851,11 +869,16 @@ fn bind_advertised_session(
 /// `session_script.is_restarting_into_new_image` selects. A caller arriving
 /// once `connection_count` are served finds nothing listening, which is what a
 /// session that is replacing its own image looks like.
-fn spawn_fake_session(
+///
+/// With `first_answer_barrier`, the session waits on it after it reads the
+/// first caller's `Prepare`, and answers that caller's Hello only once the
+/// barrier releases.
+fn spawn_fake_session_holding_its_first_answer(
     runtime_directory: &Path,
     session_id: SessionId,
     session_script: SessionRestartScript,
     connection_count: usize,
+    first_answer_barrier: Option<Arc<Barrier>>,
 ) -> JoinHandle<()> {
     let (listener, connection_token) = bind_advertised_session(runtime_directory, session_id);
 
@@ -894,6 +917,9 @@ fn spawn_fake_session(
                     IpcRequestKind::Prepare(Box::new(IpcRequestKind::Restart)),
                     "expected a Prepare of a Restart after the Hello"
                 );
+                if let Some(first_answer_barrier) = &first_answer_barrier {
+                    first_answer_barrier.wait();
+                }
                 send_ipc_response(
                     &mut connection,
                     hello_request.request_id,
@@ -1030,6 +1056,52 @@ fn a_session_reporting_the_installed_version_confirms_its_restart() {
     session_thread
         .join()
         .expect("the stand-in served its connections");
+}
+
+#[test]
+fn two_sessions_restart_at_the_same_time() {
+    // Neither stand-in answers its first caller until both have read a
+    // `Prepare` of the Restart.
+    let runtime_directory = build_test_runtime_directory();
+    let first_answer_barrier = Arc::new(Barrier::new(2));
+    let session_ids = [SessionId::new(), SessionId::new()];
+    let session_threads: Vec<JoinHandle<()>> = session_ids
+        .iter()
+        .map(|session_id| {
+            spawn_fake_session_holding_its_first_answer(
+                runtime_directory.path(),
+                *session_id,
+                SessionRestartScript {
+                    restart_answer: Some(IpcResult::Restarting),
+                    reported_build_version: "3.3.3".to_string(),
+                    is_restarting_into_new_image: true,
+                },
+                2,
+                Some(Arc::clone(&first_answer_barrier)),
+            )
+        })
+        .collect();
+
+    let mut session_outcomes = restart_advertised_sessions(
+        runtime_directory.path(),
+        "3.3.3",
+        RestartScope::EveryServer,
+        Duration::from_secs(5),
+    )
+    .expect("read the runtime directory");
+
+    session_outcomes.sort_by_key(|(session_id, _)| *session_id);
+    let mut expected_session_outcomes: Vec<(SessionId, SessionOutcome)> = session_ids
+        .iter()
+        .map(|session_id| (*session_id, SessionOutcome::Confirmed))
+        .collect();
+    expected_session_outcomes.sort_by_key(|(session_id, _)| *session_id);
+    assert_eq!(session_outcomes, expected_session_outcomes);
+    for session_thread in session_threads {
+        session_thread
+            .join()
+            .expect("the stand-in served its connections");
+    }
 }
 
 #[test]
@@ -1789,6 +1861,7 @@ fn a_first_ever_check_is_due() {
 fn a_check_within_the_interval_is_not_due() {
     let update_state = UpdateState {
         last_check_unix_seconds: Some(get_current_unix_seconds()),
+        available_release_tag: None,
     };
     assert!(!is_update_due(&update_state, 14));
 }
@@ -1799,6 +1872,7 @@ fn a_check_older_than_the_interval_is_due() {
         get_current_unix_seconds().saturating_sub(15 * SECONDS_PER_DAY);
     let update_state = UpdateState {
         last_check_unix_seconds: Some(fifteen_days_ago_unix_seconds),
+        available_release_tag: None,
     };
     assert!(is_update_due(&update_state, 14));
 }
@@ -1807,6 +1881,7 @@ fn a_check_older_than_the_interval_is_due() {
 fn a_zero_interval_is_always_due() {
     let update_state = UpdateState {
         last_check_unix_seconds: Some(get_current_unix_seconds()),
+        available_release_tag: None,
     };
     assert!(is_update_due(&update_state, 0));
 }
@@ -2619,12 +2694,14 @@ const INSTALL_SCRIPT_STAGED_COPY_LINE: &str =
     r#"$staged_binary_path = Join-Path $installation_directory "koshi-staged-$PID.exe""#;
 
 /// The lines of `install.ps1` that move the new `koshi.exe`, whose `FileInfo`
-/// `$binary_file` holds, to `$staged_binary_path`, run it there with
-/// `--version`, and stop the install with an error when its first output line
-/// is not `koshi $release_version_number`. The `if` block closes on the line
-/// after the last one.
-const INSTALL_SCRIPT_VERSION_CHECK_LINES: [&str; 4] = [
+/// `$binary_file` holds, to `$staged_binary_path`, write it through to the
+/// disk, run it there with `--version`, and stop the install with an error
+/// when its first output line is not `koshi $release_version_number`. The `if`
+/// block closes on the line after the last one.
+const INSTALL_SCRIPT_VERSION_CHECK_LINES: [&str; 6] = [
     "Move-Item -Force $binary_file.FullName $staged_binary_path",
+    "$staged_binary_stream = [System.IO.File]::Open($staged_binary_path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)",
+    "try { $staged_binary_stream.Flush($true) } finally { $staged_binary_stream.Dispose() }",
     "$new_version_line = & $staged_binary_path --version | Select-Object -First 1",
     r#"if ("$new_version_line" -ne "koshi $release_version_number") {"#,
     r#"Write-Error "The new koshi printed '$new_version_line' for --version, not 'koshi $release_version_number'""#,
@@ -2697,7 +2774,8 @@ fn run_install_ps1_version_check(printed_line: &str) -> String {
         .display()
         .to_string()
         .replace('\'', "''");
-    let [move_line, version_line, compare_line, error_line] = INSTALL_SCRIPT_VERSION_CHECK_LINES;
+    let [move_line, open_line, flush_line, version_line, compare_line, error_line] =
+        INSTALL_SCRIPT_VERSION_CHECK_LINES;
     let check_script_path = test_directory.path().join("version-check.ps1");
     fs::write(
         &check_script_path,
@@ -2708,6 +2786,8 @@ fn run_install_ps1_version_check(printed_line: &str) -> String {
              $staged_binary_path = '{escaped_staged_binary_path}'\n\
              try {{\n\
              {move_line}\n\
+             {open_line}\n\
+             {flush_line}\n\
              {version_line}\n\
              {compare_line}\n\
              {error_line}\n\
@@ -2762,15 +2842,13 @@ fn update_state_defaults_when_deserialized_from_empty_object() {
 fn update_state_survives_a_serialize_deserialize_round_trip() {
     let original_update_state = UpdateState {
         last_check_unix_seconds: Some(1_700_000_000),
+        available_release_tag: Some("v9.0.0".to_string()),
     };
     let serialized_update_state =
         serde_json::to_string(&original_update_state).expect("serializable");
     let restored_update_state: UpdateState =
         serde_json::from_str(&serialized_update_state).expect("deserializable");
-    assert_eq!(
-        restored_update_state.last_check_unix_seconds,
-        original_update_state.last_check_unix_seconds
-    );
+    assert_eq!(restored_update_state, original_update_state);
 }
 
 #[test]
@@ -2792,6 +2870,107 @@ fn update_state_in_the_current_shape_reads_as_written() {
 #[test]
 fn update_state_that_parses_as_neither_shape_reads_as_never_checked() {
     assert_eq!(parse_update_state("not json").last_check_unix_seconds, None);
+}
+
+#[test]
+fn update_state_written_by_koshi_0_5_0_reads_with_no_release_waiting() {
+    assert_eq!(
+        parse_update_state(r#"{"last_check_unix_seconds":1700000000}"#),
+        UpdateState {
+            last_check_unix_seconds: Some(1_700_000_000),
+            available_release_tag: None,
+        }
+    );
+}
+
+#[test]
+fn update_state_with_a_release_waiting_reads_as_written() {
+    assert_eq!(
+        parse_update_state(
+            r#"{"last_check_unix_seconds":1700000000,"available_release_tag":"v9.0.0"}"#
+        ),
+        UpdateState {
+            last_check_unix_seconds: Some(1_700_000_000),
+            available_release_tag: Some("v9.0.0".to_string()),
+        }
+    );
+}
+
+#[test]
+fn a_check_that_found_a_newer_release_leaves_it_for_the_next_launch() {
+    let mut update_state = UpdateState::default();
+
+    record_update_check_result(&mut update_state, Ok(Some("v9.0.0".to_string())), 100);
+
+    assert_eq!(
+        update_state,
+        UpdateState {
+            last_check_unix_seconds: Some(100),
+            available_release_tag: Some("v9.0.0".to_string()),
+        }
+    );
+}
+
+#[test]
+fn a_check_that_found_no_newer_release_clears_the_waiting_offer() {
+    let mut update_state = UpdateState {
+        last_check_unix_seconds: Some(50),
+        available_release_tag: Some("v9.0.0".to_string()),
+    };
+
+    record_update_check_result(&mut update_state, Ok(None), 100);
+
+    assert_eq!(
+        update_state,
+        UpdateState {
+            last_check_unix_seconds: Some(100),
+            available_release_tag: None,
+        }
+    );
+}
+
+#[test]
+fn a_failed_check_keeps_the_waiting_offer_and_records_its_time() {
+    let mut update_state = UpdateState {
+        last_check_unix_seconds: Some(50),
+        available_release_tag: Some("v9.0.0".to_string()),
+    };
+
+    record_update_check_result(
+        &mut update_state,
+        Err("connection timed out".to_string()),
+        100,
+    );
+
+    assert_eq!(
+        update_state,
+        UpdateState {
+            last_check_unix_seconds: Some(100),
+            available_release_tag: Some("v9.0.0".to_string()),
+        }
+    );
+}
+
+#[test]
+fn a_found_release_is_offered_when_it_is_newer_and_its_channel_is_allowed() {
+    // (release tag, pre-releases allowed, offered)
+    let offer_cases = [
+        ("v9999.0.0", false, true),
+        ("v9999.0.0", true, true),
+        ("9999.0.0", false, true),
+        ("v9999.0.0-rc.1", false, false),
+        ("v9999.0.0-rc.1", true, true),
+        ("v0.0.0", true, false),
+        (APP_VERSION, true, false),
+        ("not-a-version", true, false),
+    ];
+    for (release_tag, should_allow_prerelease_updates, is_expected_offered) in offer_cases {
+        assert_eq!(
+            is_release_offered(release_tag, should_allow_prerelease_updates),
+            is_expected_offered,
+            "{release_tag} with pre-releases allowed {should_allow_prerelease_updates}"
+        );
+    }
 }
 
 // --- release JSON parsing (no network: fixture strings only) ---
@@ -3331,6 +3510,57 @@ fn a_swap_through_a_symbolic_link_replaces_the_file_it_names_and_keeps_the_link(
     );
 }
 
+#[test]
+fn flushing_a_staged_copy_to_the_disk_keeps_its_bytes() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("test directory");
+    let staged_binary_path = test_directory.path().join("koshi.koshi-update-5000");
+    fs::write(&staged_binary_path, b"new-binary").expect("write the staged copy");
+
+    assert_eq!(flush_staged_copy_to_disk(&staged_binary_path), Ok(()));
+    assert_eq!(
+        fs::read(&staged_binary_path).expect("read the staged copy"),
+        b"new-binary"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn flushing_a_staged_copy_this_user_may_only_read_succeeds() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("test directory");
+    let staged_binary_path = test_directory.path().join("koshi.koshi-update-5000");
+    fs::write(&staged_binary_path, b"new-binary").expect("write the staged copy");
+    fs::set_permissions(&staged_binary_path, fs::Permissions::from_mode(0o444))
+        .expect("make the staged copy read-only");
+
+    assert_eq!(flush_staged_copy_to_disk(&staged_binary_path), Ok(()));
+}
+
+#[test]
+fn flushing_a_missing_staged_copy_names_the_copy_and_the_open_failure() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("test directory");
+    let staged_binary_path = test_directory.path().join("koshi.koshi-update-5000");
+
+    assert_eq!(
+        flush_staged_copy_to_disk(&staged_binary_path),
+        Err(format!(
+            "could not write {} to the disk: {}",
+            staged_binary_path.display(),
+            io::Error::from_raw_os_error(2)
+        ))
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_swap_whose_copy_fails_removes_the_staged_copy_and_keeps_the_program_file() {
@@ -3713,21 +3943,24 @@ const INSTALL_SH_VALIDATE_FUNCTION_LINES: [&str; 7] = [
 ];
 
 /// The lines of `install.sh` that copy the binary beside the installed one,
-/// set mode `755` on the copy, check the copy, and rename the copy over the
+/// set mode `755` on the copy, write the copy through to the disk with `sync`,
+/// which runs `fsync` on it, check the copy, and rename the copy over the
 /// installed one, for an installation directory this user may write.
-const INSTALL_SH_INSTALL_LINES: [&str; 4] = [
+const INSTALL_SH_INSTALL_LINES: [&str; 5] = [
     r#"cp "${binary_path}" "${staged_binary_path}""#,
     r#"chmod 755 "${staged_binary_path}""#,
+    r#"sync "${staged_binary_path}""#,
     "validate_staged_binary",
     r#"mv -f "${staged_binary_path}" "${installed_binary_path}""#,
 ];
 
 /// The lines of [`INSTALL_SH_INSTALL_LINES`] for an installation directory
 /// that only root may write: the copy, the mode change, and the rename run
-/// through `sudo`, and the check runs as this user.
-const INSTALL_SH_SUDO_INSTALL_LINES: [&str; 4] = [
+/// through `sudo`, and the flush and the check run as this user.
+const INSTALL_SH_SUDO_INSTALL_LINES: [&str; 5] = [
     r#"sudo cp "${binary_path}" "${staged_binary_path}""#,
     r#"sudo chmod 755 "${staged_binary_path}""#,
+    r#"sync "${staged_binary_path}""#,
     "validate_staged_binary",
     r#"sudo mv -f "${staged_binary_path}" "${installed_binary_path}""#,
 ];
@@ -3736,12 +3969,12 @@ const INSTALL_SH_SUDO_INSTALL_LINES: [&str; 4] = [
 /// order, under `set -e`, with the release version number `9.9.9` and a
 /// `log_error` that prints its message on standard error. `$1` is the
 /// installation directory, `$2` the staging directory that holds `koshi`, and
-/// `$3` the installed binary path. After the copy, its mode change, and its
-/// check, the program prints the staged copy file name and runs
-/// `step_before_rename`, then renames the copy.
+/// `$3` the installed binary path. After the copy, its mode change, its flush
+/// to the disk, and its check, the program prints the staged copy file name and
+/// runs `step_before_rename`, then renames the copy.
 #[cfg(unix)]
 fn build_install_sh_program(step_before_rename: &str) -> String {
-    let [copy_line, mode_line, validate_line, rename_line] = INSTALL_SH_INSTALL_LINES;
+    let [copy_line, mode_line, flush_line, validate_line, rename_line] = INSTALL_SH_INSTALL_LINES;
     let mut program_lines = vec![
         "set -e",
         r#"release_version_number="9.9.9""#,
@@ -3758,6 +3991,7 @@ fn build_install_sh_program(step_before_rename: &str) -> String {
         INSTALL_SH_CLEANUP_TRAP_LINE,
         copy_line,
         mode_line,
+        flush_line,
         validate_line,
         r#"echo "${staged_binary_path##*/}""#,
         step_before_rename,
@@ -3950,6 +4184,43 @@ fn install_sh_lines_whose_rename_fails_remove_the_copy_and_the_staging_directory
             .err()
             .map(|metadata_error| metadata_error.kind()),
         Some(io::ErrorKind::NotFound)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_install_sh_flush_ends_the_script_when_the_copy_cannot_be_opened() {
+    let [_, _, flush_line, _, _] = INSTALL_SH_INSTALL_LINES;
+    let staging_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("a staging directory");
+    let missing_copy_path = staging_directory.path().join("koshi.koshi-update-5000");
+    let flush_program = [
+        "set -e",
+        r#"staged_binary_path="$1""#,
+        flush_line,
+        "echo flushed",
+    ]
+    .join("\n");
+
+    let flush_output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&flush_program)
+        .arg("bash")
+        .arg(&missing_copy_path)
+        .env("LC_ALL", "C")
+        .output()
+        .expect("run the flush line");
+
+    assert_eq!(flush_output.status.code(), Some(1));
+    assert_eq!(flush_output.stdout, b"");
+    assert_eq!(
+        String::from_utf8(flush_output.stderr).expect("a UTF-8 error message"),
+        format!(
+            "sync: error opening '{}': No such file or directory\n",
+            missing_copy_path.display()
+        )
     );
 }
 

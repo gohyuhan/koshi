@@ -3,7 +3,9 @@
 //!
 //! Each test starts the real `koshi` binary under a temporary home directory,
 //! with `KOSHI_REMOTE_SECRET` set, against a TLS server that the test runs on
-//! a loopback port. No connection leaves this machine.
+//! a loopback port. No connection leaves this machine. A session argument that
+//! names a folder of this machine's shared directory is refused before any
+//! dial.
 
 mod common;
 
@@ -108,4 +110,58 @@ fn an_action_verb_reaches_an_unsaved_server_and_saves_it_holding_the_fingerprint
         list_saved_server_records(home_directory.path()),
         vec![(None, server_address, Some(certificate_fingerprint))]
     );
+}
+
+#[test]
+fn a_session_in_this_machines_shared_directory_is_refused_with_the_remote_flag() {
+    let owned_session_text = format!("1001/{}", SessionId::new());
+    let home_directory = build_short_test_directory();
+    let refused_argument_cases: [(Vec<&str>, String); 3] = [
+        (
+            vec!["attach", "--remote", "some-other-box", &owned_session_text],
+            format!(
+                "koshi: invalid arguments: --remote takes a session id or name, not \
+                 `{owned_session_text}`, which names a folder of this machine's shared directory\n"
+            ),
+        ),
+        (
+            vec![
+                "close-tab",
+                "--remote",
+                "some-other-box",
+                "--session",
+                &owned_session_text,
+            ],
+            format!(
+                "koshi: invalid arguments: --remote takes a session id or name, not \
+                 `{owned_session_text}`, which names a folder of this machine's shared directory\n"
+            ),
+        ),
+        (
+            vec!["attach", "--remote", "some-other-box", "1001/quiet-lake"],
+            "koshi: invalid arguments: expected `<user id>/session-<uuid>`, such as \
+             `1001/session-<uuid>`\n"
+                .to_string(),
+        ),
+    ];
+
+    for (command_arguments, expected_stderr) in refused_argument_cases {
+        let refused_output = build_koshi_command_under_home(home_directory.path())
+            .args(&command_arguments)
+            .output()
+            .expect("the koshi binary runs");
+
+        assert_eq!(
+            String::from_utf8_lossy(&refused_output.stderr),
+            expected_stderr,
+            "{command_arguments:?}"
+        );
+        assert_eq!(String::from_utf8_lossy(&refused_output.stdout), "");
+        assert_eq!(
+            refused_output.status.code(),
+            Some(CliExitCode::UsageOrConfig.get_exit_code()),
+            "{command_arguments:?}"
+        );
+        assert_eq!(list_saved_server_records(home_directory.path()), Vec::new());
+    }
 }

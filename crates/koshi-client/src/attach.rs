@@ -14,9 +14,8 @@
 //! server saved, only a certificate with the fingerprint saved for that server
 //! is accepted, and the server resolves the session against the sessions that
 //! secret reaches. The server presents that session's endpoint token and writes
-//! the Hello on this client's behalf, since a caller on another machine cannot
-//! read that file. From the Attach on, both homes speak the same frames on the
-//! same loop.
+//! the Hello on this client's behalf. From the Attach on, both homes speak the
+//! same frames on the same loop.
 //!
 //! With no value at all, `koshi attach` offers the sessions running for this
 //! user beside the sessions on every saved server that answered inside one
@@ -73,7 +72,7 @@
 //! A dial the server answers with a refusal — a certificate that
 //! is not the expected one, a secret it does not admit, a session that secret does
 //! not reach, or a protocol version this build does not accept — is not dialed
-//! again: every identical dial gets the same answer, so the viewer stops there.
+//! again, and the viewer stops there.
 //! Each dial presents the secret the last attach
 //! minted, and the session hands that attach's view back for it: the same
 //! active tab, the same focused and zoomed pane of each tab, and the same
@@ -97,9 +96,14 @@
 //! attempt opens, that link gets `Leaving` with `is_returning` `true`, then
 //! closes. The first link of a terminal that cannot be set up does the same.
 //! This terminal goes away when a read of its input fails, as a read
-//! of a closed terminal does, on `SIGHUP` on Linux and macOS, and on the
-//! console close on Windows. A process that ignores `SIGHUP`, as one that
-//! `nohup` starts, keeps ignoring it.
+//! of a closed terminal does, and on the console close on Windows. On Linux
+//! and macOS, `SIGHUP`, `SIGTERM`, `SIGINT` and `SIGQUIT` end the viewer the
+//! same way, and once the terminal is restored the process ends by the
+//! default action of the last of them that arrived. On Windows, a Ctrl+C or
+//! Ctrl+Break signal ends the viewer the same way, and the process then exits
+//! with `STATUS_CONTROL_C_EXIT` (`0xC000013A`). A second such signal before
+//! the terminal is restored ends the process at once. A signal this process
+//! ignores, as `nohup` makes it ignore `SIGHUP`, stays ignored.
 //!
 //! While the viewer has no link, each attempt to get one back runs on its own
 //! thread, and the loop keeps reading this terminal. The keys resolve against
@@ -148,17 +152,20 @@ use std::mem::take;
 use std::ops::ControlFlow;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
+#[cfg(unix)]
+use std::sync::{LazyLock, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::backend::Backend;
 use ratatui::crossterm::terminal::size;
 use ratatui::crossterm::tty::IsTty;
-use ratatui::layout::Rect;
-use ratatui::{Terminal, TerminalOptions, Viewport};
 
-use crate::input::KeyOutcome;
+use crate::input::{InputReadClock, KeyOutcome};
 use crate::mouse::MouseAction;
 use crate::PlacementInputAction;
 use crate::{compute_core_pane_area, Client, LinkStatus};
@@ -168,7 +175,7 @@ use koshi_core::command::{
     LockModeArgs, PanePlacementAnchor, PanePlacementTarget, PlacementRevision, SwitchSessionArgs,
     ToggleLockModeArgs, VisualCommand,
 };
-use koshi_core::constant::compute_heartbeat_interval;
+use koshi_core::constant::{compute_frame_interval, compute_heartbeat_interval};
 use koshi_core::geometry::{Direction, PixelCellSize, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{KeyInput, KeySequence};
@@ -179,6 +186,7 @@ use koshi_core::resolve::{resolve_action_with_scroll_line_count, DispatchPlan};
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::{IncomingEvent, SessionEvent};
+use koshi_ipc::image_chunk::ImageChunkFrame;
 use koshi_ipc::protocol::{
     ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult, WireMouseAction,
 };
@@ -194,9 +202,13 @@ use koshi_renderer::snapshot::{
     PlacementSnapshot, Reconnecting, RenderSnapshot, TabSnapshot, ViewerChrome,
 };
 use koshi_runtime::runtime::event::RuntimeEvent;
+use koshi_runtime::runtime::painted_update::{
+    PaintedUpdateReceiver, ReceivedPaintedFrame, SessionFrame,
+};
 
 use crate::terminal;
-use koshi_core::ids::parse_prefixed_uuid;
+use crate::terminal::TerminalInput;
+use koshi_core::ids::{format_session_target, parse_owned_session_id, parse_prefixed_uuid};
 use koshi_ipc::endpoint::RESTART_WINDOW_DURATION;
 use koshi_link::discovery::{self, SessionRow};
 use koshi_link::error::CliError;
@@ -213,7 +225,7 @@ use koshi_link::talk;
 pub mod paint;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// The size an attaching client reports when the terminal size cannot be read,
 /// which is what a `koshi attach` with redirected output finds.
@@ -248,13 +260,14 @@ const MAX_QUIT_WRITE_WAIT_DURATION: Duration = Duration::from_secs(1);
 /// The number the first connection of one attachment carries. Coming back after
 /// the session replaces its own process image counts up from here.
 const INITIAL_CONNECTION_INDEX: u64 = 0;
-/// Wakeup used for native output preparation and the first failed-frame retry.
-const IMAGE_OUTPUT_STEP_DELAY_DURATION: Duration = Duration::from_millis(1);
+/// The wait before the first retry of a native image frame that failed to
+/// paint: 1 ms. Each further failure doubles it.
+const FIRST_IMAGE_OUTPUT_RETRY_DELAY_DURATION: Duration = Duration::from_millis(1);
 /// Maximum wakeup after repeated native output failures.
 const MAX_IMAGE_OUTPUT_RETRY_DELAY_DURATION: Duration = Duration::from_secs(1);
 
 /// Most queued terminal and session events handled before the loop yields to
-/// image output, key timeouts, and outbound requests.
+/// image output, input timers, and outbound requests.
 const MAX_INCOMING_EVENT_COUNT_PER_PASS: usize = 16;
 
 /// Most unread terminal and session events retained before their producer waits.
@@ -265,14 +278,9 @@ const MAX_INCOMING_IMAGE_BYTE_COUNT_PER_BATCH: usize =
     koshi_ipc::frame::MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT;
 
 /// The most decided-but-unwritten mouse actions this client holds, and the most
-/// unanswered border moves it remembers. Both cap the memory a session that
-/// answers slowly can make this client hold.
-///
-/// The number is one burst: a 200 ms round trip at 250 mouse events a second is
-/// 50 events, and the busiest event — a press that clears a highlight and
-/// extends a new one — decides 2 actions, so 100 actions covers that burst.
-/// 256 is that burst two and a half times over, so an ordinary slow answer
-/// leaves both whole and only a session that stopped answering trims.
+/// unanswered border moves it remembers: 256. A pile of actions over the cap
+/// drops its oldest scrolls, as [`queue_mouse_actions`] says, and the oldest
+/// remembered border moves past the cap are forgotten.
 const MAX_PENDING_MOUSE_ACTION_COUNT: usize = 256;
 
 /// One border move already written and not yet answered.
@@ -321,7 +329,6 @@ pub(crate) struct ViewerPaint {
 }
 
 const PLACEMENT_ANIMATION_DURATION: Duration = Duration::from_millis(160);
-const PLACEMENT_ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// The viewer-owned interpolation between two placement snapshots.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -564,17 +571,24 @@ fn format_placement_direction_label(direction: Direction) -> &'static str {
 /// `Placing this pane…` until the session rejects the command, or commits
 /// it and a painted frame carries the new placement revision.
 struct Screen<B: Backend> {
-    /// The ratatui terminal the renderer paints into.
-    terminal: Terminal<B>,
+    /// The paint driver the renderer paints into.
+    paint_driver: terminal::PaintDriver<B>,
+    /// The output every frame's bytes pass through on their way to this
+    /// terminal. The backend of `paint_driver` writes into the same held
+    /// bytes.
+    frame_output: terminal::TerminalOutput,
+    /// The inputs of the last frame drawn, which the next frame compares its
+    /// own against to draw only the rows it changes.
+    shown_frame_inputs: Option<terminal::FrameInputs>,
     /// The window title used for the last title-write comparison.
     last_window_title: String,
     /// The cursor style used for the last cursor-style-write comparison.
     last_cursor_style: Option<CursorStyle>,
     /// Whether this viewer requested Shift mouse reports from the outer terminal.
     is_shift_mouse_capture_requested: bool,
-    /// The snapshot last drawn, kept so a viewer-only change can draw it
-    /// again without re-reading the frame. Its grids travel behind `Arc`s, so
-    /// retaining it does not copy cell data. `None` until the first draw.
+    /// The snapshot last drawn. A viewer-only change draws it again without
+    /// re-reading the frame. Its grids travel behind `Arc`s, and retaining it
+    /// copies no cell data. `None` until the first draw.
     last_snapshot: Option<RenderSnapshot>,
     /// The retained read-only placement snapshot, if one is accepted.
     placement_snapshot: Option<PlacementSnapshot>,
@@ -614,14 +628,21 @@ struct Screen<B: Backend> {
 
 impl<B: Backend> Screen<B> {
     /// A screen that has drawn nothing yet, with its image protocol capability.
+    /// `frame_output` takes every byte of each frame other than the ones the
+    /// backend of `paint_driver` writes. The image output calls
+    /// `notify_image_output_ready` when the next paint has new pixels to show.
     fn with_graphics_support(
-        terminal: Terminal<B>,
+        paint_driver: terminal::PaintDriver<B>,
+        frame_output: terminal::TerminalOutput,
         viewport_size: Size,
         graphics_support: terminal::GraphicsSupport,
         cell_size: Option<PixelCellSize>,
+        notify_image_output_ready: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
         Screen {
-            terminal,
+            paint_driver,
+            frame_output,
+            shown_frame_inputs: None,
             last_window_title: String::new(),
             last_cursor_style: None,
             is_shift_mouse_capture_requested: false,
@@ -639,8 +660,9 @@ impl<B: Backend> Screen<B> {
             graphics_support,
             image_output_state: terminal::ImageOutputState::from_output_kind(
                 terminal::ImageOutputKind::from_support(graphics_support),
+                notify_image_output_ready,
             ),
-            native_retry_delay: IMAGE_OUTPUT_STEP_DELAY_DURATION,
+            native_retry_delay: FIRST_IMAGE_OUTPUT_RETRY_DELAY_DURATION,
             native_retry_at: None,
             cell_size,
         }
@@ -737,8 +759,9 @@ impl<B: Backend> Screen<B> {
             displayed_snapshot.client_snapshot.active_tab_id,
             snapshot,
         );
-        match terminal::paint_frame_with_displayed_snapshot(
-            &mut self.terminal,
+        match terminal::paint_frame_with_writer(
+            &mut self.frame_output,
+            &mut self.paint_driver,
             client,
             displayed_snapshot,
             &committed_regions,
@@ -746,20 +769,17 @@ impl<B: Backend> Screen<B> {
             self.graphics_support.get_image_render_mode(),
             &mut self.image_output_state,
             self.cell_size,
+            &mut self.shown_frame_inputs,
             &mut self.last_window_title,
             &mut self.last_cursor_style,
             self.placement_snapshot.as_ref(),
             placement_display_snapshot.as_ref(),
         ) {
-            Ok(true) => {
+            Ok(()) => {
                 if is_native_image_output {
-                    self.native_retry_delay = IMAGE_OUTPUT_STEP_DELAY_DURATION;
+                    self.native_retry_delay = FIRST_IMAGE_OUTPUT_RETRY_DELAY_DURATION;
                     self.native_retry_at = None;
                 }
-            }
-            Ok(false) => {
-                client.restore_viewer(viewer_restore_point);
-                return None;
             }
             Err(paint_error) => {
                 client.restore_viewer(viewer_restore_point);
@@ -811,9 +831,9 @@ impl<B: Backend> Screen<B> {
     /// it and a painted frame carries the new placement revision.
     ///
     /// `active_tab_id` is `Some` after the first frame has been drawn. A viewer
-    /// with no changed local state draws nothing. A viewer whose viewport no
-    /// longer matches the committed region solve draws nothing until the next
-    /// session frame.
+    /// with no changed local state, and no finished image request since its
+    /// last paint, draws nothing. A viewer whose viewport no longer matches the
+    /// committed region solve draws nothing until the next session frame.
     fn refresh(&mut self, client: &mut Client, active_tab_id: Option<TabId>) -> Option<MouseFrame> {
         self.refresh_at(client, active_tab_id, Instant::now())
     }
@@ -869,6 +889,7 @@ impl<B: Backend> Screen<B> {
             && self.shown_placement_snapshot == self.placement_snapshot
             && self.shown_placement_render_snapshot.as_ref() == placement_render_snapshot
             && is_committed_tab_shown
+            && !self.image_output_state.has_unselected_results()
         {
             return None;
         }
@@ -878,8 +899,9 @@ impl<B: Backend> Screen<B> {
             committed_placement_tab_snapshot,
         );
         let displayed_snapshot = displayed_render_snapshot.as_ref().unwrap_or(snapshot);
-        if !is_frame_committed(terminal::paint_frame_with_displayed_snapshot(
-            &mut self.terminal,
+        if !is_frame_committed(terminal::paint_frame_with_writer(
+            &mut self.frame_output,
+            &mut self.paint_driver,
             client,
             displayed_snapshot,
             &self.committed_regions,
@@ -887,6 +909,7 @@ impl<B: Backend> Screen<B> {
             self.graphics_support.get_image_render_mode(),
             &mut self.image_output_state,
             self.cell_size,
+            &mut self.shown_frame_inputs,
             &mut self.last_window_title,
             &mut self.last_cursor_style,
             self.placement_snapshot.as_ref(),
@@ -1104,10 +1127,11 @@ impl<B: Backend> Screen<B> {
         }
     }
 
+    /// Return the wait before the retry of a native image frame that failed
+    /// to paint, or `None` when no such frame waits. New image pixels wake
+    /// the loop through [`Incoming::ImageOutputReady`], not through this
+    /// wakeup.
     fn compute_next_image_wakeup_at(&self, current_time: Instant) -> Option<Duration> {
-        if self.image_output_state.is_work_pending() {
-            return Some(IMAGE_OUTPUT_STEP_DELAY_DURATION);
-        }
         let is_native_frame_pending =
             self.pending_snapshot.is_some() && self.image_output_state.get_output_kind().is_some();
         let retry_delay = self
@@ -1119,10 +1143,13 @@ impl<B: Backend> Screen<B> {
     }
 
     /// Return the next redraw interval for an active placement preview
-    /// interpolation or committed-placement slide.
+    /// interpolation or committed-placement slide: the shorter of
+    /// `frame_interval` and the time the animation has left. `None` when no
+    /// animation runs.
     fn compute_next_placement_animation_wakeup_at(
         &self,
         current_time: Instant,
+        frame_interval: Duration,
     ) -> Option<Duration> {
         let animation_started_at = self
             .placement_animation
@@ -1137,7 +1164,7 @@ impl<B: Backend> Screen<B> {
             .min()?;
         let animation_remaining = PLACEMENT_ANIMATION_DURATION
             .saturating_sub(current_time.saturating_duration_since(animation_started_at));
-        Some(animation_remaining.min(PLACEMENT_ANIMATION_FRAME_INTERVAL))
+        Some(animation_remaining.min(frame_interval))
     }
 
     /// Update the pixel dimensions used to scale native image output.
@@ -1155,7 +1182,7 @@ impl<B: Backend> Screen<B> {
             })
         {
             self.image_output_state.reset_connection();
-            self.native_retry_delay = IMAGE_OUTPUT_STEP_DELAY_DURATION;
+            self.native_retry_delay = FIRST_IMAGE_OUTPUT_RETRY_DELAY_DURATION;
             self.native_retry_at = None;
             if self.pending_snapshot.is_none() {
                 self.pending_snapshot.clone_from(&self.last_snapshot);
@@ -1168,10 +1195,25 @@ impl<B: Backend> Screen<B> {
         self.placement_snapshot = placement_snapshot;
     }
 
+    /// Record that the client's image records hold `held_image_byte_count`
+    /// bytes of decoded pixels. Cached encoded output past the room they
+    /// leave in the image budget is dropped.
+    fn set_held_image_byte_count(&mut self, held_image_byte_count: u64) {
+        self.image_output_state
+            .set_held_image_byte_count(held_image_byte_count);
+    }
+
+    /// Drop the cached encoded output that reads an image in
+    /// `image_content_ids`, which the session released.
+    fn release_image_contents(&mut self, image_content_ids: &[u64]) {
+        self.image_output_state
+            .release_image_contents(image_content_ids);
+    }
+
     /// Reset native output state after the session image cache or connection changes.
     fn reset_connection(&mut self) {
         self.image_output_state.reset_connection();
-        self.native_retry_delay = IMAGE_OUTPUT_STEP_DELAY_DURATION;
+        self.native_retry_delay = FIRST_IMAGE_OUTPUT_RETRY_DELAY_DURATION;
         self.native_retry_at = None;
         self.placement_animation = None;
         self.shown_placement_render_snapshot = None;
@@ -1235,15 +1277,18 @@ fn warn_paint_error<BackendError: std::fmt::Debug>(
         terminal::PaintError::Image(image_error) => {
             tracing::warn!(%image_error, "could not paint terminal images")
         }
+        terminal::PaintError::Output(output_error) => {
+            tracing::warn!(%output_error, "could not write the frame to the terminal")
+        }
     }
 }
 
 /// Report a paint error and return whether the complete frame was committed.
 fn is_frame_committed<BackendError: std::fmt::Debug>(
-    paint_result: Result<bool, terminal::PaintError<BackendError>>,
+    paint_result: Result<(), terminal::PaintError<BackendError>>,
 ) -> bool {
     match paint_result {
-        Ok(committed) => committed,
+        Ok(()) => true,
         Err(paint_error) => {
             warn_paint_error(paint_error);
             false
@@ -1261,10 +1306,17 @@ enum AttachmentEnding {
     /// The connection broke: the session server is gone, or a link to a
     /// session on another machine read nothing for `remote-link-timeout-ms`.
     ConnectionDied,
-    /// This terminal went away while the session kept running.
+    /// This terminal went away, or this process took a termination signal,
+    /// while the session kept running.
     TerminalGone,
     /// The session moved this client to the session named here.
-    SwitchSession(SessionId),
+    SwitchSession {
+        /// The session to attach to next.
+        session_id: SessionId,
+        /// The user id whose folder of the shared directory advertises
+        /// `session_id`, or `None` for a session looked up by its id alone.
+        owner_user_id: Option<u32>,
+    },
     /// The session is replacing its own process image. The loop waits for the
     /// session's new socket and attaches again on it. A loop that cannot reach
     /// the session's new image ends here, and the report names the restart and
@@ -1290,9 +1342,10 @@ enum AttachmentEnding {
 }
 
 /// Two endings are equal when they are the same variant carrying the same
-/// fields. A [`AttachmentEnding::SwitchSession`] compares its [`SessionId`]. A
-/// [`AttachmentEnding::LinkLost`] and a [`AttachmentEnding::RefusedAfterRestart`]
-/// compare the text their cause prints, which is what the viewer shows.
+/// fields. A [`AttachmentEnding::SwitchSession`] compares its [`SessionId`] and
+/// its user id. A [`AttachmentEnding::LinkLost`] and a
+/// [`AttachmentEnding::RefusedAfterRestart`] compare the text their cause
+/// prints, which is what the viewer shows.
 impl PartialEq for AttachmentEnding {
     fn eq(&self, other_ending: &Self) -> bool {
         match (self, other_ending) {
@@ -1307,9 +1360,17 @@ impl PartialEq for AttachmentEnding {
                 AttachmentEnding::RestartedIntoIncompatibleBuild,
             ) => true,
             (
-                AttachmentEnding::SwitchSession(first_session_id),
-                AttachmentEnding::SwitchSession(second_session_id),
-            ) => first_session_id == second_session_id,
+                AttachmentEnding::SwitchSession {
+                    session_id: first_session_id,
+                    owner_user_id: first_owner_user_id,
+                },
+                AttachmentEnding::SwitchSession {
+                    session_id: second_session_id,
+                    owner_user_id: second_owner_user_id,
+                },
+            ) => {
+                first_session_id == second_session_id && first_owner_user_id == second_owner_user_id
+            }
             (AttachmentEnding::LinkLost(first_cause), AttachmentEnding::LinkLost(second_cause)) => {
                 first_cause.to_string() == second_cause.to_string()
             }
@@ -1336,15 +1397,40 @@ enum Incoming {
         /// reads a subsequent connection: connection 0 is the first, 1 the one after
         /// the first restart, and so on.
         connection_index: u64,
-        /// The frame itself, or the read that failed.
+        /// The frame itself, or the read that failed. A painted update that
+        /// does not decode or apply is a failed read.
         session_event_result: Result<SessionEvent, IpcError>,
     },
-    /// A key, a resize, or this terminal hanging up. Boxed to keep this type
-    /// close to the size of a frame.
-    Input(Box<RuntimeEvent>),
-    /// What one attempt to get the link back ended with. Only
-    /// [`run_without_link`] starts an attempt, one at a time. Boxed to keep this
-    /// type close to the size of a frame.
+    /// The image output has new pixels for the next paint: the worker ended
+    /// a request, or a paint left finished Kitty uploads unwritten. The pass
+    /// that takes it ends with [`Screen::refresh_at`], which paints them. The
+    /// sender drops this event when the channel is full; the events that fill
+    /// the channel each end a pass the same way.
+    ImageOutputReady,
+    /// The last part of a painted update the session wrote, applied by the
+    /// connection's reader.
+    Painted {
+        /// Which connection the reader that sent this was reading, as
+        /// [`Incoming::Frame`] numbers it.
+        connection_index: u64,
+        /// The applied update.
+        received_painted_frame: Box<ReceivedPaintedFrame>,
+    },
+    /// One chunk of an image record the session wrote, in the frame the
+    /// connection's reader read it in.
+    ImageChunk {
+        /// Which connection the reader that sent this was reading, as
+        /// [`Incoming::Frame`] numbers it.
+        connection_index: u64,
+        /// The chunk.
+        image_chunk_frame: ImageChunkFrame,
+    },
+    /// One event from this terminal and the instant it was read: an event the
+    /// input thread read, or this terminal hanging up as a termination signal
+    /// or a console close reports it, boxed.
+    Input(Box<TerminalInput>),
+    /// What one attempt to get the link back ended with, boxed. Only
+    /// [`run_without_link`] starts an attempt, one at a time.
     RejoinAnswer(Box<RejoinAnswer>),
 }
 
@@ -1704,17 +1790,23 @@ fn build_set_lock_mode_command(lock_mode: LockMode) -> Command {
 
 /// Where the session this client joins runs.
 ///
-/// One home is picked before the first connection opens and holds for every
-/// connection after it, so a switch and a restart re-enter the session the same
-/// way the first join entered it.
+/// One home is picked before the first connection opens. A restart re-enters
+/// the session through the same home. A switch keeps the home's machine, and on
+/// this machine it takes the user id the switch names.
 #[derive(Clone)]
 enum Home {
     /// A session on this machine, joined through the endpoint file it
-    /// advertises under `runtime_directory`.
+    /// advertises under `runtime_directory`, or through the socket a folder of
+    /// the shared directory advertises for it.
     Local {
         /// This user's runtime directory, holding one endpoint file per
         /// session.
         runtime_directory: PathBuf,
+        /// The id of another user whose folder of the shared directory
+        /// advertises the session: every dial reads that one folder. `None`
+        /// looks the session's id up in `runtime_directory`, then in the shared
+        /// directory.
+        owner_user_id: Option<u32>,
     },
     /// A session on another machine, joined through the server serving it.
     Remote {
@@ -1743,19 +1835,19 @@ struct JoinedSession {
     resume_token: Option<ConnectionToken>,
 }
 
-/// Resolve what the user typed to one running session, and report where it
-/// listens.
+/// Resolve what the user typed to one running session, through
+/// [`resolve_local_session_target`].
 ///
-/// `selector` is a `session-<uuid>` id, a bare UUID, or a session display
-/// name. `None` picks one from the sessions running for this user and the
-/// sessions `shared_sessions_base_directory` advertises instead: nothing
-/// running is a failure, one session is taken straight away, and more than one
-/// is printed as a numbered list to answer on stdin.
+/// `selector` is a `session-<uuid>` id, a bare UUID, a session display name,
+/// or `<user id>/<session id>`. `None` picks one from the sessions running for
+/// this user and the sessions `shared_sessions_base_directory` advertises
+/// instead: nothing running is a failure, one session is taken straight away,
+/// and more than one is printed as a numbered list to answer on stdin.
 fn resolve_session(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
     selector: Option<&str>,
-) -> Result<SessionAddress, CliError> {
+) -> Result<(SessionId, Option<u32>), CliError> {
     let selector = match selector {
         Some(selector) => selector.to_string(),
         // No remote rows are offered, so every place is a local one.
@@ -1764,7 +1856,7 @@ fn resolve_session(
             shared_sessions_base_directory,
             Vec::new(),
         )? {
-            SessionSelection::Local(session_id) => session_id,
+            SessionSelection::Local(selector) => selector,
             SessionSelection::Remote(remote_row_index) => {
                 unreachable!(
                     "a listing offered no remote rows and settled on place {remote_row_index}"
@@ -1772,17 +1864,62 @@ fn resolve_session(
             }
         },
     };
-    lookup_session_address(runtime_directory, &selector)
+    resolve_local_session_target(runtime_directory, shared_sessions_base_directory, &selector)
+}
+
+/// The running session `selector` names on this machine, and the user id whose
+/// folder of the shared directory advertises it.
+///
+/// A `selector` such as `1001/session-<uuid>` is read by
+/// [`parse_owned_session_id`], and
+/// [`load_session_endpoint`](ipc_client::load_session_endpoint) finds that
+/// session in the folder of user `1001` alone: the answer carries `Some(1001)`.
+/// Every other `selector` is a `session-<uuid>` id, a bare UUID, or a session
+/// display name that [`lookup_session_address`] asks the router for: the answer
+/// carries `None`.
+///
+/// # Errors
+/// [`CliError::InvalidArgs`] for a `selector` with a `/` that is not
+/// `<user id>/session-<uuid>`. Every error of
+/// [`load_session_endpoint`](ipc_client::load_session_endpoint) and of
+/// [`lookup_session_address`].
+fn resolve_local_session_target(
+    runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
+    selector: &str,
+) -> Result<(SessionId, Option<u32>), CliError> {
+    let owned_session_id =
+        parse_owned_session_id(selector).map_err(|detail| CliError::InvalidArgs { detail })?;
+    match owned_session_id {
+        Some(owned_session_id) => {
+            ipc_client::load_session_endpoint(
+                runtime_directory,
+                shared_sessions_base_directory,
+                owned_session_id.session_id,
+                Some(owned_session_id.owner_user_id),
+            )?;
+            Ok((
+                owned_session_id.session_id,
+                Some(owned_session_id.owner_user_id),
+            ))
+        }
+        None => Ok((
+            lookup_session_address(runtime_directory, selector)?.session_id,
+            None,
+        )),
+    }
 }
 
 /// Join a running session in this terminal as a new client.
 ///
-/// `selector` is a `session-<uuid>` id, a bare UUID, or a session display
-/// name. `None` picks one from the sessions running for this user and the
-/// sessions on every saved server that answered: no session running anywhere
-/// is a failure, exactly one session on this machine is taken straight away,
-/// and anything else — several sessions, or one session on a saved server —
-/// is printed as a numbered list to answer on stdin.
+/// `selector` is a `session-<uuid>` id, a bare UUID, a session display name,
+/// or `<user id>/<session id>`: `1001/session-<uuid>` names that session in the
+/// folder of user `1001` of the shared directory. `None` picks one from the
+/// sessions running for this user and the sessions on every saved server that
+/// answered: no session running anywhere is a failure, exactly one session on
+/// this machine is taken straight away, and anything else — several sessions,
+/// or one session on a saved server — is printed as a numbered list to answer
+/// on stdin.
 pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
     let config_directory = koshi_paths::resolve_config_directory();
@@ -1792,10 +1929,18 @@ pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
             config_directory.as_deref(),
         );
     };
-    let session_address = lookup_session_address(&runtime_directory, selector)?;
+    let (session_id, owner_user_id) = resolve_local_session_target(
+        &runtime_directory,
+        koshi_link::config::find_shared_sessions_base_directory(config_directory.as_deref())
+            .as_deref(),
+        selector,
+    )?;
     attach_home(
-        &Home::Local { runtime_directory },
-        SessionSelector::SessionId(session_address.session_id),
+        Home::Local {
+            runtime_directory,
+            owner_user_id,
+        },
+        SessionSelector::SessionId(session_id),
         config_directory.as_deref(),
     )
 }
@@ -1844,7 +1989,7 @@ pub fn attach_remote_session(
     // The attachment dials its own connection, so this one is finished with.
     drop(server_connection);
     attach_home(
-        &Home::Remote {
+        Home::Remote {
             server: ServerReference::Saved(saved_server),
         },
         session_selector,
@@ -1884,11 +2029,18 @@ fn attach_selected_session_from_listing(
         shared_sessions_base_directory.as_deref(),
         remote_session_rows,
     )? {
-        SessionSelection::Local(session_identifier) => {
-            let session_address = lookup_session_address(&runtime_directory, &session_identifier)?;
+        SessionSelection::Local(selector) => {
+            let (session_id, owner_user_id) = resolve_local_session_target(
+                &runtime_directory,
+                shared_sessions_base_directory.as_deref(),
+                &selector,
+            )?;
             return attach_home(
-                &Home::Local { runtime_directory },
-                SessionSelector::SessionId(session_address.session_id),
+                Home::Local {
+                    runtime_directory,
+                    owner_user_id,
+                },
+                SessionSelector::SessionId(session_id),
                 config_directory,
             );
         }
@@ -1897,7 +2049,7 @@ fn attach_selected_session_from_listing(
         }
     };
     attach_home(
-        &Home::Remote {
+        Home::Remote {
             server: remote_client::resolve_server(server_label, None)?,
         },
         SessionSelector::SessionId(selected_session_row.session_id),
@@ -1944,17 +2096,16 @@ fn select_remote_session(
 /// session.
 ///
 /// `selector` names the session to move to: a `session-<uuid>` id, a bare
-/// UUID, or a session display name, and `None` picks one from the sessions
-/// running for this user. A session on another machine is never offered, since
-/// this session cannot move a client into one. The session moves the client
-/// this terminal already holds.
+/// UUID, a session display name, or `<user id>/<session id>`, and `None` picks
+/// one from the sessions running for this user. A session on another machine
+/// is never offered. The session moves the client this terminal already holds.
 pub fn switch_in_session(
     session_context: &InSessionContext,
     selector: Option<&str>,
 ) -> Result<CommandResult, CliError> {
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
     let shared_sessions_base_directory = ipc_client::resolve_shared_sessions_base_directory();
-    let address = resolve_session(
+    let (session_id, owner_user_id) = resolve_session(
         &runtime_directory,
         shared_sessions_base_directory.as_deref(),
         selector,
@@ -1963,7 +2114,8 @@ pub fn switch_in_session(
         session_context,
         Command::SwitchSession(SwitchSessionArgs {
             client_id: None,
-            session_id: address.session_id,
+            session_id,
+            owner_user_id,
         }),
     )
 }
@@ -1990,10 +2142,12 @@ pub(crate) fn attach_session(
         runtime_directory,
         koshi_link::config::find_shared_sessions_base_directory(config_directory).as_deref(),
         session_id,
+        None,
     )?;
     attach_home(
-        &Home::Local {
+        Home::Local {
             runtime_directory: runtime_directory.to_path_buf(),
+            owner_user_id: None,
         },
         SessionSelector::SessionId(session_id),
         config_directory,
@@ -2003,10 +2157,12 @@ pub(crate) fn attach_session(
 /// Join the session `session_selector` names in `home` and run until nothing moves this
 /// client on.
 ///
-/// A session that moves this client to another one is attached to next, in the
-/// same home: a client on a server dials that server again for it, so the
-/// certificate, the secret and the scope are all checked again before the next
-/// session paints anything.
+/// A session that moves this client to another one is attached to next, on the
+/// same machine. A client on this machine dials the next session with the user
+/// id the move names, as [`Home::Local`] states. A client on a server dials
+/// that server again with the next session's id alone, so the certificate, the
+/// secret and the scope are all checked again before the next session paints
+/// anything.
 ///
 /// The path this program was started from, as
 /// [`resolve_program_path`](koshi_host::program_path::resolve_program_path)
@@ -2014,26 +2170,33 @@ pub(crate) fn attach_session(
 /// platform cannot report it. `config_directory` is handed to every
 /// attachment.
 fn attach_home(
-    home: &Home,
+    mut home: Home,
     session_selector: SessionSelector,
     config_directory: Option<&Path>,
 ) -> Result<(), CliError> {
     let client_executable_path = koshi_host::program_path::resolve_program_path().ok();
     let mut next_session_selector = session_selector;
-    while let Some(next_session_id) = attach_once(
-        home,
-        &next_session_selector,
-        client_executable_path.as_deref(),
-        config_directory,
-    )? {
+    loop {
+        let attach_result = attach_once(
+            &home,
+            &next_session_selector,
+            client_executable_path.as_deref(),
+            config_directory,
+        );
+        end_process_after_termination_signal();
+        let Some((next_session_id, next_owner_user_id)) = attach_result? else {
+            return Ok(());
+        };
         next_session_selector = SessionSelector::SessionId(next_session_id);
+        if let Home::Local { owner_user_id, .. } = &mut home {
+            *owner_user_id = next_owner_user_id;
+        }
     }
-    Ok(())
 }
 
 /// Join the session `session_selector` names in `home` and run one attachment of it,
-/// handing back the session to attach to next when this one moved the client
-/// on.
+/// handing back the session to attach to next, and the user id whose shared
+/// folder advertises it, when this one moved the client on.
 ///
 /// The terminal enters raw mode for its capability probe, then enters the
 /// alternate screen after Attach succeeds. This call owns both states and
@@ -2060,7 +2223,7 @@ fn attach_once(
     session_selector: &SessionSelector,
     client_executable_path: Option<&Path>,
     config_directory: Option<&Path>,
-) -> Result<Option<SessionId>, CliError> {
+) -> Result<Option<(SessionId, Option<u32>)>, CliError> {
     let (loaded_config, config_warnings) = koshi_link::config::load_config_files(config_directory);
     let client_config =
         koshi_link::config::resolve_client_config(loaded_config.app_config_layer.clone());
@@ -2068,11 +2231,15 @@ fn attach_once(
         terminal::TerminalOwner::open_terminal_owner(client_config.supports_image_protocols)
             .map_err(|detail| CliError::Runtime { detail })?;
     let graphics_support = terminal_owner.get_graphics_support();
+    let attach_settings = AttachSettings {
+        graphics_support,
+        max_frames_per_second: client_config.max_frames_per_second,
+    };
     let mut cell_size_query = terminal_owner.build_cell_size_query();
     let joined_session = dial_session(
         home,
         session_selector,
-        graphics_support,
+        attach_settings,
         cell_size_query.get_current_cell_size(),
         config_directory,
         client_config.remote_link_timeout_ms,
@@ -2095,9 +2262,26 @@ fn attach_once(
 
     let (incoming_sender, incoming_receiver) = build_incoming_channel();
     let (input_sender, input_receiver) = build_input_channel();
+    // A terminal that closes, or a termination signal, ends the attachment as
+    // `TerminalGone`, whose last request says this viewer does not return.
+    // With no watch, either one ends the process at once.
+    let terminal_close_watch =
+        match TerminalCloseWatch::start_terminal_close_watch(incoming_sender.clone()) {
+            Ok(terminal_close_watch) => terminal_close_watch,
+            Err(watch_error) => {
+                tracing::warn!(%watch_error, "could not watch for this terminal closing");
+                None
+            }
+        };
     let should_read_input = io::stdin().is_tty();
+    let input_read_clock = Arc::new(InputReadClock::default());
     terminal_owner
-        .activate_terminal(input_sender, client_id, should_read_input)
+        .activate_terminal(
+            input_sender,
+            client_id,
+            Arc::clone(&input_read_clock),
+            should_read_input,
+        )
         .map_err(|activation_detail| CliError::Runtime {
             detail: activation_detail,
         })?;
@@ -2115,38 +2299,6 @@ fn attach_once(
         drop(input_receiver);
         tracing::info!("standard input is not a terminal, so this client reads no keys");
     }
-    // A terminal that closes ends the attachment as `TerminalGone`, whose last
-    // request says this viewer does not return. With no watch, a close ends the
-    // process at once.
-    let terminal_close_watch =
-        match TerminalCloseWatch::start_terminal_close_watch(incoming_sender.clone()) {
-            Ok(terminal_close_watch) => terminal_close_watch,
-            Err(watch_error) => {
-                tracing::warn!(%watch_error, "could not watch for this terminal closing");
-                None
-            }
-        };
-    // The ratatui terminal owns the output side; the renderer paints its
-    // buffer. A terminal that reports no size — which is what a `koshi
-    // attach` with redirected output finds — gets a buffer of
-    // [`FALLBACK_VIEWPORT`], the size this client told the session it has.
-    let terminal = Terminal::new(CrosstermBackend::new(io::stdout())).unwrap_or_else(
-        |terminal_creation_error| {
-            tracing::warn!(%terminal_creation_error, "could not size the output terminal");
-            Terminal::with_options(
-                CrosstermBackend::new(io::stdout()),
-                TerminalOptions {
-                    viewport: Viewport::Fixed(Rect::new(
-                        0,
-                        0,
-                        FALLBACK_VIEWPORT.column_count,
-                        FALLBACK_VIEWPORT.row_count,
-                    )),
-                },
-            )
-            .expect("a fixed viewport reads no terminal size")
-        },
-    );
 
     // One channel, four producers: the reading half of every connection this
     // attachment holds in turn, this terminal's input thread, each attempt to
@@ -2172,13 +2324,12 @@ fn attach_once(
     for warning in &config_warnings {
         tracing::warn!("{warning}");
     }
-    let (_delivery_sender, delivery_receiver) = mpsc::channel();
     let mut client = terminal::build_client_with_loaded_config(
         client_id,
         get_terminal_viewport_size(),
-        delivery_receiver,
         terminal_cleanup_guard,
         loaded_config,
+        input_read_clock,
     );
     client.set_session_id(session_id);
     let mut uplink = Uplink {
@@ -2186,11 +2337,25 @@ fn attach_once(
         registry: ActionRegistry::new(),
         next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
     };
+    // Every frame is drawn at the client's viewport size, read here and on
+    // each resize event. A terminal that reports no size, which is what a
+    // `koshi attach` with redirected output finds, draws at
+    // [`FALLBACK_VIEWPORT`], the size this client told the session it has.
+    let frame_output = terminal::TerminalOutput::from_terminal_sink(Box::new(io::stdout()));
+    let paint_driver = terminal::PaintDriver::from_backend(
+        terminal::TerminalOutputBackend::from_terminal_output(&frame_output),
+        client.get_viewport_size(),
+    );
+    let image_output_ready_sender = incoming_sender.clone();
     let mut screen = Screen::with_graphics_support(
-        terminal,
+        paint_driver,
+        frame_output,
         client.get_viewport_size(),
         graphics_support,
         cell_size_query.get_current_cell_size(),
+        Arc::new(move || {
+            let _ = image_output_ready_sender.try_send(Incoming::ImageOutputReady);
+        }),
     );
 
     let mut terminal_writer = io::stdout();
@@ -2203,22 +2368,25 @@ fn attach_once(
         &mut client,
         &mut screen,
         &mut uplink,
-        graphics_support,
+        attach_settings,
         &mut cell_size_query,
         &mut terminal_writer,
         incoming_sender,
         incoming_receiver,
     );
-    drop(terminal_close_watch);
 
     // The terminal is restored before the ending message is printed, and the
-    // message lands on the shell's own screen. Dropping the screen drops the
-    // ratatui terminal it holds, which shows the cursor on the alternate
-    // screen. Dropping the client then runs its cleanup guard, which leaves
-    // the alternate screen.
+    // message lands on the shell's own screen. The screen holds no unwritten
+    // byte: each frame ends with a flush of its output. Shutting the terminal
+    // owner down writes the mode cleanup, which leaves the alternate screen
+    // and shows the cursor. Dropping the client then runs its cleanup guard.
+    // The watch stops after that, and a termination signal it took ends the
+    // process before anything is printed.
     drop(screen);
     terminal_owner.shutdown_terminal();
     drop(client);
+    drop(terminal_close_watch);
+    end_process_after_termination_signal();
     report_attachment_ending(home, ending, session_id, client_executable_path)
 }
 
@@ -2248,6 +2416,15 @@ fn attach_once(
 /// frame. With no link, the loop ends as
 /// [`AttachmentEnding::LeftWhileReconnecting`].
 ///
+/// Each input event is judged at the instant the input thread read it. Every
+/// input timer due at that instant runs before the event: an open sequence's
+/// ambiguity deadline, a placement tab hover, and a selection drag's edge
+/// scroll ([`expire_input_timers`]). At the end of a pass the timers run at the
+/// clock, and they do not run while an event the input thread read has not
+/// reached the loop. Example: the input thread reads `a` 400 ms into
+/// `<C-y>`'s 500 ms deadline, and the loop draws a frame until 600 ms: `a`
+/// continues the sequence.
+///
 /// On `Home::Remote`, the loop sends `Ping` in its first pass, after the first
 /// group of events already queued, at most
 /// [`MAX_INCOMING_EVENT_COUNT_PER_PASS`], then once every heartbeat interval of
@@ -2271,8 +2448,9 @@ fn attach_once(
 /// it, and the viewer's own id with it.
 ///
 /// `resume_token` is the secret the open connection's attach minted, presented
-/// on the next redial to get that attach's view back. Every reconnection
-/// stamps it with the secret its own attach minted.
+/// on the next redial to get that attach's view back, and on the return after
+/// a restart to prove the claim on `client_id`. Every reconnection stamps it
+/// with the secret its own attach minted.
 ///
 /// `terminal_writer` takes the bytes this client writes to its terminal
 /// outside a painted frame: each Shift mouse reporting change, and each host
@@ -2291,7 +2469,7 @@ fn run_attachment<B: Backend, W: Write>(
     client: &mut Client,
     screen: &mut Screen<B>,
     uplink: &mut Uplink,
-    graphics_support: terminal::GraphicsSupport,
+    attach_settings: AttachSettings,
     cell_size_query: &mut terminal::CellSizeQuery,
     terminal_writer: &mut W,
     incoming_sender: mpsc::SyncSender<Incoming>,
@@ -2322,6 +2500,8 @@ fn run_attachment<B: Backend, W: Write>(
     // timeout on whichever link the loop holds; a local home sends none.
     let remote_link_timeout_ms = client.get_client_config().remote_link_timeout_ms;
     let ping_interval = compute_heartbeat_interval(remote_link_timeout_ms);
+    // The pane-move animation steps once per frame interval.
+    let frame_interval = compute_frame_interval(client.get_client_config().max_frames_per_second);
     let mut next_ping_at = match home {
         Home::Remote { .. } => Some(Instant::now()),
         Home::Local { .. } => None,
@@ -2343,7 +2523,10 @@ fn run_attachment<B: Backend, W: Write>(
                     client.compute_next_placement_tab_hover_wakeup(current_time),
                     select_earliest_duration(
                         screen.compute_next_image_wakeup_at(current_time),
-                        screen.compute_next_placement_animation_wakeup_at(current_time),
+                        screen.compute_next_placement_animation_wakeup_at(
+                            current_time,
+                            frame_interval,
+                        ),
                     ),
                 ),
             ),
@@ -2366,21 +2549,92 @@ fn run_attachment<B: Backend, W: Write>(
         };
         // Take a bounded group of queued events. A full group leaves the next
         // event in the channel, so the next pass starts without waiting and
-        // image output, key timeouts, and outbound requests run between groups.
+        // image output, input timers, and outbound requests run between groups.
         let (incoming_batch_events, deferred_event) =
             build_incoming_batch(incoming_event, &incoming_receiver);
         deferred_incoming_event = deferred_event;
 
-        let mut incoming_batch_events = incoming_batch_events.into_iter();
+        let mut incoming_batch_events = incoming_batch_events.into_iter().peekable();
         let mut attachment_ending = None;
-        for incoming_event in incoming_batch_events.by_ref() {
+        // The last painted update this pass applied.
+        let mut applied_update_sequence = None;
+        while let Some(incoming_event) = incoming_batch_events.next() {
             match incoming_event {
                 // A frame read from a connection this client has already left:
                 // the reader of the connection before a restart ends by
                 // reporting that socket closing.
                 Incoming::Frame {
                     connection_index, ..
+                }
+                | Incoming::Painted {
+                    connection_index, ..
+                }
+                | Incoming::ImageChunk {
+                    connection_index, ..
                 } if connection_index != current_connection_index => {}
+                Incoming::Painted {
+                    received_painted_frame,
+                    ..
+                } => {
+                    let update_sequence = received_painted_frame.update_sequence;
+                    let adopted_render_snapshot =
+                        match image_cache.adopt_painted_frame(received_painted_frame) {
+                            Ok(adopted_render_snapshot) => adopted_render_snapshot,
+                            Err(painted_frame_error) => {
+                                tracing::warn!(
+                                    %painted_frame_error,
+                                    "could not accept a painted frame"
+                                );
+                                attachment_ending = Some(AttachmentEnding::ConnectionDied);
+                                break;
+                            }
+                        };
+                    applied_update_sequence = Some(update_sequence);
+                    // An update that the next event of the group replaces with
+                    // a newer update is applied and not drawn.
+                    let is_replaced_by_next_update = matches!(
+                        incoming_batch_events.peek(),
+                        Some(Incoming::Painted { connection_index, .. })
+                            if *connection_index == current_connection_index
+                    );
+                    if let Some(render_snapshot) = adopted_render_snapshot {
+                        if !is_replaced_by_next_update {
+                            draw_completed_painted_frame(
+                                screen,
+                                client,
+                                &mut image_cache,
+                                cell_size_query,
+                                &mut last_mouse_frame,
+                                render_snapshot,
+                            );
+                        }
+                    }
+                }
+                Incoming::ImageChunk {
+                    image_chunk_frame, ..
+                } => match image_cache.accept_image_chunk(&image_chunk_frame) {
+                    Ok(Some(render_snapshot)) => {
+                        screen
+                            .set_placement_snapshot(image_cache.build_placement_render_snapshot());
+                        draw_completed_painted_frame(
+                            screen,
+                            client,
+                            &mut image_cache,
+                            cell_size_query,
+                            &mut last_mouse_frame,
+                            render_snapshot,
+                        );
+                    }
+                    Ok(None) => {
+                        screen
+                            .set_placement_snapshot(image_cache.build_placement_render_snapshot());
+                    }
+                    Err(chunk_error) => {
+                        tracing::warn!(%chunk_error, "could not accept an image chunk");
+                        attachment_ending = Some(AttachmentEnding::ConnectionDied);
+                        break;
+                    }
+                },
                 Incoming::Frame {
                     session_event_result,
                     ..
@@ -2390,49 +2644,21 @@ fn run_attachment<B: Backend, W: Write>(
                         break;
                     }
                     match session_event_result {
-                        Ok(SessionEvent::Painted {
-                            frame: painted_frame,
-                        }) => match image_cache.adopt_painted_frame(painted_frame) {
-                            Ok(Some(render_snapshot)) => {
-                                screen.set_cell_size(cell_size_query.get_current_cell_size());
-                                if let Some(mouse_frame) =
-                                    screen.draw_snapshot(client, render_snapshot)
-                                {
-                                    adopt_painted_mouse_frame(
-                                        client,
-                                        &mut last_mouse_frame,
-                                        mouse_frame,
-                                    );
-                                }
-                                if client.get_placement_snapshot().is_none() {
-                                    if let Err(snapshot_error) =
-                                        image_cache.clear_placement_snapshot()
-                                    {
-                                        tracing::warn!(
-                                            %snapshot_error,
-                                            "could not clear a stale placement snapshot"
-                                        );
-                                        attachment_ending = Some(AttachmentEnding::ConnectionDied);
-                                        break;
-                                    }
-                                    screen.set_placement_snapshot(None);
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(painted_frame_error) => {
-                                tracing::warn!(
-                                    %painted_frame_error,
-                                    "could not accept a painted frame"
-                                );
-                                attachment_ending = Some(AttachmentEnding::ConnectionDied);
-                                break;
-                            }
-                        },
                         Ok(SessionEvent::ImageCacheReset) => {
                             image_cache.clear_image_cache();
                             client.clear_placement_snapshot();
                             screen.set_placement_snapshot(None);
                             screen.reset_connection();
+                        }
+                        Ok(SessionEvent::ImageContentReleased { image_content_ids }) => {
+                            if let Err(release_error) =
+                                image_cache.release_image_contents(&image_content_ids)
+                            {
+                                tracing::warn!(%release_error, "could not release image records");
+                                attachment_ending = Some(AttachmentEnding::ConnectionDied);
+                                break;
+                            }
+                            screen.release_image_contents(&image_content_ids);
                         }
                         Ok(SessionEvent::ImageContentStart { image_transfer }) => {
                             if let Err(transfer_error) =
@@ -2441,49 +2667,6 @@ fn run_attachment<B: Backend, W: Write>(
                                 tracing::warn!(%transfer_error, "could not start an image transfer");
                                 attachment_ending = Some(AttachmentEnding::ConnectionDied);
                                 break;
-                            }
-                        }
-                        Ok(SessionEvent::ImageContentChunk { image_chunk }) => {
-                            match image_cache.accept_image_chunk(image_chunk) {
-                                Ok(Some(render_snapshot)) => {
-                                    screen.set_placement_snapshot(
-                                        image_cache.build_placement_render_snapshot(),
-                                    );
-                                    screen.set_cell_size(cell_size_query.get_current_cell_size());
-                                    if let Some(mouse_frame) =
-                                        screen.draw_snapshot(client, render_snapshot)
-                                    {
-                                        adopt_painted_mouse_frame(
-                                            client,
-                                            &mut last_mouse_frame,
-                                            mouse_frame,
-                                        );
-                                    }
-                                    if client.get_placement_snapshot().is_none() {
-                                        if let Err(snapshot_error) =
-                                            image_cache.clear_placement_snapshot()
-                                        {
-                                            tracing::warn!(
-                                                %snapshot_error,
-                                                "could not clear a stale placement snapshot"
-                                            );
-                                            attachment_ending =
-                                                Some(AttachmentEnding::ConnectionDied);
-                                            break;
-                                        }
-                                        screen.set_placement_snapshot(None);
-                                    }
-                                }
-                                Ok(None) => {
-                                    screen.set_placement_snapshot(
-                                        image_cache.build_placement_render_snapshot(),
-                                    );
-                                }
-                                Err(chunk_error) => {
-                                    tracing::warn!(%chunk_error, "could not accept an image chunk");
-                                    attachment_ending = Some(AttachmentEnding::ConnectionDied);
-                                    break;
-                                }
                             }
                         }
                         Ok(SessionEvent::PanePlacementSnapshot {
@@ -2497,12 +2680,12 @@ fn run_attachment<B: Backend, W: Write>(
                                 Instant::now(),
                             ) {
                                 tracing::debug!(request_id, "ignored stale placement snapshot");
-                                image_cache.ignore_stale_placement_image_transfers();
+                                image_cache.clear_image_transfer_count();
                                 send_next_queued_placement_read(client, uplink);
                                 continue;
                             }
-                            if let Err(snapshot_error) =
-                                image_cache.adopt_placement_snapshot(Box::new(placement_snapshot))
+                            if let Err(snapshot_error) = image_cache
+                                .adopt_placement_snapshot(request_id, Box::new(placement_snapshot))
                             {
                                 tracing::warn!(%snapshot_error, "could not accept a placement snapshot");
                                 attachment_ending = Some(AttachmentEnding::ConnectionDied);
@@ -2596,17 +2779,19 @@ fn run_attachment<B: Backend, W: Write>(
                 // An input thread runs only for a terminal that had keys to
                 // read, so its hangup is this terminal going away while the
                 // session runs on.
-                Incoming::Input(runtime_event) if matches!(*runtime_event, RuntimeEvent::Quit) => {
+                Incoming::Input(terminal_input)
+                    if matches!(terminal_input.runtime_event, RuntimeEvent::Quit) =>
+                {
                     attachment_ending = Some(AttachmentEnding::TerminalGone);
                     break;
                 }
-                Incoming::Input(runtime_event) => {
+                Incoming::Input(terminal_input) => {
                     if handle_terminal_input_event(
                         client,
                         uplink,
                         cell_size_query,
                         last_mouse_frame.as_ref(),
-                        *runtime_event,
+                        *terminal_input,
                         &mut sent_border_moves,
                         &mut pending_mouse_actions,
                     )
@@ -2620,7 +2805,10 @@ fn run_attachment<B: Backend, W: Write>(
                 // answer of its one running attempt before it hands a link
                 // back, and the loop ends when it hands none back.
                 Incoming::RejoinAnswer(_) => {}
+                // The pass ends with the refresh that paints the result.
+                Incoming::ImageOutputReady => {}
             }
+            screen.set_held_image_byte_count(image_cache.compute_held_image_byte_count());
         }
         if let Some(attachment_ending) = attachment_ending {
             let (link_recovery, attempt_rejoin): (
@@ -2634,6 +2822,7 @@ fn run_attachment<B: Backend, W: Write>(
                 (AttachmentEnding::Restarting, _) => {
                     let rejoin_home = home.clone();
                     let rejoin_connection_token = connection_token.clone();
+                    let rejoin_resume_token = resume_token.clone();
                     let cell_size = cell_size_query.get_current_cell_size();
                     (
                         LinkRecovery::RestartRejoin {
@@ -2645,7 +2834,8 @@ fn run_attachment<B: Backend, W: Write>(
                                 session_id,
                                 client_id,
                                 &rejoin_connection_token,
-                                graphics_support,
+                                rejoin_resume_token.as_ref(),
+                                attach_settings,
                                 cell_size,
                                 remote_link_timeout_ms,
                             ) {
@@ -2673,7 +2863,7 @@ fn run_attachment<B: Backend, W: Write>(
                                 &SessionSelector::SessionId(session_id),
                                 None,
                                 redial_resume_token.as_ref(),
-                                graphics_support,
+                                attach_settings,
                                 cell_size,
                                 remote_link_timeout_ms,
                             ))
@@ -2748,6 +2938,7 @@ fn run_attachment<B: Backend, W: Write>(
             // next move asks for its whole distance from the drag anchor.
             sent_border_moves.clear();
             screen.reset_connection();
+            screen.set_held_image_byte_count(image_cache.compute_held_image_byte_count());
             if let Err(io_error) = screen.update_shift_mouse_capture(client, terminal_writer) {
                 tracing::warn!(%io_error, "could not update Shift mouse reporting");
                 break AttachmentEnding::TerminalGone;
@@ -2759,31 +2950,28 @@ fn run_attachment<B: Backend, W: Write>(
             uplink.send_request(IpcRequestKind::Ping);
             next_ping_at = Some(current_time + ping_interval);
         }
-        if fire_expired_key_sequence(client, uplink, last_mouse_frame.as_ref(), current_time)
+        // The input timers run at the clock only once every input event the
+        // input thread read has reached this loop.
+        if let Some(input_judge_time) = client.get_input_read_clock().find_input_judge_time() {
+            if expire_input_timers(
+                client,
+                uplink,
+                last_mouse_frame.as_ref(),
+                &mut sent_border_moves,
+                &mut pending_mouse_actions,
+                input_judge_time,
+            )
             .is_break()
-        {
-            break leave_after_quit(uplink);
+            {
+                break leave_after_quit(uplink);
+            }
         }
         if client.expire_placement_read(current_time) {
             send_next_queued_placement_read(client, uplink);
         }
-        if let Some((source_pane_id, destination_tab_id)) =
-            client.expire_placement_tab_hover(current_time)
-        {
-            uplink.send_placement_read(client, source_pane_id, destination_tab_id);
-        }
         if let Some((source_pane_id, destination_tab_id)) = client.take_placement_preview_refresh()
         {
             uplink.send_placement_read(client, source_pane_id, destination_tab_id);
-        }
-        // A selection drag held past a pane's edge keeps scrolling while the
-        // pointer sits still, so the clock drives it. Asking on every iteration
-        // is what re-arms the timer at each firing.
-        if let Some(mouse_frame) = last_mouse_frame.as_ref() {
-            queue_mouse_actions(
-                &mut pending_mouse_actions,
-                client.expire_mouse_scroll(Instant::now(), mouse_frame),
-            );
         }
         // Every pass ends here, whether or not it drew a frame: the events it
         // handled may have moved the viewer after that frame was drawn.
@@ -2808,13 +2996,21 @@ fn run_attachment<B: Backend, W: Write>(
             client.take_mouse_capture_release().into_iter().collect(),
         );
         flush_mouse_round(uplink, &mut sent_border_moves, &mut pending_mouse_actions);
+        // The last request of the pass reports the last painted update it
+        // applied, and the placement preview whose records it holds.
+        if let Some(update_sequence) = applied_update_sequence {
+            uplink.send_request(IpcRequestKind::PaintedUpdate {
+                update_sequence,
+                shown_placement_request_id: image_cache.find_placement_request_id(),
+            });
+        }
     };
     // A viewer whose terminal went away, or that the session moved to another
     // session, does not attach again: its last request says so. A link this
     // loop already left takes nothing.
     if matches!(
         attachment_ending,
-        AttachmentEnding::TerminalGone | AttachmentEnding::SwitchSession(_)
+        AttachmentEnding::TerminalGone | AttachmentEnding::SwitchSession { .. }
     ) {
         uplink.send_request(IpcRequestKind::Leaving {
             is_returning: false,
@@ -2856,14 +3052,18 @@ fn build_incoming_batch(
     (incoming_batch_events, None)
 }
 
-/// Return the RGBA byte cost of one queued image-content event.
+/// Return the RGBA byte cost of one queued image chunk: its chunk byte
+/// count. Every other event costs `0`.
 fn compute_incoming_image_byte_count(incoming_event: &Incoming) -> usize {
     match incoming_event {
-        Incoming::Frame {
-            session_event_result: Ok(SessionEvent::ImageContentChunk { image_chunk }),
-            ..
-        } => image_chunk.chunk_bytes.len(),
-        Incoming::Frame { .. } | Incoming::Input(_) | Incoming::RejoinAnswer(_) => 0,
+        Incoming::ImageChunk {
+            image_chunk_frame, ..
+        } => image_chunk_frame.get_chunk_bytes().len(),
+        Incoming::Frame { .. }
+        | Incoming::Painted { .. }
+        | Incoming::Input(_)
+        | Incoming::RejoinAnswer(_)
+        | Incoming::ImageOutputReady => 0,
     }
 }
 
@@ -2874,27 +3074,37 @@ fn compute_incoming_image_byte_count(incoming_event: &Incoming) -> usize {
 /// token the Hello presents, and a display name is resolved by the router
 /// first. A session with no endpoint file in the runtime directory is looked
 /// up in the shared directory `koshi.kdl` in `config_directory` names, read
-/// again on every dial. A session of this user's that refuses this build's
-/// protocol version is dialed again once it has restarted, and one that
-/// refuses the connection token is dialed again once it advertises another, as
+/// again on every dial. A home that names another user's id reads only that
+/// user's folder of the shared directory. A session of this user's that
+/// refuses this build's protocol version is dialed again once it has
+/// restarted, and one that refuses the connection token is dialed again once
+/// it advertises another, as
 /// [`run_session_exchange_with_restart_wait`](ipc_client::run_session_exchange_with_restart_wait)
+/// states. One that refuses the join while it replaces its process image, or
+/// whose connection ends while its resume file shows it doing so, is dialed
+/// again over the endpoint its new image advertises, as
+/// [`run_session_exchange_across_restart`](ipc_client::run_session_exchange_across_restart)
 /// states. On a server the whole admission runs — TLS with the check of the
 /// certificate against the fingerprint the saved record holds, the secret, and
 /// the scope check on the session asked for — and the server resolves the name
 /// against the sessions that secret reaches. A server whose router answers
-/// that it is restarting is dialed again, as
+/// that it is restarting, or whose session refuses the join while it replaces
+/// its process image, is dialed again, as
 /// [`dial_through_router_restart`](remote_client::dial_through_router_restart)
 /// states, for up to [`RESTART_WINDOW_DURATION`].
 fn dial_session(
     home: &Home,
     session_selector: &SessionSelector,
-    graphics_support: terminal::GraphicsSupport,
+    attach_settings: AttachSettings,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     config_directory: Option<&Path>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, CliError> {
     match home {
-        Home::Local { runtime_directory } => {
+        Home::Local {
+            runtime_directory,
+            owner_user_id,
+        } => {
             // The router turns a display name into a session's address before
             // this terminal joins it, and every dial after the first names the
             // session by id.
@@ -2904,11 +3114,12 @@ fn dial_session(
                     lookup_session_address(runtime_directory, session_name)?.session_id
                 }
             };
-            ipc_client::run_session_exchange_with_restart_wait(
+            ipc_client::run_session_exchange_across_restart(
                 runtime_directory,
                 koshi_link::config::find_shared_sessions_base_directory(config_directory)
                     .as_deref(),
                 session_id,
+                *owner_user_id,
                 None,
                 |endpoint| {
                     let (mut reader, mut writer) =
@@ -2918,7 +3129,8 @@ fn dial_session(
                         &mut writer,
                         &endpoint.connection_token,
                         None,
-                        graphics_support,
+                        None,
+                        attach_settings,
                         cell_size,
                         None,
                     )?;
@@ -2940,7 +3152,7 @@ fn dial_session(
                     session_selector,
                     None,
                     None,
-                    graphics_support,
+                    attach_settings,
                     cell_size,
                     remote_link_timeout_ms,
                 )
@@ -2968,7 +3180,7 @@ fn dial_remote(
     session_selector: &SessionSelector,
     resume_client_id: Option<ClientId>,
     resume_token: Option<&ConnectionToken>,
-    graphics_support: terminal::GraphicsSupport,
+    attach_settings: AttachSettings,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, DialError> {
@@ -2983,7 +3195,7 @@ fn dial_remote(
         session_selector,
         resume_client_id,
         resume_token,
-        graphics_support,
+        attach_settings,
         cell_size,
         remote_link_timeout_ms,
     )
@@ -3023,11 +3235,14 @@ fn dial_remote(
 /// read. After the `Commit` starts to be written, it carries
 /// [`CliError::CommittedRequestUnanswered`]: the session may still attach the
 /// client. [`DialError::Restarting`] when the serving router refused the join
-/// with [`koshi_ipc::router::ROUTER_RESTARTING_MESSAGE`]. [`DialError::Refused`]
+/// with [`koshi_ipc::router::ROUTER_RESTARTING_MESSAGE`], and carrying
+/// [`CliError::SessionRestarting`] when the session refused the `Prepare` or
+/// the `Commit` while it replaces its process image. [`DialError::Refused`]
 /// when the server answered and every identical join after it gets the same
 /// answer: the admitted secret does not reach `session_selector`, the session
 /// protocol versions do not overlap, or its answer is a frame this attach
-/// cannot read.
+/// cannot read. An answer to the `Commit` of another kind carries
+/// [`CliError::CommittedRequestUnanswered`].
 #[allow(clippy::too_many_arguments)]
 fn join_remote_session(
     remote_link: remote_client::RemoteLink,
@@ -3035,7 +3250,7 @@ fn join_remote_session(
     session_selector: &SessionSelector,
     resume_client_id: Option<ClientId>,
     resume_token: Option<&ConnectionToken>,
-    graphics_support: terminal::GraphicsSupport,
+    attach_settings: AttachSettings,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, DialError> {
@@ -3049,7 +3264,7 @@ fn join_remote_session(
         .send(&build_attach_prepare_request(
             resume_client_id,
             resume_token,
-            graphics_support,
+            attach_settings,
             cell_size,
             Some(remote_link_timeout_ms),
         ))
@@ -3070,10 +3285,16 @@ fn join_remote_session(
         .map_err(build_committed_attach_failure)?;
     let attach_response = read_answer_while_pinging(&mut reader, &mut writer, ping_interval)
         .map_err(build_committed_attach_failure)?;
-    let (client_id, session_id, minted_resume_token) = talk::SESSION_PEER_WORDS
-        .take_response_result(attach_response)
-        .and_then(parse_attached_session)
-        .map_err(DialError::Refused)?;
+    let attach_result = match attach_response.answer_result {
+        MaybeKnown::Known(attach_result) => attach_result,
+        MaybeKnown::Unknown { variant_name } => {
+            return Err(DialError::Refused(CliError::CommittedRequestUnanswered {
+                detail: talk::SESSION_PEER_WORDS.format_unexpected_reply_detail(&variant_name),
+            }))
+        }
+    };
+    let (client_id, session_id, minted_resume_token) =
+        parse_attached_session(attach_result).map_err(DialError::from_session_refusal)?;
 
     // Joined: the join's deadline is taken away, and each socket read and
     // write waits at most the link timeout for a byte.
@@ -3156,17 +3377,18 @@ fn read_answer_while_pinging(
 /// `Prepare` carrying this client's Attach.
 ///
 /// # Errors
-/// [`DialError::Refused`] carrying what [`talk::build_peer_refusal_error`]
-/// gives for a refusal, and the unexpected reply for every other answer.
+/// What [`DialError::from_session_refusal`] gives for what
+/// [`talk::build_peer_refusal_error`] gives for a refusal, and
+/// [`DialError::Refused`] carrying the unexpected reply for every other answer.
 fn validate_attach_prepare_answer(prepare_response: IncomingResponse) -> Result<(), DialError> {
     let prepare_result = talk::SESSION_PEER_WORDS
         .take_response_result(prepare_response)
         .map_err(DialError::Refused)?;
     match prepare_result {
         IpcResult::Prepared => Ok(()),
-        IpcResult::Error(refusal) => {
-            Err(DialError::Refused(talk::build_peer_refusal_error(&refusal)))
-        }
+        IpcResult::Error(refusal) => Err(DialError::from_session_refusal(
+            talk::build_peer_refusal_error(&refusal),
+        )),
         unexpected_result => Err(DialError::Refused(
             talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_result),
         )),
@@ -3190,15 +3412,17 @@ fn validate_attach_prepare_answer(prepare_response: IncomingResponse) -> Result<
 /// under; on this machine the wait watches the endpoint file for another one.
 /// `remote_link_timeout_ms` goes to [`dial_remote`] for a session on a server.
 /// The returned resume token is the secret the attach this client came back
-/// on minted: the local rejoin records none, and a fresh dial of a server
-/// records the one that dial minted.
+/// on minted.
 ///
-/// The Attach presents no resume token either way: this client comes back by
-/// naming `client_id`, and a session that still holds that record hands its
-/// view straight back. The returned client is `client_id` when the session
-/// handed its record back, and a fresh client the session minted when it
-/// cannot: a restart that could not bring the carried layout back holds no
-/// record, and a record whose tab closed is not handed back.
+/// The Attach names `client_id` and presents `resume_token`, the secret the
+/// attach of the connection that ended minted, as the proof of that claim.
+/// A session that still holds that record hands its view straight back. The
+/// returned client is `client_id` when the session handed its record back,
+/// and a fresh client the session minted when it cannot: a restart that could
+/// not bring the carried layout back holds no record, a record whose tab
+/// closed is not handed back, and a claim with no token or another token is
+/// not proven. Example: a record whose tab closed is taken over by its token,
+/// and the fresh client comes back with that record's view on the first tab.
 ///
 /// `Err` carries the ending the attachment reports: what [`rejoin_session`]
 /// answers on this machine, and what [`redial_restarted_remote_session_with`]
@@ -3210,18 +3434,22 @@ fn validate_attach_prepare_answer(prepare_response: IncomingResponse) -> Result<
 /// [`wait_for_router_restart`](router_client::wait_for_router_restart) sees another token, or after
 /// [`RESTART_WINDOW_DURATION`] passes with no `koshi update` holding the update
 /// lock. No router endpoint file means no wait.
+#[allow(clippy::too_many_arguments)]
 fn reconnect_after_restart(
     home: &Home,
     session_id: SessionId,
     client_id: ClientId,
     connection_token: &ConnectionToken,
-    graphics_support: terminal::GraphicsSupport,
+    resume_token: Option<&ConnectionToken>,
+    attach_settings: AttachSettings,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, AttachmentEnding> {
     let restart_deadline = Instant::now() + RESTART_WINDOW_DURATION;
     match home {
-        Home::Local { runtime_directory } => {
+        Home::Local {
+            runtime_directory, ..
+        } => {
             let router_endpoint_path = resolve_router_endpoint_path(runtime_directory);
             let router_connection_token_before_restart =
                 EndpointFile::load_from_path(&router_endpoint_path)
@@ -3232,8 +3460,9 @@ fn reconnect_after_restart(
                 session_id,
                 client_id,
                 connection_token,
+                resume_token,
                 restart_deadline,
-                graphics_support,
+                attach_settings,
                 cell_size,
             );
             if rejoin_result.as_ref().is_err_and(|rejoin_ending| {
@@ -3263,8 +3492,8 @@ fn reconnect_after_restart(
                     server,
                     &SessionSelector::SessionId(session_id),
                     Some(client_id),
-                    None,
-                    graphics_support,
+                    resume_token,
+                    attach_settings,
                     cell_size,
                     remote_link_timeout_ms,
                 )
@@ -3297,7 +3526,7 @@ fn redial_restarted_remote_session_with(
     loop {
         thread::sleep(REMOTE_RESTART_POLL_INTERVAL_DURATION);
         let redial_error = match dial_connection() {
-            Ok(joined) => return Ok(joined),
+            Ok(joined_session) => return Ok(joined_session),
             Err(DialError::Refused(
                 protocol_version_refusal @ CliError::ProtocolVersionRefused { .. },
             )) => {
@@ -3385,9 +3614,9 @@ impl RedialSchedule {
         Reconnecting {
             attempt: self.attempt,
             retry_in_seconds: self.next_dial_at.map(|next_dial_at| {
-                let time_left = next_dial_at.saturating_duration_since(current_time);
+                let remaining_duration = next_dial_at.saturating_duration_since(current_time);
                 let whole_second_count =
-                    time_left.as_secs() + u64::from(time_left.subsec_nanos() > 0);
+                    remaining_duration.as_secs() + u64::from(remaining_duration.subsec_nanos() > 0);
                 u32::try_from(whole_second_count).unwrap_or(u32::MAX)
             }),
         }
@@ -3398,10 +3627,10 @@ impl RedialSchedule {
     /// runs. 2.3 seconds left wakes after 0.3 seconds, and 2 seconds left
     /// wakes after 1 second.
     fn compute_next_wakeup(&self, current_time: Instant) -> Option<Duration> {
-        let time_left = self.next_dial_at?.saturating_duration_since(current_time);
-        let fractional_second = Duration::from_nanos(u64::from(time_left.subsec_nanos()));
+        let remaining_duration = self.next_dial_at?.saturating_duration_since(current_time);
+        let fractional_second = Duration::from_nanos(u64::from(remaining_duration.subsec_nanos()));
         if fractional_second.is_zero() {
-            Some(time_left.min(Duration::from_secs(1)))
+            Some(remaining_duration.min(Duration::from_secs(1)))
         } else {
             Some(fractional_second)
         }
@@ -3587,17 +3816,22 @@ enum HeldInput {
 ///
 /// Keys resolve against the base keymap, never the pane placement keymap. The
 /// quit binding, including one an ambiguity deadline fires, returns
-/// [`AttachmentEnding::LeftWhileReconnecting`] at once. A join that is still
-/// on the channel then sends `Leaving { is_returning: true }` when the channel
-/// is dropped, as [`JoinedSessionGuard`] states. Every other key and
-/// paste is held through [`LinkRecovery::hold_input`] for a restart rejoin,
-/// and dropped for a redial, as [`hold_fired_binding`] says for a binding; a
-/// key that opens a sequence keeps its breadcrumb. A held lock binding
-/// switches the lock mode the next key resolves in: `<C-l>` then `<C-l>`
-/// holds `SetLockMode` for `Locked`, then for `Normal`.
-/// A frame from the connection that ended is dropped. A resize and a mouse
-/// event are dropped and not recorded. A cell-size reply is taken by
-/// `cell_size_query` and not sent. Focus lost ends pane placement mode, as
+/// [`AttachmentEnding::LeftWhileReconnecting`] at once. A join that is still on
+/// the channel then sends `Leaving { is_returning: true }` when the channel is
+/// dropped, as [`JoinedSessionGuard`] states. Every other key and paste is held
+/// through [`LinkRecovery::hold_input`] for a restart rejoin, and dropped for a
+/// redial, as [`hold_fired_binding`] says for a binding; a key that opens a
+/// sequence keeps its breadcrumb. A held lock binding switches the lock mode
+/// the next key resolves in: `<C-l>` then `<C-l>` holds `SetLockMode` for
+/// `Locked`, then for `Normal`. Each input event is judged at the instant the
+/// input thread read it: an open sequence whose ambiguity deadline passed
+/// before then fires before the event is handled, and no deadline is judged at
+/// the clock while an event the input thread read is still on its way. Example:
+/// `<C-y>` binds `core:new-tab` and opens `<C-y> a`, and a paste is read 600 ms
+/// after `<C-y>` with a 500 ms chord timeout: the held `NewTab` comes before
+/// the held paste. A frame from the connection that ended is dropped. A resize
+/// and a mouse event are dropped and not recorded. A cell-size reply is taken
+/// by `cell_size_query` and not sent. Focus lost ends pane placement mode, as
 /// [`Client::cancel_placement_mode`] says. `client`'s link status follows the
 /// stretch and is [`LinkStatus::Linked`] again when this returns; a join draws
 /// the screen once more without the tag.
@@ -3639,7 +3873,10 @@ fn run_without_link<B: Backend>(
             LinkRecovery::RestartRejoin { .. } => LinkStatus::AwaitingRestartedSession,
         };
         client.set_link_status(link_status);
-        if let Some(bound_action) = client.expire_key_sequence(current_time) {
+        let input_judge_time = client.get_input_read_clock().find_input_judge_time();
+        if let Some(bound_action) = input_judge_time
+            .and_then(|input_judge_time| client.expire_key_sequence(input_judge_time))
+        {
             if hold_fired_binding(&mut link_recovery, client, uplink, bound_action).is_break() {
                 break Err(AttachmentEnding::LeftWhileReconnecting);
             }
@@ -3662,7 +3899,12 @@ fn run_without_link<B: Backend>(
                     ),
                     select_earliest_duration(
                         screen.compute_next_image_wakeup_at(wakeup_computed_at),
-                        screen.compute_next_placement_animation_wakeup_at(wakeup_computed_at),
+                        screen.compute_next_placement_animation_wakeup_at(
+                            wakeup_computed_at,
+                            compute_frame_interval(
+                                client.get_client_config().max_frames_per_second,
+                            ),
+                        ),
                     ),
                 );
                 let receive_result = match next_wakeup_duration {
@@ -3682,7 +3924,9 @@ fn run_without_link<B: Backend>(
         };
         match incoming_event {
             // A frame read from the connection that ended.
-            Incoming::Frame { .. } => {}
+            Incoming::Frame { .. } | Incoming::Painted { .. } | Incoming::ImageChunk { .. } => {}
+            // The next iteration starts with the refresh that paints the result.
+            Incoming::ImageOutputReady => {}
             Incoming::RejoinAnswer(rejoin_answer) => match *rejoin_answer {
                 RejoinAnswer::Joined(joined_session_guard) => {
                     break Ok(joined_session_guard.release_joined_session())
@@ -3701,41 +3945,64 @@ fn run_without_link<B: Backend>(
                     }
                 },
             },
-            Incoming::Input(runtime_event) => match *runtime_event {
-                RuntimeEvent::Quit => break Err(AttachmentEnding::TerminalGone),
-                RuntimeEvent::KeyInput { key_input, .. } => {
-                    let Some(chord) = key_input.to_binding_chord() else {
-                        link_recovery.hold_input(client, HeldInput::Keyboard(key_input));
-                        continue;
-                    };
-                    match client.resolve_key(chord, Instant::now()) {
-                        KeyOutcome::Fire(bound_action) => {
-                            if hold_fired_binding(&mut link_recovery, client, uplink, bound_action)
-                                .is_break()
-                            {
-                                break Err(AttachmentEnding::LeftWhileReconnecting);
-                            }
-                        }
-                        KeyOutcome::PassThrough(_) => {
-                            link_recovery.hold_input(client, HeldInput::Keyboard(key_input));
-                        }
-                        KeyOutcome::Pending | KeyOutcome::Discard => {}
+            Incoming::Input(terminal_input) => {
+                let TerminalInput {
+                    runtime_event,
+                    read_at,
+                } = *terminal_input;
+                if matches!(runtime_event, RuntimeEvent::Quit) {
+                    break Err(AttachmentEnding::TerminalGone);
+                }
+                client.get_input_read_clock().note_input_taken(read_at);
+                // A sequence whose deadline passed before this event was read
+                // fires first, and the event is handled after it.
+                if let Some(expired_bound_action) = client.expire_key_sequence(read_at) {
+                    if hold_fired_binding(&mut link_recovery, client, uplink, expired_bound_action)
+                        .is_break()
+                    {
+                        break Err(AttachmentEnding::LeftWhileReconnecting);
                     }
                 }
-                RuntimeEvent::HostPaste { pasted_text, .. } => {
-                    link_recovery.hold_input(client, HeldInput::Paste(pasted_text));
+                match runtime_event {
+                    RuntimeEvent::KeyInput { key_input, .. } => {
+                        let Some(chord) = key_input.to_binding_chord() else {
+                            link_recovery.hold_input(client, HeldInput::Keyboard(key_input));
+                            continue;
+                        };
+                        match client.resolve_key(chord, read_at) {
+                            KeyOutcome::Fire(bound_action) => {
+                                if hold_fired_binding(
+                                    &mut link_recovery,
+                                    client,
+                                    uplink,
+                                    bound_action,
+                                )
+                                .is_break()
+                                {
+                                    break Err(AttachmentEnding::LeftWhileReconnecting);
+                                }
+                            }
+                            KeyOutcome::PassThrough(_) => {
+                                link_recovery.hold_input(client, HeldInput::Keyboard(key_input));
+                            }
+                            KeyOutcome::Pending | KeyOutcome::Discard => {}
+                        }
+                    }
+                    RuntimeEvent::HostPaste { pasted_text, .. } => {
+                        link_recovery.hold_input(client, HeldInput::Paste(pasted_text));
+                    }
+                    RuntimeEvent::CellSize { cell_size, .. } => {
+                        let _ = cell_size_query.accept_cell_size_reply(cell_size);
+                    }
+                    RuntimeEvent::OuterTerminalFocusLost { .. } => {
+                        client.cancel_placement_mode();
+                        client.close_pane_move_mode();
+                    }
+                    // A resize and a mouse event are dropped and not recorded; the
+                    // new link reads the terminal's size itself.
+                    _ => {}
                 }
-                RuntimeEvent::CellSize { cell_size, .. } => {
-                    let _ = cell_size_query.accept_cell_size_reply(cell_size);
-                }
-                RuntimeEvent::OuterTerminalFocusLost { .. } => {
-                    client.cancel_placement_mode();
-                    client.close_pane_move_mode();
-                }
-                // A resize and a mouse event are dropped and not recorded; the
-                // new link reads the terminal's size itself.
-                _ => {}
-            },
+            }
         }
     };
     client.set_link_status(LinkStatus::Linked);
@@ -3914,15 +4181,13 @@ fn report_terminal_size_with_cell_size(
 /// of the runtime directory, so nothing here probes anything that listing does
 /// not. `remote` holds one row per session on a saved server that answered,
 /// each carrying that server in its `server` field; a picker for a session
-/// switch passes none, since a session on another machine is not one this
-/// session can move a client to. A single local row is the answer on its own.
+/// switch passes none. A single local row is the answer on its own.
 /// Every other non-empty listing — several rows, or one row on a saved server —
 /// is printed and the number typed on stdin selects the row. This runs before
 /// the terminal enters raw mode, so the prompt is a plain stdin read.
 ///
-/// A session that is listening but could not answer leaves both "nothing is
-/// running" and "this is the only one" unprovable, so a list of under two local
-/// rows reports that session instead of settling on either.
+/// When a session that is listening could not answer, a list of under two
+/// local rows reports that session and settles on no row.
 ///
 /// The answer names where the picked row sat. The local rows come first and
 /// `remote` follows, so a place past the local count is
@@ -3934,7 +4199,7 @@ fn select_session(
 ) -> Result<SessionSelection, CliError> {
     let discovered_sessions =
         discovery::fetch_all_session_overviews(runtime_directory, shared_sessions_base_directory);
-    let mut session_rows = discovery::build_session_rows(&discovered_sessions.sessions);
+    let mut session_rows = discovery::build_session_rows(&discovered_sessions);
     if session_rows.len() < 2 && !discovered_sessions.is_complete() {
         return Err(
             discovered_sessions.build_unanswered_error("cannot tell which session to attach to")
@@ -3951,15 +4216,20 @@ fn select_session(
         } else {
             parse_session_selection(&session_rows, &prompt_for_session_selection(&session_rows)?)?
         };
+    let selected_session_row = &session_rows[selected_row_index];
     Ok(match selected_row_index.checked_sub(local_row_count) {
         Some(remote_row_index) => SessionSelection::Remote(remote_row_index),
-        None => SessionSelection::Local(session_rows[selected_row_index].session_id.to_string()),
+        None => SessionSelection::Local(format_session_target(
+            selected_session_row.session_id,
+            selected_session_row.owner_user_id,
+        )),
     })
 }
 
 /// Whether a listing of `session_row_count` rows, the first
 /// `local_session_row_count` of them on this machine, settles on its only row
-/// without asking: exactly one row, and that row is local. A single remote row, and every longer listing, is asked.
+/// without asking: exactly one row, and that row is local. A single remote
+/// row, and every longer listing, is asked.
 fn is_single_local_session_selection(
     session_row_count: usize,
     local_session_row_count: usize,
@@ -3970,16 +4240,17 @@ fn is_single_local_session_selection(
 /// Which row a listing settled on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionSelection {
-    /// A session running for this user on this machine, named by its id.
+    /// A session on this machine, named by its id. A session that another
+    /// user's folder of the shared directory advertises is named by
+    /// `<user id>/<session id>`.
     Local(String),
     /// A session on a saved server: where in the listing's `remote` rows it sat.
     Remote(usize),
 }
 
-/// Where in `rows` a listing settles. A list of one row settles on it without
-/// printing anything; a longer list is printed by [`prompt_for_session_selection`]
-/// and the number typed
-/// on stdin names the row.
+/// Where in `session_rows` a listing settles. A list of one row settles on it
+/// without printing anything; a longer list is printed by
+/// [`prompt_for_session_selection`] and the number typed on stdin names the row.
 ///
 /// # Errors
 /// [`CliError::NoSessions`] for an empty `session_rows`. [`CliError::InvalidArgs`] when
@@ -3995,7 +4266,8 @@ fn select_session_index(session_rows: &[SessionRow]) -> Result<usize, CliError> 
     }
 }
 
-/// Print one numbered line per session — number, name, id, and for a session
+/// Print one numbered line per session — number, name, the text
+/// [`format_session_target`] gives for its id and user id, and for a session
 /// on a saved server `(remote: <server>)` — and read back the line the user
 /// answers with. The prompt names the range, `[1-3]`, or `[1]` for a single
 /// row.
@@ -4016,7 +4288,7 @@ fn prompt_for_session_selection(session_rows: &[SessionRow]) -> Result<String, C
                 "{}) {} {}",
                 row_number + 1,
                 session_row.session_name,
-                session_row.session_id
+                format_session_target(session_row.session_id, session_row.owner_user_id)
             ),
         }
     }
@@ -4041,8 +4313,8 @@ fn prompt_for_session_selection(session_rows: &[SessionRow]) -> Result<String, C
 /// Where in `session_rows` a listing settles: the place the number on
 /// `session_selection_line` names.
 ///
-/// Empty `rows` is [`CliError::NoSessions`]; a number outside
-/// `1..=rows.len()`, and a line that is not a number, are
+/// Empty `session_rows` is [`CliError::NoSessions`]; a number outside
+/// `1..=session_rows.len()`, and a line that is not a number, are
 /// [`CliError::InvalidArgs`] naming the range.
 fn parse_session_selection(
     session_rows: &[SessionRow],
@@ -4082,7 +4354,7 @@ fn lookup_session_address(
         runtime_directory,
         RouterRequestKind::AttachLookup { session_selector },
     )? {
-        RouterResult::Found(address) => Ok(address),
+        RouterResult::Found(session_address) => Ok(session_address),
         RouterResult::Error(refusal) => Err(CliError::IpcUnavailable {
             detail: refusal.message,
         }),
@@ -4123,28 +4395,35 @@ fn build_session_selector(selector: &str) -> SessionSelector {
 ///
 /// `resume_client_id` names the client record to come back as: a client returning after
 /// the session replaced its own process image carries it, and a first join
-/// leaves it `None`. The server hands that record back when it still holds it,
-/// the tab that record was viewing still exists, and no connection is
-/// streaming for it, and mints a fresh client otherwise, so the returned id is
-/// the one the caller holds from here either way.
-///
-/// The Attach presents no resume token: a join over a connection this machine
-/// opened names the client record it comes back as instead.
+/// leaves it `None`. `resume_token` is the secret that record's last attach
+/// minted, presented as the proof of that claim, and a first join leaves it
+/// `None`. The server hands that record back when it still holds it, the tab
+/// that record was viewing still exists, no connection is streaming for it,
+/// and the token is the one that record's last attach minted, and mints a
+/// fresh client otherwise. Either way, the caller holds the returned id from
+/// here.
 ///
 /// # Errors
 /// [`DialError::Unreachable`] when the Hello or the `Prepare` could not be
 /// written, or a reply to them could not be read. [`DialError::Unreachable`]
 /// carrying [`CliError::CommittedRequestUnanswered`] when the `Commit` could
 /// not be written or its answer could not be read: the session may still
-/// attach the client. [`DialError::Refused`] for every reply that arrived and
-/// does not join: a refused Hello, a protocol version this build does not
-/// accept, a refused `Prepare` or Attach, and an answer of another kind.
+/// attach the client. [`DialError::Restarting`] carrying
+/// [`CliError::SessionRestarting`] when the session refused the `Prepare` or
+/// the `Commit` while it replaces its process image: the session holds no
+/// client for this join. [`DialError::Refused`] for every other reply that
+/// arrived and does not join: a refused Hello, a protocol version this build
+/// does not accept, a refused `Prepare` or Attach, and an answer of another
+/// kind, which carries [`CliError::CommittedRequestUnanswered`] after the
+/// `Commit`.
+#[allow(clippy::too_many_arguments)]
 fn join_session(
     reader: &mut FrameReader,
     writer: &mut FrameWriter,
     connection_token: &ConnectionToken,
     resume_client_id: Option<ClientId>,
-    graphics_support: terminal::GraphicsSupport,
+    resume_token: Option<&ConnectionToken>,
+    attach_settings: AttachSettings,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     commit_timeout: Option<Duration>,
 ) -> Result<(ClientId, SessionId, Option<ConnectionToken>), DialError> {
@@ -4156,8 +4435,8 @@ fn join_session(
     writer
         .send(&build_attach_prepare_request(
             resume_client_id,
-            None,
-            graphics_support,
+            resume_token,
+            attach_settings,
             cell_size,
             None,
         ))
@@ -4167,13 +4446,20 @@ fn join_session(
         .map_err(DialError::Refused)?;
     validate_attach_prepare_answer(reader.recv_answer().map_err(build_link_failure)?)?;
     let attach_result = ipc_client::commit_prepared_request(reader, writer, 3, commit_timeout)
-        .map_err(|commit_error| match commit_error {
-            unanswered_commit @ CliError::CommittedRequestUnanswered { .. } => {
-                DialError::Unreachable(unanswered_commit)
-            }
-            unreadable_answer => DialError::Refused(unreadable_answer),
-        })?;
-    parse_attached_session(attach_result).map_err(DialError::Refused)
+        .map_err(DialError::Unreachable)?;
+    parse_attached_session(attach_result).map_err(DialError::from_session_refusal)
+}
+
+/// What this terminal asks of the session at every attach, besides the cell
+/// size each dial measures again: the image protocols its terminal proved it
+/// can receive, and its `max-frames-per-second`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AttachSettings {
+    /// The image protocols the terminal proved it can receive.
+    graphics_support: terminal::GraphicsSupport,
+    /// The most frames a second the session sends this terminal, from `30`
+    /// to `120`.
+    max_frames_per_second: u16,
 }
 
 /// The `Prepare` this client writes, numbered 2, carrying its Attach: the
@@ -4190,7 +4476,7 @@ fn join_session(
 fn build_attach_prepare_request(
     resume_client_id: Option<ClientId>,
     resume_token: Option<&ConnectionToken>,
-    graphics_support: terminal::GraphicsSupport,
+    attach_settings: AttachSettings,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     link_timeout_ms: Option<u32>,
 ) -> IpcRequest {
@@ -4202,9 +4488,12 @@ fn build_attach_prepare_request(
             resume_client_id,
             resume_token: resume_token.cloned(),
             pane_area: Some(compute_core_pane_area(viewport_size)),
-            graphics_capabilities: graphics_support.build_graphics_capabilities(),
+            graphics_capabilities: attach_settings
+                .graphics_support
+                .build_graphics_capabilities(),
             cell_size,
             link_timeout_ms,
+            max_frames_per_second: attach_settings.max_frames_per_second,
         })),
     }
 }
@@ -4215,6 +4504,11 @@ fn build_attach_prepare_request(
 ///
 /// An answer that echoes no pane area is taken as it stands, and logs one
 /// debug line.
+///
+/// # Errors
+/// What [`talk::build_peer_refusal_error`] gives for a refusal, and
+/// [`CliError::CommittedRequestUnanswered`] naming the reply for an answer of
+/// another kind: the session may hold a client for this attach.
 fn parse_attached_session(
     attach_result: IpcResult,
 ) -> Result<(ClientId, SessionId, Option<ConnectionToken>), CliError> {
@@ -4232,26 +4526,31 @@ fn parse_attached_session(
             Ok((client_id, session_id, resume_token))
         }
         IpcResult::Error(refusal) => Err(talk::build_peer_refusal_error(&refusal)),
-        unexpected_result => {
-            Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))
-        }
+        unexpected_result => Err(CliError::CommittedRequestUnanswered {
+            detail: talk::SESSION_PEER_WORDS
+                .format_unexpected_reply_detail(unexpected_result.get_wire_name()),
+        }),
     }
 }
 
 /// Come back to a session that is replacing its own process image: wait for its
-/// new socket, connect to it, and join again as `client_id`, all before
-/// `restart_deadline`. Returns the connection joined, carrying the client the
-/// session answered with and the token of the new socket. The connection
-/// carries no deadline once joined.
+/// new socket, connect to it, and join again as `client_id`, presenting
+/// `resume_token`, all before `restart_deadline`. Returns the connection
+/// joined, carrying the client the session answered with, the token of the
+/// new socket, and the resume token the join minted. The connection carries no
+/// deadline once joined.
 ///
 /// The client is `client_id` when the session handed that record back, and a
 /// fresh client the session minted otherwise.
 ///
 /// `connection_token` is the token this client attached under; the wait watches it for a
-/// change. The connect, the writes of the Hello and of the `Prepare` carrying
-/// the Attach, and the reads of both replies each end at `restart_deadline`.
-/// The `Commit` that runs the Attach and the read of its answer end
-/// [`RESTART_WINDOW_DURATION`] after the `Commit` starts to be written.
+/// change. A new socket whose session refuses the join while it replaces its
+/// process image once more is left the same way: the wait watches that
+/// socket's token for a change. The connect, the writes of the Hello and of
+/// the `Prepare` carrying the Attach, and the reads of both replies each end
+/// at `restart_deadline`. The `Commit` that runs the Attach and the read of
+/// its answer end [`RESTART_WINDOW_DURATION`] after the `Commit` starts to be
+/// written.
 ///
 /// `Err` carries the ending the attachment reports.
 /// [`AttachmentEnding::RestartedIntoIncompatibleBuild`] when the new socket
@@ -4263,13 +4562,15 @@ fn parse_attached_session(
 /// user can read; a session that has not come back, or not answered the join,
 /// by `restart_deadline`; and a new socket that refuses the connection, or that
 /// breaks before it answers the join.
+#[allow(clippy::too_many_arguments)]
 fn rejoin_session(
     runtime_directory: &Path,
     session_id: SessionId,
     client_id: ClientId,
     connection_token: &ConnectionToken,
+    resume_token: Option<&ConnectionToken>,
     restart_deadline: Instant,
-    graphics_support: terminal::GraphicsSupport,
+    attach_settings: AttachSettings,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
 ) -> Result<JoinedSession, AttachmentEnding> {
     if connection_token.expose_secret().is_empty() {
@@ -4279,57 +4580,69 @@ fn rejoin_session(
         );
         return Err(AttachmentEnding::Restarting);
     }
-    let Some(endpoint) = ipc_client::wait_for_new_session_endpoint(
-        runtime_directory,
-        session_id,
-        connection_token,
-        restart_deadline,
-    ) else {
-        tracing::warn!(%session_id, "the session advertised no new socket after its restart");
-        return Err(AttachmentEnding::Restarting);
-    };
-    let (mut reader, mut writer) =
-        ipc_client::connect_to_session(&endpoint, session_id, Some(restart_deadline))
-            .map_err(|connection_error| {
-                tracing::warn!(%connection_error, "could not reach the restarted session");
-                AttachmentEnding::Restarting
-            })?
-            .split();
-    reader.set_deadline(Some(restart_deadline));
-    writer.set_deadline(Some(restart_deadline));
-    let (rejoined_client_id, rejoined_session_id, _) = join_session(
-        &mut reader,
-        &mut writer,
-        &endpoint.connection_token,
-        Some(client_id),
-        graphics_support,
-        cell_size,
-        Some(RESTART_WINDOW_DURATION),
-    )
-    .map_err(|join_error| match join_error {
-        DialError::Refused(join_refusal @ CliError::ProtocolVersionRefused { .. }) => {
-            tracing::warn!(%join_refusal, "the restarted session refused this client");
-            AttachmentEnding::RestartedIntoIncompatibleBuild
-        }
-        DialError::Refused(join_refusal) => {
-            tracing::warn!(%join_refusal, "the restarted session refused this client");
-            AttachmentEnding::RefusedAfterRestart(Box::new(join_refusal))
-        }
-        DialError::Unreachable(join_failure) | DialError::Restarting(join_failure) => {
-            tracing::warn!(%join_failure, "could not reach the restarted session");
-            AttachmentEnding::Restarting
-        }
-    })?;
-    reader.set_deadline(None);
-    writer.set_deadline(None);
-    Ok(JoinedSession {
-        reader,
-        writer,
-        client_id: rejoined_client_id,
-        session_id: rejoined_session_id,
-        connection_token: endpoint.connection_token,
-        resume_token: None,
-    })
+    let mut replaced_connection_token = connection_token.clone();
+    loop {
+        let Some(endpoint) = ipc_client::wait_for_new_session_endpoint(
+            runtime_directory,
+            session_id,
+            Some(&replaced_connection_token),
+            restart_deadline,
+        ) else {
+            tracing::warn!(%session_id, "the session advertised no new socket after its restart");
+            return Err(AttachmentEnding::Restarting);
+        };
+        let (mut reader, mut writer) =
+            ipc_client::connect_to_session(&endpoint, session_id, Some(restart_deadline))
+                .map_err(|connection_error| {
+                    tracing::warn!(%connection_error, "could not reach the restarted session");
+                    AttachmentEnding::Restarting
+                })?
+                .split();
+        reader.set_deadline(Some(restart_deadline));
+        writer.set_deadline(Some(restart_deadline));
+        let join_result = join_session(
+            &mut reader,
+            &mut writer,
+            &endpoint.connection_token,
+            Some(client_id),
+            resume_token,
+            attach_settings,
+            cell_size,
+            Some(RESTART_WINDOW_DURATION),
+        );
+        let (rejoined_client_id, rejoined_session_id, minted_resume_token) = match join_result {
+            Ok(joined_client) => joined_client,
+            Err(DialError::Restarting(join_refusal)) => {
+                tracing::info!(%join_refusal, "the restarted session is replacing its image again");
+                replaced_connection_token = endpoint.connection_token;
+                continue;
+            }
+            Err(DialError::Refused(join_refusal @ CliError::ProtocolVersionRefused { .. })) => {
+                tracing::warn!(%join_refusal, "the restarted session refused this client");
+                return Err(AttachmentEnding::RestartedIntoIncompatibleBuild);
+            }
+            Err(DialError::Refused(join_refusal)) => {
+                tracing::warn!(%join_refusal, "the restarted session refused this client");
+                return Err(AttachmentEnding::RefusedAfterRestart(Box::new(
+                    join_refusal,
+                )));
+            }
+            Err(DialError::Unreachable(join_failure)) => {
+                tracing::warn!(%join_failure, "could not reach the restarted session");
+                return Err(AttachmentEnding::Restarting);
+            }
+        };
+        reader.set_deadline(None);
+        writer.set_deadline(None);
+        return Ok(JoinedSession {
+            reader,
+            writer,
+            client_id: rejoined_client_id,
+            session_id: rejoined_session_id,
+            connection_token: endpoint.connection_token,
+            resume_token: minted_resume_token,
+        });
+    }
 }
 
 /// This terminal's size in cells, or [`FALLBACK_VIEWPORT`] when it has none to
@@ -4351,9 +4664,15 @@ fn get_terminal_viewport_size() -> Size {
 /// channel. A failed read is put there too and ends the thread: it is the
 /// frame the loop classifies as a death.
 ///
-/// A frame this build has no variant for is dropped here and never reaches the
-/// loop. It comes from a newer session server, and the frames around it still
-/// draw.
+/// The thread owns the connection's [`PaintedUpdateReceiver`]. Each painted
+/// update is applied here, and its last part puts one [`Incoming::Painted`]
+/// on the channel. A painted update that does not decode or apply is a
+/// failed read. Each image chunk frame goes on the channel as one
+/// [`Incoming::ImageChunk`] that holds the frame as read.
+///
+/// A frame this build has no variant for, JSON or binary, is dropped here and
+/// never reaches the loop. It comes from a newer session server, and the
+/// frames around it still draw.
 ///
 /// `connection_index` numbers the connection being read, and every frame carries it,
 /// so the loop can tell this reader's frames from those of a connection it has
@@ -4365,25 +4684,49 @@ fn spawn_frame_reader(
 ) {
     let _ = thread::Builder::new()
         .name("koshi-attach-reader".to_string())
-        .spawn(move || loop {
-            let session_event_result = match frame_reader.recv::<IncomingEvent>() {
-                Ok(MaybeKnown::Known(session_event)) => Ok(session_event),
-                Ok(MaybeKnown::Unknown { variant_name }) => {
-                    tracing::debug!(%variant_name, "session frame this build does not have");
-                    continue;
+        .spawn(move || {
+            let mut painted_update_receiver = PaintedUpdateReceiver::new();
+            loop {
+                let session_frame_result = frame_reader
+                    .recv_message_or_binary::<IncomingEvent>()
+                    .and_then(|received_frame| {
+                        painted_update_receiver.accept_session_frame(received_frame)
+                    });
+                let incoming_frame = match session_frame_result {
+                    Ok(None) => continue,
+                    Ok(Some(SessionFrame::Event(MaybeKnown::Known(session_event)))) => {
+                        Incoming::Frame {
+                            connection_index,
+                            session_event_result: Ok(session_event),
+                        }
+                    }
+                    Ok(Some(SessionFrame::Event(MaybeKnown::Unknown { variant_name }))) => {
+                        tracing::debug!(%variant_name, "session frame this build does not have");
+                        continue;
+                    }
+                    Ok(Some(SessionFrame::Painted(received_painted_frame))) => Incoming::Painted {
+                        connection_index,
+                        received_painted_frame,
+                    },
+                    Ok(Some(SessionFrame::ImageChunk(image_chunk_frame))) => Incoming::ImageChunk {
+                        connection_index,
+                        image_chunk_frame,
+                    },
+                    Err(read_error) => Incoming::Frame {
+                        connection_index,
+                        session_event_result: Err(read_error),
+                    },
+                };
+                let is_connection_broken = matches!(
+                    incoming_frame,
+                    Incoming::Frame {
+                        session_event_result: Err(_),
+                        ..
+                    }
+                );
+                if incoming_sender.send(incoming_frame).is_err() || is_connection_broken {
+                    break;
                 }
-                Err(read_error) => Err(read_error),
-            };
-            let is_connection_broken = session_event_result.is_err();
-            if incoming_sender
-                .send(Incoming::Frame {
-                    connection_index,
-                    session_event_result,
-                })
-                .is_err()
-                || is_connection_broken
-            {
-                break;
             }
         })
         .expect("spawn attach reader thread");
@@ -4447,15 +4790,15 @@ fn spawn_uplink_writer(mut writer: FrameWriter) -> UplinkWriter {
 /// channel, so the session's frames and this terminal's input arrive on one
 /// receiver.
 fn spawn_input_relay(
-    input_receiver: mpsc::Receiver<RuntimeEvent>,
+    input_receiver: mpsc::Receiver<TerminalInput>,
     incoming_sender: mpsc::SyncSender<Incoming>,
 ) {
     let _ = thread::Builder::new()
         .name("koshi-attach-input".to_string())
         .spawn(move || {
-            for runtime_event in input_receiver {
+            for terminal_input in input_receiver {
                 if incoming_sender
-                    .send(Incoming::Input(Box::new(runtime_event)))
+                    .send(Incoming::Input(Box::new(terminal_input)))
                     .is_err()
                 {
                     break;
@@ -4465,68 +4808,160 @@ fn spawn_input_relay(
         .expect("spawn attach input relay thread");
 }
 
-/// How long the console close handler holds the process open on Windows while
-/// the attachment ends: 3 seconds. Windows ends the process when the handler
-/// returns, and 5 seconds after the close at the latest.
+/// How long the console control handler holds the process open on Windows
+/// while the attachment ends: 3 seconds. Windows ends the process when the
+/// handler returns, and 5 seconds after a console close at the latest.
 #[cfg(windows)]
 const CONSOLE_CLOSE_WAIT_DURATION: Duration = Duration::from_secs(3);
 
-/// The channel of the attachment that a console close reaches on Windows, or
-/// `None` while no [`TerminalCloseWatch`] runs.
+/// The channel of the attachment that a console control event reaches on
+/// Windows, or `None` while no [`TerminalCloseWatch`] runs.
 #[cfg(windows)]
 static CONSOLE_CLOSE_INCOMING_SENDER: std::sync::Mutex<Option<mpsc::SyncSender<Incoming>>> =
     std::sync::Mutex::new(None);
 
-/// One attachment's watch for its terminal closing: `SIGHUP` on Linux and
-/// macOS, and the console close on Windows. Each close puts
-/// [`RuntimeEvent::Quit`] on the loop's channel, and the loop then ends as
-/// [`AttachmentEnding::TerminalGone`]. Dropping the watch stops it.
+/// Whether a Ctrl+C or Ctrl+Break signal reached [`handle_console_control`]
+/// while a [`TerminalCloseWatch`] ran, and [`end_process_after_termination_signal`]
+/// has not ended the process for it yet.
+#[cfg(windows)]
+static HAS_RECEIVED_CONSOLE_BREAK: AtomicBool = AtomicBool::new(false);
+
+/// The signals that end `koshi attach` on Linux and macOS.
+#[cfg(unix)]
+const TERMINATION_SIGNALS: [libc::c_int; 4] =
+    [libc::SIGHUP, libc::SIGTERM, libc::SIGINT, libc::SIGQUIT];
+
+/// The actions this process registers for the [`TERMINATION_SIGNALS`], once
+/// per signal, on Linux and macOS.
+#[cfg(unix)]
+static TERMINATION_SIGNAL_ACTIONS: LazyLock<TerminationSignalActions> =
+    LazyLock::new(|| TerminationSignalActions {
+        should_run_default_action: Arc::new(AtomicBool::new(true)),
+        received_termination_signal: Arc::new(AtomicI32::new(0)),
+        registered_signals: Mutex::new(Vec::new()),
+    });
+
+/// The two actions of each termination signal on Linux and macOS: the first
+/// records the signal, and the second runs its default action while
+/// `should_run_default_action` is `true`.
+#[cfg(unix)]
+struct TerminationSignalActions {
+    /// `false` while a [`TerminalCloseWatch`] runs and has taken no
+    /// termination signal; `true` otherwise.
+    should_run_default_action: Arc<AtomicBool>,
+    /// The termination signal that arrived last since
+    /// [`take_received_termination_signal`] last ran, or `0`.
+    received_termination_signal: Arc<AtomicI32>,
+    /// The termination signals whose two actions are registered.
+    registered_signals: Mutex<Vec<libc::c_int>>,
+}
+
+#[cfg(unix)]
+impl TerminationSignalActions {
+    /// Register the two actions of `termination_signal`, and do nothing when
+    /// they are already registered.
+    ///
+    /// # Errors
+    /// The failure of `sigaction` to install signal-hook's handler.
+    fn register_signal_actions(&self, termination_signal: libc::c_int) -> io::Result<()> {
+        let mut registered_signals = self
+            .registered_signals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if registered_signals.contains(&termination_signal) {
+            return Ok(());
+        }
+        let received_termination_signal = Arc::clone(&self.received_termination_signal);
+        // SAFETY: the action runs one store to an atomic integer, which is
+        // async-signal-safe. It does not allocate, lock or panic.
+        unsafe {
+            signal_hook::low_level::register(termination_signal, move || {
+                received_termination_signal.store(termination_signal, Ordering::SeqCst);
+            })?;
+        }
+        signal_hook::flag::register_conditional_default(
+            termination_signal,
+            Arc::clone(&self.should_run_default_action),
+        )?;
+        registered_signals.push(termination_signal);
+        Ok(())
+    }
+}
+
+/// One attachment's watch for its terminal closing or its process being asked
+/// to end: on Linux and macOS, every [`TERMINATION_SIGNALS`] entry this process
+/// does not ignore, and on Windows, the console close, Ctrl+C and Ctrl+Break.
+/// Each one puts [`RuntimeEvent::Quit`] on the loop's channel, and the loop
+/// then ends as [`AttachmentEnding::TerminalGone`]. One watch runs at a time.
+/// Dropping the watch stops it.
 struct TerminalCloseWatch {
-    /// Closes the thread that reads `SIGHUP`.
+    /// Closes the thread that reads the termination signals.
     #[cfg(unix)]
-    hangup_signal_handle: signal_hook::iterator::Handle,
+    termination_signal_handle: signal_hook::iterator::Handle,
 }
 
 impl TerminalCloseWatch {
     /// Start the watch for the loop that reads `incoming_sender`'s channel.
     ///
-    /// On Linux and macOS, the `koshi-attach-hangup` thread reads `SIGHUP`.
-    /// From then on `SIGHUP` no longer ends this process, also after the watch
-    /// stops. A process that ignores `SIGHUP` when the watch starts, as one
-    /// that `nohup` starts, gets no watch: the result is `None`. On Windows, a
-    /// console control handler takes the console close: it puts the input on
-    /// the channel, waits `CONSOLE_CLOSE_WAIT_DURATION`, and returns, which
-    /// ends the process.
+    /// On Linux and macOS, each termination signal this process does not
+    /// ignore gets its two [`TerminationSignalActions`], and the
+    /// `koshi-attach-signal` thread reads it. The first signal the thread
+    /// reads makes the next one run its default action at once. While no
+    /// watch runs, a termination signal runs its default action. A signal
+    /// this process ignores when the watch starts, as `nohup` makes it ignore
+    /// `SIGHUP`, stays ignored, and a process that ignores all four gets no
+    /// watch: the result is `None`.
+    ///
+    /// On Windows, [`handle_console_control`] takes the console close, Ctrl+C
+    /// and Ctrl+Break.
     ///
     /// # Errors
-    /// On Linux and macOS, the failure to read the `SIGHUP` action, to register
-    /// `SIGHUP`, or to start the thread. On Windows, the failure of
+    /// On Linux and macOS, the failure to read a signal's action, to register
+    /// a signal, or to start the thread. On Windows, the failure of
     /// `SetConsoleCtrlHandler`.
     fn start_terminal_close_watch(
         incoming_sender: mpsc::SyncSender<Incoming>,
     ) -> io::Result<Option<TerminalCloseWatch>> {
         #[cfg(unix)]
         {
-            if is_hangup_signal_ignored()? {
+            let termination_signal_actions = &*TERMINATION_SIGNAL_ACTIONS;
+            let mut watched_signals = Vec::new();
+            for termination_signal in TERMINATION_SIGNALS {
+                if is_signal_ignored(termination_signal)? {
+                    continue;
+                }
+                termination_signal_actions.register_signal_actions(termination_signal)?;
+                watched_signals.push(termination_signal);
+            }
+            if watched_signals.is_empty() {
                 return Ok(None);
             }
-            let mut hangup_signals =
-                signal_hook::iterator::Signals::new([signal_hook::consts::SIGHUP])?;
-            let hangup_signal_handle = hangup_signals.handle();
-            thread::Builder::new()
-                .name("koshi-attach-hangup".to_string())
+            let mut termination_signals = signal_hook::iterator::Signals::new(&watched_signals)?;
+            let termination_signal_handle = termination_signals.handle();
+            let should_run_default_action =
+                Arc::clone(&termination_signal_actions.should_run_default_action);
+            termination_signal_actions
+                .should_run_default_action
+                .store(false, Ordering::SeqCst);
+            let signal_thread = thread::Builder::new()
+                .name("koshi-attach-signal".to_string())
                 .spawn(move || {
-                    for _ in hangup_signals.forever() {
-                        if incoming_sender
-                            .send(Incoming::Input(Box::new(RuntimeEvent::Quit)))
-                            .is_err()
-                        {
-                            break;
-                        }
+                    for _ in termination_signals.forever() {
+                        should_run_default_action.store(true, Ordering::SeqCst);
+                        let _ = incoming_sender.send(Incoming::Input(Box::new(TerminalInput {
+                            runtime_event: RuntimeEvent::Quit,
+                            read_at: Instant::now(),
+                        })));
                     }
-                })?;
+                });
+            if let Err(thread_start_error) = signal_thread {
+                termination_signal_actions
+                    .should_run_default_action
+                    .store(true, Ordering::SeqCst);
+                return Err(thread_start_error);
+            }
             Ok(Some(TerminalCloseWatch {
-                hangup_signal_handle,
+                termination_signal_handle,
             }))
         }
         #[cfg(windows)]
@@ -4534,12 +4969,12 @@ impl TerminalCloseWatch {
             *CONSOLE_CLOSE_INCOMING_SENDER
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(incoming_sender);
-            // SAFETY: `handle_console_close` is a `HandlerRoutine` with the
+            // SAFETY: `handle_console_control` is a `HandlerRoutine` with the
             // signature `SetConsoleCtrlHandler` takes, and it lives for the
             // whole process.
             let is_handler_added = unsafe {
                 windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
-                    Some(handle_console_close),
+                    Some(handle_console_control),
                     1,
                 )
             } != 0;
@@ -4557,13 +4992,18 @@ impl TerminalCloseWatch {
 impl Drop for TerminalCloseWatch {
     fn drop(&mut self) {
         #[cfg(unix)]
-        self.hangup_signal_handle.close();
+        {
+            TERMINATION_SIGNAL_ACTIONS
+                .should_run_default_action
+                .store(true, Ordering::SeqCst);
+            self.termination_signal_handle.close();
+        }
         #[cfg(windows)]
         {
             // SAFETY: removes the handler `start_terminal_close_watch` added.
             unsafe {
                 windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
-                    Some(handle_console_close),
+                    Some(handle_console_control),
                     0,
                 );
             }
@@ -4574,31 +5014,70 @@ impl Drop for TerminalCloseWatch {
     }
 }
 
-/// Whether this process ignores `SIGHUP`: `true` when its action is `SIG_IGN`.
+/// Whether this process ignores `signal`: `true` when its action is `SIG_IGN`.
 ///
 /// # Errors
 /// The failure of `sigaction` to read the action.
 #[cfg(unix)]
-fn is_hangup_signal_ignored() -> io::Result<bool> {
+pub(crate) fn is_signal_ignored(signal: libc::c_int) -> io::Result<bool> {
     // SAFETY: an all-zero `sigaction` is valid.
-    let mut hangup_action: libc::sigaction = unsafe { std::mem::zeroed() };
+    let mut signal_action: libc::sigaction = unsafe { std::mem::zeroed() };
     // SAFETY: a null new action makes `sigaction` only write the current
-    // `SIGHUP` action into `hangup_action`.
-    if unsafe { libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut hangup_action) } != 0 {
+    // action of `signal` into `signal_action`.
+    if unsafe { libc::sigaction(signal, std::ptr::null(), &mut signal_action) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(hangup_action.sa_sigaction == libc::SIG_IGN)
+    Ok(signal_action.sa_sigaction == libc::SIG_IGN)
 }
 
-/// The console control handler on Windows. A console close puts
-/// [`RuntimeEvent::Quit`] on the channel in [`CONSOLE_CLOSE_INCOMING_SENDER`],
-/// waits [`CONSOLE_CLOSE_WAIT_DURATION`], and returns `1`, after which Windows
-/// ends the process. Every other control event, a close with no channel, and
-/// a channel whose loop has ended return `0`, which passes the event to the
-/// next handler.
+/// The termination signal that arrived since the last call, as
+/// [`TerminationSignalActions`] recorded it, or `None`. The record is cleared.
+#[cfg(unix)]
+fn take_received_termination_signal() -> Option<libc::c_int> {
+    let received_termination_signal = TERMINATION_SIGNAL_ACTIONS
+        .received_termination_signal
+        .swap(0, Ordering::SeqCst);
+    (received_termination_signal != 0).then_some(received_termination_signal)
+}
+
+/// End this process for the termination signal an attachment took, and
+/// return when it took none.
+///
+/// On Linux and macOS, the process ends by the default action of the signal
+/// [`take_received_termination_signal`] gives, and exits with `128` plus the
+/// signal number when that action does not end it. On Windows, after a Ctrl+C
+/// or Ctrl+Break reached [`handle_console_control`], the process exits with
+/// `STATUS_CONTROL_C_EXIT` (`0xC000013A`).
+fn end_process_after_termination_signal() {
+    #[cfg(unix)]
+    if let Some(received_termination_signal) = take_received_termination_signal() {
+        let _ = signal_hook::low_level::emulate_default_handler(received_termination_signal);
+        std::process::exit(128 + received_termination_signal);
+    }
+    #[cfg(windows)]
+    if HAS_RECEIVED_CONSOLE_BREAK.swap(false, Ordering::SeqCst) {
+        std::process::exit(windows_sys::Win32::Foundation::STATUS_CONTROL_C_EXIT);
+    }
+}
+
+/// The console control handler on Windows.
+///
+/// A console close, Ctrl+C or Ctrl+Break puts [`RuntimeEvent::Quit`] on the
+/// channel in [`CONSOLE_CLOSE_INCOMING_SENDER`] and waits
+/// [`CONSOLE_CLOSE_WAIT_DURATION`]. A close then returns `1`, after which
+/// Windows ends the process. A Ctrl+C or Ctrl+Break sets
+/// [`HAS_RECEIVED_CONSOLE_BREAK`] first, and returns `0` after the wait, which
+/// runs the default handler that ends the process.
+///
+/// `0` comes back at once, which passes the event to the next handler, for
+/// every other control event, an event with no channel, a close whose loop
+/// has ended, and a Ctrl+C or Ctrl+Break that arrives after one already set
+/// [`HAS_RECEIVED_CONSOLE_BREAK`].
 #[cfg(windows)]
-unsafe extern "system" fn handle_console_close(control_type: u32) -> windows_sys::core::BOOL {
-    if control_type != windows_sys::Win32::System::Console::CTRL_CLOSE_EVENT {
+unsafe extern "system" fn handle_console_control(control_type: u32) -> windows_sys::core::BOOL {
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT};
+    let is_console_break = control_type == CTRL_C_EVENT || control_type == CTRL_BREAK_EVENT;
+    if !is_console_break && control_type != CTRL_CLOSE_EVENT {
         return 0;
     }
     let incoming_sender = CONSOLE_CLOSE_INCOMING_SENDER
@@ -4608,14 +5087,24 @@ unsafe extern "system" fn handle_console_close(control_type: u32) -> windows_sys
     let Some(incoming_sender) = incoming_sender else {
         return 0;
     };
-    if incoming_sender
-        .send(Incoming::Input(Box::new(RuntimeEvent::Quit)))
-        .is_err()
-    {
+    if is_console_break && HAS_RECEIVED_CONSOLE_BREAK.swap(true, Ordering::SeqCst) {
+        return 0;
+    }
+    let is_quit_sent = incoming_sender
+        .send(Incoming::Input(Box::new(TerminalInput {
+            runtime_event: RuntimeEvent::Quit,
+            read_at: Instant::now(),
+        })))
+        .is_ok();
+    if !is_quit_sent && !is_console_break {
         return 0;
     }
     thread::sleep(CONSOLE_CLOSE_WAIT_DURATION);
-    1
+    if is_console_break {
+        0
+    } else {
+        1
+    }
 }
 
 /// Build the bounded queue shared by terminal input and the session reader.
@@ -4624,24 +5113,28 @@ fn build_incoming_channel() -> (mpsc::SyncSender<Incoming>, mpsc::Receiver<Incom
 }
 
 /// Build the bounded queue between the terminal reader and the input relay.
-fn build_input_channel() -> (mpsc::SyncSender<RuntimeEvent>, mpsc::Receiver<RuntimeEvent>) {
+fn build_input_channel() -> (
+    mpsc::SyncSender<TerminalInput>,
+    mpsc::Receiver<TerminalInput>,
+) {
     mpsc::sync_channel(INCOMING_QUEUE_CAPACITY)
 }
 
 /// Answer one event read from this terminal.
 ///
 /// A key belongs to the viewer that received it: the keymap, the input mode and
-/// any open sequence all live here, so this decides what the press means and
+/// any open sequence all live here. This decides what the press means, and
 /// the session sees only the answer — the commands a binding runs, or the whole
 /// key event to write. A release, and a key no keybinding can name, resolve
-/// nothing and reach the session as they are. A press that goes to the pane's
-/// program also ends the selection gesture under way, since the input is the
-/// program's. A resize records the
-/// viewport and pane area, since the session reconciles tab sizes from every
-/// viewer's report. Pasted text goes up whole and ends the gesture too; the
-/// session writes it into the pane, bracketing it when that pane asked for
-/// bracketed paste. A paste of more text than one frame carries never leaves
-/// this terminal.
+/// nothing and reach the session as they are. A key resolves at `read_at`, the
+/// instant the input thread read it: a key that opens a sequence that is both a
+/// binding and a longer one's prefix sets that sequence's ambiguity deadline
+/// one chord timeout after `read_at`. A press that goes to the pane's program
+/// also ends the selection gesture under way. A resize records the viewport and
+/// pane area and sends both to the session. Pasted text goes up whole and ends
+/// the gesture too; the session writes it into the pane, bracketing it when
+/// that pane asked for bracketed paste. A paste of more text than one frame
+/// carries never leaves this terminal.
 ///
 /// [`RuntimeEvent::Quit`] never reaches here: the loop reads it as
 /// [`AttachmentEnding::TerminalGone`] and stops. An input thread runs only for a terminal
@@ -4661,6 +5154,7 @@ fn process_runtime_input_with_cell_size(
     cell_size_query: &mut terminal::CellSizeQuery,
     mouse_frame: Option<&MouseFrame>,
     runtime_event: RuntimeEvent,
+    read_at: Instant,
 ) -> ControlFlow<()> {
     match runtime_event {
         RuntimeEvent::CellSize { cell_size, .. } => {
@@ -4685,7 +5179,7 @@ fn process_runtime_input_with_cell_size(
                 }
                 return ControlFlow::Continue(());
             };
-            match client.resolve_key(chord, Instant::now()) {
+            match client.resolve_key(chord, read_at) {
                 KeyOutcome::Fire(bound_action) => {
                     return uplink.submit_bound_action(client, bound_action, mouse_frame);
                 }
@@ -4743,31 +5237,68 @@ fn send_next_queued_placement_read(client: &mut Client, uplink: &mut Uplink) {
     }
 }
 
-/// Fire the viewer's open key sequence if its ambiguity deadline has passed at
-/// `current_time`, sending the commands it resolves to up the connection. A
-/// viewer-local action reads `mouse_frame`, the frame this terminal last
-/// painted. Returns [`ControlFlow::Break`] when the sequence fired the quit
-/// binding, after `core:quit` is queued, and [`ControlFlow::Continue`]
-/// otherwise.
+/// Run the viewer's input timers that are due at `judge_time`, in this order:
+///
+/// 1. An open key sequence whose ambiguity deadline passed fires. The held
+///    mouse actions go up first as one round ([`flush_mouse_round`]), then the
+///    commands the sequence resolves to. A viewer-local action reads
+///    `mouse_frame`, the frame this terminal last painted.
+/// 2. A placement tab hover that has lasted
+///    [`PLACEMENT_TAB_HOVER_DELAY_DURATION`](crate::PLACEMENT_TAB_HOVER_DELAY_DURATION)
+///    sends the placement read of the tab under the pointer.
+/// 3. A selection drag held past a pane's edge adds its due scroll step to
+///    `pending_mouse_actions`, and its next step comes due one
+///    `SELECTION_SCROLL_INTERVAL_DURATION` after `judge_time`.
 ///
 /// A sequence that is both a complete binding and a longer one's prefix fires
-/// when its deadline passes. The viewer holds it, so it decides; the session
-/// only runs what comes back.
-fn fire_expired_key_sequence(
+/// when its deadline passes. The viewer fires it, and the session runs the
+/// commands that come back.
+///
+/// Returns [`ControlFlow::Break`] when the sequence fired the quit binding,
+/// after `core:quit` is queued, and runs no other timer then. Returns
+/// [`ControlFlow::Continue`] otherwise.
+fn expire_input_timers(
     client: &mut Client,
     uplink: &mut Uplink,
     mouse_frame: Option<&MouseFrame>,
-    current_time: Instant,
+    sent_border_moves: &mut Vec<SentBorderMove>,
+    pending_mouse_actions: &mut Vec<MouseAction>,
+    judge_time: Instant,
 ) -> ControlFlow<()> {
-    let Some(bound_action) = client.expire_key_sequence(current_time) else {
-        return ControlFlow::Continue(());
-    };
-    uplink.submit_bound_action(client, bound_action, mouse_frame)
+    if let Some(bound_action) = client.expire_key_sequence(judge_time) {
+        flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);
+        if uplink
+            .submit_bound_action(client, bound_action, mouse_frame)
+            .is_break()
+        {
+            return ControlFlow::Break(());
+        }
+    }
+    if let Some((source_pane_id, destination_tab_id)) =
+        client.expire_placement_tab_hover(judge_time)
+    {
+        uplink.send_placement_read(client, source_pane_id, destination_tab_id);
+    }
+    if let Some(mouse_frame) = mouse_frame {
+        queue_mouse_actions(
+            pending_mouse_actions,
+            client.expire_mouse_scroll(judge_time, mouse_frame),
+        );
+    }
+    ControlFlow::Continue(())
 }
 
 /// Answer one input event read from this terminal, other than its hangup,
 /// against `mouse_frame`, the frame this terminal last painted. Requests leave
 /// `uplink` in the order of the inputs that caused them.
+///
+/// The event is judged at `terminal_input.read_at`, the instant the input
+/// thread read it. The loop records that it took the event
+/// ([`InputReadClock::note_input_taken`]), and every input timer due at that
+/// instant runs first ([`expire_input_timers`]). Example: `<C-y>` binds
+/// `core:new-tab` and opens `<C-y> a`, the chord timeout is 500 ms, and a paste
+/// is read 600 ms after `<C-y>`: the `NewTab` command goes up, then the paste.
+/// Then:
 ///
 /// - A mouse event that pane placement takes
 ///   ([`Client::handle_placement_mouse`]) writes the held mouse actions as one
@@ -4777,9 +5308,9 @@ fn fire_expired_key_sequence(
 ///   `pending_mouse_actions` ([`handle_mouse_event`]), which the pass writes at
 ///   its end. Before the first paint, `mouse_frame` is `None`, and a mouse
 ///   event changes nothing.
-/// - A loss of the outer terminal's focus ends pane placement mode, the move
-///   chooser, floating pane move mode, and a grab-handle drag, and sends
-///   nothing.
+/// - A loss of the outer terminal's focus ends pane placement mode that waits
+///   for no placement, the move chooser, floating pane move mode that waits
+///   for no move, and a grab-handle drag, and sends nothing.
 /// - Every other event writes the held mouse actions as one round, then sends
 ///   its own requests
 ///   ([`process_runtime_input_with_cell_size`]).
@@ -4788,29 +5319,52 @@ fn fire_expired_key_sequence(
 /// move mode, in one pass, write the round with `FocusPane` for `B`, then the
 /// `FocusPane` that `Tab` sends.
 ///
-/// Returns [`ControlFlow::Break`] when a key fired the quit binding, and
-/// [`ControlFlow::Continue`] for every other event.
+/// Returns [`ControlFlow::Break`] when a key, or a sequence whose deadline
+/// passed before the event was read, fired the quit binding, and
+/// [`ControlFlow::Continue`] otherwise.
 fn handle_terminal_input_event(
     client: &mut Client,
     uplink: &mut Uplink,
     cell_size_query: &mut terminal::CellSizeQuery,
     mouse_frame: Option<&MouseFrame>,
-    runtime_event: RuntimeEvent,
+    terminal_input: TerminalInput,
     sent_border_moves: &mut Vec<SentBorderMove>,
     pending_mouse_actions: &mut Vec<MouseAction>,
 ) -> ControlFlow<()> {
+    let TerminalInput {
+        runtime_event,
+        read_at,
+    } = terminal_input;
+    client.get_input_read_clock().note_input_taken(read_at);
+    if expire_input_timers(
+        client,
+        uplink,
+        mouse_frame,
+        sent_border_moves,
+        pending_mouse_actions,
+        read_at,
+    )
+    .is_break()
+    {
+        return ControlFlow::Break(());
+    }
     match runtime_event {
         RuntimeEvent::MouseInput { mouse_input, .. } => {
             let Some(mouse_frame) = mouse_frame else {
                 return ControlFlow::Continue(());
             };
-            client.apply_events();
-            match client.handle_placement_mouse(mouse_input, mouse_frame, Instant::now()) {
+            match client.handle_placement_mouse(mouse_input, mouse_frame, read_at) {
                 Some(placement_input_action) => {
                     flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);
                     uplink.submit_placement_input_action(client, placement_input_action);
                 }
-                None => handle_mouse_event(client, mouse_frame, mouse_input, pending_mouse_actions),
+                None => handle_mouse_event(
+                    client,
+                    mouse_frame,
+                    mouse_input,
+                    read_at,
+                    pending_mouse_actions,
+                ),
             }
             ControlFlow::Continue(())
         }
@@ -4828,8 +5382,31 @@ fn handle_terminal_input_event(
                 cell_size_query,
                 mouse_frame,
                 other_runtime_event,
+                read_at,
             )
         }
+    }
+}
+
+/// Draw `render_snapshot`, a painted frame whose image records are complete,
+/// at the cell size `cell_size_query` holds, and adopt the mouse frame it
+/// painted ([`adopt_painted_mouse_frame`]). A viewer with no placement
+/// preview open then drops the preview `image_cache` and `screen` hold.
+fn draw_completed_painted_frame<B: Backend>(
+    screen: &mut Screen<B>,
+    client: &mut Client,
+    image_cache: &mut paint::ImageCache,
+    cell_size_query: &terminal::CellSizeQuery,
+    last_mouse_frame: &mut Option<MouseFrame>,
+    render_snapshot: RenderSnapshot,
+) {
+    screen.set_cell_size(cell_size_query.get_current_cell_size());
+    if let Some(mouse_frame) = screen.draw_snapshot(client, render_snapshot) {
+        adopt_painted_mouse_frame(client, last_mouse_frame, mouse_frame);
+    }
+    if client.get_placement_snapshot().is_none() {
+        image_cache.clear_placement_snapshot();
+        screen.set_placement_snapshot(None);
     }
 }
 
@@ -4847,7 +5424,8 @@ fn adopt_painted_mouse_frame(
 
 /// Answer one mouse event read from this terminal against `mouse_frame`, the
 /// frame this terminal last painted, and add everything the viewer decided to
-/// `pending_mouse_actions` through [`queue_mouse_actions`].
+/// `pending_mouse_actions` through [`queue_mouse_actions`]. `read_at` is when
+/// the input thread read the event: a double click is judged against it.
 ///
 /// Viewer state moves at once — the hovered pane, the gesture under way, the
 /// capture a press takes — so a drag keeps tracking the pointer while earlier
@@ -4856,11 +5434,12 @@ fn handle_mouse_event(
     client: &mut Client,
     mouse_frame: &MouseFrame,
     mouse_input: MouseInput,
+    read_at: Instant,
     pending_mouse_actions: &mut Vec<MouseAction>,
 ) {
     queue_mouse_actions(
         pending_mouse_actions,
-        client.handle_mouse(mouse_input, mouse_frame, Instant::now()),
+        client.handle_mouse(mouse_input, mouse_frame, read_at),
     );
 }
 
@@ -4878,8 +5457,7 @@ fn handle_mouse_event(
 /// that program reads; a [`MouseAction::Command`] runs once, a
 /// [`MouseAction::Resize`] states a border's whole distance from its drag
 /// anchor, and a [`MouseAction::MoveFloatingPane`] is the move a drawn draft
-/// waits for. A pile holding no scrolls therefore stays over the cap rather than
-/// break any of those.
+/// waits for. A pile holding no scrolls stays over the cap.
 fn queue_mouse_actions(
     pending_mouse_actions: &mut Vec<MouseAction>,
     mouse_actions: Vec<MouseAction>,
@@ -5028,8 +5606,8 @@ fn rebase_border_moves(
 /// this round's own earlier moves for that same border ask for: the session
 /// travels every move in a round, one after another. Each move that survives
 /// that is recorded in `sent_border_moves` under the `request_id` it went out with. A move
-/// left with no cells to travel is dropped after the fold rather than before it,
-/// so the fold still sees it and keeps it as the newest of the border's moves.
+/// left with no cells to travel is dropped after the fold: the fold sees it
+/// and keeps it as the newest of the border's moves.
 fn flush_mouse_round(
     uplink: &mut Uplink,
     sent_border_moves: &mut Vec<SentBorderMove>,
@@ -5090,9 +5668,9 @@ fn flush_mouse_round(
             requested_cell_delta,
         },
     ));
-    // A session that stops answering never trims this, so the oldest entries go
-    // once it holds a burst's worth. A forgotten move leaves its cells counted
-    // as never asked, so the next move for that border asks for them again.
+    // Past `MAX_PENDING_MOUSE_ACTION_COUNT` entries, the oldest go. A forgotten
+    // move leaves its cells counted as never asked, so the next move for that
+    // border asks for them again.
     if sent_border_moves.len() > MAX_PENDING_MOUSE_ACTION_COUNT {
         sent_border_moves.drain(..sent_border_moves.len() - MAX_PENDING_MOUSE_ACTION_COUNT);
     }
@@ -5189,7 +5767,7 @@ fn convert_mouse_action_to_wire(mouse_action: MouseAction) -> WireMouseAction {
 
 /// Fold a pile of actions into the shortest run that means the same thing.
 ///
-/// Only neighbours fold, so an action of another kind between two foldable ones
+/// Only neighbors fold, so an action of another kind between two foldable ones
 /// keeps them apart: a scroll, a forward, then a scroll stays three actions.
 ///
 /// - Two scrolls over one pane in one direction become one scroll of the summed
@@ -5317,9 +5895,13 @@ fn classify_session_event(
         Ok(SessionEvent::Detached) => Some(AttachmentEnding::Detached),
         Ok(SessionEvent::Quit) => Some(AttachmentEnding::SessionEnded),
         Ok(SessionEvent::Restarting) => Some(AttachmentEnding::Restarting),
-        Ok(SessionEvent::SwitchTo { session_id }) => {
-            Some(AttachmentEnding::SwitchSession(*session_id))
-        }
+        Ok(SessionEvent::SwitchTo {
+            session_id,
+            owner_user_id,
+        }) => Some(AttachmentEnding::SwitchSession {
+            session_id: *session_id,
+            owner_user_id: *owner_user_id,
+        }),
         Ok(_) => None,
         Err(_) => Some(AttachmentEnding::ConnectionDied),
     }
@@ -5352,7 +5934,7 @@ fn report_attachment_ending(
     ending: AttachmentEnding,
     session_id: SessionId,
     client_executable_path: Option<&Path>,
-) -> Result<Option<SessionId>, CliError> {
+) -> Result<Option<(SessionId, Option<u32>)>, CliError> {
     match ending {
         AttachmentEnding::Detached => {
             println!("detached from session {session_id}");
@@ -5362,7 +5944,10 @@ fn report_attachment_ending(
             println!("the session ended");
             Ok(None)
         }
-        AttachmentEnding::SwitchSession(next_session_id) => Ok(Some(next_session_id)),
+        AttachmentEnding::SwitchSession {
+            session_id: next_session_id,
+            owner_user_id,
+        } => Ok(Some((next_session_id, owner_user_id))),
         AttachmentEnding::ConnectionDied => Err(CliError::Runtime {
             detail: format!(
                 "the session ended unexpectedly\n  {}",
@@ -5397,9 +5982,8 @@ fn report_attachment_ending(
             );
             Ok(None)
         }
-        // Nothing is left to read a message, so this ending is logged rather
-        // than printed. The session drops this client when the connection
-        // closes behind it.
+        // This ending is logged and prints nothing. The session drops this
+        // client when the connection closes behind it.
         AttachmentEnding::TerminalGone => {
             tracing::info!(%session_id, "this terminal went away; leaving the session running");
             Ok(None)
@@ -5426,7 +6010,7 @@ fn attach_again_from_client_executable(
     home: &Home,
     session_id: SessionId,
     client_executable_path: Option<&Path>,
-) -> Result<Option<SessionId>, CliError> {
+) -> Result<Option<(SessionId, Option<u32>)>, CliError> {
     let start_failure_reason = match client_executable_path {
         None => String::from("this client could not read the path it was started from"),
         Some(client_executable_path) => {
@@ -5500,15 +6084,16 @@ fn run_attach_command(client_executable_path: &Path, session_id: SessionId) -> i
 /// How to reach `session_id` again from where it runs: the command that shows
 /// whether it still runs, and the attach command to come back on.
 ///
-/// A session on this machine reads `run \`koshi list-sessions\`; …`. One on a
-/// server names that server in both commands — `koshi attach --remote my-box`
-/// shows that server's sessions, since `list-sessions` answers from this
-/// machine alone.
+/// A session on this machine reads `run \`koshi list-sessions\`; …`. Its
+/// attach command names the user id of a home that holds one, such as
+/// `koshi attach 1001/session-<uuid>`. One on a server names that server in
+/// both commands: `koshi attach --remote my-box` shows that server's sessions.
 fn build_reattach_instructions(home: &Home, session_id: SessionId) -> String {
     match home {
-        Home::Local { .. } => format!(
+        Home::Local { owner_user_id, .. } => format!(
             "run `koshi list-sessions`; if session {session_id} is still listed, \
-             reattach with `koshi attach {session_id}`"
+             reattach with `koshi attach {}`",
+            format_session_target(session_id, *owner_user_id)
         ),
         Home::Remote { server } => {
             let server_label = server.format_server_label();

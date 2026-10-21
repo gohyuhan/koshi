@@ -11,7 +11,7 @@ use crate::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use crate::process::PtySize;
 
 /// Roundtrip a value through JSON and assert it survives unchanged.
-fn assert_json_roundtrip<Roundtrippable>(roundtrippable_subject: &Roundtrippable)
+pub(crate) fn assert_json_roundtrip<Roundtrippable>(roundtrippable_subject: &Roundtrippable)
 where
     Roundtrippable: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
 {

@@ -689,11 +689,11 @@ fn find_process_record_reads_this_process() {
         this_process_record.parent_process_id,
         std::os::unix::process::parent_id()
     );
-    // SAFETY: `getsid(0)` reads the session of this process and reads no
-    // memory of it.
     #[cfg(unix)]
     assert_eq!(
         this_process_record.posix_session_id,
+        // SAFETY: `getsid(0)` reads the session of this process and reads no
+        // memory.
         u32::try_from(unsafe { libc::getsid(0) }).ok()
     );
     #[cfg(windows)]

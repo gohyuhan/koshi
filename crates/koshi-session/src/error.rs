@@ -2,7 +2,6 @@
 
 use koshi_core::constant::MAX_FLOATING_PANES_PER_SESSION;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_pane::pane::lifecycle::PaneLifecycle;
 use thiserror::Error;
 
 use crate::session::lifecycle::{SessionLifecycle, SessionLifecycleEvent};
@@ -36,8 +35,8 @@ pub enum FloatingSetError {
     TooManyPanes,
 }
 
-/// A way a session's tabs, layout trees, floating panes, pane registry, pane and tab lifecycles,
-/// and client focus, zoom and floating views can disagree with one another.
+/// A way a session's tabs, layout trees, floating panes, pane registry, and client focus, zoom
+/// and floating views can disagree with one another.
 /// [`Session::validate_session_consistency`](crate::session::state::Session::validate_session_consistency)
 /// returns every violation it finds in one pass. Each variant names what it found: the offending
 /// pane, tab or client, the bar index two tabs claim, or the number of floating members.
@@ -47,19 +46,10 @@ pub enum SessionConsistencyError {
     #[error("tab {tab_id:?} layout references pane {pane_id:?} with no registry record")]
     PaneNotInRegistry { tab_id: TabId, pane_id: PaneId },
 
-    /// A layout leaf names a pane whose registry record is in the `Removed`
-    /// state.
-    #[error("tab {tab_id:?} layout still holds removed pane {pane_id:?}")]
-    RemovedPaneInLayout { tab_id: TabId, pane_id: PaneId },
-
-    /// A registry record in any state but `Removed` — `Spawning`, `Running`,
-    /// `Exited` or `Closing` — is neither a leaf in any tab's layout nor a
-    /// floating pane. `pane_lifecycle` is the state the record holds.
-    #[error("pane {pane_id:?} is {pane_lifecycle:?} but absent from every layout and from the floating panes")]
-    OrphanedPaneRecord {
-        pane_id: PaneId,
-        pane_lifecycle: PaneLifecycle,
-    },
+    /// A registry record is neither a leaf in any tab's layout nor a floating
+    /// pane.
+    #[error("pane {pane_id:?} is absent from every layout and from the floating panes")]
+    OrphanedPaneRecord { pane_id: PaneId },
 
     /// A client focuses a pane that has no record in the registry at all.
     #[error(
@@ -106,10 +96,6 @@ pub enum SessionConsistencyError {
     #[error("client {client_id:?} active tab {tab_id:?} is not in the session")]
     ActiveTabMissing { client_id: ClientId, tab_id: TabId },
 
-    /// The registry still holds a record in the `Removed` state.
-    #[error("removed pane {pane_id:?} still has a registry record")]
-    LingeringRemovedRecord { pane_id: PaneId },
-
     /// The same pane is a leaf in more than one place — across two tabs, or
     /// twice within one tab's tree. `tab_ids` names the tab of each leaf, one
     /// entry per leaf.
@@ -150,11 +136,6 @@ pub enum SessionConsistencyError {
     /// A floating pane has no record in the registry.
     #[error("floating pane {pane_id:?} has no registry record")]
     FloatingPaneNotInRegistry { pane_id: PaneId },
-
-    /// A floating member names a pane whose registry record is in the
-    /// `Removed` state.
-    #[error("floating panes still hold removed pane {pane_id:?}")]
-    RemovedPaneInFloatingSet { pane_id: PaneId },
 
     /// The floating panes list the same pane more than once.
     #[error("floating panes list pane {pane_id:?} more than once")]

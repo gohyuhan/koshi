@@ -11,7 +11,7 @@ impl Server {
     /// process is live.
     ///
     /// The candidate tree is built and its fit preflighted, the child PTY
-    /// is spawned, and only on success is the pane registered (`Running`), the
+    /// is spawned, and only on success is the pane registered, the
     /// tree swapped in, the sibling PTYs reflowed, and the handle parked. A launch
     /// failure commits nothing and rejects; no pane is registered without its
     /// process. A client is designated to view and focus the new pane — an
@@ -171,7 +171,7 @@ impl Server {
 
         // The child is live — commit all session state through the pure op: it
         // switches the designated client onto the tab (if not already there),
-        // registers the pane `Running`, swaps in the split, and focuses it. It
+        // registers the pane, swaps in the split, and focuses it. It
         // returns the previous tab of any client it moved, for the reflow below.
         let (previous_tab_id, mut emitted_events) = pane_ops::commit_new_pane(
             session,
@@ -295,7 +295,7 @@ impl Server {
     /// command names, else the working directory of the target's
     /// `working_directory_pane_id`. Only then does
     /// [`pane_ops::commit_new_floating_pane`] append the member, register the
-    /// pane `Running`, store the designated client's position, and focus the
+    /// pane, store the designated client's position, and focus the
     /// pane for the designated client, drawn above its other floating panes.
     /// The new pane then takes that client's input. A launch failure commits
     /// nothing and rejects. No other client's focus moves.
@@ -400,12 +400,11 @@ impl Server {
     /// authoritative and immediate, the process kill is best-effort and
     /// off-thread.
     ///
-    /// The pane's close policy picks how the child dies: `--force` overrides
-    /// it with an immediate force-kill, `Graceful` requests a stop and
-    /// escalates after its grace window — or at once when the stop request
-    /// cannot be delivered — and `ConfirmIfBusy` proceeds only for
-    /// a pane whose child already exited, rejecting otherwise with a hint at
-    /// `--force`. The removal itself is the shared cascade behind shell-exit
+    /// `--force` kills the child at once. Without it, the close requests a
+    /// stop and escalates after [`GRACEFUL_TIMEOUT_DURATION`] — or at once
+    /// when the stop request cannot be delivered. `--tree` widens the kill to
+    /// the child's whole process group ([`compute_pane_kill_policy`]).
+    /// The removal itself is the shared cascade behind shell-exit
     /// and user close: registry drop, layout collapse, per-client focus
     /// repair, and — when the last pane of the last tab goes — tab close and
     /// session quit. The kill runs on a detached thread; a graceful kill can
@@ -420,8 +419,8 @@ impl Server {
     /// sizes.
     ///
     /// A floating pane goes to [`Self::handle_close_floating_pane`]. A close
-    /// that quits the session also ends every floating pane, each under its
-    /// own close policy ([`Self::end_removed_floating_panes`]).
+    /// that quits the session also ends every floating pane with a graceful
+    /// close ([`Self::end_removed_floating_panes`]).
     pub(super) fn handle_close_pane(
         &mut self,
         command_id: CommandId,
@@ -449,17 +448,10 @@ impl Server {
             .session_by_id
             .get_mut(&pane_target.session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
-        let pane_record = session
-            .panes
-            .get_pane_record_by_id(pane_target.pane_id)
-            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
-
-        let kill_policy = Self::resolve_pane_kill_policy(
-            pane_record,
+        let kill_policy = compute_pane_kill_policy(
             command_args.should_force_close,
             command_args.should_kill_process_tree,
-            "pane may be busy; pass --force to close anyway",
-        )?;
+        );
 
         // The tab is solved against `compute_close_tab_size`; focus candidates
         // rank by geometry also when no client views the tab.
@@ -469,7 +461,7 @@ impl Server {
             &list_tabs_affected_by_pane_close(session, tab_id, pane_target.pane_id),
             command_source.get_client_id(),
         );
-        let floating_pane_kill_policies = list_floating_pane_kill_policies(session, false, false);
+        let floating_pane_ids = list_floating_pane_ids(session);
         ensure_session_placement_revision_capacity(session)?;
         ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
 
@@ -509,7 +501,11 @@ impl Server {
         );
 
         self.kill_pane_off_thread(pane_target.pane_id, kill_policy);
-        self.end_removed_floating_panes(pane_target.session_id, floating_pane_kill_policies);
+        self.end_removed_floating_panes(
+            pane_target.session_id,
+            floating_pane_ids,
+            compute_pane_kill_policy(false, false),
+        );
 
         Ok(Self::commit_events(
             &mut self.event_bus,
@@ -518,38 +514,11 @@ impl Server {
         ))
     }
 
-    /// Pick how a pane's child dies. `should_force_close` overrides the pane's own policy
-    /// with an immediate force-kill; `ConfirmIfBusy` allows the close only for
-    /// a pane whose child provably ended (`Exited`) and otherwise rejects with
-    /// `busy_hint`. `should_kill_process_tree` widens the picked kill to the child's whole process
-    /// group.
-    pub(super) fn resolve_pane_kill_policy(
-        pane_record: &PaneRecord,
-        should_force_close: bool,
-        should_kill_process_tree: bool,
-        busy_hint: &str,
-    ) -> Result<KillPolicy, Rejection> {
-        if !should_force_close
-            && matches!(pane_record.close_policy, PaneClosePolicy::ConfirmIfBusy)
-            && !matches!(pane_record.get_lifecycle(), PaneLifecycle::Exited { .. })
-        {
-            return Err(Rejection::from_reason_and_help(
-                RejectReason::InvalidState,
-                busy_hint,
-            ));
-        }
-        Ok(compute_pane_kill_policy(
-            pane_record,
-            should_force_close,
-            should_kill_process_tree,
-        ))
-    }
-
     /// Handle [`Command::ClosePane`] on a floating pane: remove it from the
     /// session and kill its child, in commit-then-kill order.
     ///
     /// The kill policy is picked as for a tiled pane
-    /// ([`Self::resolve_pane_kill_policy`]). [`remove_floating_pane`] drops
+    /// ([`compute_pane_kill_policy`]). [`remove_floating_pane`] drops
     /// the registry record, the member and every client's view of the pane,
     /// and moves the input of each client that focused the pane; no layout
     /// changes and nothing reflows. The session's placement revision
@@ -568,16 +537,10 @@ impl Server {
             .session_by_id
             .get_mut(&session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
-        let pane_record = session
-            .panes
-            .get_pane_record_by_id(pane_id)
-            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
-        let kill_policy = Self::resolve_pane_kill_policy(
-            pane_record,
+        let kill_policy = compute_pane_kill_policy(
             command_args.should_force_close,
             command_args.should_kill_process_tree,
-            "pane may be busy; pass --force to close anyway",
-        )?;
+        );
         let affected_client_ids = list_clients_holding_floating_view(session, pane_id);
         ensure_session_placement_revision_capacity(session)?;
         ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
@@ -595,18 +558,19 @@ impl Server {
         ))
     }
 
-    /// End each floating pane `floating_pane_kill_policies` names that the
-    /// session `session_id` does not hold: release its runtime bookkeeping
-    /// ([`Self::release_pane_bookkeeping`]), then kill its child under its
-    /// listed policy ([`Self::kill_pane_off_thread`]). A last-tab quit removes
+    /// End each pane of `floating_pane_ids` that the session `session_id` does
+    /// not hold as a floating pane: release its runtime bookkeeping
+    /// ([`Self::release_pane_bookkeeping`]), then kill its child under
+    /// `kill_policy` ([`Self::kill_pane_off_thread`]). A last-tab quit removes
     /// every floating pane; a removal that quit nothing leaves every floating
     /// pane in place, and this ends none.
     pub(super) fn end_removed_floating_panes(
         &mut self,
         session_id: SessionId,
-        floating_pane_kill_policies: Vec<(PaneId, KillPolicy)>,
+        floating_pane_ids: Vec<PaneId>,
+        kill_policy: KillPolicy,
     ) {
-        for (pane_id, kill_policy) in floating_pane_kill_policies {
+        for pane_id in floating_pane_ids {
             let is_member = self
                 .session_by_id
                 .get(&session_id)
@@ -619,14 +583,20 @@ impl Server {
         }
     }
 
-    /// Remove a pane's live ID, cached size, terminal engine, and every mouse
-    /// button held in it, with no release written. Clear each attached
-    /// client's scroll offset and selection for it. Every pane removal calls
-    /// this for runtime bookkeeping.
+    /// Remove a pane's live ID, cached size, terminal engine, timed renders,
+    /// and every mouse button held in it, with no release written. Close and
+    /// drop its output queue ([`Self::remove_pane_output_queue`]). Clear each
+    /// attached client's scroll offset and selection for it. Every pane removal
+    /// calls this for runtime bookkeeping.
     pub(super) fn release_pane_bookkeeping(&mut self, session_id: SessionId, pane_id: PaneId) {
         self.live_pane_ids.remove(&pane_id);
         self.pty_size_by_pane_id.remove(&pane_id);
         self.terminal_engine_by_pane_id.remove(&pane_id);
+        self.pane_animation_deadlines
+            .set_pane_render_deadline(pane_id, None);
+        self.pane_synchronized_output_deadlines
+            .set_pane_render_deadline(pane_id, None);
+        self.remove_pane_output_queue(pane_id);
         self.remove_held_mouse_buttons_in_pane(pane_id);
         let Some(session) = self.session_by_id.get_mut(&session_id) else {
             return;
@@ -640,17 +610,19 @@ impl Server {
     /// Drop a removed pane's runtime bookkeeping and reflow the survivors into
     /// the space it freed.
     ///
-    /// Removes the pane's live ID, size cache, and terminal engine — output
-    /// bytes still in flight for it now find no engine and are dropped — and
-    /// clears each client's scroll offset and any highlight in it, then
-    /// re-solves and resizes the tab that reclaims the space: the pane's own tab
-    /// when it survives, else the tab its viewers moved to (the cascade's
-    /// `TabFocused`). A tab left with no viewer has no tab size and keeps its
-    /// sizes. Each applied resize appends one [`Event::PtyResized`] to `emitted_events`.
+    /// Removes the pane's live ID, size cache, and terminal engine, closes its
+    /// output queue and drops the output still in it
+    /// ([`Self::release_pane_bookkeeping`]), and clears each client's scroll
+    /// offset and any highlight in it, then re-solves and resizes the tab that
+    /// reclaims the space: the pane's own tab when it survives, else the tab
+    /// its viewers moved to (the cascade's `TabFocused`). A tab left with no
+    /// viewer has no tab size and keeps its sizes. Each applied resize appends
+    /// one [`Event::PtyResized`] to `emitted_events`.
     ///
     /// Shared by [`handle_close_pane`](Self::handle_close_pane) and
     /// [`handle_child_exit`](Self::handle_child_exit). Both callers release any
-    /// backend entry after reflow. Child-exit also invalidates rendering.
+    /// backend entry after reflow. [`handle_child_exit`](Self::handle_child_exit)
+    /// then marks the view of every subscriber changed.
     fn release_pane_and_reflow(
         &mut self,
         session_id: SessionId,
@@ -678,21 +650,24 @@ impl Server {
     /// Remove a pane after a child-exit event or when resume finds it absent
     /// from the backend, and return the resulting domain events.
     ///
-    /// A local backend's watcher reaps a child before reporting its exit.
-    /// Resume can also report a carried pane that the backend does not drive.
+    /// A local backend's watcher sees a child end before reporting its exit,
+    /// and on Unix keeps it a zombie until `kill_pane` reaps it. Resume can also
+    /// report a carried pane that the backend does not drive.
     /// [`apply_child_exit`] removes a tiled pane — its tab may close and the
     /// last tab quit, which also ends every floating pane — and its runtime
     /// bookkeeping is released while the survivors reflow. A floating pane is
     /// removed at once through [`remove_floating_pane`], and nothing reflows.
-    /// An exit for a pane already gone — closed while the exit waited in the
-    /// inbox — is dropped.
+    /// An exit for a pane no session holds, or whose record no tab holds,
+    /// changes no session, and `kill_pane` still releases any backend entry
+    /// for it. An exit that removes a pane marks the view of every subscriber
+    /// changed (`mark_every_view_changed`).
     ///
     /// Releasing a removed pane's bookkeeping clears its live ID, size cache,
     /// and terminal engine. If the backend still holds the pane, `kill_pane`
     /// removes its entry. A local backend drops the writer, joins the watcher,
     /// and closes the terminal master; a supervisor backend sends a kill request
     /// to the helper. An absent pane returns `UnknownPane` without a kill
-    /// request. A reaped local child receives no leader signal.
+    /// request. A local child that ended receives no leader signal.
     pub fn handle_child_exit(&mut self, pane_id: PaneId, exit_status: ExitStatus) -> Vec<Event> {
         // Exactly one of `exit_code` and `signal` is `Some`.
         let pane_exit = match exit_status {
@@ -709,11 +684,12 @@ impl Server {
         };
 
         // Find the session that owns the pane. An exit for a pane already gone
-        // (closed while the exit waited in the inbox) is dropped.
+        // changes no session; any backend entry still held for it is released.
         let Some(session_id) = self
             .get_session_for_pane(pane_id)
             .map(|session| session.session_id)
         else {
+            let _ = self.get_pty_backend().kill_pane(pane_id, KillPolicy::Force);
             return Vec::new();
         };
 
@@ -740,12 +716,16 @@ impl Server {
                 advance_client_placement_revisions(session, &affected_client_ids);
                 self.release_pane_bookkeeping(session_id, pane_id);
                 let _ = pty_backend.kill_pane(pane_id, KillPolicy::Force);
-                self.render_scheduler.invalidate();
+                self.mark_every_view_changed();
                 return emitted_events;
             }
             // No tab's layout holds the pane and it does not float: its record
-            // is an `OrphanedPaneRecord`. The exit is dropped.
-            Err(_) => return Vec::new(),
+            // is an `OrphanedPaneRecord`. The exit changes no session; any
+            // backend entry still held for it is released.
+            Err(_) => {
+                let _ = pty_backend.kill_pane(pane_id, KillPolicy::Force);
+                return Vec::new();
+            }
         };
 
         // The tab is solved against `compute_close_tab_size`; focus repair
@@ -756,7 +736,7 @@ impl Server {
             &list_tabs_affected_by_pane_close(session, tab_id, pane_id),
             None,
         );
-        let floating_pane_kill_policies = list_floating_pane_kill_policies(session, false, false);
+        let floating_pane_ids = list_floating_pane_ids(session);
         // `PaneProcessExited`, then the removal cascade.
         let mut emitted_events =
             apply_child_exit(session, tab_id, pane_exit, tab_rect, pane_sizing);
@@ -774,12 +754,16 @@ impl Server {
         );
 
         // Release any backend entry still held for this pane. A local backend
-        // sends no leader signal after its watcher reaps the child. An undriven
-        // carried pane has no backend entry and returns UnknownPane.
+        // sends no leader signal after its watcher saw the child end. An
+        // undriven carried pane has no backend entry and returns UnknownPane.
         let _ = pty_backend.kill_pane(pane_id, KillPolicy::Force);
-        self.end_removed_floating_panes(session_id, floating_pane_kill_policies);
+        self.end_removed_floating_panes(
+            session_id,
+            floating_pane_ids,
+            compute_pane_kill_policy(false, false),
+        );
 
-        self.render_scheduler.invalidate();
+        self.mark_every_view_changed();
 
         emitted_events
     }
@@ -1661,15 +1645,15 @@ impl Server {
 
     /// Handle [`Command::WriteToPane`]: inject raw bytes into a pane's child
     /// stdin. The target is an explicit `--pane` (resolved globally) or the
-    /// command source's default pane, and must be live — a pane that has
-    /// exited, is closing, or is gone takes no input
-    /// ([`RejectReason::InvalidState`]).
+    /// command source's default pane.
     ///
     /// The write changes no session state, and a successful write commits no
     /// events; the child's response returns
-    /// through the normal PTY output path. A backend write failure — the
-    /// child died between the liveness check and the write — is reported to
-    /// the caller as [`RejectReason::InvalidState`].
+    /// through the normal PTY output path. A backend write failure is
+    /// reported to the caller as [`RejectReason::InvalidState`] `pane is not
+    /// accepting input`: for example, the backend holds no entry for the pane,
+    /// the pane's writer ended with its child, or the pane's input queue is
+    /// full ([`PtyError::InputQueueFull`](koshi_pty::error::PtyError::InputQueueFull)).
     pub(super) fn handle_write_to_pane(
         &mut self,
         command_id: CommandId,
@@ -1679,25 +1663,6 @@ impl Server {
         let acting_session = self.resolve_acting_session(command_source)?;
         let pane_target =
             self.resolve_pane_target(command_args.pane_id, command_source, acting_session)?;
-        let session = self
-            .session_by_id
-            .get(&pane_target.session_id)
-            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
-        let pane_record = session
-            .panes
-            .get_pane_record_by_id(pane_target.pane_id)
-            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
-        match pane_record.get_lifecycle() {
-            PaneLifecycle::Spawning | PaneLifecycle::Running => {}
-            PaneLifecycle::Exited { .. }
-            | PaneLifecycle::Closing { .. }
-            | PaneLifecycle::Removed => {
-                return Err(Rejection::from_reason_and_help(
-                    RejectReason::InvalidState,
-                    "pane is not accepting input",
-                ));
-            }
-        }
         if self
             .get_pty_backend()
             .write_pane_input(pane_target.pane_id, &command_args.pane_input_bytes)

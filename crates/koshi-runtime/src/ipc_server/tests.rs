@@ -18,29 +18,41 @@ use koshi_core::key::{
 };
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
+use koshi_image::{AnimationFrame, FrameDelay, LoopPolicy};
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
+use koshi_ipc::image_chunk::IMAGE_CHUNK_FRAME_HEAD_BYTE_COUNT;
 use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{
-    GraphicsCapabilities, IpcRequest, ProcessImageId, WireMouseAction, MIN_PROTOCOL_VERSION,
-    PROTOCOL_VERSION,
+    GraphicsCapabilities, IpcRequest, WireMouseAction, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
+use koshi_ipc::transport::ReceivedFrame;
 use koshi_layout::mode::LayoutMode;
+use koshi_layout::solver::PaneSizing;
+use koshi_layout::tree::LayoutNode;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, PaneSnapshot, RenderSnapshot,
-    ScrollbackMetadata, SessionSnapshot, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, PaneSnapshot,
+    PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot, PlacementTabSnapshot,
+    RenderSnapshot, ScrollbackMetadata, SessionSnapshot, TabSnapshot,
 };
 use koshi_terminal::graphics::{
-    DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
+    DecodedAnimation, DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
 };
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::Style;
 use koshi_test_support::fixtures::{
-    build_key_input_for_chord, count_program_runs, read_prepared_and_send_commit,
-    send_committed_request, send_prepare_request, write_printing_program,
+    build_accepted_hello_result, build_counting_bytes, build_image_chunk_frame,
+    build_key_input_for_chord, build_paint_report_request, build_restarting_refusal,
+    count_program_runs, read_prepared_and_send_commit, send_committed_request,
+    send_prepare_request, write_printing_program,
 };
 
 use crate::executable_watch::RESTART_RETRY_INTERVAL_DURATION;
+use crate::runtime::bus::SUBSCRIBER_QUEUE_CAPACITY;
+use crate::runtime::delivery_queue::{create_delivery_queue, DeliverySender};
 use crate::runtime::event::{AttachAccepted, EndingNotice, SessionEnding};
+use crate::runtime::painted_update::{
+    PaintedUpdateReceiver, PaintedUpdateSender, ReceivedPaintedFrame, SessionFrame,
+};
 use crate::server::RestartRefusal;
 
 use super::*;
@@ -156,7 +168,7 @@ fn build_attached_structure(session_id: SessionId) -> AttachedSessionStructureSn
 fn build_attach_accepted(
     client_id: ClientId,
     session_id: SessionId,
-    deliveries: Receiver<Delivery>,
+    deliveries: DeliveryReceiver,
     writer_handoff: Arc<WriterHandoff>,
     ending_notice: Arc<EndingNotice>,
 ) -> AttachAccepted {
@@ -260,6 +272,176 @@ fn build_image_record(red_byte: u8) -> Arc<ImageRecord> {
     })
 }
 
+/// One `pixel_width` × `pixel_height` image whose first byte is `red_byte`
+/// and whose other bytes are `0`.
+fn build_sized_image_record(red_byte: u8, pixel_width: u32, pixel_height: u32) -> Arc<ImageRecord> {
+    Arc::new(ImageRecord {
+        protocol: GraphicsProtocol::Kitty,
+        image: build_sized_decoded_image(red_byte, pixel_width, pixel_height),
+        animation: None,
+        action: ImageAction::Display,
+        display: ImageDisplay::default(),
+        anchor: (0, 0),
+    })
+}
+
+/// The pixels of [`build_sized_image_record`].
+fn build_sized_decoded_image(
+    red_byte: u8,
+    pixel_width: u32,
+    pixel_height: u32,
+) -> Arc<DecodedImage> {
+    let pixel_count = usize::try_from(pixel_width * pixel_height).expect("the pixel count fits");
+    let mut rgba_bytes = vec![0; pixel_count * 4];
+    rgba_bytes[0] = red_byte;
+    Arc::new(DecodedImage {
+        pixel_width,
+        pixel_height,
+        rgba_bytes,
+    })
+}
+
+/// One record for each frame of a looping animation of `frame_count`
+/// frames of `pixel_width` × `pixel_height` pixels, in frame order. Frame `n`
+/// has first byte `n`, and every record names the one animation.
+fn build_animation_frame_records(
+    frame_count: u8,
+    pixel_width: u32,
+    pixel_height: u32,
+) -> Vec<Arc<ImageRecord>> {
+    let frame_images: Vec<Arc<DecodedImage>> = (0..frame_count)
+        .map(|frame_index| build_sized_decoded_image(frame_index, pixel_width, pixel_height))
+        .collect();
+    let animation = Arc::new(
+        DecodedAnimation::from_frames_and_loop_policy(
+            frame_images
+                .iter()
+                .map(|frame_image| {
+                    AnimationFrame::from_image_and_delay(
+                        Arc::clone(frame_image),
+                        FrameDelay::from_millisecond_ratio(66, 1).expect("the delay is valid"),
+                    )
+                    .expect("the frame is valid")
+                })
+                .collect(),
+            LoopPolicy::Infinite,
+        )
+        .expect("the animation is valid"),
+    );
+    frame_images
+        .into_iter()
+        .map(|frame_image| {
+            Arc::new(ImageRecord {
+                protocol: GraphicsProtocol::Kitty,
+                image: frame_image,
+                animation: Some(Arc::clone(&animation)),
+                action: ImageAction::Display,
+                display: ImageDisplay::default(),
+                anchor: (0, 0),
+            })
+        })
+        .collect()
+}
+
+/// `base_snapshot` with its one pane showing `image_records`, placement `n`
+/// of them with placement id `n + 1` and content id `n + 1`.
+fn build_snapshot_showing_records(
+    base_snapshot: &RenderSnapshot,
+    image_records: &[Arc<ImageRecord>],
+) -> RenderSnapshot {
+    let mut render_snapshot = base_snapshot.clone();
+    render_snapshot.pane_snapshots[0].image_placement_snapshots =
+        build_image_placements(image_records);
+    render_snapshot
+}
+
+/// `base_snapshot` with its one placement showing `image_record`.
+fn build_snapshot_showing_record(
+    base_snapshot: &RenderSnapshot,
+    image_record: Arc<ImageRecord>,
+) -> RenderSnapshot {
+    let mut render_snapshot = base_snapshot.clone();
+    render_snapshot.pane_snapshots[0].image_placement_snapshots[0] =
+        ImagePlacementSnapshot::with_content_id(7, 1, image_record, (0, 0), 1, 1)
+            .expect("the placement is valid");
+    render_snapshot
+}
+
+/// One one-cell placement for each of `image_records`: placement `n` has
+/// placement id `n + 1` and content id `n + 1`.
+fn build_image_placements(image_records: &[Arc<ImageRecord>]) -> Vec<ImagePlacementSnapshot> {
+    (1..)
+        .zip(image_records)
+        .map(|(placement_id, image_record)| {
+            ImagePlacementSnapshot::with_content_id(
+                placement_id,
+                placement_id,
+                Arc::clone(image_record),
+                (0, 0),
+                1,
+                1,
+            )
+            .expect("the placement is valid")
+        })
+        .collect()
+}
+
+/// A placement preview for `render_snapshot`'s client whose source tab holds
+/// one pane showing `image_records`.
+fn build_placement_snapshot_showing_records(
+    render_snapshot: &RenderSnapshot,
+    image_records: &[Arc<ImageRecord>],
+) -> PlacementSnapshot {
+    let source_pane_id = render_snapshot.pane_snapshots[0].pane_id;
+    PlacementSnapshot {
+        session_id: render_snapshot.session_snapshot.session_id,
+        source_pane_id,
+        source_tab_id: render_snapshot.client_snapshot.active_tab_id,
+        destination_tab_id: render_snapshot.client_snapshot.active_tab_id,
+        session_placement_revision: 0,
+        client_placement_revision: 0,
+        source_tab_snapshot: PlacementTabSnapshot {
+            layout_tree: LayoutNode::Pane(source_pane_id),
+            tab_snapshot: render_snapshot.session_snapshot.active_tab_snapshot.clone(),
+            pane_snapshots: vec![PlacementPaneSnapshot {
+                pane_id: source_pane_id,
+                terminal_grid_view: None,
+                image_placement_snapshots: build_image_placements(image_records),
+            }],
+        },
+        destination_tab_snapshot: None,
+        client_snapshot: PlacementClientSnapshot {
+            client_snapshot: render_snapshot.client_snapshot.clone(),
+            reported_pane_area: None,
+        },
+        pane_sizing: PaneSizing::default(),
+    }
+}
+
+/// The content id and availability of every image placement in
+/// `painted_frame`, pane by pane.
+fn list_painted_image_availability(painted_frame: &PaintedFrame) -> Vec<(u64, bool)> {
+    painted_frame
+        .pane_snapshots
+        .iter()
+        .flat_map(|pane_snapshot| &pane_snapshot.image_placement_snapshots)
+        .map(|image_placement| {
+            (
+                image_placement.image_content_id,
+                image_placement.is_available,
+            )
+        })
+        .collect()
+}
+
+/// The content id of each upload in `image_uploads`, in order.
+fn list_upload_content_ids(image_uploads: &[(u64, Arc<ImageRecord>)]) -> Vec<u64> {
+    image_uploads
+        .iter()
+        .map(|(image_content_id, _)| *image_content_id)
+        .collect()
+}
+
 /// One frame for `client_id` whose one pane holds `row_count` rows by
 /// `column_count` columns of alternating `a` and `b`, and no image. No two
 /// neighbors fold into one run: each cell is its own run on the wire.
@@ -282,21 +464,9 @@ fn build_alternating_grid_snapshot(
     render_snapshot.pane_snapshots[0]
         .image_placement_snapshots
         .clear();
-    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(alternating_grid),
-        view_row_offset: 0,
-    });
+    render_snapshot.pane_snapshots[0].terminal_grid_view =
+        Some(GridView::from_grid(&alternating_grid, 0));
     render_snapshot
-}
-
-/// How many bytes the [`SessionEvent::Painted`] frame of `render_snapshot`
-/// encodes to.
-fn compute_painted_frame_byte_count(render_snapshot: &RenderSnapshot) -> usize {
-    serde_json::to_vec(&SessionEvent::Painted {
-        frame: Box::new(build_wire_frame(render_snapshot)),
-    })
-    .expect("encode the painted frame")
-    .len()
 }
 
 /// A stand-in dispatcher that answers the first attach as `client_id` in
@@ -306,8 +476,8 @@ fn spawn_frame_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
     client_id: ClientId,
     session_id: SessionId,
-) -> (JoinHandle<()>, Sender<Delivery>) {
-    let (delivery_sender, delivery_receiver) = mpsc::channel();
+) -> (JoinHandle<()>, DeliverySender) {
+    let (delivery_sender, delivery_receiver) = create_delivery_queue(SUBSCRIBER_QUEUE_CAPACITY);
     let dispatcher_thread = std::thread::spawn(move || {
         answer_first_attach(
             &inbox_receiver,
@@ -341,7 +511,8 @@ fn spawn_attaching_dispatcher(
                 RuntimeEvent::IpcAttach {
                     response_sender, ..
                 } => {
-                    let (delivery_sender, delivery_receiver) = mpsc::channel();
+                    let (delivery_sender, delivery_receiver) =
+                        create_delivery_queue(SUBSCRIBER_QUEUE_CAPACITY);
                     delivery_senders.push(delivery_sender);
                     let _ = response_sender.send(Some(build_attach_accepted(
                         client_id,
@@ -375,7 +546,7 @@ fn spawn_ending_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
     client_id: ClientId,
     session_id: SessionId,
-    delivery_receiver: Receiver<Delivery>,
+    delivery_receiver: DeliveryReceiver,
     writer_handoff: Arc<WriterHandoff>,
     ending_notice: Arc<EndingNotice>,
 ) -> JoinHandle<()> {
@@ -400,7 +571,7 @@ fn answer_first_attach(
     inbox_receiver: &Receiver<RuntimeEvent>,
     client_id: ClientId,
     session_id: SessionId,
-    delivery_receiver: Receiver<Delivery>,
+    delivery_receiver: DeliveryReceiver,
     writer_handoff: Arc<WriterHandoff>,
     ending_notice: Arc<EndingNotice>,
 ) {
@@ -428,10 +599,7 @@ fn answer_first_attach(
 /// Wait up to 5 seconds until no client writing thread is left on
 /// `ending_notice`, and return how many are left.
 fn wait_for_running_writer_count(ending_notice: &EndingNotice) -> usize {
-    wait_until(Duration::from_secs(5), || {
-        ending_notice.count_running_writers() == 0
-    });
-    ending_notice.count_running_writers()
+    ending_notice.wait_until_writers_end(std::time::Instant::now() + Duration::from_secs(5))
 }
 
 /// Call `is_done` every 5 milliseconds until it returns `true` or
@@ -453,11 +621,11 @@ fn wait_until(timeout_duration: Duration, mut is_done: impl FnMut() -> bool) -> 
 /// order. Asserts that the client's writing thread ends after those frames.
 fn read_frames_of_ending_session(
     directory_tag: &str,
-    delivery_receiver: Receiver<Delivery>,
+    delivery_receiver: DeliveryReceiver,
     writer_handoff: Arc<WriterHandoff>,
     ending_notice: &Arc<EndingNotice>,
     frame_count: usize,
-) -> Vec<SessionEvent> {
+) -> Vec<SessionFrame<SessionEvent>> {
     let client_id = ClientId::new();
     let session_id = SessionId::new();
     let runtime_directory = build_test_runtime_directory(directory_tag);
@@ -474,12 +642,9 @@ fn read_frames_of_ending_session(
         .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
 
-    let read_frames: Vec<SessionEvent> = (0..frame_count)
-        .map(|_| {
-            connection
-                .recv::<SessionEvent>()
-                .expect("the client is told")
-        })
+    let mut painted_update_receiver = PaintedUpdateReceiver::new();
+    let read_frames: Vec<SessionFrame<SessionEvent>> = (0..frame_count)
+        .map(|_| read_session_frame(&mut connection, &mut painted_update_receiver))
         .collect();
     assert_eq!(
         wait_for_running_writer_count(ending_notice),
@@ -492,6 +657,94 @@ fn read_frames_of_ending_session(
     dispatcher_thread.join().expect("dispatcher exits");
     delete_test_directory(&runtime_directory);
     read_frames
+}
+
+/// [`read_frames_of_ending_session`] on a stream that carries no painted
+/// update: each frame's event. Panics on a painted update.
+fn read_events_of_ending_session(
+    directory_tag: &str,
+    delivery_receiver: DeliveryReceiver,
+    writer_handoff: Arc<WriterHandoff>,
+    ending_notice: &Arc<EndingNotice>,
+    frame_count: usize,
+) -> Vec<SessionEvent> {
+    read_frames_of_ending_session(
+        directory_tag,
+        delivery_receiver,
+        writer_handoff,
+        ending_notice,
+        frame_count,
+    )
+    .into_iter()
+    .map(|session_frame| match session_frame {
+        SessionFrame::Event(session_event) => session_event,
+        other_frame => panic!("expected an event frame, got {other_frame:?}"),
+    })
+    .collect()
+}
+
+/// Read frames off `connection` until one JSON frame or the last part of one
+/// painted update arrives, applying each part with `painted_update_receiver`.
+/// A painted update is reported painted on `connection`, as a client reports
+/// each update it paints.
+fn read_session_frame(
+    connection: &mut Connection,
+    painted_update_receiver: &mut PaintedUpdateReceiver,
+) -> SessionFrame<SessionEvent> {
+    loop {
+        let received_frame = connection
+            .recv_message_or_binary::<SessionEvent>()
+            .expect("the client is told");
+        if let Some(session_frame) = painted_update_receiver
+            .accept_session_frame(received_frame)
+            .expect("a painted update part that applies")
+        {
+            if let SessionFrame::Painted(received_painted_frame) = &session_frame {
+                connection
+                    .send(&build_paint_report_request(
+                        received_painted_frame.update_sequence,
+                    ))
+                    .expect("the paint report is written");
+            }
+            return session_frame;
+        }
+    }
+}
+
+/// The painted update a client that holds nothing yet receives for
+/// `render_snapshot` and its JSON part `painted_frame`: update 1.
+fn build_first_received_painted_frame(
+    render_snapshot: &RenderSnapshot,
+    painted_frame: &PaintedFrame,
+) -> ReceivedPaintedFrame {
+    let part_payloads = PaintedUpdateSender::new()
+        .build_update_frames(render_snapshot, painted_frame, false)
+        .expect("the painted update fits the frame cap")
+        .expect("a first update is sent");
+    let mut painted_update_receiver = PaintedUpdateReceiver::new();
+    let mut received_painted_frames: Vec<ReceivedPaintedFrame> = Vec::new();
+    for part_payload in part_payloads {
+        if let Some(SessionFrame::Painted(received_painted_frame)) = painted_update_receiver
+            .accept_session_frame::<SessionEvent>(ReceivedFrame::Binary(part_payload))
+            .expect("a painted update part that applies")
+        {
+            received_painted_frames.push(*received_painted_frame);
+        }
+    }
+    assert_eq!(received_painted_frames.len(), 1);
+    received_painted_frames.remove(0)
+}
+
+/// The byte count of every binary frame the first painted update of
+/// `render_snapshot` goes out as.
+fn compute_painted_update_byte_count(render_snapshot: &RenderSnapshot) -> usize {
+    PaintedUpdateSender::new()
+        .build_update_frames(render_snapshot, &build_wire_frame(render_snapshot), false)
+        .expect("the painted update fits the frame cap")
+        .expect("a first update is sent")
+        .iter()
+        .map(Vec::len)
+        .sum()
 }
 
 #[test]
@@ -527,7 +780,7 @@ fn a_client_whose_queue_is_full_is_still_told_the_session_is_ending() {
         assert_eq!(ending_notice.get_session_ending(), Some(session_ending));
 
         assert_eq!(
-            read_frames_of_ending_session(
+            read_events_of_ending_session(
                 directory_tag,
                 delivery_receiver,
                 writer_handoff,
@@ -563,7 +816,7 @@ fn a_client_the_server_detached_reads_its_own_goodbye_when_the_session_ends() {
     );
 
     assert_eq!(
-        read_frames_of_ending_session(
+        read_events_of_ending_session(
             "detach-then-quit",
             delivery_receiver,
             writer_handoff,
@@ -597,7 +850,7 @@ fn a_client_reads_the_quit_frame_alone_when_the_events_that_ended_the_session_ar
     );
 
     assert_eq!(
-        read_frames_of_ending_session(
+        read_events_of_ending_session(
             "quit-behind-queue",
             delivery_receiver,
             writer_handoff,
@@ -646,7 +899,7 @@ fn host_writes_queued_before_the_session_ends_reach_the_client_ahead_of_its_last
         event_bus.publish(&ending_event);
 
         assert_eq!(
-            read_frames_of_ending_session(
+            read_events_of_ending_session(
                 directory_tag,
                 delivery_receiver,
                 writer_handoff,
@@ -674,12 +927,12 @@ fn host_writes_that_wait_reach_the_client_ahead_of_the_deliveries_queued_after_t
     let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
     assert!(event_bus.queue_host_write(subscriber_id, &HostWrite::from_clipboard_copy("c", b"one")));
     assert!(event_bus.queue_host_write(subscriber_id, &HostWrite::from_clipboard_copy("p", b"two")));
-    assert!(event_bus.try_send_switch(subscriber_id, next_session_id));
+    assert!(event_bus.try_send_switch(subscriber_id, next_session_id, None));
     event_bus.unsubscribe(subscriber_id);
     let ending_notice = Arc::clone(event_bus.get_ending_notice());
 
     assert_eq!(
-        read_frames_of_ending_session(
+        read_events_of_ending_session(
             "host-writes-before-switch",
             delivery_receiver,
             writer_handoff,
@@ -692,6 +945,7 @@ fn host_writes_that_wait_reach_the_client_ahead_of_the_deliveries_queued_after_t
             },
             SessionEvent::SwitchTo {
                 session_id: next_session_id,
+                owner_user_id: None,
             },
             SessionEvent::Detached,
         ]
@@ -717,7 +971,7 @@ fn a_host_write_whose_wake_found_the_queue_full_still_reaches_the_client() {
     event_bus.unsubscribe(subscriber_id);
     let ending_notice = Arc::clone(event_bus.get_ending_notice());
 
-    let read_frames = read_frames_of_ending_session(
+    let read_frames = read_events_of_ending_session(
         "host-write-full-queue",
         delivery_receiver,
         writer_handoff,
@@ -792,15 +1046,15 @@ fn a_dropped_frame_wakes_the_dispatcher_for_its_client_after_the_next_read() {
         connection.recv::<SessionEvent>().expect("the first event"),
         SessionEvent::TabCreated { tab_id }
     );
-    let RuntimeEvent::QueueRoomFreed {
-        client_id: woken_client_id,
-    } = forwarded_event_receiver
-        .recv_timeout(Duration::from_secs(5))
-        .expect("the writing thread wakes the dispatcher")
-    else {
-        panic!("the first forwarded event is the wake");
-    };
-    assert_eq!(woken_client_id, client_id);
+    assert!(
+        matches!(
+            forwarded_event_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the writing thread wakes the dispatcher"),
+            RuntimeEvent::QueueRoomFreed
+        ),
+        "the first forwarded event is the wake"
+    );
     for _ in 1..SUBSCRIBER_QUEUE_CAPACITY {
         assert_eq!(
             connection.recv::<SessionEvent>().expect("the next event"),
@@ -820,7 +1074,7 @@ fn a_dropped_frame_wakes_the_dispatcher_for_its_client_after_the_next_read() {
     assert_eq!(
         forwarded_event_receiver
             .try_iter()
-            .filter(|runtime_event| matches!(runtime_event, RuntimeEvent::QueueRoomFreed { .. }))
+            .filter(|runtime_event| matches!(runtime_event, RuntimeEvent::QueueRoomFreed))
             .count(),
         0,
         "the writing thread took the mark once"
@@ -847,7 +1101,7 @@ fn a_host_write_longer_than_one_frame_reaches_the_client_as_parts_then_its_last_
     let ending_notice = Arc::clone(event_bus.get_ending_notice());
 
     assert_eq!(
-        read_frames_of_ending_session(
+        read_events_of_ending_session(
             "host-write-parts",
             delivery_receiver,
             writer_handoff,
@@ -874,15 +1128,15 @@ fn a_host_write_after_the_writing_thread_ended_with_its_wake_unread_is_not_taken
     let session_id = SessionId::new();
     let mut event_bus = EventBus::new();
     let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
-    // One pane of 100 rows by 200 columns of alternating `a` and `b`: the
-    // painted frame is inside the frame cap, and larger than a connection
+    // One pane of 1000 rows by 1100 columns of alternating `a` and `b`: the
+    // painted update is inside the frame cap, and larger than a connection
     // holds while its client reads nothing.
-    let large_snapshot = build_alternating_grid_snapshot(client_id, 100, 200);
-    let painted_frame_byte_count = compute_painted_frame_byte_count(&large_snapshot);
+    let large_snapshot = build_alternating_grid_snapshot(client_id, 1000, 1100);
+    let painted_update_byte_count = compute_painted_update_byte_count(&large_snapshot);
     assert!(
-        painted_frame_byte_count > 1024 * 1024
-            && painted_frame_byte_count < transport::MAX_FRAME_BYTE_COUNT as usize,
-        "the painted frame is {painted_frame_byte_count} bytes"
+        painted_update_byte_count > 1024 * 1024
+            && painted_update_byte_count < transport::MAX_FRAME_BYTE_COUNT as usize,
+        "the painted update is {painted_update_byte_count} bytes"
     );
     // The frame, then a host write and its wake, wait on the queue before the
     // client attaches. The writing thread writes the host write first, then
@@ -985,6 +1239,7 @@ fn build_attach_request(
             graphics_capabilities: GraphicsCapabilities::default(),
             cell_size: None,
             link_timeout_ms,
+            max_frames_per_second: 60,
         },
     }
 }
@@ -1026,6 +1281,7 @@ fn attach_test_client_with_graphics(
                 graphics_capabilities,
                 cell_size: None,
                 link_timeout_ms: None,
+                max_frames_per_second: 60,
             },
         },
     );
@@ -1071,6 +1327,7 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
                 graphics_capabilities: GraphicsCapabilities::default(),
                 cell_size: Some(measured_cell_size),
                 link_timeout_ms: None,
+                max_frames_per_second: 60,
             },
         },
     );
@@ -1088,7 +1345,7 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
         panic!("expected IpcAttach");
     };
     assert_eq!(cell_size, Some(measured_cell_size));
-    let (delivery_sender, delivery_receiver) = mpsc::channel();
+    let (delivery_sender, delivery_receiver) = create_delivery_queue(SUBSCRIBER_QUEUE_CAPACITY);
     response_sender
         .send(Some(build_attach_accepted(
             client_id,
@@ -1124,6 +1381,95 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
     delete_test_directory(&runtime_directory);
 }
 
+#[test]
+fn a_resize_over_the_viewport_cell_limit_is_dropped_and_the_next_resize_crosses() {
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory("resize-cell-limit");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+        .expect("start serving");
+    let mut connection = connect_to_session_socket(&runtime_directory, session_id);
+    connection
+        .send(&build_hello_request(&runtime_directory, session_id))
+        .expect("send hello");
+    let _: IpcResponse = connection.recv().expect("hello reply");
+    send_prepare_request(&mut connection, build_attach_request(None, None));
+    answer_next_prepare_probe(&inbox_receiver);
+    read_prepared_and_send_commit(&mut connection, 2);
+    let RuntimeEvent::IpcAttach {
+        response_sender, ..
+    } = inbox_receiver
+        .recv()
+        .expect("attach reaches the dispatcher")
+    else {
+        panic!("expected IpcAttach");
+    };
+    let (delivery_sender, delivery_receiver) = create_delivery_queue(SUBSCRIBER_QUEUE_CAPACITY);
+    response_sender
+        .send(Some(build_attach_accepted(
+            client_id,
+            session_id,
+            delivery_receiver,
+            Arc::new(WriterHandoff::default()),
+            Arc::new(EndingNotice::default()),
+        )))
+        .expect("the dispatcher receives the accepted attach");
+    let _: IpcResponse = connection.recv().expect("attach reply");
+    let fitting_viewport_size = Size {
+        column_count: 2048,
+        row_count: 1024,
+    };
+
+    for (request_id, viewport_size) in [
+        (
+            3,
+            Size {
+                column_count: 65_535,
+                row_count: 65_535,
+            },
+        ),
+        (
+            4,
+            Size {
+                column_count: 2048,
+                row_count: 1025,
+            },
+        ),
+        (5, fitting_viewport_size),
+    ] {
+        connection
+            .send(&IpcRequest {
+                request_id,
+                request_kind: IpcRequestKind::Resize {
+                    viewport_size,
+                    pane_area: None,
+                    cell_size: None,
+                },
+            })
+            .expect("send resize");
+    }
+    let RuntimeEvent::Resize {
+        client_id: resized_client_id,
+        viewport_size,
+        ..
+    } = inbox_receiver
+        .recv()
+        .expect("the fitting resize reaches the dispatcher")
+    else {
+        panic!("expected Resize");
+    };
+    assert_eq!(
+        (resized_client_id, viewport_size),
+        (client_id, fitting_viewport_size)
+    );
+
+    drop(delivery_sender);
+    drop(connection);
+    ipc_server.shutdown();
+    delete_test_directory(&runtime_directory);
+}
+
 /// The graphics report of a terminal that speaks the Kitty image protocol and
 /// no other.
 const KITTY_GRAPHICS_CAPABILITIES: GraphicsCapabilities = GraphicsCapabilities {
@@ -1140,7 +1486,8 @@ struct AttachedFrameStream {
     runtime_directory: PathBuf,
     client_id: ClientId,
     connection: Connection,
-    delivery_sender: Sender<Delivery>,
+    painted_update_receiver: PaintedUpdateReceiver,
+    delivery_sender: DeliverySender,
 }
 
 impl AttachedFrameStream {
@@ -1170,6 +1517,7 @@ impl AttachedFrameStream {
             runtime_directory,
             client_id,
             connection,
+            painted_update_receiver: PaintedUpdateReceiver::new(),
             delivery_sender,
         }
     }
@@ -1177,7 +1525,7 @@ impl AttachedFrameStream {
     /// Queue `delivery` on the attached client's stream.
     fn send_delivery(&self, delivery: Delivery) {
         self.delivery_sender
-            .send(delivery)
+            .try_send(delivery)
             .expect("the writing thread holds the delivery queue");
     }
 
@@ -1190,11 +1538,30 @@ impl AttachedFrameStream {
         SessionEvent::PlacementCommandRejected { command_id }
     }
 
-    /// Read the next frame the attached client receives.
+    /// Read the next frame the attached client receives: a JSON frame, an
+    /// image chunk, or a whole painted update.
+    fn read_next_session_frame(&mut self) -> SessionFrame<SessionEvent> {
+        read_session_frame(&mut self.connection, &mut self.painted_update_receiver)
+    }
+
+    /// Read the next JSON frame the attached client receives. Panics on any
+    /// other frame.
     fn read_session_event(&mut self) -> SessionEvent {
-        self.connection
-            .recv::<SessionEvent>()
-            .expect("read the next frame")
+        match self.read_next_session_frame() {
+            SessionFrame::Event(session_event) => session_event,
+            other_frame => panic!("expected an event frame, got {other_frame:?}"),
+        }
+    }
+
+    /// Read the next painted update the attached client receives, and return
+    /// its JSON part. Panics on any other frame.
+    fn read_painted_frame(&mut self) -> PaintedFrame {
+        match self.read_next_session_frame() {
+            SessionFrame::Painted(received_painted_frame) => {
+                PaintedFrame::clone(&received_painted_frame.painted_frame)
+            }
+            other_frame => panic!("expected a painted update, got {other_frame:?}"),
+        }
     }
 
     /// Close the connection and the queue, stop the server, join the
@@ -1208,25 +1575,279 @@ impl AttachedFrameStream {
     }
 }
 
-/// The `ImageContentStart` and `ImageContentChunk` frames that carry
-/// `image_record` under `image_content_id`, in one chunk.
-fn build_image_transfer_events(
+/// Read every frame the client of `frame_stream` receives through
+/// `end_event`, and keep what the client shows: the available image
+/// placements of the newest painted update, and of the newest placement
+/// preview. Each paint report names that preview as held. An
+/// `ImageCacheReset` clears both. Returns every identity the
+/// `ImageContentReleased` frames name, in order.
+///
+/// # Panics
+/// When an `ImageContentReleased` names an identity that the newest painted
+/// update or the held preview shows.
+fn read_frames_checking_image_releases(
+    frame_stream: &mut AttachedFrameStream,
+    end_event: &SessionEvent,
+) -> Vec<u64> {
+    let mut painted_image_content_ids: HashSet<u64> = HashSet::new();
+    let mut preview_image_content_ids: HashSet<u64> = HashSet::new();
+    let mut held_placement_request_id = None;
+    let mut released_image_content_ids = Vec::new();
+    loop {
+        let received_frame = frame_stream
+            .connection
+            .recv_message_or_binary::<SessionEvent>()
+            .expect("the client is told");
+        let Some(session_frame) = frame_stream
+            .painted_update_receiver
+            .accept_session_frame(received_frame)
+            .expect("a painted update part that applies")
+        else {
+            continue;
+        };
+        match session_frame {
+            SessionFrame::Painted(received_painted_frame) => {
+                painted_image_content_ids = received_painted_frame
+                    .painted_frame
+                    .pane_snapshots
+                    .iter()
+                    .flat_map(|pane_snapshot| &pane_snapshot.image_placement_snapshots)
+                    .filter(|image_placement| image_placement.is_available)
+                    .map(|image_placement| image_placement.image_content_id)
+                    .collect();
+                let update_sequence = received_painted_frame.update_sequence;
+                frame_stream
+                    .connection
+                    .send(&IpcRequest {
+                        request_id: update_sequence,
+                        request_kind: IpcRequestKind::PaintedUpdate {
+                            update_sequence,
+                            shown_placement_request_id: held_placement_request_id,
+                        },
+                    })
+                    .expect("the paint report is written");
+            }
+            SessionFrame::ImageChunk(_) => {}
+            SessionFrame::Event(session_event) if session_event == *end_event => {
+                return released_image_content_ids;
+            }
+            SessionFrame::Event(SessionEvent::ImageCacheReset) => {
+                painted_image_content_ids.clear();
+                preview_image_content_ids.clear();
+                held_placement_request_id = None;
+            }
+            SessionFrame::Event(SessionEvent::PanePlacementSnapshot {
+                request_id,
+                snapshot,
+            }) => {
+                preview_image_content_ids = [
+                    Some(&snapshot.source_tab_snapshot),
+                    snapshot.destination_tab_snapshot.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                .flat_map(|placement_tab_snapshot| &placement_tab_snapshot.pane_snapshots)
+                .flat_map(|placement_pane_snapshot| {
+                    &placement_pane_snapshot.image_placement_snapshots
+                })
+                .filter(|image_placement| image_placement.is_available)
+                .map(|image_placement| image_placement.image_content_id)
+                .collect();
+                held_placement_request_id = Some(request_id);
+            }
+            SessionFrame::Event(SessionEvent::ImageContentReleased { image_content_ids }) => {
+                for image_content_id in &image_content_ids {
+                    assert!(
+                        !painted_image_content_ids.contains(image_content_id),
+                        "release of record {image_content_id}, which the newest painted update shows"
+                    );
+                    assert!(
+                        !preview_image_content_ids.contains(image_content_id),
+                        "release of record {image_content_id}, which the held preview shows"
+                    );
+                }
+                released_image_content_ids.extend(image_content_ids);
+            }
+            SessionFrame::Event(_) => {}
+        }
+    }
+}
+
+/// The `ImageContentStart` frame and the one image chunk frame that carry
+/// `image_record` under `image_content_id`.
+fn build_image_transfer_frames(
     image_content_id: u64,
     image_record: &ImageRecord,
-) -> [SessionEvent; 2] {
+) -> [SessionFrame<SessionEvent>; 2] {
     [
-        SessionEvent::ImageContentStart {
+        SessionFrame::Event(SessionEvent::ImageContentStart {
             image_transfer: build_wire_image_transfer(image_content_id, image_record),
-        },
-        SessionEvent::ImageContentChunk {
-            image_chunk: FrameImageChunk {
-                image_transfer_id: image_content_id,
-                byte_offset: 0,
-                is_last: true,
-                chunk_bytes: image_record.image.rgba_bytes.clone(),
-            },
-        },
+        }),
+        SessionFrame::ImageChunk(build_image_chunk_frame(
+            image_content_id,
+            0,
+            true,
+            &image_record.image.rgba_bytes,
+        )),
     ]
+}
+
+#[test]
+fn an_event_between_two_painted_updates_keeps_its_place_and_the_earlier_update_is_not_replaced() {
+    let mut frame_stream = AttachedFrameStream::attach_frame_stream(
+        "event-between-updates",
+        GraphicsCapabilities::default(),
+    );
+    let first_render_snapshot = build_alternating_grid_snapshot(frame_stream.client_id, 2, 4);
+    let second_render_snapshot = build_alternating_grid_snapshot(frame_stream.client_id, 3, 4);
+    frame_stream
+        .delivery_sender
+        .try_send_frame(Box::new(first_render_snapshot.clone()))
+        .expect("the first frame fits");
+    let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
+    frame_stream
+        .delivery_sender
+        .try_send_frame(Box::new(second_render_snapshot.clone()))
+        .expect("the second frame fits");
+
+    assert_eq!(
+        frame_stream.read_painted_frame(),
+        build_wire_frame(&first_render_snapshot)
+    );
+    assert_eq!(
+        frame_stream.read_session_event(),
+        rejected_placement_command_event
+    );
+    assert_eq!(
+        frame_stream.read_painted_frame(),
+        build_wire_frame(&second_render_snapshot)
+    );
+
+    frame_stream.close_frame_stream();
+}
+
+#[test]
+fn a_report_of_an_update_that_was_not_sent_closes_the_connection() {
+    let AttachedFrameStream {
+        ipc_server,
+        dispatcher_thread,
+        runtime_directory,
+        connection,
+        delivery_sender,
+        ..
+    } = AttachedFrameStream::attach_frame_stream(
+        "unsent-paint-report",
+        GraphicsCapabilities::default(),
+    );
+    let (mut frame_reader, mut frame_writer) = connection.split();
+
+    frame_writer
+        .send(&build_paint_report_request(1))
+        .expect("the paint report is written");
+
+    frame_reader.set_deadline(Some(Instant::now() + Duration::from_secs(5)));
+    assert!(
+        matches!(
+            frame_reader.recv_message_or_binary::<SessionEvent>(),
+            Err(IpcError::Disconnected)
+        ),
+        "the session closes the connection"
+    );
+
+    drop(frame_reader);
+    drop(frame_writer);
+    drop(delivery_sender);
+    ipc_server.shutdown();
+    dispatcher_thread.join().expect("dispatcher exits");
+    delete_test_directory(&runtime_directory);
+}
+
+#[test]
+fn a_client_that_reports_no_paint_receives_one_update_and_the_rest_waits_for_its_report() {
+    let AttachedFrameStream {
+        ipc_server,
+        dispatcher_thread,
+        runtime_directory,
+        client_id,
+        connection,
+        mut painted_update_receiver,
+        delivery_sender,
+    } = AttachedFrameStream::attach_frame_stream(
+        "unreported-paint",
+        GraphicsCapabilities::default(),
+    );
+    let (mut frame_reader, mut frame_writer) = connection.split();
+    let first_render_snapshot = build_alternating_grid_snapshot(client_id, 2, 4);
+    let second_render_snapshot = build_alternating_grid_snapshot(client_id, 3, 4);
+    let rejected_command_id = CommandId::new();
+    for delivery in [
+        Delivery::Frame(Box::new(first_render_snapshot.clone())),
+        Delivery::Frame(Box::new(second_render_snapshot.clone())),
+        Delivery::PlacementCommandRejected(rejected_command_id),
+    ] {
+        delivery_sender
+            .try_send(delivery)
+            .expect("the writing thread holds the delivery queue");
+    }
+    let mut read_session_frame_unreported = |frame_reader: &mut transport::FrameReader| loop {
+        let received_frame = frame_reader
+            .recv_message_or_binary::<SessionEvent>()
+            .expect("the client is told");
+        if let Some(session_frame) = painted_update_receiver
+            .accept_session_frame(received_frame)
+            .expect("a painted update part that applies")
+        {
+            break session_frame;
+        }
+    };
+
+    let SessionFrame::Painted(first_received_frame) =
+        read_session_frame_unreported(&mut frame_reader)
+    else {
+        panic!("the first update arrives");
+    };
+    assert_eq!(first_received_frame.update_sequence, 1);
+    assert_eq!(
+        *first_received_frame.painted_frame,
+        build_wire_frame(&first_render_snapshot)
+    );
+    // The second update, and the event behind it, wait for the report.
+    frame_reader.set_deadline(Some(Instant::now() + Duration::from_millis(300)));
+    assert!(
+        matches!(
+            frame_reader.recv_message_or_binary::<SessionEvent>(),
+            Err(IpcError::Transport { error_detail }) if error_detail == "this step ran out of time"
+        ),
+        "nothing arrives before the report"
+    );
+    frame_reader.set_deadline(None);
+
+    frame_writer
+        .send(&build_paint_report_request(1))
+        .expect("the paint report is written");
+    let SessionFrame::Painted(second_received_frame) =
+        read_session_frame_unreported(&mut frame_reader)
+    else {
+        panic!("the second update arrives after the report");
+    };
+    assert_eq!(second_received_frame.update_sequence, 2);
+    assert_eq!(
+        *second_received_frame.painted_frame,
+        build_wire_frame(&second_render_snapshot)
+    );
+    assert_eq!(
+        read_session_frame_unreported(&mut frame_reader),
+        SessionFrame::Event(SessionEvent::PlacementCommandRejected {
+            command_id: rejected_command_id,
+        })
+    );
+
+    drop(frame_reader);
+    drop(frame_writer);
+    drop(delivery_sender);
+    ipc_server.shutdown();
+    dispatcher_thread.join().expect("dispatcher exits");
+    delete_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -1244,12 +1865,7 @@ fn an_unsupported_terminal_receives_placement_geometry_and_no_pixel_events() {
         &mut expected_painted_frame.pane_snapshots[0].image_placement_snapshots[0];
     expected_image_placement.image_record = None;
     expected_image_placement.is_available = false;
-    assert_eq!(
-        frame_stream.read_session_event(),
-        SessionEvent::Painted {
-            frame: Box::new(expected_painted_frame),
-        }
-    );
+    assert_eq!(frame_stream.read_painted_frame(), expected_painted_frame);
     assert_eq!(
         frame_stream.read_session_event(),
         rejected_placement_command_event
@@ -1270,14 +1886,14 @@ fn a_kitty_terminal_receives_pixels_once_then_placement_only_frames() {
     frame_stream.send_delivery(Delivery::Frame(Box::new(render_snapshot.clone())));
     let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
 
-    let painted_frame_event = SessionEvent::Painted {
-        frame: Box::new(build_wire_frame(&render_snapshot)),
-    };
-    let [image_start_event, image_chunk_event] = build_image_transfer_events(1, &image_record);
-    assert_eq!(frame_stream.read_session_event(), painted_frame_event);
-    assert_eq!(frame_stream.read_session_event(), image_start_event);
-    assert_eq!(frame_stream.read_session_event(), image_chunk_event);
-    assert_eq!(frame_stream.read_session_event(), painted_frame_event);
+    let [image_start_frame, image_chunk_frame] = build_image_transfer_frames(1, &image_record);
+    assert_eq!(
+        frame_stream.read_painted_frame(),
+        build_wire_frame(&render_snapshot)
+    );
+    assert_eq!(frame_stream.read_next_session_frame(), image_start_frame);
+    assert_eq!(frame_stream.read_next_session_frame(), image_chunk_frame);
+    // The second frame changes nothing the client holds, and sends nothing.
     assert_eq!(
         frame_stream.read_session_event(),
         rejected_placement_command_event
@@ -1322,12 +1938,18 @@ fn image_scroll_return_uses_a_new_identity_and_complete_transfer() {
     }
     let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
 
-    for (render_snapshot, image_content_id, image_record) in [
-        (&visible_image_snapshot, 1, Some(&first_image_record)),
-        (&absent_image_snapshot, 0, None),
-        (&visible_image_snapshot, 2, Some(&first_image_record)),
-        (&absent_image_snapshot, 0, None),
-        (&changed_image_snapshot, 3, Some(&changed_image_record)),
+    // The release of a record follows the frame that stops showing it.
+    for (released_image_content_id, render_snapshot, image_content_id, image_record) in [
+        (None, &visible_image_snapshot, 1, Some(&first_image_record)),
+        (Some(1), &absent_image_snapshot, 0, None),
+        (None, &visible_image_snapshot, 2, Some(&first_image_record)),
+        (Some(2), &absent_image_snapshot, 0, None),
+        (
+            None,
+            &changed_image_snapshot,
+            3,
+            Some(&changed_image_record),
+        ),
     ] {
         let mut expected_painted_frame = build_wire_frame(render_snapshot);
         if let Some(expected_image_placement) = expected_painted_frame
@@ -1337,19 +1959,22 @@ fn image_scroll_return_uses_a_new_identity_and_complete_transfer() {
         {
             expected_image_placement.image_content_id = image_content_id;
         }
-        assert_eq!(
-            frame_stream.read_session_event(),
-            SessionEvent::Painted {
-                frame: Box::new(expected_painted_frame),
-            }
-        );
+        assert_eq!(frame_stream.read_painted_frame(), expected_painted_frame);
+        if let Some(released_image_content_id) = released_image_content_id {
+            assert_eq!(
+                frame_stream.read_session_event(),
+                SessionEvent::ImageContentReleased {
+                    image_content_ids: vec![released_image_content_id]
+                }
+            );
+        }
         let Some(image_record) = image_record else {
             continue;
         };
-        let [image_start_event, image_chunk_event] =
-            build_image_transfer_events(image_content_id, image_record);
-        assert_eq!(frame_stream.read_session_event(), image_start_event);
-        assert_eq!(frame_stream.read_session_event(), image_chunk_event);
+        let [image_start_frame, image_chunk_frame] =
+            build_image_transfer_frames(image_content_id, image_record);
+        assert_eq!(frame_stream.read_next_session_frame(), image_start_frame);
+        assert_eq!(frame_stream.read_next_session_frame(), image_chunk_frame);
     }
     assert_eq!(
         frame_stream.read_session_event(),
@@ -1386,16 +2011,145 @@ fn any_native_terminal_receives_image_content() {
             build_image_snapshot(frame_stream.client_id, Arc::clone(&image_record));
         frame_stream.send_delivery(Delivery::Frame(Box::new(render_snapshot.clone())));
 
-        let [image_start_event, image_chunk_event] = build_image_transfer_events(1, &image_record);
+        let [image_start_frame, image_chunk_frame] = build_image_transfer_frames(1, &image_record);
+        assert_eq!(
+            frame_stream.read_painted_frame(),
+            build_wire_frame(&render_snapshot)
+        );
+        assert_eq!(frame_stream.read_next_session_frame(), image_start_frame);
+        assert_eq!(frame_stream.read_next_session_frame(), image_chunk_frame);
+
+        frame_stream.close_frame_stream();
+    }
+}
+
+#[test]
+fn a_full_hd_image_reaches_the_client_as_raw_chunks_of_its_own_bytes() {
+    let mut frame_stream = AttachedFrameStream::attach_frame_stream(
+        "full-hd-image-chunks",
+        KITTY_GRAPHICS_CAPABILITIES,
+    );
+    let rgba_bytes = build_counting_bytes(1920 * 1080 * 4);
+    let image_record = Arc::new(ImageRecord {
+        protocol: GraphicsProtocol::Kitty,
+        image: (DecodedImage {
+            pixel_width: 1920,
+            pixel_height: 1080,
+            rgba_bytes: rgba_bytes.clone(),
+        })
+        .into(),
+        animation: None,
+        action: ImageAction::Display,
+        display: ImageDisplay::default(),
+        anchor: (0, 0),
+    });
+    let render_snapshot = build_image_snapshot(frame_stream.client_id, Arc::clone(&image_record));
+    frame_stream.send_delivery(Delivery::Frame(Box::new(render_snapshot.clone())));
+
+    assert_eq!(
+        frame_stream.read_painted_frame(),
+        build_wire_frame(&render_snapshot)
+    );
+    assert_eq!(
+        frame_stream.read_next_session_frame(),
+        SessionFrame::Event(SessionEvent::ImageContentStart {
+            image_transfer: build_wire_image_transfer(1, &image_record),
+        })
+    );
+    let mut received_rgba_bytes = Vec::new();
+    let mut chunk_frame_count = 0;
+    let mut chunk_frame_byte_count = 0;
+    loop {
+        let SessionFrame::ImageChunk(image_chunk_frame) = frame_stream.read_next_session_frame()
+        else {
+            panic!("the image's chunks follow its start");
+        };
+        assert_eq!(image_chunk_frame.get_image_transfer_id(), 1);
+        assert_eq!(
+            image_chunk_frame.get_byte_offset(),
+            received_rgba_bytes.len() as u64
+        );
+        let chunk_bytes = image_chunk_frame.get_chunk_bytes();
+        chunk_frame_count += 1;
+        chunk_frame_byte_count += 4 + IMAGE_CHUNK_FRAME_HEAD_BYTE_COUNT + chunk_bytes.len();
+        received_rgba_bytes.extend_from_slice(chunk_bytes);
+        if image_chunk_frame.is_last_chunk() {
+            break;
+        }
+    }
+
+    assert_eq!(chunk_frame_count, 8);
+    assert_eq!(chunk_frame_byte_count, 8_294_400 + 8 * 22);
+    assert_eq!(received_rgba_bytes, rgba_bytes);
+    frame_stream.close_frame_stream();
+}
+
+#[test]
+fn each_frame_of_a_looping_animation_reaches_each_of_two_clients_once() {
+    let mut frame_streams = [
+        AttachedFrameStream::attach_frame_stream(
+            "animation-first-client",
+            KITTY_GRAPHICS_CAPABILITIES,
+        ),
+        AttachedFrameStream::attach_frame_stream(
+            "animation-second-client",
+            KITTY_GRAPHICS_CAPABILITIES,
+        ),
+    ];
+    let animation_frame_records = build_animation_frame_records(30, 1, 1);
+    let animation_snapshots_by_client: Vec<Vec<RenderSnapshot>> = frame_streams
+        .iter()
+        .map(|frame_stream| {
+            let first_snapshot = build_image_snapshot(
+                frame_stream.client_id,
+                Arc::clone(&animation_frame_records[0]),
+            );
+            animation_frame_records
+                .iter()
+                .map(|image_record| {
+                    build_snapshot_showing_record(&first_snapshot, Arc::clone(image_record))
+                })
+                .collect()
+        })
+        .collect();
+
+    // Three loops of 30 frames: frame `n` always travels under content id
+    // `n + 1`, and its pixels follow it in the first loop only.
+    for loop_index in 0..3 {
+        for (frame_index, image_record) in animation_frame_records.iter().enumerate() {
+            let image_content_id = frame_index as u64 + 1;
+            for (frame_stream, animation_snapshots) in
+                frame_streams.iter_mut().zip(&animation_snapshots_by_client)
+            {
+                let animation_snapshot = &animation_snapshots[frame_index];
+                frame_stream.send_delivery(Delivery::Frame(Box::new(animation_snapshot.clone())));
+                let mut expected_painted_frame = build_wire_frame(animation_snapshot);
+                expected_painted_frame.pane_snapshots[0].image_placement_snapshots[0]
+                    .image_content_id = image_content_id;
+
+                assert_eq!(frame_stream.read_painted_frame(), expected_painted_frame);
+                if loop_index == 0 {
+                    for expected_session_frame in
+                        build_image_transfer_frames(image_content_id, image_record)
+                    {
+                        assert_eq!(
+                            frame_stream.read_next_session_frame(),
+                            expected_session_frame
+                        );
+                    }
+                }
+            }
+        }
+    }
+    for frame_stream in &mut frame_streams {
+        let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
         assert_eq!(
             frame_stream.read_session_event(),
-            SessionEvent::Painted {
-                frame: Box::new(build_wire_frame(&render_snapshot)),
-            }
+            rejected_placement_command_event,
+            "nothing else follows the last frame"
         );
-        assert_eq!(frame_stream.read_session_event(), image_start_event);
-        assert_eq!(frame_stream.read_session_event(), image_chunk_event);
-
+    }
+    for frame_stream in frame_streams {
         frame_stream.close_frame_stream();
     }
 }
@@ -1478,28 +2232,32 @@ fn a_kitty_terminal_receives_more_than_4096_placements_in_bounded_batches() {
     render_snapshot.pane_snapshots.push(second_pane_snapshot);
     frame_stream.send_delivery(Delivery::Frame(Box::new(render_snapshot.clone())));
     let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
-    let painted_frame_event = SessionEvent::Painted {
-        frame: Box::new(build_wire_frame(&render_snapshot)),
-    };
+    let painted_frame = build_wire_frame(&render_snapshot);
 
-    assert_eq!(frame_stream.read_session_event(), painted_frame_event);
+    assert_eq!(frame_stream.read_painted_frame(), painted_frame);
     for image_transfer_index in 1..=MAX_FRAME_IMAGE_TRANSFER_COUNT {
         let image_content_id =
             u64::try_from(image_transfer_index).expect("the content identity fits");
-        let [image_start_event, image_chunk_event] = build_image_transfer_events(
+        let [image_start_frame, image_chunk_frame] = build_image_transfer_frames(
             image_content_id,
             &build_red_image_record(image_content_id),
         );
-        assert_eq!(frame_stream.read_session_event(), image_start_event);
-        assert_eq!(frame_stream.read_session_event(), image_chunk_event);
+        assert_eq!(frame_stream.read_next_session_frame(), image_start_frame);
+        assert_eq!(frame_stream.read_next_session_frame(), image_chunk_frame);
     }
-    assert_eq!(frame_stream.read_session_event(), painted_frame_event);
-    let [last_image_start_event, last_image_chunk_event] = build_image_transfer_events(
+    assert_eq!(frame_stream.read_painted_frame(), painted_frame);
+    let [last_image_start_frame, last_image_chunk_frame] = build_image_transfer_frames(
         last_image_content_id,
         &build_red_image_record(last_image_content_id),
     );
-    assert_eq!(frame_stream.read_session_event(), last_image_start_event);
-    assert_eq!(frame_stream.read_session_event(), last_image_chunk_event);
+    assert_eq!(
+        frame_stream.read_next_session_frame(),
+        last_image_start_frame
+    );
+    assert_eq!(
+        frame_stream.read_next_session_frame(),
+        last_image_chunk_frame
+    );
     assert_eq!(
         frame_stream.read_session_event(),
         rejected_placement_command_event
@@ -1535,8 +2293,10 @@ fn replacing_one_placement_record_assigns_a_new_content_identity() {
         list_painted_image_content_ids(&initial_prepared_frame.painted_frame),
         vec![1]
     );
-    assert_eq!(initial_prepared_frame.image_uploads.len(), 1);
-    assert_eq!(initial_prepared_frame.image_uploads[0].0, 1);
+    assert_eq!(
+        list_upload_content_ids(&initial_prepared_frame.image_uploads),
+        vec![1]
+    );
     assert!(Arc::ptr_eq(
         &initial_prepared_frame.image_uploads[0].1,
         &first_image_record
@@ -1549,12 +2309,22 @@ fn replacing_one_placement_record_assigns_a_new_content_identity() {
         list_painted_image_content_ids(&replacement_prepared_frame.painted_frame),
         vec![2]
     );
-    assert_eq!(replacement_prepared_frame.image_uploads.len(), 1);
-    assert_eq!(replacement_prepared_frame.image_uploads[0].0, 2);
+    assert_eq!(
+        list_upload_content_ids(&replacement_prepared_frame.image_uploads),
+        vec![2]
+    );
     assert!(Arc::ptr_eq(
         &replacement_prepared_frame.image_uploads[0].1,
         &second_image_record
     ));
+    assert_eq!(
+        initial_prepared_frame.released_image_content_ids,
+        Vec::<u64>::new()
+    );
+    assert_eq!(
+        replacement_prepared_frame.released_image_content_ids,
+        vec![1]
+    );
 }
 
 #[test]
@@ -1602,8 +2372,591 @@ fn clearing_after_a_write_failure_resets_the_client_before_reusing_content_ids()
         list_painted_image_content_ids(&prepared_frame_after_clear.painted_frame),
         vec![1]
     );
-    assert_eq!(prepared_frame_after_clear.image_uploads.len(), 1);
-    assert_eq!(prepared_frame_after_clear.image_uploads[0].0, 1);
+    assert_eq!(
+        list_upload_content_ids(&prepared_frame_after_clear.image_uploads),
+        vec![1]
+    );
+}
+
+#[test]
+fn a_looping_animation_sends_each_frame_once_to_each_connection() {
+    // A 30-frame 480×270 animation through 3 loops on 2 connections: frame
+    // `n` travels under content id `n + 1`, its pixels go out in the first
+    // loop only, and nothing is released.
+    let animation_frame_records = build_animation_frame_records(30, 480, 270);
+    let base_snapshot =
+        build_image_snapshot(ClientId::new(), Arc::clone(&animation_frame_records[0]));
+    let mut image_caches = [ConnectionImageCache::new(), ConnectionImageCache::new()];
+
+    for loop_index in 0..3 {
+        for (frame_index, image_record) in animation_frame_records.iter().enumerate() {
+            let image_content_id = frame_index as u64 + 1;
+            let animation_snapshot =
+                build_snapshot_showing_record(&base_snapshot, Arc::clone(image_record));
+            for image_cache in &mut image_caches {
+                let prepared_image_frame = image_cache.prepare_image_frame(&animation_snapshot);
+
+                let expected_upload_content_ids = if loop_index == 0 {
+                    vec![image_content_id]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(
+                    list_upload_content_ids(&prepared_image_frame.image_uploads),
+                    expected_upload_content_ids
+                );
+                assert_eq!(
+                    prepared_image_frame.released_image_content_ids,
+                    Vec::<u64>::new()
+                );
+                assert_eq!(
+                    list_painted_image_availability(&prepared_image_frame.painted_frame),
+                    vec![(image_content_id, true)]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn an_animation_that_does_not_fit_beside_the_other_images_travels_frame_by_frame() {
+    // A 40 MiB image and one 10 MiB frame of a 3-frame animation show: 50
+    // MiB. All 3 frames need 70 MiB, over the 64 MiB the client holds, so
+    // each frame is sent under a new id and the frame before it is released.
+    let static_image_record = build_sized_image_record(1, 4096, 2560);
+    let animation_frame_records = build_animation_frame_records(3, 2048, 1280);
+    let base_snapshot = build_image_snapshot(ClientId::new(), Arc::clone(&static_image_record));
+    let mut image_cache = ConnectionImageCache::new();
+    let expected_steps: [(usize, Vec<u64>, Vec<u64>, u64); 4] = [
+        (0, vec![1, 2], Vec::new(), 2),
+        (1, vec![3], vec![2], 3),
+        (2, vec![4], vec![3], 4),
+        (0, vec![5], vec![4], 5),
+    ];
+
+    for (
+        frame_index,
+        expected_upload_content_ids,
+        expected_released_content_ids,
+        frame_content_id,
+    ) in expected_steps
+    {
+        let render_snapshot = build_snapshot_showing_records(
+            &base_snapshot,
+            &[
+                Arc::clone(&static_image_record),
+                Arc::clone(&animation_frame_records[frame_index]),
+            ],
+        );
+
+        let prepared_image_frame = image_cache.prepare_image_frame(&render_snapshot);
+
+        assert_eq!(
+            list_upload_content_ids(&prepared_image_frame.image_uploads),
+            expected_upload_content_ids
+        );
+        assert_eq!(
+            prepared_image_frame.released_image_content_ids,
+            expected_released_content_ids
+        );
+        assert_eq!(
+            list_painted_image_availability(&prepared_image_frame.painted_frame),
+            vec![(1, true), (frame_content_id, true)]
+        );
+    }
+}
+
+#[test]
+fn images_past_the_byte_budget_travel_without_their_records() {
+    // Three 30 MiB images in one frame: the first two fit the 64 MiB the
+    // client holds and are sent. The third travels with its own content id
+    // 3, no record and `is_available` `false`, and is not sent.
+    let image_records = [
+        build_sized_image_record(1, 4096, 1920),
+        build_sized_image_record(2, 4096, 1920),
+        build_sized_image_record(3, 4096, 1920),
+    ];
+    let base_snapshot = build_image_snapshot(ClientId::new(), Arc::clone(&image_records[0]));
+    let render_snapshot = build_snapshot_showing_records(&base_snapshot, &image_records);
+    let mut image_cache = ConnectionImageCache::new();
+
+    let prepared_image_frame = image_cache.prepare_image_frame(&render_snapshot);
+
+    assert_eq!(
+        list_upload_content_ids(&prepared_image_frame.image_uploads),
+        vec![1, 2]
+    );
+    assert_eq!(
+        list_painted_image_availability(&prepared_image_frame.painted_frame),
+        vec![(1, true), (2, true), (3, false)]
+    );
+    assert_eq!(
+        prepared_image_frame.painted_frame.pane_snapshots[0].image_placement_snapshots[2]
+            .image_record,
+        None
+    );
+}
+
+#[test]
+fn images_that_fill_the_byte_budget_exactly_travel_with_their_records() {
+    // Two 32 MiB images in one frame fill the 64 MiB the client holds
+    // exactly: both are sent.
+    let image_records = [
+        build_sized_image_record(1, 4096, 2048),
+        build_sized_image_record(2, 4096, 2048),
+    ];
+    let base_snapshot = build_image_snapshot(ClientId::new(), Arc::clone(&image_records[0]));
+    let render_snapshot = build_snapshot_showing_records(&base_snapshot, &image_records);
+    let mut image_cache = ConnectionImageCache::new();
+
+    let prepared_image_frame = image_cache.prepare_image_frame(&render_snapshot);
+
+    assert_eq!(
+        list_upload_content_ids(&prepared_image_frame.image_uploads),
+        vec![1, 2]
+    );
+    assert_eq!(
+        list_painted_image_availability(&prepared_image_frame.painted_frame),
+        vec![(1, true), (2, true)]
+    );
+}
+
+#[test]
+fn an_animation_that_fills_the_byte_budget_exactly_stays_whole() {
+    // Four 16 MiB frames fill the 64 MiB the client holds exactly. Each
+    // frame is sent once, nothing is released, and frame 0 returns under
+    // id 1 with no pixels.
+    let animation_frame_records = build_animation_frame_records(4, 2048, 2048);
+    let base_snapshot =
+        build_image_snapshot(ClientId::new(), Arc::clone(&animation_frame_records[0]));
+    let mut image_cache = ConnectionImageCache::new();
+    let expected_steps: [(usize, Vec<u64>, u64); 5] = [
+        (0, vec![1], 1),
+        (1, vec![2], 2),
+        (2, vec![3], 3),
+        (3, vec![4], 4),
+        (0, Vec::new(), 1),
+    ];
+
+    for (frame_index, expected_upload_content_ids, frame_content_id) in expected_steps {
+        let render_snapshot = build_snapshot_showing_records(
+            &base_snapshot,
+            &[Arc::clone(&animation_frame_records[frame_index])],
+        );
+
+        let prepared_image_frame = image_cache.prepare_image_frame(&render_snapshot);
+
+        assert_eq!(
+            list_upload_content_ids(&prepared_image_frame.image_uploads),
+            expected_upload_content_ids
+        );
+        assert_eq!(
+            prepared_image_frame.released_image_content_ids,
+            Vec::<u64>::new()
+        );
+        assert_eq!(
+            list_painted_image_availability(&prepared_image_frame.painted_frame),
+            vec![(frame_content_id, true)]
+        );
+    }
+}
+
+#[test]
+fn a_frame_image_that_does_not_fit_beside_a_held_preview_travels_without_its_record() {
+    // Frame 1 shows the small `first_frame_image` under id 1. The preview
+    // that answers request 5 shows the 40 MiB `preview_image` under id 2. The
+    // next frame shows the 40 MiB `next_frame_image`, which does not fit
+    // beside `preview_image`: `next_frame_image` travels with its own content
+    // id 1, no record and `is_available` `false`, and `first_frame_image` is
+    // released.
+    let first_frame_image = build_image_record(1);
+    let preview_image = build_sized_image_record(2, 4096, 2560);
+    let next_frame_image = build_sized_image_record(3, 4096, 2560);
+    let frame_snapshot = build_image_snapshot(ClientId::new(), Arc::clone(&first_frame_image));
+    let placement_snapshot =
+        build_placement_snapshot_showing_records(&frame_snapshot, &[Arc::clone(&preview_image)]);
+    let mut image_cache = ConnectionImageCache::new();
+    image_cache.prepare_image_frame(&frame_snapshot);
+    let prepared_placement_snapshot =
+        image_cache.prepare_placement_snapshot(5, 1, &placement_snapshot);
+
+    let prepared_image_frame = image_cache.prepare_image_frame(&build_snapshot_showing_records(
+        &frame_snapshot,
+        &[next_frame_image],
+    ));
+
+    assert_eq!(
+        list_upload_content_ids(&prepared_placement_snapshot.image_uploads),
+        vec![2]
+    );
+    assert_eq!(
+        list_upload_content_ids(&prepared_image_frame.image_uploads),
+        Vec::<u64>::new()
+    );
+    assert_eq!(prepared_image_frame.released_image_content_ids, vec![1]);
+    assert_eq!(
+        list_painted_image_availability(&prepared_image_frame.painted_frame),
+        vec![(1, false)]
+    );
+}
+
+#[test]
+fn a_preview_image_that_does_not_fit_beside_the_frame_travels_without_its_record() {
+    // The frame shows the 40 MiB `frame_image` under id 1. The preview shows
+    // the 40 MiB `preview_image`, which does not fit beside `frame_image`:
+    // `preview_image` travels with its own content id 1, no record and
+    // `is_available` `false`, and nothing is released.
+    let frame_image = build_sized_image_record(1, 4096, 2560);
+    let preview_image = build_sized_image_record(2, 4096, 2560);
+    let frame_snapshot = build_image_snapshot(ClientId::new(), Arc::clone(&frame_image));
+    let placement_snapshot =
+        build_placement_snapshot_showing_records(&frame_snapshot, &[Arc::clone(&preview_image)]);
+    let mut image_cache = ConnectionImageCache::new();
+    image_cache.prepare_image_frame(&frame_snapshot);
+
+    let prepared_placement_snapshot =
+        image_cache.prepare_placement_snapshot(5, 1, &placement_snapshot);
+
+    assert_eq!(
+        list_upload_content_ids(&prepared_placement_snapshot.image_uploads),
+        Vec::<u64>::new()
+    );
+    assert_eq!(
+        prepared_placement_snapshot.released_image_content_ids,
+        Vec::<u64>::new()
+    );
+    assert_eq!(
+        prepared_placement_snapshot
+            .placement_snapshot
+            .source_tab_snapshot
+            .pane_snapshots[0]
+            .image_placement_snapshots
+            .iter()
+            .map(|image_placement| (
+                image_placement.image_content_id,
+                image_placement.is_available
+            ))
+            .collect::<Vec<_>>(),
+        vec![(1, false)]
+    );
+}
+
+#[test]
+fn a_placement_preview_keeps_its_records_until_a_paint_report_leaves_it_out() {
+    // Frame 1 shows `frame_image`. The preview that answers request 5 goes
+    // out after update 1 and shows `frame_image` and `preview_only_image`.
+    // `preview_only_image` stays while a report could come from a client
+    // that holds the preview: a report of update 1, and a report of update 2
+    // that names request 5. A report of update 2 that names no preview
+    // releases `preview_only_image`.
+    let frame_image = build_image_record(1);
+    let preview_only_image = build_image_record(4);
+    let frame_snapshot = build_image_snapshot(ClientId::new(), Arc::clone(&frame_image));
+    let placement_snapshot = build_placement_snapshot_showing_records(
+        &frame_snapshot,
+        &[Arc::clone(&frame_image), Arc::clone(&preview_only_image)],
+    );
+    let mut image_cache = ConnectionImageCache::new();
+
+    let first_prepared_frame = image_cache.prepare_image_frame(&frame_snapshot);
+    let prepared_placement_snapshot =
+        image_cache.prepare_placement_snapshot(5, 1, &placement_snapshot);
+    let second_prepared_frame = image_cache.prepare_image_frame(&frame_snapshot);
+
+    assert_eq!(
+        list_upload_content_ids(&first_prepared_frame.image_uploads),
+        vec![1]
+    );
+    assert_eq!(
+        list_upload_content_ids(&prepared_placement_snapshot.image_uploads),
+        vec![2]
+    );
+    assert_eq!(
+        prepared_placement_snapshot.released_image_content_ids,
+        Vec::<u64>::new()
+    );
+    assert_eq!(
+        second_prepared_frame.released_image_content_ids,
+        Vec::<u64>::new()
+    );
+    assert_eq!(image_cache.record_paint_report(1, None), Vec::<u64>::new());
+    assert_eq!(
+        image_cache.record_paint_report(2, Some(5)),
+        Vec::<u64>::new()
+    );
+    assert_eq!(image_cache.record_paint_report(2, None), vec![2]);
+    assert_eq!(
+        list_upload_content_ids(
+            &image_cache
+                .prepare_image_frame(&build_image_snapshot(ClientId::new(), preview_only_image))
+                .image_uploads
+        ),
+        vec![3]
+    );
+}
+
+#[test]
+fn a_frame_that_shows_an_image_a_preview_sent_reuses_its_record() {
+    // The preview sent `preview_image` under id 2. The next frame shows
+    // `preview_image` in place of `first_frame_image`: it names id 2, sends no
+    // pixels, and releases `first_frame_image`.
+    let first_frame_image = build_image_record(1);
+    let preview_image = build_image_record(2);
+    let frame_snapshot = build_image_snapshot(ClientId::new(), Arc::clone(&first_frame_image));
+    let placement_snapshot =
+        build_placement_snapshot_showing_records(&frame_snapshot, &[Arc::clone(&preview_image)]);
+    let mut image_cache = ConnectionImageCache::new();
+    image_cache.prepare_image_frame(&frame_snapshot);
+    image_cache.prepare_placement_snapshot(5, 1, &placement_snapshot);
+
+    let prepared_image_frame = image_cache.prepare_image_frame(&build_snapshot_showing_record(
+        &frame_snapshot,
+        preview_image,
+    ));
+
+    assert_eq!(
+        list_upload_content_ids(&prepared_image_frame.image_uploads),
+        Vec::<u64>::new()
+    );
+    assert_eq!(prepared_image_frame.released_image_content_ids, vec![1]);
+    assert_eq!(
+        list_painted_image_availability(&prepared_image_frame.painted_frame),
+        vec![(2, true)]
+    );
+}
+
+#[test]
+fn an_image_shown_again_after_its_release_gets_a_new_identity() {
+    let shown_image = build_image_record(1);
+    let frame_snapshot = build_image_snapshot(ClientId::new(), Arc::clone(&shown_image));
+    let empty_snapshot = build_snapshot_showing_records(&frame_snapshot, &[]);
+    let mut image_cache = ConnectionImageCache::new();
+    image_cache.prepare_image_frame(&frame_snapshot);
+
+    let empty_prepared_frame = image_cache.prepare_image_frame(&empty_snapshot);
+    let returning_prepared_frame = image_cache.prepare_image_frame(&frame_snapshot);
+
+    assert_eq!(empty_prepared_frame.released_image_content_ids, vec![1]);
+    assert_eq!(
+        list_upload_content_ids(&returning_prepared_frame.image_uploads),
+        vec![2]
+    );
+}
+
+#[test]
+fn an_image_the_next_frame_stops_showing_is_released_after_that_frame_and_before_its_records() {
+    let mut frame_stream = AttachedFrameStream::attach_frame_stream(
+        "image-release-order",
+        KITTY_GRAPHICS_CAPABILITIES,
+    );
+    let first_image_record = build_image_record(1);
+    let second_image_record = build_image_record(2);
+    let first_snapshot =
+        build_image_snapshot(frame_stream.client_id, Arc::clone(&first_image_record));
+    let second_snapshot =
+        build_snapshot_showing_record(&first_snapshot, Arc::clone(&second_image_record));
+    frame_stream.send_delivery(Delivery::Frame(Box::new(first_snapshot.clone())));
+    assert_eq!(
+        frame_stream.read_painted_frame(),
+        build_wire_frame(&first_snapshot)
+    );
+    for expected_session_frame in build_image_transfer_frames(1, &first_image_record) {
+        assert_eq!(
+            frame_stream.read_next_session_frame(),
+            expected_session_frame
+        );
+    }
+
+    frame_stream.send_delivery(Delivery::Frame(Box::new(second_snapshot.clone())));
+
+    let mut expected_painted_frame = build_wire_frame(&second_snapshot);
+    expected_painted_frame.pane_snapshots[0].image_placement_snapshots[0].image_content_id = 2;
+    assert_eq!(frame_stream.read_painted_frame(), expected_painted_frame);
+    assert_eq!(
+        frame_stream.read_session_event(),
+        SessionEvent::ImageContentReleased {
+            image_content_ids: vec![1]
+        }
+    );
+    for expected_session_frame in build_image_transfer_frames(2, &second_image_record) {
+        assert_eq!(
+            frame_stream.read_next_session_frame(),
+            expected_session_frame
+        );
+    }
+    frame_stream.close_frame_stream();
+}
+
+#[test]
+fn an_update_over_the_frame_cap_sends_no_release_and_the_next_update_resets_the_records() {
+    // Update 2 stops showing record 1, and its session name alone is as long
+    // as the frame cap: the update is not sent, and no release of record 1
+    // follows it. The next update follows an image cache reset.
+    let mut frame_stream = AttachedFrameStream::attach_frame_stream(
+        "image-release-over-cap",
+        KITTY_GRAPHICS_CAPABILITIES,
+    );
+    let image_record = build_image_record(1);
+    let image_snapshot = build_image_snapshot(frame_stream.client_id, Arc::clone(&image_record));
+    let empty_snapshot = build_snapshot_showing_records(&image_snapshot, &[]);
+    let mut oversized_snapshot = empty_snapshot.clone();
+    oversized_snapshot.session_snapshot.session_name =
+        "a".repeat(transport::MAX_FRAME_BYTE_COUNT as usize);
+    frame_stream.send_delivery(Delivery::Frame(Box::new(image_snapshot.clone())));
+    assert_eq!(
+        frame_stream.read_painted_frame(),
+        build_wire_frame(&image_snapshot)
+    );
+    for expected_session_frame in build_image_transfer_frames(1, &image_record) {
+        assert_eq!(
+            frame_stream.read_next_session_frame(),
+            expected_session_frame
+        );
+    }
+
+    frame_stream.send_delivery(Delivery::Frame(Box::new(oversized_snapshot)));
+    frame_stream.send_delivery(Delivery::Frame(Box::new(empty_snapshot.clone())));
+    let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
+
+    assert_eq!(
+        frame_stream.read_session_event(),
+        SessionEvent::ImageCacheReset
+    );
+    assert_eq!(
+        frame_stream.read_painted_frame(),
+        build_wire_frame(&empty_snapshot)
+    );
+    assert_eq!(
+        frame_stream.read_session_event(),
+        rejected_placement_command_event
+    );
+    frame_stream.close_frame_stream();
+}
+
+#[test]
+fn every_image_release_names_no_record_the_newest_update_or_the_held_preview_shows() {
+    // Images 1 to 6 take content ids 1 to 6 in the order they first show.
+    // The third update shows no image, and the release of id 3, which only
+    // the second update showed, follows it.
+    let mut frame_stream =
+        AttachedFrameStream::attach_frame_stream("image-release-rule", KITTY_GRAPHICS_CAPABILITIES);
+    let image_records: Vec<Arc<ImageRecord>> = (1..=6).map(build_image_record).collect();
+    let base_snapshot = build_image_snapshot(frame_stream.client_id, Arc::clone(&image_records[0]));
+    let list_image_records = |image_indexes: &[usize]| -> Vec<Arc<ImageRecord>> {
+        image_indexes
+            .iter()
+            .map(|image_index| Arc::clone(&image_records[*image_index]))
+            .collect()
+    };
+    let build_frame_delivery = |image_indexes: &[usize]| {
+        Delivery::Frame(Box::new(build_snapshot_showing_records(
+            &base_snapshot,
+            &list_image_records(image_indexes),
+        )))
+    };
+    let build_preview_delivery =
+        |request_id: u64, image_indexes: &[usize]| Delivery::PanePlacementSnapshot {
+            request_id,
+            snapshot: Box::new(build_placement_snapshot_showing_records(
+                &base_snapshot,
+                &list_image_records(image_indexes),
+            )),
+        };
+    for delivery in [
+        build_frame_delivery(&[0]),
+        build_preview_delivery(5, &[0, 1]),
+        build_frame_delivery(&[2]),
+        build_preview_delivery(6, &[3]),
+        build_frame_delivery(&[]),
+        build_frame_delivery(&[3, 4]),
+        build_preview_delivery(7, &[5]),
+        build_frame_delivery(&[4]),
+        build_frame_delivery(&[]),
+    ] {
+        frame_stream.send_delivery(delivery);
+    }
+    let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
+
+    let released_image_content_ids =
+        read_frames_checking_image_releases(&mut frame_stream, &rejected_placement_command_event);
+
+    assert!(
+        released_image_content_ids.contains(&3),
+        "released {released_image_content_ids:?}"
+    );
+    frame_stream.close_frame_stream();
+}
+
+#[test]
+fn a_paint_report_after_a_preview_releases_the_records_only_the_preview_showed() {
+    // The preview that answers request 5 shows `frame_image` and
+    // `preview_only_image`, and `preview_only_image` travels under id 2. The
+    // client reads update 2 and reports it holding no preview: the session
+    // releases `preview_only_image` at once.
+    let mut frame_stream =
+        AttachedFrameStream::attach_frame_stream("preview-release", KITTY_GRAPHICS_CAPABILITIES);
+    let frame_image = build_image_record(1);
+    let preview_only_image = build_image_record(4);
+    let first_snapshot = build_image_snapshot(frame_stream.client_id, Arc::clone(&frame_image));
+    let mut second_snapshot = first_snapshot.clone();
+    second_snapshot.pane_snapshots[0]
+        .cursor_snapshot
+        .column_index = 1;
+    let placement_snapshot = build_placement_snapshot_showing_records(
+        &first_snapshot,
+        &[Arc::clone(&frame_image), Arc::clone(&preview_only_image)],
+    );
+    frame_stream.send_delivery(Delivery::Frame(Box::new(first_snapshot.clone())));
+    assert_eq!(
+        frame_stream.read_painted_frame(),
+        build_wire_frame(&first_snapshot)
+    );
+    for expected_session_frame in build_image_transfer_frames(1, &frame_image) {
+        assert_eq!(
+            frame_stream.read_next_session_frame(),
+            expected_session_frame
+        );
+    }
+    frame_stream.send_delivery(Delivery::PanePlacementSnapshot {
+        request_id: 5,
+        snapshot: Box::new(placement_snapshot.clone()),
+    });
+    let mut next_image_content_id = 0;
+    assert_eq!(
+        frame_stream.read_session_event(),
+        SessionEvent::PanePlacementSnapshot {
+            request_id: 5,
+            snapshot: Box::new(
+                crate::runtime::frame::build_wire_placement_snapshot_with_content_ids(
+                    &placement_snapshot,
+                    |_, _| {
+                        next_image_content_id += 1;
+                        Some(next_image_content_id)
+                    },
+                )
+            ),
+        }
+    );
+    for expected_session_frame in build_image_transfer_frames(2, &preview_only_image) {
+        assert_eq!(
+            frame_stream.read_next_session_frame(),
+            expected_session_frame
+        );
+    }
+
+    frame_stream.send_delivery(Delivery::Frame(Box::new(second_snapshot.clone())));
+
+    assert_eq!(
+        frame_stream.read_painted_frame(),
+        build_wire_frame(&second_snapshot)
+    );
+    assert_eq!(
+        frame_stream.read_session_event(),
+        SessionEvent::ImageContentReleased {
+            image_content_ids: vec![2]
+        }
+    );
+    frame_stream.close_frame_stream();
 }
 
 /// A served socket in a fresh runtime directory, with a stand-in dispatcher
@@ -1780,16 +3133,6 @@ fn build_hello_request(runtime_directory: &Path, session_id: SessionId) -> IpcRe
                 .connection_token,
             is_remote: false,
         },
-    }
-}
-
-/// The answer an accepted Hello earns: [`PROTOCOL_VERSION`], the version of
-/// the build the session runs, and the session's own process image.
-fn build_accepted_hello_result() -> IpcResult {
-    IpcResult::Hello {
-        protocol_version: PROTOCOL_VERSION,
-        build_version: env!("CARGO_PKG_VERSION").to_string(),
-        process_image_id: ProcessImageId::get_own(),
     }
 }
 
@@ -2682,7 +4025,7 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
     };
     assert_eq!(detached_client_id, client_id);
 
-    // The goodbye is the first frame after the attach reply: none of the five
+    // The goodbye is the first frame after the attach reply: none of the six
     // requests above was answered with an `IpcResponse`.
     assert_eq!(
         connection.recv::<SessionEvent>().expect("goodbye frame"),
@@ -3732,20 +5075,18 @@ fn the_directory_other_local_users_reach_holds_only_the_socket() {
     delete_test_directory(&shared_directory);
 }
 
-/// A stand-in dispatcher that answers every restart request with
-/// `restart_verdict`, every discovery request with `session_overview`, and
-/// each `IpcPrepare` probe ([`answer_prepare_probe`]). Exits when every inbox
-/// sender is gone.
+/// A stand-in dispatcher that takes every restart request, answers every
+/// discovery request with `session_overview`, and answers each `IpcPrepare`
+/// probe ([`answer_prepare_probe`]). Exits when every inbox sender is gone.
 fn spawn_restart_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
-    restart_verdict: Result<(), RestartRefusal>,
     session_overview: Option<SessionOverview>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
         for runtime_event in inbox_receiver.iter().filter_map(answer_prepare_probe) {
             match runtime_event {
                 RuntimeEvent::IpcRestart { response_sender } => {
-                    let _ = response_sender.send(restart_verdict.clone());
+                    let _ = response_sender.send(());
                 }
                 RuntimeEvent::IpcDiscovery { response_sender } => {
                     let _ = response_sender.send(session_overview.clone());
@@ -3756,20 +5097,49 @@ fn spawn_restart_dispatcher(
     })
 }
 
-/// A served socket whose stand-in dispatcher answers restart requests with
-/// `restart_verdict` and discovery requests with `session_overview`.
+/// The restart check that answers `restart_verdict` every time it runs.
+fn build_restart_check_answering(restart_verdict: Result<(), RestartRefusal>) -> RestartCheck {
+    Arc::new(move || restart_verdict.clone())
+}
+
+/// What a test session that can replace its image hands its socket: a watch of
+/// `executable_path` for a session that runs `1.0.0`, and `restart_check`.
+fn build_test_image_replacement(
+    executable_path: PathBuf,
+    restart_check: RestartCheck,
+) -> ImageReplacement {
+    ImageReplacement {
+        executable_watch: Arc::new(ExecutableWatch::from_executable_path(
+            executable_path,
+            "1.0.0",
+        )),
+        restart_check,
+    }
+}
+
+/// A served socket whose restart requests run `restart_check`, and whose
+/// stand-in dispatcher takes every restart that passes it and answers
+/// discovery requests with `session_overview`. The watch it serves with names
+/// a program file that does not exist, so it starts no version read.
 fn start_restartable_test_server(
     directory_tag: &str,
-    restart_verdict: Result<(), RestartRefusal>,
+    restart_check: RestartCheck,
     session_overview: Option<SessionOverview>,
 ) -> (IpcServer, SessionId, PathBuf, JoinHandle<()>) {
     let runtime_directory = build_test_runtime_directory(directory_tag);
     let session_id = SessionId::new();
     let (inbox_sender, inbox_receiver) = mpsc::channel();
-    let dispatcher_thread =
-        spawn_restart_dispatcher(inbox_receiver, restart_verdict, session_overview);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let dispatcher_thread = spawn_restart_dispatcher(inbox_receiver, session_overview);
+    let image_replacement =
+        build_test_image_replacement(runtime_directory.join("absent-koshi"), restart_check);
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        None,
+        Some(image_replacement),
+    )
+    .expect("start serving");
     (ipc_server, session_id, runtime_directory, dispatcher_thread)
 }
 
@@ -3807,9 +5177,88 @@ fn request_discovery(connection: &mut Connection, request_id: u64) -> IpcResult 
 }
 
 #[test]
+fn a_restart_to_a_session_that_cannot_replace_its_image_is_refused_without_the_dispatcher() {
+    let runtime_directory = build_test_runtime_directory("restart-unsupported");
+    let session_id = SessionId::new();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (restart_report_sender, restart_report_receiver) = mpsc::channel();
+    let dispatcher_thread =
+        spawn_restart_reporting_dispatcher(inbox_receiver, restart_report_sender);
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+        .expect("start serving");
+
+    let (connection, restart_result) = send_restart_request(&runtime_directory, session_id);
+
+    assert_eq!(
+        restart_result,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::RequestFailed,
+            message: "this koshi cannot replace its own image, so it cannot restart".to_string(),
+        }),
+    );
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+    assert_eq!(
+        restart_report_receiver.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected),
+        "no restart reached the dispatcher"
+    );
+}
+
+#[test]
+fn a_restart_check_that_still_runs_leaves_the_dispatcher_answering_other_requests() {
+    let (check_started_sender, check_started_receiver) = mpsc::channel::<()>();
+    let (check_release_sender, check_release_receiver) = mpsc::channel::<()>();
+    let check_started_sender = std::sync::Mutex::new(check_started_sender);
+    let check_release_receiver = std::sync::Mutex::new(check_release_receiver);
+    let blocking_restart_check: RestartCheck = Arc::new(move || {
+        let _ = check_started_sender
+            .lock()
+            .expect("started sender")
+            .send(());
+        let _ = check_release_receiver
+            .lock()
+            .expect("release receiver")
+            .recv();
+        Ok(())
+    });
+    let session_overview = build_overview_named("still-here");
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread) =
+        start_restartable_test_server(
+            "restart-check-running",
+            blocking_restart_check,
+            Some(session_overview.clone()),
+        );
+    let restart_runtime_directory = runtime_directory.clone();
+    let restart_thread =
+        std::thread::spawn(move || send_restart_request(&restart_runtime_directory, session_id));
+    check_started_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the restart check starts");
+
+    let mut discovery_connection = connect_greeted_connection(&runtime_directory, session_id);
+    let discovery_result = request_discovery(&mut discovery_connection, 2);
+    check_release_sender
+        .send(())
+        .expect("the check is released");
+    let (restart_connection, restart_result) =
+        restart_thread.join().expect("the restart request ends");
+
+    assert_eq!(discovery_result, IpcResult::Overview(session_overview));
+    assert_eq!(restart_result, IpcResult::Restarting);
+    drop(discovery_connection);
+    drop(restart_connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+}
+
+#[test]
 fn an_accepted_restart_is_answered_restarting() {
     let (ipc_server, session_id, runtime_directory, dispatcher_thread) =
-        start_restartable_test_server("restart-accepted", Ok(()), None);
+        start_restartable_test_server(
+            "restart-accepted",
+            build_restart_check_answering(Ok(())),
+            None,
+        );
 
     let (connection, restart_result) = send_restart_request(&runtime_directory, session_id);
 
@@ -3826,7 +5275,7 @@ fn a_restart_before_hello_is_refused_as_hello_required_and_the_connection_keeps_
     let (ipc_server, session_id, runtime_directory, dispatcher_thread) =
         start_restartable_test_server(
             "restart-early",
-            Ok(()),
+            build_restart_check_answering(Ok(())),
             Some(build_overview_named("still-here")),
         );
     let mut connection = connect_to_session_socket(&runtime_directory, session_id);
@@ -3902,8 +5351,10 @@ fn a_restart_naming_a_binary_that_cannot_run_is_refused_and_the_session_keeps_se
     let (ipc_server, session_id, runtime_directory, dispatcher_thread) =
         start_restartable_test_server(
             "restart-bad-binary",
-            crate::server::is_binary_runnable(&executable_path)
-                .map_err(|refusal_reason| RestartRefusal::UnfitProgramFile { refusal_reason }),
+            build_restart_check_answering(
+                crate::server::is_binary_runnable(&executable_path)
+                    .map_err(|refusal_reason| RestartRefusal::UnfitProgramFile { refusal_reason }),
+            ),
             Some(session_overview.clone()),
         );
 
@@ -3947,8 +5398,10 @@ fn a_restart_with_a_pane_that_has_no_terminal_descriptor_is_refused_naming_that_
     let (ipc_server, session_id, runtime_directory, dispatcher_thread) =
         start_restartable_test_server(
             "restart-no-fd",
-            crate::server::can_carry_panes(&carried_panes)
-                .map_err(|refusal_reason| RestartRefusal::PaneNotReady { refusal_reason }),
+            build_restart_check_answering(
+                crate::server::can_carry_panes(&carried_panes)
+                    .map_err(|refusal_reason| RestartRefusal::PaneNotReady { refusal_reason }),
+            ),
             Some(session_overview.clone()),
         );
 
@@ -4129,9 +5582,9 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
         "the detach carries the value the Leaving request named"
     );
     assert_eq!(
-        wait_for_attached_connection_count(&ipc_server, 0),
+        ipc_server.count_attached_connections(),
         0,
-        "the connection is no longer counted once its client has left"
+        "the connection leaves the count before its detach reaches the session"
     );
 
     // The session closes the connection it was serving: the stream carries this
@@ -4146,6 +5599,52 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
     let Err(IpcError::Disconnected) = after_goodbye_result else {
         panic!("expected the connection to end, got {after_goodbye_result:?}");
     };
+
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+}
+
+#[test]
+fn a_connection_that_leaves_drops_from_the_count_before_its_detach_is_handed_over() {
+    let client_id = ClientId::new();
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
+        start_attachable_test_server("leave-count-first", client_id);
+    let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
+    assert_eq!(wait_for_attached_connection_count(&ipc_server, 1), 1);
+
+    // While this test holds the intake's read lock, the serving thread cannot
+    // drop the connection from the count, which takes the write lock.
+    let held_intake_state = ipc_server
+        .connection_intake
+        .intake_state
+        .read()
+        .expect("intake");
+    connection
+        .send(&IpcRequest {
+            request_id: 3,
+            request_kind: IpcRequestKind::Leaving { is_returning: true },
+        })
+        .expect("send leaving");
+    assert_eq!(
+        received_runtime_events
+            .recv_timeout(Duration::from_millis(500))
+            .unwrap_err(),
+        mpsc::RecvTimeoutError::Timeout,
+        "no detach is handed over while the connection is still counted"
+    );
+    drop(held_intake_state);
+
+    let RuntimeEvent::ClientDetached {
+        client_id: detached_client_id,
+        ..
+    } = received_runtime_events
+        .recv_timeout(Duration::from_secs(5))
+        .expect("detach event")
+    else {
+        panic!("expected ClientDetached");
+    };
+    assert_eq!(detached_client_id, client_id);
+    assert_eq!(ipc_server.count_attached_connections(), 0);
 
     drop(connection);
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
@@ -4239,14 +5738,14 @@ fn a_rotated_token_is_advertised_and_the_one_before_it_is_refused() {
 }
 
 #[test]
-fn rotating_the_token_takes_connections_again_after_the_intake_closed() {
-    // After `close_intake`, `rotate_token` opens the intake again on the same
-    // socket.
+fn rotating_the_token_hands_requests_to_the_dispatcher_again_after_they_were_refused() {
+    // After `start_refusing_requests`, `rotate_token` hands requests to the
+    // dispatcher again on the same socket.
     let client_id = ClientId::new();
     let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
         start_attachable_test_server("rotate-reopen", client_id);
 
-    ipc_server.close_intake();
+    ipc_server.start_refusing_requests();
     ipc_server
         .rotate_token()
         .expect("the fresh token is advertised");
@@ -4331,15 +5830,93 @@ fn a_rotation_that_cannot_advertise_the_fresh_token_refuses_the_one_before_it() 
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
 }
 
-// --- closing the intake ---
+// --- refusing requests ---
+
+/// How long the refusal tests hold a request unanswered: 100 milliseconds.
+const HELD_ANSWER_DURATION: Duration = Duration::from_millis(100);
+
+/// The deadline the refusal tests give a wait for answers: 30 seconds, far
+/// past the moment the held answer is written.
+const DISTANT_ANSWER_WAIT_DURATION: Duration = Duration::from_secs(30);
+
+/// The longest a wait for answers may take once the held answer is written at
+/// 100 milliseconds: 10 seconds.
+const ANSWER_WAKE_LIMIT_DURATION: Duration = Duration::from_secs(10);
+
+/// The answer that refuses request `request_id` while the session restarts:
+/// [`build_restarting_refusal`] under that request id.
+fn build_restarting_refusal_response(request_id: u64) -> IpcResponse {
+    IpcResponse {
+        request_id: Some(request_id),
+        answer_result: build_restarting_refusal(),
+    }
+}
+
+/// The `Prepare` that hands [`build_test_command_envelope`] over under
+/// request id `2`.
+fn build_prepared_submit_request() -> IpcRequest {
+    IpcRequest {
+        request_id: 2,
+        request_kind: IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(Box::new(
+            build_test_command_envelope(),
+        )))),
+    }
+}
+
+/// The `Commit` of the request held under request id `2`.
+fn build_commit_request() -> IpcRequest {
+    IpcRequest {
+        request_id: 2,
+        request_kind: IpcRequestKind::Commit,
+    }
+}
+
+/// A served socket whose inbox the test reads itself, standing in for the
+/// dispatcher. Returns the server, its session id, the runtime directory and
+/// the inbox.
+fn start_inbox_test_server(
+    directory_tag: &str,
+) -> (IpcServer, SessionId, PathBuf, Receiver<RuntimeEvent>) {
+    let runtime_directory = build_test_runtime_directory(directory_tag);
+    let session_id = SessionId::new();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+        .expect("start serving");
+    (ipc_server, session_id, runtime_directory, inbox_receiver)
+}
+
+/// Wait for answers on `ipc_server` with a deadline
+/// [`DISTANT_ANSWER_WAIT_DURATION`] away, run `write_held_answer`
+/// [`HELD_ANSWER_DURATION`] after the wait starts, and check that the wait
+/// ends with no request unanswered, no sooner than [`HELD_ANSWER_DURATION`]
+/// and before [`ANSWER_WAKE_LIMIT_DURATION`].
+fn run_answer_wait_around_held_answer(ipc_server: &IpcServer, write_held_answer: impl FnOnce()) {
+    std::thread::scope(|thread_scope| {
+        let wait_started_at = Instant::now();
+        let answer_deadline = wait_started_at + DISTANT_ANSWER_WAIT_DURATION;
+        let answer_wait_thread = thread_scope.spawn(move || {
+            let unanswered_request_count = ipc_server.wait_until_requests_answered(answer_deadline);
+            (unanswered_request_count, Instant::now())
+        });
+        std::thread::sleep(HELD_ANSWER_DURATION);
+        write_held_answer();
+
+        let (unanswered_request_count, wait_ended_at) =
+            answer_wait_thread.join().expect("the wait ends");
+        let wait_duration = wait_ended_at.duration_since(wait_started_at);
+        assert_eq!(unanswered_request_count, 0);
+        assert!(wait_duration >= HELD_ANSWER_DURATION);
+        assert!(wait_duration < ANSWER_WAKE_LIMIT_DURATION);
+    });
+}
 
 #[test]
-fn a_request_a_client_sends_after_the_intake_closes_never_reaches_the_dispatcher() {
+fn a_key_a_client_sends_while_requests_are_refused_never_reaches_the_dispatcher() {
     let client_id = ClientId::new();
     let session_id = SessionId::new();
-    let runtime_directory = build_test_runtime_directory("intake-closed");
+    let runtime_directory = build_test_runtime_directory("intake-refusing");
     // The test keeps an inbox sender of its own. It queues the detach that ends
-    // this client's writing thread after the intake is closed.
+    // this client's writing thread after requests are refused.
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, received_runtime_events) =
         spawn_attaching_dispatcher(inbox_receiver, client_id, session_id);
@@ -4355,7 +5932,7 @@ fn a_request_a_client_sends_after_the_intake_closes_never_reaches_the_dispatcher
     let taken_key_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('a'));
     let refused_key_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('b'));
 
-    // Before the close: the press reaches the dispatcher.
+    // Before the refusal: the press reaches the dispatcher.
     connection
         .send(&IpcRequest {
             request_id: 3,
@@ -4374,18 +5951,22 @@ fn a_request_a_client_sends_after_the_intake_closes_never_reaches_the_dispatcher
     assert_eq!(keyboard_client_id, client_id);
     assert_eq!(key_input, build_key_input_for_chord(taken_key_chord));
 
-    ipc_server.close_intake();
+    ipc_server.start_refusing_requests();
+    // The attach was answered: an attached client's connection holds no
+    // request unanswered.
+    assert_eq!(ipc_server.wait_until_requests_answered(Instant::now()), 0);
 
-    // After the close: the send fails outright, the press is read and never
-    // handed over, or the reading loop ends before it reads the press. In each
-    // case no event reaches the dispatcher, including the detach the
-    // connection's own ending queues.
-    let _ = connection.send(&IpcRequest {
-        request_id: 4,
-        request_kind: IpcRequestKind::Keyboard {
-            key_input: build_key_input_for_chord(refused_key_chord),
-        },
-    });
+    // After the refusal: the press is read and never handed over, and the
+    // reading loop ends. No event reaches the dispatcher, including the
+    // detach the connection's own ending queues.
+    connection
+        .send(&IpcRequest {
+            request_id: 4,
+            request_kind: IpcRequestKind::Keyboard {
+                key_input: build_key_input_for_chord(refused_key_chord),
+            },
+        })
+        .expect("send the key press the session refuses");
     assert_eq!(
         received_runtime_events
             .recv_timeout(Duration::from_secs(2))
@@ -4409,33 +5990,149 @@ fn a_request_a_client_sends_after_the_intake_closes_never_reaches_the_dispatcher
 }
 
 #[test]
-fn a_connection_accepted_after_the_intake_closes_is_not_served() {
-    let client_id = ClientId::new();
-    let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
-        start_attachable_test_server("intake-closed-accept", client_id);
+fn a_connection_accepted_while_requests_are_refused_has_its_hello_answered_and_its_request_refused()
+{
+    let (ipc_server, session_id, runtime_directory, inbox_receiver) =
+        start_inbox_test_server("refusing-accept");
 
-    ipc_server.close_intake();
+    ipc_server.start_refusing_requests();
 
-    let mut connection = connect_to_session_socket(&runtime_directory, session_id);
-    // The send can fail when the accept loop drops the connection. The read
-    // that follows reports end of stream in both cases.
-    let _ = connection.send(&build_hello_request(&runtime_directory, session_id));
-    assert!(
-        matches!(
-            connection.recv::<IpcResponse>(),
-            Err(IpcError::Disconnected),
-        ),
-        "a connection accepted after the intake closed is closed unanswered",
-    );
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+    connection
+        .send(&build_prepared_submit_request())
+        .expect("send the Prepare");
+    let prepare_reply: IpcResponse = connection.recv().expect("the Prepare is answered");
+    assert_eq!(prepare_reply, build_restarting_refusal_response(2));
+    assert!(matches!(
+        connection.recv::<IpcResponse>(),
+        Err(IpcError::Disconnected)
+    ));
     assert_eq!(
-        received_runtime_events
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap_err(),
-        mpsc::RecvTimeoutError::Timeout,
+        inbox_receiver.try_recv().unwrap_err(),
+        mpsc::TryRecvError::Empty
+    );
+    assert_eq!(ipc_server.wait_until_requests_answered(Instant::now()), 0);
+
+    drop(connection);
+    ipc_server.shutdown();
+    drop(inbox_receiver);
+    delete_test_directory(&runtime_directory);
+}
+
+#[test]
+fn a_prepared_request_whose_commit_arrives_while_requests_are_refused_is_refused_and_does_not_run()
+{
+    let (ipc_server, session_id, runtime_directory, inbox_receiver) =
+        start_inbox_test_server("refusing-commit");
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+    connection
+        .send(&build_prepared_submit_request())
+        .expect("send the Prepare");
+    answer_next_prepare_probe(&inbox_receiver);
+    let prepare_reply: IpcResponse = connection.recv().expect("the Prepare is answered");
+    assert_eq!(
+        prepare_reply,
+        IpcResponse {
+            request_id: Some(2),
+            answer_result: IpcResult::Prepared,
+        }
+    );
+
+    ipc_server.start_refusing_requests();
+
+    run_answer_wait_around_held_answer(&ipc_server, || {
+        connection
+            .send(&build_commit_request())
+            .expect("send the Commit");
+        let commit_reply: IpcResponse = connection.recv().expect("the Commit is answered");
+        assert_eq!(commit_reply, build_restarting_refusal_response(2));
+    });
+    assert!(matches!(
+        connection.recv::<IpcResponse>(),
+        Err(IpcError::Disconnected)
+    ));
+    assert_eq!(
+        inbox_receiver.try_recv().unwrap_err(),
+        mpsc::TryRecvError::Empty
     );
 
     drop(connection);
-    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+    ipc_server.shutdown();
+    drop(inbox_receiver);
+    delete_test_directory(&runtime_directory);
+}
+
+#[test]
+fn a_request_handed_over_before_the_refusal_is_answered_and_the_wait_ends_once_that_answer_is_written(
+) {
+    let (ipc_server, session_id, runtime_directory, inbox_receiver) =
+        start_inbox_test_server("refusing-answered");
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+    connection
+        .send(&build_prepared_submit_request())
+        .expect("send the Prepare");
+    answer_next_prepare_probe(&inbox_receiver);
+    let _: IpcResponse = connection.recv().expect("the Prepare is answered");
+    connection
+        .send(&build_commit_request())
+        .expect("send the Commit");
+    let Ok(RuntimeEvent::Ipc {
+        command_envelope,
+        response_sender,
+    }) = inbox_receiver.recv()
+    else {
+        panic!("expected the committed command");
+    };
+    let command_result = CommandResult::Ok {
+        command_id: command_envelope.command_id,
+        emitted_events: Vec::new(),
+    };
+
+    ipc_server.start_refusing_requests();
+
+    run_answer_wait_around_held_answer(&ipc_server, || {
+        response_sender
+            .send(command_result.clone())
+            .expect("the serving thread waits for the answer");
+    });
+    let commit_reply: IpcResponse = connection.recv().expect("the Commit is answered");
+    assert_eq!(
+        commit_reply,
+        IpcResponse {
+            request_id: Some(2),
+            answer_result: IpcResult::CommandResult(command_result),
+        }
+    );
+
+    drop(connection);
+    ipc_server.shutdown();
+    drop(inbox_receiver);
+    delete_test_directory(&runtime_directory);
+}
+
+#[test]
+fn the_wait_for_answers_ends_at_its_deadline_with_a_request_still_unanswered() {
+    let intake = Arc::new(Intake::default());
+    let unanswered_request = intake.record_unanswered_request();
+    let wait_started_at = Instant::now();
+
+    let unanswered_request_count =
+        intake.wait_until_requests_answered(wait_started_at + HELD_ANSWER_DURATION);
+
+    assert_eq!(unanswered_request_count, 1);
+    assert!(wait_started_at.elapsed() >= HELD_ANSWER_DURATION);
+    drop(unanswered_request);
+    assert_eq!(intake.wait_until_requests_answered(Instant::now()), 0);
+}
+
+#[test]
+fn the_wait_for_answers_with_no_request_unanswered_ends_at_once() {
+    let intake = Intake::default();
+
+    assert_eq!(
+        intake.wait_until_requests_answered(Instant::now() + DISTANT_ANSWER_WAIT_DURATION),
+        0
+    );
 }
 
 /// A detach event for `client_id` at timestamp `0`, for a client that does not
@@ -4450,19 +6147,31 @@ fn build_detach_event(client_id: ClientId) -> RuntimeEvent {
 }
 
 #[test]
-fn a_closed_intake_hands_nothing_over_until_it_reopens() {
+fn a_refusing_intake_hands_nothing_over_until_it_stops_refusing() {
     let intake = Intake::default();
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let client_id = ClientId::new();
 
-    assert!(intake.hand_over_event(&inbox_sender, build_detach_event(client_id)));
-    intake.close_intake();
-    assert!(!intake.hand_over_event(&inbox_sender, build_detach_event(client_id)));
-    // Closing an intake that is already closed leaves it closed.
-    intake.close_intake();
-    assert!(!intake.hand_over_event(&inbox_sender, build_detach_event(client_id)));
-    intake.reopen_intake();
-    assert!(intake.hand_over_event(&inbox_sender, build_detach_event(client_id)));
+    assert_eq!(
+        intake.hand_over_event(&inbox_sender, build_detach_event(client_id)),
+        Ok(())
+    );
+    intake.start_refusing_requests();
+    assert_eq!(
+        intake.hand_over_event(&inbox_sender, build_detach_event(client_id)),
+        Err(DispatchFailure::Refused)
+    );
+    // Refusing again leaves the intake refusing.
+    intake.start_refusing_requests();
+    assert_eq!(
+        intake.hand_over_event(&inbox_sender, build_detach_event(client_id)),
+        Err(DispatchFailure::Refused)
+    );
+    intake.stop_refusing_requests();
+    assert_eq!(
+        intake.hand_over_event(&inbox_sender, build_detach_event(client_id)),
+        Ok(())
+    );
 
     // The two the intake took, and neither of the two it refused.
     for _ in 0..2 {
@@ -4489,7 +6198,10 @@ fn an_intake_hands_nothing_over_once_the_dispatcher_is_gone() {
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     drop(inbox_receiver);
 
-    assert!(!intake.hand_over_event(&inbox_sender, build_detach_event(ClientId::new())));
+    assert_eq!(
+        intake.hand_over_event(&inbox_sender, build_detach_event(ClientId::new())),
+        Err(DispatchFailure::DispatcherGone)
+    );
 }
 
 #[test]
@@ -4572,7 +6284,8 @@ fn spawn_origin_reporting_dispatcher(
                     response_sender,
                     ..
                 } => {
-                    let (delivery_sender, delivery_receiver) = mpsc::channel();
+                    let (delivery_sender, delivery_receiver) =
+                        create_delivery_queue(SUBSCRIBER_QUEUE_CAPACITY);
                     delivery_senders.push(delivery_sender);
                     if remote_flag_sender.send(is_remote).is_err() {
                         break;
@@ -4675,7 +6388,7 @@ fn spawn_restart_reporting_dispatcher(
     std::thread::spawn(move || {
         for runtime_event in inbox_receiver.iter().filter_map(answer_prepare_probe) {
             if let RuntimeEvent::IpcRestart { response_sender } = runtime_event {
-                let _ = response_sender.send(Ok(()));
+                let _ = response_sender.send(());
                 let _ = restart_report_sender.send(());
             }
         }
@@ -4717,10 +6430,10 @@ fn start_watched_test_server(
         session_id,
         inbox_sender,
         None,
-        Some(Arc::new(ExecutableWatch::new(
+        Some(build_test_image_replacement(
             program_path.clone(),
-            "1.0.0",
-        ))),
+            build_restart_check_answering(Ok(())),
+        )),
     )
     .expect("start serving");
     let replacement_path = write_printing_program(
@@ -4819,7 +6532,10 @@ fn a_hello_refused_for_its_version_reads_the_program_file_the_session_started_fr
         session_id,
         inbox_sender,
         None,
-        Some(Arc::new(ExecutableWatch::new(program_path, "1.0.0"))),
+        Some(build_test_image_replacement(
+            program_path,
+            build_restart_check_answering(Ok(())),
+        )),
     )
     .expect("start serving");
     let mut connection = connect_to_session_socket(&runtime_directory, session_id);
@@ -4976,7 +6692,10 @@ fn a_start_whose_program_file_cannot_be_written_leaves_no_endpoint_file_and_noth
         session_id,
         inbox_sender,
         None,
-        Some(Arc::new(ExecutableWatch::new(program_path, "1.0.0"))),
+        Some(build_test_image_replacement(
+            program_path,
+            build_restart_check_answering(Ok(())),
+        )),
     )
     else {
         panic!("a program file that cannot be written must refuse the start");
@@ -5000,16 +6719,19 @@ fn a_start_whose_program_file_cannot_be_written_leaves_no_endpoint_file_and_noth
     delete_test_directory(&runtime_directory);
 }
 
-/// Run [`restart_into_installed_version`] for `9.9.9` against a stand-in
-/// dispatcher answering `restart_verdict`, on a watch of a program printing
-/// `koshi 1.0.0`, and hand back the restart retry instant the watch holds with
-/// the instants just before and just after the run.
+/// Run [`restart_into_installed_version`] for `9.9.9` with a restart check
+/// answering `restart_verdict`, on a watch of a program printing `koshi
+/// 1.0.0`, against a stand-in dispatcher that takes the restart it is sent.
+/// Hands back the restart retry instant the watch holds, the instants just
+/// before and just after the run, and whether a restart reached the
+/// dispatcher.
 fn run_restart_into_installed_version(
     restart_verdict: Result<(), RestartRefusal>,
 ) -> (
     Option<std::time::Instant>,
     std::time::Instant,
     std::time::Instant,
+    bool,
 ) {
     let program_directory = tempfile::TempDir::new().expect("a program directory");
     let program_path = write_printing_program(
@@ -5018,36 +6740,46 @@ fn run_restart_into_installed_version(
         &program_directory.path().join("started_runs"),
         "koshi 1.0.0",
     );
-    let executable_watch = ExecutableWatch::new(program_path, "1.0.0");
+    let image_replacement =
+        build_test_image_replacement(program_path, build_restart_check_answering(restart_verdict));
     let connection_intake = Intake::default();
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let dispatcher_thread = std::thread::spawn(move || {
-        if let Ok(RuntimeEvent::IpcRestart { response_sender }) = inbox_receiver.recv() {
-            let _ = response_sender.send(restart_verdict);
-        }
+        let Ok(RuntimeEvent::IpcRestart { response_sender }) = inbox_receiver.recv() else {
+            return false;
+        };
+        let _ = response_sender.send(());
+        true
     });
 
     let started_at = std::time::Instant::now();
     restart_into_installed_version(
         &connection_intake,
         &inbox_sender,
-        &executable_watch,
+        &image_replacement,
         "9.9.9",
     );
     let finished_at = std::time::Instant::now();
-    dispatcher_thread.join().expect("the dispatcher ends");
+    drop(inbox_sender);
+    let has_dispatcher_taken_restart = dispatcher_thread.join().expect("the dispatcher ends");
 
-    let restart_retry_at = executable_watch
+    let restart_retry_at = image_replacement
+        .executable_watch
         .watch_state
         .lock()
         .expect("executable watch")
         .restart_retry_at;
-    (restart_retry_at, started_at, finished_at)
+    (
+        restart_retry_at,
+        started_at,
+        finished_at,
+        has_dispatcher_taken_restart,
+    )
 }
 
 #[test]
-fn a_restart_refused_for_a_pane_not_ready_schedules_a_retry_on_the_watch() {
-    let (restart_retry_at, started_at, finished_at) =
+fn a_restart_refused_for_a_pane_not_ready_schedules_a_retry_and_asks_no_dispatcher() {
+    let (restart_retry_at, started_at, finished_at, has_dispatcher_taken_restart) =
         run_restart_into_installed_version(Err(RestartRefusal::PaneNotReady {
             refusal_reason: "a pane is still being written to".to_string(),
         }));
@@ -5062,31 +6794,27 @@ fn a_restart_refused_for_a_pane_not_ready_schedules_a_retry_on_the_watch() {
         "the retry is due 30 s after the refusal: {restart_retry_at:?} is outside \
          {restart_retry_window:?}"
     );
+    assert!(!has_dispatcher_taken_restart);
 }
 
 #[test]
-fn a_restart_refused_for_an_unfit_program_file_schedules_no_retry() {
-    let (restart_retry_at, _started_at, _finished_at) =
+fn a_restart_refused_for_an_unfit_program_file_schedules_no_retry_and_asks_no_dispatcher() {
+    let (restart_retry_at, _started_at, _finished_at, has_dispatcher_taken_restart) =
         run_restart_into_installed_version(Err(RestartRefusal::UnfitProgramFile {
             refusal_reason: "the binary at /x is not executable".to_string(),
         }));
 
     assert_eq!(restart_retry_at, None);
+    assert!(!has_dispatcher_taken_restart);
 }
 
 #[test]
-fn a_restart_refused_for_a_process_that_cannot_replace_its_image_schedules_no_retry() {
-    let (restart_retry_at, _started_at, _finished_at) =
-        run_restart_into_installed_version(Err(RestartRefusal::ImageReplacementUnsupported));
+fn a_restart_into_the_installed_version_that_passes_its_check_reaches_the_dispatcher() {
+    let (restart_retry_at, _started_at, _finished_at, has_dispatcher_taken_restart) =
+        run_restart_into_installed_version(Ok(()));
 
     assert_eq!(restart_retry_at, None);
-}
-
-#[test]
-fn an_accepted_restart_into_the_installed_version_schedules_no_retry() {
-    let (restart_retry_at, _started_at, _finished_at) = run_restart_into_installed_version(Ok(()));
-
-    assert_eq!(restart_retry_at, None);
+    assert!(has_dispatcher_taken_restart);
 }
 
 /// A stand-in dispatcher that answers the first attach as `client_id` in
@@ -5098,8 +6826,8 @@ fn spawn_forwarding_frame_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
     client_id: ClientId,
     session_id: SessionId,
-) -> (JoinHandle<()>, Sender<Delivery>, Receiver<RuntimeEvent>) {
-    let (delivery_sender, delivery_receiver) = mpsc::channel();
+) -> (JoinHandle<()>, DeliverySender, Receiver<RuntimeEvent>) {
+    let (delivery_sender, delivery_receiver) = create_delivery_queue(SUBSCRIBER_QUEUE_CAPACITY);
     let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
     let dispatcher_thread = std::thread::spawn(move || {
         let mut unanswered_delivery_receiver = Some(delivery_receiver);
@@ -5701,7 +7429,7 @@ fn a_ping_on_an_attached_stream_crosses_nothing_and_gets_no_answer() {
     };
     let rejected_command_id = CommandId::new();
     delivery_sender
-        .send(Delivery::PlacementCommandRejected(rejected_command_id))
+        .try_send(Delivery::PlacementCommandRejected(rejected_command_id))
         .expect("the writing thread holds the delivery queue");
 
     assert_eq!(detached_client_id, client_id);
@@ -5836,7 +7564,7 @@ fn a_frame_that_goes_out_puts_off_the_next_pong_by_a_whole_heartbeat_interval() 
     let rejected_command_id = CommandId::new();
     let rejection_queued_at = Instant::now();
     delivery_sender
-        .send(Delivery::PlacementCommandRejected(rejected_command_id))
+        .try_send(Delivery::PlacementCommandRejected(rejected_command_id))
         .expect("the writing thread holds the delivery queue");
     let rejection_event = loop {
         let session_event = frame_reader.recv::<SessionEvent>().expect("the rejection");
@@ -5868,88 +7596,29 @@ fn a_frame_that_goes_out_puts_off_the_next_pong_by_a_whole_heartbeat_interval() 
 }
 
 #[test]
-fn a_pong_goes_out_while_painted_frames_over_the_frame_cap_keep_the_queue_busy() {
-    let client_id = ClientId::new();
-
-    // One pane of 200 rows by 1000 columns of alternating `a` and `b`: the
-    // painted frame is over the frame cap, and the writing thread writes
-    // nothing for it.
-    let oversize_snapshot = build_alternating_grid_snapshot(client_id, 200, 1000);
-    let painted_frame_byte_count = compute_painted_frame_byte_count(&oversize_snapshot);
-    assert!(
-        painted_frame_byte_count > transport::MAX_FRAME_BYTE_COUNT as usize,
-        "the painted frame is {painted_frame_byte_count} bytes, inside the frame cap"
-    );
-
-    let session_id = SessionId::new();
-    let runtime_directory = build_test_runtime_directory("pong-under-oversize-frames");
-    let (inbox_sender, inbox_receiver) = mpsc::channel();
-    let (dispatcher_thread, delivery_sender, _forwarded_runtime_events) =
-        spawn_forwarding_frame_dispatcher(inbox_receiver, client_id, session_id);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
-
-    // 400 of these frames, then one rejection, wait in the queue before the
-    // client attaches. The writing thread takes them in that order from its
-    // first turn, and writes the rejection only after it took every frame.
-    for _ in 0..400 {
-        delivery_sender
-            .send(Delivery::Frame(Box::new(oversize_snapshot.clone())))
-            .expect("the stand-in dispatcher holds the delivery queue");
-    }
-    delivery_sender
-        .send(Delivery::PlacementCommandRejected(CommandId::new()))
-        .expect("the stand-in dispatcher holds the delivery queue");
-    let connection = attach_test_client_over_link(
-        &runtime_directory,
-        session_id,
-        client_id,
-        true,
-        Some(MIN_LINK_TIMEOUT_MS),
-        None,
-    );
-    let (mut frame_reader, frame_writer) = connection.split();
-    frame_reader.set_deadline(Some(Instant::now() + Duration::from_secs(10)));
-
-    // The first frame on the wire is a pong: the writing thread wrote it while
-    // frames and the rejection still waited in the queue.
-    assert_eq!(
-        frame_reader
-            .recv::<SessionEvent>()
-            .expect("a pong while the frames wait"),
-        SessionEvent::Pong
-    );
-
-    drop(delivery_sender);
-    drop(frame_writer);
-    drop(frame_reader);
-    ipc_server.shutdown();
-    dispatcher_thread.join().expect("dispatcher exits");
-    delete_test_directory(&runtime_directory);
-}
-
-#[test]
 fn an_attach_with_a_link_timeout_below_the_minimum_is_refused_and_the_connection_keeps_serving() {
     let client_id = ClientId::new();
     let (ipc_server, session_id, runtime_directory, dispatcher_thread, _received_runtime_events) =
         start_attachable_test_server("link-timeout-minimum", client_id);
     let mut connection = connect_greeted_connection(&runtime_directory, session_id);
-    let build_attach_request = |request_id: u64, link_timeout_ms: u32| IpcRequest {
-        request_id,
-        request_kind: IpcRequestKind::Attach {
-            viewport_size: CLIENT_VIEWPORT_SIZE,
-            resume_client_id: None,
-            resume_token: None,
-            pane_area: None,
-            graphics_capabilities: GraphicsCapabilities::default(),
-            cell_size: None,
-            link_timeout_ms: Some(link_timeout_ms),
-        },
-    };
+    let build_attach_request_with_link_timeout =
+        |request_id: u64, link_timeout_ms: u32| IpcRequest {
+            request_id,
+            request_kind: IpcRequestKind::Attach {
+                viewport_size: CLIENT_VIEWPORT_SIZE,
+                resume_client_id: None,
+                resume_token: None,
+                pane_area: None,
+                graphics_capabilities: GraphicsCapabilities::default(),
+                cell_size: None,
+                link_timeout_ms: Some(link_timeout_ms),
+                max_frames_per_second: 60,
+            },
+        };
 
     send_committed_request(
         &mut connection,
-        build_attach_request(2, MIN_LINK_TIMEOUT_MS - 1),
+        build_attach_request_with_link_timeout(2, MIN_LINK_TIMEOUT_MS - 1),
     );
     let refusal: IpcResponse = connection.recv().expect("the refusal");
     assert_eq!(refusal.request_id, Some(2));
@@ -5963,10 +7632,149 @@ fn an_attach_with_a_link_timeout_below_the_minimum_is_refused_and_the_connection
 
     send_committed_request(
         &mut connection,
-        build_attach_request(3, MIN_LINK_TIMEOUT_MS),
+        build_attach_request_with_link_timeout(3, MIN_LINK_TIMEOUT_MS),
     );
     let attach_reply: IpcResponse = connection.recv().expect("attach reply");
     assert_eq!(attach_reply.request_id, Some(3));
+    assert_eq!(
+        attach_reply.answer_result,
+        IpcResult::Attached {
+            client_id,
+            session_id,
+            session_structure: build_attached_structure(session_id),
+            resume_token: Some(ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN)),
+            pane_area: None,
+        },
+    );
+
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+}
+
+#[test]
+fn an_attach_with_a_viewport_over_the_cell_limit_is_refused_and_the_connection_keeps_serving() {
+    let client_id = ClientId::new();
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, _received_runtime_events) =
+        start_attachable_test_server("viewport-cell-limit", client_id);
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+    let build_attach_request_with_viewport = |request_id: u64, viewport_size: Size| IpcRequest {
+        request_id,
+        request_kind: IpcRequestKind::Attach {
+            viewport_size,
+            resume_client_id: None,
+            resume_token: None,
+            pane_area: None,
+            graphics_capabilities: GraphicsCapabilities::default(),
+            cell_size: None,
+            link_timeout_ms: None,
+            max_frames_per_second: 60,
+        },
+    };
+
+    for (request_id, viewport_size) in [
+        (
+            2,
+            Size {
+                column_count: 65_535,
+                row_count: 65_535,
+            },
+        ),
+        (
+            3,
+            Size {
+                column_count: 2048,
+                row_count: 1025,
+            },
+        ),
+    ] {
+        send_committed_request(
+            &mut connection,
+            build_attach_request_with_viewport(request_id, viewport_size),
+        );
+        let refusal: IpcResponse = connection.recv().expect("the refusal");
+        assert_eq!(
+            refusal,
+            build_request_failed_test_response(
+                request_id,
+                &format!(
+                    "a viewport of {}x{} cells is over the limit of 2097152 cells",
+                    viewport_size.column_count, viewport_size.row_count
+                ),
+            )
+        );
+    }
+
+    send_committed_request(
+        &mut connection,
+        build_attach_request_with_viewport(
+            4,
+            Size {
+                column_count: 2048,
+                row_count: 1024,
+            },
+        ),
+    );
+    let attach_reply: IpcResponse = connection.recv().expect("attach reply");
+    assert_eq!(attach_reply.request_id, Some(4));
+    assert_eq!(
+        attach_reply.answer_result,
+        IpcResult::Attached {
+            client_id,
+            session_id,
+            session_structure: build_attached_structure(session_id),
+            resume_token: Some(ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN)),
+            pane_area: None,
+        },
+    );
+
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+}
+
+#[test]
+fn an_attach_with_a_frame_rate_outside_30_to_120_is_refused_and_the_connection_keeps_serving() {
+    let client_id = ClientId::new();
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, _received_runtime_events) =
+        start_attachable_test_server("frame-rate-range", client_id);
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+    let build_attach_request_with_frame_rate =
+        |request_id: u64, max_frames_per_second: u16| IpcRequest {
+            request_id,
+            request_kind: IpcRequestKind::Attach {
+                viewport_size: CLIENT_VIEWPORT_SIZE,
+                resume_client_id: None,
+                resume_token: None,
+                pane_area: None,
+                graphics_capabilities: GraphicsCapabilities::default(),
+                cell_size: None,
+                link_timeout_ms: None,
+                max_frames_per_second,
+            },
+        };
+
+    for (request_id, max_frames_per_second) in [(2, 0), (3, 29), (4, 121)] {
+        send_committed_request(
+            &mut connection,
+            build_attach_request_with_frame_rate(request_id, max_frames_per_second),
+        );
+        let refusal: IpcResponse = connection.recv().expect("the refusal");
+        assert_eq!(
+            refusal,
+            build_request_failed_test_response(
+                request_id,
+                &format!(
+                    "a frame rate of {max_frames_per_second} frames a second is outside 30 to 120"
+                ),
+            )
+        );
+    }
+
+    send_committed_request(
+        &mut connection,
+        build_attach_request_with_frame_rate(5, 120),
+    );
+    let attach_reply: IpcResponse = connection.recv().expect("attach reply");
+    assert_eq!(attach_reply.request_id, Some(5));
     assert_eq!(
         attach_reply.answer_result,
         IpcResult::Attached {
@@ -6139,7 +7947,8 @@ fn an_attach_whose_answer_cannot_be_written_reports_its_client_returning_only_wh
 
         // The answer names a session whose name alone is as long as the frame
         // cap: the session cannot write it.
-        let (_delivery_sender, delivery_receiver) = mpsc::channel();
+        let (_delivery_sender, delivery_receiver) =
+            create_delivery_queue(SUBSCRIBER_QUEUE_CAPACITY);
         let mut attach_accepted = build_attach_accepted(
             client_id,
             session_id,
@@ -6245,7 +8054,7 @@ fn a_failed_write_detaches_a_client_whose_connection_stays_open() {
         .close();
 
     delivery_sender
-        .send(Delivery::PlacementCommandRejected(CommandId::new()))
+        .try_send(Delivery::PlacementCommandRejected(CommandId::new()))
         .expect("the writing thread holds the delivery queue");
 
     let RuntimeEvent::ClientDetached {
@@ -6296,12 +8105,13 @@ fn a_resynced_client_reads_the_resync_then_the_frame_it_resumes_from() {
             2
         ),
         vec![
-            SessionEvent::Resync {
+            SessionFrame::Event(SessionEvent::Resync {
                 dropped_event_count: 1
-            },
-            SessionEvent::Painted {
-                frame: Box::new(build_wire_frame(&render_snapshot)),
-            },
+            }),
+            SessionFrame::Painted(Box::new(build_first_received_painted_frame(
+                &render_snapshot,
+                &build_wire_frame(&render_snapshot)
+            ))),
         ]
     );
 }
@@ -6479,7 +8289,11 @@ fn a_second_prepare_replaces_the_held_command() {
 fn another_request_between_prepare_and_commit_drops_the_held_request() {
     let session_overview = build_overview_named("still-here");
     let (ipc_server, session_id, runtime_directory, dispatcher_thread) =
-        start_restartable_test_server("prepare-dropped", Ok(()), Some(session_overview.clone()));
+        start_restartable_test_server(
+            "prepare-dropped",
+            build_restart_check_answering(Ok(())),
+            Some(session_overview.clone()),
+        );
     let mut connection = connect_greeted_connection(&runtime_directory, session_id);
 
     let prepare_response = exchange_request(

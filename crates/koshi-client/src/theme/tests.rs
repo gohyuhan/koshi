@@ -6,7 +6,7 @@ use super::*;
 use koshi_config::types::ThemeConfig;
 
 /// Resolving the default config theme yields exactly the renderer's default
-/// theme: the two crates' stock palettes never drift apart.
+/// theme.
 #[test]
 fn resolving_the_default_config_theme_is_the_default_theme() {
     assert_eq!(resolve_theme(&ThemeConfig::default()), Theme::default());

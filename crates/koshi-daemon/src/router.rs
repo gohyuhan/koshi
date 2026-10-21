@@ -73,18 +73,22 @@
 //! included, then restarts into its program file. Until then it answers every
 //! request that needs no wait, and refuses every new one that would wait with
 //! [`ROUTER_RESTARTING_MESSAGE`](koshi_ipc::router::ROUTER_RESTARTING_MESSAGE).
-//! On Unix it removes its program file and replaces its own running image, and
-//! keeps the same process id. On Windows it starts the new koshi, which waits
-//! for the router lock, and then runs its own shutdown and exits. A restart
-//! that fails resumes serving, still ignoring the SIGPIPE signal on Unix, and
-//! the first check 30 seconds or more after the failure reads the program file
-//! again. Every serving thread blocks
-//! SIGPIPE on its own mask; a write to a peer that hung up returns an error in
-//! every disposition state.
+//! Once no request waits, it refuses every request but a `Restart` with that
+//! sentence, answers each event already queued, and waits up to 2 seconds for
+//! every connection it serves to end. Then it serves no connection, and
+//! restarts. On Unix it removes its program file and replaces its own running
+//! image, and keeps the same process id. On Windows it starts the new koshi,
+//! which waits for the router lock, and then runs its own shutdown and exits.
+//! A restart that fails resumes serving, still ignoring the SIGPIPE signal on
+//! Unix, and the first check 30 seconds or more after the failure reads the
+//! program file again. Every serving thread blocks SIGPIPE on its own mask; a
+//! write to a peer that hung up returns an error in every disposition state.
 //!
-//! With no session left, the dispatcher waits one idle window for a request
-//! and exits when none arrives. A caller that needs the router again starts
-//! it: connect, and on failure spawn the router and retry.
+//! With no session left, the dispatcher waits one idle window for a request.
+//! A window that passes with no connection open ends the router, and a
+//! connection that arrives after that is closed before its Hello is answered.
+//! A caller that needs the router again starts it: connect, and on failure
+//! spawn the router and retry.
 //!
 //! The router also opens the machine's TLS port for remote clients, when
 //! `koshi.kdl` names an address and the operator has switched remote access
@@ -126,7 +130,8 @@ use koshi_ipc::remote_state::{
     REMOTE_ACCESS_RECORD_FILE_FORMAT,
 };
 use koshi_ipc::remote_tokens::{
-    hash_connection_token, resolve_token_store_path, TokenScope, TokenStore,
+    hash_connection_token, resolve_token_store_lock_path, resolve_token_store_path, TokenScope,
+    TokenStore,
 };
 use koshi_ipc::remote_wire::RemoteSessionRow;
 use koshi_ipc::router::{
@@ -142,7 +147,8 @@ use koshi_ipc::validate::{reclaim_stale_socket, validate_socket_address};
 use koshi_link::discovery::repeat_while_live_session_refuses;
 use koshi_link::error::CliError;
 use koshi_link::ipc_client::{self, DuplicatedForeignSession, ForeignSessionListing, UnreadPath};
-use koshi_link::router_client::{ROUTER_SUBCOMMAND, RUNTIME_DIRECTORY_FLAG};
+use koshi_link::remote_client::{acquire_store_lock, STORE_LOCK_TIMEOUT_DURATION};
+use koshi_link::router_client::{ROUTER_SUBCOMMAND, RUNTIME_DIRECTORY_FLAG, WAIT_FOR_LOCK_FLAG};
 use koshi_observability::repeated_warning::WarningRateLimiter;
 use koshi_runtime::executable_watch::ExecutableWatch;
 use koshi_runtime::server::is_binary_runnable;
@@ -150,9 +156,18 @@ use koshi_runtime::server::is_binary_runnable;
 #[cfg(unix)]
 use crate::process;
 use crate::remote_listener::{
-    self, AdmissionAsk, BoundRemoteListener, LocateRefusal, RemoteConnectionAdmission,
+    self, AdmissionAsk, BoundRemoteListener, LocateRefusal, LocatedSession,
+    RemoteConnectionAdmission,
 };
+#[cfg(unix)]
+use crate::runtime_file_keeper::RuntimeFileKeeper;
 use crate::session_server::{ALLOW_OTHER_USERS_FLAG, SESSION_SERVER_SUBCOMMAND};
+
+mod request_gate;
+mod token_use_writer;
+
+use request_gate::{AdmittedRouterConnection, RouterRequestGate};
+use token_use_writer::TokenUseWriter;
 
 #[cfg(test)]
 mod tests;
@@ -161,7 +176,8 @@ mod tests;
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// How long the dispatcher waits for a request while no session is running.
-/// A window that passes with the list still empty ends the router.
+/// A window that passes with the list still empty and no connection open ends
+/// the router.
 const ROUTER_IDLE_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 
 /// How long a newly started session server has to report the address it
@@ -196,17 +212,18 @@ const LOCK_HANDOVER_TIMEOUT_DURATION: Duration = Duration::from_secs(10);
 /// How long the lock wait pauses between attempts on the router lock.
 const LOCK_HANDOVER_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(100);
 
-/// How long shutdown pauses after withdrawing the socket. A serving thread
-/// that is writing a reply has this long to finish it.
-const DRAIN_GRACE_DURATION: Duration = Duration::from_millis(100);
+/// How long a restart waits for every connection the router admitted to end
+/// before the router restarts: 2 seconds.
+const CONNECTION_DRAIN_TIMEOUT_DURATION: Duration = Duration::from_secs(2);
 
 /// The flag carrying a `--profile` name to the session server the router
 /// starts. The session opens that profile's tabs and panes.
 const PROFILE_FLAG: &str = "--profile";
 
-/// The flag this router passes to the router it starts, telling that one to
-/// wait for the router lock rather than yield to the router holding it.
-const WAIT_FOR_LOCK_FLAG: &str = "--wait-for-lock";
+/// The error detail of a token store lock that another koshi still held at
+/// the deadline.
+const TOKEN_STORE_HELD_DETAIL: &str =
+    "another koshi is changing the remote access tokens; try again";
 
 /// The Win32 `CREATE_NO_WINDOW` creation flag: the started process gets a
 /// console with no window on screen.
@@ -385,9 +402,8 @@ struct WaitingRemoteLocate {
     awaited_session_ids: BTreeSet<SessionId>,
     /// [`SESSION_DISCOVERY_TIMEOUT_DURATION`] after the request arrived.
     answer_deadline: Instant,
-    /// Where the endpoint file path, or
-    /// [`LocateRefusal::NotReached`], goes.
-    response_sender: Sender<Result<PathBuf, LocateRefusal>>,
+    /// Where the located session, or [`LocateRefusal::NotReached`], goes.
+    response_sender: Sender<Result<LocatedSession, LocateRefusal>>,
 }
 
 /// A session creation waiting to start its session server. It starts its
@@ -561,7 +577,8 @@ enum UnansweredSessionReason {
         endpoint_file_error: IpcError,
     },
     /// Nothing listens at the session's address, and its resume file is
-    /// younger than [`RESTART_WINDOW_DURATION`](koshi_ipc::endpoint::RESTART_WINDOW_DURATION).
+    /// younger than [`RESTART_WINDOW_DURATION`](koshi_ipc::endpoint::RESTART_WINDOW_DURATION),
+    /// or the session refused the description with `Restarting`.
     ReplacingItsImage,
     /// Nothing accepts a connection at the session's address, and
     /// [`is_refusal_from_live_session`] accepts the process its endpoint file
@@ -712,6 +729,10 @@ struct RemoteState {
     next_remote_connection_id: u64,
     /// The warning written when the list is full.
     full_capacity_warning: WarningRateLimiter,
+    /// The thread that writes the last-used time of each admitted grant, or
+    /// `None` when this machine has no token store or the thread could not
+    /// start.
+    token_use_writer: Option<TokenUseWriter>,
 }
 
 impl RemoteState {
@@ -799,6 +820,12 @@ impl std::error::Error for ChildReapError {}
 /// with everything the router holds untouched. The router removes its program
 /// file and its endpoint file when it ends.
 ///
+/// On Unix, from the program file's write until the files are removed, the
+/// router holds a shared `flock` on `runtime_directory`, and every hour sets
+/// the access time of `router.json`, `router.program`, `router.sock` and
+/// `router.lock` to 30 days after the clock. A restart that fails sets them
+/// again once the program file is written again.
+///
 /// On Unix, once the lock is held and before anything is bound, every child
 /// process of this one is listed and adopted: a thread waits on each one and
 /// reaps it once it exits. After a restart in place, those are the processes
@@ -812,6 +839,15 @@ impl std::error::Error for ChildReapError {}
 ///
 /// A child process the dispatcher cannot reap ends the router with that error,
 /// after the cleanup every other end runs.
+///
+/// Every connection is admitted through the router's request gate and counts
+/// as open until its serving thread ends. The router ends idle only when no
+/// connection is open, and closes the gate first: a connection that arrives
+/// after that is closed before its Hello is answered. A due restart refuses
+/// every request read from then on but a `Restart`, which is answered
+/// `Restarting`, waits up to 2 seconds for every open connection to end, and
+/// closes the gate. A restart that fails opens the gate again. A child
+/// process that cannot be reaped closes the gate at once.
 ///
 /// `config_directory` holds the `koshi.kdl` the router reads: at the start for
 /// `remote-listen` and the shared directory, and on every attach lookup for the
@@ -829,7 +865,10 @@ pub fn run_router(
     // at this path. The watch takes the file at that path, as it is now, as the
     // one this router runs.
     let executable_path = koshi_host::program_path::resolve_program_path()?;
-    let executable_watch = Arc::new(ExecutableWatch::new(executable_path.clone(), BUILD_VERSION));
+    let executable_watch = Arc::new(ExecutableWatch::from_executable_path(
+        executable_path.clone(),
+        BUILD_VERSION,
+    ));
 
     // Where this machine's remote access tokens live, resolved once here. A
     // machine with no resolvable data directory has no store and holds no
@@ -905,6 +944,8 @@ pub fn run_router(
         delete_socket_file(&router_socket_address);
         return Err(program_file_write_error.into());
     }
+    #[cfg(unix)]
+    let mut runtime_file_keeper = start_router_file_keeper(runtime_directory);
 
     let (router_events_sender, router_events_receiver) = mpsc::channel();
     let mut router_sessions = create_router_sessions(
@@ -920,12 +961,14 @@ pub fn run_router(
     );
 
     let is_shutting_down = Arc::new(AtomicBool::new(false));
+    let router_request_gate = Arc::new(RouterRequestGate::default());
     let accept_thread = match start_router_accept_thread(
         listener,
         router_connection_token,
         router_events_sender.clone(),
         &is_shutting_down,
         Arc::clone(&executable_watch),
+        Arc::clone(&router_request_gate),
     ) {
         Ok(accept_thread_handle) => accept_thread_handle,
         Err(accept_thread_error) => {
@@ -949,6 +992,7 @@ pub fn run_router(
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
+        token_use_writer: token_store_path.clone().and_then(TokenUseWriter::start),
     };
     open_remote_listener(&mut remote_state, &executable_watch, &router_events_sender);
 
@@ -960,6 +1004,7 @@ pub fn run_router(
             token_store_path.as_deref(),
             &router_events_sender,
             &router_events_receiver,
+            &router_request_gate,
             ROUTER_IDLE_TIMEOUT_DURATION,
             SESSION_LIVENESS_CHECK_INTERVAL_DURATION,
             &mut router_sessions,
@@ -967,8 +1012,23 @@ pub fn run_router(
         ) {
             RouterExit::Idle => break Ok(()),
             #[cfg(unix)]
-            RouterExit::ChildReaperFailed(child_reap_error) => break Err(child_reap_error.into()),
+            RouterExit::ChildReaperFailed(child_reap_error) => {
+                // A deadline of now closes the intake at once, whatever is open.
+                router_request_gate.close_once_connections_end(Instant::now());
+                break Err(child_reap_error.into());
+            }
             RouterExit::Restart => {
+                let open_connection_count = router_request_gate
+                    .close_once_connections_end(Instant::now() + CONNECTION_DRAIN_TIMEOUT_DURATION);
+                if open_connection_count > 0 {
+                    tracing::warn!(
+                        open_connection_count,
+                        "connections are still open when the router restarts"
+                    );
+                }
+                if let Some(token_use_writer) = remote_state.token_use_writer.take() {
+                    token_use_writer.finish();
+                }
                 #[cfg(unix)]
                 {
                     // The program file is removed before the exec: the image
@@ -986,6 +1046,7 @@ pub fn run_router(
                             "the router program file could not be written again"
                         );
                     }
+                    runtime_file_keeper = start_router_file_keeper(runtime_directory);
                 }
                 #[cfg(windows)]
                 // The new router waits for the lock this one drops last; a
@@ -993,10 +1054,17 @@ pub fn run_router(
                 if hand_over_router_to_next_process(&executable_path, runtime_directory).is_ok() {
                     break Ok(());
                 }
+                remote_state.token_use_writer =
+                    token_store_path.clone().and_then(TokenUseWriter::start);
+                router_request_gate.reopen_intake();
                 executable_watch.schedule_restart_retry();
             }
         }
     };
+
+    if let Some(token_use_writer) = remote_state.token_use_writer.take() {
+        token_use_writer.finish();
+    }
 
     is_shutting_down.store(true, Ordering::SeqCst);
     // The accept loop sits blocked in `accept`. A bare connection wakes it,
@@ -1006,16 +1074,26 @@ pub fn run_router(
         let _ = accept_thread.join();
         drop(wake_connection);
     }
+    #[cfg(unix)]
+    drop(runtime_file_keeper);
     let _ = std::fs::remove_file(&program_file_path);
     let _ = std::fs::remove_file(&endpoint_path);
     delete_socket_file(&router_socket_address);
-    // Shutdown waits `DRAIN_GRACE_DURATION` and does not join the serving
-    // threads. A caller that loses its last reply retries as it does against
-    // a router that has exited.
-    std::thread::sleep(DRAIN_GRACE_DURATION);
-
     drop(lock_file);
     router_end
+}
+
+/// Start the keeper of the router's runtime files in `runtime_directory`:
+/// `router.json`, `router.program`, `router.sock` and `router.lock`, as
+/// [`RuntimeFileKeeper::start`] states.
+#[cfg(unix)]
+fn start_router_file_keeper(runtime_directory: &Path) -> RuntimeFileKeeper {
+    RuntimeFileKeeper::start(vec![
+        resolve_router_endpoint_path(runtime_directory),
+        resolve_router_program_file_path(runtime_directory),
+        PathBuf::from(compute_router_socket_address(runtime_directory)),
+        resolve_router_lock_path(runtime_directory),
+    ])
 }
 
 /// Take the router lock. `true` means this process holds it, and `false` that
@@ -1205,6 +1283,7 @@ fn start_router_accept_thread(
     router_events_sender: Sender<RouterEvent>,
     is_shutting_down: &Arc<AtomicBool>,
     executable_watch: Arc<ExecutableWatch>,
+    router_request_gate: Arc<RouterRequestGate>,
 ) -> std::io::Result<JoinHandle<()>> {
     let shutdown_flag = Arc::clone(is_shutting_down);
     std::thread::Builder::new()
@@ -1216,6 +1295,7 @@ fn start_router_accept_thread(
                 &router_events_sender,
                 &shutdown_flag,
                 &executable_watch,
+                &router_request_gate,
             )
         })
 }
@@ -1224,10 +1304,12 @@ fn start_router_accept_thread(
 /// serving thread.
 ///
 /// Only this router's own user is served. A connection opened by another user,
-/// and one whose user cannot be read, is closed without being served. Each
-/// served connection runs a check of `executable_watch`, as
-/// [`check_router_executable_file`] states. A failed accept is logged at warn
-/// level at most once inside
+/// and one whose user cannot be read, is closed without being served. So is a
+/// connection `router_request_gate` does not admit, and one whose serving
+/// thread the operating system does not start. Each served connection
+/// runs a check of `executable_watch`, as [`check_router_executable_file`]
+/// states, and counts as open in `router_request_gate` until its serving
+/// thread ends. A failed accept is logged at warn level at most once inside
 /// [`LOG_WINDOW_DURATION`](koshi_observability::repeated_warning::LOG_WINDOW_DURATION).
 fn run_router_accept_loop(
     listener: &Listener,
@@ -1235,6 +1317,7 @@ fn run_router_accept_loop(
     router_events_sender: &Sender<RouterEvent>,
     is_shutting_down: &AtomicBool,
     executable_watch: &Arc<ExecutableWatch>,
+    router_request_gate: &Arc<RouterRequestGate>,
 ) {
     let mut accept_failure_warning = WarningRateLimiter::new();
     transport::accept_until_shutdown(
@@ -1255,18 +1338,24 @@ fn run_router_accept_loop(
             if !matches!(connection.is_peer_same_user(), Ok(true)) {
                 return;
             }
+            let Some(admitted_connection) = router_request_gate.admit_connection() else {
+                return;
+            };
             check_router_executable_file(executable_watch, router_events_sender);
             let router_connection_token = router_connection_token.clone();
             let router_events_sender = router_events_sender.clone();
             let executable_watch = Arc::clone(executable_watch);
-            std::thread::spawn(move || {
-                serve_router_connection(
-                    connection,
-                    router_connection_token,
-                    &router_events_sender,
-                    &executable_watch,
-                )
-            });
+            let _ = std::thread::Builder::new()
+                .name("koshi-router-connection".to_string())
+                .spawn(move || {
+                    serve_router_connection(
+                        connection,
+                        router_connection_token,
+                        &router_events_sender,
+                        &executable_watch,
+                        &admitted_connection,
+                    );
+                });
         },
     );
 }
@@ -1300,11 +1389,14 @@ fn build_router_restart_trigger(
 }
 
 /// Serve one router connection until its peer hangs up or a fault closes it.
+/// The connection is closed when this returns, and `admitted_connection` is
+/// dropped after that by the caller.
 ///
 /// [`plane::read_next_request`] makes every decision that is the same on every
 /// koshi protocol — the framing faults, a request kind this build does not
-/// have, and the Hello. What is left crosses to the dispatcher and comes back
-/// as its answer.
+/// have, and the Hello. What is left goes through
+/// [`AdmittedRouterConnection::ask_dispatcher`]: an answer is written, and no
+/// answer closes the connection.
 ///
 /// A `Restarting` answer that has been written is reported to the dispatcher,
 /// and this connection keeps serving until the router ends. A Hello refused for
@@ -1321,6 +1413,7 @@ fn serve_router_connection(
     router_connection_token: ConnectionToken,
     router_events_sender: &Sender<RouterEvent>,
     executable_watch: &Arc<ExecutableWatch>,
+    admitted_connection: &AdmittedRouterConnection,
 ) {
     #[cfg(unix)]
     process::block_sigpipe_on_this_thread();
@@ -1346,7 +1439,9 @@ fn serve_router_connection(
             } => (request_id, request_kind),
         };
 
-        let Some(answer_result) = ask_dispatcher(router_events_sender, request_kind) else {
+        let Some(answer_result) =
+            admitted_connection.ask_dispatcher(router_events_sender, request_kind)
+        else {
             return;
         };
         let router_response = RouterResponse {
@@ -1364,26 +1459,6 @@ fn serve_router_connection(
     }
 }
 
-/// Hand one request to the dispatcher and wait for its answer. `None` means
-/// the dispatcher is gone and the router is exiting: the caller closes its
-/// connection without an answer.
-fn ask_dispatcher(
-    router_events_sender: &Sender<RouterEvent>,
-    request_kind: RouterRequestKind,
-) -> Option<RouterResult> {
-    let (response_sender, response_receiver) = mpsc::channel();
-    if router_events_sender
-        .send(RouterEvent::Request {
-            request_kind,
-            response_sender,
-        })
-        .is_err()
-    {
-        return None;
-    }
-    response_receiver.recv().ok()
-}
-
 /// Serve events until the router ends, leaving the session list as it stood.
 ///
 /// Each turn of the loop first runs a liveness round once
@@ -1394,8 +1469,10 @@ fn ask_dispatcher(
 /// be answered, and waits for the next event:
 ///
 /// - While no session is listed and no request waits, it waits
-///   `idle_timeout`. A window that passes ends the loop with
-///   [`RouterExit::Idle`]. A child process holds no session and keeps no loop
+///   `idle_timeout`. A window that passes with no connection open in
+///   `router_request_gate` closes the gate and ends the loop with
+///   [`RouterExit::Idle`]. A window that passes with a connection open starts
+///   the next window. A child process holds no session and keeps no loop
 ///   running.
 /// - Otherwise it waits until the next liveness round, the next moment a
 ///   waiting request stops waiting for a description, or the next deadline,
@@ -1407,9 +1484,11 @@ fn ask_dispatcher(
 /// A reap that fails ends the loop with [`RouterExit::ChildReaperFailed`].
 ///
 /// Each event goes through [`serve_router_event`]. Once
-/// [`RouterSessions::is_restart_pending`] holds and no request waits, the loop
-/// ends with [`RouterExit::Restart`]: the caller restarts this router into the
-/// program file `executable_watch` checks.
+/// [`RouterSessions::is_restart_pending`] holds and no request waits,
+/// `router_request_gate` refuses every request read from then on, each event
+/// already queued is served, and the loop ends with [`RouterExit::Restart`]:
+/// the caller restarts this router into the program file `executable_watch`
+/// checks.
 ///
 /// `router_events_sender` is the loop's own sender, handed to every thread
 /// that reports back. `token_store_path` is the file of the remote access
@@ -1425,6 +1504,7 @@ fn run_dispatch_loop(
     token_store_path: Option<&Path>,
     router_events_sender: &Sender<RouterEvent>,
     router_events_receiver: &Receiver<RouterEvent>,
+    router_request_gate: &RouterRequestGate,
     idle_timeout: Duration,
     liveness_check_interval: Duration,
     router_sessions: &mut RouterSessions,
@@ -1457,6 +1537,19 @@ fn run_dispatch_loop(
         );
         let has_waiting_request = router_sessions.has_waiting_request();
         if router_sessions.is_restart_pending && !has_waiting_request {
+            router_request_gate.start_refusing_requests();
+            while let Ok(router_event) = router_events_receiver.try_recv() {
+                serve_router_event(
+                    runtime_directory,
+                    config_directory,
+                    executable_watch,
+                    token_store_path,
+                    router_sessions,
+                    remote_state,
+                    router_events_sender,
+                    router_event,
+                );
+            }
             router_sessions.is_restart_pending = false;
             return RouterExit::Restart;
         }
@@ -1477,7 +1570,15 @@ fn run_dispatch_loop(
         .min();
         let received_event = if router_sessions.session_registry.is_empty() && !has_waiting_request
         {
-            router_events_receiver.recv_timeout(idle_timeout).ok()
+            match router_events_receiver.recv_timeout(idle_timeout) {
+                Err(RecvTimeoutError::Timeout) => {
+                    if !router_request_gate.close_if_no_connection_is_open() {
+                        continue;
+                    }
+                    None
+                }
+                receive_outcome => receive_outcome.ok(),
+            }
         } else if let Some(next_wake_at) = next_wake_at {
             match router_events_receiver
                 .recv_timeout(next_wake_at.saturating_duration_since(Instant::now()))
@@ -1642,8 +1743,7 @@ fn serve_router_event(
 /// [`RouterSessions::is_restart_pending`] holds, both are refused with
 /// [`ROUTER_RESTARTING_MESSAGE`] instead. Every other request is
 /// answered on `response_sender` before this returns. The dispatcher answers
-/// one request at a time: the remote access token store at `token_store_path`
-/// has one writer.
+/// one request at a time.
 ///
 /// `config_directory` is the one [`run_router`] was given. An attach lookup
 /// reads its `koshi.kdl` again for the shared directory.
@@ -1748,8 +1848,8 @@ fn serve_router_request(
 /// descriptions it started have answered, or
 /// [`SESSION_DISCOVERY_TIMEOUT_DURATION`] after it arrived.
 ///
-/// The dispatcher answers one at a time: the token store has one writer, and
-/// the list of admitted connections has one owner.
+/// The dispatcher answers one at a time: the list of admitted connections has
+/// one owner.
 fn serve_remote_admission(
     runtime_directory: &Path,
     token_store_path: Option<&Path>,
@@ -1835,8 +1935,10 @@ fn serve_remote_admission(
 /// A list already holding [`MAX_LIVE_REMOTE_CONNECTION_COUNT`] admits nothing
 /// more. That count is read before the secret.
 ///
-/// The store is written back, stamping that record's last-used time. A store
-/// that cannot be read or written admits nothing.
+/// The store is read and not written. The use goes to the token use writer,
+/// which stamps the record's last-used time off this thread
+/// ([`TokenUseWriter::record_token_use`]). A store that cannot be read admits
+/// nothing.
 fn admit_remote_token(
     token_store_path: Option<&Path>,
     remote_state: &mut RemoteState,
@@ -1855,19 +1957,22 @@ fn admit_remote_token(
         }
         return None;
     }
-    let Ok((token_store_path, mut token_store)) = open_token_store(token_store_path) else {
+    let Ok(token_store) = require_token_store_path(token_store_path).and_then(load_token_store)
+    else {
         return None;
     };
-    let scope = token_store.admit_token_scope(connection_token, SystemTime::now())?;
-    token_store
-        .write_token_store_to_path(token_store_path)
-        .ok()?;
+    let used_at = SystemTime::now();
+    let scope = token_store.find_token_scope(connection_token, used_at)?;
+    let token_hash = hash_connection_token(connection_token);
+    if let Some(token_use_writer) = &remote_state.token_use_writer {
+        token_use_writer.record_token_use(token_hash.clone(), used_at);
+    }
     let remote_connection_id = remote_state.next_remote_connection_id;
     remote_state.next_remote_connection_id += 1;
     remote_state
         .admitted_remote_connections
         .push(AdmittedRemoteConnection {
-            token_hash: hash_connection_token(connection_token),
+            token_hash,
             tcp_stream: remote_connection_stream,
             remote_connection_id,
         });
@@ -1918,7 +2023,7 @@ fn list_remote_session_rows(
     remote_session_rows
 }
 
-/// The endpoint file of the session an admitted client asked for, when the
+/// The session an admitted client asked for, in `runtime_directory`, when the
 /// connection numbered `remote_connection_id` still stands, the session is one
 /// of this user's, and its scope covers that session.
 ///
@@ -1937,7 +2042,7 @@ fn locate_remote_session(
     scope: &TokenScope,
     remote_connection_id: u64,
     session_selector: &SessionSelector,
-) -> Option<PathBuf> {
+) -> Option<LocatedSession> {
     if !remote_state
         .admitted_remote_connections
         .iter()
@@ -1953,10 +2058,10 @@ fn locate_remote_session(
     if !scope.is_allowed_for_session(session_id) {
         return None;
     }
-    Some(EndpointFile::resolve_endpoint_file_path(
-        runtime_directory,
+    Some(LocatedSession {
+        runtime_directory: runtime_directory.to_path_buf(),
         session_id,
-    ))
+    })
 }
 
 /// What this machine's remote access is set to: the address `koshi.kdl` names,
@@ -2046,28 +2151,66 @@ fn enable_remote_access(
     }
 }
 
-/// The remote access token store at `token_store_path`, with the path to write
-/// it back to.
-///
-/// `None` means this machine has no data directory to hold a store. A store
-/// whose bytes cannot be read is refused: every token request is refused, and
-/// nothing changes.
-fn open_token_store(token_store_path: Option<&Path>) -> Result<(&Path, TokenStore), RouterResult> {
-    let Some(token_store_path) = token_store_path else {
-        return Err(build_refused_result(
+/// The path of the remote access token store. `None` means this machine has
+/// no data directory to hold a store, and every token request is refused.
+fn require_token_store_path(token_store_path: Option<&Path>) -> Result<&Path, RouterResult> {
+    token_store_path.ok_or_else(|| {
+        build_refused_result(
             "this machine has no data directory, so no remote access token can be stored"
                 .to_string(),
-        ));
-    };
-    match TokenStore::load_token_store_from_path(token_store_path) {
-        Ok(token_store) => Ok((token_store_path, token_store)),
-        Err(token_store_read_error) => {
-            Err(build_refused_result(token_store_read_error.to_string()))
-        }
-    }
+        )
+    })
 }
 
-/// Hand `identity` a fresh secret on `scope` and write the store back.
+/// The remote access token store at `token_store_path`, without the grants
+/// that stopped working
+/// [`TOKEN_RECORD_RETENTION_DURATION`](koshi_ipc::remote_tokens::TOKEN_RECORD_RETENTION_DURATION)
+/// or longer ago ([`TokenStore::remove_ended_token_records`]).
+///
+/// A store whose bytes cannot be read is refused: every token request is
+/// refused, and nothing changes.
+fn load_token_store(token_store_path: &Path) -> Result<TokenStore, RouterResult> {
+    let mut token_store = TokenStore::load_token_store_from_path(token_store_path).map_err(
+        |token_store_read_error| build_refused_result(token_store_read_error.to_string()),
+    )?;
+    token_store.remove_ended_token_records(SystemTime::now());
+    Ok(token_store)
+}
+
+/// Take the lock beside the token store at `token_store_path`, waiting up to
+/// [`STORE_LOCK_TIMEOUT_DURATION`] for another koshi to finish its change.
+/// The returned file holds the lock until it drops.
+///
+/// # Errors
+/// `another koshi is changing the remote access tokens; try again` for a lock
+/// still held at the deadline, else the path and the operating system error
+/// that [`acquire_store_lock`] reports.
+fn acquire_token_store_lock(token_store_path: &Path) -> Result<File, String> {
+    acquire_store_lock(
+        &resolve_token_store_lock_path(token_store_path),
+        STORE_LOCK_TIMEOUT_DURATION,
+        TOKEN_STORE_HELD_DETAIL,
+    )
+}
+
+/// The path of the remote access token store, the store lock, and the store
+/// as [`load_token_store`] reads it. The lock is taken before the read
+/// ([`acquire_token_store_lock`]) and held until the returned file drops.
+///
+/// Refused as [`require_token_store_path`] and [`load_token_store`] state, and
+/// with the error detail of a lock that cannot be taken.
+fn load_locked_token_store(
+    token_store_path: Option<&Path>,
+) -> Result<(&Path, File, TokenStore), RouterResult> {
+    let token_store_path = require_token_store_path(token_store_path)?;
+    let store_lock_file =
+        acquire_token_store_lock(token_store_path).map_err(build_refused_result)?;
+    let token_store = load_token_store(token_store_path)?;
+    Ok((token_store_path, store_lock_file, token_store))
+}
+
+/// Hand `identity` a fresh secret on `scope` and write the store back, holding
+/// the store lock from the read to the write ([`load_locked_token_store`]).
 ///
 /// The clock is read once, and both the issue time and the expiry are stamped
 /// from that one reading. `expires_in` is added to the issue time with a
@@ -2084,10 +2227,11 @@ fn grant_token(
     scope: TokenScope,
     expires_in: Option<Duration>,
 ) -> RouterResult {
-    let (token_store_path, mut token_store) = match open_token_store(token_store_path) {
-        Ok(opened_token_store) => opened_token_store,
-        Err(refusal_result) => return refusal_result,
-    };
+    let (token_store_path, _store_lock_file, mut token_store) =
+        match load_locked_token_store(token_store_path) {
+            Ok(locked_token_store) => locked_token_store,
+            Err(refusal_result) => return refusal_result,
+        };
     let issued_at = SystemTime::now();
     let expires_at = match expires_in {
         None => None,
@@ -2127,7 +2271,8 @@ fn grant_token(
 }
 
 /// Stop the grants `identity` holds, narrowed to one scope when `scope` is
-/// given, and write the store back when this call stopped anything.
+/// given, and write the store back when this call stopped anything. The store
+/// lock is held from the read to the write ([`load_locked_token_store`]).
 ///
 /// Every connection those grants admitted ends once the store is written. A
 /// connection that never attached ends with the rest. The revoked hashes are
@@ -2138,10 +2283,11 @@ fn revoke_token(
     identity: &str,
     scope: Option<&TokenScope>,
 ) -> RouterResult {
-    let (token_store_path, mut token_store) = match open_token_store(token_store_path) {
-        Ok(opened_token_store) => opened_token_store,
-        Err(refusal_result) => return refusal_result,
-    };
+    let (token_store_path, _store_lock_file, mut token_store) =
+        match load_locked_token_store(token_store_path) {
+            Ok(locked_token_store) => locked_token_store,
+            Err(refusal_result) => return refusal_result,
+        };
     let revoked_token_hashes: Vec<String> = token_store
         .token_records
         .iter()
@@ -2163,11 +2309,13 @@ fn revoke_token(
     RouterResult::Revoked(revoked_scopes)
 }
 
-/// Every grant this machine has made, narrowed to the grants that reach
-/// `scope` when one is given. The store is not written.
+/// Every grant this machine has made, except a grant that stopped working
+/// [`TOKEN_RECORD_RETENTION_DURATION`](koshi_ipc::remote_tokens::TOKEN_RECORD_RETENTION_DURATION)
+/// or longer ago, narrowed to the grants that reach `scope` when one is given.
+/// The store is not written.
 fn list_token_entries(token_store_path: Option<&Path>, scope: Option<&TokenScope>) -> RouterResult {
-    match open_token_store(token_store_path) {
-        Ok((_, token_store)) => RouterResult::Tokens(token_store.list_token_entries(scope)),
+    match require_token_store_path(token_store_path).and_then(load_token_store) {
+        Ok(token_store) => RouterResult::Tokens(token_store.list_token_entries(scope)),
         Err(refusal_result) => refusal_result,
     }
 }
@@ -3045,7 +3193,7 @@ fn list_own_sessions_or_none(runtime_directory: &Path) -> Vec<SessionId> {
 ///
 /// - A [`SessionSelector::SessionId`] the list holds reads nothing.
 /// - Any other [`SessionSelector::SessionId`] reads the one path
-///   [`find_foreign_session_address`](ipc_client::find_foreign_session_address)
+///   [`find_foreign_session_advertisement`](ipc_client::find_foreign_session_advertisement)
 ///   looks up, and gives that session when it finds it.
 /// - A [`SessionSelector::SessionName`] that [`resolve_session_selector`]
 ///   resolves to a session of this user's reads nothing: that session wins.
@@ -3058,8 +3206,8 @@ fn list_own_sessions_or_none(runtime_directory: &Path) -> Vec<SessionId> {
 /// [`list_foreign_sessions`](ipc_client::list_foreign_sessions) states.
 ///
 /// # Errors
-/// The failure [`find_foreign_session_address`](ipc_client::find_foreign_session_address)
-/// gives, such as an id that sockets of two users advertise.
+/// Each [`find_foreign_session_advertisement`](ipc_client::find_foreign_session_advertisement)
+/// failure, such as an id that sockets of two users advertise.
 #[cfg(unix)]
 fn list_foreign_sessions_for_lookup(
     shared_sessions_base_directory: Option<&Path>,
@@ -3075,12 +3223,13 @@ fn list_foreign_sessions_for_lookup(
             Ok(ForeignSessionListing::default())
         }
         SessionSelector::SessionId(session_id) => Ok(ForeignSessionListing {
-            foreign_sessions: ipc_client::find_foreign_session_address(
+            foreign_sessions: ipc_client::find_foreign_session_advertisement(
                 shared_sessions_base_directory,
                 runtime_directory,
                 *session_id,
+                None,
             )?
-            .map(|socket_address| (*session_id, socket_address))
+            .map(|foreign_session_advertisement| (*session_id, foreign_session_advertisement))
             .into_iter()
             .collect(),
             ..ForeignSessionListing::default()
@@ -3213,7 +3362,9 @@ fn start_unlisted_session_descriptions(
     if foreign_session_listing.unread_path.is_some() {
         return surveyed_session_ids;
     }
-    for (foreign_session_id, foreign_socket_address) in foreign_session_listing.foreign_sessions {
+    for (foreign_session_id, foreign_session_advertisement) in
+        foreign_session_listing.foreign_sessions
+    {
         if is_session_listed_or_starting(router_sessions, foreign_session_id) {
             continue;
         }
@@ -3240,7 +3391,7 @@ fn start_unlisted_session_descriptions(
             router_events_sender,
             foreign_session_id,
             DescribedSessionOrigin::OtherUser {
-                socket_address: foreign_socket_address,
+                socket_address: foreign_session_advertisement.socket_address,
             },
         );
     }
@@ -3623,7 +3774,9 @@ fn apply_session_removal(
 
 /// The reason a description that failed with `description_error` records:
 /// [`UnansweredSessionReason::NoAnswerInTime`] for
-/// [`CliError::SessionAnswerTimedOut`], and
+/// [`CliError::SessionAnswerTimedOut`],
+/// [`UnansweredSessionReason::ReplacingItsImage`] for
+/// [`CliError::SessionRestarting`], and
 /// [`UnansweredSessionReason::DescriptionFailed`] naming the failure
 /// otherwise.
 ///
@@ -3633,6 +3786,7 @@ fn apply_session_removal(
 fn build_description_failure_reason(description_error: CliError) -> UnansweredSessionReason {
     match description_error {
         CliError::SessionAnswerTimedOut => UnansweredSessionReason::NoAnswerInTime,
+        CliError::SessionRestarting { .. } => UnansweredSessionReason::ReplacingItsImage,
         description_error => UnansweredSessionReason::DescriptionFailed { description_error },
     }
 }

@@ -22,8 +22,10 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use koshi_core::action::ActionReference;
+use koshi_core::constant::DEFAULT_MAX_FRAMES_PER_SECOND;
 use koshi_core::geometry::Direction;
 use koshi_core::key::{BindingModifierFlags, ExtendedKeysMode, Key, KeyChord, KeySequence};
+use koshi_core::lock::LockMode;
 use koshi_core::log::{LogFormat, LogLevel};
 use koshi_core::resolve::DEFAULT_SCROLL_LINE_COUNT;
 
@@ -199,6 +201,13 @@ pub struct ClientConfig {
     /// keeps the link while its bytes keep moving. A link to a session on this
     /// machine sends no ping and has no limit.
     pub remote_link_timeout_ms: u32,
+    /// The most frames a second the session sends this viewer, from `30` to
+    /// `120`. The session sends a frame at most once per second divided by
+    /// this value, and the frame after the viewer's own key, paste or mouse
+    /// event goes without that wait. The viewer's pane-move animation steps
+    /// once per the same interval. Example: `60` sends at most one frame per
+    /// 16666667 nanoseconds.
+    pub max_frames_per_second: u16,
 }
 
 impl Default for ClientConfig {
@@ -218,6 +227,7 @@ impl Default for ClientConfig {
             should_stay_in_pane_placement_mode_after_placement: true,
             should_reconnect_remote_session: true,
             remote_link_timeout_ms: 30_000,
+            max_frames_per_second: DEFAULT_MAX_FRAMES_PER_SECOND,
         }
     }
 }
@@ -340,6 +350,12 @@ impl KeybindingsConfig {
     /// explicit alternative.
     pub const RESERVED_UNLOCK: KeyChord =
         KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('l'));
+
+    /// The chord that unlocks a locked client: `unlock_alternative` when set,
+    /// otherwise [`RESERVED_UNLOCK`](Self::RESERVED_UNLOCK).
+    pub fn resolve_unlock_chord(unlock_alternative: Option<KeyChord>) -> KeyChord {
+        unlock_alternative.unwrap_or(Self::RESERVED_UNLOCK)
+    }
 }
 
 impl Default for KeybindingsConfig {
@@ -708,35 +724,35 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
 
     BTreeMap::from([
         (
-            ModeName::from_text("normal"),
+            ModeName::from_text(LockMode::Normal.get_keymap_name()),
             ModeBindings {
                 bound_action_by_key_sequence: normal_mode_bindings,
                 removed_key_sequences: BTreeSet::new(),
             },
         ),
         (
-            ModeName::from_text("locked"),
+            ModeName::from_text(LockMode::Locked.get_keymap_name()),
             ModeBindings {
                 bound_action_by_key_sequence: locked_mode_bindings,
                 removed_key_sequences: BTreeSet::new(),
             },
         ),
         (
-            ModeName::from_text("pane-placement"),
+            ModeName::from_text(LockMode::PanePlacement.get_keymap_name()),
             ModeBindings {
                 bound_action_by_key_sequence: pane_placement_mode_bindings,
                 removed_key_sequences: BTreeSet::new(),
             },
         ),
         (
-            ModeName::from_text("pane-move-choice"),
+            ModeName::from_text(LockMode::PaneMoveChoice.get_keymap_name()),
             ModeBindings {
                 bound_action_by_key_sequence: pane_move_choice_mode_bindings,
                 removed_key_sequences: BTreeSet::new(),
             },
         ),
         (
-            ModeName::from_text("floating-pane-move"),
+            ModeName::from_text(LockMode::FloatingPaneMove.get_keymap_name()),
             ModeBindings {
                 bound_action_by_key_sequence: floating_pane_move_mode_bindings,
                 removed_key_sequences: BTreeSet::new(),
@@ -1059,4 +1075,4 @@ impl Default for LoggingConfig {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

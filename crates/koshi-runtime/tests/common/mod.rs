@@ -24,22 +24,27 @@ use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::Event;
 use koshi_core::geometry::Size;
-use koshi_core::ids::{ClientId, CommandId, SessionId};
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId};
+use koshi_core::mouse::MouseTracking;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::frame::PaintedFrame;
 use koshi_ipc::protocol::{
-    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, ProcessImageId, MIN_PROTOCOL_VERSION,
-    PROTOCOL_VERSION,
+    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_runtime::ipc_server::IpcServer;
+use koshi_runtime::runtime::driver::DispatchPassOutcome;
 use koshi_runtime::runtime::event::RuntimeEvent;
+use koshi_runtime::runtime::painted_update::{
+    PaintedUpdateReceiver, ReceivedPaintedFrame, SessionFrame,
+};
 use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
-use koshi_test_support::fixtures::send_committed_request;
+use koshi_test_support::fixtures::{
+    build_accepted_hello_result, build_paint_report_request, send_committed_request,
+};
 
 /// The terminal size the seeded session is bootstrapped at, before any client
 /// attaches.
@@ -191,35 +196,9 @@ pub fn serve_test_session<ExchangeResult: Send + 'static>(
     let mut served_test_session = start_test_session(session_label, None, run_exchange);
     let server = &mut served_test_session.server;
 
-    // The per-session server's own loop: block until an event is due, bounded
-    // by the next render deadline, apply it, hand a fresh snapshot to any
-    // subscriber that lost a critical event, then push every attached client
-    // its frame when a render is due.
-    loop {
-        let current_time = Instant::now();
-        let runtime_event = match server.compute_next_render_wakeup(current_time) {
-            Some(render_wakeup_timeout) => {
-                match server
-                    .get_inbox_receiver()
-                    .recv_timeout(render_wakeup_timeout)
-                {
-                    Ok(runtime_event) => Some(runtime_event),
-                    Err(mpsc::RecvTimeoutError::Timeout) => None,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            }
-            None => match server.get_inbox_receiver().recv() {
-                Ok(runtime_event) => Some(runtime_event),
-                Err(_) => break,
-            },
-        };
-        if let Some(runtime_event) = runtime_event {
-            if server.handle_runtime_event(runtime_event).is_break() {
-                break;
-            }
-        }
-        server.push_due_frames(Instant::now());
-    }
+    // The per-session server's own loop, one dispatch pass at a time, until
+    // the inbox closes or a quit event arrives.
+    while server.run_dispatch_pass() == DispatchPassOutcome::Served {}
 
     served_test_session.finish()
 }
@@ -245,14 +224,7 @@ pub fn open_session_connection(runtime_directory: &Path, session_id: SessionId) 
         })
         .expect("send hello");
     let hello_response: IpcResponse = ipc_connection.recv().expect("hello reply");
-    assert_eq!(
-        hello_response.answer_result,
-        IpcResult::Hello {
-            protocol_version: PROTOCOL_VERSION,
-            build_version: env!("CARGO_PKG_VERSION").to_string(),
-            process_image_id: ProcessImageId::get_own(),
-        }
-    );
+    assert_eq!(hello_response.answer_result, build_accepted_hello_result());
     ipc_connection
 }
 
@@ -354,55 +326,157 @@ pub fn submit_test_command_for_client(
     emitted_events
 }
 
-/// Read `ipc_connection`'s event stream until `accepts_session_event` accepts
-/// an event, on a thread this one can give up waiting on. Returns the
-/// connection, still open, and every frame read, the accepted one last.
-/// Panics once [`TEST_WAIT_TIMEOUT_DURATION`] has passed with no accepted
-/// frame.
+/// An attached client's connection, and the receiver that applies the painted
+/// updates read off it. One receiver reads one connection from its first
+/// frame on.
+pub struct ViewerConnection {
+    /// The connection the client attached on. The session writes the
+    /// client's event frames and painted updates to it.
+    pub ipc_connection: Connection,
+    /// Applies the painted updates read off `ipc_connection`, in order.
+    painted_update_receiver: PaintedUpdateReceiver,
+}
+
+impl From<Connection> for ViewerConnection {
+    fn from(ipc_connection: Connection) -> Self {
+        ViewerConnection {
+            ipc_connection,
+            painted_update_receiver: PaintedUpdateReceiver::new(),
+        }
+    }
+}
+
+/// Read `viewer_connection`'s event stream until `accepts_session_frame`
+/// accepts a frame, on a thread this one can give up waiting on. Returns the
+/// connection, still open, and every frame read, the accepted one last: each
+/// JSON frame, and each painted update once its last part arrived. Each
+/// painted update is reported painted on the connection, as a client reports
+/// each update it paints. Panics once [`TEST_WAIT_TIMEOUT_DURATION`] has
+/// passed with no accepted frame.
 ///
-/// Each frame is decoded as a [`SessionEvent`], so a response frame written on
-/// an attached client's connection fails the read: an [`IpcResponse`] encodes
-/// as a two-field record, a `SessionEvent` as a one-field one.
+/// Each JSON frame is decoded as a [`SessionEvent`]. A response frame written
+/// on an attached client's connection fails the read: an [`IpcResponse`]
+/// encodes as a two-field record, a `SessionEvent` as a one-field one.
 pub fn read_session_frames_until(
-    mut ipc_connection: Connection,
-    accepts_session_event: impl Fn(&SessionEvent) -> bool + Send + 'static,
-) -> (Connection, Vec<SessionEvent>) {
+    viewer_connection: impl Into<ViewerConnection>,
+    accepts_session_frame: impl Fn(&SessionFrame<SessionEvent>) -> bool + Send + 'static,
+) -> (ViewerConnection, Vec<SessionFrame<SessionEvent>>) {
+    let mut viewer_connection = viewer_connection.into();
     let (read_result_sender, read_result_receiver) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut session_events = Vec::new();
+        let mut session_frames = Vec::new();
         loop {
-            let session_event: SessionEvent = ipc_connection.recv().expect("an event frame");
-            let is_accepted_session_event = accepts_session_event(&session_event);
-            session_events.push(session_event);
-            if is_accepted_session_event {
+            let received_frame = viewer_connection
+                .ipc_connection
+                .recv_message_or_binary::<SessionEvent>()
+                .expect("an event frame");
+            let Some(session_frame) = viewer_connection
+                .painted_update_receiver
+                .accept_session_frame(received_frame)
+                .expect("a painted update part that applies")
+            else {
+                continue;
+            };
+            if let SessionFrame::Painted(received_painted_frame) = &session_frame {
+                let update_sequence = received_painted_frame.update_sequence;
+                viewer_connection
+                    .ipc_connection
+                    .send(&build_paint_report_request(update_sequence))
+                    .expect("the paint report is written");
+            }
+            let is_accepted_session_frame = accepts_session_frame(&session_frame);
+            session_frames.push(session_frame);
+            if is_accepted_session_frame {
                 break;
             }
         }
-        let _ = read_result_sender.send((ipc_connection, session_events));
+        let _ = read_result_sender.send((viewer_connection, session_frames));
     });
     read_result_receiver
         .recv_timeout(TEST_WAIT_TIMEOUT_DURATION)
         .expect("the awaited frame reaches the viewer")
 }
 
+/// Turn normal mouse tracking with SGR encoding on in `pane_id`, the way the
+/// program running there does, and read `viewer_connection`'s stream until
+/// a painted frame shows the pane asking for reports. From that frame on, a
+/// forwarded event is written to the pane.
+pub fn wait_for_mouse_tracking(
+    fake_pty_backend: &FakePtyBackend,
+    pane_id: PaneId,
+    viewer_connection: impl Into<ViewerConnection>,
+) -> ViewerConnection {
+    fake_pty_backend
+        .push_output(pane_id, b"\x1b[?1000h\x1b[?1006h".to_vec())
+        .expect("the pane was spawned");
+    let (viewer_connection, _) =
+        read_session_frames_until_painted_frame(viewer_connection, move |received_painted_frame| {
+            received_painted_frame
+                .painted_frame
+                .pane_snapshots
+                .iter()
+                .any(|pane_snapshot| {
+                    pane_snapshot.pane_id == pane_id
+                        && pane_snapshot.mouse_tracking == MouseTracking::Normal
+                })
+        });
+    viewer_connection
+}
+
+/// [`read_session_frames_until`] stopping at the first painted update that
+/// `accepts_painted_frame` accepts.
+pub fn read_session_frames_until_painted_frame(
+    viewer_connection: impl Into<ViewerConnection>,
+    accepts_painted_frame: impl Fn(&ReceivedPaintedFrame) -> bool + Send + 'static,
+) -> (ViewerConnection, Vec<SessionFrame<SessionEvent>>) {
+    read_session_frames_until(
+        viewer_connection,
+        move |session_frame| match session_frame {
+            SessionFrame::Painted(received_painted_frame) => {
+                accepts_painted_frame(received_painted_frame)
+            }
+            SessionFrame::Event(_) | SessionFrame::ImageChunk(_) => false,
+        },
+    )
+}
+
 /// [`read_session_frames_until`] stopping at [`SessionEvent::Detached`].
 pub fn read_session_frames_to_detached(
-    ipc_connection: Connection,
-) -> (Connection, Vec<SessionEvent>) {
-    read_session_frames_until(ipc_connection, |session_event| {
-        *session_event == SessionEvent::Detached
+    viewer_connection: impl Into<ViewerConnection>,
+) -> (ViewerConnection, Vec<SessionFrame<SessionEvent>>) {
+    read_session_frames_until(viewer_connection, |session_frame| {
+        *session_frame == SessionFrame::Event(SessionEvent::Detached)
     })
 }
 
-/// The painted frame `session_events` ends with. Panics unless the last frame
-/// read is a painted one.
-pub fn get_last_painted_frame(session_events: &[SessionEvent]) -> &PaintedFrame {
-    match session_events.last() {
-        Some(SessionEvent::Painted {
-            frame: painted_frame,
-        }) => painted_frame,
-        other_session_event => {
-            panic!("expected the run to end with a painted frame, got {other_session_event:?}")
+/// [`read_session_frames_until`] stopping at the answer to mouse round `request_id`.
+pub fn read_session_frames_to_mouse_answer(
+    viewer_connection: impl Into<ViewerConnection>,
+    request_id: u64,
+) -> (ViewerConnection, Vec<SessionFrame<SessionEvent>>) {
+    read_session_frames_until(
+        viewer_connection,
+        move |session_frame| match session_frame {
+            SessionFrame::Event(SessionEvent::MouseAnswer {
+                request_id: answered_request_id,
+                mouse_answers: _,
+            }) => *answered_request_id == request_id,
+            SessionFrame::Event(_) | SessionFrame::Painted(_) | SessionFrame::ImageChunk(_) => {
+                false
+            }
+        },
+    )
+}
+
+/// The painted update `session_frames` ends with. Panics unless the last
+/// frame read is a painted update.
+pub fn get_last_painted_frame(
+    session_frames: &[SessionFrame<SessionEvent>],
+) -> &ReceivedPaintedFrame {
+    match session_frames.last() {
+        Some(SessionFrame::Painted(received_painted_frame)) => received_painted_frame,
+        other_session_frame => {
+            panic!("expected the run to end with a painted update, got {other_session_frame:?}")
         }
     }
 }

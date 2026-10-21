@@ -13,7 +13,6 @@ use koshi_core::event::{Event, LayoutChanged, PaneCreated, PaneFocused, TabFocus
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_core::process::SpawnSpec;
 use koshi_layout::tree::LayoutNode;
-use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 
 use crate::client::{FloatingPanePosition, FloatingPaneView};
@@ -33,10 +32,10 @@ pub struct NewPaneSpec {
     pub spawn_spec: Option<SpawnSpec>,
 }
 
-/// Register `pane_id` in the session's pane registry as `Running`, carrying
-/// `new_pane_spec`'s working directory and spawn specification. A pane id already
-/// in the registry keeps its existing record.
-pub(crate) fn register_running_pane(
+/// Register `pane_id`, whose child is already spawned, in the session's pane
+/// registry, carrying `new_pane_spec`'s working directory and spawn
+/// specification. A pane id already in the registry keeps its existing record.
+pub(crate) fn register_spawned_pane(
     session: &mut Session,
     pane_id: PaneId,
     new_pane_spec: NewPaneSpec,
@@ -44,13 +43,12 @@ pub(crate) fn register_running_pane(
     let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
     pane_record.working_directory = new_pane_spec.working_directory;
     pane_record.spawn_spec = new_pane_spec.spawn_spec;
-    let _ = pane_record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
     let _ = session.panes.register_pane_record(pane_record);
 }
 
 /// Apply an already-built, already-spawned layout edit to `tab_id`: switch the
 /// designated client onto the tab (if it is not already there), register the new
-/// pane as `Running`, swap in `candidate_layout_tree` as the tab's layout — dropping the zoom
+/// pane, swap in `candidate_layout_tree` as the tab's layout — dropping the zoom
 /// that would have hidden the new pane, so it lands visible — and focus the new
 /// pane for `focus_client_id` when one is given and still attached. The new
 /// pane then takes that client's input: no floating pane stays focused for it.
@@ -116,7 +114,7 @@ pub fn commit_new_pane(
         }
     }
 
-    register_running_pane(session, new_pane_id, new_pane_spec);
+    register_spawned_pane(session, new_pane_id, new_pane_spec);
 
     // Swap in the pre-built tree; record the new pane in the tab's focus
     // history when a client focuses it.
@@ -167,7 +165,7 @@ pub fn commit_new_pane(
 }
 
 /// Apply an already-spawned floating pane: append `floating_member` to the
-/// session's floating set, register its pane as `Running` with `new_pane_spec`'s
+/// session's floating set, register its pane with `new_pane_spec`'s
 /// working directory and spawn specification, store `designated_view`'s
 /// position as that client's view of the pane, and focus the pane for that
 /// client.
@@ -199,7 +197,7 @@ pub fn commit_new_floating_pane(
 ) -> Result<Vec<Event>, FloatingSetError> {
     let new_pane_id = floating_member.pane_id;
     session.floating_set.add_member(floating_member)?;
-    register_running_pane(session, new_pane_id, new_pane_spec);
+    register_spawned_pane(session, new_pane_id, new_pane_spec);
     let mut emitted_events = vec![Event::PaneCreated(PaneCreated {
         pane_id: new_pane_id,
         tab_id: None,

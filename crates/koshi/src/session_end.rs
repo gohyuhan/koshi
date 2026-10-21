@@ -54,6 +54,8 @@ pub enum SessionEnding {
 
 /// End the session `session_id`, found in `runtime_directory` or, for a
 /// session another local user started, in `shared_sessions_base_directory`.
+/// `owner_user_id` names that user's folder, as
+/// [`load_session_endpoint`](ipc_client::load_session_endpoint) reads it.
 ///
 /// A session whose process `find_server_process_record` confirms ends in
 /// these steps:
@@ -103,11 +105,13 @@ pub fn end_session(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
     session_id: SessionId,
+    owner_user_id: Option<u32>,
 ) -> Result<SessionEnding, CliError> {
     let endpoint_file = ipc_client::load_session_endpoint(
         runtime_directory,
         shared_sessions_base_directory,
         session_id,
+        owner_user_id,
     )?;
     let endpoint_file_path =
         EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
@@ -345,6 +349,11 @@ fn is_other_koshi_process_of_current_user(process_record: &ProcessRecord) -> boo
 /// refuses the connection token is sent the `Quit` once more inside the first
 /// 5 s, as
 /// [`run_session_exchange_with_token_wait`](ipc_client::run_session_exchange_with_token_wait)
+/// states. A session that refuses the `Quit` while it replaces its process
+/// image, or whose connection ends while its resume file shows it doing so, is
+/// sent the `Quit` once more over the endpoint its new image advertises inside
+/// the first 5 s, as
+/// [`wait_for_restarted_session_endpoint`](ipc_client::wait_for_restarted_session_endpoint)
 /// states.
 ///
 /// # Errors
@@ -357,19 +366,28 @@ fn submit_quit(
     session_id: SessionId,
 ) -> Result<(), CliError> {
     let answer_deadline = Instant::now() + QUIT_ANSWER_TIMEOUT_DURATION;
-    let (_, quit_result) = ipc_client::run_session_exchange_with_token_wait(
+    let send_quit = |session_endpoint: &EndpointFile| {
+        ipc_client::submit_external_command_to_endpoint(
+            session_endpoint,
+            session_id,
+            Command::Quit,
+            Some(answer_deadline),
+        )
+    };
+    let (asked_endpoint, quit_result) = ipc_client::run_session_exchange_with_token_wait(
         runtime_directory,
         session_id,
         endpoint_file.clone(),
         Some(answer_deadline),
-        |session_endpoint| {
-            ipc_client::submit_external_command_to_endpoint(
-                session_endpoint,
-                session_id,
-                Command::Quit,
-                Some(answer_deadline),
-            )
-        },
+        send_quit,
+    );
+    let quit_result = ipc_client::run_exchange_again_after_restart(
+        runtime_directory,
+        session_id,
+        Some(&asked_endpoint.connection_token),
+        Some(answer_deadline),
+        quit_result,
+        send_quit,
     );
     match quit_result? {
         CommandResult::Ok { .. } => Ok(()),

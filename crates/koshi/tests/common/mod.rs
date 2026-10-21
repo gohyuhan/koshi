@@ -54,6 +54,12 @@ pub const POLL_INTERVAL_DURATION: Duration = Duration::from_millis(100);
 /// one the router generates.
 pub const SESSION_SERVER_NAME: &str = "workspace";
 
+/// The least a runtime file's access time leads the test's clock by: 29 days.
+/// The router and each session server set the access times of the files they
+/// keep 30 days after their own clock, and a test reads its clock less than a
+/// day after the server started.
+pub const EARLIEST_ACCESS_TIME_LEAD_DURATION: Duration = Duration::from_secs(29 * 24 * 60 * 60);
+
 /// End the process with id `process_id`, whatever it is doing.
 #[cfg(unix)]
 pub fn terminate_process(process_id: u32) {
@@ -623,6 +629,7 @@ pub fn wait_for_attached_client_count(
             runtime_directory,
             None,
             session_id,
+            None,
             None,
         )
         .expect("the session server describes itself");

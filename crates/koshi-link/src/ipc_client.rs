@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource};
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::RejectReason;
-use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+use koshi_core::ids::{format_session_target, ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::recent_event::RecentEvent;
 use koshi_core::text::sanitize_reported_text;
 #[cfg(unix)]
@@ -56,11 +56,13 @@ use koshi_ipc::previous_release::{
     PreviousReleaseRequestKind, PreviousReleaseResult,
 };
 use koshi_ipc::protocol::{
-    ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult, ProcessImageId,
+    ConnectionToken, IncomingResponse, IpcErrorCode, IpcRequest, IpcRequestKind, IpcResult,
+    ProcessImageId,
 };
 use koshi_ipc::transport::{
-    compute_time_left_until, Connection, FrameReader, FrameWriter, CONNECT_WAIT_DURATION,
+    compute_remaining_duration_until, Connection, FrameReader, FrameWriter, CONNECT_WAIT_DURATION,
 };
+use koshi_ipc::wire::{MaybeKnown, WireName};
 use uuid::Uuid;
 
 use crate::error::CliError;
@@ -70,11 +72,15 @@ use crate::talk::{
     self, build_ipc_unavailable_error, build_peer_refusal_error, SessionHelloAnswer,
 };
 
-/// How long a session has to answer once it is asked: a session another
-/// local user started that `koshi list-sessions` asks to describe itself, any
-/// session `koshi version` asks for its build, and the session a stand-in
-/// clipboard tool hands a copy to.
-pub const SESSION_ANSWER_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
+/// How long a session or the router has to answer once it is asked: a session
+/// another local user started that `koshi list-sessions` asks to describe
+/// itself, any session and the router that `koshi version` asks for its build,
+/// the router that `koshi doctor` asks for its connections from another
+/// machine, the session a stand-in clipboard tool hands a copy to, and a
+/// session that answers the `Commit` of a request sent with an answer
+/// deadline: the Quit that `koshi kill-session` sends and the Restart that
+/// `koshi update` sends.
+pub const SERVER_ANSWER_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 
 /// The most sessions [`ask_sessions_at_once`] asks at the same time.
 pub const MAX_SESSIONS_ASKED_AT_ONCE: usize = 16;
@@ -101,13 +107,13 @@ pub const MAX_SHARED_SESSION_COUNT_PER_OWNER: usize = 256;
 /// The most directory entries one scan of the shared directory goes through:
 /// the entries of the shared directory, and those of each user's folder the
 /// scan opens. Reading one more stops [`list_foreign_sessions`] and
-/// [`find_foreign_session_address`].
+/// [`find_foreign_session_advertisement`].
 #[cfg(unix)]
 pub const MAX_SHARED_DIRECTORY_ENTRY_COUNT: usize = 65_536;
 
 /// The most user folders one scan of the shared directory goes through.
 /// Finding one more stops [`list_foreign_sessions`] and
-/// [`find_foreign_session_address`].
+/// [`find_foreign_session_advertisement`].
 #[cfg(unix)]
 pub const MAX_SHARED_USER_DIRECTORY_COUNT: usize = 256;
 
@@ -148,9 +154,12 @@ pub fn resolve_shared_sessions_base_directory() -> Option<PathBuf> {
 /// code, with a rejection's hint filtered by [`sanitize_reported_text`].
 ///
 /// A session of this user's that refuses this build's protocol version is
-/// asked again once it has restarted, and one that refuses the connection
-/// token is asked again once it advertises another, as
-/// [`run_session_exchange_with_restart_wait`] states.
+/// asked again once it has restarted, one that refuses the connection token is
+/// asked again once it advertises another, and one met while it replaces its
+/// process image is asked again through its new image, as
+/// [`run_session_exchange_across_restart`] states. A session that refuses the
+/// command because it is replacing its image, and has advertised no new
+/// endpoint in time, is [`CliError::SessionRestarting`].
 pub fn submit_in_session_command(
     in_session_context: &InSessionContext,
     command: Command,
@@ -168,9 +177,11 @@ pub fn submit_in_session_command(
 /// `client_id` is the client the command acts for, and rides on the source.
 /// Naming one changes nothing about the exchange: the Hello and the `Prepare`
 /// go out back to back, then the `Commit`, and it costs two round trips
-/// either way.
+/// either way. `owner_user_id` names the user whose session it is, as
+/// [`load_session_endpoint`] reads it.
 pub fn submit_external_command(
     session_id: SessionId,
+    owner_user_id: Option<u32>,
     client_id: Option<ClientId>,
     command: Command,
 ) -> Result<CommandResult, CliError> {
@@ -178,6 +189,7 @@ pub fn submit_external_command(
         &resolve_runtime_directory()?,
         resolve_shared_sessions_base_directory().as_deref(),
         session_id,
+        owner_user_id,
         client_id,
         command,
     )
@@ -190,10 +202,11 @@ fn submit_command_via_runtime_directory(
     in_session_context: &InSessionContext,
     command: Command,
 ) -> Result<CommandResult, CliError> {
-    run_session_exchange_with_restart_wait(
+    run_session_exchange_across_restart(
         runtime_directory,
         None,
         in_session_context.session_id,
+        None,
         None,
         |endpoint_file| {
             let command_source = CommandSource::from_in_session_cli(
@@ -261,24 +274,26 @@ pub struct ClipboardCopyExchange {
 /// The session and the pane are `in_session_context.session_id` and
 /// `in_session_context.pane_id`, and the session's endpoint file is in
 /// `runtime_directory`. The part goes as an [`IpcRequestKind::Prepare`]
-/// carrying an [`IpcRequestKind::ClipboardCopy`] when `is_last_part`, and as
-/// an [`IpcRequestKind::ClipboardCopyPart`] otherwise, with request id `2`.
-/// The Hello and the part go out back to back, before either reply is read,
-/// through [`run_session_exchange_with_restart_wait`]: a session of this
-/// user's that refuses this build's protocol version, or the connection
-/// token, gets the Hello and the same part again once it has restarted or
-/// advertises another token. The exchange and each wait end `answer_timeout`
-/// after the call. A `Prepared` answer is followed by the `Commit` numbered
-/// `3`, whose answer has `answer_timeout` from the moment it is written.
+/// carrying an [`IpcRequestKind::ClipboardCopy`] when `is_last_part`, and as an
+/// [`IpcRequestKind::ClipboardCopyPart`] otherwise, with request id `2`. The
+/// Hello and the part go out back to back, before either reply is read, through
+/// [`run_session_exchange_across_restart`]: a session of this user's that
+/// refuses this build's protocol version, or the connection token, or that is
+/// met while it replaces its process image, gets the Hello and the same part
+/// again once it has restarted or advertises another token. The exchange and
+/// each wait end `answer_timeout` after the call. A `Prepared` answer is
+/// followed by the `Commit` numbered `3`, whose answer has `answer_timeout`
+/// from the moment it is written.
 ///
 /// Example: the copy `hi` in one part opens with one `Prepare`. A pane that a
 /// client on another machine focuses alone gets `Prepared`, then the `Commit`
 /// gives `Routed { should_run_clipboard_tool: false }`.
 ///
 /// # Errors
-/// - What [`run_session_exchange_with_restart_wait`] gives: a session that is
-///   not running, and a write or read that fails or does not end in time. The
-///   session then routes no byte of the copy.
+/// - What [`run_session_exchange_across_restart`] gives: a session that is
+///   not running, a session that is restarting, and a write or read that
+///   fails or does not end in time. The session then routes no byte of the
+///   copy.
 /// - [`CliError::CommittedRequestUnanswered`] when the `Commit` got no answer:
 ///   the session may route the copy.
 /// - What [`build_peer_refusal_error`] gives for an answer that refuses the
@@ -297,13 +312,14 @@ pub fn open_clipboard_copy_exchange(
 ) -> Result<(ClipboardCopyExchange, ClipboardCopyAnswer), CliError> {
     let answer_deadline = Instant::now() + answer_timeout;
     let first_request_id = 2;
-    let (mut response_reader, mut request_writer, _, first_copy_result) =
-        run_session_exchange_with_restart_wait(
-            runtime_directory,
-            None,
-            in_session_context.session_id,
-            Some(answer_deadline),
-            |session_endpoint| {
+    run_session_exchange_across_restart(
+        runtime_directory,
+        None,
+        in_session_context.session_id,
+        None,
+        Some(answer_deadline),
+        |session_endpoint| {
+            let (mut response_reader, mut request_writer, _, first_copy_result) =
                 open_session_exchange(
                     session_endpoint,
                     in_session_context.session_id,
@@ -315,27 +331,27 @@ pub fn open_clipboard_copy_exchange(
                         is_last_part,
                     ),
                     Some(answer_deadline),
-                )
-            },
-        )?;
-    let first_copy_result = commit_prepared_clipboard_copy(
-        &mut response_reader,
-        &mut request_writer,
-        first_request_id,
-        is_last_part,
-        first_copy_result,
-        answer_timeout,
-    )?;
-    let first_copy_answer = parse_clipboard_copy_answer(first_copy_result, is_last_part)?;
-    let copy_exchange = ClipboardCopyExchange {
-        response_reader,
-        request_writer,
-        last_request_id: first_request_id,
-        pane_id: in_session_context.pane_id,
-        clipboard_targets: clipboard_targets.to_string(),
-        answer_timeout,
-    };
-    Ok((copy_exchange, first_copy_answer))
+                )?;
+            let first_copy_result = commit_prepared_clipboard_copy(
+                &mut response_reader,
+                &mut request_writer,
+                first_request_id,
+                is_last_part,
+                first_copy_result,
+                answer_timeout,
+            )?;
+            let first_copy_answer = parse_clipboard_copy_answer(first_copy_result, is_last_part)?;
+            let copy_exchange = ClipboardCopyExchange {
+                response_reader,
+                request_writer,
+                last_request_id: first_request_id,
+                pane_id: in_session_context.pane_id,
+                clipboard_targets: clipboard_targets.to_string(),
+                answer_timeout,
+            };
+            Ok((copy_exchange, first_copy_answer))
+        },
+    )
 }
 
 impl ClipboardCopyExchange {
@@ -409,24 +425,27 @@ impl ClipboardCopyExchange {
 /// `client_id` rides on the source.
 ///
 /// `shared_sessions_base_directory` is searched for `session_id` when
-/// `runtime_directory` holds no endpoint file for it, through
-/// [`load_session_endpoint`].
+/// `runtime_directory` holds no endpoint file for it, and `owner_user_id`
+/// names the user whose session it is, through [`load_session_endpoint`].
 ///
 /// A session of this user's that refuses this build's protocol version is
-/// asked again once it has restarted, and one that refuses the connection
-/// token is asked again once it advertises another, as
-/// [`run_session_exchange_with_restart_wait`] states.
+/// asked again once it has restarted, one that refuses the connection token is
+/// asked again once it advertises another, and one met while it replaces its
+/// process image is asked again through its new image, as
+/// [`run_session_exchange_across_restart`] states.
 pub fn submit_external_command_via_runtime_directory(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
     session_id: SessionId,
+    owner_user_id: Option<u32>,
     client_id: Option<ClientId>,
     command: Command,
 ) -> Result<CommandResult, CliError> {
-    run_session_exchange_with_restart_wait(
+    run_session_exchange_across_restart(
         runtime_directory,
         shared_sessions_base_directory,
         session_id,
+        owner_user_id,
         None,
         |endpoint_file| {
             let command_source = CommandSource::from_external_cli(Some(session_id), client_id);
@@ -489,7 +508,7 @@ fn apply_current_working_directory_to_command(mut command: Command) -> Command {
 ///
 /// With `answer_deadline`, the `Prepare` is answered by that moment, as
 /// [`connect_to_session`] states, and the `Commit` has
-/// [`SESSION_ANSWER_TIMEOUT_DURATION`] after it.
+/// [`SERVER_ANSWER_TIMEOUT_DURATION`] after it.
 fn submit_command_envelope(
     endpoint: &EndpointFile,
     session_id: SessionId,
@@ -513,9 +532,12 @@ fn submit_command_envelope(
     match prepared_submit.request_result? {
         IpcResult::CommandResult(command_result) => Ok(talk::filter_rejection_hint(command_result)),
         IpcResult::Error(refusal) => Err(build_peer_refusal_error(&refusal)),
-        unexpected_result => {
-            Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))
-        }
+        // An answer to the `Commit` that is not the command's result is
+        // `CommittedRequestUnanswered`.
+        unexpected_result => Err(CliError::CommittedRequestUnanswered {
+            detail: talk::SESSION_PEER_WORDS
+                .format_unexpected_reply_detail(unexpected_result.get_wire_name()),
+        }),
     }
 }
 
@@ -547,6 +569,10 @@ pub fn fetch_foreign_session_overview(
 /// by that moment, as [`connect_to_session`] states. An exchange still
 /// unfinished then is [`CliError::SessionAnswerTimedOut`]. With `None`, the
 /// exchange waits for the answer however long it takes.
+///
+/// # Errors
+/// [`CliError::IpcUnavailable`] reading `session <asked id> described another
+/// session, <answered id>` for an overview of any session but `session_id`.
 pub fn fetch_session_overview_from_endpoint(
     endpoint: &EndpointFile,
     session_id: SessionId,
@@ -558,6 +584,14 @@ pub fn fetch_session_overview_from_endpoint(
     };
     match exchange_session_request(endpoint, session_id, ipc_request, answer_deadline)? {
         IpcResult::Overview(mut session_overview) => {
+            let answered_session_id = session_overview.session.session_id;
+            if answered_session_id != session_id {
+                return Err(CliError::IpcUnavailable {
+                    detail: format!(
+                        "session {session_id} described another session, {answered_session_id}"
+                    ),
+                });
+            }
             crate::discovery::filter_session_overview_text(&mut session_overview);
             Ok(session_overview)
         }
@@ -571,7 +605,9 @@ pub fn fetch_session_overview_from_endpoint(
 /// Ask the running session `session_id` to describe its layout: each tab's
 /// split tree, and the rectangles each viewing client solves it to
 /// ([`SessionLayout`]). `tab` narrows the answer to one tab; absent, every
-/// tab is described.
+/// tab is described. The session name and each tab name come back filtered by
+/// [`sanitize_reported_text`]: a tab named `"\u{1b}[2Jeditor"` reads back as
+/// `"[2Jeditor"`.
 ///
 /// Naming a `tab` the session no longer holds is a target failure, not an
 /// empty answer: the session describes no tab, and this reports the tab as
@@ -585,9 +621,10 @@ pub fn fetch_session_overview_from_endpoint(
 /// [`load_session_endpoint`].
 ///
 /// A session of this user's that refuses this build's protocol version is
-/// asked again once it has restarted, and one that refuses the connection
-/// token is asked again once it advertises another, as
-/// [`run_session_exchange_with_restart_wait`] states.
+/// asked again once it has restarted, one that refuses the connection token is
+/// asked again once it advertises another, and one met while it replaces its
+/// process image is asked again through its new image, as
+/// [`run_session_exchange_across_restart`] states.
 pub fn fetch_layout(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
@@ -598,31 +635,40 @@ pub fn fetch_layout(
         request_id: 2,
         request_kind: IpcRequestKind::Layout { tab_id },
     };
-    let layout_result = run_session_exchange_with_restart_wait(
+    let mut session_layout = run_session_exchange_across_restart(
         runtime_directory,
         shared_sessions_base_directory,
         session_id,
         None,
-        |session_endpoint| {
-            exchange_session_request(session_endpoint, session_id, ipc_request.clone(), None)
+        None,
+        |session_endpoint| match exchange_session_request(
+            session_endpoint,
+            session_id,
+            ipc_request.clone(),
+            None,
+        )? {
+            IpcResult::Layout(session_layout) => Ok(session_layout),
+            IpcResult::Error(refusal) => Err(build_peer_refusal_error(&refusal)),
+            unexpected_result => {
+                Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))
+            }
         },
     )?;
-    match layout_result {
-        IpcResult::Layout(session_layout) => match tab_id {
-            Some(tab_id) if session_layout.tabs.is_empty() => Err(CliError::CommandRejected {
-                reason: RejectReason::TargetNotFound,
-                help: Some(format!("no running session has tab {tab_id}")),
-            }),
-            _ => Ok(session_layout),
-        },
-        IpcResult::Error(refusal) => Err(build_peer_refusal_error(&refusal)),
-        unexpected_result => {
-            Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))
-        }
+    session_layout.session_name = sanitize_reported_text(&session_layout.session_name);
+    for tab_layout in &mut session_layout.tabs {
+        tab_layout.tab_name = sanitize_reported_text(&tab_layout.tab_name);
+    }
+    match tab_id {
+        Some(tab_id) if session_layout.tabs.is_empty() => Err(CliError::CommandRejected {
+            reason: RejectReason::TargetNotFound,
+            help: Some(format!("no running session has tab {tab_id}")),
+        }),
+        _ => Ok(session_layout),
     }
 }
 
 /// Ask `session_id` for the events it published most recently, oldest first.
+/// Each event name comes back filtered by [`sanitize_reported_text`].
 ///
 /// A refusal carries the session's own sentence through.
 ///
@@ -631,9 +677,10 @@ pub fn fetch_layout(
 /// [`load_session_endpoint`].
 ///
 /// A session of this user's that refuses this build's protocol version is
-/// asked again once it has restarted, and one that refuses the connection
-/// token is asked again once it advertises another, as
-/// [`run_session_exchange_with_restart_wait`] states.
+/// asked again once it has restarted, one that refuses the connection token is
+/// asked again once it advertises another, and one met while it replaces its
+/// process image is asked again through its new image, as
+/// [`run_session_exchange_across_restart`] states.
 pub fn fetch_recent_events(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
@@ -643,32 +690,41 @@ pub fn fetch_recent_events(
         request_id: 2,
         request_kind: IpcRequestKind::RecentEvents,
     };
-    let recent_events_result = run_session_exchange_with_restart_wait(
+    let mut recent_events = run_session_exchange_across_restart(
         runtime_directory,
         shared_sessions_base_directory,
         session_id,
         None,
-        |session_endpoint| {
-            exchange_session_request(session_endpoint, session_id, ipc_request.clone(), None)
+        None,
+        |session_endpoint| match exchange_session_request(
+            session_endpoint,
+            session_id,
+            ipc_request.clone(),
+            None,
+        )? {
+            IpcResult::RecentEvents(recent_events) => Ok(recent_events),
+            IpcResult::Error(refusal) => Err(build_peer_refusal_error(&refusal)),
+            unexpected_result => {
+                Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))
+            }
         },
     )?;
-    match recent_events_result {
-        IpcResult::RecentEvents(recent_events) => Ok(recent_events),
-        IpcResult::Error(refusal) => Err(build_peer_refusal_error(&refusal)),
-        unexpected_result => {
-            Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))
-        }
+    for recent_event in &mut recent_events {
+        recent_event.event_name = sanitize_reported_text(&recent_event.event_name).into();
     }
+    Ok(recent_events)
 }
 
 /// The result of asking a running session to restart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionRestart {
-    /// The session answered that it is replacing its own process image.
+    /// The session answered that it is replacing its own process image, or
+    /// was already replacing it when the Restart reached it.
     Restarting {
-        /// The process image that took the Restart, as its Hello named it.
-        /// `None` for a session of koshi 0.3.0 or 0.4.0, whose Hello names no
-        /// process image.
+        /// The process image that took the Restart, or refused it with
+        /// `Restarting`, as its Hello named it. `None` for a session of koshi
+        /// 0.3.0 or 0.4.0, whose Hello names no process image, and for a
+        /// failure that [`is_ended_by_image_replacement`] accepts.
         asked_process_image_id: Option<ProcessImageId>,
     },
     /// Nothing advertises that session, or nothing listens behind the address
@@ -702,15 +758,21 @@ pub enum SessionRestart {
 /// by `answer_deadline`, and a failure once it is reached is
 /// [`CliError::SessionAnswerTimedOut`]: no `Commit` was written, and the
 /// session runs no Restart. The `Commit` and its answer get
-/// [`SESSION_ANSWER_TIMEOUT_DURATION`] more. A `Commit` that gets no answer
+/// [`SERVER_ANSWER_TIMEOUT_DURATION`] more. A `Commit` that gets no answer
 /// gives [`SessionRestart::Unanswered`].
 ///
-/// A session that refuses the request gives what [`build_peer_refusal_error`]
-/// builds from the sentence the session sent. A session from this build
-/// refuses with `RequestFailed`, and a `v0.5.0-pr.1` session refuses with
-/// `MalformedRequest`: both are [`CliError::IpcUnavailable`]. A session that
-/// refuses this build's protocol version at the Hello gives
-/// [`CliError::ProtocolVersionRefused`].
+/// A session that refuses the request with `Restarting` is already replacing
+/// its image and gives [`SessionRestart::Restarting`]. So does every other
+/// failure that [`is_ended_by_image_replacement`] accepts. An answer to the
+/// `Commit` that is not a Restart answer gives [`SessionRestart::Unanswered`]
+/// naming it.
+///
+/// A session that refuses the request otherwise gives what
+/// [`build_peer_refusal_error`] builds from the sentence the session sent. A
+/// session from this build refuses with `RequestFailed`, and a `v0.5.0-pr.1`
+/// session refuses with `MalformedRequest`: both are
+/// [`CliError::IpcUnavailable`]. A session that refuses this build's protocol
+/// version at the Hello gives [`CliError::ProtocolVersionRefused`].
 ///
 /// `shared_sessions_base_directory` is searched for `session_id` when
 /// `runtime_directory` holds no endpoint file for it, through
@@ -737,6 +799,7 @@ pub fn restart_running_session(
         runtime_directory,
         shared_sessions_base_directory,
         session_id,
+        None,
         Some(answer_deadline),
         |session_endpoint| {
             exchange_prepared_session_request(
@@ -749,6 +812,13 @@ pub fn restart_running_session(
     );
     let prepared_restart = match restart_exchange {
         Ok(prepared_restart) => prepared_restart,
+        Err(restart_error)
+            if is_ended_by_image_replacement(runtime_directory, session_id, &restart_error) =>
+        {
+            return Ok(SessionRestart::Restarting {
+                asked_process_image_id: None,
+            })
+        }
         Err(CliError::SessionNotFound { .. }) => return Ok(SessionRestart::NotRunning),
         Err(CliError::PreviousReleaseServer { .. }) => {
             return restart_previous_release_session(
@@ -765,10 +835,17 @@ pub fn restart_running_session(
         Ok(IpcResult::Restarting) => Ok(SessionRestart::Restarting {
             asked_process_image_id,
         }),
-        Ok(IpcResult::Error(refusal)) => Err(build_peer_refusal_error(&refusal)),
-        Ok(unexpected_result) => {
-            Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))
+        Ok(IpcResult::Error(refusal)) if refusal.code == IpcErrorCode::Restarting => {
+            Ok(SessionRestart::Restarting {
+                asked_process_image_id,
+            })
         }
+        Ok(IpcResult::Error(refusal)) => Err(build_peer_refusal_error(&refusal)),
+        Ok(unexpected_result) => Ok(SessionRestart::Unanswered {
+            failure_detail: talk::SESSION_PEER_WORDS
+                .format_unexpected_reply_detail(unexpected_result.get_wire_name()),
+            asked_process_image_id,
+        }),
         Err(CliError::CommittedRequestUnanswered { detail }) => Ok(SessionRestart::Unanswered {
             failure_detail: detail,
             asked_process_image_id,
@@ -923,6 +1000,7 @@ fn connect_to_previous_release_session(
         runtime_directory,
         shared_sessions_base_directory,
         session_id,
+        None,
     ) {
         Ok(session_endpoint) => session_endpoint,
         Err(CliError::SessionNotFound { .. }) => return Ok(None),
@@ -995,12 +1073,14 @@ pub fn find_running_session_version(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
     session_id: SessionId,
+    owner_user_id: Option<u32>,
     answer_deadline: Option<Instant>,
 ) -> Result<Option<String>, CliError> {
     let session_hello_answer = find_running_session_hello_answer(
         runtime_directory,
         shared_sessions_base_directory,
         session_id,
+        owner_user_id,
         answer_deadline,
     )?;
     Ok(session_hello_answer.map(|session_hello_answer| session_hello_answer.build_version))
@@ -1015,9 +1095,10 @@ pub fn find_running_session_version(
 /// reached is [`CliError::SessionAnswerTimedOut`].
 ///
 /// `shared_sessions_base_directory` is searched for `session_id` when
-/// `runtime_directory` holds no endpoint file for it, through
-/// [`load_session_endpoint`]. A session that refuses the connection token is
-/// asked once more, as [`run_session_exchange_with_token_wait`] states.
+/// `runtime_directory` holds no endpoint file for it, and `owner_user_id`
+/// names the user whose session it is, through [`load_session_endpoint`]. A
+/// session that refuses the connection token is asked once more, as
+/// [`run_session_exchange_with_token_wait`] states.
 ///
 /// # Errors
 /// The failure of the endpoint file read, a refused Hello, as
@@ -1026,12 +1107,14 @@ pub fn find_running_session_hello_answer(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
     session_id: SessionId,
+    owner_user_id: Option<u32>,
     answer_deadline: Option<Instant>,
 ) -> Result<Option<SessionHelloAnswer>, CliError> {
     match load_session_endpoint(
         runtime_directory,
         shared_sessions_base_directory,
         session_id,
+        owner_user_id,
     ) {
         Ok(session_endpoint) => {
             let (_, session_hello_result) = run_session_exchange_with_token_wait(
@@ -1113,8 +1196,9 @@ fn find_session_hello_answer_from_endpoint(
 /// Up to [`MAX_SESSIONS_ASKED_AT_ONCE`] sessions are asked at the same time:
 /// the calling thread asks, and so does each thread it starts beside it, one
 /// fewer than that limit at most. A thread that cannot start leaves its share
-/// to the threads that run. A session still unasked once `answer_deadline` is
-/// reached is not asked, and answers [`CliError::SessionAnswerTimedOut`]. A
+/// to the threads that run. With `Some(answer_deadline)`, a session still
+/// unasked once `answer_deadline` is reached is not asked, and answers
+/// [`CliError::SessionAnswerTimedOut`]. With `None`, every session is asked. A
 /// panic in `ask_session` reaches the caller.
 ///
 /// Example: 40 sessions, 3 of them stopped with `SIGSTOP`, are asked by 16
@@ -1123,7 +1207,7 @@ fn find_session_hello_answer_from_endpoint(
 /// meanwhile.
 pub fn ask_sessions_at_once<SessionAsk: Sync, SessionAnswer: Send>(
     session_asks: &[SessionAsk],
-    answer_deadline: Instant,
+    answer_deadline: Option<Instant>,
     ask_session: impl Fn(&SessionAsk) -> Result<SessionAnswer, CliError> + Sync,
 ) -> Vec<Result<SessionAnswer, CliError>> {
     let next_session_ask_index = AtomicUsize::new(0);
@@ -1134,7 +1218,9 @@ pub fn ask_sessions_at_once<SessionAsk: Sync, SessionAnswer: Send>(
             let Some(session_ask) = session_asks.get(session_ask_index) else {
                 return indexed_session_answers;
             };
-            let session_answer = if Instant::now() >= answer_deadline {
+            let session_answer = if answer_deadline
+                .is_some_and(|answer_deadline| Instant::now() >= answer_deadline)
+            {
                 Err(CliError::SessionAnswerTimedOut)
             } else {
                 ask_session(session_ask)
@@ -1226,13 +1312,13 @@ pub fn list_own_sessions(runtime_directory: &Path) -> Result<Vec<SessionId>, Unr
 }
 
 /// Wait for `session_id` to advertise a socket in `runtime_directory` under a
-/// token other than `connection_token`, and hand that endpoint file back.
-/// `None` when `restart_deadline` passes with the connection token still
-/// unchanged.
+/// token other than `replaced_connection_token`, or under any token when it is
+/// `None`, and hand that endpoint file back. `None` when `restart_deadline`
+/// passes with no such file advertised.
 ///
 /// A session server mints a fresh token every time it binds: a token other
-/// than `connection_token` is the session's new image serving. The process id
-/// in the file is not compared; on Unix, `execvp` keeps it.
+/// than `replaced_connection_token` is the session's new image serving. The
+/// process id in the file is not compared; on Unix, `execvp` keeps it.
 ///
 /// The file is read every [`RESTART_POLL_INTERVAL_DURATION`] until the
 /// deadline, and the last pause ends at the deadline. A missing or unreadable
@@ -1243,13 +1329,13 @@ pub fn list_own_sessions(runtime_directory: &Path) -> Result<Vec<SessionId>, Unr
 pub fn wait_for_new_session_endpoint(
     runtime_directory: &Path,
     session_id: SessionId,
-    connection_token: &ConnectionToken,
+    replaced_connection_token: Option<&ConnectionToken>,
     restart_deadline: Instant,
 ) -> Option<EndpointFile> {
     let endpoint_path = EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
     loop {
         if let Ok(endpoint) = EndpointFile::load_from_path(&endpoint_path) {
-            if endpoint.connection_token != *connection_token {
+            if replaced_connection_token != Some(&endpoint.connection_token) {
                 return Some(endpoint);
             }
         }
@@ -1264,7 +1350,8 @@ pub fn wait_for_new_session_endpoint(
 /// after it refused this build's protocol version over `refused_endpoint`
 /// with the sentence `refusal_detail`.
 ///
-/// Only a session of this user's is waited for: one whose endpoint file in
+/// Only a session of this user's is waited for: one that `refused_endpoint`
+/// names with a token that is not empty, whose endpoint file in
 /// `runtime_directory` can be read, or that [`is_replacing_its_image`]
 /// accepts, and whose program file says a restart may still come, as
 /// [`RefusingServerBuild::is_restart_expected`] states. The wait reads the
@@ -1297,7 +1384,9 @@ pub fn wait_for_refused_session_restart(
     refusal_detail: String,
     answer_deadline: Option<Instant>,
 ) -> Result<EndpointFile, CliError> {
-    if !is_own_session(runtime_directory, session_id) {
+    if refused_endpoint.connection_token.is_empty()
+        || !is_own_session(runtime_directory, session_id)
+    {
         return Err(CliError::ProtocolVersionRefused {
             detail: refusal_detail,
         });
@@ -1334,7 +1423,7 @@ pub fn wait_for_refused_session_restart(
             if let Some(restarted_endpoint) = wait_for_new_session_endpoint(
                 runtime_directory,
                 session_id,
-                &refused_endpoint.connection_token,
+                Some(&refused_endpoint.connection_token),
                 restart_deadline,
             ) {
                 return Ok(restarted_endpoint);
@@ -1352,9 +1441,9 @@ pub fn wait_for_refused_session_restart(
     )))
 }
 
-/// Run `make_exchange` over the endpoint of the session `session_id`, found as
-/// [`load_session_endpoint`] finds it, through
-/// [`run_session_exchange_with_token_wait`]. An exchange that ends in
+/// Run `make_exchange` over the endpoint of the session `session_id` of the
+/// user `owner_user_id` names, found as [`load_session_endpoint`] finds it,
+/// through [`run_session_exchange_with_token_wait`]. An exchange that ends in
 /// [`CliError::ProtocolVersionRefused`] runs once more, over the endpoint
 /// [`wait_for_refused_session_restart`] hands back, and that wait's failure is
 /// what this gives otherwise. `answer_deadline` bounds each wait.
@@ -1366,6 +1455,7 @@ pub fn run_session_exchange_with_restart_wait<ExchangeAnswer>(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
     session_id: SessionId,
+    owner_user_id: Option<u32>,
     answer_deadline: Option<Instant>,
     mut make_exchange: impl FnMut(&EndpointFile) -> Result<ExchangeAnswer, CliError>,
 ) -> Result<ExchangeAnswer, CliError> {
@@ -1373,6 +1463,7 @@ pub fn run_session_exchange_with_restart_wait<ExchangeAnswer>(
         runtime_directory,
         shared_sessions_base_directory,
         session_id,
+        owner_user_id,
     )?;
     let (exchanged_endpoint, exchange_result) = run_session_exchange_with_token_wait(
         runtime_directory,
@@ -1398,6 +1489,157 @@ pub fn run_session_exchange_with_restart_wait<ExchangeAnswer>(
     }
 }
 
+/// Run `make_exchange` over the endpoint of the session `session_id` of the
+/// user `owner_user_id` names through
+/// [`run_session_exchange_with_restart_wait`], and run it once more over the
+/// endpoint [`wait_for_restarted_session_endpoint`] hands back when that
+/// exchange met the session while it replaced its process image. A session
+/// named with an `owner_user_id` is asked once.
+///
+/// A request this runs once more did not run: `make_exchange` gives a refusal
+/// or an end of the exchange before any `Commit` as an error, and
+/// [`CliError::CommittedRequestUnanswered`] for every failure after one, which
+/// is never run again.
+///
+/// Example: `koshi action write-chars hi` reaches a session that has started
+/// to replace its image. The session refuses the `Prepare` with `Restarting`,
+/// its new image advertises a fresh endpoint 300 ms after the refusal, and
+/// `hi` reaches the pane through that image.
+///
+/// # Errors
+/// What the last exchange gives. When no restarted endpoint comes, what the
+/// first exchange gave.
+pub fn run_session_exchange_across_restart<ExchangeAnswer>(
+    runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
+    session_id: SessionId,
+    owner_user_id: Option<u32>,
+    answer_deadline: Option<Instant>,
+    mut make_exchange: impl FnMut(&EndpointFile) -> Result<ExchangeAnswer, CliError>,
+) -> Result<ExchangeAnswer, CliError> {
+    let mut presented_connection_token: Option<ConnectionToken> = None;
+    let first_exchange_result = run_session_exchange_with_restart_wait(
+        runtime_directory,
+        shared_sessions_base_directory,
+        session_id,
+        owner_user_id,
+        answer_deadline,
+        |session_endpoint| {
+            presented_connection_token = Some(session_endpoint.connection_token.clone());
+            make_exchange(session_endpoint)
+        },
+    );
+    if owner_user_id.is_some() {
+        return first_exchange_result;
+    }
+    run_exchange_again_after_restart(
+        runtime_directory,
+        session_id,
+        presented_connection_token.as_ref(),
+        answer_deadline,
+        first_exchange_result,
+        make_exchange,
+    )
+}
+
+/// Run `make_exchange` once more over the endpoint
+/// [`wait_for_restarted_session_endpoint`] hands back when
+/// `first_exchange_result`, the end of an exchange with the session
+/// `session_id` that presented `presented_connection_token`, met that session
+/// while it replaced its process image.
+///
+/// # Errors
+/// What the second exchange gives. With no second exchange, the error of
+/// `first_exchange_result`.
+pub fn run_exchange_again_after_restart<ExchangeAnswer>(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    presented_connection_token: Option<&ConnectionToken>,
+    answer_deadline: Option<Instant>,
+    first_exchange_result: Result<ExchangeAnswer, CliError>,
+    make_exchange: impl FnOnce(&EndpointFile) -> Result<ExchangeAnswer, CliError>,
+) -> Result<ExchangeAnswer, CliError> {
+    let Err(exchange_error) = &first_exchange_result else {
+        return first_exchange_result;
+    };
+    match wait_for_restarted_session_endpoint(
+        runtime_directory,
+        session_id,
+        presented_connection_token,
+        exchange_error,
+        answer_deadline,
+    ) {
+        Some(restarted_endpoint) => make_exchange(&restarted_endpoint),
+        None => first_exchange_result,
+    }
+}
+
+/// The endpoint to run an exchange with the session `session_id` once more
+/// over, after the exchange that presented `presented_connection_token` met
+/// the session while it replaced its process image and ended in
+/// `exchange_error`. `None` presented token means no endpoint file was read.
+/// The empty presented token, which another user's session is asked with,
+/// gives `None` at once.
+///
+/// When [`is_ended_by_image_replacement`] accepts `exchange_error`, the wait
+/// is [`wait_for_new_session_endpoint`] for a token other than the presented
+/// one, for up to [`RESTART_WINDOW_DURATION`] and at most until
+/// `answer_deadline`.
+///
+/// `None` for every other failure, for a wait that ends with nothing
+/// advertised, and for a wait that ends less than 1 ms before
+/// `answer_deadline`.
+pub fn wait_for_restarted_session_endpoint(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    presented_connection_token: Option<&ConnectionToken>,
+    exchange_error: &CliError,
+    answer_deadline: Option<Instant>,
+) -> Option<EndpointFile> {
+    if presented_connection_token.is_some_and(ConnectionToken::is_empty)
+        || !is_ended_by_image_replacement(runtime_directory, session_id, exchange_error)
+    {
+        return None;
+    }
+    let restart_deadline =
+        bound_by_answer_deadline(Instant::now() + RESTART_WINDOW_DURATION, answer_deadline);
+    let restarted_endpoint = wait_for_new_session_endpoint(
+        runtime_directory,
+        session_id,
+        presented_connection_token,
+        restart_deadline,
+    )?;
+    if is_answer_deadline_reached(answer_deadline) {
+        return None;
+    }
+    Some(restarted_endpoint)
+}
+
+/// Whether `exchange_error`, the end of an exchange with the session
+/// `session_id`, met that session while it replaced its process image:
+/// [`CliError::SessionRestarting`], or [`CliError::IpcUnavailable`] or
+/// [`CliError::SessionNotFound`] while [`is_replacing_its_image`] accepts the
+/// session in `runtime_directory`. An exchange that ended so ran no request
+/// past its `Commit`.
+///
+/// Example: a connection that ends before its answer, 200 ms after the
+/// session wrote its resume file, gives `true`. The same end with no resume
+/// file gives `false`.
+#[must_use]
+pub fn is_ended_by_image_replacement(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    exchange_error: &CliError,
+) -> bool {
+    match exchange_error {
+        CliError::SessionRestarting { .. } => true,
+        CliError::IpcUnavailable { .. } | CliError::SessionNotFound { .. } => {
+            is_replacing_its_image(runtime_directory, session_id)
+        }
+        _ => false,
+    }
+}
+
 /// Run `make_exchange` over `session_endpoint`, the endpoint the session
 /// `session_id` advertised, and hand back the endpoint the last exchange ran
 /// over with what that exchange gave.
@@ -1410,9 +1652,10 @@ pub fn run_session_exchange_with_restart_wait<ExchangeAnswer>(
 /// for up to [`REFUSED_TOKEN_ADVERTISE_WAIT_DURATION`] and at most until
 /// `answer_deadline`, then runs `make_exchange` once more over that file when
 /// 1 ms or more is left until `answer_deadline`. The refusal of another user's
-/// session, a refusal whose wait ends with the token unchanged, and a refusal
-/// whose wait ends with less than 1 ms left until `answer_deadline` are handed
-/// back as they are. Example: a session that restarted in place accepts its
+/// session, which `session_endpoint` names with the empty token, a refusal
+/// whose wait ends with the token unchanged, and a refusal whose wait ends
+/// with less than 1 ms left until `answer_deadline` are handed back as they
+/// are. Example: a session that restarted in place accepts its
 /// fresh token before it writes its endpoint file; a command that read the file
 /// before the write is refused, then runs once more under the fresh token.
 pub fn run_session_exchange_with_token_wait<ExchangeAnswer>(
@@ -1426,7 +1669,8 @@ pub fn run_session_exchange_with_token_wait<ExchangeAnswer>(
     if !matches!(
         exchange_result,
         Err(CliError::ConnectionTokenRefused { .. })
-    ) || !is_own_session(runtime_directory, session_id)
+    ) || session_endpoint.connection_token.is_empty()
+        || !is_own_session(runtime_directory, session_id)
     {
         return (session_endpoint, exchange_result);
     }
@@ -1437,7 +1681,7 @@ pub fn run_session_exchange_with_token_wait<ExchangeAnswer>(
     match wait_for_new_session_endpoint(
         runtime_directory,
         session_id,
-        &session_endpoint.connection_token,
+        Some(&session_endpoint.connection_token),
         advertise_deadline,
     ) {
         Some(advertised_endpoint) if !is_answer_deadline_reached(answer_deadline) => {
@@ -1479,11 +1723,11 @@ pub(crate) fn compute_poll_pause_duration(wait_deadline: Instant) -> Duration {
 }
 
 /// The failure an exchange with the session `session_id` ends in while that
-/// session replaces its process image: [`CliError::IpcUnavailable`] reading
+/// session replaces its process image: [`CliError::SessionRestarting`] reading
 /// `session session-<uuid> is restarting; ask again in a moment`.
 #[must_use]
 pub fn build_session_restarting_error(session_id: SessionId) -> CliError {
-    CliError::IpcUnavailable {
+    CliError::SessionRestarting {
         detail: format!("session {session_id} is restarting; ask again in a moment"),
     }
 }
@@ -1535,9 +1779,9 @@ fn parse_session_id(file_name: &str, file_name_suffix: &str) -> Option<SessionId
 /// Windows no listing is read, and every listing is empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ForeignSessionListing {
-    /// Each listed session's id and the control-socket address reaching it,
-    /// in no particular order. No id is here twice.
-    pub foreign_sessions: Vec<(SessionId, String)>,
+    /// Each listed session's id and where the shared directory advertises
+    /// it, in no particular order. No id is here twice.
+    pub foreign_sessions: Vec<(SessionId, ForeignSessionAdvertisement)>,
     /// Each session id more than one socket advertises, in no particular
     /// order.
     pub duplicated_sessions: Vec<DuplicatedForeignSession>,
@@ -1711,6 +1955,17 @@ fn is_unadvertised_path_error(read_error: &std::io::Error) -> bool {
     )
 }
 
+/// Where the shared directory advertises one session another local user
+/// started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignSessionAdvertisement {
+    /// The user id that owns the folder and the socket advertising the
+    /// session, such as `1001`.
+    pub owner_user_id: u32,
+    /// The control-socket address reaching the session.
+    pub socket_address: String,
+}
+
 /// One session id that more than one socket in the shared directory
 /// advertises. koshi reaches none of those sockets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1721,24 +1976,39 @@ pub struct DuplicatedForeignSession {
     pub advertisement_count: usize,
     /// The users owning those sockets, each once, lowest first.
     pub owner_user_ids: Vec<u32>,
+    /// The lowest of `owner_user_ids` whose sockets advertise the id once:
+    /// `<user id>/<session id>` reaches that one socket. `None` when every
+    /// owner's sockets advertise it more than once.
+    pub reachable_owner_user_id: Option<u32>,
 }
 
 impl DuplicatedForeignSession {
-    /// The duplicate `session_id` reads as, from the owner of each socket
-    /// advertising it, one entry per socket. Example: owners `[1002, 1001,
-    /// 1002]` give `advertisement_count` 3 and `owner_user_ids` `[1001, 1002]`.
+    /// The duplicate `session_id` reads as, from each of its `advertisements`.
+    /// Example: advertisements by the owners `[1002, 1001, 1002]` give
+    /// `advertisement_count` 3, `owner_user_ids` `[1001, 1002]` and
+    /// `reachable_owner_user_id` `Some(1001)`.
     #[cfg(unix)]
-    fn from_socket_owner_user_ids(
+    fn from_advertisements(
         session_id: SessionId,
-        mut socket_owner_user_ids: Vec<u32>,
+        advertisements: &[ForeignSessionAdvertisement],
     ) -> DuplicatedForeignSession {
-        let advertisement_count = socket_owner_user_ids.len();
-        socket_owner_user_ids.sort_unstable();
-        socket_owner_user_ids.dedup();
+        let mut advertising_owner_user_ids: Vec<u32> = advertisements
+            .iter()
+            .map(|advertisement| advertisement.owner_user_id)
+            .collect();
+        advertising_owner_user_ids.sort_unstable();
+        let reachable_owner_user_id = advertising_owner_user_ids
+            .chunk_by(|first_owner_user_id, second_owner_user_id| {
+                first_owner_user_id == second_owner_user_id
+            })
+            .find(|owner_advertisements| owner_advertisements.len() == 1)
+            .map(|owner_advertisements| owner_advertisements[0]);
+        advertising_owner_user_ids.dedup();
         DuplicatedForeignSession {
             session_id,
-            advertisement_count,
-            owner_user_ids: socket_owner_user_ids,
+            advertisement_count: advertisements.len(),
+            owner_user_ids: advertising_owner_user_ids,
+            reachable_owner_user_id,
         }
     }
 
@@ -1754,8 +2024,10 @@ impl DuplicatedForeignSession {
 
 impl std::fmt::Display for DuplicatedForeignSession {
     /// `session session-<uuid> is advertised 2 times in the shared directory,
-    /// by user ids 1001, 1002; koshi reaches none of them`. One owner reads
-    /// `by user id 1001`.
+    /// by user ids 1001, 1002; koshi reaches none of them; name the owner to
+    /// reach one, such as 1001/session-<uuid>`. One owner reads `by user id
+    /// 1001`. The example names `reachable_owner_user_id`. With none, the
+    /// sentence ends at `none of them`.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let owner_noun = if self.owner_user_ids.len() == 1 {
             "user id"
@@ -1773,11 +2045,20 @@ impl std::fmt::Display for DuplicatedForeignSession {
             "session {} is advertised {} times in the shared directory, by {owner_noun} \
              {owner_user_id_list}; koshi reaches none of them",
             self.session_id, self.advertisement_count
+        )?;
+        let Some(reachable_owner_user_id) = self.reachable_owner_user_id else {
+            return Ok(());
+        };
+        write!(
+            formatter,
+            "; name the owner to reach one, such as {}",
+            format_session_target(self.session_id, Some(reachable_owner_user_id))
         )
     }
 }
 
-/// Why [`find_foreign_session_address`] reaches no socket for a session id.
+/// Why `find_foreign_session_advertisement` reaches no socket for a session
+/// id.
 #[derive(Debug, thiserror::Error)]
 pub enum ForeignSessionLookupError {
     /// More than one socket advertises the id.
@@ -1909,7 +2190,8 @@ fn list_foreign_sessions_with_scan(
             return foreign_session_listing;
         }
     };
-    let mut advertisements_by_session_id: HashMap<SessionId, Vec<(u32, String)>> = HashMap::new();
+    let mut advertisements_by_session_id: HashMap<SessionId, Vec<ForeignSessionAdvertisement>> =
+        HashMap::new();
     'user_directories: for directory_entry in directory_entries {
         if let Err(unread_path) =
             shared_directory_scan.count_read_entry(shared_sessions_base_directory)
@@ -1984,26 +2266,20 @@ fn list_foreign_sessions_with_scan(
                 advertisements_by_session_id
                     .entry(session_id)
                     .or_default()
-                    .push((
+                    .push(ForeignSessionAdvertisement {
                         owner_user_id,
-                        compute_socket_address(&user_directory_path, session_id),
-                    ));
+                        socket_address: compute_socket_address(&user_directory_path, session_id),
+                    });
             }
         }
     }
     for (session_id, advertisements) in advertisements_by_session_id {
         match advertisements.as_slice() {
-            [(_, socket_address)] => foreign_session_listing
+            [advertisement] => foreign_session_listing
                 .foreign_sessions
-                .push((session_id, socket_address.clone())),
+                .push((session_id, advertisement.clone())),
             _ => foreign_session_listing.duplicated_sessions.push(
-                DuplicatedForeignSession::from_socket_owner_user_ids(
-                    session_id,
-                    advertisements
-                        .iter()
-                        .map(|(owner_user_id, _)| *owner_user_id)
-                        .collect(),
-                ),
+                DuplicatedForeignSession::from_advertisements(session_id, &advertisements),
             ),
         }
     }
@@ -2034,9 +2310,8 @@ fn is_socket_owned_by(socket_metadata: &std::fs::Metadata, owner_user_id: u32) -
     socket_metadata.file_type().is_socket() && socket_metadata.uid() == owner_user_id
 }
 
-/// The control-socket address of the session `session_id` another local user
-/// started, as `shared_sessions_base_directory` advertises it, or `Ok(None)`
-/// when it advertises none.
+/// Where `shared_sessions_base_directory` advertises the session `session_id`
+/// another local user started, or `Ok(None)` when it advertises none.
 ///
 /// No user's folder is listed, and no cap on sessions applies: the one path
 /// `session-<uuid>.sock` is looked up in each folder named after another
@@ -2047,56 +2322,64 @@ fn is_socket_owned_by(socket_metadata: &std::fs::Metadata, owner_user_id: u32) -
 /// [`MAX_SHARED_DIRECTORY_ENTRY_COUNT`] entries of the shared directory and at
 /// most [`MAX_SHARED_USER_DIRECTORY_COUNT`] user folders.
 ///
-/// An id whose endpoint file or resume file sits in `runtime_directory` is
-/// this user's, and gives `Ok(None)`: another user's socket under that id is
-/// never taken for it. A shared directory, a folder or a socket path that is
-/// gone, is not a directory, or that its owner lets no other user read
-/// advertises nothing. Example: the socket of `session_id` in another user's
-/// folder at mode `0700` cannot be looked up, and gives `Ok(None)`.
+/// With `owner_user_id` of `None`, an id whose endpoint file or resume file
+/// sits in `runtime_directory` is this user's, and gives `Ok(None)`: another
+/// user's socket under that id is never taken for it. With an `owner_user_id`,
+/// only a folder that user owns is looked in, and no file in
+/// `runtime_directory` is looked up. Example: `Some(1001)` for an id that the
+/// folders of users 1001 and 1002 both advertise gives the socket in the folder
+/// of user 1001. A shared directory, a folder or a socket path that is gone, is
+/// not a directory, or that its owner lets no other user read advertises
+/// nothing. Example: the socket of `session_id` in another user's folder at
+/// mode `0700` cannot be looked up, and gives `Ok(None)`.
 ///
 /// # Errors
 /// [`ForeignSessionLookupError::AdvertisedMoreThanOnce`] when sockets in two
-/// folders advertise the id. [`ForeignSessionLookupError::PathUnreadable`]
-/// when the endpoint file or the resume file of `session_id` in
-/// `runtime_directory` cannot be looked up, when the owner of
-/// `runtime_directory` cannot be read, when a read of the shared directory
-/// fails another way, such as with `EMFILE`, and when the shared directory
-/// holds one entry past
-/// [`MAX_SHARED_DIRECTORY_ENTRY_COUNT`] or one user folder past
-/// [`MAX_SHARED_USER_DIRECTORY_COUNT`]. Those two name the shared directory,
-/// read as `it holds more than 65536 entries` and `it holds more than 256
-/// user folders`.
+/// folders that are looked in advertise the id.
+/// [`ForeignSessionLookupError::PathUnreadable`] when the endpoint file or the
+/// resume file of `session_id` in `runtime_directory` cannot be looked up, when
+/// the owner of `runtime_directory` cannot be read, when a read of the shared
+/// directory fails another way, such as with `EMFILE`, and when the shared
+/// directory holds one entry past [`MAX_SHARED_DIRECTORY_ENTRY_COUNT`] or one
+/// user folder past [`MAX_SHARED_USER_DIRECTORY_COUNT`]. Those two name the
+/// shared directory, read as `it holds more than 65536 entries` and
+/// `it holds more than 256 user folders`.
 #[cfg(unix)]
-pub fn find_foreign_session_address(
+pub fn find_foreign_session_advertisement(
     shared_sessions_base_directory: &Path,
     runtime_directory: &Path,
     session_id: SessionId,
-) -> Result<Option<String>, ForeignSessionLookupError> {
-    find_foreign_session_address_with_scan(
+    owner_user_id: Option<u32>,
+) -> Result<Option<ForeignSessionAdvertisement>, ForeignSessionLookupError> {
+    find_foreign_session_advertisement_with_scan(
         shared_sessions_base_directory,
         runtime_directory,
         session_id,
+        owner_user_id,
         SharedDirectoryScan::default(),
     )
 }
 
-/// [`find_foreign_session_address`], counting on from the entries and user
-/// folders `shared_directory_scan` already holds.
+/// [`find_foreign_session_advertisement`], counting on from the entries and
+/// user folders `shared_directory_scan` already holds.
 #[cfg(unix)]
-fn find_foreign_session_address_with_scan(
+fn find_foreign_session_advertisement_with_scan(
     shared_sessions_base_directory: &Path,
     runtime_directory: &Path,
     session_id: SessionId,
+    owner_user_id: Option<u32>,
     shared_directory_scan: SharedDirectoryScan,
-) -> Result<Option<String>, ForeignSessionLookupError> {
+) -> Result<Option<ForeignSessionAdvertisement>, ForeignSessionLookupError> {
     use std::os::unix::fs::MetadataExt;
 
-    for own_session_file_path in [
-        EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id),
-        resolve_resume_file_path(runtime_directory, session_id),
-    ] {
-        if is_file_present(&own_session_file_path)? {
-            return Ok(None);
+    if owner_user_id.is_none() {
+        for own_session_file_path in [
+            EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id),
+            resolve_resume_file_path(runtime_directory, session_id),
+        ] {
+            if is_file_present(&own_session_file_path)? {
+                return Ok(None);
+            }
         }
     }
     let own_user_directory_name = find_own_user_directory_name(runtime_directory)?;
@@ -2108,7 +2391,7 @@ fn find_foreign_session_address_with_scan(
         }
     };
     let mut shared_directory_scan = shared_directory_scan;
-    let mut advertisements: Vec<(u32, String)> = Vec::new();
+    let mut advertisements: Vec<ForeignSessionAdvertisement> = Vec::new();
     for directory_entry in directory_entries {
         shared_directory_scan.count_read_entry(shared_sessions_base_directory)?;
         let directory_entry = directory_entry.map_err(|read_error| {
@@ -2127,6 +2410,10 @@ fn find_foreign_session_address_with_scan(
                 continue;
             }
         };
+        if owner_user_id.is_some_and(|owner_user_id| owner_user_id != user_directory_metadata.uid())
+        {
+            continue;
+        }
         let socket_address = compute_socket_address(&user_directory_path, session_id);
         let socket_metadata = match std::fs::symlink_metadata(&socket_address) {
             Ok(socket_metadata) => socket_metadata,
@@ -2136,19 +2423,19 @@ fn find_foreign_session_address_with_scan(
             }
         };
         if is_socket_owned_by(&socket_metadata, user_directory_metadata.uid()) {
-            advertisements.push((user_directory_metadata.uid(), socket_address));
+            advertisements.push(ForeignSessionAdvertisement {
+                owner_user_id: user_directory_metadata.uid(),
+                socket_address,
+            });
         }
     }
     match advertisements.as_slice() {
         [] => Ok(None),
-        [(_, socket_address)] => Ok(Some(socket_address.clone())),
+        [advertisement] => Ok(Some(advertisement.clone())),
         _ => Err(ForeignSessionLookupError::AdvertisedMoreThanOnce {
-            duplicated_session: DuplicatedForeignSession::from_socket_owner_user_ids(
+            duplicated_session: DuplicatedForeignSession::from_advertisements(
                 session_id,
-                advertisements
-                    .iter()
-                    .map(|(owner_user_id, _)| *owner_user_id)
-                    .collect(),
+                &advertisements,
             ),
         }),
     }
@@ -2202,6 +2489,29 @@ fn find_own_user_directory_name(runtime_directory: &Path) -> Result<Option<Strin
         Ok(directory_metadata) => Ok(Some(directory_metadata.uid().to_string())),
         Err(read_error) if read_error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(read_error) => Err(UnreadPath::from_read_error(runtime_directory, &read_error)),
+    }
+}
+
+/// Whether `owner_user_id` is this user's id: the id that owns
+/// `runtime_directory`, as `find_own_user_directory_name` reads it. `false`
+/// when `runtime_directory` does not exist, and always on Windows, where no
+/// user id names a folder.
+///
+/// # Errors
+/// [`ForeignSessionLookupError::PathUnreadable`] naming `runtime_directory`
+/// when it exists and its owner cannot be read.
+fn is_own_user_id(
+    runtime_directory: &Path,
+    owner_user_id: u32,
+) -> Result<bool, ForeignSessionLookupError> {
+    #[cfg(unix)]
+    {
+        Ok(find_own_user_directory_name(runtime_directory)? == Some(owner_user_id.to_string()))
+    }
+    #[cfg(windows)]
+    {
+        let _ = (runtime_directory, owner_user_id);
+        Ok(false)
     }
 }
 
@@ -2276,7 +2586,7 @@ struct PreparedRequestExchange {
 /// [`open_session_exchange`], which `answer_deadline` bounds. Then
 /// [`commit_after_prepare_answer`] takes the `Prepare`'s answer. With
 /// `answer_deadline`, the `Commit` and its answer have
-/// [`SESSION_ANSWER_TIMEOUT_DURATION`] from the moment the `Commit` is
+/// [`SERVER_ANSWER_TIMEOUT_DURATION`] from the moment the `Commit` is
 /// written. With `None`, nothing ends them early.
 ///
 /// Example: a session whose dispatcher is busy for 10 seconds, asked with a
@@ -2299,7 +2609,7 @@ fn exchange_prepared_session_request(
     };
     let (mut response_reader, mut request_writer, hello_answer, prepare_result) =
         open_session_exchange(endpoint, session_id, prepare_request, answer_deadline)?;
-    let commit_timeout = answer_deadline.map(|_| SESSION_ANSWER_TIMEOUT_DURATION);
+    let commit_timeout = answer_deadline.map(|_| SERVER_ANSWER_TIMEOUT_DURATION);
     let request_result = commit_after_prepare_answer(
         prepare_result,
         &mut response_reader,
@@ -2351,10 +2661,9 @@ pub(crate) fn commit_after_prepare_answer(
 ///
 /// # Errors
 /// [`CliError::CommittedRequestUnanswered`] naming the failure when the write
-/// or the read fails or runs past that deadline: the session may run the
-/// request, or may have run it. What
-/// [`take_response_result`](talk::PeerWords::take_response_result) gives for
-/// an answer that is not a result.
+/// or the read fails or runs past that deadline, and naming the reply when the
+/// answer is a result this build has no name for: the session may run the
+/// request, or may have run it.
 pub fn commit_prepared_request(
     response_reader: &mut FrameReader,
     request_writer: &mut FrameWriter,
@@ -2374,7 +2683,12 @@ pub fn commit_prepared_request(
     let commit_response: IncomingResponse = response_reader
         .recv_answer()
         .map_err(talk::build_committed_request_unanswered_error)?;
-    talk::SESSION_PEER_WORDS.take_response_result(commit_response)
+    match commit_response.answer_result {
+        MaybeKnown::Known(commit_result) => Ok(commit_result),
+        MaybeKnown::Unknown { variant_name } => Err(CliError::CommittedRequestUnanswered {
+            detail: talk::SESSION_PEER_WORDS.format_unexpected_reply_detail(&variant_name),
+        }),
+    }
 }
 
 /// Connect to `endpoint`, open with the Hello, and run `ipc_request` on the same
@@ -2461,7 +2775,10 @@ fn build_clipboard_copy_request(
 /// which has `answer_timeout` from that write.
 ///
 /// # Errors
-/// What [`commit_prepared_request`] gives.
+/// What [`commit_prepared_request`] gives, and
+/// [`CliError::CommittedRequestUnanswered`] naming the reply for an answer to
+/// the `Commit` that is neither `ClipboardCopyRouted` nor a refusal: the
+/// session may route the copy.
 fn commit_prepared_clipboard_copy(
     response_reader: &mut FrameReader,
     request_writer: &mut FrameWriter,
@@ -2473,12 +2790,19 @@ fn commit_prepared_clipboard_copy(
     if !is_last_part || copy_result != IpcResult::Prepared {
         return Ok(copy_result);
     }
-    commit_prepared_request(
+    let committed_result = commit_prepared_request(
         response_reader,
         request_writer,
         copy_request_id + 1,
         Some(answer_timeout),
-    )
+    )?;
+    match committed_result {
+        IpcResult::ClipboardCopyRouted { .. } | IpcResult::Error(_) => Ok(committed_result),
+        unexpected_result => Err(CliError::CommittedRequestUnanswered {
+            detail: talk::SESSION_PEER_WORDS
+                .format_unexpected_reply_detail(unexpected_result.get_wire_name()),
+        }),
+    }
 }
 
 /// The [`ClipboardCopyAnswer`] in `copy_result`, the session's answer to one
@@ -2523,15 +2847,16 @@ fn build_session_exchange_error(ipc_error: IpcError, answer_deadline: Option<Ins
     build_ipc_unavailable_error(ipc_error)
 }
 
-/// Whether `answer_deadline` is reached, as [`compute_time_left_until`]
+/// Whether `answer_deadline` is reached, as [`compute_remaining_duration_until`]
 /// decides: less than 1 ms is left. `None` is never reached.
 pub(crate) fn is_answer_deadline_reached(answer_deadline: Option<Instant>) -> bool {
-    answer_deadline.is_some_and(|answer_deadline| compute_time_left_until(answer_deadline).is_err())
+    answer_deadline
+        .is_some_and(|answer_deadline| compute_remaining_duration_until(answer_deadline).is_err())
 }
 
 /// How to reach `session_id`: the endpoint file in `runtime_directory`, or — for a
 /// session another local user started — what `shared_sessions_base_directory`
-/// advertises for it, through [`find_foreign_session_address`].
+/// advertises for it, through `find_foreign_session_advertisement`.
 ///
 /// A session another local user started writes its endpoint file into that
 /// user's own runtime directory, which this user may not read and does not
@@ -2545,20 +2870,45 @@ pub(crate) fn is_answer_deadline_reached(answer_deadline: Option<Instant>) -> bo
 /// [`is_replacing_its_image`] accepts it is restarting, and the shared
 /// directory is not searched for it.
 ///
+/// `owner_user_id` of `None` searches as above. Another user's id looks in the
+/// folders of `shared_sessions_base_directory` that user owns, and reads no
+/// endpoint file of this user's: the endpoint carries the empty token.
+///
 /// # Errors
-/// [`CliError::SessionNotFound`] for an id no searched place holds, and for
-/// the endpoint file of a koshi 0.1.0 window that
-/// [`is_koshi_0_1_0_window_closed`] finds closed; the failure
-/// [`build_session_restarting_error`] gives for a session that is restarting;
-/// [`CliError::IpcUnavailable`] carrying the sentence of a failure
-/// [`find_foreign_session_address`] gives; and [`CliError::IpcUnavailable`]
-/// for an endpoint file that exists and cannot be read, a koshi 0.1.0
-/// window's that is still open included.
+/// [`CliError::SessionNotFound`] for an id no searched place holds, and for the
+/// endpoint file of a koshi 0.1.0 window that [`is_koshi_0_1_0_window_closed`]
+/// finds closed. With an `owner_user_id`, the name it carries is
+/// `<user id>/session-<uuid>`. [`CliError::InvalidArgs`] for an `owner_user_id`
+/// that owns `runtime_directory`; for the user id `1001`, its message reads
+/// ``1001/<session id> names a session of yours; name it by its id alone: `<session id>` ``.
+/// The failure [`build_session_restarting_error`] gives for a session that is
+/// restarting; [`CliError::IpcUnavailable`] carrying the sentence of a failure
+/// to read the owner of `runtime_directory`, or of a failure that
+/// `find_foreign_session_advertisement` gives; and [`CliError::IpcUnavailable`]
+/// for an endpoint file that exists and cannot be read, a koshi 0.1.0 window's
+/// that is still open included.
 pub fn load_session_endpoint(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
     session_id: SessionId,
+    owner_user_id: Option<u32>,
 ) -> Result<EndpointFile, CliError> {
+    if let Some(owner_user_id) = owner_user_id {
+        if is_own_user_id(runtime_directory, owner_user_id)? {
+            return Err(CliError::InvalidArgs {
+                detail: format!(
+                    "{} names a session of yours; name it by its id alone: `{session_id}`",
+                    format_session_target(session_id, Some(owner_user_id))
+                ),
+            });
+        }
+        return load_foreign_session_endpoint(
+            runtime_directory,
+            shared_sessions_base_directory,
+            session_id,
+            Some(owner_user_id),
+        );
+    }
     let endpoint_path = EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
     match EndpointFile::load_from_path(&endpoint_path) {
         Ok(endpoint) => Ok(endpoint),
@@ -2566,25 +2916,12 @@ pub fn load_session_endpoint(
             if is_replacing_its_image(runtime_directory, session_id) {
                 return Err(build_session_restarting_error(session_id));
             }
-            #[cfg(unix)]
-            let foreign_socket_address = match shared_sessions_base_directory {
-                Some(shared_sessions_base_directory) => find_foreign_session_address(
-                    shared_sessions_base_directory,
-                    runtime_directory,
-                    session_id,
-                )?,
-                None => None,
-            };
-            #[cfg(windows)]
-            let foreign_socket_address: Option<String> = {
-                let _ = shared_sessions_base_directory;
-                None
-            };
-            foreign_socket_address
-                .map(build_foreign_session_endpoint)
-                .ok_or_else(|| CliError::SessionNotFound {
-                    session_name: session_id.to_string(),
-                })
+            load_foreign_session_endpoint(
+                runtime_directory,
+                shared_sessions_base_directory,
+                session_id,
+                None,
+            )
         }
         Err(IpcError::Koshi010WindowEndpointFile { .. })
             if is_koshi_0_1_0_window_closed(runtime_directory, session_id) =>
@@ -2597,6 +2934,44 @@ pub fn load_session_endpoint(
             detail: ipc_error.to_string(),
         }),
     }
+}
+
+/// How to reach the session `session_id` of another local user: the socket
+/// `find_foreign_session_advertisement` finds in `shared_sessions_base_directory`
+/// for `owner_user_id`, with the empty token. `shared_sessions_base_directory`
+/// of `None`, and every lookup on Windows, finds nothing.
+///
+/// # Errors
+/// [`CliError::SessionNotFound`] naming what [`format_session_target`] gives
+/// for `session_id` and `owner_user_id` when nothing is found, and
+/// [`CliError::IpcUnavailable`] carrying the sentence of the lookup's failure.
+fn load_foreign_session_endpoint(
+    runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
+    session_id: SessionId,
+    owner_user_id: Option<u32>,
+) -> Result<EndpointFile, CliError> {
+    #[cfg(unix)]
+    let foreign_socket_address = match shared_sessions_base_directory {
+        Some(shared_sessions_base_directory) => find_foreign_session_advertisement(
+            shared_sessions_base_directory,
+            runtime_directory,
+            session_id,
+            owner_user_id,
+        )?
+        .map(|foreign_session_advertisement| foreign_session_advertisement.socket_address),
+        None => None,
+    };
+    #[cfg(windows)]
+    let foreign_socket_address: Option<String> = {
+        let _ = (runtime_directory, shared_sessions_base_directory);
+        None
+    };
+    foreign_socket_address
+        .map(build_foreign_session_endpoint)
+        .ok_or_else(|| CliError::SessionNotFound {
+            session_name: format_session_target(session_id, owner_user_id),
+        })
 }
 
 /// Whether nothing listens at
@@ -2626,7 +3001,7 @@ pub fn is_koshi_0_1_0_window_closed(runtime_directory: &Path, session_id: Sessio
 /// reached with [`Connection::connect_within`].
 ///
 /// With `answer_deadline`, the wait also ends by that moment, and no connect
-/// starts once [`compute_time_left_until`] finds it reached: that is
+/// starts once [`compute_remaining_duration_until`] finds it reached: that is
 /// [`CliError::SessionAnswerTimedOut`]. Example: a deadline 300 ms away gives
 /// the connect 300 ms, and one already passed connects to nothing.
 ///
@@ -2643,7 +3018,7 @@ pub fn connect_to_session(
     answer_deadline: Option<Instant>,
 ) -> Result<Connection, CliError> {
     let connect_wait_duration = match answer_deadline {
-        Some(answer_deadline) => compute_time_left_until(answer_deadline)
+        Some(answer_deadline) => compute_remaining_duration_until(answer_deadline)
             .map_err(|_| CliError::SessionAnswerTimedOut)?
             .min(CONNECT_WAIT_DURATION),
         None => CONNECT_WAIT_DURATION,

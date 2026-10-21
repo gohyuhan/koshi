@@ -18,7 +18,7 @@ use koshi_core::{
     ids::PaneId,
 };
 use koshi_layout::focus::FocusCandidates;
-use koshi_pane::{pane::lifecycle::PaneLifecycle, registry::PaneRegistry};
+use koshi_pane::registry::PaneRegistry;
 
 use crate::{client::Client, session::state::Tab};
 
@@ -32,8 +32,8 @@ pub enum FocusRepairResult {
     Focused(PaneId),
     /// The tab's layout still holds panes, but none is eligible: every pane is
     /// suppressed (zero-area, too little room to draw), or every visible pane
-    /// is [`PaneLifecycle::Removed`] or missing from the registry. The caller
-    /// shows the terminal-too-small overlay.
+    /// is missing from the registry. The caller shows the terminal-too-small
+    /// overlay.
     TerminalTooSmall,
 }
 
@@ -49,10 +49,8 @@ pub enum FocusRepairResult {
 /// (from `koshi_layout::focus::compute_focus_candidates`); its
 /// `layout_order_pane_ids` is exactly the
 /// visible panes, so suppressed panes are already excluded. A pane is
-/// *eligible* when it appears in `layout_order_pane_ids`, has a record in
-/// `pane_registry`, and that record is not [`PaneLifecycle::Removed`]. A
-/// `Spawning`, `Running`, dead (`Exited`) or `Closing` pane all stay eligible:
-/// each is a visible, focusable placeholder until it is removed.
+/// *eligible* when it appears in `layout_order_pane_ids` and has a record in
+/// `pane_registry`.
 ///
 /// When no pane is eligible, the verdict is
 /// [`FocusRepairResult::TerminalTooSmall`].
@@ -66,9 +64,7 @@ pub fn repair_focus(
         ranked_focus_candidates
             .layout_order_pane_ids
             .contains(&pane_id)
-            && pane_registry
-                .get_pane_record_by_id(pane_id)
-                .is_some_and(|pane_record| *pane_record.get_lifecycle() != PaneLifecycle::Removed)
+            && pane_registry.get_pane_record_by_id(pane_id).is_some()
     };
 
     // The recovery order in one pass, focus history newest-first.

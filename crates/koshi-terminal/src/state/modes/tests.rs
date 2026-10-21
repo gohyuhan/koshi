@@ -1,4 +1,5 @@
-//! Unit tests for the terminal mode flags and their default startup values.
+//! Unit tests for the terminal mode flags: their default startup values,
+//! their stored form, and the modes resume format 4 stores.
 
 use super::*;
 
@@ -12,6 +13,7 @@ fn terminal_modes_default_matches_the_documented_startup_state() {
     // Autowrap (DECAWM `?7`), Sixel scrolling, and private Sixel registers
     // start on; the other mode flags start off.
     assert!(terminal_modes.is_autowrap_enabled);
+    assert!(!terminal_modes.is_insert_mode_enabled);
     assert!(terminal_modes.is_sixel_scrolling_enabled);
     assert!(terminal_modes.is_sixel_private_color_registers_enabled);
     assert!(!terminal_modes.is_sixel_cursor_right_enabled);
@@ -92,7 +94,7 @@ fn terminal_modes_default_serializes_to_the_resume_body_shape() {
     let terminal_modes_json = serde_json::to_string(&TerminalModes::default()).expect("serializes");
     assert_eq!(
         terminal_modes_json,
-        r#"{"is_bracketed_paste_enabled":false,"mouse_tracking":"Off","mouse_encoding":"Default","is_alternate_scroll_enabled":false,"is_autowrap_enabled":true,"is_application_cursor_keys_enabled":false,"is_left_right_margin_mode_enabled":false,"is_reverse_video_enabled":false,"is_cursor_blink_enabled":false,"cursor_shape":null,"is_sixel_scrolling_enabled":true,"is_sixel_private_color_registers_enabled":true,"is_sixel_cursor_right_enabled":false}"#
+        r#"{"is_bracketed_paste_enabled":false,"mouse_tracking":"Off","mouse_encoding":"Default","is_alternate_scroll_enabled":false,"is_autowrap_enabled":true,"is_insert_mode_enabled":false,"is_application_cursor_keys_enabled":false,"is_left_right_margin_mode_enabled":false,"is_reverse_video_enabled":false,"is_cursor_blink_enabled":false,"cursor_shape":null,"is_sixel_scrolling_enabled":true,"is_sixel_private_color_registers_enabled":true,"is_sixel_cursor_right_enabled":false}"#
     );
 }
 
@@ -104,6 +106,7 @@ fn terminal_modes_with_every_value_flipped_round_trip_through_json() {
         mouse_encoding: MouseEncoding::Sgr,
         is_alternate_scroll_enabled: true,
         is_autowrap_enabled: false,
+        is_insert_mode_enabled: true,
         is_application_cursor_keys_enabled: true,
         is_left_right_margin_mode_enabled: true,
         is_reverse_video_enabled: true,
@@ -116,7 +119,7 @@ fn terminal_modes_with_every_value_flipped_round_trip_through_json() {
     let terminal_modes_json = serde_json::to_string(&terminal_modes).expect("serializes");
     assert_eq!(
         terminal_modes_json,
-        r#"{"is_bracketed_paste_enabled":true,"mouse_tracking":"AnyMotion","mouse_encoding":"Sgr","is_alternate_scroll_enabled":true,"is_autowrap_enabled":false,"is_application_cursor_keys_enabled":true,"is_left_right_margin_mode_enabled":true,"is_reverse_video_enabled":true,"is_cursor_blink_enabled":true,"cursor_shape":"Bar","is_sixel_scrolling_enabled":false,"is_sixel_private_color_registers_enabled":false,"is_sixel_cursor_right_enabled":true}"#
+        r#"{"is_bracketed_paste_enabled":true,"mouse_tracking":"AnyMotion","mouse_encoding":"Sgr","is_alternate_scroll_enabled":true,"is_autowrap_enabled":false,"is_insert_mode_enabled":true,"is_application_cursor_keys_enabled":true,"is_left_right_margin_mode_enabled":true,"is_reverse_video_enabled":true,"is_cursor_blink_enabled":true,"cursor_shape":"Bar","is_sixel_scrolling_enabled":false,"is_sixel_private_color_registers_enabled":false,"is_sixel_cursor_right_enabled":true}"#
     );
     let restored_terminal_modes: TerminalModes =
         serde_json::from_str(&terminal_modes_json).expect("reads back");
@@ -125,7 +128,7 @@ fn terminal_modes_with_every_value_flipped_round_trip_through_json() {
 
 #[test]
 fn a_terminal_modes_body_without_cursor_shape_reads_back_as_none() {
-    let serialized_modes_json = r#"{"is_bracketed_paste_enabled":false,"mouse_tracking":"Off","mouse_encoding":"Default","is_alternate_scroll_enabled":false,"is_autowrap_enabled":true,"is_application_cursor_keys_enabled":false,"is_left_right_margin_mode_enabled":false,"is_reverse_video_enabled":false,"is_cursor_blink_enabled":false,"is_sixel_scrolling_enabled":true,"is_sixel_private_color_registers_enabled":true,"is_sixel_cursor_right_enabled":false}"#;
+    let serialized_modes_json = r#"{"is_bracketed_paste_enabled":false,"mouse_tracking":"Off","mouse_encoding":"Default","is_alternate_scroll_enabled":false,"is_autowrap_enabled":true,"is_insert_mode_enabled":false,"is_application_cursor_keys_enabled":false,"is_left_right_margin_mode_enabled":false,"is_reverse_video_enabled":false,"is_cursor_blink_enabled":false,"is_sixel_scrolling_enabled":true,"is_sixel_private_color_registers_enabled":true,"is_sixel_cursor_right_enabled":false}"#;
     let restored_terminal_modes: TerminalModes =
         serde_json::from_str(serialized_modes_json).expect("reads back");
     assert_eq!(restored_terminal_modes, TerminalModes::default());
@@ -133,7 +136,7 @@ fn a_terminal_modes_body_without_cursor_shape_reads_back_as_none() {
 
 #[test]
 fn a_terminal_modes_body_missing_a_flag_is_rejected() {
-    let serialized_modes_json = r#"{"is_bracketed_paste_enabled":false,"mouse_tracking":"Off","mouse_encoding":"Default","is_alternate_scroll_enabled":false,"is_autowrap_enabled":true,"is_application_cursor_keys_enabled":false,"is_left_right_margin_mode_enabled":false,"is_reverse_video_enabled":false,"cursor_shape":null,"is_sixel_scrolling_enabled":true,"is_sixel_private_color_registers_enabled":true,"is_sixel_cursor_right_enabled":false}"#;
+    let serialized_modes_json = r#"{"is_bracketed_paste_enabled":false,"mouse_tracking":"Off","mouse_encoding":"Default","is_alternate_scroll_enabled":false,"is_autowrap_enabled":true,"is_insert_mode_enabled":false,"is_application_cursor_keys_enabled":false,"is_left_right_margin_mode_enabled":false,"is_reverse_video_enabled":false,"cursor_shape":null,"is_sixel_scrolling_enabled":true,"is_sixel_private_color_registers_enabled":true,"is_sixel_cursor_right_enabled":false}"#;
     let terminal_modes_deserialization_error =
         serde_json::from_str::<TerminalModes>(serialized_modes_json)
             .expect_err("is_cursor_blink_enabled is required");
@@ -143,6 +146,35 @@ fn a_terminal_modes_body_missing_a_flag_is_rejected() {
             "missing field `is_cursor_blink_enabled` at line 1 column {}",
             serialized_modes_json.len()
         )
+    );
+}
+
+#[test]
+fn a_resume_format_4_modes_body_reads_back_with_insert_mode_off_and_every_other_flag_kept() {
+    let format_4_modes_json = r#"{"is_bracketed_paste_enabled":true,"mouse_tracking":"AnyMotion","mouse_encoding":"Sgr","is_alternate_scroll_enabled":true,"is_autowrap_enabled":false,"is_application_cursor_keys_enabled":true,"is_left_right_margin_mode_enabled":true,"is_reverse_video_enabled":true,"is_cursor_blink_enabled":true,"cursor_shape":"Bar","is_sixel_scrolling_enabled":false,"is_sixel_private_color_registers_enabled":false,"is_sixel_cursor_right_enabled":true}"#;
+
+    let terminal_modes = serde_json::from_str::<ResumeFormat4TerminalModes>(format_4_modes_json)
+        .expect("reads the format 4 body")
+        .into_terminal_modes();
+
+    assert_eq!(
+        terminal_modes,
+        TerminalModes {
+            is_bracketed_paste_enabled: true,
+            mouse_tracking: MouseTracking::AnyMotion,
+            mouse_encoding: MouseEncoding::Sgr,
+            is_alternate_scroll_enabled: true,
+            is_autowrap_enabled: false,
+            is_insert_mode_enabled: false,
+            is_application_cursor_keys_enabled: true,
+            is_left_right_margin_mode_enabled: true,
+            is_reverse_video_enabled: true,
+            is_cursor_blink_enabled: true,
+            cursor_shape: Some(CursorShape::Bar),
+            is_sixel_scrolling_enabled: false,
+            is_sixel_private_color_registers_enabled: false,
+            is_sixel_cursor_right_enabled: true,
+        }
     );
 }
 

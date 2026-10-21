@@ -157,21 +157,3 @@ fn color_bad_digit_quotes_the_offending_value() {
         "color `#gg0011` contains a non-hex digit"
     );
 }
-
-#[test]
-fn color_parse_errors_compare_by_value() {
-    assert_eq!(
-        ColorParseError::BadLength { character_count: 5 },
-        ColorParseError::BadLength { character_count: 5 }
-    );
-    assert_ne!(
-        ColorParseError::BadLength { character_count: 5 },
-        ColorParseError::BadLength { character_count: 4 }
-    );
-    assert_ne!(
-        ColorParseError::BadLength { character_count: 6 },
-        ColorParseError::BadDigit {
-            invalid_hex_text: "z".to_string(),
-        }
-    );
-}

@@ -106,7 +106,10 @@ impl ExecutableWatch {
     /// now counts as examined: [`check_executable_file`](Self::check_executable_file)
     /// reads its version only once the file has changed.
     #[must_use]
-    pub fn new(executable_path: PathBuf, running_version: &str) -> ExecutableWatch {
+    pub fn from_executable_path(
+        executable_path: PathBuf,
+        running_version: &str,
+    ) -> ExecutableWatch {
         let examined_file_identity = ExecutableFileIdentity::load_from_path(&executable_path);
         ExecutableWatch {
             executable_path,

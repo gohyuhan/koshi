@@ -37,6 +37,19 @@ fn an_unknown_pane_displays_the_pane_id() {
 }
 
 #[test]
+fn a_full_input_queue_displays_the_pane_and_the_bytes_waiting() {
+    let pane_id = PaneId::new();
+    let pty_error = PtyError::InputQueueFull {
+        pane_id,
+        queued_byte_count: 67_108_864,
+    };
+    assert_eq!(
+        pty_error.to_string(),
+        format!("pane {pane_id} is not reading its input: 67108864 bytes wait for it")
+    );
+}
+
+#[test]
 fn an_empty_detail_leaves_the_prefix_and_its_trailing_space() {
     let pty_error = PtyError::Io {
         detail: String::new(),

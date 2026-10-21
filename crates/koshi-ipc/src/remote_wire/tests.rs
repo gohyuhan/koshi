@@ -20,7 +20,7 @@ use super::*;
 use crate::error::IpcError;
 use crate::protocol::tests::build_fixed_test_uuid;
 use crate::protocol::{MIN_PROTOCOL_VERSION, PROTOCOL_VERSION};
-use crate::transport::{read_message, MAX_FRAME_BYTE_COUNT};
+use crate::transport::{read_message, BINARY_FRAME_FLAG, MAX_FRAME_BYTE_COUNT};
 
 /// The number every mutation run starts from.
 const MUTATION_SEED: u64 = 0x5ead_bead_0f15_1234;
@@ -140,8 +140,15 @@ fn a_length_prefix_past_the_cap_is_refused_before_a_payload_buffer_is_made() {
         let claimed_frame_byte_count = MAX_FRAME_BYTE_COUNT
             + 1
             + (compute_next_number(&mut mutation_state)
-                % u64::from(u32::MAX - MAX_FRAME_BYTE_COUNT)) as u32;
-        let mut framed_remote_client_bytes = claimed_frame_byte_count.to_be_bytes().to_vec();
+                % u64::from(!BINARY_FRAME_FLAG - MAX_FRAME_BYTE_COUNT)) as u32;
+        let frame_kind_bit = if compute_next_number(&mut mutation_state).is_multiple_of(2) {
+            0
+        } else {
+            BINARY_FRAME_FLAG
+        };
+        let mut framed_remote_client_bytes = (claimed_frame_byte_count | frame_kind_bit)
+            .to_be_bytes()
+            .to_vec();
         framed_remote_client_bytes.extend_from_slice(b"a frame payload no read ever reaches");
 
         let (frame_read_result, consumed_byte_count) =
@@ -216,6 +223,7 @@ fn a_mutated_length_prefix_is_refused_or_read_and_never_panics() {
     let valid_hello_frame_bytes = build_framed_remote_client_frame(&build_hello_frame());
     let hello_payload_byte_count = (valid_hello_frame_bytes.len() - 4) as u32;
     let mut too_large_frame_count = 0usize;
+    let mut binary_frame_count = 0usize;
 
     for _ in 0..MUTATION_ROUND_COUNT {
         let mut mutated_hello_frame_bytes = valid_hello_frame_bytes.clone();
@@ -237,12 +245,24 @@ fn a_mutated_length_prefix_is_refused_or_read_and_never_panics() {
                 maximum_frame_byte_count,
             }) => {
                 too_large_frame_count += 1;
-                assert!(claimed_frame_payload_byte_count > MAX_FRAME_BYTE_COUNT);
+                assert!(
+                    claimed_frame_payload_byte_count & !BINARY_FRAME_FLAG > MAX_FRAME_BYTE_COUNT
+                );
                 assert_eq!(
                     frame_byte_count,
-                    u64::from(claimed_frame_payload_byte_count)
+                    u64::from(claimed_frame_payload_byte_count & !BINARY_FRAME_FLAG)
                 );
                 assert_eq!(maximum_frame_byte_count, MAX_FRAME_BYTE_COUNT);
+                assert_eq!(consumed_byte_count, 4, "only the length prefix was read");
+            }
+            // Bit 31 marks a binary frame within the cap, which a reader of
+            // client frames refuses after the length prefix.
+            Err(IpcError::UnexpectedBinaryFrame) => {
+                binary_frame_count += 1;
+                assert_ne!(claimed_frame_payload_byte_count & BINARY_FRAME_FLAG, 0);
+                assert!(
+                    claimed_frame_payload_byte_count & !BINARY_FRAME_FLAG <= MAX_FRAME_BYTE_COUNT
+                );
                 assert_eq!(consumed_byte_count, 4, "only the length prefix was read");
             }
             // The prefix named fewer bytes than the frame payload holds: a whole frame
@@ -261,10 +281,10 @@ fn a_mutated_length_prefix_is_refused_or_read_and_never_panics() {
         }
     }
 
-    assert!(
-        too_large_frame_count > 0,
-        "the run mutated {MUTATION_ROUND_COUNT} length prefixes and none crossed the cap"
-    );
+    // The seeded run: 2 036 prefixes name a payload past the cap, and 8 set
+    // bit 31 with a payload within it.
+    assert_eq!(too_large_frame_count, 2036);
+    assert_eq!(binary_frame_count, 8);
 }
 
 /// The one refusal that is not [`REMOTE_REFUSED`] names the caller's range

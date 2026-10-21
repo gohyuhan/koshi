@@ -4,6 +4,7 @@
 //! discriminants are stable, and ensuring command envelopes validate client IDs.
 
 use super::*;
+use crate::event::tests::assert_json_roundtrip;
 use crate::event::{Event, QuitCause, RejectReason};
 use crate::geometry::{AxisPercent, FloatingPaneDimension};
 use crate::ids::{ClientId, CommandId, PaneId, SessionId};
@@ -22,17 +23,6 @@ fn build_new_pane_args() -> NewPaneArgs {
         spawn_spec: None,
         client_id: None,
     }
-}
-
-/// Roundtrip a value through JSON and assert it survives unchanged.
-fn assert_json_roundtrip<Roundtrippable>(roundtrippable_subject: &Roundtrippable)
-where
-    Roundtrippable: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
-{
-    let serialized_json = serde_json::to_string(roundtrippable_subject).expect("serialize");
-    let decoded_roundtrippable_subject: Roundtrippable =
-        serde_json::from_str(&serialized_json).expect("deserialize");
-    assert_eq!(*roundtrippable_subject, decoded_roundtrippable_subject);
 }
 
 #[test]
@@ -444,6 +434,7 @@ fn command_variant_names_are_canonical() {
             Command::SwitchSession(SwitchSessionArgs {
                 client_id: None,
                 session_id: SessionId::new(),
+                owner_user_id: None,
             }),
             "SwitchSession",
         ),
@@ -1165,6 +1156,15 @@ fn a_command_written_in_the_protocol_four_shape_is_refused() {
         .expect_err("a new pane without a placement is refused")
         .to_string(),
         "missing field `placement`"
+    );
+    assert_eq!(
+        serde_json::from_value::<SwitchSessionArgs>(json!({
+            "client_id": null,
+            "session_id": "00000000-0000-0000-0000-000000000001"
+        }))
+        .expect_err("a switch without its user id is refused")
+        .to_string(),
+        "missing field `owner_user_id`"
     );
 }
 

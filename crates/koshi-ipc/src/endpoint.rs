@@ -67,10 +67,10 @@ pub const PROGRAM_FILE_FORMAT: u32 = koshi_core::compat::PROGRAM_FILE_FORMAT.max
 /// [`validate_socket_address`](crate::validate::validate_socket_address)
 /// accepts. Passing a session's shared user directory as `runtime_directory`
 /// gives the address other local users reach, the location
-/// [`validate_shared_socket_address`](crate::validate::validate_shared_socket_address)
-/// accepts. On Windows it is the pipe name `koshi-session-<uuid>`, inside the
-/// `koshi-` namespace `validate_socket_address` requires there; pipe names
-/// share one machine-wide namespace, and `runtime_directory` goes unused.
+/// `validate_shared_socket_address` accepts. On Windows it is the pipe name
+/// `koshi-session-<uuid>`, inside the `koshi-` namespace
+/// `validate_socket_address` requires there; pipe names share one
+/// machine-wide namespace, and `runtime_directory` goes unused.
 ///
 /// Every consumer derives the address through here, including the
 /// `KOSHI_SOCKET` variable injected into spawned panes.

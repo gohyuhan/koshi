@@ -1,9 +1,6 @@
 //! Tests for bounded placement-preview validation.
 
-use crate::frame::{
-    FrameAttributes, FrameCell, FrameImageAction, FrameImagePlacement, FrameImageRecordHeader,
-    FrameRow, FrameRun, FrameStyle, FrameWindow,
-};
+use crate::frame::{FrameImageAction, FrameImagePlacement, FrameImageRecordHeader};
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_layout::mode::LayoutMode;
@@ -11,44 +8,17 @@ use koshi_layout::tree::LayoutNode;
 
 use super::*;
 
-fn build_test_frame_cell() -> FrameCell {
-    FrameCell {
-        character: ' ',
-        combining_characters: Vec::new(),
-        cell_width: 1,
-        style: FrameStyle {
-            foreground_color: Default::default(),
-            background_color: Default::default(),
-            underline_color: None,
-            text_attributes: FrameAttributes {
-                is_bold: false,
-                is_italic: false,
-                is_reverse: false,
-                is_faint: false,
-                is_blinking: false,
-                is_concealed: false,
-                is_struck_through: false,
-                is_overlined: false,
-                underline_style: Default::default(),
-            },
-        },
-    }
-}
-
-fn build_test_window(column_count: u16, row_count: u16) -> FrameWindow {
-    FrameWindow {
+/// A window of `row_count` rows, each the same placeholder bytes. Validation
+/// reads no row's bytes.
+pub(crate) fn build_test_window(column_count: u16, row_count: u16) -> PlacementWindow {
+    PlacementWindow {
         column_count,
-        row_snapshots: vec![
-            FrameRow {
-                cell_runs: vec![FrameRun {
-                    repeat_count: column_count,
-                    cell: build_test_frame_cell(),
-                }],
-                row_end: Default::default(),
+        encoded_rows: vec![
+            EncodedRow {
+                encoded_row_bytes: vec![0x00],
             };
             usize::from(row_count)
         ],
-        view_row_offset: 0,
     }
 }
 
@@ -133,187 +103,208 @@ fn valid_snapshot_passes_validation() {
 
 #[test]
 fn snapshot_rejects_a_missing_cross_tab_snapshot() {
-    let mut snapshot = build_test_snapshot();
-    snapshot.destination_tab_id = TabId::new();
+    let mut placement_snapshot = build_test_snapshot();
+    placement_snapshot.destination_tab_id = TabId::new();
 
     assert_eq!(
-        snapshot.validate(),
+        placement_snapshot.validate(),
         Err(PanePlacementSnapshotValidationError::TabIdentityMismatch)
     );
 }
 
 #[test]
 fn snapshot_rejects_duplicate_pane_slots() {
-    let mut snapshot = build_test_snapshot();
-    snapshot
+    let mut placement_snapshot = build_test_snapshot();
+    placement_snapshot
         .source_tab_snapshot
         .pane_slots
-        .push(snapshot.source_tab_snapshot.pane_slots[0].clone());
+        .push(placement_snapshot.source_tab_snapshot.pane_slots[0].clone());
 
     assert_eq!(
-        snapshot.validate(),
+        placement_snapshot.validate(),
         Err(PanePlacementSnapshotValidationError::PaneSnapshotMismatch)
     );
 }
 
 #[test]
 fn snapshot_rejects_a_source_pane_outside_the_source_tab() {
-    let mut snapshot = build_test_snapshot();
-    snapshot.source_pane_id = PaneId::new();
+    let mut placement_snapshot = build_test_snapshot();
+    placement_snapshot.source_pane_id = PaneId::new();
 
     assert_eq!(
-        snapshot.validate(),
+        placement_snapshot.validate(),
         Err(PanePlacementSnapshotValidationError::SourcePaneMissing)
     );
 }
 
 #[test]
 fn snapshot_rejects_a_layout_tree_that_does_not_match_the_slots() {
-    let mut snapshot = build_test_snapshot();
-    snapshot.source_tab_snapshot.layout_tree = LayoutNode::Pane(PaneId::new());
+    let mut placement_snapshot = build_test_snapshot();
+    placement_snapshot.source_tab_snapshot.layout_tree = LayoutNode::Pane(PaneId::new());
 
     assert_eq!(
-        snapshot.validate(),
+        placement_snapshot.validate(),
         Err(PanePlacementSnapshotValidationError::LayoutMismatch)
     );
 }
 
 #[test]
 fn snapshot_rejects_missing_pane_content() {
-    let mut snapshot = build_test_snapshot();
-    snapshot.source_tab_snapshot.pane_snapshots.clear();
+    let mut placement_snapshot = build_test_snapshot();
+    placement_snapshot
+        .source_tab_snapshot
+        .pane_snapshots
+        .clear();
 
     assert_eq!(
-        snapshot.validate(),
+        placement_snapshot.validate(),
         Err(PanePlacementSnapshotValidationError::PaneSnapshotMismatch)
     );
 }
 
 #[test]
 fn snapshot_rejects_duplicate_pane_ids_across_tabs() {
-    let mut snapshot = build_test_snapshot();
+    let mut placement_snapshot = build_test_snapshot();
     let destination_tab_id = TabId::new();
-    let mut destination_tab_snapshot = snapshot.source_tab_snapshot.clone();
+    let mut destination_tab_snapshot = placement_snapshot.source_tab_snapshot.clone();
     destination_tab_snapshot.tab_id = destination_tab_id;
-    snapshot.destination_tab_id = destination_tab_id;
-    snapshot.destination_tab_snapshot = Some(destination_tab_snapshot);
+    placement_snapshot.destination_tab_id = destination_tab_id;
+    placement_snapshot.destination_tab_snapshot = Some(destination_tab_snapshot);
 
     assert_eq!(
-        snapshot.validate(),
+        placement_snapshot.validate(),
         Err(PanePlacementSnapshotValidationError::DuplicatePaneId)
     );
 }
 
 #[test]
 fn snapshot_accepts_a_window_that_does_not_match_the_preview_slot() {
-    let mut snapshot = build_test_snapshot();
-    snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window = Some(build_test_window(1, 1));
+    let mut placement_snapshot = build_test_snapshot();
+    placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
+        Some(build_test_window(1, 1));
 
-    assert_eq!(snapshot.validate(), Ok(()));
+    assert_eq!(placement_snapshot.validate(), Ok(()));
 }
 
 #[test]
-fn snapshot_rejects_a_window_row_that_does_not_match_the_window_width() {
-    let mut snapshot = build_test_snapshot();
-    let mut terminal_window = build_test_window(1, 1);
-    terminal_window.row_snapshots[0].cell_runs[0].repeat_count = 2;
-    snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window = Some(terminal_window);
+fn snapshot_rejects_a_window_with_no_column_or_no_row() {
+    for terminal_window in [build_test_window(0, 1), build_test_window(1, 0)] {
+        let mut placement_snapshot = build_test_snapshot();
+        placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
+            Some(terminal_window);
+
+        assert_eq!(
+            placement_snapshot.validate(),
+            Err(PanePlacementSnapshotValidationError::TerminalWindowMismatch)
+        );
+    }
+}
+
+#[test]
+fn snapshot_rejects_a_window_of_more_than_65_535_rows() {
+    let mut placement_snapshot = build_test_snapshot();
+    let mut terminal_window = build_test_window(1, u16::MAX);
+    terminal_window.encoded_rows.push(EncodedRow {
+        encoded_row_bytes: vec![0x00],
+    });
+    placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
+        Some(terminal_window);
 
     assert_eq!(
-        snapshot.validate(),
+        placement_snapshot.validate(),
         Err(PanePlacementSnapshotValidationError::TerminalWindowMismatch)
     );
 }
 
 #[test]
 fn snapshot_rejects_cells_over_the_preview_limit() {
-    let mut snapshot = build_test_snapshot();
+    let mut placement_snapshot = build_test_snapshot();
     let oversized_size = Size {
         column_count: u16::MAX,
         row_count: 5,
     };
     let oversized_rect = Rect::from_size_at_origin(oversized_size);
-    snapshot.source_tab_snapshot.tab_size = oversized_size;
-    snapshot.source_tab_snapshot.pane_slots[0].outer_rect = oversized_rect;
-    snapshot.source_tab_snapshot.pane_slots[0].content_rect = Some(oversized_rect);
-    snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
+    placement_snapshot.source_tab_snapshot.tab_size = oversized_size;
+    placement_snapshot.source_tab_snapshot.pane_slots[0].outer_rect = oversized_rect;
+    placement_snapshot.source_tab_snapshot.pane_slots[0].content_rect = Some(oversized_rect);
+    placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
         Some(build_test_window(u16::MAX, 5));
 
     assert_eq!(
-        snapshot.validate(),
+        placement_snapshot.validate(),
         Err(PanePlacementSnapshotValidationError::CellCountExceeded)
     );
 }
 
 #[test]
 fn snapshot_rejects_duplicate_image_placement_ids() {
-    let mut snapshot = build_test_snapshot();
+    let mut placement_snapshot = build_test_snapshot();
     let image_placement = build_test_image_placement(1, 1);
-    snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
+    placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
         Some(build_test_window(80, 24));
-    snapshot.source_tab_snapshot.pane_snapshots[0].image_placement_snapshots =
+    placement_snapshot.source_tab_snapshot.pane_snapshots[0].image_placement_snapshots =
         vec![image_placement.clone(), image_placement];
 
     assert_eq!(
-        snapshot.validate(),
+        placement_snapshot.validate(),
         Err(PanePlacementSnapshotValidationError::DuplicateImagePlacementId)
     );
 }
 
 #[test]
 fn snapshot_rejects_image_bytes_over_the_preview_limit() {
-    let mut snapshot = build_test_snapshot();
-    snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
+    let mut placement_snapshot = build_test_snapshot();
+    placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
         Some(build_test_window(80, 24));
-    snapshot.source_tab_snapshot.pane_snapshots[0].image_placement_snapshots = vec![
+    placement_snapshot.source_tab_snapshot.pane_snapshots[0].image_placement_snapshots = vec![
         build_test_image_placement(1, 1),
         build_test_image_placement(2, 2),
     ];
 
     assert_eq!(
-        snapshot.validate(),
+        placement_snapshot.validate(),
         Err(PanePlacementSnapshotValidationError::ImageByteCountExceeded)
     );
 }
 
 #[test]
 fn snapshot_counts_shared_image_bytes_once() {
-    let mut snapshot = build_test_snapshot();
-    snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
+    let mut placement_snapshot = build_test_snapshot();
+    placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
         Some(build_test_window(80, 24));
-    snapshot.source_tab_snapshot.pane_snapshots[0].image_placement_snapshots = vec![
+    placement_snapshot.source_tab_snapshot.pane_snapshots[0].image_placement_snapshots = vec![
         build_test_image_placement(1, 1),
         build_test_image_placement(2, 1),
     ];
 
-    assert_eq!(snapshot.validate(), Ok(()));
+    assert_eq!(placement_snapshot.validate(), Ok(()));
 }
 
 #[test]
 fn snapshot_accepts_an_image_outside_the_preview_slot_inside_the_terminal_window() {
-    let mut snapshot = build_test_snapshot();
-    snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
+    let mut placement_snapshot = build_test_snapshot();
+    placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
         Some(build_test_window(100, 30));
     let mut image_placement = build_test_image_placement(1, 1);
     image_placement.anchor_cell = (25, 90);
-    snapshot.source_tab_snapshot.pane_snapshots[0].image_placement_snapshots =
+    placement_snapshot.source_tab_snapshot.pane_snapshots[0].image_placement_snapshots =
         vec![image_placement];
 
-    assert_eq!(snapshot.validate(), Ok(()));
+    assert_eq!(placement_snapshot.validate(), Ok(()));
 }
 
 #[test]
 fn snapshot_rejects_an_image_outside_the_terminal_window() {
-    let mut snapshot = build_test_snapshot();
-    snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
+    let mut placement_snapshot = build_test_snapshot();
+    placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
         Some(build_test_window(100, 30));
     let mut image_placement = build_test_image_placement(1, 1);
     image_placement.anchor_cell = (30, 90);
-    snapshot.source_tab_snapshot.pane_snapshots[0].image_placement_snapshots =
+    placement_snapshot.source_tab_snapshot.pane_snapshots[0].image_placement_snapshots =
         vec![image_placement];
 
     assert_eq!(
-        snapshot.validate(),
+        placement_snapshot.validate(),
         Err(PanePlacementSnapshotValidationError::ImagePlacementMismatch)
     );
 }

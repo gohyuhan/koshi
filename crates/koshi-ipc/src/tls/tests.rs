@@ -150,13 +150,16 @@ fn the_expected_fingerprint_is_taken_and_every_other_one_is_refused() {
     );
 }
 
+/// A loopback address nothing listens on: the operating system picks a free
+/// port, and the listener that held it is closed before the dial.
+fn build_refusing_loopback_address() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    listener.local_addr().expect("read the bound address")
+}
+
 #[test]
 fn a_port_nothing_listens_on_refuses_the_dial_and_names_the_way_to_open_it() {
-    // The operating system picks a free port. The listener goes before the
-    // dial, and nothing holds that port when the connection arrives.
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let server_address = listener.local_addr().expect("read the bound address");
-    drop(listener);
+    let server_address = build_refusing_loopback_address();
 
     let ipc_error = connect_tls_stream(
         &server_address.to_string(),
@@ -180,6 +183,181 @@ fn a_port_nothing_listens_on_refuses_the_dial_and_names_the_way_to_open_it() {
              if remote access is not enabled on that machine, run `koshi share grant` \
              there and answer yes to the offer to open the port"
         )
+    );
+}
+
+#[test]
+fn a_dial_whose_first_address_refuses_connects_to_the_next_one() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let listening_address = listener.local_addr().expect("read the bound address");
+    let refusing_address = build_refusing_loopback_address();
+
+    let (_socket, reached_address) = connect_first_reachable_address(
+        "laptop.example:7654",
+        vec![refusing_address, listening_address],
+        Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect("the second address connects");
+
+    assert_eq!(reached_address, listening_address);
+}
+
+#[test]
+fn a_dial_whose_first_address_fails_starts_the_next_one_before_the_attempt_delay() {
+    // A TCP connect to the broadcast address fails before any packet is sent.
+    // The deadline falls at the attempt delay, so only a dial started by that
+    // failure connects before it.
+    let broadcast_address: SocketAddr = "255.255.255.255:9".parse().expect("an IPv4 address");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let listening_address = listener.local_addr().expect("read the bound address");
+
+    let (_socket, reached_address) = connect_first_reachable_address(
+        "laptop.example:7654",
+        vec![broadcast_address, listening_address],
+        Instant::now() + CONNECTION_ATTEMPT_DELAY_DURATION,
+    )
+    .expect("the second address connects");
+
+    assert_eq!(reached_address, listening_address);
+}
+
+#[test]
+fn a_dial_tries_the_other_address_family_second() {
+    // The lookup order is the refusing IPv4 address, the IPv4 listener, then
+    // the IPv6 listener. The second dial goes to the IPv6 listener, which
+    // connects before the IPv4 listener's dial is due.
+    let refusing_address = build_refusing_loopback_address();
+    let ipv4_listener = TcpListener::bind("127.0.0.1:0").expect("bind IPv4 loopback");
+    let ipv4_listening_address = ipv4_listener.local_addr().expect("read the bound address");
+    let ipv6_listener = TcpListener::bind("[::1]:0").expect("bind IPv6 loopback");
+    let ipv6_listening_address = ipv6_listener.local_addr().expect("read the bound address");
+
+    let (_socket, reached_address) = connect_first_reachable_address(
+        "laptop.example:7654",
+        vec![
+            refusing_address,
+            ipv4_listening_address,
+            ipv6_listening_address,
+        ],
+        Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect("an address connects");
+
+    assert_eq!(reached_address, ipv6_listening_address);
+}
+
+#[test]
+fn a_dial_whose_every_address_refuses_reports_the_refusal() {
+    let first_refusing_address = build_refusing_loopback_address();
+    let second_refusing_address = build_refusing_loopback_address();
+
+    let dial_result = connect_first_reachable_address(
+        "laptop.example:7654",
+        vec![first_refusing_address, second_refusing_address],
+        Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+    );
+
+    let Err(IpcError::ConnectRefused { server_address }) = dial_result else {
+        panic!("a dial every address refuses is refused");
+    };
+    assert_eq!(server_address, "laptop.example:7654");
+}
+
+#[test]
+fn a_dial_whose_every_address_fails_reports_the_failure_of_the_first_address_dialled() {
+    // A TCP connect to the broadcast address fails before any packet is sent,
+    // with an error that is neither a refusal nor a timeout.
+    let broadcast_address: SocketAddr = "255.255.255.255:9".parse().expect("an IPv4 address");
+    let refusing_address = build_refusing_loopback_address();
+
+    let refused_first_result = connect_first_reachable_address(
+        "laptop.example:7654",
+        vec![refusing_address, broadcast_address],
+        Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+    );
+    let broadcast_first_result = connect_first_reachable_address(
+        "laptop.example:7654",
+        vec![broadcast_address, refusing_address],
+        Instant::now() + LOOPBACK_TIMEOUT_DURATION,
+    );
+
+    let Err(IpcError::ConnectRefused { server_address }) = refused_first_result else {
+        panic!("a dial whose first address refuses reports the refusal");
+    };
+    assert_eq!(server_address, "laptop.example:7654");
+    let broadcast_connect_error =
+        TcpStream::connect_timeout(&broadcast_address, LOOPBACK_TIMEOUT_DURATION)
+            .expect_err("the broadcast address cannot be dialled");
+    let Err(IpcError::Transport { error_detail }) = broadcast_first_result else {
+        panic!("a dial whose first address cannot be reached reports that failure");
+    };
+    assert_eq!(
+        error_detail,
+        format!("laptop.example:7654 could not be reached: {broadcast_connect_error}")
+    );
+}
+
+#[test]
+fn a_dial_whose_first_address_stays_silent_connects_to_the_next_one_after_the_attempt_delay() {
+    // A connect to 127.0.0.2 port 9 is refused at once, or, where 127.0.0.2
+    // is routed to the loopback interface and not held by it, gets no answer.
+    let silent_address: SocketAddr = "127.0.0.2:9".parse().expect("a loopback address");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let listening_address = listener.local_addr().expect("read the bound address");
+
+    let dial_started_at = Instant::now();
+    let (_socket, reached_address) = connect_first_reachable_address(
+        "laptop.example:7654",
+        vec![silent_address, listening_address],
+        dial_started_at + LOOPBACK_TIMEOUT_DURATION,
+    )
+    .expect("the second address connects");
+    let dial_duration = dial_started_at.elapsed();
+
+    assert_eq!(reached_address, listening_address);
+    assert!(
+        dial_duration < CONNECTION_ATTEMPT_DELAY_DURATION + DEADLINE_SLACK_DURATION,
+        "the dial took {dial_duration:?}"
+    );
+}
+
+#[test]
+fn addresses_are_dialled_with_the_two_families_taking_turns() {
+    let parse_address =
+        |address_text: &str| -> SocketAddr { address_text.parse().expect("a socket address") };
+    let first_ipv6_address = parse_address("[2001:db8::1]:7654");
+    let second_ipv6_address = parse_address("[2001:db8::2]:7654");
+    let first_ipv4_address = parse_address("192.0.2.1:7654");
+    let second_ipv4_address = parse_address("192.0.2.2:7654");
+    let third_ipv4_address = parse_address("192.0.2.3:7654");
+
+    assert_eq!(
+        order_addresses_by_family(vec![
+            first_ipv6_address,
+            second_ipv6_address,
+            first_ipv4_address,
+            second_ipv4_address,
+            third_ipv4_address,
+        ]),
+        vec![
+            first_ipv6_address,
+            first_ipv4_address,
+            second_ipv6_address,
+            second_ipv4_address,
+            third_ipv4_address,
+        ]
+    );
+    assert_eq!(
+        order_addresses_by_family(vec![
+            first_ipv4_address,
+            first_ipv6_address,
+            second_ipv4_address
+        ]),
+        vec![first_ipv4_address, first_ipv6_address, second_ipv4_address]
+    );
+    assert_eq!(
+        order_addresses_by_family(Vec::new()),
+        Vec::<SocketAddr>::new()
     );
 }
 

@@ -28,7 +28,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use koshi_config::app_config::{parse_app_config, AppConfigFile};
 use koshi_config::keybinding::parse_keybindings;
@@ -143,7 +143,8 @@ pub fn build_logging_parameters(
 /// A forced switch stays on for the session's whole life. A switch left to the
 /// file is read again from `koshi.kdl` in `config_directory` on every request
 /// from another user: an `allow-other-users` turned off after the session
-/// started closes the connections it had admitted.
+/// started closes the connections it had admitted. The file is parsed again
+/// only when its text differs from the text read last.
 ///
 /// The socket's directory is `koshi.kdl`'s `shared-sessions-dir` when it names
 /// one, and `/tmp/koshi` otherwise.
@@ -165,8 +166,14 @@ pub fn resolve_other_users_policy(
     let other_user_access_check: OtherUsersSetting = if is_other_user_access_forced {
         Arc::new(|| true)
     } else {
-        let config_directory = config_directory.map(Path::to_path_buf);
-        Arc::new(move || is_other_user_access_allowed(config_directory.as_deref()))
+        let config_path =
+            config_directory.map(|config_directory| config_directory.join("koshi.kdl"));
+        let last_access_answer = Mutex::new(None);
+        Arc::new(move || {
+            config_path.as_deref().is_some_and(|config_path| {
+                is_other_user_access_allowed(config_path, &last_access_answer)
+            })
+        })
     };
     Some(OtherUsers {
         shared_directory: shared_sessions_directory,
@@ -201,11 +208,51 @@ pub fn load_current_server_config(config_directory: Option<&Path>) -> ServerConf
     )
 }
 
-/// Whether `koshi.kdl` in `config_directory` carries `allow-other-users` right
-/// now.
+/// The `allow-other-users` answer for one text of `koshi.kdl`.
 #[cfg(unix)]
-fn is_other_user_access_allowed(config_directory: Option<&Path>) -> bool {
-    load_current_server_config(config_directory).should_allow_other_users
+struct OtherUserAccessAnswer {
+    /// The file's text, or `None` when the file was absent or unreadable.
+    config_source_text: Option<String>,
+    /// Whether that text turns `allow-other-users` on.
+    is_allowed: bool,
+}
+
+/// Whether `koshi.kdl` at `config_path` carries `allow-other-users` right now.
+///
+/// The file is read on each call. It is parsed only when its text differs
+/// from the text `last_access_answer` holds, which then holds the new text and
+/// its answer. A file that is absent, unreadable or not valid gives `false`.
+#[cfg(unix)]
+fn is_other_user_access_allowed(
+    config_path: &Path,
+    last_access_answer: &Mutex<Option<OtherUserAccessAnswer>>,
+) -> bool {
+    let config_source_text = load_config_file(config_path, &mut Vec::new());
+    let mut last_access_answer = last_access_answer
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(access_answer) = last_access_answer.as_ref() {
+        if access_answer.config_source_text == config_source_text {
+            return access_answer.is_allowed;
+        }
+    }
+    let app_config_layer = config_source_text
+        .as_deref()
+        .and_then(|config_source_text| {
+            parse_app_config(config_path, config_source_text)
+                .ok()
+                .map(|app_config_file| app_config_file.layer)
+        });
+    let is_allowed = merge_server(
+        ServerConfig::default(),
+        app_config_layer.into_iter().collect(),
+    )
+    .should_allow_other_users;
+    *last_access_answer = Some(OtherUserAccessAnswer {
+        config_source_text,
+        is_allowed,
+    });
+    is_allowed
 }
 
 /// The machine-wide directory holding the sessions other local users started,
@@ -220,7 +267,7 @@ pub fn find_shared_sessions_base_directory(config_directory: Option<&Path>) -> O
 }
 
 /// The machine-wide directory holding the sessions other local users started,
-/// as [`resolve_shared_sessions_directory`] names it, while `server_config`
+/// as `resolve_shared_sessions_directory` names it, while `server_config`
 /// has `allow-other-users` on. `None` while it is off, and always `None` on
 /// Windows, where `allow-other-users` and `shared-sessions-dir` have no effect.
 ///

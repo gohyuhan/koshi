@@ -1,9 +1,8 @@
 //! Tests for the process-wide beta-feature gate and the warning a blocked
 //! entry point writes.
 //!
-//! The gate is one process-wide flag, so a test that asserts its untouched
-//! initial value cannot live beside a test that sets it. That assertion is
-//! `tests/starts_closed.rs`, a test binary of its own.
+//! `tests/starts_closed.rs`, a test binary of its own, asserts the gate's
+//! untouched initial value.
 
 use super::*;
 
@@ -36,8 +35,8 @@ fn beta_feature_gate_returns_the_latest_setting() {
     set_beta_features_allowed(false);
 }
 
-/// `log_blocked_feature_warning` itself logs on every call; the once-per-site limit lives in
-/// the generated code, not here.
+/// `log_blocked_feature_warning` writes one record on every call.
+/// `#[beta_feature]` limits each site to one warning.
 #[test]
 fn log_blocked_emits_one_warn_record_per_call_with_the_function_field() {
     let (_logging_guard, captured_log_output) = koshi_observability::logging::with_test_writer();

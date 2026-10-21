@@ -1003,11 +1003,15 @@ fn load_shared_memory_payload(
 ) -> Result<Vec<u8>, GraphicsError> {
     let shared_memory_name =
         CString::new(shared_memory_name_bytes).map_err(|_| build_external_source_error())?;
+    // SAFETY: `shared_memory_name` is a NUL-terminated C string that lives
+    // across the call.
     let shared_memory_descriptor =
         unsafe { libc::shm_open(shared_memory_name.as_ptr(), libc::O_RDONLY, 0) };
     if shared_memory_descriptor < 0 {
         return Err(build_external_source_error());
     }
+    // SAFETY: `shm_open` returned `shared_memory_descriptor`, an open
+    // descriptor that nothing else owns. The `File` closes it once.
     let mut shared_memory_file = unsafe { File::from_raw_fd(shared_memory_descriptor) };
     let source_read_result = load_file_byte_range(
         &mut shared_memory_file,
@@ -1015,6 +1019,8 @@ fn load_shared_memory_payload(
         source_byte_count,
     );
     drop(shared_memory_file);
+    // SAFETY: `shared_memory_name` is a NUL-terminated C string that lives
+    // across the call.
     let is_unlinked = unsafe { libc::shm_unlink(shared_memory_name.as_ptr()) } == 0;
     if !is_unlinked && source_read_result.is_ok() {
         return Err(build_external_source_error());
@@ -1042,24 +1048,28 @@ fn load_shared_memory_payload(
         .map_err(|_| build_external_source_error())?;
     let mut wide_name_units = shared_memory_name.encode_utf16().collect::<Vec<_>>();
     wide_name_units.push(0);
+    // SAFETY: `wide_name_units` is a NUL-terminated UTF-16 string that lives
+    // across the call.
     let shared_memory_mapping =
         unsafe { OpenFileMappingW(FILE_MAP_READ, 0, wide_name_units.as_ptr()) };
     if shared_memory_mapping.is_null() {
         return Err(build_external_source_error());
     }
     let shared_memory_mapping_result = (|| {
-        let source_byte_offset_u64 =
+        let source_byte_offset =
             u64::try_from(source_byte_offset).map_err(|_| build_external_source_error())?;
         let mut windows_system_info = SYSTEM_INFO::default();
+        // SAFETY: `windows_system_info` is a writable `SYSTEM_INFO` that the
+        // call fills.
         unsafe { GetSystemInfo(&mut windows_system_info) };
         let allocation_granularity_bytes = u64::from(windows_system_info.dwAllocationGranularity);
         if allocation_granularity_bytes == 0 {
             return Err(build_external_source_error());
         }
         let aligned_source_byte_offset =
-            source_byte_offset_u64 - source_byte_offset_u64 % allocation_granularity_bytes;
+            source_byte_offset - source_byte_offset % allocation_granularity_bytes;
         let mapped_view_byte_offset =
-            usize::try_from(source_byte_offset_u64 - aligned_source_byte_offset)
+            usize::try_from(source_byte_offset - aligned_source_byte_offset)
                 .map_err(|_| build_external_source_error())?;
         if source_byte_count.is_some_and(|requested_byte_count| {
             requested_byte_count > MAX_GRAPHICS_TRANSFER_BYTE_COUNT
@@ -1074,6 +1084,10 @@ fn load_shared_memory_payload(
             ),
             None => None,
         };
+        // SAFETY: `shared_memory_mapping` is the open handle `OpenFileMappingW`
+        // returned, and the offset is a multiple of the allocation
+        // granularity. The call returns NULL when the requested bytes pass the
+        // end of the mapping.
         let mapped_view = unsafe {
             MapViewOfFile(
                 shared_memory_mapping,
@@ -1093,6 +1107,9 @@ fn load_shared_memory_payload(
                 requested_byte_count
             } else {
                 let mut memory_information = MEMORY_BASIC_INFORMATION::default();
+                // SAFETY: `mapped_view.Value` is the base of the mapped view,
+                // and `memory_information` is a writable
+                // `MEMORY_BASIC_INFORMATION` of the size passed.
                 let queried_byte_count = unsafe {
                     VirtualQuery(
                         mapped_view.Value as *const c_void,
@@ -1113,8 +1130,14 @@ fn load_shared_memory_payload(
                 .try_reserve_exact(payload_byte_count)
                 .map_err(|_| build_external_source_too_large())?;
             shared_memory_bytes.resize(payload_byte_count, 0);
+            // SAFETY: `mapped_view_byte_offset` is at most the view's byte
+            // count: the requested view holds it plus `requested_byte_count`
+            // bytes, and the queried region holds at least it.
             let source_pointer =
                 unsafe { (mapped_view.Value as *const u8).add(mapped_view_byte_offset) };
+            // SAFETY: the `payload_byte_count` bytes at `source_pointer` lie
+            // inside the mapped view, and `shared_memory_bytes` holds
+            // `payload_byte_count` bytes that do not overlap the view.
             unsafe {
                 ptr::copy_nonoverlapping(
                     source_pointer,
@@ -1124,9 +1147,13 @@ fn load_shared_memory_payload(
             };
             Ok(shared_memory_bytes)
         })();
+        // SAFETY: `mapped_view` is the view `MapViewOfFile` returned, and no
+        // pointer into it outlives this call.
         unsafe { UnmapViewOfFile(mapped_view) };
         mapped_view_result
     })();
+    // SAFETY: `shared_memory_mapping` is the handle `OpenFileMappingW`
+    // returned, and this is its only close.
     unsafe { CloseHandle(shared_memory_mapping) };
     shared_memory_mapping_result
 }

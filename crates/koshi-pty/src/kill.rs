@@ -15,8 +15,9 @@
 //! [`crate::kill::StopRequest`], which says whether anything received the
 //! request.
 //!
-//! On Windows every child also joins one job shared by the whole process, so
-//! the panes of a process that dies without closing them die with it.
+//! On Windows every pane program starts inside two jobs: one shared by the
+//! whole process, whose members end when the process ends however it ended,
+//! and one of the pane's own, which `force_kill_process_tree` terminates.
 
 #[cfg(unix)]
 use nix::{
@@ -25,18 +26,18 @@ use nix::{
     unistd::Pid,
 };
 #[cfg(windows)]
-use std::os::windows::io::RawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 #[cfg(windows)]
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 #[cfg(windows)]
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, DuplicateHandle, HANDLE},
+    Foundation::HANDLE,
     System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     },
-    System::Threading::{GetCurrentProcess, TerminateProcess, PROCESS_TERMINATE},
+    System::Threading::TerminateProcess,
 };
 
 use crate::error::PtyError;
@@ -168,200 +169,157 @@ impl PtyChildKillControl {
     }
 }
 
-/// Owns a Windows Job Object handle and closes it on drop.
+/// The job every pane program of this process starts inside besides its own
+/// pane's job, created on first use and held open until this process exits.
 ///
-/// One of these is created per child, grouping that child and its descendants
-/// so [`force_kill_process_tree`] can terminate them together. That per-child job carries no
-/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so closing its handle terminates no
-/// member: [`force_kill_child`] ends the child alone, [`force_kill_process_tree`]
-/// ends the whole group.
+/// The job carries `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Windows terminates
+/// every process in such a job when the job's last handle closes, and process
+/// exit closes that handle however the process ended — a clean exit, a crash,
+/// or a kill from outside.
 ///
-/// [`get_shared_kill_on_close_job`] holds one more, with that limit set.
-///
-/// [`force_kill_child`]: PtyChildKillControl::force_kill_child
-/// [`force_kill_process_tree`]: PtyChildKillControl::force_kill_process_tree
+/// `None` once creating it or setting its limit failed; no pane opens then.
 #[cfg(windows)]
-struct OwnedJob(HANDLE);
+static SHARED_KILL_ON_CLOSE_JOB: OnceLock<Option<OwnedHandle>> = OnceLock::new();
 
-#[cfg(windows)]
-impl Drop for OwnedJob {
-    fn drop(&mut self) {
-        unsafe {
-            CloseHandle(self.0);
-        }
-    }
-}
-
-// SAFETY: a job handle may be used and closed from any thread.
-#[cfg(windows)]
-unsafe impl Send for OwnedJob {}
-
-// SAFETY: a job handle may be used from several threads at once.
-#[cfg(windows)]
-unsafe impl Sync for OwnedJob {}
-
-/// The one job every child of this process joins besides its own.
-///
-/// `None` once creating it or setting its limit failed; a caller that cannot
-/// join it refuses to open the pane.
-#[cfg(windows)]
-static SHARED_KILL_ON_CLOSE_JOB: OnceLock<Option<OwnedJob>> = OnceLock::new();
-
-/// The job whose closing ends every child of this process, created on first
-/// use and held open until this process exits.
-///
-/// Windows terminates every process in a job carrying
-/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` when the job's last handle closes, and
-/// process exit closes that handle however the process ended — a clean exit, a
-/// crash, or a kill from outside.
+/// The job of [`SHARED_KILL_ON_CLOSE_JOB`], created on first use.
 ///
 /// `None` when the job could not be created or its limit could not be set.
 #[cfg(windows)]
-fn get_shared_kill_on_close_job() -> Option<HANDLE> {
+fn get_shared_kill_on_close_job() -> Option<&'static OwnedHandle> {
     SHARED_KILL_ON_CLOSE_JOB
-        .get_or_init(|| unsafe {
-            let shared_job_handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if shared_job_handle.is_null() {
-                return None;
-            }
-            let shared_job = OwnedJob(shared_job_handle);
-
+        .get_or_init(|| {
+            let shared_job = create_job_object()?;
             let mut job_limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
             job_limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            let set_information_result = SetInformationJobObject(
-                shared_job.0,
-                JobObjectExtendedLimitInformation,
-                std::ptr::addr_of!(job_limits).cast(),
-                u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
-                    .expect("the limit block is far below 4 GiB"),
-            );
+            // SAFETY: `shared_job` is an open job handle, and the call reads
+            // the `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` size passed from
+            // `job_limits`, which lives for the call.
+            let set_information_result = unsafe {
+                SetInformationJobObject(
+                    shared_job.as_raw_handle(),
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::addr_of!(job_limits).cast(),
+                    u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                        .expect("the limit block is far below 4 GiB"),
+                )
+            };
             if set_information_result == 0 {
                 return None;
             }
             Some(shared_job)
         })
         .as_ref()
-        .map(|shared_job| shared_job.0)
 }
 
-/// Owns a duplicated handle to the child process and closes it on drop.
-///
-/// `force_kill_child` terminates through this handle. The handle names the exact process
-/// object, dead or alive; a PID another process took over after the child
-/// exited is never terminated.
+/// Create an unnamed job object whose handle no child process inherits, or
+/// `None` when `CreateJobObjectW` fails.
 #[cfg(windows)]
-struct OwnedHandle(HANDLE);
+fn create_job_object() -> Option<OwnedHandle> {
+    // SAFETY: `CreateJobObjectW` accepts NULL security attributes and a NULL
+    // name.
+    let job_handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if job_handle.is_null() {
+        return None;
+    }
+    // SAFETY: `job_handle` is the non-NULL handle that `CreateJobObjectW`
+    // returned, and nothing else owns it.
+    Some(unsafe { OwnedHandle::from_raw_handle(job_handle) })
+}
+
+/// A pane's two jobs: the job of [`SHARED_KILL_ON_CLOSE_JOB`], and a job of
+/// the pane's own that is created before the pane program starts.
+///
+/// The pane program starts inside both, and every process it starts belongs
+/// to both. The pane's own job carries no `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`:
+/// closing its handle ends no member.
+#[cfg(windows)]
+pub(crate) struct PaneJob {
+    shared_job: &'static OwnedHandle,
+    own_job: OwnedHandle,
+}
 
 #[cfg(windows)]
-impl Drop for OwnedHandle {
-    fn drop(&mut self) {
-        unsafe {
-            CloseHandle(self.0);
-        }
+impl PaneJob {
+    /// Create the pane's own job. The first call in a process also creates the
+    /// shared job.
+    ///
+    /// # Errors
+    /// Returns [`PtyError::Signal`] carrying `the job that ends this process's
+    /// panes could not be created` when the shared job does not exist, and
+    /// `CreateJobObjectW failed` when the pane's own job cannot be created.
+    pub(crate) fn create() -> Result<Self, PtyError> {
+        let Some(shared_job) = get_shared_kill_on_close_job() else {
+            return Err(PtyError::Signal {
+                detail: "the job that ends this process's panes could not be created".to_string(),
+            });
+        };
+        let Some(own_job) = create_job_object() else {
+            return Err(PtyError::Signal {
+                detail: "CreateJobObjectW failed".to_string(),
+            });
+        };
+        Ok(PaneJob {
+            shared_job,
+            own_job,
+        })
+    }
+
+    /// The shared job, then the pane's own job: the order a new process joins
+    /// them in. The pane's own job has no member when the process joins it.
+    pub(crate) fn list_job_handles(&self) -> [HANDLE; 2] {
+        [
+            self.shared_job.as_raw_handle(),
+            self.own_job.as_raw_handle(),
+        ]
     }
 }
 
-// SAFETY: a process handle may be used and closed from any thread.
+/// The exit code a pane program ends with when
+/// [`PtyChildKillControl::force_kill_child`] or
+/// [`PtyChildKillControl::force_kill_process_tree`] terminates it: 137.
 #[cfg(windows)]
-unsafe impl Send for OwnedHandle {}
+const TERMINATED_EXIT_CODE: u32 = 137;
 
-/// Terminates a spawned child by process handle and Job Object.
+/// Terminates a pane program through its process handle and its pane's job.
 ///
-/// `force_kill_child` terminates only the child process through its duplicated handle;
-/// `force_kill_process_tree` terminates every process in the job (`TerminateJobObject`), reaping
-/// the child's descendants.
+/// `force_kill_child` terminates only the program (`TerminateProcess`);
+/// `force_kill_process_tree` terminates every process in the pane's own job
+/// (`TerminateJobObject`), the program's descendants included.
 #[cfg(windows)]
 pub struct PtyChildKillControl {
     process_id: u32,
-    child_job: OwnedJob,
-    process_handle: OwnedHandle,
+    /// The handle `CreateProcessW` returned for the program. It names the
+    /// exact process object, dead or alive: a process that took over the
+    /// program's process ID after it ended is never terminated.
+    process_handle: Arc<OwnedHandle>,
+    pane_job: PaneJob,
 }
 
 #[cfg(windows)]
 impl PtyChildKillControl {
-    /// Join the child to the job that ends with this process, then create a
-    /// job of its own and join it to that too. Descendants join the per-child
-    /// job automatically, and [`force_kill_process_tree`](Self::force_kill_process_tree)
-    /// reaps the whole group.
-    ///
-    /// The shared job is joined first. `AssignProcessToJobObject` takes a
-    /// process that already belongs to a job only into an empty job, and only
-    /// the freshly created per-child job is empty.
-    ///
-    /// # Errors
-    /// Returns [`PtyError::Signal`] when the shared job does not exist, when
-    /// the child cannot join either job, when the per-child job cannot be
-    /// created, or when the child's process handle cannot be duplicated. A
-    /// child that could outlive this process never opens a pane.
-    pub fn from_process_id_and_handle(
+    /// Build the kill control of the pane program `process_id`, which started
+    /// inside `pane_job`'s jobs, from the program's process handle.
+    pub(crate) fn from_pane_job(
         process_id: u32,
-        child_handle: RawHandle,
-    ) -> Result<Self, PtyError> {
-        unsafe {
-            let Some(shared_job_handle) = get_shared_kill_on_close_job() else {
-                return Err(PtyError::Signal {
-                    detail: "the job that ends this process's panes could not be created"
-                        .to_string(),
-                });
-            };
-            if AssignProcessToJobObject(shared_job_handle, child_handle as HANDLE) == 0 {
-                return Err(PtyError::Signal {
-                    detail: "AssignProcessToJobObject failed for the job that ends this \
-                             process's panes"
-                        .to_string(),
-                });
-            }
-
-            let child_job_handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if child_job_handle.is_null() {
-                return Err(PtyError::Signal {
-                    detail: "CreateJobObjectW failed".to_string(),
-                });
-            }
-            // Owned from here on: every return below closes the handle.
-            let child_job = OwnedJob(child_job_handle);
-
-            if AssignProcessToJobObject(child_job.0, child_handle as HANDLE) == 0 {
-                return Err(PtyError::Signal {
-                    detail: "AssignProcessToJobObject failed".to_string(),
-                });
-            }
-
-            // Duplicate the child handle into one this control owns, carrying
-            // only PROCESS_TERMINATE. `force_kill_child` terminates through it; a process
-            // that recycled the PID after the child exited is never hit.
-            let mut process_handle: HANDLE = std::ptr::null_mut();
-            let current_process_handle = GetCurrentProcess();
-            if DuplicateHandle(
-                current_process_handle,
-                child_handle as HANDLE,
-                current_process_handle,
-                &mut process_handle,
-                PROCESS_TERMINATE,
-                0,
-                0,
-            ) == 0
-            {
-                return Err(PtyError::Signal {
-                    detail: "DuplicateHandle failed".to_string(),
-                });
-            }
-
-            Ok(PtyChildKillControl {
-                process_id,
-                child_job,
-                process_handle: OwnedHandle(process_handle),
-            })
+        process_handle: Arc<OwnedHandle>,
+        pane_job: PaneJob,
+    ) -> Self {
+        PtyChildKillControl {
+            process_id,
+            process_handle,
+            pane_job,
         }
     }
 
-    /// Terminate only the child process with exit code 137; its descendants
+    /// Terminate only the child process with exit code `137`; its descendants
     /// are left running.
     ///
     /// # Errors
     /// Returns [`PtyError::Signal`] when `TerminateProcess` fails.
     pub fn force_kill_child(&self) -> Result<(), PtyError> {
-        if unsafe { TerminateProcess(self.process_handle.0, 137) } == 0 {
+        let process_handle = self.process_handle.as_raw_handle();
+        // SAFETY: `self.process_handle` keeps the process handle open.
+        if unsafe { TerminateProcess(process_handle, TERMINATED_EXIT_CODE) } == 0 {
             return Err(PtyError::Signal {
                 detail: "TerminateProcess failed".to_string(),
             });
@@ -369,13 +327,15 @@ impl PtyChildKillControl {
         Ok(())
     }
 
-    /// Terminate every process in the job with exit code 137, reaping the
-    /// child's descendants.
+    /// Terminate every process in the pane's own job with exit code `137`: the
+    /// child and every process it started.
     ///
     /// # Errors
     /// Returns [`PtyError::Signal`] when `TerminateJobObject` fails.
     pub fn force_kill_process_tree(&self) -> Result<(), PtyError> {
-        if unsafe { TerminateJobObject(self.child_job.0, 137) } == 0 {
+        let own_job_handle = self.pane_job.own_job.as_raw_handle();
+        // SAFETY: `self.pane_job` keeps the job handle open.
+        if unsafe { TerminateJobObject(own_job_handle, TERMINATED_EXIT_CODE) } == 0 {
             return Err(PtyError::Signal {
                 detail: "TerminateJobObject failed".to_string(),
             });

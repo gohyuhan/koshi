@@ -12,11 +12,16 @@ use std::time::{Duration, Instant};
 use koshi_input::host::{Event, Parser, WindowSize};
 use rustix::termios::{self, Termios};
 
-use crate::terminal::reader;
+use super::{
+    choose_shorter_timeout_duration, ESCAPE_SEQUENCE_TIMEOUT_DURATION, OUTPUT_BUFFER_BYTE_COUNT,
+};
+use crate::terminal::{limit_window_size, reader};
 
-const ESCAPE_SEQUENCE_TIMEOUT_DURATION: Duration = Duration::from_millis(25);
 const TERMINAL_INPUT_BYTE_COUNT: usize = 4_096;
-const OUTPUT_BUFFER_BYTE_COUNT: usize = 4_096;
+
+/// The job-control stop signals that raw mode sets to `SIG_IGN`: `SIGTSTP`,
+/// `SIGTTIN` and `SIGTTOU`.
+const STOP_SIGNALS: [libc::c_int; 3] = [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU];
 
 /// The controlling terminal file and output owner for one Unix terminal.
 #[derive(Debug)]
@@ -24,7 +29,10 @@ pub(crate) struct TerminalDevice {
     terminal_file: File,
     terminal_output_writer: BufWriter<File>,
     original_termios: Termios,
-    is_raw_mode: bool,
+    /// `Some` while the terminal is in raw mode: the action each of
+    /// [`STOP_SIGNALS`] had before raw mode, in the same order. `None` in
+    /// cooked mode.
+    stop_signal_actions_before_raw_mode: Option<[libc::sighandler_t; 3]>,
 }
 
 impl TerminalDevice {
@@ -45,13 +53,20 @@ impl TerminalDevice {
                     terminal_output_stream,
                 ),
                 original_termios,
-                is_raw_mode: false,
+                stop_signal_actions_before_raw_mode: None,
             },
             event_source,
         ))
     }
 
-    /// Apply byte-at-a-time input without echo or signal processing.
+    /// Apply byte-at-a-time input without echo or signal processing, then set
+    /// each of [`STOP_SIGNALS`] to `SIG_IGN` until [`Self::enter_cooked_mode`].
+    /// A `kill -TSTP` sent to this process while the terminal is in raw mode
+    /// changes nothing. A call while the terminal is already in raw mode keeps
+    /// the actions the first call recorded.
+    ///
+    /// # Errors
+    /// The failure of `tcsetattr`. The stop signals then keep their actions.
     pub(crate) fn enter_raw_mode(&mut self) -> io::Result<()> {
         let mut raw_termios = self.original_termios.clone();
         raw_termios.make_raw();
@@ -60,20 +75,44 @@ impl TerminalDevice {
             termios::OptionalActions::Now,
             &raw_termios,
         )?;
-        self.is_raw_mode = true;
+        self.stop_signal_actions_before_raw_mode
+            .get_or_insert_with(|| {
+                STOP_SIGNALS.map(|stop_signal| {
+                    // SAFETY: `SIG_IGN` installs no handler code, and a stop
+                    // signal is one whose action can be set.
+                    unsafe { libc::signal(stop_signal, libc::SIG_IGN) }
+                })
+            });
         Ok(())
     }
 
-    /// Restore the terminal state captured by [`Self::open_terminal_device`].
+    /// Restore the terminal state captured by [`Self::open_terminal_device`],
+    /// then give each of [`STOP_SIGNALS`] back the action it had before raw
+    /// mode. In cooked mode, this does nothing.
+    ///
+    /// # Errors
+    /// The failure of `tcsetattr`. The terminal then stays in raw mode, and the
+    /// stop signals stay ignored.
     pub(crate) fn enter_cooked_mode(&mut self) -> io::Result<()> {
-        if self.is_raw_mode {
-            termios::tcsetattr(
-                &self.terminal_file,
-                termios::OptionalActions::Now,
-                &self.original_termios,
-            )?;
-            self.is_raw_mode = false;
+        let Some(stop_signal_actions_before_raw_mode) = self.stop_signal_actions_before_raw_mode
+        else {
+            return Ok(());
+        };
+        termios::tcsetattr(
+            &self.terminal_file,
+            termios::OptionalActions::Now,
+            &self.original_termios,
+        )?;
+        for (stop_signal, stop_signal_action) in STOP_SIGNALS
+            .into_iter()
+            .zip(stop_signal_actions_before_raw_mode)
+        {
+            // SAFETY: `stop_signal_action` is `SIG_DFL` or `SIG_IGN`: koshi
+            // installs no handler for a stop signal, and `execve` resets a
+            // caught signal to `SIG_DFL`.
+            unsafe { libc::signal(stop_signal, stop_signal_action) };
         }
+        self.stop_signal_actions_before_raw_mode = None;
         Ok(())
     }
 }
@@ -195,7 +234,7 @@ impl reader::EventSource for EventSource {
                         ESCAPE_SEQUENCE_TIMEOUT_DURATION
                             .saturating_sub(input_sequence_started_at.elapsed())
                     });
-            let terminal_poll_wait_duration = choose_terminal_poll_wait_duration(
+            let terminal_poll_wait_duration = choose_shorter_timeout_duration(
                 event_wait_deadline_instant.map(|event_wait_deadline_instant| {
                     event_wait_deadline_instant.saturating_duration_since(Instant::now())
                 }),
@@ -283,15 +322,16 @@ pub(crate) fn read_window_size() -> io::Result<WindowSize> {
     read_terminal_window_size(&open_terminal_output()?)
 }
 
-/// Read one terminal's window size through `TIOCGWINSZ`.
+/// Read one terminal's window size through `TIOCGWINSZ`, cut to the cell
+/// limit as [`limit_window_size`] cuts it.
 fn read_terminal_window_size(terminal_file: &File) -> io::Result<WindowSize> {
     let terminal_window_size = termios::tcgetwinsize(terminal_file)?;
-    Ok(WindowSize {
+    Ok(limit_window_size(WindowSize {
         column_count: terminal_window_size.ws_col,
         row_count: terminal_window_size.ws_row,
         pixel_width: filter_nonzero_pixel_dimension(terminal_window_size.ws_xpixel),
         pixel_height: filter_nonzero_pixel_dimension(terminal_window_size.ws_ypixel),
-    })
+    }))
 }
 
 fn open_terminal_output() -> io::Result<File> {
@@ -333,24 +373,6 @@ fn drain_pipe(pipe_stream: &UnixStream) -> io::Result<()> {
             Err(io_error) if io_error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
             Err(io_error) => return Err(io_error),
         }
-    }
-}
-
-fn choose_terminal_poll_wait_duration(
-    event_wait_remaining_duration: Option<Duration>,
-    escape_sequence_timeout_duration: Option<Duration>,
-) -> Option<Duration> {
-    match (
-        event_wait_remaining_duration,
-        escape_sequence_timeout_duration,
-    ) {
-        (Some(event_wait_remaining_duration), Some(escape_sequence_timeout_duration)) => {
-            Some(event_wait_remaining_duration.min(escape_sequence_timeout_duration))
-        }
-        (Some(terminal_poll_wait_duration), None) | (None, Some(terminal_poll_wait_duration)) => {
-            Some(terminal_poll_wait_duration)
-        }
-        (None, None) => None,
     }
 }
 
@@ -426,7 +448,10 @@ fn wait_for_file_descriptors(
     let poll_deadline_instant =
         timeout_duration.map(|wait_duration| Instant::now() + wait_duration);
     loop {
+        // SAFETY: an all-zero `fd_set` is a valid empty descriptor set.
         let mut descriptor_set = unsafe { std::mem::zeroed::<libc::fd_set>() };
+        // SAFETY: `descriptor_set` is a valid `fd_set`, and every descriptor
+        // in `raw_file_descriptors` is in `0..FD_SETSIZE`.
         unsafe {
             libc::FD_ZERO(&mut descriptor_set);
             for file_descriptor in raw_file_descriptors {
@@ -440,6 +465,9 @@ fn wait_for_file_descriptors(
             tv_sec: timeout_duration.as_secs().min(libc::time_t::MAX as u64) as libc::time_t,
             tv_usec: timeout_duration.subsec_micros() as libc::suseconds_t,
         });
+        // SAFETY: `descriptor_set` holds only open descriptors below
+        // `FD_SETSIZE`, the first argument is one past the largest of them, and
+        // `select_timeout` lives across the call.
         let select_result = unsafe {
             libc::select(
                 raw_file_descriptors.into_iter().max().unwrap_or(0) + 1,
@@ -452,6 +480,8 @@ fn wait_for_file_descriptors(
             )
         };
         if select_result >= 0 {
+            // SAFETY: every descriptor is in `0..FD_SETSIZE`, and
+            // `descriptor_set` is the set `select` filled.
             return Ok(unsafe {
                 [
                     libc::FD_ISSET(raw_file_descriptors[0], &descriptor_set),

@@ -1,11 +1,13 @@
 //! Tests for building the discovery overview from live session state.
 
 use super::*;
+use koshi_test_support::fixtures::build_test_uuid_with_suffix;
 
 use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
+use crate::runtime::command::tests::get_command_outcome;
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::client::ClientOrigin;
 use koshi_core::command::{Command, CommandEnvelope, CommandSource, NewPanePlacement};
@@ -14,12 +16,10 @@ use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::{ClientId, CommandId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::ShellKind;
-use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_session::client::ClientRegistry;
 use koshi_test_support::fake_pty::FakePtyBackend;
-use uuid::Uuid;
 
 const VIEWPORT_SIZE: Size = Size {
     column_count: 80,
@@ -124,12 +124,16 @@ fn a_command_pane_reports_its_argv_program_first() {
         }),
     );
     let command_result = server.submit_command(command_envelope);
-    assert!(
-        matches!(
-            command_result,
-            koshi_core::command::CommandResult::Ok { .. }
-        ),
-        "the command pane must split: {command_result:?}"
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec![
+            "PaneCreated",
+            "LayoutChanged",
+            "PaneFocused",
+            "PtyResized",
+            "PtyResized"
+        ]),
+        "the command pane must split"
     );
 
     let overview = server.build_overview().expect("one session is running");
@@ -192,10 +196,10 @@ fn a_pane_lists_every_client_focused_on_it_in_client_id_order() {
         .next()
         .copied()
         .expect("the genesis tab");
-    let joining = ClientId::new();
+    let joining_client_id = ClientId::new();
     server.handle_client_attach(
         session_id,
-        joining,
+        joining_client_id,
         VIEWPORT_SIZE,
         None,
         tab_id,
@@ -206,7 +210,7 @@ fn a_pane_lists_every_client_focused_on_it_in_client_id_order() {
 
     let overview = server.build_overview().expect("one session is running");
 
-    let mut sorted_client_ids = vec![seeded_client_id, joining];
+    let mut sorted_client_ids = vec![seeded_client_id, joining_client_id];
     sorted_client_ids.sort();
     assert_eq!(overview.panes.len(), 1);
     assert_eq!(overview.panes[0].focused_by_client_ids, sorted_client_ids);
@@ -317,16 +321,8 @@ fn discovery_reports_the_raw_pane_area() {
     );
 }
 
-/// A fixed UUID ending in `tail`, so tab ids sort in a known order.
-fn build_test_uuid_with_suffix(suffix_byte: u8) -> Uuid {
-    Uuid::parse_str(&format!(
-        "00000000-0000-0000-0000-0000000000{suffix_byte:02}"
-    ))
-    .expect("literal UUID parses")
-}
-
 /// A session named `quiet-lake` with no tabs, no panes and no clients.
-fn build_empty_session(session_id: SessionId) -> Session {
+pub(crate) fn build_empty_session(session_id: SessionId) -> Session {
     Session::from_identity_and_client_registry(
         session_id,
         "quiet-lake".to_string(),
@@ -336,7 +332,7 @@ fn build_empty_session(session_id: SessionId) -> Session {
 }
 
 /// Add a tab named `tab_name` at bar position `tab_index`, holding one registered
-/// `Spawning` pane, and return that pane's id.
+/// pane, and return that pane's id.
 fn register_session_tab_with_pane(
     session: &mut Session,
     tab_id: TabId,
@@ -353,23 +349,6 @@ fn register_session_tab_with_pane(
         Tab::from_root_pane(tab_id, tab_name.to_string(), tab_index, pane_id),
     );
     pane_id
-}
-
-/// Drive `pane_id`'s lifecycle through `lifecycle_events`, in order.
-fn advance_pane_lifecycle(
-    session: &mut Session,
-    pane_id: PaneId,
-    lifecycle_events: &[PaneLifecycleEvent],
-) {
-    let pane_record = session
-        .panes
-        .get_pane_record_mut_by_id(pane_id)
-        .expect("a registered pane");
-    for lifecycle_event in lifecycle_events {
-        pane_record
-            .update_lifecycle(*lifecycle_event)
-            .expect("a legal step");
-    }
 }
 
 #[test]
@@ -474,85 +453,4 @@ fn a_layout_leaf_the_registry_does_not_hold_gets_no_row_but_is_still_counted() {
         Some(1)
     );
     assert_eq!(overview.session.pane_count, 1);
-}
-
-#[test]
-fn each_lifecycle_becomes_its_reported_state_and_a_removed_pane_gets_no_row() {
-    let session_id = SessionId::new();
-    let mut session = build_empty_session(session_id);
-    let spawning_tab = TabId::from_uuid(build_test_uuid_with_suffix(1));
-    let exited_tab = TabId::from_uuid(build_test_uuid_with_suffix(2));
-    let closing_tab = TabId::from_uuid(build_test_uuid_with_suffix(3));
-    let removed_tab = TabId::from_uuid(build_test_uuid_with_suffix(4));
-    let spawning_pane_id =
-        register_session_tab_with_pane(&mut session, spawning_tab, "spawning", 0);
-    let exited_pane_id = register_session_tab_with_pane(&mut session, exited_tab, "exited", 1);
-    let closing_pane_id = register_session_tab_with_pane(&mut session, closing_tab, "closing", 2);
-    let removed_pane_id = register_session_tab_with_pane(&mut session, removed_tab, "removed", 3);
-
-    let lifecycle_time = SystemTime::UNIX_EPOCH;
-    advance_pane_lifecycle(
-        &mut session,
-        exited_pane_id,
-        &[
-            PaneLifecycleEvent::ProcessStarted,
-            PaneLifecycleEvent::ProcessExited {
-                exit_code: Some(3),
-                exited_at: lifecycle_time,
-            },
-        ],
-    );
-    advance_pane_lifecycle(
-        &mut session,
-        closing_pane_id,
-        &[
-            PaneLifecycleEvent::ProcessStarted,
-            PaneLifecycleEvent::CloseRequested {
-                close_requested_at: lifecycle_time,
-            },
-        ],
-    );
-    advance_pane_lifecycle(
-        &mut session,
-        removed_pane_id,
-        &[
-            PaneLifecycleEvent::ProcessStarted,
-            PaneLifecycleEvent::CloseRequested {
-                close_requested_at: lifecycle_time,
-            },
-            PaneLifecycleEvent::Cleaned,
-        ],
-    );
-
-    let mut server = build_test_runtime();
-    server.session_by_id.insert(session_id, session);
-
-    let overview = server.build_overview().expect("one session is running");
-
-    let pane_lifecycles: Vec<(PaneId, PaneLifecycle)> = overview
-        .panes
-        .iter()
-        .map(|pane_summary| (pane_summary.pane_id, pane_summary.lifecycle))
-        .collect();
-    assert_eq!(
-        pane_lifecycles,
-        vec![
-            (spawning_pane_id, PaneLifecycle::Spawning),
-            (exited_pane_id, PaneLifecycle::Exited { exit_code: Some(3) }),
-            (closing_pane_id, PaneLifecycle::Closing),
-        ],
-        "a pane whose lifecycle is Removed produces no row"
-    );
-
-    // The registry still holds the removed pane record, and its tab still holds the
-    // layout leaf. Both counts include it.
-    assert_eq!(overview.session.pane_count, 4);
-    assert_eq!(
-        overview
-            .tabs
-            .iter()
-            .find(|tab_summary| tab_summary.tab_id == removed_tab)
-            .map(|tab_summary| tab_summary.pane_count),
-        Some(1)
-    );
 }

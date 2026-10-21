@@ -10,12 +10,10 @@
 use std::collections::HashMap;
 
 use koshi_core::discovery::{
-    ClientDiscovery, PaneDiscovery, PaneLifecycle as DiscoveryPaneLifecycle, SessionDiscovery,
-    SessionOverview, TabDiscovery,
+    ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, SessionOverview, TabDiscovery,
 };
 use koshi_core::ids::PaneId;
 use koshi_core::process::SpawnSpec;
-use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_session::session::state::{Session, Tab};
 
 use koshi_terminal::engine::TerminalEngine;
@@ -87,8 +85,9 @@ impl Server {
 
 /// One [`PaneDiscovery`] row per pane that a tab's layout holds and the session
 /// registry knows, in the tab-bar order of the tabs holding them and layout
-/// order within each tab. A pane whose lifecycle is `Removed` gets no row, and
-/// neither does a layout leaf the registry does not hold. The title is the pane
+/// order within each tab. A layout leaf the registry does not hold gets no row.
+/// Every row's lifecycle is [`PaneLifecycle::Running`]. A pane whose child
+/// exited is gone from the registry and gets no row. The title is the pane
 /// terminal's OSC 0/1/2 title, once the child has set one.
 fn list_pane_discoveries(
     session: &Session,
@@ -100,15 +99,6 @@ fn list_pane_discoveries(
         for pane_id in tab.get_layout_tree().list_leaf_pane_ids() {
             let Some(pane_record) = session.panes.get_pane_record_by_id(pane_id) else {
                 continue;
-            };
-            let pane_lifecycle = match pane_record.get_lifecycle() {
-                PaneLifecycle::Spawning => DiscoveryPaneLifecycle::Spawning,
-                PaneLifecycle::Running => DiscoveryPaneLifecycle::Running,
-                PaneLifecycle::Exited { exit_code, .. } => DiscoveryPaneLifecycle::Exited {
-                    exit_code: *exit_code,
-                },
-                PaneLifecycle::Closing { .. } => DiscoveryPaneLifecycle::Closing,
-                PaneLifecycle::Removed => continue,
             };
             let focused_by_client_ids = session
                 .clients
@@ -125,7 +115,7 @@ fn list_pane_discoveries(
                     .and_then(|engine| engine.get_terminal_state().get_title().map(str::to_owned)),
                 working_directory: pane_record.working_directory.clone(),
                 command_argv: pane_record.spawn_spec.as_ref().map(list_spawn_argv),
-                lifecycle: pane_lifecycle,
+                lifecycle: PaneLifecycle::Running,
                 focused_by_client_ids,
             });
         }
@@ -143,4 +133,4 @@ fn list_spawn_argv(spawn_spec: &SpawnSpec) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -15,10 +15,10 @@ use koshi_core::geometry::Size;
 use koshi_core::ids::SessionId;
 use koshi_ipc::event::MAX_HOST_WRITE_BYTE_COUNT;
 use koshi_pty::backend::state::PtyBackend;
-use koshi_renderer::snapshot::Delivery;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use super::*;
+use crate::runtime::delivery_queue::DeliveryReceiver;
 
 /// A bare runtime over a fake backend.
 fn build_test_runtime() -> Server {
@@ -155,7 +155,7 @@ fn an_empty_bracketed_paste_is_just_the_two_markers() {
 fn copying_queues_the_osc_52_sequence_for_the_clients_outer_terminal() {
     let mut server = build_test_runtime();
     let client_id = ClientId::new();
-    let (delivery_receiver, _) = server.subscribe(client_id);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
 
     server.copy_to_clipboard(client_id, "hello");
 
@@ -171,7 +171,7 @@ fn copying_queues_the_osc_52_sequence_for_the_clients_outer_terminal() {
 fn a_second_copy_to_one_client_replaces_the_first_while_it_waits() {
     let mut server = build_test_runtime();
     let client_id = ClientId::new();
-    let (delivery_receiver, _) = server.subscribe(client_id);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
 
     server.copy_to_clipboard(client_id, "one");
     server.copy_to_clipboard(client_id, "two");
@@ -186,7 +186,7 @@ fn a_second_copy_to_one_client_replaces_the_first_while_it_waits() {
 fn a_copy_that_the_waiting_host_writes_refuse_is_skipped_and_they_stay_whole() {
     let mut server = build_test_runtime();
     let client_id = ClientId::new();
-    let (delivery_receiver, _) = server.subscribe(client_id);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
     let waiting_copied_bytes = vec![b'a'; MAX_HOST_WRITE_BYTE_COUNT];
     assert!(server.queue_host_write(
         client_id,
@@ -205,7 +205,7 @@ fn a_copy_that_the_waiting_host_writes_refuse_is_skipped_and_they_stay_whole() {
 fn copying_an_empty_selection_queues_the_empty_sequence() {
     let mut server = build_test_runtime();
     let client_id = ClientId::new();
-    let (delivery_receiver, _) = server.subscribe(client_id);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
 
     server.copy_to_clipboard(client_id, "");
 
@@ -220,8 +220,8 @@ fn each_client_takes_only_the_sequence_its_own_copy_queued() {
     let mut server = build_test_runtime();
     let client_with_first_copy = ClientId::new();
     let client_with_second_copy = ClientId::new();
-    let (first_receiver, _) = server.subscribe(client_with_first_copy);
-    let (second_receiver, _) = server.subscribe(client_with_second_copy);
+    let (first_receiver, _) = server.subscribe(client_with_first_copy, 60);
+    let (second_receiver, _) = server.subscribe(client_with_second_copy, 60);
 
     server.copy_to_clipboard(client_with_first_copy, "one");
     server.copy_to_clipboard(client_with_second_copy, "two");
@@ -249,9 +249,9 @@ struct ClipboardRoutingFixture {
     /// The client on another machine.
     remote_client_id: ClientId,
     /// The subscription of the client on this machine.
-    local_receiver: mpsc::Receiver<Delivery>,
+    local_receiver: DeliveryReceiver,
     /// The subscription of the client on another machine.
-    remote_receiver: mpsc::Receiver<Delivery>,
+    remote_receiver: DeliveryReceiver,
 }
 
 /// [`ClipboardRoutingFixture`] over a server whose `pane-clipboard-writes`
@@ -286,8 +286,8 @@ fn build_clipboard_routing_fixture(
         SystemTime::UNIX_EPOCH,
         true,
     );
-    let (local_receiver, _) = server.subscribe(local_client_id);
-    let (remote_receiver, _) = server.subscribe(remote_client_id);
+    let (local_receiver, _) = server.subscribe(local_client_id, 60);
+    let (remote_receiver, _) = server.subscribe(remote_client_id, 60);
     ClipboardRoutingFixture {
         server,
         pane_id,

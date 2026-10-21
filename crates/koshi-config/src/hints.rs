@@ -125,9 +125,8 @@ impl KeymapHintCatalog {
     ) -> Self {
         let chord_timeout_duration =
             Duration::from_millis(u64::from(keybindings_config.chord_timeout_ms));
-        let unlock_chord = keybindings_config
-            .unlock_alternative
-            .unwrap_or(KeybindingsConfig::RESERVED_UNLOCK);
+        let unlock_chord =
+            KeybindingsConfig::resolve_unlock_chord(keybindings_config.unlock_alternative);
         let merged_keymap = merge_keymaps(
             keymap_layers,
             keybindings_config.unlock_alternative,

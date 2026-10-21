@@ -173,7 +173,7 @@ fn split_modifier_flags<'a>(
 /// Folds a single-character key into canonical form: an uppercase letter becomes
 /// its lowercase plus [`BindingModifierFlags::SHIFT`]. Rejects `SHIFT` on a character that
 /// is not lowercase (`<S-1>`), and rejects any whitespace or control character.
-fn finish_key_character(
+pub(crate) fn finish_key_character(
     key_token: &str,
     mut modifier_flags: BindingModifierFlags,
     key_character: char,
@@ -230,22 +230,22 @@ fn resolve_named_key(key_token: &str, key_name: &str) -> Result<NamedKey, KeyPar
                 )
             });
     }
-    Ok(match key_name.len() {
-        2 if key_name.eq_ignore_ascii_case("cr") => NamedKey::Enter,
-        2 if key_name.eq_ignore_ascii_case("bs") => NamedKey::Backspace,
-        2 if key_name.eq_ignore_ascii_case("up") => NamedKey::Up,
-        3 if key_name.eq_ignore_ascii_case("tab") => NamedKey::Tab,
-        3 if key_name.eq_ignore_ascii_case("esc") => NamedKey::Esc,
-        3 if key_name.eq_ignore_ascii_case("del") => NamedKey::Delete,
-        3 if key_name.eq_ignore_ascii_case("end") => NamedKey::End,
-        4 if key_name.eq_ignore_ascii_case("left") => NamedKey::Left,
-        4 if key_name.eq_ignore_ascii_case("home") => NamedKey::Home,
-        4 if key_name.eq_ignore_ascii_case("down") => NamedKey::Down,
-        5 if key_name.eq_ignore_ascii_case("space") => NamedKey::Space,
-        5 if key_name.eq_ignore_ascii_case("right") => NamedKey::Right,
-        6 if key_name.eq_ignore_ascii_case("insert") => NamedKey::Insert,
-        6 if key_name.eq_ignore_ascii_case("pageup") => NamedKey::PageUp,
-        8 if key_name.eq_ignore_ascii_case("pagedown") => NamedKey::PageDown,
+    Ok(match key_name.to_ascii_lowercase().as_str() {
+        "cr" => NamedKey::Enter,
+        "bs" => NamedKey::Backspace,
+        "up" => NamedKey::Up,
+        "tab" => NamedKey::Tab,
+        "esc" => NamedKey::Esc,
+        "del" => NamedKey::Delete,
+        "end" => NamedKey::End,
+        "left" => NamedKey::Left,
+        "home" => NamedKey::Home,
+        "down" => NamedKey::Down,
+        "space" => NamedKey::Space,
+        "right" => NamedKey::Right,
+        "insert" => NamedKey::Insert,
+        "pageup" => NamedKey::PageUp,
+        "pagedown" => NamedKey::PageDown,
         _ => {
             return Err(build_key_parse_error(
                 key_token,

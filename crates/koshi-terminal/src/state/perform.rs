@@ -183,6 +183,11 @@ impl vte::Perform for TerminalState {
         if character == '\u{10EEEE}' {
             cell.set_image_placeholder(ImagePlaceholder::from_placeholder_style(style));
         }
+        // Insert mode (IRM) shifts the cells from the cursor to the right
+        // margin right by the glyph's width before the glyph is written.
+        if self.modes.is_insert_mode_enabled {
+            self.edit_cells_at_cursor(glyph_width, CellEdit::InsertBlanks);
+        }
         self.place_glyph(cursor_row_index, cursor_column_index, cell);
 
         // Anchor a new cluster at this base; continuations that follow
@@ -698,70 +703,15 @@ impl vte::Perform for TerminalState {
             'm' => apply_sgr(&mut self.get_active_render_mut().style, csi_parameters),
             't' => self.report_window_size(csi_parameters),
             // ICH — insert n blank cells at the cursor, shifting the rest of the
-            // line right; cells pushed past the right edge fall off.
-            '@' => {
-                let requested_cell_count = get_cursor_move_count(csi_parameters);
-                let background_fill_style =
-                    self.get_active_render().style.get_background_fill_style();
-                let cursor_row_index = self.get_active_cursor().row;
-                let cursor_column_index = self.get_active_cursor().column;
-                let (left_column_index, right_column_index) = self.get_horizontal_margin_bounds();
-                let operation_column_index = cursor_column_index.max(left_column_index);
-                let mut has_removed_image_fragments = false;
-                if operation_column_index <= right_column_index {
-                    let inserted_cell_count =
-                        requested_cell_count.min(right_column_index - operation_column_index + 1);
-                    has_removed_image_fragments = self.discard_active_image_fragments(
-                        cursor_row_index,
-                        cursor_row_index.saturating_add(1),
-                        right_column_index
-                            .saturating_add(1)
-                            .saturating_sub(inserted_cell_count),
-                        right_column_index.saturating_add(1),
-                    );
-                    self.get_active_grid_mut().insert_cells_in_columns(
-                        cursor_row_index,
-                        operation_column_index,
-                        right_column_index,
-                        requested_cell_count,
-                        background_fill_style,
-                    );
-                }
-                self.finish_native_fragment_removal(has_removed_image_fragments);
-                self.normalize_wide_pairs(cursor_row_index);
-                self.clear_wrap_latch();
-            }
+            // line right; cells pushed past the right margin fall off.
+            '@' => self.edit_cells_at_cursor(
+                get_cursor_move_count(csi_parameters),
+                CellEdit::InsertBlanks,
+            ),
             // DCH — delete n cells at the cursor, pulling the rest of the line
             // left; the right end is refilled with blanks.
             'P' => {
-                let requested_cell_count = get_cursor_move_count(csi_parameters);
-                let background_fill_style =
-                    self.get_active_render().style.get_background_fill_style();
-                let cursor_row_index = self.get_active_cursor().row;
-                let cursor_column_index = self.get_active_cursor().column;
-                let (left_column_index, right_column_index) = self.get_horizontal_margin_bounds();
-                let operation_column_index = cursor_column_index.max(left_column_index);
-                let mut has_removed_image_fragments = false;
-                if operation_column_index <= right_column_index {
-                    let deleted_cell_count =
-                        requested_cell_count.min(right_column_index - operation_column_index + 1);
-                    has_removed_image_fragments = self.discard_active_image_fragments(
-                        cursor_row_index,
-                        cursor_row_index.saturating_add(1),
-                        operation_column_index,
-                        operation_column_index.saturating_add(deleted_cell_count),
-                    );
-                    self.get_active_grid_mut().delete_cells_in_columns(
-                        cursor_row_index,
-                        operation_column_index,
-                        right_column_index,
-                        requested_cell_count,
-                        background_fill_style,
-                    );
-                }
-                self.finish_native_fragment_removal(has_removed_image_fragments);
-                self.normalize_wide_pairs(cursor_row_index);
-                self.clear_wrap_latch();
+                self.edit_cells_at_cursor(get_cursor_move_count(csi_parameters), CellEdit::Delete)
             }
             // DECSLRM — set the left/right margins and home the cursor when
             // DECLRMM (`?69`) is enabled. With the mode off, the same final
@@ -852,6 +802,15 @@ impl vte::Perform for TerminalState {
                         requested_line_count,
                         background_fill_style,
                     );
+                }
+            }
+            // SM / RM — set or reset ANSI modes, each mode of the list in turn.
+            // IRM (`4`) is the only stored one; every other mode changes nothing.
+            'h' | 'l' => {
+                for csi_parameter_numbers in csi_parameters.iter() {
+                    if csi_parameter_numbers.first() == Some(&4) {
+                        self.modes.is_insert_mode_enabled = action == 'h';
+                    }
                 }
             }
             // DECSTBM — set the top/bottom scroll margins (1-based; defaults are
@@ -1041,11 +1000,13 @@ impl TerminalState {
     ) {
         match (mode_action, dec_private_mode_number) {
             // DECSET `?47`/`?1047` — switch to the alternate buffer, leaving
-            // its cells and cursor untouched. Crossing from the primary clones
-            // the primary's render state (pen, charsets, GL slot) into the
+            // its cells and cursor untouched. Crossing from the primary gives
+            // an alternate with no grid its blank grid, then clones the
+            // primary's render state (pen, charsets, GL slot) into the
             // alternate.
             ('h', 47 | 1047) => {
                 if self.active_screen == Screen::Primary {
+                    self.allocate_alternate_grid();
                     self.alternate_render = self.primary_render;
                 }
                 self.active_screen = Screen::Alternate;
@@ -1053,17 +1014,18 @@ impl TerminalState {
             // DECSET `?1049` — DECSC the primary cursor (the primary fields
             // directly, whichever screen is live), clone the primary's render
             // state into the alternate, reset the alternate to a fresh buffer,
-            // seed its cursor position from the primary, then switch. Runs
-            // when the list began off the alternate, even after an earlier
-            // `?47` in the same list swapped. The alternate inherits no cells,
-            // cursor, wrap latch, saved cursor, or scroll region from a
-            // previous session.
+            // give it a blank grid, seed its cursor position from the primary,
+            // then switch. Runs when the list began off the alternate, even
+            // after an earlier `?47` in the same list swapped. The alternate
+            // inherits no cells, cursor, wrap latch, saved cursor, or scroll
+            // region from a previous session.
             ('h', 1049) => {
                 if screen_at_start != Screen::Alternate {
                     self.save_primary_cursor();
                     // Clone the primary's render state into the alternate.
                     self.alternate_render = self.primary_render;
                     self.reset_alternate_buffer();
+                    self.allocate_alternate_grid();
                     self.seed_alternate_cursor();
                     self.active_screen = Screen::Alternate;
                 }
@@ -1076,7 +1038,7 @@ impl TerminalState {
             // DECRST `?47` — switch back to the primary buffer, leaving the
             // alternate's cells and cursor as they are.
             ('l', 47) => self.active_screen = Screen::Primary,
-            // DECRST `?1047` — reset the alternate buffer (clear cells +
+            // DECRST `?1047` — reset the alternate buffer (free its grid +
             // scroll region + cursor), then switch back to the primary. Only
             // while the alternate is live: after an earlier exit in the same
             // list, a no-op.
@@ -1214,6 +1176,63 @@ impl TerminalState {
         self.modes.is_left_right_margin_mode_enabled = false;
     }
 
+    /// Insert or delete `requested_cell_count` cells at the cursor, as ICH
+    /// (`CSI Ps @`), DCH (`CSI Ps P`) and a glyph printed in insert mode do.
+    /// [`CellEdit::InsertBlanks`] shifts the cells from the cursor to the
+    /// right margin right and fills the gap with blanks in the pen background;
+    /// cells shifted past the right margin are lost, with their image
+    /// fragments. [`CellEdit::Delete`] removes the cells at the cursor, with
+    /// their image fragments, shifts the rest up to the right margin left, and
+    /// fills the right end with blanks in the pen background. The cursor stays
+    /// and its deferred-wrap latch clears. A cursor outside the left/right
+    /// margins changes nothing and keeps its latch.
+    ///
+    /// Example — in a 5-column row `abcde` with the cursor on `b`, inserting
+    /// 2 cells gives `a  bc`, and deleting 2 cells gives `ade  `.
+    fn edit_cells_at_cursor(&mut self, requested_cell_count: u16, cell_edit: CellEdit) {
+        let cursor_row_index = self.get_active_cursor().row;
+        let cursor_column_index = self.get_active_cursor().column;
+        let (left_column_index, right_column_index) = self.get_horizontal_margin_bounds();
+        if !(left_column_index..=right_column_index).contains(&cursor_column_index) {
+            return;
+        }
+        let background_fill_style = self.get_active_render().style.get_background_fill_style();
+        let edited_cell_count =
+            requested_cell_count.min(right_column_index - cursor_column_index + 1);
+        let first_removed_column_index = match cell_edit {
+            CellEdit::InsertBlanks => right_column_index
+                .saturating_add(1)
+                .saturating_sub(edited_cell_count),
+            CellEdit::Delete => cursor_column_index,
+        };
+        let has_removed_image_fragments = self.discard_active_image_fragments(
+            cursor_row_index,
+            cursor_row_index.saturating_add(1),
+            first_removed_column_index,
+            first_removed_column_index.saturating_add(edited_cell_count),
+        );
+        let active_grid = self.get_active_grid_mut();
+        match cell_edit {
+            CellEdit::InsertBlanks => active_grid.insert_cells_in_columns(
+                cursor_row_index,
+                cursor_column_index,
+                right_column_index,
+                requested_cell_count,
+                background_fill_style,
+            ),
+            CellEdit::Delete => active_grid.delete_cells_in_columns(
+                cursor_row_index,
+                cursor_column_index,
+                right_column_index,
+                requested_cell_count,
+                background_fill_style,
+            ),
+        }
+        self.finish_native_fragment_removal(has_removed_image_fragments);
+        self.normalize_wide_pairs(cursor_row_index);
+        self.clear_wrap_latch();
+    }
+
     /// Apply DECSCUSR (`CSI Ps SP q`) — the sequence an editor sends to change
     /// the cursor's look as it changes mode: vim sends `CSI 2 SP q` (steady
     /// block) for normal mode and `CSI 5 SP q` (blinking bar) for insert.
@@ -1244,6 +1263,16 @@ impl TerminalState {
         self.modes.cursor_shape = cursor_shape;
         self.modes.is_cursor_blink_enabled = is_blinking;
     }
+}
+
+/// What [`TerminalState::edit_cells_at_cursor`] does to the cells at the
+/// cursor.
+#[derive(Clone, Copy)]
+enum CellEdit {
+    /// Shift the cells right and fill the gap with blanks (ICH).
+    InsertBlanks,
+    /// Remove the cells and shift the rest left (DCH).
+    Delete,
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ use crate::state::{Charset, TerminalState};
 impl TerminalState {
     /// The charset selected into GL: the active screen's `G0`–`G3` slot named
     /// by its `gl`. Every printed byte is translated through it.
-    fn get_active_charset(&self) -> Charset {
+    pub(super) fn get_active_charset(&self) -> Charset {
         let active_render_state = self.get_active_render();
         active_render_state.charsets[active_render_state.gl]
     }

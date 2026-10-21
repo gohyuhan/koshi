@@ -22,10 +22,11 @@
 //! is 30 seconds. Either way it closes every pane it still holds before it
 //! goes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use koshi_core::ids::{PaneId, SessionId};
@@ -33,9 +34,10 @@ use koshi_core::process::{ExitStatus, KillPolicy};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::supervisor::{
-    compute_supervisor_socket_address, IncomingSupervisorRequest, SupervisorEvent,
-    SupervisorHandshake, SupervisorMessage, SupervisorPane, SupervisorRequestKind,
-    SupervisorResponse, SupervisorResult,
+    build_pane_output_frame_head, compute_supervisor_socket_address, IncomingSupervisorRequest,
+    SupervisorEvent, SupervisorHandshake, SupervisorMessage, SupervisorPane, SupervisorRequestKind,
+    SupervisorResponse, SupervisorResult, OUTPUT_WINDOW_PROTOCOL_VERSION,
+    PANE_OUTPUT_WINDOW_BYTE_COUNT,
 };
 use koshi_ipc::transport::{Connection, FrameReader, FrameWriter, Listener};
 use koshi_ipc::wire::MaybeKnown;
@@ -67,19 +69,31 @@ const ACCEPT_RETRY_DELAY_DURATION: Duration = Duration::from_millis(100);
 /// A send holds the chunk it is carrying until the write succeeds. While no
 /// link is up, and while the linked session server holds the output, it waits,
 /// and the pane's own terminal applies the backpressure: the child fills its
-/// terminal and blocks. The one chunk in flight is written whole to the link
-/// that takes it, so a swap loses no byte.
+/// terminal and blocks.
 ///
-/// A frame half written to a link that broke goes with that link, so the chunk
-/// is re-sent once, not twice.
+/// On a link of [`OUTPUT_WINDOW_PROTOCOL_VERSION`] or newer, each pane also
+/// has a credit, which starts at [`PANE_OUTPUT_WINDOW_BYTE_COUNT`] on each new
+/// link. A chunk goes out as binary frames of at most the pane's credit, each
+/// frame spends its bytes, and a send with no credit left waits for the
+/// session server's [`GrantPaneOutput`](SupervisorRequestKind::GrantPaneOutput).
+/// On an older link, each chunk goes out whole as one JSON frame.
+///
+/// Example — a pane with 10 bytes of credit sends a 25-byte chunk as a
+/// 10-byte frame, waits, and sends the other 15 bytes once grants cover them.
+///
+/// The part of a chunk in flight is written whole to the link that takes it:
+/// a swap loses no byte. A frame half written to a link that broke goes with
+/// that link, and that part is re-sent once.
 ///
 /// A parked send gives up in two cases: the pane is being closed, or the
 /// supervisor is ending.
 struct LinkSink {
     /// The link and what may give up on it.
     link_state: Mutex<LinkState>,
-    /// Wakes every parked send when the link or either list changes.
-    changed: Condvar,
+    /// Wakes every parked send when the link opens, the output is resumed, a
+    /// pane gets output credit, a pane starts closing, or the supervisor
+    /// starts ending.
+    link_state_changed: Condvar,
 }
 
 /// The link, and the answers that hold a send back or let it give up.
@@ -87,9 +101,19 @@ struct LinkState {
     /// The writing half of the link every frame goes out on, and `None` while
     /// no session server is linked.
     frame_writer: Option<FrameWriter>,
-    /// Whether a Hello has opened the link. An event waits until the link is
-    /// open, so a peer that has not presented the token is handed no pane output.
-    is_open: bool,
+    /// The number of links this supervisor has taken, the current one
+    /// included. A response written off the serve loop names the link its
+    /// request arrived on, and is dropped once a newer link replaced that one.
+    link_generation: u64,
+    /// The protocol version the Hello that opened the link settled on, and
+    /// `None` until a Hello opens it. An event waits until the link is open: a
+    /// peer that has not presented the token is handed no pane output.
+    link_protocol_version: Option<u32>,
+    /// Each pane's output credit on this link, on a link of
+    /// [`OUTPUT_WINDOW_PROTOCOL_VERSION`] or newer. A pane with no entry has
+    /// [`PANE_OUTPUT_WINDOW_BYTE_COUNT`]. A new link clears every entry, and
+    /// closing a pane removes its entry.
+    output_credit_by_pane_id: HashMap<PaneId, u32>,
     /// Whether the linked session server asked for pane events to be held. An
     /// event waits while it is set, so a session server about to replace its
     /// own process image is written nothing more.
@@ -121,33 +145,59 @@ impl LinkSink {
         Arc::new(LinkSink {
             link_state: Mutex::new(LinkState {
                 frame_writer: None,
-                is_open: false,
+                link_generation: 0,
+                link_protocol_version: None,
+                output_credit_by_pane_id: HashMap::new(),
                 is_paused: false,
                 closing_pane_ids: HashSet::new(),
                 ended_pane_ids: HashSet::new(),
                 is_closing: false,
             }),
-            changed: Condvar::new(),
+            link_state_changed: Condvar::new(),
         })
     }
 
-    /// Store `frame_writer` as the link every response now uses. Events keep
-    /// waiting until [`mark_link_open`](Self::mark_link_open) reports an
-    /// accepted Hello, and a hold requested by the previous link is lifted.
-    fn set_link_writer(&self, frame_writer: FrameWriter) {
+    /// Store `frame_writer` as the link every response now uses, and return
+    /// that link's generation. Events keep waiting until
+    /// [`mark_link_open`](Self::mark_link_open) reports an accepted Hello, a
+    /// hold requested by the previous link is lifted, and every pane's output
+    /// credit goes back to [`PANE_OUTPUT_WINDOW_BYTE_COUNT`].
+    fn set_link_writer(&self, frame_writer: FrameWriter) -> u64 {
         let mut link_state = self.link_state.lock().expect("supervisor link");
         link_state.frame_writer = Some(frame_writer);
-        link_state.is_open = false;
+        link_state.link_generation += 1;
+        link_state.link_protocol_version = None;
         link_state.is_paused = false;
+        link_state.output_credit_by_pane_id.clear();
+        link_state.link_generation
     }
 
-    /// Report the Hello that opened the link, releasing every parked send onto
-    /// it.
-    fn mark_link_open(&self) {
+    /// Report the Hello that opened the link at `link_protocol_version`,
+    /// releasing every parked send onto it.
+    fn mark_link_open(&self, link_protocol_version: u32) {
         let mut link_state = self.link_state.lock().expect("supervisor link");
-        link_state.is_open = true;
+        link_state.link_protocol_version = Some(link_protocol_version);
         drop(link_state);
-        self.changed.notify_all();
+        self.link_state_changed.notify_all();
+    }
+
+    /// Add `granted_byte_count` to `pane_id`'s output credit on this link, up
+    /// to [`PANE_OUTPUT_WINDOW_BYTE_COUNT`], and release a send parked for
+    /// credit. A grant for a pane being closed changes nothing.
+    fn grant_pane_output(&self, pane_id: PaneId, granted_byte_count: u32) {
+        let mut link_state = self.link_state.lock().expect("supervisor link");
+        if link_state.closing_pane_ids.contains(&pane_id) {
+            return;
+        }
+        let output_credit = link_state
+            .output_credit_by_pane_id
+            .entry(pane_id)
+            .or_insert(PANE_OUTPUT_WINDOW_BYTE_COUNT);
+        *output_credit = output_credit
+            .saturating_add(granted_byte_count)
+            .min(PANE_OUTPUT_WINDOW_BYTE_COUNT);
+        drop(link_state);
+        self.link_state_changed.notify_all();
     }
 
     /// Hold every pane event here instead of writing it to the link: a send
@@ -165,14 +215,14 @@ impl LinkSink {
         let mut link_state = self.link_state.lock().expect("supervisor link");
         link_state.is_paused = false;
         drop(link_state);
-        self.changed.notify_all();
+        self.link_state_changed.notify_all();
     }
 
     /// Drop the link, so every send parks until the next one arrives.
     fn clear_link(&self) {
         let mut link_state = self.link_state.lock().expect("supervisor link");
         link_state.frame_writer = None;
-        link_state.is_open = false;
+        link_state.link_protocol_version = None;
     }
 
     /// Let `pane_id` go: a send parked for it gives up at once, and so does the
@@ -184,16 +234,17 @@ impl LinkSink {
     fn mark_pane_closing(&self, pane_id: PaneId) {
         let mut link_state = self.link_state.lock().expect("supervisor link");
         link_state.closing_pane_ids.insert(pane_id);
+        link_state.output_credit_by_pane_id.remove(&pane_id);
         drop(link_state);
-        self.changed.notify_all();
+        self.link_state_changed.notify_all();
     }
 
     /// Forget a pane that is now closed: a pane the backend no longer holds has
     /// no entry left to close.
     ///
-    /// The pane stays in `closing_pane_ids`, so a reader still parked in
-    /// [`send_event`](Self::send_event) gives its chunk up when it wakes rather than
-    /// writing it to a link after the close was answered.
+    /// The pane stays in `closing_pane_ids`: a reader still parked in
+    /// [`send_output`](Self::send_output) gives its chunk up when it wakes, and
+    /// writes nothing to a link after the close was answered.
     fn remove_ended_pane(&self, pane_id: PaneId) {
         let mut link_state = self.link_state.lock().expect("supervisor link");
         link_state.ended_pane_ids.remove(&pane_id);
@@ -218,18 +269,23 @@ impl LinkSink {
         let mut link_state = self.link_state.lock().expect("supervisor link");
         link_state.is_closing = true;
         drop(link_state);
-        self.changed.notify_all();
+        self.link_state_changed.notify_all();
     }
 
-    /// Send one response on the link. `false` means the link broke, which the
-    /// caller reads as the end of that link.
+    /// Send one response on the link of generation `link_generation`, the
+    /// one its request arrived on. `false` means that link broke or is no
+    /// longer the current one, which the serve loop reads as the end of that
+    /// link.
     ///
-    /// This never parks. A response that finds no link is dropped, not held for
-    /// the next one.
-    fn send_response(&self, supervisor_response: SupervisorResponse) -> bool {
+    /// This never parks. A response that finds no link, or a newer link, is
+    /// dropped, not held for the next one.
+    fn send_response(&self, link_generation: u64, supervisor_response: SupervisorResponse) -> bool {
         let supervisor_message =
             SupervisorMessage::<_, SupervisorEvent>::Response(supervisor_response);
         let mut link_state = self.link_state.lock().expect("supervisor link");
+        if link_state.link_generation != link_generation {
+            return false;
+        }
         let Some(frame_writer) = link_state.frame_writer.as_mut() else {
             return false;
         };
@@ -252,7 +308,7 @@ impl LinkSink {
             if link_state.is_closing || link_state.closing_pane_ids.contains(&pane_id) {
                 return false;
             }
-            if link_state.is_open && !link_state.is_paused {
+            if link_state.link_protocol_version.is_some() && !link_state.is_paused {
                 if let Some(frame_writer) = link_state.frame_writer.as_mut() {
                     if frame_writer.send(&supervisor_message).is_ok() {
                         return true;
@@ -260,20 +316,110 @@ impl LinkSink {
                     link_state.frame_writer = None;
                 }
             }
-            link_state = self.changed.wait(link_state).expect("supervisor link");
+            link_state = self
+                .link_state_changed
+                .wait(link_state)
+                .expect("supervisor link");
+        }
+    }
+
+    /// Send one chunk of `pane_id`'s output, waiting when no link is open,
+    /// while the linked session server holds the output, and, on a link of
+    /// [`OUTPUT_WINDOW_PROTOCOL_VERSION`] or newer, while the pane has no
+    /// output credit. The chunk goes out in parts
+    /// ([`write_output_part`](Self::write_output_part)) until every byte is
+    /// sent. An empty chunk sends nothing.
+    ///
+    /// `false` means nobody will ever want it: the pane is closed or being
+    /// closed, or the supervisor is ending. The parts sent before that stay
+    /// sent.
+    fn send_output(&self, pane_id: PaneId, output_bytes: &[u8]) -> bool {
+        let mut unsent_output_bytes = output_bytes;
+        let mut link_state = self.link_state.lock().expect("supervisor link");
+        while !unsent_output_bytes.is_empty() {
+            if link_state.is_closing || link_state.closing_pane_ids.contains(&pane_id) {
+                return false;
+            }
+            match Self::write_output_part(&mut link_state, pane_id, unsent_output_bytes) {
+                Some(sent_byte_count) => {
+                    unsent_output_bytes = &unsent_output_bytes[sent_byte_count..];
+                }
+                None => {
+                    link_state = self
+                        .link_state_changed
+                        .wait(link_state)
+                        .expect("supervisor link")
+                }
+            }
+        }
+        true
+    }
+
+    /// Write the next part of `unsent_output_bytes`, `pane_id`'s output, to
+    /// the link `link_state` holds, and return that part's byte count.
+    ///
+    /// On a link of [`OUTPUT_WINDOW_PROTOCOL_VERSION`] or newer, the part is
+    /// at most the pane's output credit, goes out as one binary frame
+    /// ([`build_pane_output_frame_head`]), and spends its byte count from that
+    /// credit. On an older link, the part is every unsent byte, as one JSON
+    /// [`SupervisorEvent::Output`].
+    ///
+    /// `None` when no part goes out now: no link is open, the output is held,
+    /// the pane has no credit, or the write failed, which drops the link.
+    fn write_output_part(
+        link_state: &mut LinkState,
+        pane_id: PaneId,
+        unsent_output_bytes: &[u8],
+    ) -> Option<usize> {
+        let link_protocol_version = link_state.link_protocol_version?;
+        if link_state.is_paused {
+            return None;
+        }
+        let frame_writer = link_state.frame_writer.as_mut()?;
+        let write_result = if link_protocol_version < OUTPUT_WINDOW_PROTOCOL_VERSION {
+            let supervisor_message =
+                SupervisorMessage::<SupervisorResult, _>::Event(SupervisorEvent::Output {
+                    pane_id,
+                    output_bytes: unsent_output_bytes.to_vec(),
+                });
+            frame_writer
+                .send(&supervisor_message)
+                .map(|()| unsent_output_bytes.len())
+        } else {
+            let output_credit = link_state
+                .output_credit_by_pane_id
+                .get(&pane_id)
+                .copied()
+                .unwrap_or(PANE_OUTPUT_WINDOW_BYTE_COUNT);
+            let part_byte_count = unsent_output_bytes.len().min(output_credit as usize);
+            if part_byte_count == 0 {
+                return None;
+            }
+            frame_writer
+                .send_binary_with_head(
+                    &build_pane_output_frame_head(pane_id),
+                    &unsent_output_bytes[..part_byte_count],
+                )
+                .map(|()| {
+                    link_state
+                        .output_credit_by_pane_id
+                        .insert(pane_id, output_credit - part_byte_count as u32);
+                    part_byte_count
+                })
+        };
+        match write_result {
+            Ok(sent_byte_count) => Some(sent_byte_count),
+            Err(_) => {
+                link_state.frame_writer = None;
+                None
+            }
         }
     }
 }
 
 impl PtySink for LinkSink {
     fn accept_output_bytes(&self, pane_id: PaneId, output_bytes: Vec<u8>) -> bool {
-        self.send_event(
-            pane_id,
-            SupervisorEvent::Output {
-                pane_id,
-                output_bytes,
-            },
-        )
+        self.send_output(pane_id, &output_bytes)
     }
 
     /// Send one pane's exit, and record the pane once that frame is on a link.
@@ -351,7 +497,10 @@ fn run_pane_supervisor_loop(
     idle_exit_duration: Duration,
 ) {
     let link_sink = LinkSink::new();
-    let pty_backend = PortablePtyBackend::with_pty_sink(Arc::clone(&link_sink) as Arc<dyn PtySink>);
+    let pty_backend = Arc::new(PortablePtyBackend::with_pty_sink(
+        Arc::clone(&link_sink) as Arc<dyn PtySink>
+    ));
+    let mut pane_kill_threads: Vec<JoinHandle<()>> = Vec::new();
 
     let (connection_sender, connection_receiver) = channel::<Connection>();
     start_accept_thread(supervisor_listener, connection_sender);
@@ -361,28 +510,56 @@ fn run_pane_supervisor_loop(
             break;
         };
         let (frame_reader, frame_writer) = supervisor_connection.split();
-        link_sink.set_link_writer(frame_writer);
-        let link_outcome =
-            serve_supervisor_link(frame_reader, &link_sink, &pty_backend, connection_token);
+        let link_generation = link_sink.set_link_writer(frame_writer);
+        let link_outcome = serve_supervisor_link(
+            frame_reader,
+            &SupervisorLink {
+                link_sink: Arc::clone(&link_sink),
+                pty_backend: Arc::clone(&pty_backend),
+                link_generation,
+            },
+            connection_token,
+            &mut pane_kill_threads,
+        );
         link_sink.clear_link();
         if link_outcome == LinkOutcome::ShutdownRequested {
             break;
         }
     }
 
-    close_every_pane(&link_sink, &pty_backend);
+    close_every_pane(&link_sink, &pty_backend, pane_kill_threads);
 }
 
 /// Close every pane the supervisor still holds: no child and no terminal is
 /// left behind.
 ///
-/// Every send is ended first. Closing a pane's terminal waits for its reader to
-/// carry that terminal to the end.
-fn close_every_pane(link_sink: &LinkSink, pty_backend: &PortablePtyBackend) {
+/// 1. Every send is ended. Closing a pane's terminal waits for its reader to
+///    carry that terminal to the end.
+/// 2. Every kill still running on its own thread is waited for.
+/// 3. Every pane left is closed with [`KillPolicy::Tree`].
+fn close_every_pane(
+    link_sink: &LinkSink,
+    pty_backend: &PortablePtyBackend,
+    pane_kill_threads: Vec<JoinHandle<()>>,
+) {
     link_sink.mark_closing();
+    for pane_kill_thread in pane_kill_threads {
+        let _ = pane_kill_thread.join();
+    }
     for carried_pane in pty_backend.list_carried_panes() {
         let _ = pty_backend.kill_pane(carried_pane.pane_id, KillPolicy::Tree);
     }
+}
+
+/// What serving one link reaches: the sink every frame goes out through, the
+/// backend that holds the panes, and the link's generation.
+struct SupervisorLink {
+    /// The sink that writes every frame to the current link.
+    link_sink: Arc<LinkSink>,
+    /// The backend that opens and closes every pane.
+    pty_backend: Arc<PortablePtyBackend>,
+    /// The generation [`LinkSink::set_link_writer`] gave this link.
+    link_generation: u64,
 }
 
 /// Start the thread that accepts links.
@@ -435,16 +612,23 @@ const HANDSHAKE_WINDOW_DURATION: Duration = Duration::from_secs(10);
 /// A [`SupervisorHandshake`] gates every request. A malformed-but-aligned frame
 /// is answered with [`IpcErrorCode::MalformedRequest`], and a request kind this
 /// build does not have is refused by name; the link keeps serving after either.
+/// A [`GrantPaneOutput`](SupervisorRequestKind::GrantPaneOutput) is answered
+/// with nothing, a refusal included. An accepted
+/// [`Kill`](SupervisorRequestKind::Kill) is answered by its own thread
+/// ([`start_pane_kill`]), which is pushed onto `pane_kill_threads`, and the
+/// loop reads the next request at once.
 ///
 /// Reads before the gate opens end at [`HANDSHAKE_WINDOW_DURATION`]; a link that
 /// presents no accepted Hello inside it is [`LinkOutcome::Broken`], and the
 /// next link is served. Reads after the gate opens have no deadline.
 fn serve_supervisor_link(
     mut frame_reader: FrameReader,
-    link_sink: &LinkSink,
-    pty_backend: &PortablePtyBackend,
+    supervisor_link: &SupervisorLink,
     connection_token: &ConnectionToken,
+    pane_kill_threads: &mut Vec<JoinHandle<()>>,
 ) -> LinkOutcome {
+    let link_sink = supervisor_link.link_sink.as_ref();
+    let link_generation = supervisor_link.link_generation;
     let mut handshake = SupervisorHandshake::from_connection_token(connection_token.clone());
     frame_reader.set_deadline(Some(Instant::now() + HANDSHAKE_WINDOW_DURATION));
     loop {
@@ -462,7 +646,7 @@ fn serve_supervisor_link(
                             .to_string(),
                     }),
                 };
-                if link_sink.send_response(refusal_response) {
+                if link_sink.send_response(link_generation, refusal_response) {
                     continue;
                 }
                 return LinkOutcome::Broken;
@@ -485,7 +669,7 @@ fn serve_supervisor_link(
                         handshake.build_unknown_request_kind_error(&unknown_variant_name),
                     ),
                 };
-                if link_sink.send_response(refusal_response) {
+                if link_sink.send_response(link_generation, refusal_response) {
                     continue;
                 }
                 return LinkOutcome::Broken;
@@ -494,26 +678,46 @@ fn serve_supervisor_link(
 
         let is_shutdown_request = request_kind == SupervisorRequestKind::Shutdown;
         let is_hello_request = matches!(request_kind, SupervisorRequestKind::Hello { .. });
+        let is_grant_request =
+            matches!(request_kind, SupervisorRequestKind::GrantPaneOutput { .. });
         let response_result = match handshake.validate_request_kind(&request_kind) {
+            // A grant is answered with nothing, a refusal included.
+            Err(_) if is_grant_request => continue,
             Err(refusal_error) => SupervisorResult::Error(refusal_error),
             Ok(()) => {
                 // An accepted Hello lets this link carry pane output. No output
                 // reaches a peer that never presented the token, and the
                 // handshake deadline comes off once it did.
                 if is_hello_request {
-                    link_sink.mark_link_open();
+                    link_sink.mark_link_open(
+                        handshake
+                            .get_agreed_protocol_version()
+                            .expect("an accepted Hello settles the link's version"),
+                    );
                     frame_reader.set_deadline(None);
                 }
-                serve_supervisor_request(link_sink, pty_backend, &handshake, request_kind)
+                match serve_supervisor_request(
+                    supervisor_link,
+                    &handshake,
+                    request_id,
+                    request_kind,
+                    pane_kill_threads,
+                ) {
+                    Some(response_result) => response_result,
+                    None => continue,
+                }
             }
         };
         // A refused Shutdown ends nothing: the link keeps serving.
         let should_shutdown =
             is_shutdown_request && !matches!(response_result, SupervisorResult::Error(_));
-        if !link_sink.send_response(SupervisorResponse {
-            request_id,
-            answer_result: response_result,
-        }) {
+        if !link_sink.send_response(
+            link_generation,
+            SupervisorResponse {
+                request_id,
+                answer_result: response_result,
+            },
+        ) {
             return LinkOutcome::Broken;
         }
         if should_shutdown {
@@ -522,14 +726,23 @@ fn serve_supervisor_link(
     }
 }
 
-/// Carry out one request the gate accepted, and build the response to send back.
+/// Carry out one request the gate accepted, and build the response the serve
+/// loop sends back.
+///
+/// `None` for a request the serve loop does not answer: a
+/// [`GrantPaneOutput`](SupervisorRequestKind::GrantPaneOutput), which nothing
+/// answers, and a [`Kill`](SupervisorRequestKind::Kill), which
+/// [`start_pane_kill`] answers to `request_id` from its own thread.
 fn serve_supervisor_request(
-    link_sink: &LinkSink,
-    pty_backend: &PortablePtyBackend,
+    supervisor_link: &SupervisorLink,
     handshake: &SupervisorHandshake,
+    request_id: Option<u64>,
     request_kind: SupervisorRequestKind,
-) -> SupervisorResult {
-    match request_kind {
+    pane_kill_threads: &mut Vec<JoinHandle<()>>,
+) -> Option<SupervisorResult> {
+    let link_sink = supervisor_link.link_sink.as_ref();
+    let pty_backend = supervisor_link.pty_backend.as_ref();
+    let supervisor_result = match request_kind {
         SupervisorRequestKind::Hello { .. } => SupervisorResult::Hello {
             protocol_version: handshake
                 .get_agreed_protocol_version()
@@ -560,7 +773,16 @@ fn serve_supervisor_request(
         SupervisorRequestKind::Kill {
             pane_id,
             kill_policy,
-        } => build_done_or_refused_result(close_pane(link_sink, pty_backend, pane_id, kill_policy)),
+        } => {
+            start_pane_kill(
+                supervisor_link,
+                request_id,
+                pane_id,
+                kill_policy,
+                pane_kill_threads,
+            );
+            return None;
+        }
         SupervisorRequestKind::LiveCwd { pane_id } => SupervisorResult::Cwd(
             pty_backend
                 .find_live_working_directory(pane_id)
@@ -589,7 +811,83 @@ fn serve_supervisor_request(
             SupervisorResult::Done
         }
         SupervisorRequestKind::Shutdown => SupervisorResult::Done,
+        SupervisorRequestKind::GrantPaneOutput {
+            pane_id,
+            granted_byte_count,
+        } => {
+            link_sink.grant_pane_output(pane_id, granted_byte_count);
+            return None;
+        }
+    };
+    Some(supervisor_result)
+}
+
+/// Close `pane_id` under `kill_policy` ([`close_pane`]) on a thread of its
+/// own, and answer request `request_id` from that thread once the close
+/// returns: [`Done`](SupervisorResult::Done), or the close's failure as a
+/// refusal. The answer goes out only while the link the request arrived on is
+/// still the current one.
+///
+/// The thread joins `pane_kill_threads`, after the threads that already
+/// ended leave it. When the operating system starts no thread, the close and
+/// its answer run on this thread.
+///
+/// Example — a graceful Kill with a 3-second window, then a Resize: the
+/// Resize is answered at once, and the Kill about 3 seconds after it arrived.
+fn start_pane_kill(
+    supervisor_link: &SupervisorLink,
+    request_id: Option<u64>,
+    pane_id: PaneId,
+    kill_policy: KillPolicy,
+    pane_kill_threads: &mut Vec<JoinHandle<()>>,
+) {
+    pane_kill_threads.retain(|pane_kill_thread| !pane_kill_thread.is_finished());
+    let link_sink = Arc::clone(&supervisor_link.link_sink);
+    let pty_backend = Arc::clone(&supervisor_link.pty_backend);
+    let link_generation = supervisor_link.link_generation;
+    match std::thread::Builder::new()
+        .name("koshi-pty-kill".to_string())
+        .spawn(move || {
+            close_pane_and_answer(
+                &link_sink,
+                &pty_backend,
+                link_generation,
+                request_id,
+                pane_id,
+                kill_policy,
+            );
+        }) {
+        Ok(pane_kill_thread) => pane_kill_threads.push(pane_kill_thread),
+        Err(_) => close_pane_and_answer(
+            &supervisor_link.link_sink,
+            &supervisor_link.pty_backend,
+            link_generation,
+            request_id,
+            pane_id,
+            kill_policy,
+        ),
     }
+}
+
+/// Close `pane_id` under `kill_policy` ([`close_pane`]), then answer request
+/// `request_id` on the link of generation `link_generation`:
+/// [`Done`](SupervisorResult::Done), or the close's failure as a refusal.
+fn close_pane_and_answer(
+    link_sink: &LinkSink,
+    pty_backend: &PortablePtyBackend,
+    link_generation: u64,
+    request_id: Option<u64>,
+    pane_id: PaneId,
+    kill_policy: KillPolicy,
+) {
+    let close_result = close_pane(link_sink, pty_backend, pane_id, kill_policy);
+    let _ = link_sink.send_response(
+        link_generation,
+        SupervisorResponse {
+            request_id,
+            answer_result: build_done_or_refused_result(close_result),
+        },
+    );
 }
 
 /// Close every pane whose exit has already been written to a link.

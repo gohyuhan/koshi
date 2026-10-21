@@ -49,7 +49,6 @@ fn allow_beta_features_folds_onto_the_session_side_only() {
     };
 
     let merged_server_config = merge_server(ServerConfig::default(), vec![config_layer.clone()]);
-    assert!(merged_server_config.should_allow_beta_features);
     assert_eq!(
         merged_server_config,
         ServerConfig {
@@ -99,7 +98,6 @@ fn allow_other_users_folds_onto_the_session_side_only() {
 
     // The session side takes the value.
     let merged_server_config = merge_server(ServerConfig::default(), vec![config_layer.clone()]);
-    assert!(merged_server_config.should_allow_other_users);
     assert_eq!(
         merged_server_config,
         ServerConfig {
@@ -238,10 +236,6 @@ fn remote_listen_folds_onto_the_session_side_only() {
     // The session side takes the address.
     let merged_server_config = merge_server(ServerConfig::default(), vec![config_layer.clone()]);
     assert_eq!(
-        merged_server_config.remote_listen_address,
-        Some(SocketAddr::from(([127, 0, 0, 1], 7654)))
-    );
-    assert_eq!(
         merged_server_config,
         ServerConfig {
             remote_listen_address: Some(SocketAddr::from(([127, 0, 0, 1], 7654))),
@@ -291,7 +285,6 @@ fn auto_close_session_folds_onto_the_session_side_only() {
 
     // The session side takes the value.
     let merged_server_config = merge_server(ServerConfig::default(), vec![config_layer.clone()]);
-    assert!(merged_server_config.should_auto_close_session);
     assert_eq!(
         merged_server_config,
         ServerConfig {
@@ -444,9 +437,25 @@ fn copy_whitespace_and_terminal_type_overrides_keep_siblings() {
     let merged_server_config = merge_server(ServerConfig::default(), vec![config_layer.clone()]);
     let merged_client_config = merge_client(ClientConfig::default(), vec![config_layer]);
 
-    assert!(!merged_client_config.copy.should_trim_trailing_whitespace); // overridden to false
-    assert_eq!(merged_server_config.terminal.term, "screen-256color");
-    assert_eq!(merged_server_config.terminal.colorterm, "truecolor"); // default kept
+    assert_eq!(
+        merged_client_config,
+        ClientConfig {
+            copy: CopyConfig {
+                should_trim_trailing_whitespace: false,
+            },
+            ..ClientConfig::default()
+        }
+    );
+    assert_eq!(
+        merged_server_config,
+        ServerConfig {
+            terminal: TerminalConfig {
+                term: "screen-256color".to_string(),
+                ..ServerConfig::default().terminal
+            },
+            ..ServerConfig::default()
+        }
+    );
 }
 
 #[test]
@@ -497,22 +506,18 @@ fn theme_accent_override_keeps_other_color_roles() {
         ..Default::default()
     };
     let merged_client_config = merge_client(ClientConfig::default(), vec![config_layer]);
-    let default_palette = ClientConfig::default().theme.colors;
 
+    let default_theme = ClientConfig::default().theme;
     assert_eq!(
-        merged_client_config.theme.colors.accent,
-        overridden_accent_color
+        merged_client_config.theme,
+        ThemeConfig {
+            colors: ColorPalette {
+                accent: overridden_accent_color,
+                ..default_theme.colors
+            },
+            ..default_theme
+        }
     );
-    // Every other role keeps its default.
-    assert_eq!(
-        merged_client_config.theme.colors.ramp_start,
-        default_palette.ramp_start
-    );
-    assert_eq!(
-        merged_client_config.theme.colors.ramp_end,
-        default_palette.ramp_end
-    );
-    assert_eq!(merged_client_config.theme.theme_name, "default"); // sibling field kept
 }
 
 #[test]
@@ -650,11 +655,12 @@ fn keybinding_leader_override_keeps_timing_defaults() {
     let merged_client_config = merge_client(ClientConfig::default(), vec![config_layer]);
 
     assert_eq!(
-        merged_client_config.keybindings.leader,
-        Leader::Modifiers(BindingModifierFlags::ALT)
+        merged_client_config.keybindings,
+        KeybindingsConfig {
+            leader: Leader::Modifiers(BindingModifierFlags::ALT),
+            ..KeybindingsConfig::default()
+        }
     );
-    assert_eq!(merged_client_config.keybindings.chord_timeout_ms, 500); // default kept
-    assert_eq!(merged_client_config.keybindings.maximum_chord_depth, 4); // default kept
 }
 
 #[test]
@@ -846,6 +852,26 @@ fn remote_link_timeout_folds_onto_the_viewer_side_only() {
         merged_client_config,
         ClientConfig {
             remote_link_timeout_ms: 90_000,
+            ..ClientConfig::default()
+        }
+    );
+
+    let merged_server_config = merge_server(ServerConfig::default(), vec![config_layer]);
+    assert_eq!(merged_server_config, ServerConfig::default());
+}
+
+#[test]
+fn max_frames_per_second_folds_onto_the_viewer_side_only() {
+    let config_layer = PartialKoshiConfig {
+        max_frames_per_second: Some(120),
+        ..Default::default()
+    };
+
+    let merged_client_config = merge_client(ClientConfig::default(), vec![config_layer.clone()]);
+    assert_eq!(
+        merged_client_config,
+        ClientConfig {
+            max_frames_per_second: 120,
             ..ClientConfig::default()
         }
     );

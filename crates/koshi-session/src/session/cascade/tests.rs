@@ -1,4 +1,4 @@
-//! Tests for pane lifecycle cascades: removal, focus repair, and tab closure.
+//! Tests for pane removal cascades: removal, focus repair, and tab closure.
 //!
 //! These tests verify that pane removal (via exit or user action) cascades:
 //! focus is repaired on all clients, sibling panes inherit focus, emptying a
@@ -15,8 +15,6 @@ use koshi_core::geometry::{Point, Size, SplitDirection};
 use koshi_core::ids::SessionId;
 use koshi_layout::solver::MIN_PANE_SIZE;
 use koshi_layout::tree::{LayoutNode, SplitNode};
-use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
-use koshi_pane::pane::policy::PaneClosePolicy;
 use koshi_pane::pane::state::PaneRecord;
 
 use crate::client::{Client, ClientOrigin, ClientRegistry, FloatingPaneView};
@@ -29,71 +27,9 @@ const TEST_VIEWPORT_SIZE: Size = Size {
     row_count: 24,
 };
 
-/// Returns a rect covering the full viewport (80×24), used as the layout bounds when solving tab
-/// geometry.
-fn build_rect() -> Rect {
+/// A viewport-sized rect for solving a tab's layout: [`TEST_VIEWPORT_SIZE`] at `(0, 0)`.
+fn build_viewport_rect() -> Rect {
     Rect::from_size_at_origin(TEST_VIEWPORT_SIZE)
-}
-
-/// Creates a pane record with the specified lifecycle state and exit policy.
-///
-/// The pane record starts as a fresh `Spawning` state and is walked to the
-/// requested lifecycle through legal `update_lifecycle` events, the only way
-/// the state changes. Timestamps use `UNIX_EPOCH` to keep tests
-/// deterministic. Close policy is set to `Force`.
-fn build_pane_record(pane_id: PaneId, pane_lifecycle: PaneLifecycle) -> PaneRecord {
-    let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
-    pane_record.close_policy = PaneClosePolicy::Force;
-    walk_pane_lifecycle(&mut pane_record, pane_lifecycle);
-    pane_record
-}
-
-/// Transitions a pane record from its current state to the target lifecycle state
-/// by emitting the legal sequence of intermediate events.
-fn walk_pane_lifecycle(pane_record: &mut PaneRecord, target_pane_lifecycle: PaneLifecycle) {
-    match target_pane_lifecycle {
-        PaneLifecycle::Spawning => {}
-        PaneLifecycle::Running => {
-            pane_record
-                .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
-                .expect("walk_pane_lifecycle drives only legal transitions");
-        }
-        PaneLifecycle::Exited {
-            exit_code,
-            exited_at,
-        } => {
-            pane_record
-                .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
-                .expect("walk_pane_lifecycle drives only legal transitions");
-            pane_record
-                .update_lifecycle(PaneLifecycleEvent::ProcessExited {
-                    exit_code,
-                    exited_at,
-                })
-                .expect("walk_pane_lifecycle drives only legal transitions");
-        }
-        PaneLifecycle::Closing { close_requested_at } => {
-            pane_record
-                .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
-                .expect("walk_pane_lifecycle drives only legal transitions");
-            pane_record
-                .update_lifecycle(PaneLifecycleEvent::CloseRequested { close_requested_at })
-                .expect("walk_pane_lifecycle drives only legal transitions");
-        }
-        PaneLifecycle::Removed => {
-            pane_record
-                .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
-                .expect("walk_pane_lifecycle drives only legal transitions");
-            pane_record
-                .update_lifecycle(PaneLifecycleEvent::CloseRequested {
-                    close_requested_at: SystemTime::UNIX_EPOCH,
-                })
-                .expect("walk_pane_lifecycle drives only legal transitions");
-            pane_record
-                .update_lifecycle(PaneLifecycleEvent::Cleaned)
-                .expect("walk_pane_lifecycle drives only legal transitions");
-        }
-    }
 }
 
 /// Creates a tab containing a single pane.
@@ -169,8 +105,8 @@ fn fixtures_build_a_consistent_session() {
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, left_pane_id, right_pane_id)],
         vec![
-            build_pane_record(left_pane_id, PaneLifecycle::Running),
-            build_pane_record(right_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(left_pane_id),
+            PaneRecord::from_terminal_pane(right_pane_id),
         ],
     );
     session.attach_client(build_focused_client(
@@ -193,8 +129,8 @@ fn removing_a_focused_pane_focuses_a_survivor() {
             surviving_pane_id,
         )],
         vec![
-            build_pane_record(removed_pane_id, PaneLifecycle::Running),
-            build_pane_record(surviving_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(removed_pane_id),
+            PaneRecord::from_terminal_pane(surviving_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, tab_id, removed_pane_id);
@@ -205,7 +141,7 @@ fn removing_a_focused_pane_focuses_a_survivor() {
         &mut session,
         tab_id,
         removed_pane_id,
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -265,8 +201,8 @@ fn removing_a_pane_missing_from_the_layout_still_repairs_focus_and_zoom() {
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, surviving_pane_id)],
         vec![
-            build_pane_record(removed_pane_id, PaneLifecycle::Running),
-            build_pane_record(surviving_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(removed_pane_id),
+            PaneRecord::from_terminal_pane(surviving_pane_id),
         ],
     );
     let mut client = build_focused_client(session.session_id, tab_id, removed_pane_id);
@@ -278,7 +214,7 @@ fn removing_a_pane_missing_from_the_layout_still_repairs_focus_and_zoom() {
         &mut session,
         tab_id,
         removed_pane_id,
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -325,8 +261,8 @@ fn removing_a_nonfocused_pane_leaves_focus_untouched() {
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, removed_pane_id, focused_pane_id)],
         vec![
-            build_pane_record(removed_pane_id, PaneLifecycle::Running),
-            build_pane_record(focused_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(removed_pane_id),
+            PaneRecord::from_terminal_pane(focused_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, tab_id, focused_pane_id);
@@ -337,7 +273,7 @@ fn removing_a_nonfocused_pane_leaves_focus_untouched() {
         &mut session,
         tab_id,
         removed_pane_id,
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -380,8 +316,8 @@ fn collapsing_a_multi_pane_tab_emits_layout_changed() {
             surviving_pane_id,
         )],
         vec![
-            build_pane_record(removed_pane_id, PaneLifecycle::Running),
-            build_pane_record(surviving_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(removed_pane_id),
+            PaneRecord::from_terminal_pane(surviving_pane_id),
         ],
     );
 
@@ -389,7 +325,7 @@ fn collapsing_a_multi_pane_tab_emits_layout_changed() {
         &mut session,
         tab_id,
         removed_pane_id,
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -425,8 +361,8 @@ fn focus_repair_runs_for_every_client_on_the_removed_pane() {
             surviving_pane_id,
         )],
         vec![
-            build_pane_record(removed_pane_id, PaneLifecycle::Running),
-            build_pane_record(surviving_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(removed_pane_id),
+            PaneRecord::from_terminal_pane(surviving_pane_id),
         ],
     );
     let first_client = build_focused_client(session.session_id, tab_id, removed_pane_id);
@@ -440,7 +376,7 @@ fn focus_repair_runs_for_every_client_on_the_removed_pane() {
         &mut session,
         tab_id,
         removed_pane_id,
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -480,9 +416,9 @@ fn focus_repair_reaches_a_client_viewing_another_tab() {
             build_single_pane_tab(viewing_tab_id, viewing_pane_id),
         ],
         vec![
-            build_pane_record(removed_pane_id, PaneLifecycle::Running),
-            build_pane_record(surviving_pane_id, PaneLifecycle::Running),
-            build_pane_record(viewing_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(removed_pane_id),
+            PaneRecord::from_terminal_pane(surviving_pane_id),
+            PaneRecord::from_terminal_pane(viewing_pane_id),
         ],
     );
     let mut client = build_focused_client(session.session_id, viewing_tab_id, viewing_pane_id);
@@ -494,7 +430,7 @@ fn focus_repair_reaches_a_client_viewing_another_tab() {
         &mut session,
         removed_tab_id,
         removed_pane_id,
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -548,8 +484,8 @@ fn removing_a_focused_pane_with_no_room_to_refocus_clears_focus() {
             surviving_pane_id,
         )],
         vec![
-            build_pane_record(removed_pane_id, PaneLifecycle::Running),
-            build_pane_record(surviving_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(removed_pane_id),
+            PaneRecord::from_terminal_pane(surviving_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, tab_id, removed_pane_id);
@@ -620,8 +556,8 @@ fn a_too_small_event_carries_a_starving_area_and_region_cause() {
             surviving_pane_id,
         )],
         vec![
-            build_pane_record(removed_pane_id, PaneLifecycle::Running),
-            build_pane_record(surviving_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(removed_pane_id),
+            PaneRecord::from_terminal_pane(surviving_pane_id),
         ],
     );
     let mut client = build_focused_client(session.session_id, tab_id, removed_pane_id);
@@ -663,7 +599,7 @@ fn a_starving_report_names_the_clients_own_regions() {
     let pane_id = PaneId::new();
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, pane_id)],
-        vec![build_pane_record(pane_id, PaneLifecycle::Running)],
+        vec![PaneRecord::from_terminal_pane(pane_id)],
     );
     let mut client = build_focused_client(session.session_id, tab_id, pane_id);
     client.update_pane_area(Some(PaneArea::Starving));
@@ -671,7 +607,7 @@ fn a_starving_report_names_the_clients_own_regions() {
     session.attach_client(client);
 
     assert_eq!(
-        resolve_terminal_too_small_cause(&session, tab_id, client_id, build_rect()),
+        resolve_terminal_too_small_cause(&session, tab_id, client_id, build_viewport_rect()),
         TerminalTooSmallCause::Regions
     );
 }
@@ -682,7 +618,7 @@ fn a_reported_area_smaller_than_the_default_names_the_clients_regions() {
     let pane_id = PaneId::new();
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, pane_id)],
-        vec![build_pane_record(pane_id, PaneLifecycle::Running)],
+        vec![PaneRecord::from_terminal_pane(pane_id)],
     );
     let mut client = build_focused_client(session.session_id, tab_id, pane_id);
     client.update_pane_area(Some(PaneArea::Reported(Size {
@@ -693,7 +629,7 @@ fn a_reported_area_smaller_than_the_default_names_the_clients_regions() {
     session.attach_client(client);
 
     assert_eq!(
-        resolve_terminal_too_small_cause(&session, tab_id, client_id, build_rect()),
+        resolve_terminal_too_small_cause(&session, tab_id, client_id, build_viewport_rect()),
         TerminalTooSmallCause::Regions
     );
 }
@@ -704,7 +640,7 @@ fn a_smaller_viewer_names_the_other_client() {
     let pane_id = PaneId::new();
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, pane_id)],
-        vec![build_pane_record(pane_id, PaneLifecycle::Running)],
+        vec![PaneRecord::from_terminal_pane(pane_id)],
     );
     let target_client = build_focused_client(session.session_id, tab_id, pane_id);
     let target_client_id = target_client.get_client_id();
@@ -737,7 +673,7 @@ fn a_shorter_solve_rect_is_a_terminal_shortage() {
     let pane_id = PaneId::new();
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, pane_id)],
-        vec![build_pane_record(pane_id, PaneLifecycle::Running)],
+        vec![PaneRecord::from_terminal_pane(pane_id)],
     );
     let target_client = build_focused_client(session.session_id, tab_id, pane_id);
     let target_client_id = target_client.get_client_id();
@@ -771,11 +707,11 @@ fn a_client_id_that_is_not_attached_is_a_terminal_shortage() {
     let pane_id = PaneId::new();
     let session = build_session_with(
         vec![build_single_pane_tab(tab_id, pane_id)],
-        vec![build_pane_record(pane_id, PaneLifecycle::Running)],
+        vec![PaneRecord::from_terminal_pane(pane_id)],
     );
 
     assert_eq!(
-        resolve_terminal_too_small_cause(&session, tab_id, ClientId::new(), build_rect()),
+        resolve_terminal_too_small_cause(&session, tab_id, ClientId::new(), build_viewport_rect()),
         TerminalTooSmallCause::Terminal
     );
 }
@@ -792,8 +728,8 @@ fn a_tab_no_client_is_viewing_is_a_terminal_shortage() {
             build_tab_at_index(other_tab_id, other_pane_id, 1),
         ],
         vec![
-            build_pane_record(viewed_pane_id, PaneLifecycle::Running),
-            build_pane_record(other_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(viewed_pane_id),
+            PaneRecord::from_terminal_pane(other_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, viewed_tab_id, viewed_pane_id);
@@ -802,7 +738,7 @@ fn a_tab_no_client_is_viewing_is_a_terminal_shortage() {
 
     assert_eq!(session.get_tab_size(other_tab_id), None);
     assert_eq!(
-        resolve_terminal_too_small_cause(&session, other_tab_id, client_id, build_rect()),
+        resolve_terminal_too_small_cause(&session, other_tab_id, client_id, build_viewport_rect()),
         TerminalTooSmallCause::Terminal
     );
 }
@@ -817,8 +753,8 @@ fn the_removed_pane_leaves_the_tab_focus_history() {
     let mut session = build_session_with(
         vec![tab],
         vec![
-            build_pane_record(removed_pane_id, PaneLifecycle::Running),
-            build_pane_record(surviving_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(removed_pane_id),
+            PaneRecord::from_terminal_pane(surviving_pane_id),
         ],
     );
 
@@ -826,7 +762,7 @@ fn the_removed_pane_leaves_the_tab_focus_history() {
         &mut session,
         tab_id,
         removed_pane_id,
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -844,14 +780,14 @@ fn removing_the_last_pane_closes_the_tab_and_quits() {
     let only_pane_id = PaneId::new();
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, only_pane_id)],
-        vec![build_pane_record(only_pane_id, PaneLifecycle::Running)],
+        vec![PaneRecord::from_terminal_pane(only_pane_id)],
     );
 
     let emitted_events = remove_pane_cascade(
         &mut session,
         tab_id,
         only_pane_id,
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -893,7 +829,7 @@ fn removing_the_last_pane_a_client_focuses_leaves_a_consistent_session() {
     let only_pane_id = PaneId::new();
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, only_pane_id)],
-        vec![build_pane_record(only_pane_id, PaneLifecycle::Running)],
+        vec![PaneRecord::from_terminal_pane(only_pane_id)],
     );
     let client = build_focused_client(session.session_id, tab_id, only_pane_id);
     let client_id = client.get_client_id();
@@ -903,7 +839,7 @@ fn removing_the_last_pane_a_client_focuses_leaves_a_consistent_session() {
         &mut session,
         tab_id,
         only_pane_id,
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -960,8 +896,8 @@ fn closing_the_last_pane_of_one_tab_among_several_does_not_quit() {
             build_single_pane_tab(second_tab_id, second_pane_id),
         ],
         vec![
-            build_pane_record(first_pane_id, PaneLifecycle::Running),
-            build_pane_record(second_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(first_pane_id),
+            PaneRecord::from_terminal_pane(second_pane_id),
         ],
     );
 
@@ -969,7 +905,7 @@ fn closing_the_last_pane_of_one_tab_among_several_does_not_quit() {
         &mut session,
         first_tab_id,
         first_pane_id,
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -1001,13 +937,13 @@ fn closing_the_last_pane_of_one_tab_among_several_does_not_quit() {
 
 #[test]
 fn on_child_exit_for_an_unknown_pane_only_emits_the_exit_fact() {
-    // An unknown pane still reports its exit fact. It has no pane record: no
-    // exit policy applies, and nothing else in the session changes.
+    // An unknown pane has no pane record: its exit fact is the only event, and
+    // nothing else in the session changes.
     let tab_id = TabId::new();
     let only_pane_id = PaneId::new();
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, only_pane_id)],
-        vec![build_pane_record(only_pane_id, PaneLifecycle::Running)],
+        vec![PaneRecord::from_terminal_pane(only_pane_id)],
     );
     let unknown_pane_id = PaneId::new();
 
@@ -1019,7 +955,7 @@ fn on_child_exit_for_an_unknown_pane_only_emits_the_exit_fact() {
             exit_code: Some(1),
             signal: None,
         },
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -1054,14 +990,14 @@ fn removing_an_unknown_pane_emits_nothing() {
     let only_pane_id = PaneId::new();
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, only_pane_id)],
-        vec![build_pane_record(only_pane_id, PaneLifecycle::Running)],
+        vec![PaneRecord::from_terminal_pane(only_pane_id)],
     );
 
     let emitted_events = remove_pane_cascade(
         &mut session,
         tab_id,
         PaneId::new(),
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -1088,20 +1024,20 @@ fn removing_an_unknown_pane_emits_nothing() {
 #[test]
 fn removing_a_pane_under_an_unknown_tab_changes_nothing_and_emits_nothing() {
     let tab_id = TabId::new();
-    let (kept, target) = (PaneId::new(), PaneId::new());
+    let (kept_pane_id, requested_pane_id) = (PaneId::new(), PaneId::new());
     let mut session = build_session_with(
-        vec![build_two_pane_tab(tab_id, kept, target)],
+        vec![build_two_pane_tab(tab_id, kept_pane_id, requested_pane_id)],
         vec![
-            build_pane_record(kept, PaneLifecycle::Running),
-            build_pane_record(target, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(kept_pane_id),
+            PaneRecord::from_terminal_pane(requested_pane_id),
         ],
     );
 
     let emitted_events = remove_pane_cascade(
         &mut session,
         TabId::new(),
-        target,
-        build_rect(),
+        requested_pane_id,
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -1113,24 +1049,24 @@ fn removing_a_pane_under_an_unknown_tab_changes_nothing_and_emits_nothing() {
     assert_eq!(
         session
             .panes
-            .get_pane_record_by_id(target)
+            .get_pane_record_by_id(requested_pane_id)
             .map(PaneRecord::get_pane_id),
-        Some(target)
+        Some(requested_pane_id)
     );
     assert_eq!(
         session.tabs[&tab_id].get_layout_tree().list_leaf_pane_ids(),
-        vec![kept, target]
+        vec![kept_pane_id, requested_pane_id]
     );
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
 
 #[test]
-fn a_close_on_exit_pane_runs_the_removal_cascade() {
+fn a_pane_exit_emits_the_exit_fact_then_runs_the_removal_cascade() {
     let tab_id = TabId::new();
     let pane_id = PaneId::new();
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, pane_id)],
-        vec![build_pane_record(pane_id, PaneLifecycle::Running)],
+        vec![PaneRecord::from_terminal_pane(pane_id)],
     );
 
     let emitted_events = apply_child_exit(
@@ -1141,7 +1077,7 @@ fn a_close_on_exit_pane_runs_the_removal_cascade() {
             exit_code: Some(0),
             signal: None,
         },
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -1198,9 +1134,9 @@ fn closing_a_clients_active_tab_moves_it_to_the_previous_tab() {
             build_tab_at_index(right_tab_id, right_pane_id, 2),
         ],
         vec![
-            build_pane_record(left_pane_id, PaneLifecycle::Running),
-            build_pane_record(middle_pane_id, PaneLifecycle::Running),
-            build_pane_record(right_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(left_pane_id),
+            PaneRecord::from_terminal_pane(middle_pane_id),
+            PaneRecord::from_terminal_pane(right_pane_id),
         ],
     );
     let mut client = build_focused_client(session.session_id, middle_tab_id, middle_pane_id);
@@ -1212,7 +1148,7 @@ fn closing_a_clients_active_tab_moves_it_to_the_previous_tab() {
         &mut session,
         middle_tab_id,
         middle_pane_id,
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -1239,8 +1175,8 @@ fn closing_the_first_tab_moves_the_client_to_the_next_tab() {
             build_tab_at_index(second_tab_id, second_pane_id, 1),
         ],
         vec![
-            build_pane_record(first_pane_id, PaneLifecycle::Running),
-            build_pane_record(second_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(first_pane_id),
+            PaneRecord::from_terminal_pane(second_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, first_tab_id, first_pane_id);
@@ -1251,7 +1187,7 @@ fn closing_the_first_tab_moves_the_client_to_the_next_tab() {
         &mut session,
         first_tab_id,
         first_pane_id,
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -1280,8 +1216,8 @@ fn closing_a_tab_a_client_is_not_viewing_leaves_its_active_tab() {
             build_tab_at_index(viewing_tab_id, viewing_pane_id, 1),
         ],
         vec![
-            build_pane_record(other_pane_id, PaneLifecycle::Running),
-            build_pane_record(viewing_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(other_pane_id),
+            PaneRecord::from_terminal_pane(viewing_pane_id),
         ],
     );
     let mut client = build_focused_client(session.session_id, viewing_tab_id, viewing_pane_id);
@@ -1293,7 +1229,7 @@ fn closing_a_tab_a_client_is_not_viewing_leaves_its_active_tab() {
         &mut session,
         other_tab_id,
         other_pane_id,
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -1314,7 +1250,7 @@ fn closing_the_last_tab_prunes_client_focus_and_quits() {
     let pane_id = PaneId::new();
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, pane_id)],
-        vec![build_pane_record(pane_id, PaneLifecycle::Running)],
+        vec![PaneRecord::from_terminal_pane(pane_id)],
     );
     let client = build_focused_client(session.session_id, tab_id, pane_id);
     let client_id = client.get_client_id();
@@ -1324,7 +1260,7 @@ fn closing_the_last_tab_prunes_client_focus_and_quits() {
         &mut session,
         tab_id,
         pane_id,
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -1369,8 +1305,8 @@ fn removing_a_hidden_pane_leaves_a_zoomed_client_zoomed() {
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, focused_pane_id, removed_pane_id)],
         vec![
-            build_pane_record(focused_pane_id, PaneLifecycle::Running),
-            build_pane_record(removed_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(focused_pane_id),
+            PaneRecord::from_terminal_pane(removed_pane_id),
         ],
     );
     let mut client = build_focused_client(session.session_id, tab_id, focused_pane_id);
@@ -1383,7 +1319,7 @@ fn removing_a_hidden_pane_leaves_a_zoomed_client_zoomed() {
         &mut session,
         tab_id,
         removed_pane_id,
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -1433,8 +1369,8 @@ fn removing_the_zoomed_pane_drops_that_clients_zoom() {
             zoomed_pane_id,
         )],
         vec![
-            build_pane_record(surviving_pane_id, PaneLifecycle::Running),
-            build_pane_record(zoomed_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(surviving_pane_id),
+            PaneRecord::from_terminal_pane(zoomed_pane_id),
         ],
     );
     let mut client = build_focused_client(session.session_id, tab_id, zoomed_pane_id);
@@ -1446,7 +1382,7 @@ fn removing_the_zoomed_pane_drops_that_clients_zoom() {
         &mut session,
         tab_id,
         zoomed_pane_id,
-        build_rect(),
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -1474,23 +1410,23 @@ fn removing_the_zoomed_pane_drops_that_clients_zoom() {
 #[test]
 fn a_registry_pane_missing_from_the_layout_is_dropped_without_touching_the_tab() {
     let tab_id = TabId::new();
-    let (kept, ghost) = (PaneId::new(), PaneId::new());
+    let (kept_pane_id, orphan_pane_id) = (PaneId::new(), PaneId::new());
     let mut session = build_session_with(
-        vec![build_single_pane_tab(tab_id, kept)],
+        vec![build_single_pane_tab(tab_id, kept_pane_id)],
         vec![
-            build_pane_record(kept, PaneLifecycle::Running),
-            build_pane_record(ghost, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(kept_pane_id),
+            PaneRecord::from_terminal_pane(orphan_pane_id),
         ],
     );
-    let client = build_focused_client(session.session_id, tab_id, kept);
+    let client = build_focused_client(session.session_id, tab_id, kept_pane_id);
     let client_id = client.get_client_id();
     session.attach_client(client);
 
     let emitted_events = remove_pane_cascade(
         &mut session,
         tab_id,
-        ghost,
-        build_rect(),
+        orphan_pane_id,
+        build_viewport_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
@@ -1503,9 +1439,11 @@ fn a_registry_pane_missing_from_the_layout_is_dropped_without_touching_the_tab()
     assert_eq!(
         emitted_events,
         vec![
-            Event::PaneClosing(PaneClosing { pane_id: ghost }),
+            Event::PaneClosing(PaneClosing {
+                pane_id: orphan_pane_id
+            }),
             Event::PaneRemoved(PaneRemoved {
-                pane_id: ghost,
+                pane_id: orphan_pane_id,
                 tab_id: Some(tab_id),
             }),
         ]
@@ -1513,20 +1451,20 @@ fn a_registry_pane_missing_from_the_layout_is_dropped_without_touching_the_tab()
     assert_eq!(
         session
             .panes
-            .get_pane_record_by_id(ghost)
+            .get_pane_record_by_id(orphan_pane_id)
             .map(PaneRecord::get_pane_id),
         None
     );
     assert_eq!(
         session
             .panes
-            .get_pane_record_by_id(kept)
+            .get_pane_record_by_id(kept_pane_id)
             .map(PaneRecord::get_pane_id),
-        Some(kept)
+        Some(kept_pane_id)
     );
     assert_eq!(
         session.tabs[&tab_id].get_layout_tree(),
-        &LayoutNode::Pane(kept)
+        &LayoutNode::Pane(kept_pane_id)
     );
     assert_eq!(
         session.tabs.keys().copied().collect::<Vec<TabId>>(),
@@ -1538,54 +1476,7 @@ fn a_registry_pane_missing_from_the_layout_is_dropped_without_touching_the_tab()
             .get_client_by_id(client_id)
             .expect("client")
             .get_focused_pane_id(tab_id),
-        Some(kept)
-    );
-}
-
-/// A second exit report for a pane already recorded as `Exited` removes the
-/// pane and closes its last tab, as the first report does.
-#[test]
-fn a_repeated_exit_still_removes_the_pane() {
-    let tab_id = TabId::new();
-    let pane_id = PaneId::new();
-    let mut session = build_session_with(
-        vec![build_single_pane_tab(tab_id, pane_id)],
-        vec![build_pane_record(
-            pane_id,
-            PaneLifecycle::Exited {
-                exit_code: Some(1),
-                exited_at: SystemTime::UNIX_EPOCH,
-            },
-        )],
-    );
-
-    let emitted_events = apply_child_exit(
-        &mut session,
-        tab_id,
-        PaneProcessExited {
-            pane_id,
-            exit_code: Some(2),
-            signal: None,
-        },
-        build_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-    );
-
-    assert_eq!(
-        emitted_events.first(),
-        Some(&Event::PaneProcessExited(PaneProcessExited {
-            pane_id,
-            exit_code: Some(2),
-            signal: None,
-        }))
-    );
-    assert_eq!(session.panes.get_pane_record_by_id(pane_id), None);
-    assert_eq!(
-        session.tabs.keys().copied().collect::<Vec<TabId>>(),
-        Vec::new()
+        Some(kept_pane_id)
     );
 }
 
@@ -1597,8 +1488,8 @@ fn remove_floating_pane_drops_the_record_the_member_and_every_client_view() {
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, tiled_pane_id)],
         vec![
-            build_pane_record(tiled_pane_id, PaneLifecycle::Running),
-            build_pane_record(floating_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(tiled_pane_id),
+            PaneRecord::from_terminal_pane(floating_pane_id),
         ],
     );
     session
@@ -1671,10 +1562,10 @@ fn remove_floating_pane_moves_a_focusing_client_to_its_most_recent_shown_float()
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, tiled_pane_id)],
         vec![
-            build_pane_record(tiled_pane_id, PaneLifecycle::Running),
-            build_pane_record(shown_pane_id, PaneLifecycle::Running),
-            build_pane_record(minimized_pane_id, PaneLifecycle::Running),
-            build_pane_record(removed_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(tiled_pane_id),
+            PaneRecord::from_terminal_pane(shown_pane_id),
+            PaneRecord::from_terminal_pane(minimized_pane_id),
+            PaneRecord::from_terminal_pane(removed_pane_id),
         ],
     );
     for pane_id in [shown_pane_id, minimized_pane_id, removed_pane_id] {
@@ -1735,8 +1626,8 @@ fn remove_floating_pane_reports_no_focus_for_a_client_left_with_no_pane_to_type_
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, tiled_pane_id)],
         vec![
-            build_pane_record(tiled_pane_id, PaneLifecycle::Running),
-            build_pane_record(floating_pane_id, PaneLifecycle::Running),
+            PaneRecord::from_terminal_pane(tiled_pane_id),
+            PaneRecord::from_terminal_pane(floating_pane_id),
         ],
     );
     session
@@ -1779,7 +1670,7 @@ fn remove_floating_pane_of_a_tiled_pane_changes_nothing() {
     let tiled_pane_id = PaneId::new();
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, tiled_pane_id)],
-        vec![build_pane_record(tiled_pane_id, PaneLifecycle::Running)],
+        vec![PaneRecord::from_terminal_pane(tiled_pane_id)],
     );
 
     assert_eq!(remove_floating_pane(&mut session, tiled_pane_id), vec![]);

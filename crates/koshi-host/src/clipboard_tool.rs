@@ -1,11 +1,11 @@
 //! The clipboard tools that koshi stands in for inside a pane, and the folder
 //! of stand-ins that one session puts first on the `PATH` of its panes.
 //!
-//! On Linux and macOS, [`refresh_clipboard_tool_directory`] fills that folder
+//! On Linux and macOS, `refresh_clipboard_tool_directory` fills that folder
 //! with one symbolic link to the koshi program per tool in
-//! [`CLIPBOARD_TOOL_NAMES`] that [`find_real_clipboard_tool`] finds on
+//! `CLIPBOARD_TOOL_NAMES` that `find_real_clipboard_tool` finds on
 //! `PATH`. A pane that runs `xclip` then runs koshi under the name `xclip`,
-//! and koshi runs the real `xclip` that [`find_real_clipboard_tool`] finds
+//! and koshi runs the real `xclip` that `find_real_clipboard_tool` finds
 //! whenever the copy stays on this machine.
 //!
 //! Example: with `PATH` `/usr/bin:/bin` and `/usr/bin/xclip` the only tool

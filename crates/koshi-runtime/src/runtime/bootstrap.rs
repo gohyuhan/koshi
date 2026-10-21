@@ -155,7 +155,6 @@ impl Server {
 
         self.session_by_id.insert(session_id, session);
         self.park_pane_pty(pane_id, root_pane_pty_size);
-        self.render_scheduler.invalidate();
 
         Ok(())
     }
@@ -205,7 +204,6 @@ impl Server {
         for (pane_id, _) in carried_pane_sizes {
             self.handle_pty_output(*pane_id, LAYOUT_NOT_RESTORED_NOTICE_BYTES);
         }
-        self.render_scheduler.invalidate();
     }
 
     /// Seed the first session from a `--profile` template: one session holding
@@ -391,7 +389,6 @@ impl Server {
             focused_tab_id,
             &mut reflow_events,
         );
-        self.render_scheduler.invalidate();
 
         Ok(())
     }

@@ -12,13 +12,28 @@
 //! - A `koshi detach --all` ends a `koshi attach` client with exit code `0`.
 //! - With `auto-close-session #true`, the session server process ends when its
 //!   last client leaves. With the default, it keeps running.
+//! - A `koshi attach` client on a terminal ignores `SIGTSTP`, `SIGTTIN` and
+//!   `SIGTTOU`. When it gets `SIGTERM`, it writes the terminal mode cleanup
+//!   last, then ends by `SIGTERM`.
 //!
 //! Each test serves its own temporary runtime directory, and starts every
 //! `koshi` process under its own temporary home. The tests that start `koshi
 //! attach` or write a `koshi.kdl` run on Unix only.
 
 #[cfg(unix)]
+use std::fs::File;
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
+use std::os::fd::{FromRawFd, OwnedFd};
+#[cfg(unix)]
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::{ExitStatus, Stdio};
+#[cfg(unix)]
+use std::sync::{Arc, Mutex};
 #[cfg(unix)]
 use std::time::Instant;
 
@@ -80,6 +95,162 @@ fn start_attaching_client(home_directory: &Path, session_id: SessionId) -> Runni
         .spawn()
         .expect("the koshi binary starts");
     RunningClient { child_process }
+}
+
+/// The bytes `koshi attach` writes to its terminal when it enters its modes.
+#[cfg(unix)]
+const APPLICATION_MODE_SETUP_BYTES: &[u8] =
+    b"\x1b[?1049h\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h";
+
+/// The bytes `koshi attach` writes to its terminal when it leaves its modes.
+#[cfg(unix)]
+const APPLICATION_MODE_CLEANUP_BYTES: &[u8] =
+    b"\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q";
+
+/// A `koshi attach` client whose three standard streams are the follower side
+/// of a pseudo terminal, and the bytes a thread has read from the leader side
+/// so far.
+#[cfg(unix)]
+struct TerminalAttachingClient {
+    running_client: RunningClient,
+    terminal_output_bytes: Arc<Mutex<Vec<u8>>>,
+    /// One follower descriptor this test holds open. Every byte the client
+    /// wrote stays readable on the leader side after the client exits.
+    _follower_terminal: OwnedFd,
+}
+
+#[cfg(unix)]
+impl TerminalAttachingClient {
+    /// Wait until the bytes read from the terminal satisfy
+    /// `is_terminal_output_done`, for [`WAIT_DURATION`] at most.
+    ///
+    /// # Panics
+    /// When [`WAIT_DURATION`] passes first. The message names `expectation`
+    /// and the last 200 bytes read.
+    fn wait_for_terminal_output(
+        &self,
+        expectation: &str,
+        is_terminal_output_done: impl Fn(&[u8]) -> bool,
+    ) {
+        let wait_deadline = Instant::now() + WAIT_DURATION;
+        loop {
+            {
+                let terminal_output_bytes = self
+                    .terminal_output_bytes
+                    .lock()
+                    .expect("the terminal output lock");
+                if is_terminal_output_done(&terminal_output_bytes) {
+                    return;
+                }
+                let tail_start = terminal_output_bytes.len().saturating_sub(200);
+                assert!(
+                    Instant::now() < wait_deadline,
+                    "the terminal output never {expectation}; it ends with {:?}",
+                    String::from_utf8_lossy(&terminal_output_bytes[tail_start..])
+                );
+            }
+            std::thread::sleep(POLL_INTERVAL_DURATION);
+        }
+    }
+
+    /// Wait for the client to exit, for [`WAIT_DURATION`] at most.
+    ///
+    /// # Panics
+    /// When [`WAIT_DURATION`] passes first.
+    fn wait_for_exit(&mut self) -> ExitStatus {
+        let wait_deadline = Instant::now() + WAIT_DURATION;
+        loop {
+            if let Some(exit_status) = self
+                .running_client
+                .child_process
+                .try_wait()
+                .expect("the client's state can be read")
+            {
+                return exit_status;
+            }
+            assert!(Instant::now() < wait_deadline, "the client kept running");
+            std::thread::sleep(POLL_INTERVAL_DURATION);
+        }
+    }
+}
+
+/// Start the `koshi` binary as a client attaching to `session_id` on a pseudo
+/// terminal of 24 rows and 80 columns, the way a user types `koshi attach <id>`
+/// in a terminal window. The client runs in a process group of its own, and
+/// this test process is in another group of the same session.
+#[cfg(unix)]
+fn start_terminal_attaching_client(
+    home_directory: &Path,
+    session_id: SessionId,
+) -> TerminalAttachingClient {
+    let mut leader_descriptor: libc::c_int = -1;
+    let mut follower_descriptor: libc::c_int = -1;
+    let mut terminal_window_size = libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: `openpty` writes the two descriptors it opens into the two
+    // integers. A null name and a null `termios` are allowed, and the window
+    // size outlives the call.
+    let open_result = unsafe {
+        libc::openpty(
+            &mut leader_descriptor,
+            &mut follower_descriptor,
+            std::ptr::null_mut(),
+            std::ptr::null_mut::<libc::termios>(),
+            &raw mut terminal_window_size,
+        )
+    };
+    assert_eq!(
+        open_result,
+        0,
+        "openpty failed: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: `openpty` opened both descriptors for this process, and each one
+    // is owned here once.
+    let (leader_terminal, follower_terminal) = unsafe {
+        (
+            OwnedFd::from_raw_fd(leader_descriptor),
+            OwnedFd::from_raw_fd(follower_descriptor),
+        )
+    };
+    let clone_follower = || {
+        follower_terminal
+            .try_clone()
+            .expect("the follower descriptor is duplicated")
+    };
+    let child_process = build_koshi_command_under_home(home_directory)
+        .arg("attach")
+        .arg(session_id.to_string())
+        .stdin(Stdio::from(clone_follower()))
+        .stdout(Stdio::from(clone_follower()))
+        .stderr(Stdio::from(clone_follower()))
+        .process_group(0)
+        .spawn()
+        .expect("the koshi binary starts");
+    let terminal_output_bytes = Arc::new(Mutex::new(Vec::new()));
+    let reader_output_bytes = Arc::clone(&terminal_output_bytes);
+    std::thread::spawn(move || {
+        let mut leader_reader = File::from(leader_terminal);
+        let mut read_bytes = [0_u8; 4096];
+        while let Ok(read_byte_count) = leader_reader.read(&mut read_bytes) {
+            if read_byte_count == 0 {
+                return;
+            }
+            reader_output_bytes
+                .lock()
+                .expect("the terminal output lock")
+                .extend_from_slice(&read_bytes[..read_byte_count]);
+        }
+    });
+    TerminalAttachingClient {
+        running_client: RunningClient { child_process },
+        terminal_output_bytes,
+        _follower_terminal: follower_terminal,
+    }
 }
 
 /// Wait until the session server answers a Hello, then close that connection.
@@ -313,8 +484,7 @@ fn auto_close_ends_the_session_server_process_when_the_last_client_leaves() {
 }
 
 /// A session told to end writes the quit frame on every attached stream before
-/// its process goes, so the client says the session ended instead of reporting
-/// it dead.
+/// its process goes, and the client says the session ended.
 #[cfg(unix)]
 #[test]
 fn a_kill_session_ends_every_attached_stream_with_the_quit_frame() {
@@ -330,7 +500,7 @@ fn a_kill_session_ends_every_attached_stream_with_the_quit_frame() {
     attach_client_on_connection(&mut viewer_connection, session_id);
 
     // The stream is read while `kill-session` runs. `kill-session` names no
-    // client, so the session ends rather than one client leaving it.
+    // client: the session ends.
     let session_ending_reader = std::thread::spawn(move || read_session_ending(viewer_connection));
     let kill_output = build_koshi_command_under_home(home_directory.path())
         .arg("kill-session")
@@ -387,4 +557,48 @@ fn a_session_server_outlives_its_last_client_by_default() {
         None,
         "the session server ended without being asked to"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_attaching_client_ignores_stop_signals_and_ends_by_a_termination_signal() {
+    let home_directory = build_short_test_directory();
+    let runtime_directory = resolve_runtime_directory_under_home(home_directory.path());
+    let session_id = SessionId::new();
+    let _session_process =
+        start_session_server_under_home(home_directory.path(), &runtime_directory, session_id);
+    let _client_started_router = RouterStartedByClient {
+        runtime_directory: runtime_directory.clone(),
+    };
+
+    wait_for_session_server(&runtime_directory, session_id);
+    let mut terminal_attaching_client =
+        start_terminal_attaching_client(home_directory.path(), session_id);
+    // The client starts its signal watch before it writes its terminal modes.
+    terminal_attaching_client.wait_for_terminal_output(
+        "entered the client's modes",
+        |terminal_output_bytes| {
+            terminal_output_bytes
+                .windows(APPLICATION_MODE_SETUP_BYTES.len())
+                .any(|window| window == APPLICATION_MODE_SETUP_BYTES)
+        },
+    );
+
+    let client_process_id =
+        libc::pid_t::try_from(terminal_attaching_client.running_client.child_process.id())
+            .expect("a process id fits pid_t");
+    // The client ignores each stop signal, then ends by the `SIGTERM` below.
+    for stop_signal in [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
+        // SAFETY: `kill` sends `stop_signal` to the client this test started.
+        assert_eq!(unsafe { libc::kill(client_process_id, stop_signal) }, 0);
+    }
+    // SAFETY: `kill` sends `SIGTERM` to the client this test started.
+    assert_eq!(unsafe { libc::kill(client_process_id, libc::SIGTERM) }, 0);
+
+    let exit_status = terminal_attaching_client.wait_for_exit();
+    assert_eq!(exit_status.signal(), Some(libc::SIGTERM));
+    terminal_attaching_client
+        .wait_for_terminal_output("ended with the mode cleanup", |terminal_output_bytes| {
+            terminal_output_bytes.ends_with(APPLICATION_MODE_CLEANUP_BYTES)
+        });
 }

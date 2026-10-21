@@ -1,4 +1,4 @@
-//! Directional neighbour selection over solved pane rectangles.
+//! Directional neighbor selection over solved pane rectangles.
 //!
 //! Given the pane rectangle a move starts from and the pane rectangles it may land on,
 //! this module picks the one the user sees in a cardinal direction. It reads

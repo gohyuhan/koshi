@@ -11,8 +11,38 @@ use serde_json::{Map, Number, Value};
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_session::session::state::Session;
 use koshi_storage::error::StorageError;
+use koshi_terminal::engine::{GraphicsEvent, GraphicsTransportState, SynchronizedOutputTransport};
+use koshi_terminal::state::ResumeFormat4TerminalState;
 
 use super::{CarriedPaneState, CarriedQuit, ResumeBody, RESUME_FORMAT};
+use crate::runtime::saved_view::SavedViewStore;
+
+/// A pane state in the shape resume format 4 writes: the fields of
+/// [`CarriedPaneState`], with every grid row and history line of its terminal
+/// state stored as a list of JSON cells, and its terminal modes without
+/// insert mode.
+#[derive(Deserialize)]
+struct ResumeFormat4CarriedPaneState {
+    terminal_state: ResumeFormat4TerminalState,
+    undecoded_bytes: Vec<u8>,
+    #[serde(deserialize_with = "super::deserialize_graphics_events")]
+    graphics_events: Vec<GraphicsEvent>,
+    graphics_transport: Option<GraphicsTransportState>,
+    synchronized_output: Option<SynchronizedOutputTransport>,
+}
+
+impl ResumeFormat4CarriedPaneState {
+    /// The same pane state, with its terminal state's rows encoded.
+    fn into_carried_pane_state(self) -> CarriedPaneState {
+        CarriedPaneState {
+            terminal_state: self.terminal_state.into_terminal_state(),
+            undecoded_bytes: self.undecoded_bytes,
+            graphics_events: self.graphics_events,
+            graphics_transport: self.graphics_transport,
+            synchronized_output: self.synchronized_output,
+        }
+    }
+}
 
 struct ParsedJsonObject<'a> {
     json_fields: BTreeMap<String, &'a RawValue>,
@@ -35,12 +65,12 @@ impl<'de> Deserialize<'de> for ParsedJsonObject<'de> {
 
             fn visit_map<A: MapAccess<'de>>(
                 self,
-                mut json_map: A,
+                mut map_access: A,
             ) -> Result<Self::Value, A::Error> {
                 let mut json_fields = BTreeMap::new();
                 let mut repeated_json_field_names = BTreeSet::new();
                 while let Some((field_name, raw_field)) =
-                    json_map.next_entry::<String, &'de RawValue>()?
+                    map_access.next_entry::<String, &'de RawValue>()?
                 {
                     if json_fields.insert(field_name.clone(), raw_field).is_some() {
                         repeated_json_field_names.insert(field_name);
@@ -84,8 +114,8 @@ impl<'de> DeserializeSeed<'de> for OpaqueByteArraySeed<'_, 'de> {
                 formatter.write_str("JSON with unique object fields")
             }
 
-            fn visit_bool<E: de::Error>(self, boolean: bool) -> Result<Value, E> {
-                Ok(Value::Bool(boolean))
+            fn visit_bool<E: de::Error>(self, is_true: bool) -> Result<Value, E> {
+                Ok(Value::Bool(is_true))
             }
 
             fn visit_i64<E: de::Error>(self, number: i64) -> Result<Value, E> {
@@ -124,12 +154,12 @@ impl<'de> DeserializeSeed<'de> for OpaqueByteArraySeed<'_, 'de> {
                 Ok(Value::Array(json_values))
             }
 
-            fn visit_map<A: MapAccess<'de>>(self, mut json_map: A) -> Result<Value, A::Error> {
+            fn visit_map<A: MapAccess<'de>>(self, mut map_access: A) -> Result<Value, A::Error> {
                 let mut json_fields = Map::new();
-                while let Some(field_name) = json_map.next_key::<String>()? {
+                while let Some(field_name) = map_access.next_key::<String>()? {
                     let json_field = if OPAQUE_BYTE_ARRAY_FIELD_NAMES.contains(&field_name.as_str())
                     {
-                        let raw_field = json_map.next_value::<&'de RawValue>()?;
+                        let raw_field = map_access.next_value::<&'de RawValue>()?;
                         if raw_field.get().trim_start().starts_with('[') {
                             let array_index = self.opaque_byte_arrays.len();
                             self.opaque_byte_arrays.push(raw_field);
@@ -139,7 +169,7 @@ impl<'de> DeserializeSeed<'de> for OpaqueByteArraySeed<'_, 'de> {
                                 .map_err(de::Error::custom)?
                         }
                     } else {
-                        json_map.next_value_seed(OpaqueByteArraySeed {
+                        map_access.next_value_seed(OpaqueByteArraySeed {
                             opaque_byte_arrays: self.opaque_byte_arrays,
                         })?
                     };
@@ -178,7 +208,7 @@ impl Serialize for JsonWithOpaqueByteArrays<'_, '_> {
                 sequence.end()
             }
             Value::Object(json_fields) => {
-                let mut json_map = serializer.serialize_map(Some(json_fields.len()))?;
+                let mut json_object = serializer.serialize_map(Some(json_fields.len()))?;
                 for (field_name, json_field) in json_fields {
                     let opaque_array =
                         if OPAQUE_BYTE_ARRAY_FIELD_NAMES.contains(&field_name.as_str()) {
@@ -193,9 +223,9 @@ impl Serialize for JsonWithOpaqueByteArrays<'_, '_> {
                             None
                         };
                     if let Some(raw_array) = opaque_array {
-                        json_map.serialize_entry(field_name, raw_array)?;
+                        json_object.serialize_entry(field_name, raw_array)?;
                     } else {
-                        json_map.serialize_entry(
+                        json_object.serialize_entry(
                             field_name,
                             &Self {
                                 json_value: json_field,
@@ -204,7 +234,7 @@ impl Serialize for JsonWithOpaqueByteArrays<'_, '_> {
                         )?;
                     }
                 }
-                json_map.end()
+                json_object.end()
             }
             json_scalar => json_scalar.serialize(serializer),
         }
@@ -323,10 +353,10 @@ const FORMAT_FOUR_BODY_FIELD_NAMES: ResumeBodyFieldNames = ResumeBodyFieldNames 
     ancillary_pane_field_names: &[],
 };
 
-/// The oldest format whose saved pane states have the current
-/// [`CarriedPaneState`] shape. A pane state saved at this format or a newer
-/// one decodes with no migration step.
-const OLDEST_FORMAT_WITH_CURRENT_PANE_STATE: u32 = 4;
+/// The oldest format whose saved pane states hold every field of
+/// [`CarriedPaneState`]. A pane state saved at this format decodes as a
+/// [`ResumeFormat4CarriedPaneState`] with no JSON step.
+const OLDEST_FORMAT_WITH_CURRENT_PANE_FIELDS: u32 = 4;
 
 /// The top-level field names of a body saved at `resume_format`.
 fn get_resume_body_field_names(resume_format: u32) -> &'static ResumeBodyFieldNames {
@@ -442,10 +472,14 @@ pub(super) fn migrate_resume_body(
             ),
         }
     }
+    // A body read from formats 1 through 4 comes back with an empty saved-view
+    // store and no child left running.
     Ok(ResumeBody {
         session_by_id,
         carried_pane_state_by_pane_id,
         carried_quit,
+        saved_view_store: SavedViewStore::default(),
+        left_running_child_process_ids: Vec::new(),
     })
 }
 
@@ -502,9 +536,11 @@ fn migrate_previous_session_json(
 
 /// Read the saved pane state `raw_pane_state`, stored under `pane_key` in a
 /// body saved at `source_resume_format`, as a [`CarriedPaneState`]. A pane
-/// state saved at [`OLDEST_FORMAT_WITH_CURRENT_PANE_STATE`] or a newer format
-/// decodes as it is. An older one passes through every step together with its
-/// entries in `ancillary_pane_fields`.
+/// state saved at [`OLDEST_FORMAT_WITH_CURRENT_PANE_FIELDS`] decodes as a
+/// [`ResumeFormat4CarriedPaneState`]. An older one first passes through every
+/// step together with its entries in `ancillary_pane_fields`, then decodes the
+/// same way. Decoding encodes every grid row and history line, one at a time,
+/// and reads insert mode back off.
 ///
 /// # Errors
 /// Returns an invalid-resume error when the pane state cannot be read, a step
@@ -515,10 +551,12 @@ fn migrate_previous_pane_state(
     raw_pane_state: &RawValue,
     ancillary_pane_fields: &BTreeMap<&str, BTreeMap<String, &RawValue>>,
 ) -> Result<CarriedPaneState, StorageError> {
-    if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_PANE_STATE {
-        return serde_json::from_str(raw_pane_state.get()).map_err(|parse_error| {
-            build_invalid_resume_error(format!("pane {pane_key} is unreadable: {parse_error}"))
-        });
+    if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_PANE_FIELDS {
+        return serde_json::from_str::<ResumeFormat4CarriedPaneState>(raw_pane_state.get())
+            .map(ResumeFormat4CarriedPaneState::into_carried_pane_state)
+            .map_err(|parse_error| {
+                build_invalid_resume_error(format!("pane {pane_key} is unreadable: {parse_error}"))
+            });
     }
     let migrated_pane_bytes = migrate_previous_pane_json(
         source_resume_format,
@@ -526,17 +564,19 @@ fn migrate_previous_pane_state(
         raw_pane_state,
         ancillary_pane_fields,
     )?;
-    serde_json::from_slice(&migrated_pane_bytes).map_err(|parse_error| {
-        build_invalid_resume_error(format!(
-            "migrated pane {pane_key} is unreadable: {parse_error}"
-        ))
-    })
+    serde_json::from_slice::<ResumeFormat4CarriedPaneState>(&migrated_pane_bytes)
+        .map(ResumeFormat4CarriedPaneState::into_carried_pane_state)
+        .map_err(|parse_error| {
+            build_invalid_resume_error(format!(
+                "migrated pane {pane_key} is unreadable: {parse_error}"
+            ))
+        })
 }
 
 /// Run every resume step from `source_resume_format` on the saved pane state
 /// `raw_pane_state` of the pane stored under `pane_key`, together with that
 /// pane's entry in each of `ancillary_pane_fields`, and hand back the migrated
-/// pane as JSON bytes in the current [`CarriedPaneState`] shape.
+/// pane as JSON bytes in the [`ResumeFormat4CarriedPaneState`] shape.
 ///
 /// # Errors
 /// Returns an invalid-resume error when the pane JSON cannot be read or a step
@@ -637,8 +677,9 @@ fn write_migrated_json(
 /// Runs the steps from `source_resume_format` up to [`RESUME_FORMAT`] on
 /// `resume_body`, in order. Step 1 converts format 1 to format 2. Step 2 adds
 /// the format-3 fields. Step 3 converts format 3 to format 4. Step 4 adds the
-/// format-5 floating fields. A body saved at format 3 also gets the step-2
-/// fields before step 3. Steps 2 and 4 add only the fields that are missing.
+/// format-5 floating fields and removes each pane record's `lifecycle` and
+/// `close_policy`. A body saved at format 3 also gets the step-2 fields before
+/// step 3. Steps 2 and 4 add only the fields that are missing.
 ///
 /// # Errors
 /// Returns an invalid-resume error when a step cannot convert `resume_body`.
@@ -1069,16 +1110,6 @@ fn migrate_pane(pane: &mut Value, json_path: &str) -> Result<(), StorageError> {
             ],
         );
     }
-    if let Some(close_policy) = json_fields.get_mut("close_policy") {
-        let policy_fields = get_json_object(close_policy, "pane.close_policy")?;
-        if let Some(graceful) = policy_fields.get_mut("Graceful") {
-            rename_json_field(
-                get_json_object(graceful, "pane.close_policy.Graceful")?,
-                "timeout",
-                "timeout_duration",
-            );
-        }
-    }
     Ok(())
 }
 
@@ -1144,12 +1175,15 @@ fn migrate_client(client: &mut Value, json_path: &str) -> Result<(), StorageErro
 /// Adds the format-5 floating fields that `resume_body` lacks: `floating_set`
 /// `{"members":[]}` on each session, and `floating_pane_view_by_pane_id` `{}`,
 /// `floating_pane_focus_order` `[]` and `focused_floating_pane_id` `null` on
-/// each of its clients. A field that is present keeps its value.
+/// each of its clients. A field that is present keeps its value. Removes
+/// `lifecycle` and `close_policy` from each record in a session's
+/// `panes.pane_record_by_id`.
 ///
 /// # Errors
 /// Returns an invalid-resume error when `body.session_by_id`, a session's
-/// `clients` or `clients.client_by_id` is missing, or when the body, a value
-/// on that path, or a client is not an object.
+/// `clients`, `clients.client_by_id`, `panes` or `panes.pane_record_by_id` is
+/// missing, or when the body, a value on that path, a client or a pane record
+/// is not an object.
 fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageError> {
     let sessions = get_required_json_field(
         get_json_object(resume_body, "body")?,
@@ -1181,6 +1215,22 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
                 client_fields
                     .entry("focused_floating_pane_id")
                     .or_insert(Value::Null);
+                Ok(())
+            },
+        )?;
+        let panes = get_required_json_field(session_fields, "panes", session_path)?;
+        let pane_record_by_id = get_required_json_field(
+            get_json_object(panes, "session.panes")?,
+            "pane_record_by_id",
+            "session.panes",
+        )?;
+        migrate_json_object_members(
+            pane_record_by_id,
+            "session.panes.pane_record_by_id",
+            |pane_record, pane_record_path| {
+                let pane_record_fields = get_json_object(pane_record, pane_record_path)?;
+                pane_record_fields.remove("lifecycle");
+                pane_record_fields.remove("close_policy");
                 Ok(())
             },
         )

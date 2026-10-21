@@ -27,11 +27,11 @@ use std::path::Path;
 
 use kdl::KdlNode;
 
-use crate::error::{build_validation_error, validate_config_schema_version, ConfigError};
+use crate::error::{build_validation_error, ConfigError};
 use crate::layer::{PartialColorPalette, PartialThemeConfig};
 use crate::parser::{
-    find_section_block, format_unknown_key, parse_kdl, parse_string_kdl_value,
-    parse_version_argument, set_parsed_field,
+    find_section_block, format_unknown_key, parse_kdl, parse_string_kdl_value, set_parsed_field,
+    validate_version_node,
 };
 use crate::types::RgbColor;
 
@@ -54,12 +54,11 @@ const COLOR_KEYS: &[&str] = &[
     "colors.bar-bg",
 ];
 
-/// Parses a theme file's `theme_source_text` into a [`PartialThemeConfig`] override layer
-/// and one warning per skipped color, unknown key, value written on the
-/// `colors` line, and repeated `colors` block, in file order. The returned
-/// layer's
-/// [`theme_name`](PartialThemeConfig::theme_name) is left unset: the theme is named by its
-/// file, which the caller knows and this parser does not.
+/// Parses a theme file's `theme_source_text` into a [`PartialThemeConfig`]
+/// override layer and one warning per skipped color, unknown key, value
+/// written on the `colors` line, and repeated `colors` block, in file order.
+/// The returned layer leaves [`theme_name`](PartialThemeConfig::theme_name)
+/// unset, and the caller sets it from the file name.
 ///
 /// # Errors
 /// Returns [`ConfigError::Parse`] when `theme_source_text` is not valid KDL.
@@ -86,13 +85,7 @@ pub fn parse_theme(
                     ));
                 }
                 has_seen_version = true;
-                let declared_version =
-                    parse_version_argument(config_node).map_err(|(_, version_error_detail)| {
-                        build_validation_error("version", version_error_detail)
-                    })?;
-                validate_config_schema_version(declared_version).map_err(|diagnostic| {
-                    build_validation_error("version", &diagnostic.to_string())
-                })?;
+                validate_version_node(config_node)?;
             }
             "colors" => {
                 if has_seen_colors {

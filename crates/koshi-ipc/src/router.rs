@@ -52,9 +52,11 @@ pub const ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.maximum_version;
 /// The floor is 3. Raising it drops support for every build below it.
 pub const MIN_ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.minimum_version;
 
-/// The sentence a router refuses a session lookup, a session creation, and a
-/// remote attach with between deciding to restart into a new build and the
-/// restart. The same router answers again once it has restarted.
+/// The sentence a router refuses a request with between deciding to restart
+/// into a new build and the restart: a session lookup, a session creation and
+/// a remote attach from the decision on, and every request but a `Restart`
+/// once no request waits. The same router answers again once it has
+/// restarted.
 pub const ROUTER_RESTARTING_MESSAGE: &str =
     "the router is restarting into a new build; run the command again";
 
@@ -278,7 +280,7 @@ pub enum RouterResult {
     /// remote access is set to.
     RemoteStatus {
         /// The IP address and port remote clients would be served on, such
-        /// as `192.168.1.20:7654`, or `None` when `koshi.kdl` names no listen
+        /// as `192.0.2.20:7654`, or `None` when `koshi.kdl` names no listen
         /// address.
         remote_listen_address: Option<SocketAddr>,
         /// Whether the operator has switched remote access on. This is the
@@ -300,7 +302,7 @@ pub enum RouterResult {
     /// Answers [`RouterRequestKind::EnableRemote`]: remote access is on.
     RemoteEnabled {
         /// The IP address and port remote clients are served on, such as
-        /// `192.168.1.20:7654`.
+        /// `192.0.2.20:7654`.
         remote_listen_address: SocketAddr,
         /// The fingerprint of the certificate the remote listener presents,
         /// as 64 lowercase hex characters. A dialling client gives it with

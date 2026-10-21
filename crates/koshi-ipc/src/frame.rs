@@ -1,40 +1,21 @@
-//! One painted frame: the picture the session composed for one attached
-//! client, at that client's own viewport and scroll position, ready to draw.
+//! One painted frame: the structure of the picture the session composed for
+//! one attached client, at that client's own viewport and scroll position.
 //!
-//! The session solves the client's active tab, cuts each pane's visible window
-//! out of its grid, and resolves that client's highlight, then sends the result
-//! as a [`PaintedFrame`](crate::frame::PaintedFrame). The client draws what
-//! arrives. Every attached client gets its own frame: a client on an 80×24
-//! terminal and one on a 200×50 terminal receive different frames of the same
-//! session in the same instant.
-//!
-//! Scrollback rows never travel here. A pane sends the rows its window shows
-//! this frame and nothing else, plus the one number the scroll indicator is
-//! drawn from:
-//! [`retained_line_count`](crate::frame::FrameScrollback::retained_line_count). A client
-//! scrolled 500 lines back over a 24-row pane receives those 24 rows, never the
-//! 500 above them.
-//!
-//! Rows are run-length encoded.
-//! [`FrameRow::from_cells`](crate::frame::FrameRow::from_cells) folds each
-//! stretch of equal neighbouring cells into one
-//! [`FrameRun`](crate::frame::FrameRun): a blank 80-column row travels as a
-//! single run with `repeat_count == 80`, and
-//! [`FrameRow::expand_cells`](crate::frame::FrameRow::expand_cells) expands the runs back
-//! into the same 80 cells.
+//! The session solves the client's active tab and resolves that client's
+//! highlight, then sends the result as the JSON part of a painted update
+//! ([`painted_update`](crate::painted_update)): the layout, the tab bar, the
+//! client's own state, and everything about each pane except its rows, its
+//! cursor and its scroll position, which travel in the binary part. Every
+//! attached client gets its own frame: a client on an 80×24 terminal and one
+//! on a 200×50 terminal receive different frames of the same session in the
+//! same instant.
 //!
 //! A field this build does not know is ignored, in this record and every one
-//! under it: a frame from a newer koshi still draws. The four value enums —
-//! [`FrameCursorShape`](crate::frame::FrameCursorShape),
-//! [`FrameRowEnd`](crate::frame::FrameRowEnd),
-//! [`FrameColor`](crate::frame::FrameColor) and
-//! [`FrameUnderline`](crate::frame::FrameUnderline) — fall back to their
-//! plainest value when this build has no name for what arrives. Image
-//! presentation fields use the same rule: an unknown image protocol reads as
-//! Kitty, an unknown image action as `Display`, and an unknown optional image
-//! dimension or Sixel background reads as absent. A cell whose underline
-//! arrives as `"Dotted2"` draws with no underline; every other cell in the
-//! frame is unaffected.
+//! under it: a frame from a newer koshi still draws. Image presentation fields
+//! fall back to their plainest value when this build has no name for what
+//! arrives: an unknown image protocol reads as Kitty, an unknown image action
+//! as `Display`, and an unknown optional image dimension or Sixel background
+//! reads as absent.
 
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
@@ -48,13 +29,16 @@ use serde::{Deserialize, Serialize};
 const MAX_FRAME_IMAGE_SIDE_PIXEL_COUNT: u32 = 16_384;
 const MAX_FRAME_IMAGE_PIXEL_COUNT: u64 = 16_777_216;
 
-/// The maximum total RGBA bytes a chunked painted frame may carry.
+/// The most RGBA bytes the image records one connection's client holds may
+/// total: 64 MiB. One image record is never larger.
 pub const MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT: u64 = 67_108_864;
 
-/// The largest raw image chunk carried by one session event.
+/// The largest raw image chunk carried by one image chunk frame
+/// ([`image_chunk`](crate::image_chunk)).
 pub const MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT: usize = 1_048_576;
 
-/// The largest number of image transfers accepted after one painted frame.
+/// The most image transfers a client accepts after one painted update or
+/// placement preview: 4096.
 pub const MAX_FRAME_IMAGE_TRANSFER_COUNT: usize = 4_096;
 
 /// Decode an image presentation value through an owned JSON value, falling
@@ -324,7 +308,8 @@ pub struct FrameImageRecordHeader {
     pub anchor_cell: (u16, u16),
 }
 
-/// One image record whose RGBA bytes travel in separate bounded events.
+/// One image record whose RGBA bytes follow in image chunk frames
+/// ([`image_chunk`](crate::image_chunk)).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FrameImageTransfer {
     /// The image-record identity on this connection.
@@ -370,53 +355,6 @@ impl<'de> Deserialize<'de> for FrameImageTransfer {
             image_content_id: transfer_fields.image_content_id,
             image_record: transfer_fields.image_record,
             image_byte_count: transfer_fields.image_byte_count,
-        })
-    }
-}
-
-/// One bounded part of one chunked image transfer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FrameImageChunk {
-    /// The image-record identity named by the transfer start.
-    pub image_transfer_id: u64,
-    /// The raw-byte offset of `chunk_bytes` in that image.
-    pub byte_offset: u64,
-    /// Whether this chunk ends the transfer.
-    pub is_last: bool,
-    /// Raw RGBA bytes, encoded as base64 on the wire.
-    #[serde(with = "crate::bytes")]
-    pub chunk_bytes: Vec<u8>,
-}
-
-impl<'de> Deserialize<'de> for FrameImageChunk {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct FrameImageChunkFields {
-            image_transfer_id: u64,
-            byte_offset: u64,
-            is_last: bool,
-            #[serde(with = "crate::bytes")]
-            chunk_bytes: Vec<u8>,
-        }
-
-        let chunk_fields = FrameImageChunkFields::deserialize(deserializer)?;
-        if chunk_fields.image_transfer_id == 0 {
-            return Err(D::Error::custom("image transfer identity must not be zero"));
-        }
-        if chunk_fields.chunk_bytes.is_empty() {
-            return Err(D::Error::custom("image chunk must not be empty"));
-        }
-        if chunk_fields.chunk_bytes.len() > MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT {
-            return Err(D::Error::custom("image chunk exceeds its byte limit"));
-        }
-        Ok(Self {
-            image_transfer_id: chunk_fields.image_transfer_id,
-            byte_offset: chunk_fields.byte_offset,
-            is_last: chunk_fields.is_last,
-            chunk_bytes: chunk_fields.chunk_bytes,
         })
     }
 }
@@ -620,9 +558,10 @@ pub struct FrameClient {
     pub is_mouse_selection_enabled: bool,
 }
 
-/// One pane's content: the cells drawn inside the matching [`FrameSlot`]'s or
-/// [`FrameFloatingPaneSlot`]'s content rect, plus what a mouse event over this
-/// pane is answered from.
+/// One pane's content apart from its rows, its cursor and its scroll
+/// position: what is drawn inside the matching [`FrameSlot`]'s or
+/// [`FrameFloatingPaneSlot`]'s content rect besides the cells, plus what a
+/// mouse event over this pane is answered from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FramePane {
     /// The pane this content belongs to, matched to a [`FrameSlot`] or a
@@ -633,11 +572,6 @@ pub struct FramePane {
     /// directory (`~`-shortened), falling back to the OSC title. `None` when
     /// the pane has reported neither.
     pub pane_title: Option<String>,
-    /// The cursor's position and look within the content area.
-    pub cursor_snapshot: FrameCursor,
-    /// The visible terminal cells. `None` for a slot showing nothing this
-    /// frame.
-    pub terminal_window: Option<FrameWindow>,
     /// The complete image placements whose rectangles fit inside this pane's
     /// visible window. Empty when the pane has no image to draw.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -655,10 +589,6 @@ pub struct FramePane {
     /// Whether the pane is showing the alternate screen. The alternate screen
     /// keeps no scrollback and has no view to scroll.
     pub is_on_alt_screen: bool,
-    /// The absolute line number of the top row this frame shows for the pane,
-    /// counting every line the pane has ever pushed into scrollback. A press on
-    /// the pane's `n`-th visible row names line `view_top_row_index + n`.
-    pub view_top_row_index: u64,
     /// The viewing client's highlighted text in this pane, cut down to the rows
     /// this frame shows. `None` when the client has nothing highlighted here,
     /// or when the highlight is entirely outside the visible rows.
@@ -667,38 +597,6 @@ pub struct FramePane {
     /// including one scrolled entirely out of the visible rows, where
     /// [`selection_spans`](Self::selection_spans) is `None`.
     pub has_selection: bool,
-    /// Scrollback state for the scroll-position indicator.
-    pub scrollback_metadata: FrameScrollback,
-}
-
-/// The cursor's position within the content area, and how it is drawn.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FrameCursor {
-    /// The cursor's row within the content area, starting at 0.
-    pub row_index: u16,
-    /// The cursor's column within the content area, starting at 0.
-    pub column_index: u16,
-    /// Whether the cursor is visible.
-    pub is_visible: bool,
-    /// Whether the cursor blinks.
-    pub is_blinking: bool,
-    /// The shape the cursor is drawn as (DECSCUSR), or `None` while the pane
-    /// has asked for no shape at all, which leaves the user's own configured
-    /// cursor standing. A shape this build has no name for reads as `None`.
-    #[serde(default, deserialize_with = "crate::wire::deserialize_or_default")]
-    pub shape: Option<FrameCursorShape>,
-}
-
-/// A cursor shape a pane asked for with DECSCUSR. Mirrors
-/// `koshi_terminal::state::CursorShape`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FrameCursorShape {
-    /// A box filling the whole cell.
-    Block,
-    /// A line along the bottom of the cell.
-    Underline,
-    /// A vertical bar at the cell's left edge.
-    Bar,
 }
 
 /// Which cells of a pane are highlighted this frame, as a column range per
@@ -714,231 +612,5 @@ pub struct FrameSelection {
     pub row_spans: Vec<(u16, u16, u16)>,
 }
 
-/// Scrollback state the scroll-position indicator is drawn from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FrameScrollback {
-    /// How many scrollback lines are currently retained.
-    pub retained_line_count: usize,
-}
-
-/// The cells a pane shows this frame, run-length encoded row by row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FrameWindow {
-    /// The width every row expands back to.
-    pub column_count: u16,
-    /// The visible rows, top row first.
-    pub row_snapshots: Vec<FrameRow>,
-    /// Rows scrolled up from the live tail; `0` shows the live bottom of the
-    /// buffer.
-    pub view_row_offset: usize,
-}
-
-/// One row of cells, as runs of equal neighbouring cells.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FrameRow {
-    /// The runs, left to right. Their counts sum to the row's width.
-    pub cell_runs: Vec<FrameRun>,
-    /// Whether the row ends its logical line or continues onto the next. An
-    /// ending this build has no name for reads as
-    /// [`Hard`](FrameRowEnd::Hard).
-    #[serde(
-        default,
-        deserialize_with = "crate::wire::deserialize_or_default",
-        skip_serializing_if = "FrameRowEnd::is_hard"
-    )]
-    pub row_end: FrameRowEnd,
-}
-
-/// How a row ends: the wire form of the terminal's per-row line-continuation
-/// state.
-///
-/// [`Hard`](Self::Hard) is left off the wire and read back as the default;
-/// the two wrapped endings travel with their row.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FrameRowEnd {
-    /// The row ends its logical line: the next row starts a new one.
-    #[default]
-    Hard,
-    /// The row soft-wrapped under autowrap: the next row continues this row's
-    /// logical line.
-    Soft,
-    /// The row soft-wrapped when a wide glyph did not fit its last column;
-    /// that last cell is a blank spacer.
-    SoftWide,
-}
-
-impl FrameRowEnd {
-    /// Whether this is the default [`Hard`](FrameRowEnd::Hard), which is left
-    /// off the wire.
-    #[must_use]
-    pub fn is_hard(&self) -> bool {
-        matches!(self, FrameRowEnd::Hard)
-    }
-}
-
-impl FrameRow {
-    /// Fold `frame_cells` into runs: each stretch of equal neighbouring cells becomes
-    /// one [`FrameRun`]. A count stops at [`u16::MAX`] and the next equal cell
-    /// opens a new run. `row_end` is how the row ends its logical line.
-    ///
-    /// 80 blank cells give one run with `repeat_count == 80`. 70 000 blank
-    /// cells give two runs, `65_535` then `4_465`.
-    #[must_use]
-    pub fn from_cells(
-        frame_cells: impl IntoIterator<Item = FrameCell>,
-        row_end: FrameRowEnd,
-    ) -> Self {
-        let mut cell_runs: Vec<FrameRun> = Vec::new();
-        for frame_cell in frame_cells {
-            match cell_runs.last_mut() {
-                Some(cell_run)
-                    if cell_run.cell == frame_cell && cell_run.repeat_count < u16::MAX =>
-                {
-                    cell_run.repeat_count += 1;
-                }
-                _ => cell_runs.push(FrameRun {
-                    repeat_count: 1,
-                    cell: frame_cell,
-                }),
-            }
-        }
-        Self { cell_runs, row_end }
-    }
-
-    /// Expand the runs back into cells, each run's cell repeated
-    /// `repeat_count` times.
-    /// The inverse of [`from_cells`](Self::from_cells). The returned vector is
-    /// allocated once, at the runs' total count.
-    #[must_use]
-    pub fn expand_cells(&self) -> Vec<FrameCell> {
-        let total_cell_count = self
-            .cell_runs
-            .iter()
-            .map(|cell_run| usize::from(cell_run.repeat_count))
-            .sum();
-        let mut frame_cells = Vec::with_capacity(total_cell_count);
-        for cell_run in &self.cell_runs {
-            let repeat_count = usize::from(cell_run.repeat_count);
-            frame_cells.extend(std::iter::repeat_n(cell_run.cell.clone(), repeat_count));
-        }
-        frame_cells
-    }
-}
-
-/// One run: how many times its cell repeats.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FrameRun {
-    /// How many cells this run stands for. Never 0.
-    pub repeat_count: u16,
-    /// The cell every position in the run holds.
-    pub cell: FrameCell,
-}
-
-/// A single cell: its character, the rest of its grapheme cluster, its display
-/// width, and its style.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FrameCell {
-    /// The base character occupying the cell.
-    pub character: char,
-    /// The rest of the grapheme cluster layered over [`character`](Self::character), in
-    /// arrival order: combining accents, variation selectors, and the joined
-    /// parts of a multi-codepoint emoji. Empty for a plain cell; the client
-    /// draws `character` followed by these as one glyph.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub combining_characters: Vec<char>,
-    /// Display width in cells: 0 (continuation half of a wide glyph), 1
-    /// (narrow), or 2 (wide, e.g. CJK).
-    pub cell_width: u8,
-    /// The cell's colors and text attributes.
-    pub style: FrameStyle,
-}
-
-/// A cell's colors and text attributes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FrameStyle {
-    /// The foreground color. A color this build has no name for reads as
-    /// [`Default`](FrameColor::Default).
-    #[serde(default, deserialize_with = "crate::wire::deserialize_or_default")]
-    pub foreground_color: FrameColor,
-    /// The background color. A color this build has no name for reads as
-    /// [`Default`](FrameColor::Default).
-    #[serde(default, deserialize_with = "crate::wire::deserialize_or_default")]
-    pub background_color: FrameColor,
-    /// The underline color (SGR 58); `None` follows the foreground color. A
-    /// color this build has no name for reads as `None`.
-    #[serde(
-        default,
-        deserialize_with = "crate::wire::deserialize_or_default",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub underline_color: Option<FrameColor>,
-    /// The boolean text attributes and the underline style.
-    pub text_attributes: FrameAttributes,
-}
-
-/// The SGR text attributes of one cell.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FrameAttributes {
-    /// Bold / increased intensity (SGR 1).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_bold: bool,
-    /// Italic (SGR 3).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_italic: bool,
-    /// Reverse video — swap foreground and background (SGR 7).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_reverse: bool,
-    /// Faint / decreased intensity (SGR 2).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_faint: bool,
-    /// Blink (SGR 5 slow or 6 rapid, collapsed to one flag).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_blinking: bool,
-    /// Conceal — hidden text (SGR 8).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_concealed: bool,
-    /// Crossed-out / strikethrough (SGR 9).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_struck_through: bool,
-    /// Overline (SGR 53).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_overlined: bool,
-    /// The underline style (SGR 4 / 21 / 24 and the `4:n` forms). A style this
-    /// build has no name for reads as [`None`](FrameUnderline::None).
-    #[serde(default, deserialize_with = "crate::wire::deserialize_or_default")]
-    pub underline_style: FrameUnderline,
-}
-
-/// A foreground or background color. Mirrors `koshi_terminal::style::Color`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum FrameColor {
-    /// The terminal's configured default color.
-    #[default]
-    Default,
-    /// A 256-color palette index.
-    Indexed(u8),
-    /// A 24-bit truecolor value.
-    Rgb(u8, u8, u8),
-}
-
-/// The underline style of a cell: a cell draws at most one underline. Mirrors
-/// `koshi_terminal::style::UnderlineStyle`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum FrameUnderline {
-    /// Not underlined (SGR 24 or `4:0`).
-    #[default]
-    None,
-    /// Single underline (SGR 4 or `4:1`).
-    Single,
-    /// Double underline (SGR 21 or `4:2`).
-    Double,
-    /// Curly / wavy underline (`4:3`).
-    Curly,
-    /// Dotted underline (`4:4`).
-    Dotted,
-    /// Dashed underline (`4:5`).
-    Dashed,
-}
-
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -23,6 +23,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, ChildStdout, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use koshi_core::command::{
@@ -37,14 +38,16 @@ use koshi_core::process::SpawnSpec;
 use koshi_ipc::endpoint::{resolve_resume_file_path, EndpointFile};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::frame::PaintedFrame;
 use koshi_ipc::protocol::{
-    IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse, IpcResult,
-    WireMouseAction,
+    ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
+    IpcResult, WireMouseAction,
 };
 use koshi_ipc::router::{RouterResult, SessionSelector};
 use koshi_ipc::transport::{Connection, FrameWriter};
 use koshi_layout::mode::LayoutMode;
+use koshi_runtime::runtime::painted_update::{
+    PaintedUpdateReceiver, ReceivedPaintedFrame, SessionFrame,
+};
 
 mod common;
 
@@ -59,7 +62,9 @@ use common::{
     send_attach_lookup, start_router_process, terminate_process, wait_for_session_lookup_refusal,
     RunningProcess, SessionProcess, SESSION_SERVER_NAME, WAIT_DURATION,
 };
-use koshi_test_support::fixtures::{send_committed_request, start_program_process};
+use koshi_test_support::fixtures::{
+    build_paint_report_request, send_committed_request, start_program_process,
+};
 
 /// How long a poll in this suite pauses between attempts: 50 milliseconds.
 const RESTART_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(50);
@@ -208,12 +213,12 @@ fn send_terminal_line(
 
 /// The session's own description of itself, read over its control socket.
 fn fetch_session_overview(runtime_directory: &Path, session_id: SessionId) -> SessionOverview {
-    koshi_link::discovery::fetch_session_overview(runtime_directory, None, session_id, None)
+    koshi_link::discovery::fetch_session_overview(runtime_directory, None, session_id, None, None)
         .expect("the session server describes itself")
 }
 
-/// The panes the session holds, in the order it reports them, with the state
-/// each one is in.
+/// The panes the session holds, in pane id order, with the state each one is
+/// in.
 fn list_pane_lifecycles(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -300,15 +305,20 @@ fn list_child_process_ids(parent_process_id: u32) -> Vec<u32> {
 
 /// One attached client's event stream, read on a thread of its own and taken
 /// with a deadline, plus the writing half that carries this client's own
-/// requests up.
+/// requests up. The reading thread reports each painted update it applies
+/// painted on that writing half, as a client reports each update it paints.
 struct AttachedClientStream {
     /// The id the session minted or handed back for this client.
     client_id: ClientId,
-    /// Every frame the reading thread has read, in arrival order. The read that
-    /// ends the connection arrives here too.
-    session_events: Receiver<Result<SessionEvent, IpcError>>,
-    /// This client's own uplink.
-    request_writer: FrameWriter,
+    /// The secret the session minted at this attach, which a return after the
+    /// session replaced its own image presents with `client_id`.
+    resume_token: Option<ConnectionToken>,
+    /// Every event and every applied painted update the reading thread has
+    /// read, in arrival order. The read that ends the connection arrives here
+    /// too.
+    session_events: Receiver<Result<SessionFrame<SessionEvent>, IpcError>>,
+    /// This client's own uplink, shared with the reading thread.
+    request_writer: Arc<Mutex<FrameWriter>>,
 }
 
 impl AttachedClientStream {
@@ -318,11 +328,14 @@ impl AttachedClientStream {
     ///
     /// `resume_client_id` names the client record to come back as after the
     /// session replaced its own image, and is `None` on a first attach.
+    /// `resume_token` is the secret that record's last attach minted, presented
+    /// as the proof of that claim, and is `None` on a first attach.
     fn attach_test_client(
         runtime_directory: &Path,
         session_id: SessionId,
         viewport_size: Size,
         resume_client_id: Option<ClientId>,
+        resume_token: Option<ConnectionToken>,
     ) -> (AttachedClientStream, EndpointFile) {
         let (mut connection, endpoint_file) =
             wait_for_session_connection(runtime_directory, session_id);
@@ -331,11 +344,12 @@ impl AttachedClientStream {
             request_kind: IpcRequestKind::Attach {
                 viewport_size,
                 resume_client_id,
-                resume_token: None,
+                resume_token,
                 pane_area: None,
                 graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
                 cell_size: None,
                 link_timeout_ms: None,
+                max_frames_per_second: 60,
             },
         };
         send_committed_request(&mut connection, attach_request);
@@ -344,6 +358,7 @@ impl AttachedClientStream {
         let IpcResult::Attached {
             client_id,
             session_id: joined_session_id,
+            resume_token: minted_resume_token,
             ..
         } = ipc_response.answer_result
         else {
@@ -355,17 +370,39 @@ impl AttachedClientStream {
         assert_eq!(joined_session_id, session_id);
 
         let (mut session_event_reader, request_writer) = connection.split();
+        let request_writer = Arc::new(Mutex::new(request_writer));
+        let reporting_request_writer = Arc::clone(&request_writer);
         let (session_events_sender, session_events) = mpsc::channel();
-        std::thread::spawn(move || loop {
-            let session_event_result = session_event_reader.recv::<SessionEvent>();
-            let is_stream_ended = session_event_result.is_err();
-            if session_events_sender.send(session_event_result).is_err() || is_stream_ended {
-                return;
+        std::thread::spawn(move || {
+            let mut painted_update_receiver = PaintedUpdateReceiver::new();
+            loop {
+                let session_frame_result = session_event_reader
+                    .recv_message_or_binary::<SessionEvent>()
+                    .and_then(|received_frame| {
+                        painted_update_receiver.accept_session_frame(received_frame)
+                    })
+                    .transpose();
+                let Some(session_frame_result) = session_frame_result else {
+                    continue;
+                };
+                if let Ok(SessionFrame::Painted(received_painted_frame)) = &session_frame_result {
+                    let update_sequence = received_painted_frame.update_sequence;
+                    // A connection the session closed fails the next read.
+                    let _ = reporting_request_writer
+                        .lock()
+                        .expect("the request writer")
+                        .send(&build_paint_report_request(update_sequence));
+                }
+                let is_stream_ended = session_frame_result.is_err();
+                if session_events_sender.send(session_frame_result).is_err() || is_stream_ended {
+                    return;
+                }
             }
         });
         (
             AttachedClientStream {
                 client_id,
+                resume_token: minted_resume_token,
                 session_events,
                 request_writer,
             },
@@ -373,9 +410,10 @@ impl AttachedClientStream {
         )
     }
 
-    /// The next frame on the stream, or the read that ended it. Fails the test
-    /// once [`WAIT_DURATION`] has passed with nothing arriving.
-    fn receive_next_event(&self) -> Result<SessionEvent, IpcError> {
+    /// The next event or applied painted update on the stream, or the read
+    /// that ended it. Fails the test once [`WAIT_DURATION`] has passed with
+    /// nothing arriving.
+    fn receive_next_event(&self) -> Result<SessionFrame<SessionEvent>, IpcError> {
         match self.session_events.recv_timeout(WAIT_DURATION) {
             Ok(session_event) => session_event,
             Err(RecvTimeoutError::Timeout) => {
@@ -393,12 +431,14 @@ impl AttachedClientStream {
         loop {
             let remaining_duration = wait_deadline.saturating_duration_since(Instant::now());
             match self.session_events.recv_timeout(remaining_duration) {
-                Ok(Ok(session_event)) => {
+                Ok(Ok(SessionFrame::Event(session_event))) => {
                     if event_predicate(&session_event) {
                         return session_event;
                     }
                     received_event_names.push(session_event.get_event_name());
                 }
+                Ok(Ok(SessionFrame::Painted(_))) => received_event_names.push("Painted"),
+                Ok(Ok(SessionFrame::ImageChunk(_))) => received_event_names.push("ImageChunk"),
                 Ok(Err(stream_error)) => {
                     panic!("the event stream ended before the event: {stream_error}")
                 }
@@ -413,15 +453,15 @@ impl AttachedClientStream {
         }
     }
 
-    /// The next painted frame, skipping every frame that carries no picture.
-    /// Fails the test on a stream that ends first.
-    fn receive_next_painted_frame(&self) -> PaintedFrame {
+    /// The next applied painted update, skipping every event. Fails the test
+    /// on a stream that ends first.
+    fn receive_next_painted_frame(&self) -> ReceivedPaintedFrame {
         loop {
             match self.receive_next_event() {
-                Ok(SessionEvent::Painted {
-                    frame: painted_frame,
-                }) => return *painted_frame,
-                Ok(_) => {}
+                Ok(SessionFrame::Painted(received_painted_frame)) => {
+                    return *received_painted_frame
+                }
+                Ok(SessionFrame::Event(_) | SessionFrame::ImageChunk(_)) => {}
                 Err(stream_error) => {
                     panic!("the event stream ended before a frame: {stream_error}")
                 }
@@ -429,26 +469,25 @@ impl AttachedClientStream {
         }
     }
 
-    /// The first painted frame `frame_predicate` accepts. Fails the test once [`WAIT_DURATION`]
-    /// has passed with none, naming what the last painted frame held.
+    /// The first applied painted update `frame_predicate` accepts. Fails the
+    /// test once [`WAIT_DURATION`] has passed with none, naming what the last
+    /// painted update held.
     fn receive_painted_frame_when(
         &self,
-        frame_predicate: impl Fn(&PaintedFrame) -> bool,
-    ) -> PaintedFrame {
+        frame_predicate: impl Fn(&ReceivedPaintedFrame) -> bool,
+    ) -> ReceivedPaintedFrame {
         let wait_deadline = Instant::now() + WAIT_DURATION;
-        let mut last_painted_frame: Option<PaintedFrame> = None;
+        let mut last_painted_frame: Option<ReceivedPaintedFrame> = None;
         loop {
             let remaining_duration = wait_deadline.saturating_duration_since(Instant::now());
             match self.session_events.recv_timeout(remaining_duration) {
-                Ok(Ok(SessionEvent::Painted {
-                    frame: painted_frame,
-                })) => {
-                    if frame_predicate(&painted_frame) {
-                        return *painted_frame;
+                Ok(Ok(SessionFrame::Painted(received_painted_frame))) => {
+                    if frame_predicate(&received_painted_frame) {
+                        return *received_painted_frame;
                     }
-                    last_painted_frame = Some(*painted_frame);
+                    last_painted_frame = Some(*received_painted_frame);
                 }
-                Ok(Ok(_)) => {}
+                Ok(Ok(SessionFrame::Event(_) | SessionFrame::ImageChunk(_))) => {}
                 Ok(Err(stream_error)) => {
                     panic!("the event stream ended before a frame: {stream_error}")
                 }
@@ -469,12 +508,12 @@ impl AttachedClientStream {
 
     /// Read to the frame that says the session is replacing its own image, and
     /// hand back everything read before it.
-    fn receive_events_until_restarting(&self) -> Vec<SessionEvent> {
+    fn receive_events_until_restarting(&self) -> Vec<SessionFrame<SessionEvent>> {
         let mut received_events = Vec::new();
         loop {
             match self.receive_next_event() {
-                Ok(SessionEvent::Restarting) => return received_events,
-                Ok(session_event) => received_events.push(session_event),
+                Ok(SessionFrame::Event(SessionEvent::Restarting)) => return received_events,
+                Ok(session_frame) => received_events.push(session_frame),
                 Err(stream_error) => {
                     panic!("the event stream ended before the restart: {stream_error}")
                 }
@@ -482,29 +521,27 @@ impl AttachedClientStream {
         }
     }
 
-    /// The last painted frame to arrive in the next `time_window`, and `None` when
-    /// no frame is painted in it.
-    fn receive_last_painted_frame(&self, time_window: Duration) -> Option<PaintedFrame> {
+    /// The last painted update to arrive in the next `time_window`, and `None`
+    /// when no update is painted in it.
+    fn receive_last_painted_frame(&self, time_window: Duration) -> Option<ReceivedPaintedFrame> {
         self.drain_session_events(time_window)
             .into_iter()
-            .filter_map(|session_event| match session_event {
-                SessionEvent::Painted {
-                    frame: painted_frame,
-                } => Some(*painted_frame),
-                _ => None,
+            .filter_map(|session_frame| match session_frame {
+                SessionFrame::Painted(received_painted_frame) => Some(*received_painted_frame),
+                SessionFrame::Event(_) | SessionFrame::ImageChunk(_) => None,
             })
             .next_back()
     }
 
     /// Everything that arrives in the next `time_window`. A stream that ends inside
     /// it contributes the frames it delivered first.
-    fn drain_session_events(&self, time_window: Duration) -> Vec<SessionEvent> {
+    fn drain_session_events(&self, time_window: Duration) -> Vec<SessionFrame<SessionEvent>> {
         let settle_deadline = Instant::now() + time_window;
         let mut received_events = Vec::new();
         while let Some(remaining_duration) = settle_deadline.checked_duration_since(Instant::now())
         {
             match self.session_events.recv_timeout(remaining_duration) {
-                Ok(Ok(session_event)) => received_events.push(session_event),
+                Ok(Ok(session_frame)) => received_events.push(session_frame),
                 Ok(Err(_)) | Err(_) => return received_events,
             }
         }
@@ -513,12 +550,14 @@ impl AttachedClientStream {
 
     /// Send one request up this client's own connection. The streaming half
     /// writes no response; the answer is whatever reaches the event stream.
-    fn send_session_request(&mut self, request_id: u64, request_kind: IpcRequestKind) {
+    fn send_session_request(&self, request_id: u64, request_kind: IpcRequestKind) {
         let ipc_request = IpcRequest {
             request_id,
             request_kind,
         };
         self.request_writer
+            .lock()
+            .expect("the request writer")
             .send(&ipc_request)
             .expect("the session reads the request");
     }
@@ -527,16 +566,16 @@ impl AttachedClientStream {
     /// connection the session has already closed. This is how a client behaves
     /// while the session is replacing its image: it keeps sending until the
     /// socket under it goes.
-    fn send_request_while_connection_open(
-        &mut self,
-        request_id: u64,
-        request_kind: IpcRequestKind,
-    ) {
+    fn send_request_while_connection_open(&self, request_id: u64, request_kind: IpcRequestKind) {
         let ipc_request = IpcRequest {
             request_id,
             request_kind,
         };
-        let _ = self.request_writer.send(&ipc_request);
+        let _ = self
+            .request_writer
+            .lock()
+            .expect("the request writer")
+            .send(&ipc_request);
     }
 
     /// Move this client's view of `pane_id` up into scrollback by `scroll_line_count`, and
@@ -544,7 +583,7 @@ impl AttachedClientStream {
     ///
     /// The session answers exactly one round per request, and the first frame
     /// after that answer is the scrolled one.
-    fn scroll_pane_up(&mut self, pane_id: PaneId, scroll_line_count: usize) -> PaintedFrame {
+    fn scroll_pane_up(&self, pane_id: PaneId, scroll_line_count: usize) -> ReceivedPaintedFrame {
         self.send_session_request(
             11,
             IpcRequestKind::Mouse(vec![WireMouseAction::Scroll {
@@ -555,7 +594,7 @@ impl AttachedClientStream {
         );
         loop {
             match self.receive_next_event() {
-                Ok(SessionEvent::MouseAnswer { request_id, .. }) => {
+                Ok(SessionFrame::Event(SessionEvent::MouseAnswer { request_id, .. })) => {
                     assert_eq!(request_id, 11);
                     return self.receive_next_painted_frame();
                 }
@@ -573,28 +612,28 @@ impl AttachedClientStream {
 ///
 /// A blank row between two rows of text is kept.
 ///
-/// Empty when the frame carries no content for `pane_id`, and when the pane shows
-/// no cells. A frame painted before the pane existed carries no content for it.
-fn get_pane_rows(painted_frame: &PaintedFrame, pane_id: PaneId) -> Vec<String> {
-    let Some(pane_snapshot) = painted_frame
-        .pane_snapshots
+/// Empty when the update carries no content for `pane_id`, and when the pane shows
+/// no cells. An update painted before the pane existed carries no content for it.
+fn get_pane_rows(painted_frame: &ReceivedPaintedFrame, pane_id: PaneId) -> Vec<String> {
+    let Some(pane_view) = painted_frame
+        .pane_views
         .iter()
-        .find(|pane_snapshot| pane_snapshot.pane_id == pane_id)
+        .find(|pane_view| pane_view.pane_id == pane_id)
     else {
         return Vec::new();
     };
-    let Some(terminal_window) = pane_snapshot.terminal_window.as_ref() else {
+    let Some(grid_view) = pane_view.terminal_grid_view.as_ref() else {
         return Vec::new();
     };
-    let mut row_texts: Vec<String> = terminal_window
+    let mut row_texts: Vec<String> = grid_view
         .row_snapshots
         .iter()
         .map(|row_snapshot| {
             row_snapshot
-                .expand_cells()
+                .list_row_cells()
                 .iter()
-                .filter(|cell_snapshot| cell_snapshot.cell_width > 0)
-                .map(|cell_snapshot| cell_snapshot.character)
+                .filter(|cell| cell.get_display_width() > 0)
+                .map(|cell| cell.get_character())
                 .collect::<String>()
                 .trim_end()
                 .to_string()
@@ -610,18 +649,18 @@ fn get_pane_rows(painted_frame: &PaintedFrame, pane_id: PaneId) -> Vec<String> {
 ///
 /// Before → after: a frame holding one pane that printed one line reads
 /// `pane-… : ["printed-1"]`.
-fn describe_painted_frame(painted_frame: &PaintedFrame) -> String {
-    if painted_frame.pane_snapshots.is_empty() {
+fn describe_painted_frame(painted_frame: &ReceivedPaintedFrame) -> String {
+    if painted_frame.pane_views.is_empty() {
         return "no panes".to_string();
     }
     painted_frame
-        .pane_snapshots
+        .pane_views
         .iter()
-        .map(|pane_snapshot| {
+        .map(|pane_view| {
             format!(
                 "{} : {:?}",
-                pane_snapshot.pane_id,
-                get_pane_rows(painted_frame, pane_snapshot.pane_id)
+                pane_view.pane_id,
+                get_pane_rows(painted_frame, pane_view.pane_id)
             )
         })
         .collect::<Vec<_>>()
@@ -629,13 +668,12 @@ fn describe_painted_frame(painted_frame: &PaintedFrame) -> String {
 }
 
 /// How many scrollback lines `pane_id` holds in `painted_frame`.
-fn get_retained_line_count(painted_frame: &PaintedFrame, pane_id: PaneId) -> usize {
+fn get_retained_line_count(painted_frame: &ReceivedPaintedFrame, pane_id: PaneId) -> usize {
     painted_frame
-        .pane_snapshots
+        .pane_views
         .iter()
-        .find(|pane_snapshot| pane_snapshot.pane_id == pane_id)
-        .unwrap_or_else(|| panic!("the frame carries no content for pane {pane_id}"))
-        .scrollback_metadata
+        .find(|pane_view| pane_view.pane_id == pane_id)
+        .unwrap_or_else(|| panic!("the update carries no content for pane {pane_id}"))
         .retained_line_count
 }
 
@@ -715,6 +753,7 @@ fn a_restart_keeps_every_pane_its_child_its_screen_and_its_scrollback() {
             session_id,
             SHORT_ATTACH_VIEWPORT_SIZE,
             None,
+            None,
         );
     let (mut control_connection, _) =
         wait_for_session_connection(runtime_directory.path(), session_id);
@@ -785,10 +824,11 @@ fn a_restart_keeps_every_pane_its_child_its_screen_and_its_scrollback() {
     let _restarted_process = RunningProcess {
         process_id: restarted_endpoint.process_id,
     };
-    let (mut attached_client_stream, _) = AttachedClientStream::attach_test_client(
+    let (attached_client_stream, _) = AttachedClientStream::attach_test_client(
         runtime_directory.path(),
         session_id,
         SHORT_ATTACH_VIEWPORT_SIZE,
+        None,
         None,
     );
 
@@ -904,6 +944,7 @@ fn output_written_across_the_swap_arrives_once_and_in_order() {
             session_id,
             TALL_ATTACH_VIEWPORT_SIZE,
             None,
+            None,
         );
     let (mut control_connection, _) =
         wait_for_session_connection(runtime_directory.path(), session_id);
@@ -939,6 +980,7 @@ fn output_written_across_the_swap_arrives_once_and_in_order() {
         session_id,
         TALL_ATTACH_VIEWPORT_SIZE,
         None,
+        None,
     );
 
     let completed_painted_frame =
@@ -965,11 +1007,12 @@ fn input_sent_after_the_clients_are_told_still_reaches_its_pane() {
         session_id,
     );
 
-    let (mut attached_client_stream, endpoint_before_restart) =
+    let (attached_client_stream, endpoint_before_restart) =
         AttachedClientStream::attach_test_client(
             runtime_directory.path(),
             session_id,
             TALL_ATTACH_VIEWPORT_SIZE,
+            None,
             None,
         );
     let (mut control_connection, _) =
@@ -1068,6 +1111,7 @@ fn a_client_that_never_leaves_does_not_hold_the_swap_up() {
             session_id,
             TALL_ATTACH_VIEWPORT_SIZE,
             None,
+            None,
         );
     let (mut control_connection, _) =
         wait_for_session_connection(runtime_directory.path(), session_id);
@@ -1122,6 +1166,7 @@ fn a_pane_a_running_session_opened_prints_what_its_child_wrote() {
         session_id,
         TALL_ATTACH_VIEWPORT_SIZE,
         None,
+        None,
     );
     let (mut control_connection, _) =
         wait_for_session_connection(runtime_directory.path(), session_id);
@@ -1165,6 +1210,7 @@ fn a_pane_whose_child_never_exits_does_not_hold_the_swap_up() {
             runtime_directory.path(),
             session_id,
             TALL_ATTACH_VIEWPORT_SIZE,
+            None,
             None,
         );
     let (mut control_connection, _) =
@@ -1225,6 +1271,7 @@ fn a_client_that_comes_back_keeps_its_id_its_focus_and_its_zoom() {
         session_id,
         TALL_ATTACH_VIEWPORT_SIZE,
         None,
+        None,
     );
     let (mut control_connection, _) =
         wait_for_session_connection(runtime_directory.path(), session_id);
@@ -1253,15 +1300,16 @@ fn a_client_that_comes_back_keeps_its_id_its_focus_and_its_zoom() {
         Command::TogglePaneFullscreen,
     );
     let zoomed_painted_frame = initial_client_stream.receive_painted_frame_when(|painted_frame| {
-        painted_frame.client_snapshot.focused_pane_id == Some(focused_pane_id)
+        painted_frame.painted_frame.client_snapshot.focused_pane_id == Some(focused_pane_id)
             && painted_frame
+                .painted_frame
                 .session_snapshot
                 .active_tab_snapshot
                 .layout_mode
                 == LayoutMode::Fullscreen { focused_pane_id }
     });
     assert_eq!(
-        zoomed_painted_frame.client_snapshot.client_id,
+        zoomed_painted_frame.painted_frame.client_snapshot.client_id,
         initial_client_stream.client_id
     );
 
@@ -1285,6 +1333,7 @@ fn a_client_that_comes_back_keeps_its_id_its_focus_and_its_zoom() {
         session_id,
         TALL_ATTACH_VIEWPORT_SIZE,
         Some(initial_client_stream.client_id),
+        initial_client_stream.resume_token.clone(),
     );
 
     // The record came across the swap: the session handed back the same
@@ -1295,15 +1344,16 @@ fn a_client_that_comes_back_keeps_its_id_its_focus_and_its_zoom() {
     );
     let painted_frame = reconnected_client_stream.receive_next_painted_frame();
     assert_eq!(
-        painted_frame.client_snapshot.client_id,
+        painted_frame.painted_frame.client_snapshot.client_id,
         initial_client_stream.client_id
     );
     assert_eq!(
-        painted_frame.client_snapshot.focused_pane_id,
+        painted_frame.painted_frame.client_snapshot.focused_pane_id,
         Some(focused_pane_id)
     );
     assert_eq!(
         painted_frame
+            .painted_frame
             .session_snapshot
             .active_tab_snapshot
             .layout_mode,
@@ -1347,6 +1397,7 @@ fn a_second_caller_naming_a_client_already_streaming_is_given_a_client_of_its_ow
             session_id,
             TALL_ATTACH_VIEWPORT_SIZE,
             None,
+            None,
         );
     let (mut control_connection, _) =
         wait_for_session_connection(runtime_directory.path(), session_id);
@@ -1367,7 +1418,7 @@ fn a_second_caller_naming_a_client_already_streaming_is_given_a_client_of_its_ow
         }),
     );
     original_client_stream.receive_painted_frame_when(|painted_frame| {
-        painted_frame.client_snapshot.focused_pane_id == Some(focused_pane_id)
+        painted_frame.painted_frame.client_snapshot.focused_pane_id == Some(focused_pane_id)
     });
 
     assert_eq!(
@@ -1391,6 +1442,7 @@ fn a_second_caller_naming_a_client_already_streaming_is_given_a_client_of_its_ow
         session_id,
         TALL_ATTACH_VIEWPORT_SIZE,
         Some(client_id),
+        original_client_stream.resume_token.clone(),
     );
     assert_eq!(
         first_client_stream.client_id, client_id,
@@ -1402,11 +1454,12 @@ fn a_second_caller_naming_a_client_already_streaming_is_given_a_client_of_its_ow
         session_id,
         TALL_ATTACH_VIEWPORT_SIZE,
         Some(client_id),
+        None,
     );
 
     assert_ne!(
         second_client_stream.client_id, client_id,
-        "the second caller naming the same record is given one of its own"
+        "the second caller naming the same record with no token is given one of its own"
     );
     assert_ne!(
         second_client_stream.client_id,
@@ -1427,15 +1480,19 @@ fn a_second_caller_naming_a_client_already_streaming_is_given_a_client_of_its_ow
     assert_eq!(attached_client_ids, expected_attached_client_ids);
 
     let painted_frame = first_client_stream.receive_next_painted_frame();
-    assert_eq!(painted_frame.client_snapshot.client_id, client_id);
     assert_eq!(
-        painted_frame.client_snapshot.focused_pane_id,
+        painted_frame.painted_frame.client_snapshot.client_id,
+        client_id
+    );
+    assert_eq!(
+        painted_frame.painted_frame.client_snapshot.focused_pane_id,
         Some(focused_pane_id),
         "the first caller keeps the focus the record carried across the swap"
     );
     assert_eq!(
         second_client_stream
             .receive_next_painted_frame()
+            .painted_frame
             .client_snapshot
             .client_id,
         second_client_stream.client_id
@@ -1460,6 +1517,7 @@ fn a_client_that_never_comes_back_is_detached_when_the_window_closes() {
             runtime_directory.path(),
             session_id,
             TALL_ATTACH_VIEWPORT_SIZE,
+            None,
             None,
         );
     let (mut control_connection, _) =
@@ -1530,6 +1588,7 @@ fn a_restart_into_a_binary_that_cannot_run_is_refused_and_the_session_keeps_serv
             session_id,
             TALL_ATTACH_VIEWPORT_SIZE,
             None,
+            None,
         );
     let (mut control_connection, _) =
         wait_for_session_connection(runtime_directory.path(), session_id);
@@ -1597,6 +1656,7 @@ fn a_restart_into_a_binary_that_cannot_run_is_refused_and_the_session_keeps_serv
     assert_eq!(
         attached_client_stream
             .receive_next_painted_frame()
+            .painted_frame
             .client_snapshot
             .client_id,
         attached_client_stream.client_id
@@ -1737,6 +1797,7 @@ fn a_restart_whose_config_migration_fails_still_swaps_and_keeps_every_pane() {
             session_id,
             TALL_ATTACH_VIEWPORT_SIZE,
             None,
+            None,
         );
     let (mut control_connection, _) =
         wait_for_session_connection(runtime_directory.path(), session_id);
@@ -1779,6 +1840,7 @@ fn a_restart_whose_config_migration_fails_still_swaps_and_keeps_every_pane() {
         session_id,
         TALL_ATTACH_VIEWPORT_SIZE,
         None,
+        None,
     );
     let mut expected_pane_lifecycles = vec![
         (seeded_pane_id, PaneLifecycle::Running),
@@ -1792,6 +1854,7 @@ fn a_restart_whose_config_migration_fails_still_swaps_and_keeps_every_pane() {
     assert_eq!(
         attached_client_stream
             .receive_next_painted_frame()
+            .painted_frame
             .client_snapshot
             .client_id,
         attached_client_stream.client_id
@@ -1815,6 +1878,7 @@ fn a_swap_that_cannot_write_its_state_leaves_the_session_serving_with_live_reade
         runtime_directory.path(),
         session_id,
         TALL_ATTACH_VIEWPORT_SIZE,
+        None,
         None,
     );
     let (mut control_connection, _) =
@@ -1863,12 +1927,34 @@ fn a_swap_that_cannot_write_its_state_leaves_the_session_serving_with_live_reade
         restarted_endpoint.process_id,
         endpoint_before_restart.process_id
     );
+    // The endpoint file written again under the fresh token gets an access
+    // time at least 29 days ahead of the clock.
+    #[cfg(unix)]
+    {
+        let endpoint_file_path =
+            EndpointFile::resolve_endpoint_file_path(runtime_directory.path(), session_id);
+        let earliest_access_time =
+            std::time::SystemTime::now() + common::EARLIEST_ACCESS_TIME_LEAD_DURATION;
+        let wait_deadline = Instant::now() + WAIT_DURATION;
+        while std::fs::metadata(&endpoint_file_path)
+            .and_then(|endpoint_file_metadata| endpoint_file_metadata.accessed())
+            .expect("read the endpoint file's access time")
+            < earliest_access_time
+        {
+            assert!(
+                Instant::now() < wait_deadline,
+                "the session never set the access time of its rewritten endpoint file ahead"
+            );
+            std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
+        }
+    }
 
     let (attached_client_stream, _) = AttachedClientStream::attach_test_client(
         runtime_directory.path(),
         session_id,
         TALL_ATTACH_VIEWPORT_SIZE,
         Some(initial_client_stream.client_id),
+        initial_client_stream.resume_token.clone(),
     );
     assert_eq!(
         attached_client_stream.client_id,
@@ -1928,6 +2014,7 @@ fn a_pane_child_that_exits_around_the_swap_is_reported_exactly_once() {
         session_id,
         TALL_ATTACH_VIEWPORT_SIZE,
         None,
+        None,
     );
     let (mut control_connection, _) =
         wait_for_session_connection(runtime_directory.path(), session_id);
@@ -1986,6 +2073,7 @@ fn a_pane_child_that_exits_around_the_swap_is_reported_exactly_once() {
         session_id,
         TALL_ATTACH_VIEWPORT_SIZE,
         Some(initial_client_stream.client_id),
+        initial_client_stream.resume_token.clone(),
     );
     exit_event_count += count_pane_exit_events(
         &attached_client_stream.drain_session_events(SETTLE_DURATION),
@@ -2002,16 +2090,16 @@ fn a_pane_child_that_exits_around_the_swap_is_reported_exactly_once() {
 }
 
 /// Count events in `session_events` that report `pane_id`'s child exiting.
-fn count_pane_exit_events(session_events: &[SessionEvent], pane_id: PaneId) -> usize {
+fn count_pane_exit_events(session_events: &[SessionFrame<SessionEvent>], pane_id: PaneId) -> usize {
     session_events
         .iter()
-        .filter(|session_event| {
+        .filter(|session_frame| {
             matches!(
-                session_event,
-                SessionEvent::PaneProcessExited {
+                session_frame,
+                SessionFrame::Event(SessionEvent::PaneProcessExited {
                     pane_id: reported_pane_id,
                     ..
-                } if *reported_pane_id == pane_id
+                }) if *reported_pane_id == pane_id
             )
         })
         .count()
@@ -2111,6 +2199,8 @@ fn a_resume_run_that_cannot_bind_its_socket_leaves_no_resume_file_behind() {
             session_by_id: std::collections::HashMap::new(),
             carried_pane_state_by_pane_id: std::collections::HashMap::new(),
             carried_quit: None,
+            saved_view_store: koshi_runtime::runtime::saved_view::SavedViewStore::default(),
+            left_running_child_process_ids: Vec::new(),
         },
     )
     .expect("the resume file is written");
@@ -2259,21 +2349,22 @@ fn a_resume_file_whose_header_does_not_read_comes_back_as_one_fresh_shell_showin
     );
 
     let fresh_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
-    let (mut attached_client_stream, _) = AttachedClientStream::attach_test_client(
+    let (attached_client_stream, _) = AttachedClientStream::attach_test_client(
         runtime_directory.path(),
         session_id,
         TALL_ATTACH_VIEWPORT_SIZE,
         None,
+        None,
     );
     let painted_frame = attached_client_stream.receive_painted_frame_when(|painted_frame| {
-        painted_frame.is_recovery_notice_visible
+        painted_frame.painted_frame.is_recovery_notice_visible
             && painted_frame
-                .pane_snapshots
+                .pane_views
                 .iter()
-                .any(|pane_snapshot| pane_snapshot.pane_id == fresh_pane_id)
+                .any(|pane_view| pane_view.pane_id == fresh_pane_id)
     });
     assert!(
-        painted_frame.is_recovery_notice_visible,
+        painted_frame.painted_frame.is_recovery_notice_visible,
         "{}",
         describe_painted_frame(&painted_frame)
     );
@@ -2290,13 +2381,14 @@ fn a_resume_file_whose_header_does_not_read_comes_back_as_one_fresh_shell_showin
             },
         },
     );
-    let cleared_frame = attached_client_stream
-        .receive_painted_frame_when(|painted_frame| !painted_frame.is_recovery_notice_visible);
+    let cleared_frame = attached_client_stream.receive_painted_frame_when(|painted_frame| {
+        !painted_frame.painted_frame.is_recovery_notice_visible
+    });
     assert!(
         cleared_frame
-            .pane_snapshots
+            .pane_views
             .iter()
-            .any(|pane_snapshot| pane_snapshot.pane_id == fresh_pane_id),
+            .any(|pane_view| pane_view.pane_id == fresh_pane_id),
         "{}",
         describe_painted_frame(&cleared_frame)
     );

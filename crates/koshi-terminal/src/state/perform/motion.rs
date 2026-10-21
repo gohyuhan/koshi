@@ -2,6 +2,7 @@
 //! index, save / restore cursor, absolute placement, the deferred-wrap latch,
 //! and tab-stop math.
 
+use crate::grid::row_snapshot::RowSnapshot;
 use crate::grid::state::RowEnd;
 use crate::state::{RenderState, SavedCursor, Screen, TerminalState};
 use crate::style::Style;
@@ -132,35 +133,31 @@ impl TerminalState {
             self.active_screen == Screen::Primary && first_row_index == 0 && is_full_grid_width;
         let mut has_removed_native_image_fragments = false;
         if should_feed_scrollback {
-            if self.native_fragment_count_by_image_source_id.is_empty() {
-                for row_index in 0..shifted_row_count {
-                    if let Some(scrolled_off_row) = self.primary.list_rows().get(row_index as usize)
-                    {
-                        let row_metadata = self.primary.get_row_metadata(row_index);
-                        self.scrollback.push_row(scrolled_off_row, row_metadata);
-                    }
-                }
-            } else {
-                let primary_grid = &self.primary;
-                let scrollback = &mut self.scrollback;
-                let native_fragment_count_by_image_source_id =
-                    &mut self.native_fragment_count_by_image_source_id;
-                for row_index in 0..shifted_row_count {
-                    if let Some(scrolled_off_row) = primary_grid.list_rows().get(row_index as usize)
-                    {
-                        let row_metadata = primary_grid.get_row_metadata(row_index);
-                        scrollback.push_row_with_evicted(
-                            scrolled_off_row,
-                            row_metadata,
-                            |evicted_rows| {
-                                has_removed_native_image_fragments |=
-                                    super::super::images::discard_native_fragment_references(
-                                        native_fragment_count_by_image_source_id,
-                                        evicted_rows.iter(),
-                                    );
-                            },
-                        );
-                    }
+            let primary_grid = &mut self.primary;
+            let scrollback = &mut self.scrollback;
+            let native_fragment_count_by_image_source_id =
+                &mut self.native_fragment_count_by_image_source_id;
+            let mut discard_evicted_line_fragments = |evicted_line: &RowSnapshot| {
+                has_removed_native_image_fragments |=
+                    super::super::images::discard_native_fragment_references(
+                        native_fragment_count_by_image_source_id,
+                        evicted_line
+                            .list_image_cells()
+                            .iter()
+                            .map(|image_cell| image_cell.cell_extra.get_image_fragments()),
+                    );
+            };
+            // Each departing row becomes a history line: the snapshot a frame
+            // already published for it, or a new encoding written into the
+            // bytes of the history line the line cap drops for it.
+            for row_index in 0..shifted_row_count {
+                let encoded_row_bytes =
+                    scrollback.evict_oldest_line_for_next_push(&mut discard_evicted_line_fragments);
+                if let Some(row_snapshot) =
+                    primary_grid.take_row_snapshot(row_index, encoded_row_bytes)
+                {
+                    scrollback
+                        .push_row_with_evicted(row_snapshot, &mut discard_evicted_line_fragments);
                 }
             }
         } else {

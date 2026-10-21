@@ -12,9 +12,10 @@ impl Server {
     /// else the acting client's active tab.
     ///
     /// Rejects with [`RejectReason::TargetNotFound`] when the command source names no
-    /// live session, the issuing pane is gone, or the tab is gone;
-    /// [`RejectReason::SourceClientStale`] when the command source's client is no
-    /// longer attached; [`RejectReason::TargetAmbiguous`] when several clients
+    /// live session or the tab is gone; [`RejectReason::TargetGone`] when the
+    /// issuing pane is gone; [`RejectReason::SourceClientStale`] when the
+    /// command source's client is no longer attached;
+    /// [`RejectReason::TargetAmbiguous`] when several clients
     /// are attached and none is named.
     fn resolve_acting_tab_session(
         &mut self,
@@ -139,7 +140,7 @@ impl Server {
         )?;
 
         // The child is live — commit all session state through the pure op:
-        // it registers the root pane `Running`, appends the tab, and switches
+        // it registers the root pane, appends the tab, and switches
         // the designated client onto it. It returns the client's previous
         // tab, for the reflow below.
         let new_pane_spec = NewPaneSpec {
@@ -190,20 +191,16 @@ impl Server {
     /// state removal is authoritative and immediate, the kills are
     /// best-effort and off-thread.
     ///
-    /// Close policies gate the whole tab up front, all-or-nothing: without
-    /// `--force`, one `ConfirmIfBusy` pane whose child has not provably
-    /// exited rejects the close before anything mutates, with a hint at
-    /// `--force`. `--force` force-kills every pane regardless of policy.
-    /// `--tree` widens each picked kill to the child's whole process group,
-    /// and still lets a busy `ConfirmIfBusy` pane reject the close. The
-    /// removal itself is [`tab_ops::close_tab`]: pane records drop, the tab
-    /// goes, viewers move to the nearest surviving tab, and closing the last
-    /// tab removes every floating pane and quits the session. `--force` and
-    /// `--tree` apply to those floating panes too, and a busy `ConfirmIfBusy`
-    /// floating pane never refuses the quit. The kills run on one detached
-    /// thread per pane — a graceful kill can sleep out its grace window, every
-    /// child gets its stop request immediately, and the dispatcher keeps
-    /// draining.
+    /// Each pane of the tab gets one kill ([`compute_pane_kill_policy`]):
+    /// `--force` kills at once, else a graceful close escalates after
+    /// [`GRACEFUL_TIMEOUT_DURATION`], and `--tree` widens each kill to the
+    /// child's whole process group. The removal itself is
+    /// [`tab_ops::close_tab`]: pane records drop, the tab goes, viewers move to
+    /// the nearest surviving tab, and closing the last tab removes every
+    /// floating pane and quits the session. `--force` and `--tree` apply to
+    /// those floating panes too. The kills run on one detached thread per
+    /// pane — a graceful kill can sleep out its grace window, every child gets
+    /// its stop request immediately, and the dispatcher keeps draining.
     ///
     /// After the removal, the tab the displaced viewers landed on reflows to
     /// its new tab size (it now counts the movers). A destination with no
@@ -227,21 +224,10 @@ impl Server {
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
         let pane_ids = target_tab_state.get_layout_tree().list_leaf_pane_ids();
 
-        // Pick how every child dies before anything mutates — all-or-nothing:
-        // one busy `ConfirmIfBusy` pane rejects the whole tab.
-        let mut pane_kill_policies: Vec<(PaneId, KillPolicy)> = Vec::with_capacity(pane_ids.len());
-        for &pane_id in &pane_ids {
-            let Some(pane_record) = session.panes.get_pane_record_by_id(pane_id) else {
-                continue;
-            };
-            let kill_policy = Self::resolve_pane_kill_policy(
-                pane_record,
-                command_args.should_force_close,
-                command_args.should_kill_process_tree,
-                "a pane in the tab may be busy; pass --force to close anyway",
-            )?;
-            pane_kill_policies.push((pane_id, kill_policy));
-        }
+        let kill_policy = compute_pane_kill_policy(
+            command_args.should_force_close,
+            command_args.should_kill_process_tree,
+        );
         let landing_tab_id = tab_ops::find_nearest_surviving_tab(session, tab_id);
         let mut affected_tab_ids = vec![tab_id];
         if let Some(landing_tab_id) = landing_tab_id {
@@ -254,11 +240,7 @@ impl Server {
         );
         ensure_session_placement_revision_capacity(session)?;
         ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
-        let floating_pane_kill_policies = list_floating_pane_kill_policies(
-            session,
-            command_args.should_force_close,
-            command_args.should_kill_process_tree,
-        );
+        let floating_pane_ids = list_floating_pane_ids(session);
 
         // Commit the state removal: pane records drop, the tab goes, viewers
         // move to the nearest surviving tab, last-tab close quits the session.
@@ -287,10 +269,10 @@ impl Server {
 
         // One kill thread per pane; every child receives its stop request at
         // once.
-        for (pane_id, kill_policy) in pane_kill_policies {
+        for &pane_id in &pane_ids {
             self.kill_pane_off_thread(pane_id, kill_policy);
         }
-        self.end_removed_floating_panes(session_id, floating_pane_kill_policies);
+        self.end_removed_floating_panes(session_id, floating_pane_ids, kill_policy);
 
         Ok(Self::commit_events(
             &mut self.event_bus,

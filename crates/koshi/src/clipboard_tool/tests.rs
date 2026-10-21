@@ -4,6 +4,14 @@
 //! input of a copy is read part by part, and how the real tool reads every
 //! byte of it.
 
+use std::sync::mpsc;
+
+use koshi_core::ids::{PaneId, SessionId};
+use koshi_ipc::protocol::{IpcRequestKind, IpcResult};
+use koshi_test_support::fixtures::{
+    build_restarting_refusal, build_test_runtime_directory, spawn_session_replacing_its_image,
+};
+
 use super::*;
 
 /// A copy of standard input to `clipboard_targets`.
@@ -700,6 +708,49 @@ fn an_input_of_one_part_is_one_last_part() {
 }
 
 #[test]
+fn a_rewound_input_that_has_ended_gives_its_parts_again_from_the_first() {
+    let input_bytes = build_letter_bytes(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 1);
+    let mut copy_input = CopyInput::from_input_reader(input_bytes.as_slice(), false);
+    let _ = copy_input.read_next_copy_part().expect("a slice reads");
+    assert_eq!(
+        copy_input.read_next_copy_part().expect("a slice reads"),
+        Some((&b"a"[..], true))
+    );
+
+    copy_input.rewind_copy_parts();
+
+    let (first_copy_part, is_first_part_last) = copy_input
+        .read_next_copy_part()
+        .expect("a slice reads")
+        .expect("the input is UTF-8");
+    assert!(
+        first_copy_part == &input_bytes[..MAX_CLIPBOARD_COPY_PART_BYTE_COUNT],
+        "the first part holds the first 12582774 bytes again"
+    );
+    assert!(!is_first_part_last);
+    assert_eq!(
+        copy_input.read_next_copy_part().expect("a slice reads"),
+        Some((&b"a"[..], true))
+    );
+}
+
+#[test]
+fn a_rewound_single_part_input_gives_its_trimmed_last_part_again() {
+    let mut copy_input = CopyInput::from_input_reader(&b"hi\n"[..], true);
+    assert_eq!(
+        copy_input.read_next_copy_part().expect("a slice reads"),
+        Some((&b"hi"[..], true))
+    );
+
+    copy_input.rewind_copy_parts();
+
+    assert_eq!(
+        copy_input.read_next_copy_part().expect("a slice reads"),
+        Some((&b"hi"[..], true))
+    );
+}
+
+#[test]
 fn an_input_one_byte_past_a_part_gives_a_part_then_a_last_part_of_one_byte() {
     let input_bytes = build_letter_bytes(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 1);
     let mut copy_input = CopyInput::from_input_reader(input_bytes.as_slice(), false);
@@ -888,4 +939,58 @@ fn a_failed_write_to_the_real_tool_ends_the_writing_with_no_error() {
         .expect("a failed write is no error");
 
     assert_eq!(&real_tool_input_bytes, b"ab");
+}
+
+#[test]
+fn a_copy_whose_second_part_meets_the_session_replacing_its_image_goes_again_from_its_first_part() {
+    let runtime_directory = build_test_runtime_directory();
+    let in_session_context = InSessionContext {
+        session_id: SessionId::new(),
+        client_id: None,
+        pane_id: PaneId::new(),
+    };
+    let (new_image_part_sender, new_image_part_receiver) = mpsc::channel();
+    let session_thread = spawn_session_replacing_its_image(
+        runtime_directory.path(),
+        in_session_context.session_id,
+        "the token of the image replaced",
+        "the token of the new image",
+        |request_kind| match request_kind {
+            IpcRequestKind::ClipboardCopyPart { .. } => IpcResult::ClipboardCopyPartTaken,
+            _ => build_restarting_refusal(),
+        },
+        move |request_kind| match request_kind {
+            IpcRequestKind::ClipboardCopyPart { copied_bytes } => {
+                let _ = new_image_part_sender.send(copied_bytes.len());
+                IpcResult::ClipboardCopyPartTaken
+            }
+            IpcRequestKind::ClipboardCopy { copied_bytes, .. } => {
+                let _ = new_image_part_sender.send(copied_bytes.len());
+                IpcResult::ClipboardCopyRouted {
+                    should_run_clipboard_tool: false,
+                }
+            }
+            unexpected_request_kind => panic!("unexpected {unexpected_request_kind:?}"),
+        },
+    );
+    let input_bytes = build_letter_bytes(MAX_CLIPBOARD_COPY_PART_BYTE_COUNT + 1);
+    let mut copy_input = CopyInput::from_input_reader(input_bytes.as_slice(), false);
+
+    let copy_routing = route_copy_input_to_session(
+        &mut copy_input,
+        "c",
+        runtime_directory.path(),
+        &in_session_context,
+    )
+    .expect("the input reads");
+
+    session_thread.join().expect("the stand-in session exits");
+    assert!(
+        matches!(copy_routing, CopyRouting::Routed),
+        "expected Routed, got {copy_routing:?}"
+    );
+    assert_eq!(
+        new_image_part_receiver.try_iter().collect::<Vec<usize>>(),
+        vec![MAX_CLIPBOARD_COPY_PART_BYTE_COUNT, 1]
+    );
 }

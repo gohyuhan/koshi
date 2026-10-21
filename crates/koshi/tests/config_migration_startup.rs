@@ -23,9 +23,8 @@ use common::{
 
 const STARTUP_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(20);
 
-fn build_service_command_arguments(session_id: SessionId) -> [Vec<String>; 3] {
+fn build_service_command_arguments(session_id: SessionId) -> [Vec<String>; 2] {
     [
-        vec!["koshi".to_string(), "resume-support".to_string()],
         vec!["koshi".to_string(), "serve-router".to_string()],
         vec![
             "koshi".to_string(),
@@ -199,6 +198,7 @@ fn non_service_commands_leave_released_config_unchanged_on_every_platform() {
             "config".to_string(),
             "check".to_string(),
         ],
+        vec!["koshi".to_string(), "resume-support".to_string()],
         vec!["koshi".to_string()],
     ];
     for cli_arguments in command_arguments {
@@ -244,12 +244,15 @@ fn run_test_koshi_command(process_command: &mut Command) -> Output {
     }
 }
 
-/// Runs `koshi resume-support` with `home_directory` as the home directory, and
-/// asserts it exits `0`, writes nothing to stderr, and prints this build's
-/// resume-format bounds under both key pairs.
-fn assert_resume_support_answers(home_directory: &Path) {
+#[test]
+fn resume_support_answers_and_leaves_a_released_config_and_the_migration_lock_alone() {
+    let test_directory = TempDir::new().expect("create test directory");
+    let config_directory = resolve_config_directory_under_home(test_directory.path());
+    let app_config_path = write_app_config(&config_directory, "version 1\nmade-up-key \"x\"\n");
+    block_migration_lock(&config_directory);
+
     let process_output = run_test_koshi_command(
-        build_koshi_command_under_home(home_directory).arg("resume-support"),
+        build_koshi_command_under_home(test_directory.path()).arg("resume-support"),
     );
 
     assert_eq!(process_output.status.code(), Some(0));
@@ -265,89 +268,9 @@ fn assert_resume_support_answers(home_directory: &Path) {
             "max": resume_support.maximum_resume_format,
         })
     );
-}
-
-#[test]
-fn resume_support_migrates_released_config_before_advertising_a_session_swap() {
-    let test_directory = TempDir::new().expect("create test directory");
-    let app_config_path = write_app_config(
-        &resolve_config_directory_under_home(test_directory.path()),
-        "version 1\n",
-    );
-
-    assert_resume_support_answers(test_directory.path());
-
-    assert_eq!(
-        fs::read_to_string(app_config_path).expect("read migrated config"),
-        "version 2\n"
-    );
-}
-
-#[test]
-fn resume_support_answers_for_a_released_config_with_an_unknown_key() {
-    let test_directory = TempDir::new().expect("create test directory");
-    let app_config_path = write_app_config(
-        &resolve_config_directory_under_home(test_directory.path()),
-        "version 1\nmade-up-key \"x\"\n",
-    );
-
-    assert_resume_support_answers(test_directory.path());
-
-    assert_eq!(
-        fs::read_to_string(app_config_path).expect("read migrated config"),
-        "version 2\nmade-up-key \"x\"\n"
-    );
-}
-
-#[test]
-fn resume_support_accepts_current_config_without_a_migration_lock() {
-    let test_directory = TempDir::new().expect("create test directory");
-    let config_directory = resolve_config_directory_under_home(test_directory.path());
-    let app_config_path = write_app_config(&config_directory, "version 2\n");
-    block_migration_lock(&config_directory);
-
-    assert_resume_support_answers(test_directory.path());
-
     assert_eq!(
         fs::read_to_string(app_config_path).expect("read unchanged config"),
-        "version 2\n"
-    );
-}
-
-#[test]
-fn resume_support_answers_when_its_config_migration_fails() {
-    let test_directory = TempDir::new().expect("create test directory");
-    let config_directory = resolve_config_directory_under_home(test_directory.path());
-    let app_config_path = write_app_config(&config_directory, "version 1\n");
-    let (migration_lock_path, lock_open_error) = block_migration_lock(&config_directory);
-
-    let process_output = run_test_koshi_command(
-        build_koshi_command_under_home(test_directory.path()).arg("resume-support"),
-    );
-
-    assert_eq!(process_output.status.code(), Some(0));
-    assert_eq!(
-        String::from_utf8_lossy(&process_output.stderr),
-        format!(
-            "koshi: config failed: open {}: {lock_open_error}; starting with the config files \
-             as they are\n",
-            migration_lock_path.display()
-        )
-    );
-    let resume_support = ResumeSupport::from_current_build();
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&process_output.stdout)
-            .expect("decode resume support"),
-        serde_json::json!({
-            "minimum_resume_format": resume_support.minimum_resume_format,
-            "maximum_resume_format": resume_support.maximum_resume_format,
-            "min": resume_support.minimum_resume_format,
-            "max": resume_support.maximum_resume_format,
-        })
-    );
-    assert_eq!(
-        fs::read_to_string(&app_config_path).expect("read unchanged config"),
-        "version 1\n"
+        "version 1\nmade-up-key \"x\"\n"
     );
 }
 

@@ -3,6 +3,8 @@
 //! stores, snaps, and copies what came back.
 
 use super::*;
+use crate::runtime::delivery_queue::DeliveryReceiver;
+use crate::runtime::snapshot::tests::find_selection_row_spans;
 
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime};
@@ -22,7 +24,7 @@ use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{CommandId, SessionId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord};
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
-use koshi_renderer::snapshot::{Delivery, ViewerChrome};
+use koshi_renderer::snapshot::ViewerChrome;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::build_key_input_for_chord;
 
@@ -50,30 +52,25 @@ fn build_selection_server() -> (Server, ClientId, PaneId) {
 /// A runtime with one bootstrapped 80x24 client, its viewer half, and its
 /// single pane.
 fn build_selection_runtime() -> (Server, ViewerClient, PaneId) {
-    let (mut server, client_id, pane_id) = build_selection_server();
-    let viewer = build_viewer(&mut server, client_id);
+    let (server, client_id, pane_id) = build_selection_server();
+    let viewer = build_viewer(client_id);
     (server, viewer, pane_id)
 }
 
-/// [`build_selection_runtime`], plus a subscription for the client made
-/// before the viewer's: the host writes for the client's outer terminal go on
-/// it.
-fn build_selection_runtime_with_outer_terminal(
-) -> (Server, ViewerClient, PaneId, mpsc::Receiver<Delivery>) {
+/// [`build_selection_runtime`], plus a subscription for the client: the host
+/// writes for the client's outer terminal go on it.
+fn build_selection_runtime_with_outer_terminal() -> (Server, ViewerClient, PaneId, DeliveryReceiver)
+{
     let (mut server, client_id, pane_id) = build_selection_server();
-    let (outer_terminal_receiver, _) = server.subscribe(client_id);
-    let viewer = build_viewer(&mut server, client_id);
+    let (outer_terminal_receiver, _) = server.subscribe(client_id, 60);
+    let viewer = build_viewer(client_id);
     (server, viewer, pane_id, outer_terminal_receiver)
 }
 
 /// The viewer from [`build_viewer`], with its `copy` settings overridden by
 /// `copy_config`.
-fn build_copying_viewer(
-    server: &mut Server,
-    client_id: ClientId,
-    copy_config: PartialCopyConfig,
-) -> ViewerClient {
-    let mut viewer = build_viewer(server, client_id);
+fn build_copying_viewer(client_id: ClientId, copy_config: PartialCopyConfig) -> ViewerClient {
+    let mut viewer = build_viewer(client_id);
     viewer.load_startup_config(
         Some(PartialKoshiConfig {
             copy: Some(copy_config),
@@ -172,8 +169,8 @@ fn build_mouse_release(position: Point) -> MouseInput {
 
 /// Turn on this client's mouse-select mode the way its keybinding does. A drag
 /// then grabs the mouse for a koshi selection even over a program that asked
-/// for the mouse. The viewer picks the change up from its subscription on the
-/// next event.
+/// for the mouse. The viewer reads the change off the frame it applies before
+/// the next event.
 fn enable_mouse_selection(server: &mut Server, client_id: ClientId) {
     let _ = server.submit_command(CommandEnvelope::from_parts(
         CommandId::new(),
@@ -1351,7 +1348,7 @@ fn output_under_a_highlight_leaves_it_on_the_same_text_and_the_same_screen_row()
     );
     let selection_before_output =
         get_selection(&mut server, client_id, pane_id).expect("a highlight");
-    let drawn_row_spans_before_output = get_drawn_row_spans(&server, client_id);
+    let drawn_row_spans_before_output = find_selection_row_spans(&server, client_id);
 
     // Enough output to push the highlighted line off the top of the screen.
     for line_number in 0..30 {
@@ -1364,20 +1361,11 @@ fn output_under_a_highlight_leaves_it_on_the_same_text_and_the_same_screen_row()
         "the stored highlight was never touched"
     );
     assert_eq!(
-        get_drawn_row_spans(&server, client_id),
+        find_selection_row_spans(&server, client_id),
         drawn_row_spans_before_output,
         "and it still draws on the same screen row: the view is held and the \
          text under it does not move"
     );
-}
-
-/// The highlight rows the client's first pane draws this frame.
-fn get_drawn_row_spans(server: &Server, client_id: ClientId) -> Option<Vec<(u16, u16, u16)>> {
-    let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
-    render_snapshot.pane_snapshots[0]
-        .selection_spans
-        .as_ref()
-        .map(|selection_spans| selection_spans.row_spans.clone())
 }
 
 #[test]
@@ -2452,7 +2440,6 @@ fn copy_release_obeys_disabled_trailing_whitespace_trimming() {
         build_selection_runtime_with_outer_terminal();
     let client_id = viewer.get_client_id();
     let mut viewer = build_copying_viewer(
-        &mut server,
         client_id,
         PartialCopyConfig {
             should_trim_trailing_whitespace: Some(false),

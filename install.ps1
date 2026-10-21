@@ -69,10 +69,13 @@ try {
     }
 
     # Move the new koshi.exe to $staged_binary_path, replacing a copy that an
-    # earlier run with the same process id left there, and run it with
-    # --version. A first output line other than "koshi <release version
-    # number>" stops the install, and the installed koshi.exe stays as it was.
+    # earlier run with the same process id left there, write it through to the
+    # disk, and run it with --version. A first output line other than "koshi
+    # <release version number>" stops the install, and the installed koshi.exe
+    # stays as it was.
     Move-Item -Force $binary_file.FullName $staged_binary_path
+    $staged_binary_stream = [System.IO.File]::Open($staged_binary_path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+    try { $staged_binary_stream.Flush($true) } finally { $staged_binary_stream.Dispose() }
     $new_version_line = & $staged_binary_path --version | Select-Object -First 1
     if ("$new_version_line" -ne "koshi $release_version_number") {
         Write-Error "The new koshi printed '$new_version_line' for --version, not 'koshi $release_version_number'"

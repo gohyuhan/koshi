@@ -65,14 +65,20 @@ fn run_koshi_command(process_command: &mut std::process::Command) -> std::proces
         .expect("the koshi binary runs to its end")
 }
 
-/// The exact `koshi list-sessions` table for one session: the header row, then
-/// that session's id and name. Each column is padded to its widest cell and
-/// separated by two spaces, with no trailing spaces.
-fn render_single_session_listing(session_id: SessionId) -> String {
+/// The exact `koshi list-sessions` table for one session on this machine: the
+/// header row, then that session's id, its name, the server `local`, and the
+/// owner, which is `owner_user_id` or `-` when it is `None`. Each column is
+/// padded to its widest cell and separated by two spaces, with no trailing
+/// spaces.
+fn render_single_session_listing(session_id: SessionId, owner_user_id: Option<u32>) -> String {
     let session_id_text = session_id.to_string();
     let session_name_column_width = SESSION_SERVER_NAME.len().max("name".len());
+    let owner_text = match owner_user_id {
+        Some(owner_user_id) => owner_user_id.to_string(),
+        None => "-".to_string(),
+    };
     format!(
-        "{:session_id_column_width$}  {:session_name_column_width$}  server\n{session_id_text}  {SESSION_SERVER_NAME:session_name_column_width$}  local\n",
+        "{:session_id_column_width$}  {:session_name_column_width$}  server  owner\n{session_id_text}  {SESSION_SERVER_NAME:session_name_column_width$}  local   {owner_text}\n",
         "id",
         "name",
         session_id_column_width = session_id_text.len(),
@@ -274,7 +280,7 @@ fn another_local_user_lists_and_kills_a_session_while_the_switch_is_on() {
     );
     assert_eq!(
         String::from_utf8_lossy(&list_output.stdout),
-        render_single_session_listing(session_id)
+        render_single_session_listing(session_id, Some(get_effective_user_id()))
     );
 
     // The version walk reaches the same session the listing did, so a session
@@ -356,7 +362,7 @@ fn another_local_user_finds_nothing_while_the_switch_is_off() {
     );
     assert_eq!(
         String::from_utf8_lossy(&list_output.stdout),
-        "id  name  server\n"
+        "id  name  server  owner\n"
     );
 
     let kill_output = run_koshi_command(
@@ -426,7 +432,7 @@ fn this_users_own_session_is_listed_once_while_the_switch_is_on() {
     );
     assert_eq!(
         String::from_utf8_lossy(&list_output.stdout),
-        render_single_session_listing(session_id)
+        render_single_session_listing(session_id, None)
     );
 
     // The version walk covers the same two places the listing does, so this
@@ -647,6 +653,6 @@ fn this_users_own_session_is_listed_once_with_the_switch_on() {
     );
     assert_eq!(
         String::from_utf8_lossy(&list_output.stdout),
-        render_single_session_listing(session_id)
+        render_single_session_listing(session_id, None)
     );
 }

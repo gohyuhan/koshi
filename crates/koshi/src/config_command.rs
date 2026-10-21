@@ -73,7 +73,7 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "koshi.remote-listen",
         "koshi.kdl",
         "unset",
-        "IP address and port the remote listener binds to, such as 192.168.1.20:7654. Setting \
+        "IP address and port the remote listener binds to, such as 192.0.2.20:7654. Setting \
          it opens nothing; `koshi share grant` asks before the port opens.",
     ),
     build_config_field_help(
@@ -402,8 +402,9 @@ pub fn run_config_command(command: &ConfigCommand) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Migrate config before `serve-session`, `serve-router`, or `resume-support`
-/// runs. Other commands and an unresolved config directory make no changes.
+/// Migrate config before `serve-session` or `serve-router` runs. Every other
+/// command, `resume-support` among them, and an unresolved config directory
+/// make no changes.
 ///
 /// # Errors
 /// Returns the errors of [`migrate_config_directory_for_update`].
@@ -413,11 +414,7 @@ pub fn migrate_config_for_service_command(
 ) -> Result<(), CliError> {
     if matches!(
         command,
-        Some(
-            CliCommand::ServeSession { .. }
-                | CliCommand::ServeRouter { .. }
-                | CliCommand::ResumeSupport
-        )
+        Some(CliCommand::ServeSession { .. } | CliCommand::ServeRouter { .. })
     ) {
         if let Some(config_directory) = config_directory {
             migrate_config_directory_for_update(config_directory)?;

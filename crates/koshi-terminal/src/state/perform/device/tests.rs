@@ -4,26 +4,13 @@
 //! mode reports, version packing, and reply-queue accumulation and draining.
 
 use super::*;
-use koshi_core::process::PtySize;
-
-/// Build terminal state for one pane of `column_count × row_count`.
-fn build_terminal_state(column_count: u16, row_count: u16) -> TerminalState {
-    TerminalState::from_pty_size(PtySize {
-        column_count,
-        row_count,
-    })
-}
-
-/// Feed `pty_output_bytes` through a fresh parser into `terminal_state`.
-fn advance_vte_parser(terminal_state: &mut TerminalState, pty_output_bytes: &[u8]) {
-    let mut parser = vte::Parser::new();
-    parser.advance(terminal_state, pty_output_bytes);
-}
+use crate::state::perform::tests::build_terminal_state;
+use crate::state::tests::process_terminal_bytes;
 
 /// Feed PTY output bytes into a fresh terminal state and return its drained replies.
 fn collect_device_replies_for(pty_output_bytes: &[u8]) -> Vec<u8> {
     let mut terminal_state = build_terminal_state(8, 4);
-    advance_vte_parser(&mut terminal_state, pty_output_bytes);
+    process_terminal_bytes(&mut terminal_state, pty_output_bytes);
     terminal_state.take_device_query_replies()
 }
 
@@ -150,7 +137,7 @@ fn dsr_6_reports_the_alternate_screens_cursor_while_active() {
     let mut terminal_state = build_terminal_state(8, 4);
     // Move on the primary, enter the alternate (fresh cursor seeded from the
     // primary's position), then move on the alternate and query.
-    advance_vte_parser(&mut terminal_state, b"\x1b[3;5H\x1b[?1049h\x1b[2;2H\x1b[6n");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[3;5H\x1b[?1049h\x1b[2;2H\x1b[6n");
     assert_eq!(terminal_state.take_device_query_replies(), b"\x1b[2;2R");
 }
 
@@ -283,7 +270,7 @@ fn decrqm_reports_cursor_visibility_per_active_screen() {
     // Visibility is tracked per screen: hiding on the alternate reports
     // hidden there, and the untouched primary reports visible again on exit.
     let mut terminal_state = build_terminal_state(8, 4);
-    advance_vte_parser(
+    process_terminal_bytes(
         &mut terminal_state,
         b"\x1b[?1049h\x1b[?25l\x1b[?25$p\x1b[?1049l\x1b[?25$p",
     );
@@ -336,7 +323,7 @@ fn decrqm_reports_the_active_mouse_tracking_level_and_only_it() {
                 "\x1b[?{mouse_tracking_level_text};{dec_mode_state_number}$y"
             ));
         }
-        advance_vte_parser(&mut terminal_state, terminal_input_sequence.as_bytes());
+        process_terminal_bytes(&mut terminal_state, terminal_input_sequence.as_bytes());
         assert_eq!(
             terminal_state.take_device_query_replies(),
             expected_device_reply_text.as_bytes()
@@ -362,7 +349,7 @@ fn decrqm_reports_the_active_mouse_encoding_and_only_it() {
                 "\x1b[?{mouse_encoding_text};{dec_mode_state_number}$y"
             ));
         }
-        advance_vte_parser(&mut terminal_state, terminal_input_sequence.as_bytes());
+        process_terminal_bytes(&mut terminal_state, terminal_input_sequence.as_bytes());
         assert_eq!(
             terminal_state.take_device_query_replies(),
             expected_device_reply_text.as_bytes()
@@ -414,8 +401,16 @@ fn decrqm_reports_an_unstored_mode_as_not_recognized() {
 }
 
 #[test]
-fn ansi_rqm_reports_every_mode_as_not_recognized() {
-    assert_eq!(collect_device_replies_for(b"\x1b[4$p"), b"\x1b[4;0$y");
+fn ansi_rqm_reports_insert_mode_as_set_or_reset_and_other_modes_as_not_recognized() {
+    assert_eq!(collect_device_replies_for(b"\x1b[4$p"), b"\x1b[4;2$y");
+    assert_eq!(
+        collect_device_replies_for(b"\x1b[4h\x1b[4$p"),
+        b"\x1b[4;1$y"
+    );
+    assert_eq!(
+        collect_device_replies_for(b"\x1b[4h\x1b[4l\x1b[4$p"),
+        b"\x1b[4;2$y"
+    );
     assert_eq!(collect_device_replies_for(b"\x1b[20$p"), b"\x1b[20;0$y");
 }
 
@@ -430,7 +425,7 @@ fn replies_accumulate_in_query_order() {
 #[test]
 fn take_device_query_replies_drains_the_queue() {
     let mut terminal_state = build_terminal_state(8, 4);
-    advance_vte_parser(&mut terminal_state, b"\x1b[5n");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[5n");
     assert_eq!(terminal_state.take_device_query_replies(), b"\x1b[0n");
     assert_eq!(terminal_state.take_device_query_replies(), b"");
 }
@@ -505,7 +500,7 @@ fn dsr_6_reports_the_last_row_after_the_screen_scrolls() {
 #[test]
 fn decxcpr_reports_the_alternate_screens_cursor_while_active() {
     let mut terminal_state = build_terminal_state(8, 4);
-    advance_vte_parser(
+    process_terminal_bytes(
         &mut terminal_state,
         b"\x1b[3;5H\x1b[?1049h\x1b[2;2H\x1b[?6n",
     );
@@ -580,7 +575,7 @@ fn replies_queue_across_a_screen_switch_in_order() {
     // One device-global queue: a query on the alternate screen and one after
     // the exit drain together, in query order.
     let mut terminal_state = build_terminal_state(8, 4);
-    advance_vte_parser(&mut terminal_state, b"\x1b[?1049h\x1b[5n\x1b[?1049l\x1b[c");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?1049h\x1b[5n\x1b[?1049l\x1b[c");
     assert_eq!(
         terminal_state.take_device_query_replies(),
         b"\x1b[0n\x1b[?62;22c"

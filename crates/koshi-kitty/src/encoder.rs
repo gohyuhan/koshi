@@ -1,8 +1,6 @@
 //! Bounded Kitty image encoding and output.
 
-use std::fmt;
 use std::io::{self, Write};
-use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -15,10 +13,7 @@ const KITTY_PROTOCOL: GraphicsProtocol = GraphicsProtocol::Kitty;
 /// The largest compressed byte slice in one Kitty graphics chunk.
 const KITTY_COMPRESSED_CHUNK_BYTE_COUNT: usize = 3_072;
 
-/// The largest number of Kitty graphics chunks emitted by one advance.
-const KITTY_IMAGE_CHUNK_COUNT_PER_STEP: usize = 16;
-
-/// The largest number of raw RGBA bytes compressed by one advance.
+/// The largest number of raw RGBA bytes compressed by one step.
 const KITTY_COMPRESSION_RGBA_BYTE_COUNT_PER_STEP: usize = 262_144;
 
 /// The scratch output capacity used by one compression pass.
@@ -27,8 +22,8 @@ const KITTY_COMPRESSION_OUTPUT_BYTE_COUNT: usize = 65_536;
 /// Kitty placement fields written by the placement command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KittyPlacement {
-    /// The Kitty image number to place.
-    pub image_number: u32,
+    /// The Kitty image id to place, carried by `i=`.
+    pub image_id: u32,
     /// The Kitty placement identity.
     pub placement_id: u32,
     /// The source rectangle's left pixel.
@@ -54,9 +49,9 @@ pub struct KittyPlacement {
 /// Errors returned while validating or writing Kitty output.
 #[derive(Debug, Error)]
 pub enum KittyOutputError {
-    /// The image number is zero.
-    #[error("Kitty image number must be nonzero")]
-    InvalidImageNumber,
+    /// The image id is zero.
+    #[error("Kitty image id must be nonzero")]
+    InvalidImageId,
     /// The placement identity is zero.
     #[error("Kitty placement id must be nonzero")]
     InvalidPlacementId,
@@ -115,117 +110,58 @@ pub enum KittyOutputError {
     /// The compressor consumed and produced no bytes.
     #[error("Kitty image compression made no progress")]
     CompressionNoProgress,
-    /// A compressed chunk did not fit the fixed Base64 buffer.
-    #[error("Kitty compressed chunk exceeds its Base64 buffer")]
-    EncodedChunkTooLarge,
     /// The destination writer rejected output.
     #[error("Kitty output write failed: {0}")]
     Io(#[from] io::Error),
 }
 
-/// A zlib-compressed Kitty upload advanced in bounded output steps.
-pub struct KittyUpload {
-    decoded_image: Arc<DecodedImage>,
-    image_number: u32,
-    compressor: Compress,
-    rgba_input_byte_offset: usize,
-    compressed_bytes: Vec<u8>,
-    compressed_byte_offset: usize,
-    is_compression_complete: bool,
-    has_started_transmission: bool,
-}
-
-impl fmt::Debug for KittyUpload {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("KittyUpload")
-            .field("image_width_pixels", &self.decoded_image.pixel_width)
-            .field("image_height_pixels", &self.decoded_image.pixel_height)
-            .field("image_number", &self.image_number)
-            .field("rgba_input_byte_offset", &self.rgba_input_byte_offset)
-            .field("compressed_byte_count", &self.compressed_bytes.len())
-            .field("compressed_byte_offset", &self.compressed_byte_offset)
-            .field("is_compression_complete", &self.is_compression_complete)
-            .field("has_started_transmission", &self.has_started_transmission)
-            .finish()
-    }
-}
-
-impl KittyUpload {
-    /// Create a bounded zlib upload for one decoded image.
-    pub fn from_decoded_image(
-        decoded_image: Arc<DecodedImage>,
-        image_number: u32,
-    ) -> Result<Self, KittyOutputError> {
-        if image_number == 0 {
-            return Err(KittyOutputError::InvalidImageNumber);
+/// Compress the RGBA bytes of `decoded_image` into one zlib stream: the payload
+/// that [`write_kitty_transmit`] carries for a Kitty `a=t,o=z` transmit.
+///
+/// Each step compresses at most 256 KiB of RGBA input, and `is_cancelled` is
+/// called before each step. Returns `Ok(None)` when `is_cancelled` returns
+/// `true` before the stream ends. Example: a 1×1 image with RGBA bytes
+/// `[1, 2, 3, 4]` gives the 12 bytes whose Base64 is `eAFjZGJmAQAAGAAL`.
+///
+/// # Errors
+/// [`KittyOutputError::InvalidImageDimensions`] for a size that
+/// [`compute_rgba_byte_count`] refuses for Kitty,
+/// [`KittyOutputError::InvalidImageRgbaByteCount`] for RGBA bytes whose count
+/// does not match the size, [`KittyOutputError::AllocationFailed`] when
+/// the compressed bytes cannot be stored, [`KittyOutputError::Compression`]
+/// when the compressor fails, and [`KittyOutputError::CompressionNoProgress`]
+/// when a compressor call consumes and produces no bytes.
+pub fn compress_kitty_image(
+    decoded_image: &DecodedImage,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<Option<Vec<u8>>, KittyOutputError> {
+    validate_decoded_image(decoded_image)?;
+    let mut compressor = Compress::new(Compression::fast(), true);
+    let mut compressed_bytes = Vec::new();
+    compressed_bytes
+        .try_reserve_exact(KITTY_COMPRESSION_OUTPUT_BYTE_COUNT)
+        .map_err(|_| KittyOutputError::AllocationFailed)?;
+    let mut compression_output_bytes = vec![0u8; KITTY_COMPRESSION_OUTPUT_BYTE_COUNT];
+    let mut rgba_input_byte_offset = 0usize;
+    loop {
+        if is_cancelled() {
+            return Ok(None);
         }
-        validate_decoded_image(&decoded_image)?;
-        let mut compressed_bytes = Vec::new();
-        compressed_bytes
-            .try_reserve_exact(KITTY_COMPRESSION_OUTPUT_BYTE_COUNT)
-            .map_err(|_| KittyOutputError::AllocationFailed)?;
-        Ok(Self {
-            decoded_image,
-            image_number,
-            compressor: Compress::new(Compression::fast(), true),
-            rgba_input_byte_offset: 0,
-            compressed_bytes,
-            compressed_byte_offset: 0,
-            is_compression_complete: false,
-            has_started_transmission: false,
-        })
-    }
-
-    /// Return whether compression and transmission reached their ends.
-    #[must_use]
-    pub fn is_upload_complete(&self) -> bool {
-        self.is_compression_complete
-            && self.compressed_byte_offset == self.compressed_bytes.len()
-            && self.has_started_transmission
-    }
-
-    /// Compress and write one bounded Kitty output step.
-    pub fn advance_upload<W: Write>(&mut self, writer: &mut W) -> Result<(), KittyOutputError> {
-        if !self.is_compression_complete
-            && self
-                .compressed_bytes
-                .len()
-                .saturating_sub(self.compressed_byte_offset)
-                <= KITTY_COMPRESSED_CHUNK_BYTE_COUNT
-        {
-            self.compress_next_input_step()?;
-        }
-        self.write_output_chunks(writer)
-    }
-
-    fn compress_next_input_step(&mut self) -> Result<(), KittyOutputError> {
-        if self.compressed_byte_offset != 0 {
-            self.compressed_bytes
-                .copy_within(self.compressed_byte_offset.., 0);
-            self.compressed_bytes
-                .truncate(self.compressed_bytes.len() - self.compressed_byte_offset);
-            self.compressed_byte_offset = 0;
-        }
-        let rgba_input_end_byte_offset = self
-            .rgba_input_byte_offset
+        let rgba_input_end_byte_offset = rgba_input_byte_offset
             .saturating_add(KITTY_COMPRESSION_RGBA_BYTE_COUNT_PER_STEP)
-            .min(self.decoded_image.rgba_bytes.len());
-        let compression_flush_mode =
-            if rgba_input_end_byte_offset == self.decoded_image.rgba_bytes.len() {
-                FlushCompress::Finish
-            } else {
-                FlushCompress::None
-            };
-        let mut compression_output_bytes = [0u8; KITTY_COMPRESSION_OUTPUT_BYTE_COUNT];
+            .min(decoded_image.rgba_bytes.len());
+        let compression_flush_mode = if rgba_input_end_byte_offset == decoded_image.rgba_bytes.len()
+        {
+            FlushCompress::Finish
+        } else {
+            FlushCompress::None
+        };
         loop {
-            let rgba_input_byte_count_before = self.compressor.total_in();
-            let compressed_output_byte_count_before = self.compressor.total_out();
-            let compression_status = self
-                .compressor
+            let rgba_input_byte_count_before = compressor.total_in();
+            let compressed_output_byte_count_before = compressor.total_out();
+            let compression_status = compressor
                 .compress(
-                    &self.decoded_image.rgba_bytes
-                        [self.rgba_input_byte_offset..rgba_input_end_byte_offset],
+                    &decoded_image.rgba_bytes[rgba_input_byte_offset..rgba_input_end_byte_offset],
                     &mut compression_output_bytes,
                     compression_flush_mode,
                 )
@@ -233,122 +169,91 @@ impl KittyUpload {
                     compression_message: compression_error.to_string(),
                 })?;
             let consumed_rgba_byte_count = usize::try_from(
-                self.compressor
+                compressor
                     .total_in()
                     .saturating_sub(rgba_input_byte_count_before),
             )
             .map_err(|_| KittyOutputError::CompressionNoProgress)?;
             let produced_compressed_byte_count = usize::try_from(
-                self.compressor
+                compressor
                     .total_out()
                     .saturating_sub(compressed_output_byte_count_before),
             )
             .map_err(|_| KittyOutputError::CompressionNoProgress)?;
-            self.rgba_input_byte_offset = self
-                .rgba_input_byte_offset
+            rgba_input_byte_offset = rgba_input_byte_offset
                 .checked_add(consumed_rgba_byte_count)
                 .ok_or(KittyOutputError::CompressionNoProgress)?;
-            self.compressed_bytes
+            compressed_bytes
                 .try_reserve(produced_compressed_byte_count)
                 .map_err(|_| KittyOutputError::AllocationFailed)?;
-            self.compressed_bytes
+            compressed_bytes
                 .extend_from_slice(&compression_output_bytes[..produced_compressed_byte_count]);
             if compression_status == Status::StreamEnd {
-                self.is_compression_complete = true;
-                return Ok(());
+                return Ok(Some(compressed_bytes));
             }
-            if self.rgba_input_byte_offset == rgba_input_end_byte_offset
-                && rgba_input_end_byte_offset < self.decoded_image.rgba_bytes.len()
+            if rgba_input_byte_offset == rgba_input_end_byte_offset
+                && rgba_input_end_byte_offset < decoded_image.rgba_bytes.len()
             {
-                return Ok(());
+                break;
             }
             if consumed_rgba_byte_count == 0 && produced_compressed_byte_count == 0 {
                 return Err(KittyOutputError::CompressionNoProgress);
             }
         }
     }
-
-    fn write_output_chunks<W: Write>(&mut self, writer: &mut W) -> Result<(), KittyOutputError> {
-        let mut kitty_output_bytes = Vec::new();
-        kitty_output_bytes
-            .try_reserve_exact(KITTY_IMAGE_CHUNK_COUNT_PER_STEP * 4_160)
-            .map_err(|_| KittyOutputError::AllocationFailed)?;
-        let mut next_compressed_byte_offset = self.compressed_byte_offset;
-        let mut is_first_chunk = !self.has_started_transmission;
-        let mut written_chunk_count = 0usize;
-        while written_chunk_count < KITTY_IMAGE_CHUNK_COUNT_PER_STEP {
-            let available_compressed_byte_count = self
-                .compressed_bytes
-                .len()
-                .saturating_sub(next_compressed_byte_offset);
-            if available_compressed_byte_count == 0
-                || (!self.is_compression_complete
-                    && available_compressed_byte_count <= KITTY_COMPRESSED_CHUNK_BYTE_COUNT)
-            {
-                break;
-            }
-            let compressed_chunk_byte_count =
-                available_compressed_byte_count.min(KITTY_COMPRESSED_CHUNK_BYTE_COUNT);
-            let compressed_chunk_end_byte_offset =
-                next_compressed_byte_offset + compressed_chunk_byte_count;
-            let has_more_chunks = !self.is_compression_complete
-                || compressed_chunk_end_byte_offset < self.compressed_bytes.len();
-            write_upload_chunk(
-                &mut kitty_output_bytes,
-                &self.decoded_image,
-                self.image_number,
-                is_first_chunk,
-                has_more_chunks,
-                &self.compressed_bytes
-                    [next_compressed_byte_offset..compressed_chunk_end_byte_offset],
-            )?;
-            is_first_chunk = false;
-            next_compressed_byte_offset = compressed_chunk_end_byte_offset;
-            written_chunk_count += 1;
-        }
-        if kitty_output_bytes.is_empty() {
-            return Ok(());
-        }
-        writer
-            .write_all(&kitty_output_bytes)
-            .map_err(KittyOutputError::Io)?;
-        writer.flush().map_err(KittyOutputError::Io)?;
-        self.compressed_byte_offset = next_compressed_byte_offset;
-        self.has_started_transmission = true;
-        Ok(())
-    }
 }
 
-fn write_upload_chunk(
-    kitty_output_bytes: &mut Vec<u8>,
-    decoded_image: &DecodedImage,
-    image_number: u32,
-    is_first_chunk: bool,
-    has_more_chunks: bool,
+/// Write the Kitty transmit of an image of `pixel_width` × `pixel_height`
+/// pixels under the Kitty image id `image_id`, whose zlib payload is
+/// `compressed_bytes`.
+///
+/// The payload is cut into 3 072-byte chunks, the last one shorter, and each
+/// chunk travels Base64-encoded in one command. The first command is
+/// `ESC _ G a=t,f=32,s=<width>,v=<height>,i=<id>,q=2,o=z,m=<more>;`, every
+/// command after it is `ESC _ G q=2,m=<more>;`, and each ends with `ESC \`.
+/// `<more>` is `1` on every chunk but the last, and `0` on the last. An empty
+/// payload writes nothing.
+///
+/// Example: the payload of a 1×1 image with RGBA bytes `[1, 2, 3, 4]` under
+/// id `7` writes `ESC _ G a=t,f=32,s=1,v=1,i=7,q=2,o=z,m=0;eAFjZGJmAQAAGAAL
+/// ESC \`.
+///
+/// # Errors
+/// [`KittyOutputError::InvalidImageId`] for an `image_id` of `0`, with
+/// nothing written, and [`KittyOutputError::Io`] for a failed write.
+pub fn write_kitty_transmit<W: Write>(
+    writer: &mut W,
+    pixel_width: u32,
+    pixel_height: u32,
+    image_id: u32,
     compressed_bytes: &[u8],
 ) -> Result<(), KittyOutputError> {
-    if is_first_chunk {
-        write!(
-            kitty_output_bytes,
-            "\x1b_Ga=t,f=32,s={},v={},I={},q=2,o=z,m={};",
-            decoded_image.pixel_width,
-            decoded_image.pixel_height,
-            image_number,
-            u8::from(has_more_chunks),
-        )?;
-    } else {
-        write!(
-            kitty_output_bytes,
-            "\x1b_Gq=2,m={};",
-            u8::from(has_more_chunks)
-        )?;
+    if image_id == 0 {
+        return Err(KittyOutputError::InvalidImageId);
     }
-    let mut encoded_base64_bytes = [0u8; 4_096];
-    let encoded_byte_count = STANDARD
-        .encode_slice(compressed_bytes, &mut encoded_base64_bytes)
-        .map_err(|_| KittyOutputError::EncodedChunkTooLarge)?;
-    kitty_output_bytes.extend_from_slice(&encoded_base64_bytes[..encoded_byte_count]);
-    kitty_output_bytes.extend_from_slice(b"\x1b\\");
+    let chunk_count = compressed_bytes
+        .len()
+        .div_ceil(KITTY_COMPRESSED_CHUNK_BYTE_COUNT);
+    let mut encoded_base64_text = String::new();
+    for (chunk_index, compressed_chunk_bytes) in compressed_bytes
+        .chunks(KITTY_COMPRESSED_CHUNK_BYTE_COUNT)
+        .enumerate()
+    {
+        let has_more_chunks = chunk_index + 1 < chunk_count;
+        if chunk_index == 0 {
+            write!(
+                writer,
+                "\x1b_Ga=t,f=32,s={pixel_width},v={pixel_height},i={image_id},q=2,o=z,m={};",
+                u8::from(has_more_chunks),
+            )?;
+        } else {
+            write!(writer, "\x1b_Gq=2,m={};", u8::from(has_more_chunks))?;
+        }
+        encoded_base64_text.clear();
+        STANDARD.encode_string(compressed_chunk_bytes, &mut encoded_base64_text);
+        writer.write_all(encoded_base64_text.as_bytes())?;
+        writer.write_all(b"\x1b\\")?;
+    }
     Ok(())
 }
 
@@ -361,8 +266,8 @@ pub fn write_kitty_placement<W: Write>(
     validate_kitty_placement(decoded_image, placement)?;
     write!(
         writer,
-        "\x1b_Ga=p,I={},p={},x={},y={},w={},h={},",
-        placement.image_number,
+        "\x1b_Ga=p,i={},p={},x={},y={},w={},h={},",
+        placement.image_id,
         placement.placement_id,
         placement.source_x_pixels,
         placement.source_y_pixels,
@@ -383,15 +288,20 @@ pub fn write_kitty_placement<W: Write>(
     Ok(())
 }
 
-/// Write a Kitty command that deletes one image's data.
+/// Write a Kitty command that deletes the image `image_id`, every placement of
+/// it and its data: `ESC _ G a=d,d=I,i=<image_id>,q=2; ESC \`.
+///
+/// # Errors
+/// [`KittyOutputError::InvalidImageId`] for an `image_id` of `0`, with
+/// nothing written, and [`KittyOutputError::Io`] for a failed write.
 pub fn write_kitty_image_delete<W: Write>(
     writer: &mut W,
-    image_number: u32,
+    image_id: u32,
 ) -> Result<(), KittyOutputError> {
-    if image_number == 0 {
-        return Err(KittyOutputError::InvalidImageNumber);
+    if image_id == 0 {
+        return Err(KittyOutputError::InvalidImageId);
     }
-    write!(writer, "\x1b_Ga=d,d=N,I={image_number},q=2;\x1b\\")?;
+    write!(writer, "\x1b_Ga=d,d=I,i={image_id},q=2;\x1b\\")?;
     Ok(())
 }
 
@@ -402,7 +312,7 @@ pub fn write_kitty_delete_all<W: Write>(writer: &mut W) -> Result<(), KittyOutpu
 }
 
 /// Write a Kitty command that deletes all visible placements and retains every
-/// image's data. An image number transmitted before this command still places.
+/// image's data. An image id transmitted before this command still places.
 pub fn write_kitty_visible_placement_delete<W: Write>(
     writer: &mut W,
 ) -> Result<(), KittyOutputError> {
@@ -451,8 +361,8 @@ fn validate_kitty_placement(
     decoded_image: &DecodedImage,
     placement: &KittyPlacement,
 ) -> Result<(), KittyOutputError> {
-    if placement.image_number == 0 {
-        return Err(KittyOutputError::InvalidImageNumber);
+    if placement.image_id == 0 {
+        return Err(KittyOutputError::InvalidImageId);
     }
     if placement.placement_id == 0 {
         return Err(KittyOutputError::InvalidPlacementId);

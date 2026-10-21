@@ -300,9 +300,9 @@ fn kill_policy_refuses_a_negative_timeout() {
     let negative_timeout_parse_error =
         serde_json::from_str::<KillPolicy>(r#"{"Graceful":{"timeout_duration":-1}}"#)
             .expect_err("a negative second count is refused");
-    assert!(
-        negative_timeout_parse_error.to_string().contains("u64"),
-        "{negative_timeout_parse_error}"
+    assert_eq!(
+        negative_timeout_parse_error.to_string(),
+        "invalid value: integer `-1`, expected u64 at line 1 column 34"
     );
 }
 
@@ -311,9 +311,9 @@ fn kill_policy_refuses_a_fractional_timeout() {
     let fractional_timeout_parse_error =
         serde_json::from_str::<KillPolicy>(r#"{"GracefulTree":{"timeout_duration":3.5}}"#)
             .expect_err("a fractional second count is refused");
-    assert!(
-        fractional_timeout_parse_error.to_string().contains("u64"),
-        "{fractional_timeout_parse_error}"
+    assert_eq!(
+        fractional_timeout_parse_error.to_string(),
+        "invalid type: floating point `3.5`, expected u64 at line 1 column 39"
     );
 }
 
@@ -392,9 +392,9 @@ fn pty_size_refuses_a_dimension_past_u16() {
     let pty_size_parse_error =
         serde_json::from_str::<PtySize>(r#"{"column_count":65536,"row_count":24}"#)
             .expect_err("a column count past u16 is refused");
-    assert!(
-        pty_size_parse_error.to_string().contains("u16"),
-        "{pty_size_parse_error}"
+    assert_eq!(
+        pty_size_parse_error.to_string(),
+        "invalid value: integer `65536`, expected u16 at line 1 column 21"
     );
 }
 

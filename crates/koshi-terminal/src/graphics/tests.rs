@@ -50,7 +50,7 @@ use koshi_core::process::PtySize;
 use koshi_image::{decode_raster, decompress_bounded};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-fn build_red_png_bytes() -> Vec<u8> {
+pub(crate) fn build_red_png_bytes() -> Vec<u8> {
     use image::ImageEncoder;
 
     let mut png_bytes = Vec::new();
@@ -2847,7 +2847,13 @@ fn a_c1_screen_wrapper_with_an_inner_transfer_survives_an_engine_swap() {
         .get_graphics_transport_state()
         .expect("the split wrapper has transport state");
     assert!(graphics_transport_state.is_screen_continuation);
-    assert!(graphics_transport_state.screen_inner_transport.is_some());
+    assert_eq!(
+        graphics_transport_state.screen_inner_transport,
+        Some(Box::new(GraphicsTransportState {
+            carry_bytes: inner_iterm_bytes[..split_byte_index].to_vec(),
+            ..GraphicsTransportState::default()
+        }))
+    );
     let mut resumed_terminal_engine = swap_terminal_engine(engine);
     let mut final_screen_chunk = inner_iterm_bytes[split_byte_index..].to_vec();
     final_screen_chunk.extend_from_slice(b"\x1b\\");
@@ -2902,7 +2908,13 @@ fn a_c1_tmux_wrapper_with_an_inner_transfer_survives_an_engine_swap() {
         .get_graphics_transport_state()
         .expect("the split wrapper has transport state");
     assert!(graphics_transport_state.is_tmux_continuation);
-    assert!(graphics_transport_state.tmux_inner_transport.is_some());
+    assert_eq!(
+        graphics_transport_state.tmux_inner_transport,
+        Some(Box::new(GraphicsTransportState {
+            carry_bytes: inner_iterm_bytes[..split_byte_index].to_vec(),
+            ..GraphicsTransportState::default()
+        }))
+    );
     let mut resumed_terminal_engine = swap_terminal_engine(engine);
     let mut final_tmux_chunk = b"tmux;".to_vec();
     final_tmux_chunk.extend_from_slice(&inner_iterm_bytes[split_byte_index..]);
@@ -2934,13 +2946,15 @@ fn nested_passthrough_wrappers_survive_an_engine_swap() {
         .get_graphics_transport_state()
         .expect("the nested wrappers have transport state");
     assert!(graphics_transport_state.is_tmux_continuation);
-    assert!(graphics_transport_state.tmux_inner_transport.is_some());
-    assert!(graphics_transport_state
-        .tmux_inner_transport
-        .as_ref()
-        .expect("the tmux parser")
-        .screen_inner_transport
-        .is_some());
+    assert_eq!(
+        graphics_transport_state
+            .tmux_inner_transport
+            .and_then(|tmux_inner_transport| tmux_inner_transport.screen_inner_transport),
+        Some(Box::new(GraphicsTransportState {
+            carry_bytes: inner_iterm_bytes[..split_byte_index].to_vec(),
+            ..GraphicsTransportState::default()
+        }))
+    );
     let mut resumed_terminal_engine = swap_terminal_engine(engine);
     let _ = resumed_terminal_engine.process_pty_output(&final_nested_chunk);
 

@@ -487,7 +487,15 @@ fn a_block_nested_exactly_to_the_limit_still_parses() {
         "}".repeat(MAX_BLOCK_DEPTH)
     );
 
-    assert!(parse_kdl(Path::new("koshi.kdl"), &boundary_depth_config_text).is_ok());
+    let parsed_document = parse_kdl(Path::new("koshi.kdl"), &boundary_depth_config_text)
+        .expect("a block at the depth limit parses");
+    let mut block_depth = 0;
+    let mut current_document = &parsed_document;
+    while let Some(child_document) = current_document.nodes().first().and_then(KdlNode::children) {
+        block_depth += 1;
+        current_document = child_document;
+    }
+    assert_eq!(block_depth, MAX_BLOCK_DEPTH);
 }
 
 #[test]
@@ -504,6 +512,8 @@ fn braces_inside_comments_and_strings_open_no_level() {
         format!("key #\"{opening_brace_sequence}\"#"),
         format!("key ##\"{opening_brace_sequence}\"#\"##"),
         format!("key #true // {opening_brace_sequence}"),
+        format!("key \"\"\"\nsay \"{opening_brace_sequence}\n\"\"\""),
+        format!("key #\"\"\"\nsay \"#{opening_brace_sequence}\n\"\"\"#"),
     ] {
         assert_eq!(
             find_first_brace_past_depth_limit(&brace_context_kdl_text),
@@ -511,6 +521,34 @@ fn braces_inside_comments_and_strings_open_no_level() {
             "kdl text: {brace_context_kdl_text:?}"
         );
     }
+}
+
+#[test]
+fn a_quote_inside_a_multi_line_string_leaves_every_brace_after_it_counted() {
+    let multi_line_string_text = "x \"\"\"\nsay \"hi\n\"\"\"\n";
+    let deeply_nested_kdl_text = format!(
+        "{multi_line_string_text}{}{}",
+        "a {".repeat(MAX_BLOCK_DEPTH + 1),
+        "}".repeat(MAX_BLOCK_DEPTH + 1)
+    );
+    assert_eq!(
+        find_first_brace_past_depth_limit(&deeply_nested_kdl_text),
+        Some(multi_line_string_text.len() + MAX_BLOCK_DEPTH * 3 + 2)
+    );
+}
+
+#[test]
+fn braces_inside_a_multi_line_string_parse_as_text() {
+    let multi_line_string_kdl_text = format!(
+        "key \"\"\"\nsay \"{}\n\"\"\"\n",
+        "{".repeat(MAX_BLOCK_DEPTH + 1)
+    );
+    let config_document = parse_kdl(Path::new("koshi.kdl"), &multi_line_string_kdl_text)
+        .expect("a multi-line string holding braces parses");
+    assert_eq!(
+        config_document.nodes()[0].entries()[0].value().as_string(),
+        Some(format!("say \"{}", "{".repeat(MAX_BLOCK_DEPTH + 1)).as_str())
+    );
 }
 
 #[test]
@@ -532,6 +570,15 @@ fn find_string_end_offset_stops_at_the_closing_quote() {
     assert_eq!(find_string_end_offset(b"#true", 0), 1);
     assert_eq!(find_string_end_offset(b"\"never closed", 0), 13);
     assert_eq!(find_string_end_offset(b"#\"never closed", 0), 14);
+    assert_eq!(
+        find_string_end_offset(b"\"\"\"\na \" b\n\"\"\" rest", 0),
+        13
+    );
+    assert_eq!(
+        find_string_end_offset(b"#\"\"\"\na \"# b\n\"\"\"# rest", 0),
+        16
+    );
+    assert_eq!(find_string_end_offset(b"\"\" rest", 0), 2);
 }
 
 #[test]

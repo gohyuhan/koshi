@@ -12,16 +12,16 @@ use std::path::Path;
 use kdl::{KdlDiagnostic, KdlDocument, KdlError, KdlNode, KdlValue};
 use miette::SourceSpan;
 
-use crate::error::ConfigParseDiagnostic;
+use crate::error::{
+    build_validation_error, validate_config_schema_version, ConfigError, ConfigParseDiagnostic,
+};
 
 #[cfg(test)]
 mod tests;
 
-/// The deepest `{ … }` nesting [`parse_kdl`] reads.
-///
-/// The KDL parser recurses once per level and uses about 34 KiB of stack for
-/// each, so 24 levels fit inside a 1 MiB thread stack. Koshi's own files nest
-/// at most three levels deep.
+/// The deepest `{ … }` nesting [`parse_kdl`] reads. Text that opens level 25
+/// is refused before the `kdl` parser reads it. Koshi's own files nest at most
+/// three levels deep.
 pub(crate) const MAX_BLOCK_DEPTH: usize = 24;
 
 /// The byte offset in `source_text` of the `{` that opens level
@@ -83,12 +83,15 @@ fn find_first_brace_past_depth_limit(source_text: &str) -> Option<usize> {
 /// The byte offset just past the string that starts at `start_byte_index`, where
 /// `source_bytes[start_byte_index]` is `"` or `#`.
 ///
-/// `#` runs that no `"` follows — `#true`, `#null` — are not strings, and the
-/// answer is `start_byte_index + 1`. A string that never closes ends at
-/// `source_bytes.len()`.
+/// A string opens with `"` or `"""`, after any number of `#`. It closes at the
+/// same quote run followed by the same `#` count. A `\` skips the next byte in
+/// a string with no `#`. `#` runs that no `"` follows — `#true`, `#null` — are
+/// not strings, and the answer is `start_byte_index + 1`. A string that never
+/// closes ends at `source_bytes.len()`.
 ///
 /// - `"a\"b" rest` from offset 0 → 6, the offset of the space
 /// - `##"a"#b"## rest` from offset 0 → 10
+/// - `"""`, a newline, `a " b`, a newline, `""" rest` from offset 0 → 13
 /// - `#true` from offset 0 → 1
 fn find_string_end_offset(source_bytes: &[u8], start_byte_index: usize) -> usize {
     let mut byte_index = start_byte_index;
@@ -99,27 +102,24 @@ fn find_string_end_offset(source_bytes: &[u8], start_byte_index: usize) -> usize
     if source_bytes.get(byte_index) != Some(&b'"') {
         return start_byte_index + 1;
     }
-    byte_index += 1;
-    if hash_character_count == 0 {
-        while byte_index < source_bytes.len() {
-            match source_bytes[byte_index] {
-                b'\\' => byte_index += 2,
-                b'"' => return byte_index + 1,
-                _ => byte_index += 1,
-            }
-        }
-        return source_bytes.len();
-    }
+    let quote_character_count = if source_bytes[byte_index..].starts_with(b"\"\"\"") {
+        3
+    } else {
+        1
+    };
+    byte_index += quote_character_count;
     while byte_index < source_bytes.len() {
-        if source_bytes[byte_index] == b'"'
-            && source_bytes[byte_index + 1..]
-                .iter()
-                .take(hash_character_count)
-                .all(|source_byte| *source_byte == b'#')
-        {
-            let string_end_offset = byte_index + 1 + hash_character_count;
-            if string_end_offset <= source_bytes.len() {
-                return string_end_offset;
+        if hash_character_count == 0 && source_bytes[byte_index] == b'\\' {
+            byte_index += 2;
+            continue;
+        }
+        let delimiter_end_offset = byte_index + quote_character_count + hash_character_count;
+        if let Some(delimiter_bytes) = source_bytes.get(byte_index..delimiter_end_offset) {
+            let (quote_bytes, hash_bytes) = delimiter_bytes.split_at(quote_character_count);
+            if quote_bytes.iter().all(|source_byte| *source_byte == b'"')
+                && hash_bytes.iter().all(|source_byte| *source_byte == b'#')
+            {
+                return delimiter_end_offset;
             }
         }
         byte_index += 1;
@@ -134,13 +134,13 @@ fn build_nested_depth_diagnostic(
     config_source_text: &str,
     depth_limit_byte_offset: usize,
 ) -> ConfigParseDiagnostic {
-    let config_source_text_arc = std::sync::Arc::new(config_source_text.to_string());
+    let shared_config_source_text = std::sync::Arc::new(config_source_text.to_string());
     ConfigParseDiagnostic::from_kdl_error(
         config_path,
         KdlError {
-            input: config_source_text_arc.clone(),
+            input: shared_config_source_text.clone(),
             diagnostics: vec![KdlDiagnostic {
-                input: config_source_text_arc,
+                input: shared_config_source_text,
                 span: (depth_limit_byte_offset, 1).into(),
                 message: Some(format!(
                     "blocks nest more than {MAX_BLOCK_DEPTH} levels deep"
@@ -268,9 +268,8 @@ pub(crate) fn parse_u32_kdl_value(field_node: &KdlNode) -> Result<u32, String> {
 }
 
 /// Reads the schema number a `version` node declares. Every config file that
-/// carries a `version` node reads it through this function, so one mistake
-/// reads the same way in `koshi.kdl`, a theme, `keybinding.kdl`, a profile,
-/// and migration.
+/// carries a `version` node reads it through this function: `koshi.kdl`, a
+/// theme, `keybinding.kdl`, a profile, and migration.
 ///
 /// `version 3` gives `Ok(3)`.
 ///
@@ -292,31 +291,60 @@ pub(crate) fn parse_version_argument(
     if version_node.children().is_some() {
         return Err((version_node.span(), "`version` takes no children"));
     }
-    let [version_argument] = version_node.entries() else {
-        return Err((
-            version_node.span(),
-            "`version` takes exactly one integer argument",
-        ));
+    let version_argument = match version_node.entries() {
+        [version_argument] if version_argument.name().is_none() => version_argument,
+        _ => {
+            return Err((
+                version_node.span(),
+                "`version` takes exactly one integer argument",
+            ))
+        }
     };
-    if version_argument.name().is_some() {
-        return Err((
-            version_node.span(),
-            "`version` takes exactly one integer argument",
-        ));
-    }
-    let schema_version_error_message = "`version` must be an integer from 1 to 4294967295";
-    let schema_version = version_argument
+    version_argument
         .value()
         .as_integer()
-        .ok_or((version_argument.span(), schema_version_error_message))
-        .and_then(|schema_version_value| {
-            u32::try_from(schema_version_value)
-                .map_err(|_| (version_argument.span(), schema_version_error_message))
-        })?;
-    Ok(schema_version)
+        .and_then(|schema_version_value| u32::try_from(schema_version_value).ok())
+        .ok_or((
+            version_argument.span(),
+            "`version` must be an integer from 1 to 4294967295",
+        ))
 }
 
-/// Stores a parsed field value in `parsed_field_value`. On `Err`, leaves the
+/// The first problem in `version_node`, with the span a caret points at, or
+/// `None` when the node declares a supported version.
+///
+/// Reads the node with [`parse_version_argument`], which gives its own span
+/// and reason, then checks the number with [`validate_config_schema_version`]:
+/// `version 0` and a version newer than this build give the whole node and the
+/// [`ConfigVersionDiagnostic`] message.
+///
+/// [`ConfigVersionDiagnostic`]: crate::error::ConfigVersionDiagnostic
+pub(crate) fn find_version_node_problem(version_node: &KdlNode) -> Option<(SourceSpan, String)> {
+    match parse_version_argument(version_node) {
+        Ok(declared_version) => validate_config_schema_version(declared_version)
+            .err()
+            .map(|version_diagnostic| (version_node.span(), version_diagnostic.to_string())),
+        Err((version_error_span, version_error_detail)) => {
+            Some((version_error_span, version_error_detail.to_string()))
+        }
+    }
+}
+
+/// Reads `version_node` with [`find_version_node_problem`].
+///
+/// # Errors
+/// Returns [`ConfigError::Validation`] with key `version` and the reason
+/// [`find_version_node_problem`] gives.
+pub(crate) fn validate_version_node(version_node: &KdlNode) -> Result<(), ConfigError> {
+    match find_version_node_problem(version_node) {
+        Some((_, version_error_detail)) => {
+            Err(build_validation_error("version", &version_error_detail))
+        }
+        None => Ok(()),
+    }
+}
+
+/// Stores a parsed field value in `field_value_slot`. On `Err`, leaves the
 /// field value untouched and pushes one warning naming the field and reason.
 ///
 /// `section_name` is the enclosing block (`pane`), `field_name` the field node's

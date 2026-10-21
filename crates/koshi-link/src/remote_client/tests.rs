@@ -986,13 +986,20 @@ fn read_hidden_terminal_line_replaces_bytes_that_are_not_utf_8() {
 /// How long a lock test waits before it reads the lock as held: 50 ms.
 const TEST_LOCK_WAIT_DURATION: Duration = Duration::from_millis(50);
 
+/// The detail a lock test expects when the lock is held at the deadline.
+const TEST_HELD_LOCK_DETAIL: &str = "another test holds the lock";
+
 #[test]
 fn a_lock_taken_where_nothing_exists_makes_the_file_and_the_directory() {
     let test_directory = tempfile::tempdir().expect("a temp directory");
     let lock_file_path = test_directory.path().join("remote").join("servers.lock");
 
-    let held_lock_file = acquire_store_lock(&lock_file_path, TEST_LOCK_WAIT_DURATION)
-        .expect("nothing else holds it");
+    let held_lock_file = acquire_store_lock(
+        &lock_file_path,
+        TEST_LOCK_WAIT_DURATION,
+        TEST_HELD_LOCK_DETAIL,
+    )
+    .expect("nothing else holds it");
 
     assert!(
         lock_file_path.is_file(),
@@ -1011,8 +1018,12 @@ fn a_lock_and_the_directory_holding_it_are_readable_by_their_owner_alone() {
     let lock_directory_path = test_directory.path().join("remote");
     let lock_file_path = lock_directory_path.join("servers.lock");
 
-    let held_lock_file = acquire_store_lock(&lock_file_path, TEST_LOCK_WAIT_DURATION)
-        .expect("nothing else holds it");
+    let held_lock_file = acquire_store_lock(
+        &lock_file_path,
+        TEST_LOCK_WAIT_DURATION,
+        TEST_HELD_LOCK_DETAIL,
+    )
+    .expect("nothing else holds it");
 
     let get_file_mode = |file_path: &std::path::Path| {
         file_path
@@ -1040,14 +1051,21 @@ fn a_lock_and_the_directory_holding_it_are_readable_by_their_owner_alone() {
 fn a_lock_another_holder_keeps_is_refused_after_the_wait() {
     let test_directory = tempfile::tempdir().expect("a temp directory");
     let lock_file_path = test_directory.path().join("servers.lock");
-    let held_lock_file = acquire_store_lock(&lock_file_path, TEST_LOCK_WAIT_DURATION)
-        .expect("nothing else holds it");
+    let held_lock_file = acquire_store_lock(
+        &lock_file_path,
+        TEST_LOCK_WAIT_DURATION,
+        TEST_HELD_LOCK_DETAIL,
+    )
+    .expect("nothing else holds it");
 
     assert_eq!(
-        acquire_store_lock(&lock_file_path, TEST_LOCK_WAIT_DURATION)
-            .expect_err("the first holder has it")
-            .to_string(),
-        "IPC unavailable: another koshi is changing the saved servers; try again"
+        acquire_store_lock(
+            &lock_file_path,
+            TEST_LOCK_WAIT_DURATION,
+            TEST_HELD_LOCK_DETAIL
+        )
+        .expect_err("the first holder has it"),
+        TEST_HELD_LOCK_DETAIL
     );
     drop(held_lock_file);
 }
@@ -1057,14 +1075,13 @@ fn a_lock_another_holder_keeps_is_refused_after_the_wait() {
 fn a_lock_another_holder_keeps_is_refused_with_no_wait_at_all() {
     let test_directory = tempfile::tempdir().expect("a temp directory");
     let lock_file_path = test_directory.path().join("servers.lock");
-    let held_lock_file =
-        acquire_store_lock(&lock_file_path, Duration::ZERO).expect("nothing else holds it");
+    let held_lock_file = acquire_store_lock(&lock_file_path, Duration::ZERO, TEST_HELD_LOCK_DETAIL)
+        .expect("nothing else holds it");
 
     assert_eq!(
-        acquire_store_lock(&lock_file_path, Duration::ZERO)
-            .expect_err("the first holder has it")
-            .to_string(),
-        "IPC unavailable: another koshi is changing the saved servers; try again"
+        acquire_store_lock(&lock_file_path, Duration::ZERO, TEST_HELD_LOCK_DETAIL)
+            .expect_err("the first holder has it"),
+        TEST_HELD_LOCK_DETAIL
     );
     drop(held_lock_file);
 }
@@ -1080,17 +1097,15 @@ fn a_lock_whose_directory_cannot_be_made_names_that_directory() {
     let create_directory_error =
         std::fs::create_dir_all(&blocking_file_path).expect_err("a file is in the way");
 
-    let refusal = acquire_store_lock(
+    let refusal_detail = acquire_store_lock(
         &blocking_file_path.join("servers.lock"),
         TEST_LOCK_WAIT_DURATION,
+        TEST_HELD_LOCK_DETAIL,
     )
     .expect_err("a file is in the way");
 
-    let CliError::IpcUnavailable { detail } = refusal else {
-        panic!("a lock that cannot be taken is a transport failure");
-    };
     assert_eq!(
-        detail,
+        refusal_detail,
         format!(
             "{} could not be made: {create_directory_error}",
             blocking_file_path.display()
@@ -1104,12 +1119,20 @@ fn a_lock_its_holder_released_is_taken_by_the_next_caller() {
     let test_directory = tempfile::tempdir().expect("a temp directory");
     let lock_file_path = test_directory.path().join("servers.lock");
 
-    let first_held_lock_file = acquire_store_lock(&lock_file_path, TEST_LOCK_WAIT_DURATION)
-        .expect("nothing else holds it");
+    let first_held_lock_file = acquire_store_lock(
+        &lock_file_path,
+        TEST_LOCK_WAIT_DURATION,
+        TEST_HELD_LOCK_DETAIL,
+    )
+    .expect("nothing else holds it");
     drop(first_held_lock_file);
 
-    let second_held_lock_file = acquire_store_lock(&lock_file_path, TEST_LOCK_WAIT_DURATION)
-        .expect("the first holder let it go");
+    let second_held_lock_file = acquire_store_lock(
+        &lock_file_path,
+        TEST_LOCK_WAIT_DURATION,
+        TEST_HELD_LOCK_DETAIL,
+    )
+    .expect("the first holder let it go");
     drop(second_held_lock_file);
 }
 
@@ -1167,10 +1190,10 @@ fn a_refusal_longer_than_the_cap_is_cut_to_it() {
 
 #[test]
 fn a_bare_ipv6_literal_is_not_an_address() {
-    // The host before the last colon of `fe80::1` still holds a colon: only
+    // The host before the last colon of `2001:db8::1` still holds a colon: only
     // the bracketed form is an IPv6 address shape.
     assert!(!is_server_address("::1"));
-    assert!(!is_server_address("fe80::1"));
+    assert!(!is_server_address("2001:db8::1"));
     assert!(!is_server_address("desk.local:+7654"), "a port is digits");
 }
 
@@ -1478,4 +1501,23 @@ fn a_restart_window_that_has_passed_hands_back_the_last_dials_answer() {
         "IPC unavailable: connection refused"
     );
     assert_eq!(dial_count.get(), 2);
+}
+
+#[test]
+fn a_session_refusal_while_restarting_is_a_restarting_dial_and_every_other_refusal_is_refused() {
+    let restarting_dial = DialError::from_session_refusal(CliError::SessionRestarting {
+        detail: "the session is restarting; ask again in a moment".to_string(),
+    });
+    let refused_dial = DialError::from_session_refusal(CliError::IpcUnavailable {
+        detail: "the token presented does not match this Koshi's".to_string(),
+    });
+
+    let DialError::Restarting(CliError::SessionRestarting { detail }) = restarting_dial else {
+        panic!("expected a restarting dial, got {restarting_dial:?}");
+    };
+    assert_eq!(detail, "the session is restarting; ask again in a moment");
+    let DialError::Refused(CliError::IpcUnavailable { detail }) = refused_dial else {
+        panic!("expected a refused dial, got {refused_dial:?}");
+    };
+    assert_eq!(detail, "the token presented does not match this Koshi's");
 }

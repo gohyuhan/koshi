@@ -4,8 +4,16 @@ use super::*;
 use crate::engine::TerminalEngine;
 use crate::graphics::{DecodedImage, ImageDimension, ImageDisplay};
 use crate::grid::state::RowMetadata;
+use crate::state::tests::process_terminal_bytes;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use koshi_core::process::PtySize;
+
+/// The heap bytes `cell` spends on native image fragments: `0` for a cell
+/// with no image data.
+fn compute_cell_fragment_storage_bytes(cell: &Cell) -> usize {
+    cell.get_image_cell_extra()
+        .map_or(0, CellExtra::compute_image_fragment_storage_bytes)
+}
 
 fn build_terminal_state() -> TerminalState {
     let mut terminal_state = TerminalState::from_pty_size(PtySize {
@@ -46,11 +54,6 @@ fn build_image_record(
         },
         anchor,
     }
-}
-
-fn apply_terminal_text(terminal_state: &mut TerminalState, terminal_text: &str) {
-    vte::Parser::<{ crate::engine::OSC_BUFFER_BYTE_CAPACITY }>::new_with_size()
-        .advance(terminal_state, terminal_text.as_bytes());
 }
 
 fn build_iterm_image_command(requested_width_text: &str, requested_height_text: &str) -> Vec<u8> {
@@ -150,7 +153,7 @@ fn native_text_and_erases_remove_only_the_covered_image_portions() {
                 Ok(())
             );
             assert_eq!(terminal_state.list_image_placements_for_view(0).len(), 1);
-            apply_terminal_text(&mut terminal_state, terminal_text_command);
+            process_terminal_bytes(&mut terminal_state, terminal_text_command.as_bytes());
             assert_eq!(
                 list_image_portions(&terminal_state, 0),
                 [
@@ -204,7 +207,7 @@ fn native_wide_text_erases_both_cells_and_line_erase_keeps_other_rows() {
             terminal_state.apply_image_record(&build_image_record(protocol, 3, 2, (0, 0))),
             Ok(())
         );
-        apply_terminal_text(&mut terminal_state, "\x1b[1;2H界");
+        process_terminal_bytes(&mut terminal_state, "\x1b[1;2H界".as_bytes());
         assert_eq!(
             list_image_portions(&terminal_state, 0),
             [
@@ -214,7 +217,7 @@ fn native_wide_text_erases_both_cells_and_line_erase_keeps_other_rows() {
                 ((1, 2), (1, 2), [1, 2, 100, 255])
             ]
         );
-        apply_terminal_text(&mut terminal_state, "\x1b[2K");
+        process_terminal_bytes(&mut terminal_state, b"\x1b[2K");
         assert_eq!(
             list_image_portions(&terminal_state, 0),
             [
@@ -234,7 +237,7 @@ fn native_insert_delete_cells_move_the_source_coordinates_with_cells() {
             terminal_state.apply_image_record(&build_image_record(protocol, 3, 1, (0, 0))),
             Ok(())
         );
-        apply_terminal_text(&mut terminal_state, "\x1b[1;2H\x1b[@");
+        process_terminal_bytes(&mut terminal_state, b"\x1b[1;2H\x1b[@");
         assert_eq!(
             list_image_portions(&terminal_state, 0),
             [
@@ -243,7 +246,7 @@ fn native_insert_delete_cells_move_the_source_coordinates_with_cells() {
                 ((0, 3), (0, 2), [0, 2, 100, 255])
             ]
         );
-        apply_terminal_text(&mut terminal_state, "\x1b[P");
+        process_terminal_bytes(&mut terminal_state, b"\x1b[P");
         assert_eq!(
             list_image_portions(&terminal_state, 0),
             [
@@ -253,6 +256,43 @@ fn native_insert_delete_cells_move_the_source_coordinates_with_cells() {
             ]
         );
     }
+}
+
+#[test]
+fn inserted_and_deleted_cells_drop_only_the_fragments_that_leave_the_row() {
+    let mut terminal_state = build_terminal_state();
+    assert_eq!(
+        terminal_state.apply_image_record(&build_image_record(
+            GraphicsProtocol::Sixel,
+            3,
+            1,
+            (0, 0)
+        )),
+        Ok(())
+    );
+
+    // ICH 4 at column 0 of 6 pushes the image cell at column 2 past the
+    // right margin.
+    process_terminal_bytes(&mut terminal_state, b"\x1b[1;1H\x1b[4@");
+    assert_eq!(
+        terminal_state.native_fragment_count_by_image_source_id,
+        HashMap::from([(1, 2)])
+    );
+
+    // DCH 1 at column 0 deletes a blank cell.
+    process_terminal_bytes(&mut terminal_state, b"\x1b[P");
+    assert_eq!(
+        terminal_state.native_fragment_count_by_image_source_id,
+        HashMap::from([(1, 2)])
+    );
+
+    // DCH 2 at column 3 deletes both remaining image cells.
+    process_terminal_bytes(&mut terminal_state, b"\x1b[1;4H\x1b[2P");
+    assert_eq!(
+        terminal_state.native_fragment_count_by_image_source_id,
+        HashMap::new()
+    );
+    assert_eq!(terminal_state.native_images, []);
 }
 
 #[test]
@@ -268,7 +308,7 @@ fn native_partial_line_operations_move_source_coordinates_with_cells() {
             HashMap::from([(1, 1)])
         );
 
-        apply_terminal_text(&mut terminal_state, "\x1b[?69h\x1b[4;5s\x1b[2;1H\x1b[L");
+        process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[4;5s\x1b[2;1H\x1b[L");
 
         assert_eq!(
             list_image_portions(&terminal_state, 0),
@@ -279,7 +319,7 @@ fn native_partial_line_operations_move_source_coordinates_with_cells() {
             HashMap::from([(1, 1)])
         );
 
-        apply_terminal_text(&mut terminal_state, "\x1b[M");
+        process_terminal_bytes(&mut terminal_state, b"\x1b[M");
 
         assert_eq!(
             list_image_portions(&terminal_state, 0),
@@ -383,6 +423,38 @@ fn tall_sixel_scrolling_keeps_its_latest_rows_and_retains_history() {
             ((3, 0), (3, 0))
         ]
     );
+}
+
+#[test]
+fn erasing_saved_lines_that_hold_a_whole_sixel_frees_its_source() {
+    let mut terminal_state = build_terminal_state();
+    let image_record = build_image_record(GraphicsProtocol::Sixel, 1, 10, (0, 0));
+    assert_eq!(
+        terminal_state.apply_image_record_with_sixel_options(
+            &image_record,
+            Some(true),
+            false,
+            None,
+        ),
+        Ok(())
+    );
+    process_terminal_bytes(&mut terminal_state, b"\n\n\n\n");
+    assert_eq!(terminal_state.scrollback.get_retained_line_count(), 10);
+    assert_eq!(
+        terminal_state.native_fragment_count_by_image_source_id,
+        HashMap::from([(1, 10)])
+    );
+    assert_eq!(terminal_state.native_images.len(), 1);
+
+    process_terminal_bytes(&mut terminal_state, b"\x1b[3J");
+
+    assert_eq!(terminal_state.scrollback.get_retained_line_count(), 0);
+    assert_eq!(
+        terminal_state.native_fragment_count_by_image_source_id,
+        HashMap::new()
+    );
+    assert_eq!(terminal_state.native_images, []);
+    assert_eq!(list_image_portions(&terminal_state, 0), []);
 }
 
 #[test]
@@ -555,9 +627,9 @@ fn native_holes_and_screen_ownership_survive_restore() {
             terminal_state.apply_image_record(&build_image_record(protocol, 3, 1, (0, 0))),
             Ok(())
         );
-        apply_terminal_text(&mut terminal_state, "\x1b[1;2H\x1b[X");
+        process_terminal_bytes(&mut terminal_state, b"\x1b[1;2H\x1b[X");
         let primary_image_portions = list_image_portions(&terminal_state, 0);
-        apply_terminal_text(&mut terminal_state, "\x1b[?1049h");
+        process_terminal_bytes(&mut terminal_state, b"\x1b[?1049h");
         assert_eq!(list_image_portions(&terminal_state, 0), []);
         assert_eq!(
             terminal_state.apply_image_record(&build_image_record(protocol, 1, 1, (1, 1))),
@@ -570,7 +642,7 @@ fn native_holes_and_screen_ownership_survive_restore() {
             list_image_portions(&restored_terminal_state, 0),
             alternate_image_portions
         );
-        apply_terminal_text(&mut restored_terminal_state, "\x1b[?1049l");
+        process_terminal_bytes(&mut restored_terminal_state, b"\x1b[?1049l");
         assert_eq!(
             list_image_portions(&restored_terminal_state, 0),
             primary_image_portions
@@ -599,8 +671,8 @@ fn dangling_native_source_reference_is_rejected_on_restore() {
         Ok(())
     );
     let mut serialized_terminal_state = serde_json::to_value(&terminal_state).unwrap();
-    serialized_terminal_state["primary"]["rows"][0][0]["combining"]["image_fragments"][0]
-        ["image_source_id"] = serde_json::json!(u64::MAX);
+    serialized_terminal_state["primary"]["rows"][0]["image_cells"][0]["cell_extra"]
+        ["image_fragments"][0]["image_source_id"] = serde_json::json!(u64::MAX);
     assert_eq!(
         serde_json::from_value::<TerminalState>(serialized_terminal_state)
             .unwrap_err()
@@ -640,7 +712,7 @@ fn sixel_overlays_keep_both_sources_and_text_clears_both_image_portions() {
             ((0, 1), (0, 1), [255, 0, 0, 255])
         ]
     );
-    apply_terminal_text(&mut terminal_state, "\x1b[1;2Hx");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[1;2Hx");
     assert_eq!(
         list_image_portions(&terminal_state, 0),
         [
@@ -699,18 +771,21 @@ fn native_fragment_storage_counts_each_persistent_allocation() {
         source_column_index: 0,
     };
 
-    assert_eq!(cell.compute_image_fragment_storage_bytes(), 0);
+    assert_eq!(compute_cell_fragment_storage_bytes(&cell), 0);
     cell.set_image_fragment(first_image_fragment, true);
-    let one_fragment_storage_byte_count = cell.compute_image_fragment_storage_bytes();
-    assert!(one_fragment_storage_byte_count > 0);
+    let one_fragment_storage_byte_count = compute_cell_fragment_storage_bytes(&cell);
+    assert_eq!(
+        one_fragment_storage_byte_count,
+        std::mem::size_of::<CellExtra>()
+    );
     cell.set_image_fragment(second_image_fragment, true);
-    let two_fragment_storage_byte_count = cell.compute_image_fragment_storage_bytes();
+    let two_fragment_storage_byte_count = compute_cell_fragment_storage_bytes(&cell);
     assert_eq!(
         two_fragment_storage_byte_count - one_fragment_storage_byte_count,
         cell.get_image_fragment_capacity() * image_fragment_size_bytes
     );
     cell.set_image_fragment(third_image_fragment, true);
-    let three_fragment_storage_byte_count = cell.compute_image_fragment_storage_bytes();
+    let three_fragment_storage_byte_count = compute_cell_fragment_storage_bytes(&cell);
     assert_eq!(
         three_fragment_storage_byte_count - one_fragment_storage_byte_count,
         cell.get_image_fragment_capacity() * image_fragment_size_bytes
@@ -724,7 +799,7 @@ fn native_fragment_storage_counts_each_persistent_allocation() {
         true,
     );
     assert_eq!(
-        cell.compute_image_fragment_storage_bytes(),
+        compute_cell_fragment_storage_bytes(&cell),
         three_fragment_storage_byte_count
     );
 }
@@ -756,10 +831,10 @@ fn native_fragment_overlays_reuse_capacity_and_keep_exact_order() {
     );
     let mut single_fragment_cell = Cell::build_blank();
     single_fragment_cell.set_image_fragment(cell.get_image_fragments()[0], true);
-    let cell_image_fragment_storage_byte_count = cell.compute_image_fragment_storage_bytes();
+    let cell_image_fragment_storage_byte_count = compute_cell_fragment_storage_bytes(&cell);
     assert_eq!(
         cell_image_fragment_storage_byte_count,
-        single_fragment_cell.compute_image_fragment_storage_bytes()
+        compute_cell_fragment_storage_bytes(&single_fragment_cell)
             + cell.get_image_fragment_capacity() * std::mem::size_of::<ImageCellFragment>()
     );
 
@@ -771,8 +846,8 @@ fn native_fragment_overlays_reuse_capacity_and_keep_exact_order() {
         cell.get_image_fragments()
     );
     assert_eq!(
-        restored_cell.compute_image_fragment_storage_bytes(),
-        single_fragment_cell.compute_image_fragment_storage_bytes()
+        compute_cell_fragment_storage_bytes(&restored_cell),
+        compute_cell_fragment_storage_bytes(&single_fragment_cell)
             + restored_cell.get_image_fragment_capacity()
                 * std::mem::size_of::<ImageCellFragment>()
     );
@@ -870,7 +945,7 @@ fn erasing_the_last_native_fragments_removes_the_canonical_source() {
         HashMap::from([(1, 2)])
     );
 
-    apply_terminal_text(&mut terminal_state, "\x1b[1;1Hxx");
+    process_terminal_bytes(&mut terminal_state, b"\x1b[1;1Hxx");
 
     assert_eq!(terminal_state.list_image_placements_for_view(0), []);
     assert_eq!(terminal_state.native_images, []);
@@ -898,7 +973,7 @@ fn scrolling_with_one_image_in_long_history_does_not_rebuild_coverage() {
     for _ in 0..5_000 {
         terminal_state
             .scrollback
-            .push_row(&blank_row, RowMetadata::default());
+            .push_row_cells(&blank_row, RowMetadata::default());
     }
     assert_eq!(
         terminal_state.apply_image_record(&build_image_record(
@@ -909,11 +984,11 @@ fn scrolling_with_one_image_in_long_history_does_not_rebuild_coverage() {
         )),
         Ok(())
     );
-    apply_terminal_text(&mut terminal_state, "\n");
+    process_terminal_bytes(&mut terminal_state, b"\n");
     for _ in 0..4_998 {
         terminal_state
             .scrollback
-            .push_row(&blank_row, RowMetadata::default());
+            .push_row_cells(&blank_row, RowMetadata::default());
     }
     assert_eq!(
         terminal_state.native_fragment_count_by_image_source_id,
@@ -922,7 +997,7 @@ fn scrolling_with_one_image_in_long_history_does_not_rebuild_coverage() {
 
     REBUILD_CELL_VISITS.with(|visits| visits.set(0));
     for _ in 0..128 {
-        apply_terminal_text(&mut terminal_state, "\n");
+        process_terminal_bytes(&mut terminal_state, b"\n");
     }
 
     assert_eq!(REBUILD_CELL_VISITS.with(std::cell::Cell::get), 0);
@@ -933,7 +1008,7 @@ fn scrolling_with_one_image_in_long_history_does_not_rebuild_coverage() {
     assert_eq!(terminal_state.native_images.len(), 1);
 
     for _ in 0..4_874 {
-        apply_terminal_text(&mut terminal_state, "\n");
+        process_terminal_bytes(&mut terminal_state, b"\n");
     }
     assert_eq!(REBUILD_CELL_VISITS.with(std::cell::Cell::get), 0);
     assert_eq!(

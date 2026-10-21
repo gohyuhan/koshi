@@ -27,6 +27,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use kdl::{KdlDocument, KdlNode};
 use koshi_core::action::ActionReference;
@@ -34,11 +35,11 @@ use koshi_core::key::KeySequence;
 use miette::{Diagnostic, NamedSource, SourceSpan};
 use thiserror::Error;
 
-use crate::error::{validate_config_schema_version, ConfigParseDiagnostic};
+use crate::error::ConfigParseDiagnostic;
 use crate::key::{parse_chord, parse_leader, Leader};
 use crate::key_sequence::parse_sequence;
 use crate::layer::PartialKeybindingsConfig;
-use crate::parser::{format_unknown_key, parse_kdl, parse_version_argument};
+use crate::parser::{find_version_node_problem, format_unknown_key, parse_kdl};
 use crate::types::{BoundAction, ModeBindings, ModeName};
 
 #[cfg(test)]
@@ -74,7 +75,7 @@ pub struct KeybindingDiagnostic {
     diagnostic_message: String,
     /// The keybinding file text, named by its path.
     #[source_code]
-    keybinding_source: NamedSource<String>,
+    keybinding_source: NamedSource<Arc<str>>,
     /// Where in the file the problem sits.
     #[label]
     diagnostic_span: SourceSpan,
@@ -107,8 +108,10 @@ pub fn parse_keybindings(
 ) -> Result<PartialKeybindingsConfig, KeybindingParseError> {
     let keybinding_document = parse_kdl(keybinding_path, keybinding_source_text)?;
     let mut keybinding_document_walker = KeybindingDocumentWalker {
-        keybinding_path,
-        keybinding_source_text,
+        keybinding_source: NamedSource::new(
+            keybinding_path.display().to_string(),
+            Arc::from(keybinding_source_text),
+        ),
         diagnostics: Vec::new(),
     };
     let partial_keybindings_config =
@@ -125,16 +128,15 @@ pub fn parse_keybindings(
 
 /// Walks the parsed document, collecting the partial layer and every schema
 /// violation.
-struct KeybindingDocumentWalker<'a> {
-    /// Path of the file, naming diagnostic source code.
-    keybinding_path: &'a Path,
-    /// The file text, embedded in each diagnostic as its source code.
-    keybinding_source_text: &'a str,
+struct KeybindingDocumentWalker {
+    /// The file text named by its path. Every diagnostic holds a clone that
+    /// shares the one text buffer.
+    keybinding_source: NamedSource<Arc<str>>,
     /// Every schema violation found so far.
     diagnostics: Vec<KeybindingDiagnostic>,
 }
 
-impl KeybindingDocumentWalker<'_> {
+impl KeybindingDocumentWalker {
     /// Records one schema violation at `diagnostic_span`.
     fn record_diagnostic(
         &mut self,
@@ -143,10 +145,7 @@ impl KeybindingDocumentWalker<'_> {
     ) {
         self.diagnostics.push(KeybindingDiagnostic {
             diagnostic_message: diagnostic_message.into(),
-            keybinding_source: NamedSource::new(
-                self.keybinding_path.display().to_string(),
-                self.keybinding_source_text.to_string(),
-            ),
+            keybinding_source: self.keybinding_source.clone(),
             diagnostic_span,
         });
     }
@@ -228,16 +227,13 @@ impl KeybindingDocumentWalker<'_> {
         partial_keybindings_config: &mut PartialKeybindingsConfig,
     ) {
         match kdl_node.name().value() {
-            "version" => match parse_version_argument(kdl_node) {
-                Ok(schema_version) => {
-                    if let Err(version_error) = validate_config_schema_version(schema_version) {
-                        self.record_diagnostic(kdl_node.span(), version_error.to_string());
-                    }
+            "version" => {
+                if let Some((version_error_span, version_error_detail)) =
+                    find_version_node_problem(kdl_node)
+                {
+                    self.record_diagnostic(version_error_span, version_error_detail);
                 }
-                Err((diagnostic_span, diagnostic_message)) => {
-                    self.record_diagnostic(diagnostic_span, diagnostic_message)
-                }
-            },
+            }
             "chord-timeout-ms" => {
                 if let Some(integer_value) =
                     self.parse_integer_argument(kdl_node, u64::from(u32::MAX))

@@ -57,21 +57,12 @@ pub struct TabDiscovery {
     pub pane_count: usize,
 }
 
-/// Where a pane sits in its life, as reported by discovery queries.
+/// Where a pane sits in its life, as reported by discovery queries. Every
+/// listed pane runs its child: a pane leaves its session when its child exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneLifecycle {
-    /// The pane is being created; its child has not started yet.
-    Spawning,
-    /// The pane's child process is running.
+    /// The pane's child process is running. Serializes as `"Running"`.
     Running,
-    /// The pane's child exited. `exit_code` is `None` when it was signal-killed
-    /// or its status was unavailable.
-    Exited {
-        /// The child's exit code, when one was observed.
-        exit_code: Option<i32>,
-    },
-    /// The pane is shutting down.
-    Closing,
 }
 
 /// One pane, as `inspect pane` reports it and `list-panes` rows are drawn

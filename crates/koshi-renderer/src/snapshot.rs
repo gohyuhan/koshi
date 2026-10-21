@@ -7,8 +7,8 @@
 //! renderer reads the snapshot and nothing else.
 //!
 //! Everything here is a plain data package: scalar copies of the live state,
-//! plus the screen [`Grid`] behind an [`Arc`] so cloning a built snapshot
-//! shares the buffer by reference. The snapshot is built and read in the same
+//! plus each visible row as a shared [`RowSnapshot`], so cloning a built
+//! snapshot copies no cell. The snapshot is built and read in the same
 //! process; a client in another process is served the same frame as a
 //! [`Delivery::Frame`], which its connection thread turns into koshi-ipc's
 //! wire form.
@@ -43,7 +43,8 @@ use koshi_terminal::graphics::{
     ImageAction, ImageRecord, MAX_IMAGE_BYTE_COUNT, MAX_IMAGE_PIXEL_COUNT,
     MAX_IMAGE_SIDE_PIXEL_COUNT,
 };
-use koshi_terminal::grid::state::Grid;
+use koshi_terminal::grid::row_snapshot::RowSnapshot;
+use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::state::{CursorShape, ImagePlacement, ImagePlacementId};
 
 use crate::floating_pane_chrome::compute_floating_pane_content_rect;
@@ -308,7 +309,14 @@ pub enum Delivery {
     /// verbatim. This item carries none of them: it wakes that thread.
     HostWrite,
     /// The session the subscriber's client leaves this one for.
-    SwitchTo(SessionId),
+    SwitchTo {
+        /// The session the client attaches to next.
+        session_id: SessionId,
+        /// The user id whose folder of the shared directory advertises
+        /// `session_id`, or `None` for a session the client looks up by its id
+        /// alone.
+        owner_user_id: Option<u32>,
+    },
     /// A pane placement command from the subscriber's key binding, or a
     /// floating pane move from its key binding or its mouse round, was
     /// rejected.
@@ -518,7 +526,7 @@ impl<'a> FrameLayout<'a> {
 /// shows and where an event over it goes.
 ///
 /// It carries no cells, no cursor and no titles, so a viewer holding one
-/// between paints holds no pane's [`Grid`].
+/// between paints holds no pane's rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MouseFrame {
     /// The session being viewed, including its solved active tab.
@@ -815,6 +823,39 @@ pub struct PaneSnapshot {
     pub scrollback_metadata: ScrollbackMetadata,
 }
 
+impl PaneSnapshot {
+    /// A snapshot of `pane_id` that shows nothing: no title, no grid, no
+    /// images, a hidden non-blinking cursor at `(0, 0)` with no shape, mouse
+    /// tracking off, the primary screen at view row `0`, no highlight, and no
+    /// retained scrollback lines.
+    #[must_use]
+    pub fn from_empty_pane(pane_id: PaneId) -> Self {
+        Self {
+            pane_id,
+            pane_title: None,
+            cursor_snapshot: CursorSnapshot {
+                row_index: 0,
+                column_index: 0,
+                is_visible: false,
+                is_blinking: false,
+                shape: None,
+            },
+            terminal_grid_view: None,
+            image_placement_snapshots: Vec::new(),
+            is_reverse_video: false,
+            mouse_tracking: MouseTracking::Off,
+            is_alternate_scroll_enabled: false,
+            is_on_alternate_screen: false,
+            view_top_row_index: 0,
+            selection_spans: None,
+            has_selection: false,
+            scrollback_metadata: ScrollbackMetadata {
+                retained_line_count: 0,
+            },
+        }
+    }
+}
+
 /// Which cells of a pane are highlighted this frame, as a column range per
 /// visible row.
 ///
@@ -881,20 +922,59 @@ pub enum CursorStyle {
     },
 }
 
-/// The visible cells for one pane: the live screen grid, plus how far the view
-/// is scrolled back from the tail.
+/// The visible rows of one pane, top to bottom, plus how far the view is
+/// scrolled back from the tail.
 ///
-/// The grid is held behind an [`Arc`], so cloning a built [`GridView`] shares
-/// the buffer by reference. The history rows for a non-zero
-/// [`view_row_offset`](Self::view_row_offset) are supplied by the scroll feature that
-/// sets it.
+/// Each row is a shared [`RowSnapshot`], so cloning a built [`GridView`]
+/// copies no cell. A view scrolled back by `view_row_offset` lists that many
+/// history rows above the top of the live screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GridView {
-    /// The live screen buffer.
-    pub grid: Arc<Grid>,
+    /// The visible rows, top to bottom.
+    pub row_snapshots: Vec<Arc<RowSnapshot>>,
+    /// The column count of the pane. A row holding fewer cells shows nothing
+    /// past its last cell, and a row holding more shows its first
+    /// `column_count` cells.
+    pub column_count: u16,
     /// Rows scrolled up from the live tail; `0` shows the live bottom of the
     /// buffer.
     pub view_row_offset: usize,
+}
+
+impl GridView {
+    /// The view of every row of `terminal_grid`, scrolled back by
+    /// `view_row_offset`.
+    #[must_use]
+    pub fn from_grid(terminal_grid: &Grid, view_row_offset: usize) -> Self {
+        let (_, column_count) = terminal_grid.get_grid_dimensions();
+        GridView {
+            row_snapshots: terminal_grid.list_row_snapshots().collect(),
+            column_count,
+            view_row_offset,
+        }
+    }
+
+    /// The `(row_count, column_count)` the view shows.
+    #[must_use]
+    pub fn get_view_dimensions(&self) -> (u16, u16) {
+        (
+            u16::try_from(self.row_snapshots.len()).unwrap_or(u16::MAX),
+            self.column_count,
+        )
+    }
+
+    /// The cell at `row_index`/`column_index`, or `None` past the view's
+    /// rows, past its column count, or past the row's last cell.
+    #[must_use]
+    pub fn get_cell(&self, row_index: u16, column_index: u16) -> Option<&Cell> {
+        if column_index >= self.column_count {
+            return None;
+        }
+        self.row_snapshots
+            .get(usize::from(row_index))?
+            .list_row_cells()
+            .get(usize::from(column_index))
+    }
 }
 
 /// One validated terminal image placement carried in a read-only frame.

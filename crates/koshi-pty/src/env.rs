@@ -15,7 +15,7 @@ use koshi_core::process::{ShellKind, SpawnSpec};
 /// replace defaults with the same key.
 ///
 /// The returned map contains only overlay entries. The caller applies it over
-/// the inherited parent environment; on Windows, `portable-pty` matches names
+/// the inherited parent environment; on Windows, names match
 /// case-insensitively.
 pub fn build_environment_overlay(spawn_spec: &SpawnSpec) -> BTreeMap<String, String> {
     let mut environment_overlay = BTreeMap::new();

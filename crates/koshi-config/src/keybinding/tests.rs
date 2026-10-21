@@ -7,6 +7,9 @@ use std::path::Path;
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey};
 
 use super::*;
+use crate::keymap_merge::tests::{
+    build_character_chord, build_single_chord_sequence, build_two_chord_sequence,
+};
 use crate::types::SCHEMA_VERSION;
 
 /// Parses `keybinding_source_text` as the keybinding file `keybinding.kdl`. A
@@ -41,16 +44,6 @@ fn collect_keybinding_diagnostic_messages(keybinding_source_text: &str) -> Vec<S
         }
         Ok(_) => panic!("expected schema errors, file parsed"),
     }
-}
-
-/// A one-chord sequence.
-fn build_single_chord_sequence(modifier_flags: BindingModifierFlags, key: Key) -> KeySequence {
-    KeySequence::from_first_and_rest(KeyChord::from_parts(modifier_flags, key), Vec::new())
-}
-
-/// A two-chord sequence.
-fn build_two_chord_sequence(first_chord: KeyChord, second_chord: KeyChord) -> KeySequence {
-    KeySequence::from_first_and_rest(first_chord, vec![second_chord])
 }
 
 #[test]
@@ -108,17 +101,14 @@ mode "locked" {
     assert_eq!(partial_keybindings_config.maximum_chord_depth, Some(5));
     assert_eq!(
         partial_keybindings_config.leader,
-        Some(Leader::Chord(KeyChord::from_parts(
+        Some(Leader::Chord(build_character_chord(
             BindingModifierFlags::CTRL,
-            Key::Char('p')
+            'p'
         )))
     );
     assert_eq!(
         partial_keybindings_config.unlock_alternative,
-        Some(Some(KeyChord::from_parts(
-            BindingModifierFlags::ALT,
-            Key::Char('u')
-        )))
+        Some(Some(build_character_chord(BindingModifierFlags::ALT, 'u')))
     );
 
     let mode_bindings_by_name = partial_keybindings_config
@@ -129,7 +119,7 @@ mode "locked" {
     let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
     assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 2);
     let new_tab_binding = &normal_mode_bindings.bound_action_by_key_sequence
-        [&build_single_chord_sequence(BindingModifierFlags::CTRL, Key::Char('t'))];
+        [&build_single_chord_sequence(BindingModifierFlags::CTRL, 't')];
     assert_eq!(
         new_tab_binding.action_reference,
         ActionReference::from_str("core:new-tab").unwrap()
@@ -137,8 +127,8 @@ mode "locked" {
     // `<leader> w` under a chord leader is the leader chord then `w`.
     let close_pane_binding = &normal_mode_bindings.bound_action_by_key_sequence
         [&build_two_chord_sequence(
-            KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
-            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('w')),
+            build_character_chord(BindingModifierFlags::CTRL, 'p'),
+            build_character_chord(BindingModifierFlags::NONE, 'w'),
         )];
     assert_eq!(
         close_pane_binding.action_reference,
@@ -146,10 +136,10 @@ mode "locked" {
     );
     assert_eq!(
         normal_mode_bindings.removed_key_sequences,
-        [build_single_chord_sequence(
+        [KeySequence::from(KeyChord::from_parts(
             BindingModifierFlags::NONE,
             Key::Named(NamedKey::Tab)
-        )]
+        ))]
         .into()
     );
 
@@ -157,7 +147,7 @@ mode "locked" {
     assert_eq!(locked_mode_bindings.bound_action_by_key_sequence.len(), 1);
     assert_eq!(
         locked_mode_bindings.bound_action_by_key_sequence
-            [&build_single_chord_sequence(BindingModifierFlags::ALT, Key::Char('q'))]
+            [&build_single_chord_sequence(BindingModifierFlags::ALT, 'q')]
             .action_reference,
         ActionReference::from_str("core:quit").unwrap()
     );
@@ -179,8 +169,8 @@ leader "<C-p>"
         .mode_bindings_by_name
         .expect("mode present");
     let expected_key_sequence = build_two_chord_sequence(
-        KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
-        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('n')),
+        build_character_chord(BindingModifierFlags::CTRL, 'p'),
+        build_character_chord(BindingModifierFlags::NONE, 'n'),
     );
     let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
     assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 1);
@@ -208,7 +198,7 @@ mode "normal" {
     assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 1);
     assert_eq!(
         normal_mode_bindings.bound_action_by_key_sequence
-            [&build_single_chord_sequence(BindingModifierFlags::CTRL, Key::Char('t'))]
+            [&build_single_chord_sequence(BindingModifierFlags::CTRL, 't')]
             .action_reference,
         ActionReference::from_str("core:new-tab").unwrap()
     );
@@ -238,7 +228,7 @@ mode "normal" {
     assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 1);
     assert_eq!(
         normal_mode_bindings.bound_action_by_key_sequence
-            [&build_single_chord_sequence(BindingModifierFlags::CTRL, Key::Char('t'))]
+            [&build_single_chord_sequence(BindingModifierFlags::CTRL, 't')]
             .action_reference,
         ActionReference::from_str("core:new-tab").unwrap()
     );
@@ -261,8 +251,10 @@ mode "normal" {
         .mode_bindings_by_name
         .expect("mode present");
     let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
-    let tab_key_sequence =
-        build_single_chord_sequence(BindingModifierFlags::NONE, Key::Named(NamedKey::Tab));
+    let tab_key_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::NONE,
+        Key::Named(NamedKey::Tab),
+    ));
     assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 1);
     assert_eq!(
         normal_mode_bindings.bound_action_by_key_sequence[&tab_key_sequence].action_reference,
@@ -293,13 +285,13 @@ mode "Normal" { bind "<C-w>" "core:close-pane" }
     );
     assert_eq!(
         mode_bindings_by_name[&ModeName::from_text("normal")].bound_action_by_key_sequence
-            [&build_single_chord_sequence(BindingModifierFlags::CTRL, Key::Char('t'))]
+            [&build_single_chord_sequence(BindingModifierFlags::CTRL, 't')]
             .action_reference,
         ActionReference::from_str("core:new-tab").unwrap()
     );
     assert_eq!(
         mode_bindings_by_name[&ModeName::from_text("Normal")].bound_action_by_key_sequence
-            [&build_single_chord_sequence(BindingModifierFlags::CTRL, Key::Char('w'))]
+            [&build_single_chord_sequence(BindingModifierFlags::CTRL, 'w')]
             .action_reference,
         ActionReference::from_str("core:close-pane").unwrap()
     );
@@ -314,14 +306,19 @@ fn an_empty_mode_name_is_a_mode_of_its_own() {
         .mode_bindings_by_name
         .expect("mode present");
     assert_eq!(
-        mode_bindings_by_name.keys().cloned().collect::<Vec<_>>(),
-        vec![ModeName::from_text("")]
-    );
-    assert_eq!(
-        mode_bindings_by_name[&ModeName::from_text("")]
-            .bound_action_by_key_sequence
-            .len(),
-        1
+        mode_bindings_by_name,
+        BTreeMap::from([(
+            ModeName::from_text(""),
+            ModeBindings {
+                bound_action_by_key_sequence: BTreeMap::from([(
+                    build_single_chord_sequence(BindingModifierFlags::CTRL, 't'),
+                    BoundAction {
+                        action_reference: ActionReference::from_str("core:new-tab").unwrap(),
+                    },
+                )]),
+                removed_key_sequences: BTreeSet::new(),
+            },
+        )])
     );
 }
 
@@ -362,12 +359,10 @@ mode "normal" {
     assert_eq!(
         *parsed_key_sequence,
         KeySequence::from_first_and_rest(
-            KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('a')),
+            build_character_chord(BindingModifierFlags::CTRL, 'a'),
             "bcdefgh"
                 .chars()
-                .map(|character| {
-                    KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char(character))
-                })
+                .map(|character| build_character_chord(BindingModifierFlags::NONE, character))
                 .collect(),
         )
     );
@@ -376,14 +371,34 @@ mode "normal" {
 #[test]
 fn invalid_kdl_syntax_is_a_syntax_error() {
     let parse_error = parse_keybinding_text("mode \"normal\" {").expect_err("unclosed block");
+    // `KeybindingParseError::Invalid` renders as `invalid keybinding file …`.
     assert_eq!(
         parse_error.to_string(),
         "config parse error in keybinding.kdl"
     );
-    assert!(
-        matches!(parse_error, KeybindingParseError::Syntax(_)),
-        "got: {parse_error:?}"
+}
+
+#[test]
+fn every_diagnostic_of_one_file_shares_one_source_text() {
+    let keybinding_text = "version 1\nchord-timeout-ms \"x\"\nleader \"<C-\"\n";
+    let diagnostics = match parse_keybindings(Path::new("keybinding.kdl"), keybinding_text) {
+        Err(KeybindingParseError::Invalid { diagnostics, .. }) => diagnostics,
+        unexpected_parse_result => {
+            panic!("expected schema errors, got {unexpected_parse_result:?}")
+        }
+    };
+    let [first_diagnostic, second_diagnostic] = diagnostics.as_slice() else {
+        panic!("expected two diagnostics, got {diagnostics:?}");
+    };
+    assert_eq!(first_diagnostic.keybinding_source.name(), "keybinding.kdl");
+    assert_eq!(
+        &**first_diagnostic.keybinding_source.inner(),
+        keybinding_text
     );
+    assert!(Arc::ptr_eq(
+        first_diagnostic.keybinding_source.inner(),
+        second_diagnostic.keybinding_source.inner()
+    ));
 }
 
 #[test]
@@ -581,7 +596,7 @@ fn the_parse_time_chord_ceiling_is_255() {
         .iter()
         .next()
         .expect("one binding");
-    let repeated_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('a'));
+    let repeated_chord = build_character_chord(BindingModifierFlags::NONE, 'a');
     assert_eq!(
         *parsed_key_sequence,
         KeySequence::from_first_and_rest(repeated_chord, vec![repeated_chord; 254])

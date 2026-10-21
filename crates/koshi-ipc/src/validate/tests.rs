@@ -222,7 +222,9 @@ fn a_runtime_directory_this_user_owns_passes_the_owner_check() {
             .uid()
     };
 
-    assert_eq!(owner, unsafe { libc::geteuid() });
+    // SAFETY: `geteuid` takes no arguments and always succeeds.
+    let effective_user_id = unsafe { libc::geteuid() };
+    assert_eq!(owner, effective_user_id);
     validate_socket_address(&socket_address, runtime_directory).expect("validate");
 }
 

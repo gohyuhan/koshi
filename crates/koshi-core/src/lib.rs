@@ -25,6 +25,9 @@
 //! - [`text`] — bounding and filtering what a pane or a remote peer reports
 //!   about itself: titles, working directories, and names;
 //!   [`display_width`] — the columns that text takes on a terminal screen.
+//! - [`varint`] — the unsigned LEB128 integers of the row encoding and the
+//!   binary session frames; [`random`] — a random number for a choice that
+//!   needs no secrecy.
 //!
 //! [`compat`] holds the table of every versioned surface koshi carries — the
 //! wire protocols two builds speak and the files one build writes for another
@@ -47,9 +50,11 @@ pub mod log;
 pub mod mouse;
 pub mod naming;
 pub mod process;
+pub mod random;
 pub mod recent_event;
 pub mod redact;
 pub mod registry;
 pub mod resolve;
 pub mod selection;
 pub mod text;
+pub mod varint;

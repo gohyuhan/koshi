@@ -4,7 +4,7 @@
 //! Every test owns the child it signals and never touches a process it did not
 //! spawn. On Unix, each group request names a pid that leads no process group,
 //! or a pid that the control refuses before any call. On Windows,
-//! `force_kill_process_tree` ends the per-child job of a spawned child.
+//! `force_kill_process_tree` ends the pane's own job of a spawned child.
 
 use super::*;
 
@@ -198,46 +198,79 @@ mod unix {
 mod windows {
     use super::*;
 
-    use std::os::windows::io::AsRawHandle;
+    use std::os::windows::io::{AsRawHandle, OwnedHandle};
     use std::process::Command;
+    use std::sync::Arc;
 
-    /// A child that runs about 30 seconds; the test terminates it at once.
-    fn spawn_pinger() -> std::process::Child {
-        Command::new("ping")
+    use windows_sys::Win32::{
+        Foundation::WAIT_OBJECT_0,
+        System::{
+            JobObjects::AssignProcessToJobObject,
+            Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE},
+        },
+    };
+
+    /// A `ping` child that runs about 30 seconds, joined to a new pane's two
+    /// jobs in [`PaneJob::list_job_handles`] order, and the kill control built
+    /// for it. The test terminates it at once.
+    fn build_pinger_kill_control() -> (PtyChildKillControl, Arc<OwnedHandle>, u32) {
+        let child_process = Command::new("ping")
             .args(["-n", "30", "127.0.0.1"])
             .spawn()
-            .expect("spawn ping child")
+            .expect("spawn ping child");
+        let process_id = child_process.id();
+        let process_handle = Arc::new(OwnedHandle::from(child_process));
+        let pane_job = PaneJob::create().expect("create the pane's jobs");
+        for job_handle in pane_job.list_job_handles() {
+            assert_ne!(
+                // SAFETY: `pane_job` and `process_handle` keep both handles
+                // open for the call.
+                unsafe { AssignProcessToJobObject(job_handle, process_handle.as_raw_handle()) },
+                0,
+                "AssignProcessToJobObject failed"
+            );
+        }
+        let kill_control =
+            PtyChildKillControl::from_pane_job(process_id, Arc::clone(&process_handle), pane_job);
+        (kill_control, process_handle, process_id)
+    }
+
+    /// The exit code of the process behind `process_handle`, once it has ended.
+    fn wait_for_exit_code(process_handle: &OwnedHandle) -> u32 {
+        assert_eq!(
+            // SAFETY: `process_handle` keeps the process handle open for the
+            // call.
+            unsafe { WaitForSingleObject(process_handle.as_raw_handle(), INFINITE) },
+            WAIT_OBJECT_0,
+            "the wait for the child failed"
+        );
+        let mut exit_code: u32 = 0;
+        assert_ne!(
+            // SAFETY: `process_handle` keeps the process handle open, and
+            // `exit_code` is a writable `u32`.
+            unsafe { GetExitCodeProcess(process_handle.as_raw_handle(), &mut exit_code) },
+            0,
+            "GetExitCodeProcess failed"
+        );
+        exit_code
     }
 
     #[test]
     fn constructor_reports_child_process_id_and_force_terminates_child() {
-        let mut child_process = spawn_pinger();
-        let process_id = child_process.id();
-
-        let kill_control = PtyChildKillControl::from_process_id_and_handle(
-            process_id,
-            child_process.as_raw_handle(),
-        )
-        .expect("construct kill control");
+        let (kill_control, process_handle, process_id) = build_pinger_kill_control();
         assert_eq!(kill_control.get_child_process_id(), process_id);
 
         kill_control
             .force_kill_child()
             .expect("terminate the child");
 
-        let child_exit_status = child_process.wait().expect("reap child");
         // `force_kill_child` passes exit code 137 to `TerminateProcess`.
-        assert_eq!(child_exit_status.code(), Some(137));
+        assert_eq!(wait_for_exit_code(&process_handle), 137);
     }
 
     #[test]
     fn stop_requests_send_nothing_and_answer_not_delivered() {
-        let mut child_process = spawn_pinger();
-        let kill_control = PtyChildKillControl::from_process_id_and_handle(
-            child_process.id(),
-            child_process.as_raw_handle(),
-        )
-        .expect("construct kill control");
+        let (kill_control, process_handle, _) = build_pinger_kill_control();
 
         assert_eq!(kill_control.request_child_stop(), StopRequest::NotDelivered);
         assert_eq!(
@@ -249,8 +282,7 @@ mod windows {
         kill_control
             .force_kill_process_tree()
             .expect("terminate the job");
-        let child_exit_status = child_process.wait().expect("reap child");
         // `force_kill_process_tree` passes exit code 137 to `TerminateJobObject`.
-        assert_eq!(child_exit_status.code(), Some(137));
+        assert_eq!(wait_for_exit_code(&process_handle), 137);
     }
 }

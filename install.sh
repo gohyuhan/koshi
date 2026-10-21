@@ -20,11 +20,16 @@ log_error() {
   echo -e "${RED}[ERROR]${RESET_COLOR} $1" >&2
 }
 
-# Detect OS
+# Detect OS. The script installs on Linux only. On macOS, it prints the
+# Homebrew install command and ends with status 1 before it downloads anything.
 operating_system_name="$(uname -s)"
 case "${operating_system_name}" in
-Linux*) operating_system_slug=linux ;;
-Darwin*) operating_system_slug=darwin ;;
+Linux*) ;;
+Darwin*)
+  log_error "install.sh does not install koshi on macOS. Install koshi with Homebrew (https://brew.sh): brew install gohyuhan/koshi/koshi"
+  log_error "A koshi that install.sh installed before updates with: koshi update"
+  exit 1
+  ;;
 *)
   log_error "Unsupported operating system: ${operating_system_name}"
   exit 1
@@ -35,7 +40,6 @@ esac
 architecture_name="$(uname -m)"
 case "${architecture_name}" in
 x86_64) architecture_slug=amd64 ;;
-arm64) architecture_slug=arm64 ;;
 aarch64) architecture_slug=arm64 ;;
 *)
   log_error "Unsupported architecture: ${architecture_name}"
@@ -43,7 +47,7 @@ aarch64) architecture_slug=arm64 ;;
   ;;
 esac
 
-write_installation_message "Detected OS: ${operating_system_slug}, Architecture: ${architecture_slug}"
+write_installation_message "Detected OS: linux, Architecture: ${architecture_slug}"
 
 # The release this script installs
 release_version="v0.5.0"
@@ -51,9 +55,9 @@ release_version="v0.5.0"
 write_installation_message "Installing koshi version: ${release_version}"
 
 # Construct download URL
-# Naming convention: koshi-v{version}-{os}-{arch}.tar.gz
+# Naming convention: koshi-v{version}-linux-{arch}.tar.gz
 release_version_number="${release_version#v}"
-archive_file_name="koshi-v${release_version_number}-${operating_system_slug}-${architecture_slug}.tar.gz"
+archive_file_name="koshi-v${release_version_number}-linux-${architecture_slug}.tar.gz"
 release_archive_url="https://github.com/gohyuhan/koshi/releases/download/${release_version}/${archive_file_name}"
 
 write_installation_message "Download URL: ${release_archive_url}"
@@ -105,7 +109,8 @@ if [ ! -d "${installation_directory}" ]; then
 fi
 
 # Copy the binary beside the installed one as koshi.koshi-update-<process id of
-# this shell>, set mode 755 on the copy, check that the copy prints its
+# this shell>, set mode 755 on the copy, write the copy through to the disk
+# with sync (fsync on the copy) as this user, check that the copy prints its
 # version, and rename the copy over the installed one in one step. A failed
 # step, HUP, INT, or TERM runs the EXIT trap, which deletes the copy and the
 # staging directory. The installed binary is then the old one or the complete
@@ -114,6 +119,7 @@ if [ -w "${installation_directory}" ]; then
   trap 'rm -rf "${staging_directory}"; rm -f "${staged_binary_path}"' EXIT
   cp "${binary_path}" "${staged_binary_path}"
   chmod 755 "${staged_binary_path}"
+  sync "${staged_binary_path}"
   validate_staged_binary
   mv -f "${staged_binary_path}" "${installed_binary_path}"
 else
@@ -121,6 +127,7 @@ else
   trap 'rm -rf "${staging_directory}"; if [ -e "${staged_binary_path}" ]; then sudo rm -f "${staged_binary_path}"; fi' EXIT
   sudo cp "${binary_path}" "${staged_binary_path}"
   sudo chmod 755 "${staged_binary_path}"
+  sync "${staged_binary_path}"
   validate_staged_binary
   sudo mv -f "${staged_binary_path}" "${installed_binary_path}"
 fi

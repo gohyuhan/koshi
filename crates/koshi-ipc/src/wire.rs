@@ -227,4 +227,4 @@ pub(crate) fn has_exactly_json_fields(json_bytes: &[u8], field_names: &[&str]) -
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

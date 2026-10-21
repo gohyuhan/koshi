@@ -2,8 +2,8 @@
 //!
 //! These two answers differ while an update is rolling out. `koshi update`
 //! installs a new binary, the router restarts into it, and each session server
-//! replaces its own image one at a time; until every swap lands, the program a
-//! shell runs is a newer build than the process answering it.
+//! replaces its own image; until every swap lands, the program a shell runs is
+//! a newer build than the process answering it.
 //!
 //! This module only gathers the answers. [`crate::output`] renders them.
 
@@ -177,18 +177,18 @@ pub fn build_unreachable_server_error(
 
 /// Every koshi server this user can reach and the build it named: the router
 /// first, then one row per session, in session id order. The router has
-/// [`SESSION_ANSWER_TIMEOUT_DURATION`](ipc_client::SESSION_ANSWER_TIMEOUT_DURATION)
+/// [`SERVER_ANSWER_TIMEOUT_DURATION`](ipc_client::SERVER_ANSWER_TIMEOUT_DURATION)
 /// to answer.
 ///
 /// The sessions are the same set `list-sessions` asks — this user's own, as
 /// [`list_own_sessions`](ipc_client::list_own_sessions) gives them, and while
 /// `allow-other-users` is on, the ones other local users started, as
-/// [`list_foreign_sessions`](ipc_client::list_foreign_sessions) lists them.
-/// Up to [`MAX_SESSIONS_ASKED_AT_ONCE`](ipc_client::MAX_SESSIONS_ASKED_AT_ONCE)
+/// `list_foreign_sessions` lists them. Up to
+/// [`MAX_SESSIONS_ASKED_AT_ONCE`](ipc_client::MAX_SESSIONS_ASKED_AT_ONCE)
 /// sessions are asked at the same time through
 /// [`ask_sessions_at_once`](ipc_client::ask_sessions_at_once), and every
 /// exchange ends by one deadline,
-/// [`SESSION_ANSWER_TIMEOUT_DURATION`](ipc_client::SESSION_ANSWER_TIMEOUT_DURATION)
+/// [`SERVER_ANSWER_TIMEOUT_DURATION`](ipc_client::SERVER_ANSWER_TIMEOUT_DURATION)
 /// after the router answered. A session restarting earns a row that could not
 /// be asked, and so does each session id the shared directory advertises more
 /// than once. The sessions the shared directory holds past its caps earn no
@@ -196,12 +196,12 @@ pub fn build_unreachable_server_error(
 /// sessions under a path a listing could not read: the count of those paths is
 /// in the report, and stderr names each one.
 ///
-/// `session` narrows the answer to that one session and leaves out the
-/// router. An id is asked directly; a name is looked up against the running
-/// sessions and must match exactly one.
+/// `session_reference` narrows the answer to that one session and leaves out
+/// the router. An id, or `<user id>/<session id>`, is asked directly; a name
+/// is looked up against the running sessions and must match exactly one.
 ///
-/// A server that could not be asked earns a row saying so rather than sinking
-/// the whole answer; [`build_unreachable_server_error`] turns those rows into the failure
+/// A server that could not be asked earns a row saying so, and the other rows
+/// still come back; [`build_unreachable_server_error`] turns those rows into the failure
 /// the caller ends with.
 pub fn list_server_version_rows(
     session_reference: Option<&SessionReference>,
@@ -222,7 +222,7 @@ fn list_server_version_rows_in_runtime_directory(
     session_reference: Option<&SessionReference>,
 ) -> Result<ServerVersionReport, CliError> {
     if let Some(session_reference) = session_reference {
-        let session_id = resolve_session_id(
+        let (session_id, owner_user_id) = resolve_session_target(
             runtime_directory,
             shared_sessions_base_directory,
             session_reference,
@@ -232,6 +232,7 @@ fn list_server_version_rows_in_runtime_directory(
                 runtime_directory,
                 shared_sessions_base_directory,
                 session_id,
+                owner_user_id,
             )],
             unlisted_session_count: 0,
             unread_path_count: 0,
@@ -243,10 +244,10 @@ fn list_server_version_rows_in_runtime_directory(
         None,
         router_client::find_running_router_version(
             runtime_directory,
-            Some(Instant::now() + ipc_client::SESSION_ANSWER_TIMEOUT_DURATION),
+            Some(Instant::now() + ipc_client::SERVER_ANSWER_TIMEOUT_DURATION),
         ),
     )];
-    let answer_deadline = Instant::now() + ipc_client::SESSION_ANSWER_TIMEOUT_DURATION;
+    let answer_deadline = Instant::now() + ipc_client::SERVER_ANSWER_TIMEOUT_DURATION;
     let census_plan =
         discovery::plan_session_census(runtime_directory, shared_sessions_base_directory);
     discovery::print_census_gap_notes(&census_plan);
@@ -260,17 +261,18 @@ fn list_server_version_rows_in_runtime_directory(
     let session_asks = census_plan.session_asks;
     let version_answers = ipc_client::ask_sessions_at_once(
         &session_asks,
-        answer_deadline,
-        |(session_id, foreign_socket_address)| match foreign_socket_address {
+        Some(answer_deadline),
+        |(session_id, foreign_session_advertisement)| match foreign_session_advertisement {
             None => ipc_client::find_running_session_version(
                 runtime_directory,
                 None,
                 *session_id,
+                None,
                 Some(answer_deadline),
             ),
-            Some(foreign_socket_address) => ipc_client::find_foreign_session_version(
+            Some(foreign_session_advertisement) => ipc_client::find_foreign_session_version(
                 *session_id,
-                foreign_socket_address,
+                &foreign_session_advertisement.socket_address,
                 answer_deadline,
             ),
         },
@@ -291,12 +293,15 @@ fn list_server_version_rows_in_runtime_directory(
 }
 
 /// Ask one session's server for its build. The session has
-/// [`SESSION_ANSWER_TIMEOUT_DURATION`](ipc_client::SESSION_ANSWER_TIMEOUT_DURATION)
-/// to answer.
+/// [`SERVER_ANSWER_TIMEOUT_DURATION`](ipc_client::SERVER_ANSWER_TIMEOUT_DURATION)
+/// to answer. `owner_user_id` names the folder of the shared directory the
+/// session is read from, as
+/// [`load_session_endpoint`](ipc_client::load_session_endpoint) reads it.
 fn build_session_version_row(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
     session_id: SessionId,
+    owner_user_id: Option<u32>,
 ) -> ServerVersionRow {
     ServerVersionRow::from_version_probe(
         ServerKind::Session,
@@ -305,31 +310,47 @@ fn build_session_version_row(
             runtime_directory,
             shared_sessions_base_directory,
             session_id,
-            Some(Instant::now() + ipc_client::SESSION_ANSWER_TIMEOUT_DURATION),
+            owner_user_id,
+            Some(Instant::now() + ipc_client::SERVER_ANSWER_TIMEOUT_DURATION),
         ),
     )
 }
 
-/// The session a `--session` value names: an id is taken as it stands, and a
-/// name is looked up over a census of the running sessions.
-fn resolve_session_id(
+/// The session a `--session` value names, and the user id whose folder of the
+/// shared directory advertises it: an id is taken as it stands with no user
+/// id, `<user id>/<session id>` as it stands, and a name is looked up over a
+/// census of the running sessions, with the user id
+/// [`Discovered::find_owner_user_id`](koshi_link::discovery::Discovered::find_owner_user_id)
+/// gives.
+fn resolve_session_target(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
     session_reference: &SessionReference,
-) -> Result<SessionId, CliError> {
+) -> Result<(SessionId, Option<u32>), CliError> {
     match session_reference {
-        SessionReference::SessionId(session_id) => Ok(*session_id),
-        SessionReference::SessionName(session_name) => targeting::resolve_session_scope(
-            runtime_directory,
-            shared_sessions_base_directory,
-            Some(session_reference),
-        )?
-        .sessions
-        .first()
-        .map(|overview| overview.session.session_id)
-        .ok_or_else(|| CliError::SessionNotFound {
-            session_name: session_name.clone(),
-        }),
+        SessionReference::SessionId(session_id) => Ok((*session_id, None)),
+        SessionReference::OwnedSessionId(owned_session_id) => Ok((
+            owned_session_id.session_id,
+            Some(owned_session_id.owner_user_id),
+        )),
+        SessionReference::SessionName(session_name) => {
+            let discovered_sessions = targeting::resolve_session_scope(
+                runtime_directory,
+                shared_sessions_base_directory,
+                Some(session_reference),
+            )?;
+            let session_id = discovered_sessions
+                .sessions
+                .first()
+                .map(|session_overview| session_overview.session.session_id)
+                .ok_or_else(|| CliError::SessionNotFound {
+                    session_name: session_name.clone(),
+                })?;
+            Ok((
+                session_id,
+                discovered_sessions.find_owner_user_id(session_id),
+            ))
+        }
     }
 }
 

@@ -4,8 +4,6 @@
 
 use super::*;
 
-use std::time::Instant;
-
 use koshi_core::geometry::PixelCellSize;
 use koshi_ipc::protocol::ConnectionToken;
 
@@ -15,7 +13,8 @@ use crate::runtime::saved_view::SavedView;
 
 impl Server {
     /// Record `cell_size` as the measured cell size of `client_id`, reflow the
-    /// tab it views and the session's floating panes, and schedule a frame.
+    /// tab it views and the session's floating panes, and mark the view of
+    /// every subscriber changed.
     ///
     /// A changed measurement advances the session's placement revision and the
     /// placement revision of every client whose view of that tab can change,
@@ -60,7 +59,7 @@ impl Server {
             &mut emitted_events,
         );
         self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
-        self.render_scheduler.invalidate();
+        self.mark_every_view_changed();
         self.publish_events(&emitted_events);
     }
 
@@ -72,19 +71,23 @@ impl Server {
     /// `resume_client_id` names the client record a caller asks to come back as, after
     /// the session replaced its own process image. The record is handed back
     /// when the session still holds it, the tab it was viewing still exists,
-    /// and no connection is streaming for it: the arriving viewport, pane area
+    /// no connection is streaming for it, and `resume_token` is the token that
+    /// record's last attach minted. The arriving viewport, pane area
     /// and origin replace the record's, and its per-tab focus, zoom, scrollback
     /// offsets, selections, floating view, lock mode, mouse selection mode,
     /// label and color all stay. That is the
     /// whole of the `resume_client_id` path — no `resume_client_id`, an id the session does not
     /// hold, an id whose tab is gone, an id a connection is already streaming
-    /// for all mint a fresh client instead, so an attach never fails over
-    /// `resume_client_id`.
+    /// for, and an id presented with no token or another client's token all
+    /// mint a fresh client instead, so an attach never fails over
+    /// `resume_client_id`. Example: after a swap, a viewer that names the
+    /// owner's client id with no token attaches as a fresh client, and the
+    /// owner's own attach with its token takes its record back.
     ///
     /// `resume_token` names the view a caller asks to have back, filed when
-    /// that caller's last client detached. It is read on the fresh-client path
-    /// alone: a `resume_client_id` claim that succeeds keeps the record it took, and the
-    /// token's view is dropped. A view that comes back puts the client on the
+    /// that caller's last client detached. A token that proves a
+    /// `resume_client_id` claim has no view filed under it: a client's view is
+    /// filed only once its record goes. A view that comes back puts the client on the
     /// tab it names — the session's first tab when that tab is gone — and then
     /// restores the rest of the view onto the freshly minted client
     /// ([`Self::restore_saved_view`]). The token
@@ -94,7 +97,8 @@ impl Server {
     /// returns `None` reads no token and spends none: that view stands until
     /// its 24 hours run out.
     ///
-    /// A token minted for a client that is still attached takes that client
+    /// A token minted for a client that is still attached, or for a record
+    /// that came across a swap and still awaits reconnect, takes that client
     /// over: its view is filed under the token ([`Self::save_client_view`])
     /// and restored onto the fresh client, and its record is removed with no
     /// quit, before the fresh client registers. Its subscription goes with
@@ -117,11 +121,13 @@ impl Server {
     /// state: no change can slip between them. `None` when no session is
     /// running, or when the one running holds no tab to view — neither is
     /// something a client can attach to. `attached_at` is supplied by the
-    /// caller; the handler never reads the clock itself.
+    /// caller; the handler never reads the clock itself. The subscription
+    /// gets a frame at most `max_frames_per_second` times a second
+    /// ([`subscribe`](Self::subscribe)).
     // Carries the whole of one attach request: what it claims back (`resume_client_id`,
     // `resume_token`), the view it arrives with (`viewport_size`, `pane_area`,
     // `cell_size`), and how the connection is served (`attached_at`,
-    // `is_remote`).
+    // `is_remote`, `max_frames_per_second`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_ipc_attach(
         &mut self,
@@ -132,6 +138,7 @@ impl Server {
         cell_size: Option<PixelCellSize>,
         attached_at: SystemTime,
         is_remote: bool,
+        max_frames_per_second: u16,
     ) -> Option<AttachAccepted> {
         let session = self.get_sole_session()?;
         let session_id = session.session_id;
@@ -147,27 +154,33 @@ impl Server {
             let is_streaming = self
                 .find_subscriber_id_by_client_id(claimed_client_id)
                 .is_some();
-            (session.tabs.contains_key(&client_active_tab_id) && !is_streaming)
+            let is_claim_proven = resume_token.as_ref().is_some_and(|resume_token| {
+                self.saved_view_store
+                    .find_client_id_by_resume_token(resume_token)
+                    == Some(claimed_client_id)
+            });
+            (session.tabs.contains_key(&client_active_tab_id) && !is_streaming && is_claim_proven)
                 .then_some((claimed_client_id, client_active_tab_id))
         });
         let mut emitted_events = Vec::new();
-        // A token minted for a client that is still attached: that client's
-        // view is filed under the token and taken below, and its record goes.
+        // A token minted for a client the session still holds, attached or
+        // awaiting its re-attach: that client's view is filed under the token
+        // and taken below, and its record goes.
         if let (None, Some(resume_token)) = (claimed_client_view, resume_token.as_ref()) {
             if let Some(previous_client_id) = self
                 .saved_view_store
                 .find_client_id_by_resume_token(resume_token)
             {
+                self.client_ids_awaiting_reconnect
+                    .remove(&previous_client_id);
                 self.save_client_view(previous_client_id, attached_at);
                 self.remove_client_record(previous_client_id, &mut emitted_events);
             }
         }
-        let saved_view = resume_token
-            .and_then(|resume_token| {
-                self.saved_view_store
-                    .take_saved_view(&resume_token, attached_at)
-            })
-            .filter(|_| claimed_client_view.is_none());
+        let saved_view = resume_token.and_then(|resume_token| {
+            self.saved_view_store
+                .take_saved_view(&resume_token, attached_at)
+        });
         let (client_id, active_tab_id) = match claimed_client_view {
             Some(claimed_client_view) => claimed_client_view,
             None => {
@@ -205,7 +218,7 @@ impl Server {
         }
         self.publish_events(&emitted_events);
 
-        let (deliveries, writer_handoff) = self.subscribe(client_id);
+        let (deliveries, writer_handoff) = self.subscribe(client_id, max_frames_per_second);
         let resume_token = self.saved_view_store.mint_resume_token(client_id);
         let session = self
             .session_by_id
@@ -224,7 +237,7 @@ impl Server {
     }
 
     /// Put `saved_view` back on `client_id` in `session_id`, then reconcile the
-    /// PTY sizes of `active_tab_id` and schedule a redraw.
+    /// PTY sizes of `active_tab_id`.
     ///
     /// Applies the focused pane of each tab first, then the zoomed pane of each
     /// tab, then the scroll offset of each pane, then the floating view
@@ -233,18 +246,19 @@ impl Server {
     /// focuses; the zoom pass runs after it, and leaves each tab zoomed on the
     /// pane `saved_view` names.
     ///
-    /// An entry naming a tab the session no longer holds, or a pane the session
-    /// no longer holds, is dropped instead of applied: that tab keeps no focus
-    /// and stays tiled, and that pane sits at the live bottom. A floating view
-    /// entry naming a pane that is no longer floating is dropped, and a
-    /// floating focus on that pane moves as [`Client::minimize_floating_pane`]
-    /// moves it. A scroll offset past the lines its pane still retains is cut
-    /// down to that count — an offset of 500 onto a pane retaining 120 lines
-    /// restores 120, and onto a pane whose scrollback was erased restores 0,
-    /// which sits at the live bottom and holds the view no longer. A restored
-    /// zoom changes the size the tab's panes solve to, so the tab reflows and
-    /// one [`Event::PtyResized`] is returned for each pane whose PTY size
-    /// changed.
+    /// A focus or zoom entry naming a tab the session no longer holds, or a
+    /// pane that tab's layout no longer holds, is dropped instead of applied:
+    /// that tab keeps the focus the attach gave it and stays tiled. A scroll
+    /// entry naming a pane the session no longer holds is dropped, and that
+    /// pane sits at the live bottom. A floating view entry naming a pane that
+    /// is no longer floating is dropped, and a floating focus on that pane
+    /// moves as [`Client::minimize_floating_pane`] moves it. A scroll offset
+    /// past the lines its pane still retains is cut down to that count — an
+    /// offset of 500 onto a pane retaining 120 lines restores 120, and onto a
+    /// pane whose scrollback was erased restores 0, which sits at the live
+    /// bottom and holds the view no longer. A restored zoom changes the size
+    /// the tab's panes solve to, so the tab reflows and one
+    /// [`Event::PtyResized`] is returned for each pane whose PTY size changed.
     ///
     /// A restore that moves the client's input off the pane the attach put it
     /// on returns one [`Event::PaneFocused`] naming the pane that takes the
@@ -275,17 +289,18 @@ impl Server {
         let focused_pane_id_by_tab_id_before = client.list_focused_pane_ids().clone();
         let zoomed_pane_id_by_tab_id_before = client.list_zoomed_pane_ids().clone();
         let previous_focused_pane_id = client.get_active_focused_pane_id();
+        let is_pane_in_tab_layout = |tab_id: TabId, pane_id: PaneId| {
+            tab_by_id
+                .get(&tab_id)
+                .is_some_and(|tab| tab.get_layout_tree().has_pane(pane_id))
+        };
         for (&tab_id, &pane_id) in &saved_view.focused_pane_id_by_tab_id {
-            if tab_by_id.contains_key(&tab_id)
-                && pane_registry.get_pane_record_by_id(pane_id).is_some()
-            {
+            if is_pane_in_tab_layout(tab_id, pane_id) {
                 client.update_focused_pane(tab_id, pane_id);
             }
         }
         for (&tab_id, &pane_id) in &saved_view.zoomed_pane_id_by_tab_id {
-            if tab_by_id.contains_key(&tab_id)
-                && pane_registry.get_pane_record_by_id(pane_id).is_some()
-            {
+            if is_pane_in_tab_layout(tab_id, pane_id) {
                 client.zoom_pane(tab_id, pane_id);
             }
         }
@@ -325,13 +340,12 @@ impl Server {
             &mut emitted_events,
         );
         emitted_events.extend(pane_focused_event);
-        self.render_scheduler.invalidate();
 
         emitted_events
     }
 
     /// Attach a client to `session_id` viewing `active_tab_id`, then reconcile the
-    /// affected tabs' PTY sizes and schedule a redraw.
+    /// affected tabs' PTY sizes and mark the view of every subscriber changed.
     ///
     /// A client lives in exactly one session. If this id already lives in another
     /// session it is detached there first — reflowing the tab it leaves — so it
@@ -363,8 +377,8 @@ impl Server {
     /// tab's live panes reflow to the new size, one [`Event::PtyResized`] each. A tab with no
     /// tab size keeps its sizes. After the tabs, the session's floating panes reflow to the new
     /// [`Session::get_shared_floating_viewport`], and so do the floating panes of a session the
-    /// client moved out of. The attach always marks the screen stale: every client repaints
-    /// from the reconciled snapshot. An attach naming an unknown session, or a tab the session
+    /// client moved out of. The attach always marks the view of every subscriber changed
+    /// (`mark_every_view_changed`). An attach naming an unknown session, or a tab the session
     /// does not hold, is dropped. `attached_at` is supplied by the producer; the handler never
     /// reads the clock itself.
     // Carries the whole of one attach: where it lands (`session_id`,
@@ -553,15 +567,15 @@ impl Server {
         }
         self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
 
-        self.render_scheduler.invalidate();
+        self.mark_every_view_changed();
 
         emitted_events
     }
 
     /// Update one client's full terminal viewport, reconcile the active tab's
     /// pane region and PTYs, reflow the session's floating panes to the new
-    /// [`Session::get_shared_floating_viewport`], then schedule a frame for the
-    /// new terminal size.
+    /// [`Session::get_shared_floating_viewport`], then mark the view of every
+    /// subscriber changed.
     ///
     /// `pane_area` and `cell_size` replace the client's reports, `None`
     /// included. A resize reporting [`PaneArea::Starving`] from the tab's only
@@ -613,7 +627,7 @@ impl Server {
             &mut emitted_events,
         );
         self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
-        self.render_scheduler.invalidate();
+        self.mark_every_view_changed();
         emitted_events
     }
 
@@ -626,11 +640,11 @@ impl Server {
     /// the producer; the handler never reads the clock itself.
     ///
     /// Files nothing in three cases. A client that is still awaiting reconnect
-    /// files nothing and keeps whatever hash stands against its id; a process
-    /// that came back from a restart starts with an empty store, so a client
-    /// awaiting reconnect there has no hash to keep. A client no session holds
-    /// files nothing and its minted hash is dropped, so the token it was handed
-    /// takes back nothing. A client whose attach minted no token files nothing.
+    /// files nothing and keeps the hash that stands against its id, so only
+    /// the attach that presents its token claims its record. A client no
+    /// session holds files nothing and its minted hash is dropped, so the
+    /// token it was handed takes back nothing. A client whose attach minted no
+    /// token files nothing.
     ///
     /// Reads the client's record: call it before that record is removed by
     /// [`handle_client_detach`](Self::handle_client_detach),
@@ -659,7 +673,8 @@ impl Server {
     }
 
     /// Detach the client `client_id`, then reconcile the PTY sizes of the tab it
-    /// was viewing and of the session's floating panes, and schedule a redraw.
+    /// was viewing and of the session's floating panes, and mark the view of
+    /// every subscriber changed.
     ///
     /// Removing the client hands back its record, whose active tab names the
     /// tab whose viewer set shrank. The departing viewer is dropped from that
@@ -669,8 +684,8 @@ impl Server {
     /// tab size and keeps its sizes. The session's floating panes then reflow
     /// to the new [`Session::get_shared_floating_viewport`]: they grow when the
     /// departing client was the smallest, and keep their sizes when no client
-    /// is left. The detach always marks the screen stale: the remaining
-    /// clients repaint.
+    /// is left. The detach always marks the view of every subscriber changed
+    /// (`mark_every_view_changed`).
     ///
     /// Every mouse button the client holds is released first
     /// (`release_client_mouse_buttons`). A detach for a client this runtime
@@ -717,7 +732,7 @@ impl Server {
     /// Detach the client `client_id`, which may attach again with the resume
     /// token its attach minted: release every mouse button it holds, remove
     /// its record, reflow the tab it was viewing and the session's floating
-    /// panes, and schedule a redraw, as
+    /// panes, and mark the view of every subscriber changed, as
     /// [`handle_client_detach`](Self::handle_client_detach) does. Requests no
     /// quit: with `auto-close-session` on, a session this leaves with no
     /// client keeps running.
@@ -740,7 +755,7 @@ impl Server {
     /// Release every mouse button the client `client_id` holds
     /// ([`release_client_mouse_buttons`](Self::release_client_mouse_buttons)),
     /// then remove its record, reflow the tab it was viewing and the session's
-    /// floating panes, and schedule a redraw, as
+    /// floating panes, and mark the view of every subscriber changed, as
     /// [`handle_client_detach`](Self::handle_client_detach) states. Pushes one
     /// [`Event::PtyResized`] per reflowed pane onto `emitted_events`. Requests
     /// no quit.
@@ -779,7 +794,7 @@ impl Server {
         );
         self.reflow_floating_panes(pty_backend.as_ref(), session_id, emitted_events);
 
-        self.render_scheduler.invalidate();
+        self.mark_every_view_changed();
 
         Some(session_id)
     }
@@ -787,7 +802,11 @@ impl Server {
     /// Detach every client whose record came across an image swap and has not
     /// attached again by `unclaimed_client_deadline`.
     ///
-    /// Each one's record is removed as
+    /// Each one's view is filed under the token its last attach minted, as
+    /// [`save_client_view`](Self::save_client_view) files one with
+    /// `unclaimed_client_deadline` as the detach time: that token takes the view
+    /// back within 24 hours. A client carried with no resume-token hash files
+    /// nothing. Each one's record is then removed as
     /// [`handle_client_detach`](Self::handle_client_detach) removes one, and its
     /// tab and the session's floating panes reflow. No quit is requested: a
     /// session these removals leave with no client keeps running, with
@@ -800,7 +819,7 @@ impl Server {
     /// the handler never reads the clock to decide anything.
     pub(crate) fn handle_drop_unclaimed_clients(
         &mut self,
-        unclaimed_client_deadline: Instant,
+        unclaimed_client_deadline: SystemTime,
     ) -> Vec<Event> {
         if self.client_ids_awaiting_reconnect.is_empty() {
             return Vec::new();
@@ -812,13 +831,15 @@ impl Server {
         unclaimed_client_ids.sort();
         tracing::info!(
             unclaimed_client_count = unclaimed_client_ids.len(),
-            waited_ms = Instant::now()
-                .saturating_duration_since(unclaimed_client_deadline)
+            waited_ms = SystemTime::now()
+                .duration_since(unclaimed_client_deadline)
+                .unwrap_or_default()
                 .as_millis(),
             "detaching the clients that did not attach again after the restart"
         );
         let mut emitted_events = Vec::new();
         for client_id in unclaimed_client_ids {
+            self.save_client_view(client_id, unclaimed_client_deadline);
             self.remove_client_record(client_id, &mut emitted_events);
         }
         emitted_events

@@ -119,6 +119,7 @@ fn run_external_cli_invocation(
         session.runtime_directory.path(),
         None,
         session.session_id,
+        None,
         parsed_command.get_source_client_id(),
         action_command,
     )
@@ -410,8 +411,8 @@ fn close_pane_over_the_socket_kills_the_child_and_removes_the_pane() {
     );
     assert_eq!(exit_code, CliExitCode::Success);
 
-    // With no `--force`, the pane's own close policy picks the kill: a
-    // graceful one carrying the standard window.
+    // With no `--force`, the kill is graceful and carries
+    // `GRACEFUL_TIMEOUT_DURATION`.
     assert_eq!(
         wait_for_pane_kill_policies(&session, created_pane_id),
         vec![KillPolicy::Graceful {

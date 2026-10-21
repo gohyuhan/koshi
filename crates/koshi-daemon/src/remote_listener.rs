@@ -62,7 +62,7 @@ use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -70,7 +70,8 @@ use rustls::{ServerConfig, ServerConnection};
 use serde::Deserialize;
 
 use koshi_core::constant::MIN_LINK_TIMEOUT_MS;
-use koshi_ipc::endpoint::EndpointFile;
+use koshi_core::ids::SessionId;
+use koshi_ipc::endpoint::{is_replacing_its_image, EndpointFile};
 use koshi_ipc::protocol::{
     compute_agreed_protocol_version, ConnectionToken, IpcRequest, IpcRequestKind,
 };
@@ -87,6 +88,7 @@ use koshi_ipc::transport::{
     Connection, Deadlined, RawReader, RawWriter, ReadCloser, CONNECT_WAIT_DURATION,
     MAX_FRAME_BYTE_COUNT,
 };
+use koshi_link::ipc_client::RESTART_POLL_INTERVAL_DURATION;
 use koshi_observability::repeated_warning::WarningRateLimiter;
 use koshi_runtime::executable_watch::ExecutableWatch;
 
@@ -102,9 +104,11 @@ const ADMISSION_WINDOW_DURATION: Duration = Duration::from_secs(10);
 /// How long one address's connection attempts are counted over.
 const RATE_WINDOW_DURATION: Duration = Duration::from_secs(60);
 
-/// How many connections one address may open inside [`RATE_WINDOW_DURATION`] before
-/// the rest are dropped.
-const MAX_ATTEMPT_COUNT: u32 = 10;
+/// How many connections from one address may be inside the admission window,
+/// or have left it without being admitted, inside [`RATE_WINDOW_DURATION`]
+/// before the rest are dropped. A connection whose secret is admitted stops
+/// counting at its admission.
+const MAX_UNADMITTED_ATTEMPT_COUNT: u32 = 10;
 
 /// How many peer addresses the attempt table counts at once.
 const MAX_RATE_TABLE_ENTRY_COUNT: usize = 1024;
@@ -166,15 +170,24 @@ pub(crate) enum AdmissionAsk {
         remote_connection_id: u64,
         /// The session the caller named.
         session_selector: SessionSelector,
-        /// Where the answer goes: the endpoint file of the session to attach
-        /// to, or why the attach is refused.
-        response_sender: Sender<Result<PathBuf, LocateRefusal>>,
+        /// Where the answer goes: the session to attach to, or why the attach
+        /// is refused.
+        response_sender: Sender<Result<LocatedSession, LocateRefusal>>,
     },
     /// Remove one admitted connection that has ended from the router's list.
     RemoveConnection {
         /// The number that connection was registered under.
         remote_connection_id: u64,
     },
+}
+
+/// The session a remote attach reached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocatedSession {
+    /// The directory that holds the session's endpoint file and resume file.
+    pub(crate) runtime_directory: PathBuf,
+    /// The session the attach named.
+    pub(crate) session_id: SessionId,
 }
 
 /// Why the dispatcher refused a remote attach.
@@ -283,10 +296,11 @@ fn build_remote_server_tls_config(certificate_file: &CertificateFile) -> io::Res
 }
 
 /// Accept connections and give each its own thread, dropping the ones from an
-/// address that has opened more than [`MAX_ATTEMPT_COUNT`] inside
-/// [`RATE_WINDOW_DURATION`] and the ones that arrive while
-/// [`MAX_ADMISSION_COUNT`] connections are already waiting to present a
-/// secret. A failed accept is reported at most once inside
+/// address that already counts [`MAX_UNADMITTED_ATTEMPT_COUNT`] connections
+/// not admitted inside [`RATE_WINDOW_DURATION`], and the ones that arrive
+/// while [`MAX_ADMISSION_COUNT`] connections are already waiting to present a
+/// secret. A connection dropped for a full admission window does not count
+/// against its address. A failed accept is reported at most once inside
 /// [`LOG_WINDOW_DURATION`](koshi_observability::repeated_warning::LOG_WINDOW_DURATION),
 /// waits [`ACCEPT_RETRY_DELAY_DURATION`], and retries.
 /// Each connection given a thread runs a check of `executable_watch` first.
@@ -296,7 +310,7 @@ fn run_remote_accept_loop(
     dispatcher_events_sender: &Sender<RouterEvent>,
     executable_watch: &Arc<ExecutableWatch>,
 ) {
-    let mut peer_address_rate_table = PeerAddressRateTable::new();
+    let peer_address_rate_table = Arc::new(Mutex::new(PeerAddressRateTable::new()));
     let admission_count = Arc::new(AtomicUsize::new(0));
     let mut full_admission_warning = WarningRateLimiter::new();
     let mut accept_failure_warning = WarningRateLimiter::new();
@@ -316,23 +330,6 @@ fn run_remote_accept_loop(
             }
         };
         let current_time = Instant::now();
-        let peer_ip_address = peer_address.ip();
-        match peer_address_rate_table.decide_attempt(peer_ip_address, current_time) {
-            PeerAddressAttemptDecision::Serve => {}
-            PeerAddressAttemptDecision::DropAndSay => {
-                tracing::warn!(
-                    %peer_ip_address,
-                    "remote connection attempts from {peer_ip_address} exceeded {MAX_ATTEMPT_COUNT} in \
-                     {RATE_WINDOW_DURATION:?}; dropping the rest until the window passes"
-                );
-                drop(tcp_stream);
-                continue;
-            }
-            PeerAddressAttemptDecision::DropInSilence => {
-                drop(tcp_stream);
-                continue;
-            }
-        }
         let Some(admission_slot) = AdmissionSlot::enter_admission(&admission_count) else {
             if full_admission_warning.record_warning_if_due(current_time) {
                 tracing::warn!(
@@ -342,6 +339,33 @@ fn run_remote_accept_loop(
             }
             drop(tcp_stream);
             continue;
+        };
+        let peer_ip_address = peer_address.ip();
+        let attempt_decision = peer_address_rate_table
+            .lock()
+            .expect("peer address rate table")
+            .decide_attempt(peer_ip_address, current_time);
+        let window_started_at = match attempt_decision {
+            PeerAddressAttemptDecision::Serve { window_started_at } => window_started_at,
+            PeerAddressAttemptDecision::DropAndSay => {
+                tracing::warn!(
+                    %peer_ip_address,
+                    "{MAX_UNADMITTED_ATTEMPT_COUNT} remote connections from {peer_ip_address} were \
+                     not admitted within {RATE_WINDOW_DURATION:?}; dropping the rest until the window \
+                     passes"
+                );
+                drop(tcp_stream);
+                continue;
+            }
+            PeerAddressAttemptDecision::DropInSilence => {
+                drop(tcp_stream);
+                continue;
+            }
+        };
+        let counted_attempt = CountedAttempt {
+            peer_address_rate_table: Arc::clone(&peer_address_rate_table),
+            peer_ip_address,
+            window_started_at,
         };
         check_router_executable_file(executable_watch, dispatcher_events_sender);
         let tls_config = Arc::clone(tls_config);
@@ -354,8 +378,33 @@ fn run_remote_accept_loop(
                     &tls_config,
                     &dispatcher_events_sender,
                     admission_slot,
+                    counted_attempt,
                 )
             });
+    }
+}
+
+/// One connection counted in its address's window of the
+/// [`PeerAddressRateTable`]. It stays counted until
+/// [`remove_attempt`](Self::remove_attempt) runs at its admission. A connection
+/// that ends any other way stays counted until its window passes.
+struct CountedAttempt {
+    /// The table the connection is counted in.
+    peer_address_rate_table: Arc<Mutex<PeerAddressRateTable>>,
+    /// The address the connection came from.
+    peer_ip_address: IpAddr,
+    /// When the window the connection is counted in opened.
+    window_started_at: Instant,
+}
+
+impl CountedAttempt {
+    /// Take this connection out of its address's count, as
+    /// [`PeerAddressRateTable::remove_attempt`] states.
+    fn remove_attempt(self) {
+        self.peer_address_rate_table
+            .lock()
+            .expect("peer address rate table")
+            .remove_attempt(self.peer_ip_address, self.window_started_at);
     }
 }
 
@@ -395,8 +444,12 @@ impl Drop for AdmissionSlot {
 /// What the rate table says to do with one connection attempt.
 #[derive(Debug, PartialEq, Eq)]
 enum PeerAddressAttemptDecision {
-    /// Serve it: this address is inside its limit.
-    Serve,
+    /// Serve it: this address is inside its limit. The attempt is counted in
+    /// the window that opened at `window_started_at`.
+    Serve {
+        /// When the window the attempt is counted in opened.
+        window_started_at: Instant,
+    },
     /// Drop it, and log that the address crossed its limit. This is the first
     /// attempt over the limit in this window.
     DropAndSay,
@@ -407,13 +460,18 @@ enum PeerAddressAttemptDecision {
 
 /// What one address has done inside the window it opened.
 struct PeerAddressRateWindow {
-    /// How many connections that address has opened since `window_started_at`.
-    attempt_count: u32,
+    /// How many connections from that address served since `window_started_at`
+    /// are not admitted: the ones still inside the admission window and the
+    /// ones that left it without being admitted.
+    unadmitted_attempt_count: u32,
+    /// Whether a dropped attempt from that address was logged inside this
+    /// window.
+    is_limit_reported: bool,
     /// When the first of them arrived.
     window_started_at: Instant,
 }
 
-/// How many connections each address has opened lately.
+/// How many connections each address has opened lately and not had admitted.
 ///
 /// Bounded at [`MAX_RATE_TABLE_ENTRY_COUNT`]. Every check first drops the
 /// addresses whose window has passed; a check that still finds the table full
@@ -431,18 +489,21 @@ impl PeerAddressRateTable {
         }
     }
 
-    /// Count one connection from `peer_ip_address` at `current_time` and say
-    /// what to do with it.
+    /// Say what to do with one connection from `peer_ip_address` at
+    /// `current_time`, and count it when it is served.
     ///
-    /// An address is logged once per window, on the attempt that crosses
-    /// [`MAX_ATTEMPT_COUNT`]. Every attempt after it in that window is dropped
-    /// in silence.
+    /// A connection is served while its address counts fewer than
+    /// [`MAX_UNADMITTED_ATTEMPT_COUNT`] connections. A dropped connection is
+    /// not counted. An address is logged once per window, on the first
+    /// connection dropped in it; every other one dropped in that window is
+    /// dropped in silence.
     ///
-    /// Example — with [`MAX_ATTEMPT_COUNT`] at 10, attempts 1 to 10 from one
-    /// address are [`PeerAddressAttemptDecision::Serve`], attempt 11 is
+    /// Example — with [`MAX_UNADMITTED_ATTEMPT_COUNT`] at 10 and no
+    /// connection admitted, attempts 1 to 10 from one address are
+    /// [`PeerAddressAttemptDecision::Serve`], attempt 11 is
     /// [`PeerAddressAttemptDecision::DropAndSay`], and attempts 12 onward are
-    /// [`PeerAddressAttemptDecision::DropInSilence`] until the window
-    /// passes.
+    /// [`PeerAddressAttemptDecision::DropInSilence`] until the window passes
+    /// or [`remove_attempt`](Self::remove_attempt) takes one of the 10 out.
     fn decide_attempt(
         &mut self,
         peer_ip_address: IpAddr,
@@ -474,19 +535,39 @@ impl PeerAddressRateTable {
             .window_by_peer_ip_address
             .entry(peer_ip_address)
             .or_insert(PeerAddressRateWindow {
-                attempt_count: 0,
+                unadmitted_attempt_count: 0,
+                is_limit_reported: false,
                 window_started_at: current_time,
             });
-        peer_address_rate_window.attempt_count += 1;
-        match peer_address_rate_window.attempt_count {
-            current_attempt_count if current_attempt_count <= MAX_ATTEMPT_COUNT => {
-                PeerAddressAttemptDecision::Serve
-            }
-            current_attempt_count if current_attempt_count == MAX_ATTEMPT_COUNT + 1 => {
-                PeerAddressAttemptDecision::DropAndSay
-            }
-            _ => PeerAddressAttemptDecision::DropInSilence,
+        if peer_address_rate_window.unadmitted_attempt_count < MAX_UNADMITTED_ATTEMPT_COUNT {
+            peer_address_rate_window.unadmitted_attempt_count += 1;
+            return PeerAddressAttemptDecision::Serve {
+                window_started_at: peer_address_rate_window.window_started_at,
+            };
         }
+        if peer_address_rate_window.is_limit_reported {
+            return PeerAddressAttemptDecision::DropInSilence;
+        }
+        peer_address_rate_window.is_limit_reported = true;
+        PeerAddressAttemptDecision::DropAndSay
+    }
+
+    /// Take one served connection from `peer_ip_address` out of the count of
+    /// the window that opened at `window_started_at`. Nothing changes when
+    /// that address's window is gone or opened at another moment: the
+    /// connection was counted in a window that has passed.
+    fn remove_attempt(&mut self, peer_ip_address: IpAddr, window_started_at: Instant) {
+        let Some(peer_address_rate_window) =
+            self.window_by_peer_ip_address.get_mut(&peer_ip_address)
+        else {
+            return;
+        };
+        if peer_address_rate_window.window_started_at != window_started_at {
+            return;
+        }
+        peer_address_rate_window.unadmitted_attempt_count = peer_address_rate_window
+            .unadmitted_attempt_count
+            .saturating_sub(1);
     }
 }
 
@@ -541,7 +622,9 @@ enum PreviousReleaseRemoteClientFrame {
 /// finished at.
 ///
 /// `admission_slot` holds this connection's place in the admission window and
-/// is dropped the moment the secret is admitted.
+/// is dropped the moment the secret is admitted. `counted_attempt` counts this
+/// connection against its address, and is removed from that count the moment
+/// the secret is admitted.
 ///
 /// On Unix the thread blocks SIGPIPE on its own signal mask; a write to a peer
 /// that hung up returns an error whatever the process-wide disposition is.
@@ -550,6 +633,7 @@ fn serve_remote_connection(
     tls_config: &Arc<ServerConfig>,
     dispatcher_events_sender: &Sender<RouterEvent>,
     admission_slot: AdmissionSlot,
+    counted_attempt: CountedAttempt,
 ) {
     #[cfg(unix)]
     crate::process::block_sigpipe_on_this_thread();
@@ -636,8 +720,10 @@ fn serve_remote_connection(
         return;
     };
 
-    // The caller leaves the admission window.
+    // The caller leaves the admission window and stops counting against its
+    // address.
     drop(admission_slot);
+    counted_attempt.remove_attempt();
 
     // Both halves lose their deadlines. Each socket read and write then waits
     // at most ADMITTED_FRAME_TIMEOUT_DURATION for a byte.
@@ -694,7 +780,7 @@ fn serve_admitted_remote_connection(
         &admitted_connection,
         dispatcher_events_sender,
     );
-    let Some((session_endpoint_path, link_timeout_ms)) = attached_session else {
+    let Some((located_session, link_timeout_ms)) = attached_session else {
         report_remote_connection_ended(
             dispatcher_events_sender,
             admitted_connection.remote_connection_id,
@@ -705,7 +791,7 @@ fn serve_admitted_remote_connection(
         reader,
         writer,
         control_stream,
-        session_endpoint_path,
+        &located_session,
         admitted_connection.remote_connection_id,
         session_protocol_versions,
         link_timeout_ms.map(|link_timeout_ms| Duration::from_millis(u64::from(link_timeout_ms))),
@@ -716,11 +802,11 @@ fn serve_admitted_remote_connection(
 /// Read the frames an admitted connection sends until it attaches or ends.
 ///
 /// A list is answered and the next frame is read, so one connection may list
-/// and then attach. `Some` is the endpoint file of the session an admitted
-/// attach reached, with that attach's `link_timeout_ms`; the bytes after
-/// that attach belong to that session's server. `None` means the connection
-/// is finished: it hung up, a read ran out of time, it sent something this
-/// loop does not serve, its attach was refused, or the dispatcher is gone.
+/// and then attach. `Some` is the session an admitted attach reached, with that
+/// attach's `link_timeout_ms`; the bytes after that attach belong to that
+/// session's server. `None` means the connection is finished: it hung up, a
+/// read ran out of time, it sent something this loop does not serve, its attach
+/// was refused, or the dispatcher is gone.
 ///
 /// An attach naming a `link_timeout_ms` below [`MIN_LINK_TIMEOUT_MS`],
 /// `1000`, is refused before the dispatcher is asked where its session is.
@@ -729,7 +815,7 @@ fn process_admitted_remote_frames(
     writer: &mut (impl Write + Deadlined),
     admitted_connection: &RemoteConnectionAdmission,
     dispatcher_events_sender: &Sender<RouterEvent>,
-) -> Option<(PathBuf, Option<u32>)> {
+) -> Option<(LocatedSession, Option<u32>)> {
     loop {
         let remote_client_frame = match read_client_frame(reader, MAX_FRAME_BYTE_COUNT) {
             RemoteClientFrameRead::Frame(remote_client_frame) => remote_client_frame,
@@ -783,7 +869,7 @@ fn process_admitted_remote_frames(
                         }
                     })?;
                 return match locate_answer {
-                    Ok(session_endpoint_path) => Some((session_endpoint_path, link_timeout_ms)),
+                    Ok(located_session) => Some((located_session, link_timeout_ms)),
                     Err(LocateRefusal::NotReached) => {
                         send_refusal(writer);
                         None
@@ -859,8 +945,44 @@ fn open_local_session_bridge(
     Some((session_reader, session_writer, session_read_closer))
 }
 
-/// Open the local connection to an admitted client's session and carry the
-/// bytes both ways.
+/// Open the local connection to the session `located_session` names, as
+/// [`open_local_session_bridge`] opens it. While an open fails and
+/// [`is_replacing_its_image`] accepts the session, the open runs again every
+/// [`RESTART_POLL_INTERVAL_DURATION`]. Once it no longer accepts the session,
+/// one last open runs.
+///
+/// Example: a session that withdrew its endpoint file to start its new image
+/// is opened once the new image advertises its own endpoint file, about one
+/// second after the withdrawal.
+///
+/// `None` when the last open fails.
+fn open_local_session_bridge_across_restart(
+    located_session: &LocatedSession,
+    session_protocol_versions: (u32, u32),
+) -> Option<(RawReader, RawWriter, ReadCloser)> {
+    let session_endpoint_path = EndpointFile::resolve_endpoint_file_path(
+        &located_session.runtime_directory,
+        located_session.session_id,
+    );
+    loop {
+        if let Some(session_bridge) =
+            open_local_session_bridge(&session_endpoint_path, session_protocol_versions)
+        {
+            return Some(session_bridge);
+        }
+        if !is_replacing_its_image(
+            &located_session.runtime_directory,
+            located_session.session_id,
+        ) {
+            return open_local_session_bridge(&session_endpoint_path, session_protocol_versions);
+        }
+        std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
+    }
+}
+
+/// Open the local connection to the session `located_session` names for an
+/// admitted client, as [`open_local_session_bridge_across_restart`] opens it,
+/// and carry the bytes both ways.
 ///
 /// The router sends the session-plane Hello carrying the session's endpoint
 /// token and the client's version range. The session server's answer to that
@@ -892,7 +1014,7 @@ fn bridge_remote_connection_to_session(
     reader: TlsReader,
     mut writer: TlsWriter,
     control_stream: TcpStream,
-    session_endpoint_path: PathBuf,
+    located_session: &LocatedSession,
     remote_connection_id: u64,
     session_protocol_versions: (u32, u32),
     link_timeout: Option<Duration>,
@@ -900,7 +1022,7 @@ fn bridge_remote_connection_to_session(
 ) {
     writer.set_idle_timeout(link_timeout);
     let Some((mut session_reader, mut session_writer, session_read_closer)) =
-        open_local_session_bridge(&session_endpoint_path, session_protocol_versions)
+        open_local_session_bridge_across_restart(located_session, session_protocol_versions)
     else {
         send_refusal(&mut writer);
         report_remote_connection_ended(dispatcher_events_sender, remote_connection_id);

@@ -3,11 +3,13 @@
 //!
 //! [`Server::build_snapshot`] takes a `client_id` and produces the world the way that one client
 //! sees it: its viewed tab solved into pane rectangles, and each of that tab's panes' terminal
-//! grids, cursors, and scrollback line counts copied out. A pane the client follows live travels by
-//! reference — the per-pane [`Arc<Grid>`](koshi_terminal::grid::state::Grid) handle from
-//! [`TerminalState::get_active_grid_arc`](koshi_terminal::state::TerminalState::get_active_grid_arc)
-//! — and copies no cells; the next write to that pane clones its buffer once (copy-on-write). A
-//! pane the client has scrolled back in carries a grid composed for that window instead.
+//! grids, cursors, and scrollback line counts copied out. Each pane travels as a
+//! [`GridView`]: one shared
+//! [`Arc<RowSnapshot>`](koshi_terminal::grid::row_snapshot::RowSnapshot) per visible row, and no
+//! copied cell. A pane the client follows live lists its screen rows' snapshots. A write to a row
+//! after the snapshot gives that row a new snapshot and leaves the frozen one unchanged. A pane
+//! the client has scrolled back in lists the history lines' snapshots above the screen rows'
+//! snapshots for that window.
 //!
 //! The snapshot is per-client, not session-global:
 //! `session_snapshot.active_tab_snapshot` holds *this* client's viewed tab, and
@@ -25,7 +27,6 @@ use std::sync::{Arc, OnceLock};
 use koshi_core::command::{Selection, SelectionKind};
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, TabId};
-use koshi_core::mouse::MouseTracking;
 use koshi_layout::content::list_content_rects;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::{solve_layout_with_mode, LayoutSolve, PaneSizing};
@@ -38,7 +39,6 @@ use koshi_renderer::snapshot::{
 use koshi_session::client::{Client, FloatingPanePosition};
 use koshi_session::session::state::{Session, Tab};
 use koshi_terminal::graphics::DecodedImage;
-use koshi_terminal::grid::state::Grid;
 use koshi_terminal::scrollback::Scrollback;
 use koshi_terminal::selection::order_selection_positions;
 use koshi_terminal::state::Screen;
@@ -392,20 +392,21 @@ impl Server {
         }
     }
 
-    /// Content snapshot for one pane at scrollback view `scrollback_offset` — lines the
-    /// viewing client has scrolled up from the live bottom, `0` following live
-    /// output. The offset is clamped to the pane's retained line count, and that
-    /// clamped value drives both the composed grid and the scroll indicator, so
-    /// the two never disagree. At `0` the grid travels by reference (no copy); a
-    /// scrolled-back offset composes a window of history over the live screen.
+    /// Content snapshot for one pane at scrollback view `scrollback_offset`:
+    /// the lines the viewing client has scrolled up from the live bottom, `0`
+    /// following live output. The offset is clamped to the pane's retained
+    /// line count, and the listed rows and the scroll indicator both read that
+    /// clamped value. At `0` the rows are the live screen's row snapshots; a
+    /// scrolled-back offset lists a window of history rows above the top of the
+    /// live screen. No cell is copied in either case.
     ///
-    /// `selection` is the viewing client's highlight in this pane, resolved here
-    /// from absolute line numbers to the rows this frame actually shows.
+    /// `pane_selection` is the viewing client's highlight in this pane,
+    /// resolved here from absolute line numbers to the rows this frame shows.
     ///
-    /// A pane with no terminal engine — one not yet spawned — gets
-    /// `terminal_grid_view = None`, a hidden cursor, and no mouse mode at all: the
-    /// renderer draws no cells for it, and a wheel over it asks nothing of a
-    /// program.
+    /// A pane with no terminal engine, one not yet spawned, gets
+    /// [`PaneSnapshot::from_empty_pane`]: no grid, a hidden cursor, and mouse
+    /// tracking off. The renderer draws no cells for it, and a wheel over it
+    /// asks nothing of a program.
     #[allow(clippy::needless_pass_by_value)]
     fn build_pane_snapshot(
         &self,
@@ -414,40 +415,24 @@ impl Server {
         pane_selection: Option<Selection>,
     ) -> PaneSnapshot {
         let Some(terminal_engine) = self.terminal_engine_by_pane_id.get(&pane_id) else {
-            return PaneSnapshot {
-                pane_id,
-                pane_title: None,
-                cursor_snapshot: CursorSnapshot {
-                    row_index: 0,
-                    column_index: 0,
-                    is_visible: false,
-                    is_blinking: false,
-                    shape: None,
-                },
-                terminal_grid_view: None,
-                image_placement_snapshots: Vec::new(),
-                is_reverse_video: false,
-                mouse_tracking: MouseTracking::Off,
-                is_alternate_scroll_enabled: false,
-                is_on_alternate_screen: false,
-                selection_spans: None,
-                has_selection: false,
-                view_top_row_index: 0,
-                scrollback_metadata: ScrollbackMetadata {
-                    retained_line_count: 0,
-                },
-            };
+            return PaneSnapshot::from_empty_pane(pane_id);
         };
 
         let terminal_state = terminal_engine.get_terminal_state();
         let (row_index, column_index) = terminal_state.get_active_cursor_position();
         let scrollback_state = terminal_state.get_scrollback();
-        // The engine resolves the requested offset to the grid actually shown and
-        // its effective offset (0 while following live or on the alternate
-        // screen), so the composed grid, the indicator, and cursor suppression
-        // all agree on how far the view is scrolled.
-        let (terminal_grid, effective_scrollback_offset) =
+        // The engine resolves the requested offset to the rows shown and its
+        // effective offset: `0` while following live output or on the alternate
+        // screen. The listed rows, the indicator and the cursor suppression all
+        // read that effective offset.
+        let (row_snapshots, effective_scrollback_offset) =
             terminal_state.get_scrolled_view(scrollback_offset);
+        let (_, column_count) = terminal_state.get_active_grid().get_grid_dimensions();
+        let terminal_grid_view = GridView {
+            row_snapshots,
+            column_count,
+            view_row_offset: effective_scrollback_offset,
+        };
         let image_placement_snapshots = terminal_state
             .list_image_placements_for_view(effective_scrollback_offset)
             .iter()
@@ -480,7 +465,7 @@ impl Server {
             selection_spans: pane_selection.and_then(|pane_selection| {
                 compute_selection_spans(
                     &pane_selection,
-                    &terminal_grid,
+                    &terminal_grid_view,
                     scrollback_state,
                     effective_scrollback_offset,
                 )
@@ -490,10 +475,7 @@ impl Server {
             view_top_row_index: scrollback_state
                 .get_total_pushed_line_count()
                 .saturating_sub(effective_scrollback_offset as u64),
-            terminal_grid_view: Some(GridView {
-                grid: terminal_grid,
-                view_row_offset: effective_scrollback_offset,
-            }),
+            terminal_grid_view: Some(terminal_grid_view),
             is_reverse_video: terminal_state.is_reverse_video_enabled(),
             mouse_tracking: terminal_state.get_mouse_tracking(),
             is_alternate_scroll_enabled: terminal_state.is_alternate_scroll_enabled(),
@@ -708,11 +690,11 @@ fn list_pane_slots(layout_solve: &LayoutSolve) -> Vec<PaneSlot> {
 /// column 4.
 fn compute_selection_spans(
     selection: &Selection,
-    terminal_grid: &Grid,
+    terminal_grid_view: &GridView,
     scrollback: &Scrollback,
     scrollback_offset: usize,
 ) -> Option<SelectionSpans> {
-    let (row_count, column_count) = terminal_grid.get_grid_dimensions();
+    let (row_count, column_count) = terminal_grid_view.get_view_dimensions();
     if row_count == 0 || column_count == 0 {
         return None;
     }
@@ -773,4 +755,4 @@ fn compute_selection_spans(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

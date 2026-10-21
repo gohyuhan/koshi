@@ -26,7 +26,7 @@ const IPV6_ROUTE_PROBE_ADDRESS: SocketAddr = SocketAddr::new(
 /// One address of this machine, and the interface that carries it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostAddress {
-    /// The address, such as `192.168.1.20` or `2001:db8::20`.
+    /// The address, such as `192.0.2.20` or `2001:db8::20`.
     pub ip_address: IpAddr,
     /// The name of the interface, such as `en0`, `eth0` or `Wi-Fi`.
     pub interface_name: String,
@@ -41,9 +41,9 @@ pub struct HostAddress {
 /// them in. Nothing is sent to either address. Empty when the system does not
 /// list the addresses.
 ///
-/// Example: `en0` with `192.168.1.20` and `fe80::1`, `utun3` with
-/// `100.64.0.2`, and a default route through `en0` give `192.168.1.20` on
-/// `en0`, then `100.64.0.2` on `utun3`.
+/// Example: `en0` with `192.0.2.20` and `fe80::`, `utun3` with
+/// `198.51.100.2`, and a default route through `en0` give `192.0.2.20` on
+/// `en0`, then `198.51.100.2` on `utun3`.
 #[must_use]
 pub fn list_host_addresses() -> Vec<HostAddress> {
     let host_addresses: Vec<HostAddress> = platform::list_interface_addresses()

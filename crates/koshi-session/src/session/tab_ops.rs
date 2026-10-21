@@ -24,7 +24,7 @@ use koshi_layout::tree::LayoutNode;
 use crate::client::Client;
 use crate::session::cascade::remove_floating_pane;
 use crate::session::lifecycle::SessionLifecycleEvent;
-use crate::session::pane_ops::{register_running_pane, NewPaneSpec};
+use crate::session::pane_ops::{register_spawned_pane, NewPaneSpec};
 use crate::session::state::{Session, Tab};
 
 /// Which tab a focus request names, resolved against the current display order
@@ -41,8 +41,8 @@ pub enum TabTarget {
     Next,
 }
 
-/// Apply an already-spawned new tab: register its root pane as `Running`,
-/// append the tab after the last one, and switch the focused client onto it.
+/// Apply an already-spawned new tab: register its root pane, append the tab
+/// after the last one, and switch the focused client onto it.
 ///
 /// The caller mints `new_tab_id` and `new_pane_id` and spawns the root pane's
 /// child under `new_pane_id` before calling. The tab takes the next dense
@@ -73,7 +73,7 @@ pub fn commit_new_tab(
 ) -> (Option<TabId>, Vec<Event>) {
     let mut emitted_events = vec![];
 
-    register_running_pane(session, new_pane_id, new_pane_spec);
+    register_spawned_pane(session, new_pane_id, new_pane_spec);
 
     let mut new_tab = Tab::from_root_pane(new_tab_id, tab_name, session.tabs.len(), new_pane_id);
     new_tab.record_focus_mru(new_pane_id);
@@ -128,7 +128,7 @@ pub struct ProfileTab {
 }
 
 /// Commit a whole multi-pane tab from a profile: register every pane in
-/// `profile_tab.pane_ids` as `Running`, append the tab under `tab_name` with
+/// `profile_tab.pane_ids`, append the tab under `tab_name` with
 /// `profile_tab.layout_tree`, and record the pane at
 /// `profile_tab.focused_leaf_index` as the tab's most-recent focus.
 ///
@@ -173,7 +173,7 @@ pub fn commit_profile_tab(
     let mut emitted_events = Vec::new();
 
     for (pane_id, new_pane_spec) in pane_ids.iter().zip(new_pane_specs) {
-        register_running_pane(session, *pane_id, new_pane_spec);
+        register_spawned_pane(session, *pane_id, new_pane_spec);
     }
 
     let root_pane_id = pane_ids[0];

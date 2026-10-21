@@ -224,11 +224,13 @@ pub enum NewPanePlacement {
 pub struct ClosePaneArgs {
     /// Pane to close; `None` closes the focused pane.
     pub pane_id: Option<PaneId>,
-    /// Kill the pane's child immediately, overriding its close policy.
+    /// Kill the pane's child immediately. `false` asks the child to stop and
+    /// kills it once
+    /// [`GRACEFUL_TIMEOUT_DURATION`](crate::constant::GRACEFUL_TIMEOUT_DURATION)
+    /// passes with the child still running.
     pub should_force_close: bool,
     /// Kill the child's whole process group: every descendant it spawned
-    /// stops with it. Changes kill scope only; a `ConfirmIfBusy` pane still
-    /// rejects the close while busy.
+    /// stops with it. Changes kill scope only.
     pub should_kill_process_tree: bool,
 }
 
@@ -341,11 +343,13 @@ pub struct NewTabArgs {
 pub struct CloseTabArgs {
     /// Tab to close; `None` closes the focused tab.
     pub tab_id: Option<TabId>,
-    /// Kill every pane's child immediately, overriding each close policy.
+    /// Kill every pane's child immediately. `false` asks each child to stop
+    /// and kills it once
+    /// [`GRACEFUL_TIMEOUT_DURATION`](crate::constant::GRACEFUL_TIMEOUT_DURATION)
+    /// passes with the child still running.
     pub should_force_close: bool,
     /// Kill each child's whole process group: every descendant stops with
-    /// its pane. Changes kill scope only; a `ConfirmIfBusy` pane still
-    /// rejects the close while busy.
+    /// its pane. Changes kill scope only.
     pub should_kill_process_tree: bool,
 }
 
@@ -519,6 +523,13 @@ pub struct SwitchSessionArgs {
     /// Session the client moves to. The caller resolves it; this session never
     /// looks a name up.
     pub session_id: SessionId,
+    /// The user id whose folder of the shared directory advertises
+    /// `session_id`, as `koshi attach 1001/session-<uuid>` names it. The client
+    /// that moves reads that one folder. `None` looks the id up in the runtime
+    /// directory, then in every folder of the shared directory. A message
+    /// without `owner_user_id` is refused.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub owner_user_id: Option<u32>,
 }
 
 /// Selection and copy commands — the commands of visual mode.

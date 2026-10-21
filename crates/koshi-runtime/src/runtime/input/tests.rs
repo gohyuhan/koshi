@@ -8,16 +8,19 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{mpsc, Arc};
 
-use crate::runtime::command::tests::{build_floating_new_pane_args, create_floating_pane};
+use crate::runtime::command::tests::{
+    attach_second_client, build_floating_new_pane_args, create_floating_pane, get_command_outcome,
+};
 use crate::runtime::pty_inbox::InboxSink;
+use crate::runtime::render_schedule::tests::{
+    get_frame_wait, subscribe_and_push_first_frame, DEFAULT_FRAME_INTERVAL_DURATION,
+};
 use crate::runtime::tests::build_viewer;
 use koshi_config::conflict::KeymapVerdict;
 use koshi_config::layer::{PartialKeybindingsConfig, PartialKoshiConfig, PartialLayoutDefaults};
 use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::action::ActionReference;
-use koshi_core::command::{
-    Command, CommandResult, FocusPaneArgs, FocusTarget, NewPaneArgs, NewPanePlacement,
-};
+use koshi_core::command::{Command, FocusPaneArgs, FocusTarget, NewPaneArgs, NewPanePlacement};
 use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::SessionId;
 use koshi_core::key::{
@@ -27,7 +30,6 @@ use koshi_core::key::{
 use koshi_core::lock::LockMode;
 use koshi_layout::edit::split_leaf;
 use koshi_layout::tree::{LayoutNode, SplitNode};
-use koshi_session::client::{Client, ClientOrigin};
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::build_key_input_for_chord;
 use std::time::{Duration, Instant};
@@ -91,6 +93,46 @@ fn recovery_notice_clears_only_after_pane_input_succeeds() {
 }
 
 #[test]
+fn showing_and_clearing_the_recovery_notice_each_mark_the_view_of_every_subscriber() {
+    let (mut server, _, client_id, _) = build_test_server();
+    let pane_id = get_only_pane_id(&server);
+    let session_id = server
+        .get_session_for_client(client_id)
+        .expect("attached session")
+        .session_id;
+    let other_client_id = attach_second_client(&mut server, client_id, Some(pane_id));
+    let client_ids = [client_id, other_client_id];
+    let shown_time = Instant::now();
+    let _delivery_receivers = client_ids.map(|viewing_client_id| {
+        subscribe_and_push_first_frame(&mut server, viewing_client_id, shown_time)
+    });
+
+    server.show_session_recovery_notice(session_id);
+    for viewing_client_id in client_ids {
+        assert_eq!(
+            get_frame_wait(&server, viewing_client_id, shown_time),
+            Some(DEFAULT_FRAME_INTERVAL_DURATION)
+        );
+    }
+
+    let cleared_time = shown_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(cleared_time);
+    for viewing_client_id in client_ids {
+        assert_eq!(
+            get_frame_wait(&server, viewing_client_id, cleared_time),
+            None
+        );
+    }
+    server.clear_session_recovery_notice_after_pane_input(pane_id);
+    for viewing_client_id in client_ids {
+        assert_eq!(
+            get_frame_wait(&server, viewing_client_id, cleared_time),
+            Some(DEFAULT_FRAME_INTERVAL_DURATION)
+        );
+    }
+}
+
+#[test]
 fn recovery_notice_stays_for_empty_or_failed_paste_and_clears_for_written_paste() {
     let (mut server, fake_pty_backend, client_id, _) = build_test_server();
     let pane_id = get_only_pane_id(&server);
@@ -141,12 +183,11 @@ impl Server {
     /// Run the action a viewer's keypress resolved to, the way an attached
     /// viewer does: resolve `bound_action.action_reference` against the
     /// built-in table with `new_pane_direction`, dispatch the command it
-    /// stands for attributed to `client_id`'s keybinding, and mark the status
-    /// line stale. A viewer-local action dispatches nothing and still marks the
-    /// status line stale.
+    /// stands for attributed to `client_id`'s keybinding, and mark the view
+    /// of every subscriber changed. A viewer-local action dispatches nothing
+    /// and still marks every view changed.
     ///
-    /// An action that does not resolve dispatches nothing and marks nothing
-    /// stale.
+    /// An action that does not resolve dispatches nothing and marks nothing.
     fn handle_bound_action(
         &mut self,
         client_id: ClientId,
@@ -168,7 +209,7 @@ impl Server {
             );
             let _ = self.dispatch(command_envelope);
         }
-        self.render_scheduler.invalidate();
+        self.mark_every_view_changed();
     }
 }
 
@@ -188,12 +229,14 @@ fn build_test_server() -> (Server, Arc<FakePtyBackend>, ClientId, ViewerClient) 
             SystemTime::UNIX_EPOCH,
         )
         .expect("bootstrap");
-    let viewer = build_viewer(&mut server, client_id);
+    let viewer = build_viewer(client_id);
     (server, fake_pty_backend, client_id, viewer)
 }
 
 /// One keypress, the way the running binary delivers it: the viewer decides
 /// what the chord means, and only what it resolves to reaches the session.
+/// The viewer then applies the frame the session composes for it, when the
+/// session still has the client.
 fn apply_key_press(
     server: &mut Server,
     viewer: &mut ViewerClient,
@@ -211,10 +254,14 @@ fn apply_key_press(
         }
         KeyOutcome::Pending | KeyOutcome::Discard => {}
     }
-    viewer.apply_events();
+    if let Some(render_snapshot) = server.build_snapshot(client_id) {
+        viewer.apply_render_snapshot(&render_snapshot);
+    }
 }
 
-/// Fire an open sequence's binding if its ambiguity deadline has passed.
+/// Fire an open sequence's binding if its ambiguity deadline has passed, then
+/// apply the frame the session composes for the viewer, when the session
+/// still has the client.
 fn expire_pending_key_sequence(
     server: &mut Server,
     viewer: &mut ViewerClient,
@@ -224,7 +271,9 @@ fn expire_pending_key_sequence(
         let new_pane_direction = viewer.get_client_config().layout.new_pane_direction;
         server.handle_bound_action(viewer.get_client_id(), bound_action, new_pane_direction);
     }
-    viewer.apply_events();
+    if let Some(render_snapshot) = server.build_snapshot(viewer.get_client_id()) {
+        viewer.apply_render_snapshot(&render_snapshot);
+    }
 }
 
 fn build_key_chord(modifier_flags: BindingModifierFlags, key_character: char) -> KeyChord {
@@ -281,18 +330,23 @@ fn build_server_with_scrolled_client() -> (Server, koshi_core::ids::PaneId, Clie
     (server, pane_id, client_id, viewer)
 }
 
-/// Runs `command` as if `client_id` had issued it from a keybinding. Panics if
-/// the command is rejected.
-fn dispatch_test_command(server: &mut Server, client_id: ClientId, command: Command) {
+/// Runs `command` as if `client_id` had issued it from a keybinding, and
+/// checks that it applied with exactly `expected_event_names`, in order.
+fn dispatch_test_command(
+    server: &mut Server,
+    client_id: ClientId,
+    command: Command,
+    expected_event_names: &[&'static str],
+) {
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
         command,
     );
-    let dispatch_result = server.dispatch(command_envelope);
-    assert!(
-        matches!(dispatch_result, CommandResult::Ok { .. }),
-        "test setup: command was rejected: {dispatch_result:?}"
+    assert_eq!(
+        get_command_outcome(&server.dispatch(command_envelope)),
+        Ok(expected_event_names.to_vec()),
+        "test setup: the command applied"
     );
 }
 
@@ -1156,43 +1210,6 @@ fn get_active_tab_id(server: &Server, client_id: ClientId) -> koshi_core::ids::T
         .get_active_tab_id()
 }
 
-/// Attaches a second local client to `first_client_id`'s session, on the
-/// first client's active tab with `focused_pane_id` focused, and returns the
-/// second client's id.
-fn attach_second_client(
-    server: &mut Server,
-    first_client_id: ClientId,
-    focused_pane_id: koshi_core::ids::PaneId,
-) -> ClientId {
-    let session_id = server
-        .get_session_for_client(first_client_id)
-        .expect("session")
-        .session_id;
-    let tab_id = get_active_tab_id(server, first_client_id);
-    let second_client_id = ClientId::new();
-    let mut second_client = Client::from_attachment(
-        second_client_id,
-        session_id,
-        SystemTime::now(),
-        Size {
-            column_count: 80,
-            row_count: 24,
-        },
-        None,
-        tab_id,
-        ClientOrigin::Local,
-        "C-test-client".to_string(),
-        0,
-    );
-    second_client.update_focused_pane(tab_id, focused_pane_id);
-    server
-        .session_by_id
-        .get_mut(&session_id)
-        .expect("session")
-        .attach_client(second_client);
-    second_client_id
-}
-
 #[test]
 fn resize_prefix_moves_a_live_split_border() {
     let (mut server, _fake_pty_backend, _client_id, mut viewer) = build_test_server();
@@ -1792,7 +1809,7 @@ fn a_key_reaches_the_focused_floating_pane_only_while_its_client_has_room_to_dra
     // A second 80x24 terminal keeps an 80x22 floating viewport for the
     // session. The first client's 3x3 terminal gives a 3x1 pane area, below
     // the 4x5 floating minimum.
-    attach_second_client(&mut server, client_id, tiled_pane_id);
+    attach_second_client(&mut server, client_id, Some(tiled_pane_id));
     server.handle_client_resize(
         client_id,
         Size {
@@ -1850,11 +1867,17 @@ fn one_client_zooming_does_not_stop_another_client_keys() {
     assert_ne!(focused_pane_id, original_pane_id);
 
     // Client B joins the tab, focused on the first pane.
-    let second_client_id = attach_second_client(&mut server, first_client_id, original_pane_id);
-    let mut second_viewer = build_viewer(&mut server, second_client_id);
+    let second_client_id =
+        attach_second_client(&mut server, first_client_id, Some(original_pane_id));
+    let mut second_viewer = build_viewer(second_client_id);
 
     // Client A zooms its own pane and hides `original_pane_id` from A's view only.
-    dispatch_test_command(&mut server, first_client_id, Command::TogglePaneFullscreen);
+    dispatch_test_command(
+        &mut server,
+        first_client_id,
+        Command::TogglePaneFullscreen,
+        &["LayoutChanged"],
+    );
 
     // B types. B is tiled and sees `original_pane_id`, and its key lands there.
     apply_key_press(
@@ -1910,6 +1933,7 @@ fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
             spawn_spec: None,
             client_id: Some(first_client_id),
         }),
+        &["PaneCreated", "LayoutChanged", "PaneFocused", "PtyResized"],
     );
     let stacked_pane_id = get_focused_pane_id(&server, first_client_id);
     assert_ne!(
@@ -1918,7 +1942,8 @@ fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
     );
 
     // Client B joins the same tab.
-    let second_client_id = attach_second_client(&mut server, first_client_id, stacked_pane_id);
+    let second_client_id =
+        attach_second_client(&mut server, first_client_id, Some(stacked_pane_id));
 
     // Client B focuses the other member and activates it. The stacked pane
     // client A still has focused collapses to a header.
@@ -1929,6 +1954,7 @@ fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
             focus_target: FocusTarget::Pane(original_pane_id),
             client_id: Some(second_client_id),
         }),
+        &["LayoutChanged", "PtyResized", "PaneFocused"],
     );
     assert_eq!(
         get_focused_pane_id(&server, first_client_id),
@@ -1938,7 +1964,7 @@ fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
 
     // Client A types at a pane that draws nothing. Client B types at the member
     // that is drawn.
-    let mut second_viewer = build_viewer(&mut server, second_client_id);
+    let mut second_viewer = build_viewer(second_client_id);
     apply_key_press(
         &mut server,
         &mut viewer,
@@ -1991,10 +2017,11 @@ fn pending_sequences_stay_independent_across_clients_in_the_same_session() {
 
     // Client B joins the same session, focused on the original pane, a
     // different pane than client A's.
-    let second_client_id = attach_second_client(&mut server, first_client_id, original_pane_id);
+    let second_client_id =
+        attach_second_client(&mut server, first_client_id, Some(original_pane_id));
 
     // Each viewer holds its own keymap and its own open sequence.
-    let mut second_viewer = build_viewer(&mut server, second_client_id);
+    let mut second_viewer = build_viewer(second_client_id);
 
     // Client A opens the pane prefix and leaves it hanging...
     apply_key_press(
@@ -2055,8 +2082,8 @@ fn one_viewer_open_sequence_is_invisible_to_another_viewer() {
 
     // Client B joins the same session with no sequence of its own.
     let only_pane_id = get_only_pane_id(&server);
-    let second_client_id = attach_second_client(&mut server, first_client_id, only_pane_id);
-    let mut second_viewer = build_viewer(&mut server, second_client_id);
+    let second_client_id = attach_second_client(&mut server, first_client_id, Some(only_pane_id));
+    let mut second_viewer = build_viewer(second_client_id);
 
     assert_eq!(
         viewer.get_pending_key_sequence().cloned(),

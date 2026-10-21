@@ -54,10 +54,12 @@
 //! dispatcher by then. [`IpcServer::count_attached_connections`] counts the attached
 //! clients still being read.
 //!
-//! [`IpcServer::close_intake`] ends the connections that are left: no event a
-//! peer sends from here is handed to the dispatcher, and every connection being
-//! served has its read direction closed. Its thread ends without reading
-//! another request. The dispatcher calls it before it stops draining the inbox.
+//! [`IpcServer::start_refusing_requests`] stops every event a peer sends from
+//! reaching the dispatcher. Each request that needs the dispatcher is answered
+//! with [`IpcErrorCode::Restarting`], and did not run. The dispatcher calls it
+//! before it stops draining the inbox, and then waits with
+//! [`IpcServer::wait_until_requests_answered`] until every answer it gave is
+//! written.
 //!
 //! [`IpcServer::shutdown`] stops accepting, joins the accept loop, and
 //! removes the endpoint file and the socket.
@@ -65,23 +67,28 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::command::{CommandEnvelope, CommandSource};
-use koshi_core::constant::{compute_heartbeat_interval, MIN_LINK_TIMEOUT_MS};
-use koshi_core::ids::{ClientId, PaneId, SessionId};
+use koshi_core::constant::{
+    compute_heartbeat_interval, HIGHEST_MAX_FRAMES_PER_SECOND, LOWEST_MAX_FRAMES_PER_SECOND,
+    MAX_VIEWPORT_CELL_COUNT, MIN_LINK_TIMEOUT_MS,
+};
+use koshi_core::ids::{ClientId, SessionId};
 use koshi_ipc::endpoint::{
     compute_socket_address, delete_socket_file, EndpointFile, ServerProgramFile,
 };
 use koshi_ipc::error::IpcError;
-use koshi_ipc::event::SessionEvent;
+use koshi_ipc::event::{SessionEvent, MAX_RELEASED_IMAGE_CONTENT_COUNT};
 use koshi_ipc::frame::{
-    FrameImageChunk, FrameImagePlacement, PaintedFrame, MAX_FRAME_IMAGE_TRANSFER_COUNT,
+    FrameImagePlacement, PaintedFrame, MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT,
+    MAX_FRAME_IMAGE_TRANSFER_COUNT,
 };
 use koshi_ipc::handshake::{Handshake, Peer};
+use koshi_ipc::image_chunk::build_image_chunk_frame_head;
 use koshi_ipc::plane::{self, RequestDisposition};
 use koshi_ipc::protocol::{
     ConnectionToken, GraphicsCapabilities, IncomingRequest, IpcErrorCode, IpcErrorPayload,
@@ -97,15 +104,23 @@ use koshi_observability::repeated_warning::WarningRateLimiter;
 use koshi_renderer::snapshot::{
     Delivery, ImagePlacementSnapshot, PlacementSnapshot, RenderSnapshot,
 };
-use koshi_terminal::graphics::ImageRecord;
+use koshi_terminal::graphics::{DecodedAnimation, DecodedImage, ImageRecord};
 
 use crate::executable_watch::ExecutableWatch;
 use crate::runtime::bus::{build_wire_event, build_wire_host_write_events, WriterHandoff};
-use crate::runtime::event::{EndingNotice, RuntimeEvent, SessionEnding};
+use crate::runtime::delivery_queue::{DeliveryReceiver, PacedReceive, PaintedUpdateReport};
+use crate::runtime::event::{EndingNotice, RunningCount, RuntimeEvent, SessionEnding};
 use crate::runtime::frame::{
     build_wire_frame, build_wire_frame_with_content_ids, build_wire_image_chunk_sources,
     build_wire_image_transfer, build_wire_placement_snapshot,
+    build_wire_placement_snapshot_with_content_ids,
 };
+use crate::runtime::painted_update::PaintedUpdateSender;
+use crate::server::{RestartCheck, RestartRefusal};
+
+mod paint_window;
+
+use paint_window::PaintWindow;
 
 /// How long the accept loop sleeps after a failed accept before it accepts
 /// again. A persistent accept error — say, the process is out of file
@@ -120,6 +135,10 @@ const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// connection from another machine or from another user of this machine.
 const CLIPBOARD_COPY_ORIGIN_REFUSAL: &str =
     "a pane clipboard copy must come from this machine and this user";
+
+/// The sentence that refuses, with [`IpcErrorCode::Restarting`], a request
+/// read while the session replaces its process image.
+const SESSION_RESTARTING_MESSAGE: &str = "the session is restarting; ask again in a moment";
 
 /// Reads the `allow-other-users` setting from the configuration again and
 /// reports whether it is on. Called for each connection from another local
@@ -149,25 +168,32 @@ pub struct OtherUsers {
 pub enum OtherUsers {}
 
 /// What the control socket takes in: every connection being served, how many of
-/// them carry an attached client, and whether what a peer sends still reaches
-/// the session.
+/// them carry an attached client, how many requests wait for their answer to be
+/// written, and whether what a peer sends still reaches the session.
 ///
-/// A serving thread reads `is_closed` and hands its event to the dispatcher under
-/// one shared borrow of the intake, and [`close_intake`](Intake::close_intake) sets
-/// `is_closed` under the exclusive borrow. A hand-off either finishes before the
-/// close, or reads the closed intake and never happens. Once
-/// [`close_intake`](Intake::close_intake) returns, no serving thread sends another event.
+/// A serving thread reads `is_refusing_requests` and hands its event to the
+/// dispatcher under one shared borrow of the intake, and
+/// [`start_refusing_requests`](Intake::start_refusing_requests) sets it under
+/// the exclusive borrow. A hand-off either finishes before that call, or reads
+/// the refusing intake and never happens. Once that call returns, no serving
+/// thread hands over another event.
 #[derive(Debug, Default)]
 struct Intake {
     intake_state: RwLock<IntakeState>,
+    /// How many requests were read and wait for their answer to be written,
+    /// each request held by a [`Prepare`](IpcRequestKind::Prepare) answered
+    /// `Prepared` included until its `Commit` is answered.
+    unanswered_requests: RunningCount,
 }
 
 /// What an [`Intake`] holds.
 #[derive(Debug, Default)]
 struct IntakeState {
-    /// `true` once [`Intake::close_intake`] ran. No event reaches the dispatcher from
-    /// here.
-    is_closed: bool,
+    /// `true` from [`Intake::start_refusing_requests`] until
+    /// [`Intake::stop_refusing_requests`]. No event reaches the dispatcher
+    /// while it is set, and every request that needs the dispatcher is refused
+    /// with [`IpcErrorCode::Restarting`].
+    is_refusing_requests: bool,
     /// How many connections carry an attached client and are still being read.
     attached_connection_count: usize,
     /// The read direction of every connection being served, under the number
@@ -178,16 +204,23 @@ struct IntakeState {
     next_connection_number: u64,
 }
 
+/// Why an event handed to an [`Intake`] did not reach the dispatcher, or why
+/// no answer to it came back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchFailure {
+    /// The intake refuses requests: the event was dropped.
+    Refused,
+    /// The dispatcher is gone: the event was dropped, or no answer came.
+    DispatcherGone,
+}
+
 impl Intake {
     /// File `connection`'s read direction and hand back the entry its serving
-    /// thread holds. `None` means the connection is not served: intake is
-    /// closed, or its read direction could not be taken.
+    /// thread holds. `None` means the connection is not served: its read
+    /// direction could not be taken.
     fn accept_connection(self: &Arc<Self>, connection: &Connection) -> Option<ServedConnection> {
         let reader = connection.create_read_closer().ok()?;
         let mut intake_state = self.intake_state.write().expect("intake");
-        if intake_state.is_closed {
-            return None;
-        }
         let connection_number = intake_state.next_connection_number;
         intake_state.next_connection_number += 1;
         intake_state
@@ -199,15 +232,24 @@ impl Intake {
         })
     }
 
-    /// Hand `event` to the dispatcher over the runtime inbox. `false` means it
-    /// was not handed over: intake is closed, or the dispatcher is gone.
+    /// Hand `runtime_event` to the dispatcher over the runtime inbox.
+    ///
+    /// # Errors
+    /// [`DispatchFailure::Refused`] while the intake refuses requests, and
+    /// [`DispatchFailure::DispatcherGone`] once the dispatcher is gone. The
+    /// event is dropped in both cases.
     fn hand_over_event(
         &self,
         inbox_sender: &Sender<RuntimeEvent>,
         runtime_event: RuntimeEvent,
-    ) -> bool {
+    ) -> Result<(), DispatchFailure> {
         let intake_state = self.intake_state.read().expect("intake");
-        !intake_state.is_closed && inbox_sender.send(runtime_event).is_ok()
+        if intake_state.is_refusing_requests {
+            return Err(DispatchFailure::Refused);
+        }
+        inbox_sender
+            .send(runtime_event)
+            .map_err(|_| DispatchFailure::DispatcherGone)
     }
 
     /// Count one attached client's connection as being read, and hand back the
@@ -230,24 +272,41 @@ impl Intake {
             .attached_connection_count
     }
 
-    /// Take connections again after a [`close_intake`](Intake::close_intake): a connection
-    /// accepted from here on is served, and a serving thread hands its events
-    /// over again.
-    ///
-    /// The connections closed by that call stay closed.
-    fn reopen_intake(&self) {
-        self.intake_state.write().expect("intake").is_closed = false;
+    /// Count one request as waiting for its answer to be written, and hand
+    /// back the entry the serving thread holds until that answer is written or
+    /// the connection ends.
+    fn record_unanswered_request(self: &Arc<Self>) -> UnansweredRequest {
+        self.unanswered_requests.record_started();
+        UnansweredRequest {
+            intake: Arc::clone(self),
+        }
     }
 
-    /// Stop events reaching the dispatcher and close the read direction of
-    /// every connection being served. Each serving thread ends without reading
-    /// another request.
-    fn close_intake(&self) {
-        let mut intake_state = self.intake_state.write().expect("intake");
-        intake_state.is_closed = true;
-        for reader in intake_state.reader_by_connection_number.values() {
-            reader.close();
-        }
+    /// Wait until no request waits for its answer to be written, or until
+    /// `answer_deadline` passes. Gives how many requests still wait.
+    fn wait_until_requests_answered(&self, answer_deadline: Instant) -> usize {
+        self.unanswered_requests
+            .wait_until_none_run(answer_deadline)
+    }
+
+    /// Refuse every event from here on: no serving thread hands another event
+    /// to the dispatcher, and every request that needs the dispatcher is
+    /// answered with [`IpcErrorCode::Restarting`]. Connections are still
+    /// accepted and served.
+    fn start_refusing_requests(&self) {
+        self.intake_state
+            .write()
+            .expect("intake")
+            .is_refusing_requests = true;
+    }
+
+    /// Hand events to the dispatcher again after
+    /// [`start_refusing_requests`](Intake::start_refusing_requests).
+    fn stop_refusing_requests(&self) {
+        self.intake_state
+            .write()
+            .expect("intake")
+            .is_refusing_requests = false;
     }
 
     /// Close the read direction of the connection filed under
@@ -261,6 +320,22 @@ impl Intake {
         {
             reader.close();
         }
+    }
+}
+
+/// One request counted in its [`Intake`] as waiting for its answer to be
+/// written, while the serving thread holds this. Dropping it counts the
+/// request as answered and wakes
+/// [`Intake::wait_until_requests_answered`].
+#[derive(Debug)]
+struct UnansweredRequest {
+    /// The intake this request is counted in.
+    intake: Arc<Intake>,
+}
+
+impl Drop for UnansweredRequest {
+    fn drop(&mut self) {
+        self.intake.unanswered_requests.record_ended();
     }
 }
 
@@ -309,7 +384,7 @@ struct AttachedStream {
     /// Client whose input and output use this stream.
     client_id: ClientId,
     /// Deliveries waiting to be written to the client.
-    deliveries: Receiver<Delivery>,
+    deliveries: DeliveryReceiver,
     /// The host-write bytes that wait for the client's own terminal, which the
     /// writer takes before each delivery and before its last frame, and the
     /// owed-frame mark, which the writer takes after each delivery.
@@ -331,6 +406,18 @@ struct AttachedStream {
     /// `true` when the connection came from another machine, or when its
     /// Attach named a client to come back as (`resume_client_id`).
     is_returning_before_first_request: bool,
+}
+
+/// What a session that can replace its own process image hands its control
+/// socket: the watch of the program file it started from, and the check every
+/// restart request runs before it reaches the dispatcher.
+pub struct ImageReplacement {
+    /// The watch of the program file the session started from.
+    pub executable_watch: Arc<ExecutableWatch>,
+    /// What a restart must promise. It runs on the thread that serves the
+    /// `Restart` request, or on the thread that read the program file's
+    /// version.
+    pub restart_check: RestartCheck,
 }
 
 /// The serving side of one session's control socket: the bound listener's
@@ -379,20 +466,23 @@ impl IpcServer {
     /// The endpoint file is written to the same private path at the same `0600`
     /// mode either way; only the address it carries differs.
     ///
-    /// `executable_watch` `Some` checks the program file the session started
-    /// from on each connection the socket takes, as
+    /// `image_replacement` `Some` lets the session replace its own process
+    /// image. Its watch checks the program file the session started from on
+    /// each connection the socket takes, as
     /// [`ExecutableWatch::check_executable_file`] states. A file that now
-    /// holds another koshi version sends the dispatcher
-    /// [`RuntimeEvent::IpcRestart`], as a `Restart` request does. The session
-    /// also writes its [`ServerProgramFile`] after the endpoint file, from the
-    /// watch's path and running version, and a failed write unwinds the bind
-    /// as a failed endpoint write does.
+    /// holds another koshi version runs the restart check and then sends the
+    /// dispatcher [`RuntimeEvent::IpcRestart`], as a `Restart` request does.
+    /// The session also writes its [`ServerProgramFile`] after the endpoint
+    /// file, from the watch's path and running version, and a failed write
+    /// unwinds the bind as a failed endpoint write does. `None` writes no
+    /// program file, and every `Restart` is refused with
+    /// [`RestartRefusal::ImageReplacementUnsupported`].
     pub fn start(
         runtime_directory: &Path,
         session_id: SessionId,
         inbox_sender: Sender<RuntimeEvent>,
         other_users: Option<OtherUsers>,
-        executable_watch: Option<Arc<ExecutableWatch>>,
+        image_replacement: Option<ImageReplacement>,
     ) -> Result<IpcServer, IpcError> {
         koshi_paths::ensure_private_directory(runtime_directory).map_err(|directory_error| {
             IpcError::Transport {
@@ -435,13 +525,15 @@ impl IpcServer {
             connection_token: connection_token.clone(),
             process_id: std::process::id(),
         };
-        let program_file_path = executable_watch.as_ref().map(|_| {
+        let image_replacement = image_replacement.map(Arc::new);
+        let program_file_path = image_replacement.as_ref().map(|_| {
             ServerProgramFile::resolve_session_program_file_path(runtime_directory, session_id)
         });
         let advertisement_result =
             endpoint_file.write_to_path(&endpoint_path).and_then(|()| {
-                match (&executable_watch, &program_file_path) {
-                    (Some(executable_watch), Some(program_file_path)) => executable_watch
+                match (&image_replacement, &program_file_path) {
+                    (Some(image_replacement), Some(program_file_path)) => image_replacement
+                        .executable_watch
                         .build_server_program_file()
                         .write_to_path(program_file_path),
                     _ => Ok(()),
@@ -474,7 +566,7 @@ impl IpcServer {
                 &accept_shutdown_flag,
                 allow_other_users_setting.as_ref(),
                 &accept_intake,
-                executable_watch.as_ref(),
+                image_replacement.as_ref(),
             );
         });
 
@@ -489,29 +581,43 @@ impl IpcServer {
         })
     }
 
-    /// End every connection still being served: no event a peer sends from here
-    /// is handed to the dispatcher, and each connection has its read direction
-    /// closed. The thread serving it ends without reading another request.
+    /// Refuse every request from here on: no event a peer sends is handed to
+    /// the dispatcher, and every request that needs the dispatcher is answered
+    /// with [`IpcErrorCode::Restarting`]. Connections are still accepted and
+    /// served, and a Hello is still answered.
     ///
     /// A request a peer sent before this either reached the dispatcher already
-    /// or never does. The dispatcher's next pass over the runtime inbox is the
-    /// last that can find anything a peer sent.
+    /// or is refused. The dispatcher's next pass over the runtime inbox is the
+    /// last that can find anything a peer sent, and the serving thread writes
+    /// each answer that pass gives.
     ///
-    /// A peer still holding its connection loses what it wrote and the session
-    /// had not read, and sees its connection close.
+    /// A request held by a `Prepare` answered `Prepared` is refused at its
+    /// `Commit`, and does not run. Refusing again changes nothing.
+    pub fn start_refusing_requests(&self) {
+        self.connection_intake.start_refusing_requests();
+    }
+
+    /// Wait until every request read on a connection has its answer written,
+    /// or until `answer_deadline` passes, and give how many requests still
+    /// wait. A request held by a `Prepare` answered `Prepared` waits until its
+    /// `Commit` is answered or its connection ends.
     ///
-    /// A connection accepted after this is closed without being served.
-    /// Closing an already-closed intake changes nothing.
-    pub fn close_intake(&self) {
-        self.connection_intake.close_intake();
+    /// Example: after [`start_refusing_requests`](Self::start_refusing_requests),
+    /// a `Commit` that arrives 5 ms after that call is refused, its refusal is
+    /// written, and the wait returns `0`.
+    #[must_use]
+    pub fn wait_until_requests_answered(&self, answer_deadline: Instant) -> usize {
+        self.connection_intake
+            .wait_until_requests_answered(answer_deadline)
     }
 
     /// Mint a fresh connection token, accept it from the next connection on,
     /// and rewrite the endpoint file with it.
     ///
     /// The address does not change. A connection already open keeps serving:
-    /// the token is checked at Hello only. An intake closed by
-    /// [`close_intake`](Self::close_intake) takes connections again.
+    /// the token is checked at Hello only. After
+    /// [`start_refusing_requests`](Self::start_refusing_requests), each request
+    /// read from here on reaches the dispatcher again.
     ///
     /// # Errors
     /// Returns the failure of writing the endpoint file. The fresh token is
@@ -519,10 +625,10 @@ impl IpcServer {
     /// advertises a token no connection is served under.
     pub fn rotate_token(&self) -> Result<(), IpcError> {
         let fresh_connection_token = ConnectionToken::generate();
-        // The fresh token is stored before the intake reopens and before the
-        // endpoint file advertises it.
+        // The fresh token is stored before requests reach the dispatcher again
+        // and before the endpoint file advertises it.
         *self.connection_token.write().expect("connection token") = fresh_connection_token.clone();
-        self.connection_intake.reopen_intake();
+        self.connection_intake.stop_refusing_requests();
         let endpoint_file = EndpointFile {
             socket_address: self.socket_address.clone(),
             connection_token: fresh_connection_token,
@@ -552,7 +658,7 @@ impl IpcServer {
     /// joined, and the program file, the endpoint file and the socket are
     /// removed, in that order. Connections already being
     /// served run out on their own threads; with the dispatcher draining, their
-    /// in-flight requests end in a closed connection rather than a mutation.
+    /// in-flight requests end in a closed connection and change nothing.
     ///
     /// Dropping an `IpcServer` runs the same teardown, including when a panic
     /// unwinds the server.
@@ -643,14 +749,14 @@ impl Drop for IpcServer {
 ///
 /// `connection_intake` files each connection's read direction before its thread
 /// starts, and is what that thread hands its events over through. A connection
-/// the intake does not take — it is closed, or the read direction could not be
-/// taken — is closed without being served.
+/// whose read direction could not be taken is closed without being served.
 ///
-/// Each connection the intake takes runs a check of `executable_watch`, and
-/// its serving thread runs
+/// Each connection the intake takes runs a check of the watch
+/// `image_replacement` holds, and its serving thread runs
 /// [`ExecutableWatch::check_executable_file_after_refused_hello`] for each
 /// Hello refused for its protocol version. When either finds another koshi
-/// version, [`restart_into_installed_version`] asks the dispatcher to restart.
+/// version, [`restart_into_installed_version`] runs the restart check and asks
+/// the dispatcher to restart.
 fn run_accept_loop(
     listener: &Listener,
     connection_token: &RwLock<ConnectionToken>,
@@ -658,7 +764,7 @@ fn run_accept_loop(
     is_shutting_down: &AtomicBool,
     allow_other_users_setting: Option<&OtherUsersSetting>,
     connection_intake: &Arc<Intake>,
-    executable_watch: Option<&Arc<ExecutableWatch>>,
+    image_replacement: Option<&Arc<ImageReplacement>>,
 ) {
     let mut accept_failure_warning = WarningRateLimiter::new();
     transport::accept_until_shutdown(
@@ -682,12 +788,14 @@ fn run_accept_loop(
             let Some(served_connection) = connection_intake.accept_connection(&connection) else {
                 return;
             };
-            if let Some(executable_watch) = executable_watch {
-                executable_watch.check_executable_file(build_installed_version_restart(
-                    connection_intake,
-                    inbox_sender,
-                    executable_watch,
-                ));
+            if let Some(image_replacement) = image_replacement {
+                image_replacement.executable_watch.check_executable_file(
+                    build_installed_version_restart(
+                        connection_intake,
+                        inbox_sender,
+                        image_replacement,
+                    ),
+                );
             }
             let peer = Peer::Local {
                 is_same_user,
@@ -705,7 +813,7 @@ fn run_accept_loop(
             // checked against the token rotated last.
             let connection_token = connection_token.read().expect("connection token").clone();
             let inbox_sender = inbox_sender.clone();
-            let executable_watch = executable_watch.cloned();
+            let image_replacement = image_replacement.cloned();
             std::thread::spawn(move || {
                 serve_connection(
                     connection,
@@ -714,7 +822,7 @@ fn run_accept_loop(
                     peer,
                     live_setting,
                     &served_connection,
-                    executable_watch.as_ref(),
+                    image_replacement.as_ref(),
                 );
             });
         },
@@ -786,9 +894,12 @@ fn run_accept_loop(
 /// [`stamp_cli_command_source`] before it crosses to the dispatcher: this connection carries
 /// a `koshi` CLI invocation.
 ///
-/// A `Restart` the dispatcher refuses is answered with
-/// [`IpcErrorCode::RequestFailed`] carrying the sentence naming what is
-/// wrong, and the connection keeps serving.
+/// A `Restart` runs the restart check `image_replacement` holds on this
+/// thread before anything reaches the dispatcher. A check that refuses, and a
+/// connection served with no `image_replacement`, are answered with
+/// [`IpcErrorCode::RequestFailed`] carrying the sentence naming what is wrong,
+/// and the connection keeps serving. A check that passes sends
+/// [`RuntimeEvent::IpcRestart`], and the answer is `Restarting`.
 ///
 /// An answered `Attach` ends the request loop: the connection is handed to
 /// [`stream_events`], which carries that client's events out and that client's
@@ -796,10 +907,19 @@ fn run_accept_loop(
 /// cannot be written detaches the client: as returning when the connection
 /// came from another machine or the `Attach` names a client to come back as
 /// (`resume_client_id`), and as not returning otherwise. An `Attach` whose
-/// `link_timeout_ms` is below [`MIN_LINK_TIMEOUT_MS`], `1000`, reaches no
+/// `viewport_size` holds more than [`MAX_VIEWPORT_CELL_COUNT`] cells reaches
+/// no dispatcher: it is refused with [`IpcErrorCode::RequestFailed`] and the
+/// sentence `a viewport of 65535x65535 cells is over the limit of 2097152
+/// cells` for `65535x65535`, and the connection keeps serving. An `Attach`
+/// whose `link_timeout_ms` is below [`MIN_LINK_TIMEOUT_MS`], `1000`, reaches no
 /// dispatcher: it is refused with [`IpcErrorCode::RequestFailed`] and the
 /// sentence `a link timeout of 999 ms is below the minimum of 1000 ms` for
-/// `999`, and the connection keeps serving.
+/// `999`, and the connection keeps serving. An `Attach` whose
+/// `max_frames_per_second` is outside [`LOWEST_MAX_FRAMES_PER_SECOND`] to
+/// [`HIGHEST_MAX_FRAMES_PER_SECOND`], `30` to `120`, reaches no dispatcher
+/// either: it is refused with [`IpcErrorCode::RequestFailed`] and the sentence
+/// `a frame rate of 0 frames a second is outside 30 to 120` for `0`, and the
+/// connection keeps serving.
 ///
 /// `live_setting` is the live read of the `allow-other-users` setting on a
 /// connection from another local user, and `None` on one from the user who
@@ -811,12 +931,17 @@ fn run_accept_loop(
 ///
 /// `served_connection` is this connection's entry in the [`Intake`]: the intake
 /// holds this connection's read direction through it, and the entry is removed
-/// when this function returns. An intake that closes ends the connection,
-/// whatever the request was.
+/// when this function returns. Each request read is counted in the intake as
+/// unanswered until its answer is written, the `Attached` answer of an attach
+/// included, or until the connection ends. A request held by a `Prepare`
+/// answered `Prepared` stays counted until its `Commit` is answered. While the
+/// intake refuses requests, a request that needs the dispatcher is answered
+/// with [`IpcErrorCode::Restarting`] and [`SESSION_RESTARTING_MESSAGE`], and
+/// the connection ends.
 ///
 /// A Hello refused for its protocol version runs
-/// [`ExecutableWatch::check_executable_file_after_refused_hello`] on
-/// `executable_watch`, which restarts the session through
+/// [`ExecutableWatch::check_executable_file_after_refused_hello`] on the watch
+/// `image_replacement` holds, which restarts the session through
 /// [`restart_into_installed_version`] when the program file holds another
 /// koshi version, and the connection keeps serving.
 fn serve_connection(
@@ -826,11 +951,14 @@ fn serve_connection(
     peer: Peer,
     live_setting: Option<OtherUsersSetting>,
     served_connection: &ServedConnection,
-    executable_watch: Option<&Arc<ExecutableWatch>>,
+    image_replacement: Option<&Arc<ImageReplacement>>,
 ) {
     let mut handshake = Handshake::from_expected_token_and_peer(connection_token, peer);
     let mut held_copy_bytes: Vec<u8> = Vec::new();
     let mut prepared_request_kind: Option<IpcRequestKind> = None;
+    // The request a `Prepare` answered `Prepared` holds stays counted as
+    // unanswered until its `Commit` is answered.
+    let mut prepared_unanswered_request: Option<UnansweredRequest> = None;
     // The setting is read again for each request. `None` is a connection from
     // the user who started the session, whose admission cannot be withdrawn.
     let admission_setting = live_setting.clone();
@@ -847,14 +975,16 @@ fn serve_connection(
         ) {
             RequestDisposition::Answered => continue,
             RequestDisposition::VersionRefused => {
-                if let Some(executable_watch) = executable_watch {
-                    executable_watch.check_executable_file_after_refused_hello(
-                        build_installed_version_restart(
-                            &served_connection.intake,
-                            inbox_sender,
-                            executable_watch,
-                        ),
-                    );
+                if let Some(image_replacement) = image_replacement {
+                    image_replacement
+                        .executable_watch
+                        .check_executable_file_after_refused_hello(
+                            build_installed_version_restart(
+                                &served_connection.intake,
+                                inbox_sender,
+                                image_replacement,
+                            ),
+                        );
                 }
                 continue;
             }
@@ -876,6 +1006,10 @@ fn serve_connection(
                 }
                 (request_kind, false)
             }
+        };
+        let unanswered_request = match prepared_unanswered_request.take() {
+            Some(prepared_unanswered_request) => prepared_unanswered_request,
+            None => served_connection.intake.record_unanswered_request(),
         };
 
         let outgoing_response = match request_kind {
@@ -919,13 +1053,16 @@ fn serve_connection(
                     let dispatch_response = request_dispatcher_response(
                         &served_connection.intake,
                         inbox_sender,
+                        &mut connection,
+                        request_id,
                         |response_sender| RuntimeEvent::IpcClipboardCopyPrepare {
                             pane_id,
                             copied_byte_count,
                             response_sender,
                         },
                     );
-                    // No dispatcher left: the connection closes with no answer.
+                    // No dispatcher left, or a refusal while the session
+                    // restarts: the connection ends.
                     let Some(can_route_clipboard_tool_copy) = dispatch_response else {
                         return;
                     };
@@ -953,9 +1090,12 @@ fn serve_connection(
                     let dispatch_response = request_dispatcher_response(
                         &served_connection.intake,
                         inbox_sender,
+                        &mut connection,
+                        request_id,
                         |response_sender| RuntimeEvent::IpcPrepare { response_sender },
                     );
-                    // No dispatcher left: the connection closes with no answer.
+                    // No dispatcher left, or a refusal while the session
+                    // restarts: the connection ends.
                     if dispatch_response.is_none() {
                         return;
                     }
@@ -979,11 +1119,15 @@ fn serve_connection(
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
                     inbox_sender,
+                    &mut connection,
+                    request_id,
                     |response_sender| RuntimeEvent::Ipc {
                         command_envelope: stamped_command_envelope,
                         response_sender,
                     },
                 );
+                // No dispatcher left, or a refusal while the session restarts:
+                // the connection ends.
                 let Some(command_result) = dispatch_response else {
                     return;
                 };
@@ -991,6 +1135,18 @@ fn serve_connection(
                     request_id,
                     answer_result: IpcResult::CommandResult(command_result),
                 }
+            }
+            IpcRequestKind::Attach { viewport_size, .. }
+                if viewport_size.compute_cell_count() > MAX_VIEWPORT_CELL_COUNT =>
+            {
+                build_request_failed_response(
+                    request_id,
+                    format!(
+                        "a viewport of {}x{} cells is over the limit of \
+                         {MAX_VIEWPORT_CELL_COUNT} cells",
+                        viewport_size.column_count, viewport_size.row_count
+                    ),
+                )
             }
             IpcRequestKind::Attach {
                 link_timeout_ms: Some(link_timeout_ms),
@@ -1003,6 +1159,20 @@ fn serve_connection(
                 ),
             ),
             IpcRequestKind::Attach {
+                max_frames_per_second,
+                ..
+            } if !(LOWEST_MAX_FRAMES_PER_SECOND..=HIGHEST_MAX_FRAMES_PER_SECOND)
+                .contains(&max_frames_per_second) =>
+            {
+                build_request_failed_response(
+                    request_id,
+                    format!(
+                        "a frame rate of {max_frames_per_second} frames a second is outside \
+                         {LOWEST_MAX_FRAMES_PER_SECOND} to {HIGHEST_MAX_FRAMES_PER_SECOND}"
+                    ),
+                )
+            }
+            IpcRequestKind::Attach {
                 viewport_size,
                 resume_client_id,
                 resume_token,
@@ -1010,6 +1180,7 @@ fn serve_connection(
                 graphics_capabilities,
                 cell_size,
                 link_timeout_ms,
+                max_frames_per_second,
             } => {
                 // A connection that ends before its first request after this
                 // attach reports its client as returning when it came from
@@ -1020,6 +1191,8 @@ fn serve_connection(
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
                     inbox_sender,
+                    &mut connection,
+                    request_id,
                     |response_sender| RuntimeEvent::IpcAttach {
                         resume_client_id,
                         resume_token,
@@ -1028,19 +1201,21 @@ fn serve_connection(
                         cell_size,
                         attached_at: SystemTime::now(),
                         is_remote: handshake.is_remote_caller(),
+                        max_frames_per_second,
                         response_sender,
                     },
                 );
-                // No running session, or no dispatcher left to mint the
-                // client: the connection closes with no answer.
+                // No running session, no dispatcher left to mint the client,
+                // or a refusal while the session restarts: the connection
+                // ends.
                 let Some(Some(accepted_client)) = dispatch_response else {
                     return;
                 };
                 // Counted before the answer is written and dropped once the
-                // stream below ends. A caller that reads its `Attached` frame
-                // finds this connection counted.
-                let _attached_connection_guard =
-                    served_connection.intake.record_attached_connection();
+                // stream below stops reading, before its detach is handed
+                // over. A caller that reads its `Attached` frame finds this
+                // connection counted.
+                let attached_connection = served_connection.intake.record_attached_connection();
                 let attached_response = IpcResponse {
                     request_id,
                     answer_result: IpcResult::Attached {
@@ -1052,7 +1227,8 @@ fn serve_connection(
                     },
                 };
                 if connection.send(&attached_response).is_err() {
-                    served_connection.intake.hand_over_event(
+                    drop(attached_connection);
+                    let _ = served_connection.intake.hand_over_event(
                         inbox_sender,
                         RuntimeEvent::ClientDetached {
                             client_id: accepted_client.client_id,
@@ -1063,6 +1239,7 @@ fn serve_connection(
                     );
                     return;
                 }
+                drop(unanswered_request);
                 // The reply is written; from here the connection carries
                 // the client's event stream and the client's own input.
                 stream_events(
@@ -1077,30 +1254,36 @@ fn serve_connection(
                         is_remote: handshake.is_remote_caller(),
                         is_returning_before_first_request,
                     },
+                    attached_connection,
                     inbox_sender,
                     live_setting,
                     served_connection,
                 );
                 return;
             }
-            // A keyboard event, a resize, a paste and a mouse round belong on
-            // an attached client's connection, which the `Attach` arm above
-            // hands to `stream_events`. On this control path they name no
-            // client and close the connection.
+            // A keyboard event, a resize, a cell size, a paste, a mouse round,
+            // a placement read, a ping and a paint report belong on an
+            // attached client's connection, which the `Attach` arm above hands
+            // to `stream_events`. On this control path they name no client and
+            // close the connection.
             IpcRequestKind::Keyboard { .. }
             | IpcRequestKind::Resize { .. }
             | IpcRequestKind::CellSize { .. }
             | IpcRequestKind::Paste { .. }
             | IpcRequestKind::Mouse(_)
             | IpcRequestKind::ReadPanePlacement { .. }
-            | IpcRequestKind::Ping => return,
+            | IpcRequestKind::Ping
+            | IpcRequestKind::PaintedUpdate { .. } => return,
             IpcRequestKind::Discovery => {
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
                     inbox_sender,
+                    &mut connection,
+                    request_id,
                     |response_sender| RuntimeEvent::IpcDiscovery { response_sender },
                 );
-                // No running session: the connection closes with no answer.
+                // No running session, no dispatcher left, or a refusal while
+                // the session restarts: the connection ends.
                 let Some(Some(session_overview)) = dispatch_response else {
                     return;
                 };
@@ -1113,12 +1296,15 @@ fn serve_connection(
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
                     inbox_sender,
+                    &mut connection,
+                    request_id,
                     |response_sender| RuntimeEvent::IpcLayout {
                         tab_id,
                         response_sender,
                     },
                 );
-                // No running session: the connection closes with no answer.
+                // No running session, no dispatcher left, or a refusal while
+                // the session restarts: the connection ends.
                 let Some(Some(session_layout)) = dispatch_response else {
                     return;
                 };
@@ -1132,24 +1318,31 @@ fn serve_connection(
                 answer_result: IpcResult::RecentEvents(recent_events::list_recent_events()),
             },
             IpcRequestKind::Restart => {
-                let dispatch_response = request_dispatcher_response(
-                    &served_connection.intake,
-                    inbox_sender,
-                    |response_sender| RuntimeEvent::IpcRestart { response_sender },
-                );
-                match dispatch_response {
-                    Some(Ok(())) => IpcResponse {
+                let restart_verdict = match image_replacement {
+                    Some(image_replacement) => (image_replacement.restart_check)(),
+                    None => Err(RestartRefusal::ImageReplacementUnsupported),
+                };
+                if let Err(restart_refusal) = restart_verdict {
+                    // Nothing reached the dispatcher, and the connection
+                    // keeps serving.
+                    build_request_failed_response(request_id, restart_refusal.to_string())
+                } else {
+                    let dispatch_response = request_dispatcher_response(
+                        &served_connection.intake,
+                        inbox_sender,
+                        &mut connection,
+                        request_id,
+                        |response_sender| RuntimeEvent::IpcRestart { response_sender },
+                    );
+                    // No dispatcher left, or a refusal while the session
+                    // restarts: the connection ends.
+                    if dispatch_response.is_none() {
+                        return;
+                    }
+                    IpcResponse {
                         request_id,
                         answer_result: IpcResult::Restarting,
-                    },
-                    // The dispatcher named what is wrong. Nothing was torn
-                    // down, and the connection keeps serving.
-                    Some(Err(restart_refusal)) => {
-                        build_request_failed_response(request_id, restart_refusal.to_string())
                     }
-                    // No dispatcher left: the connection closes with no
-                    // answer.
-                    None => return,
                 }
             }
             // No answer belongs to this one.
@@ -1165,12 +1358,15 @@ fn serve_connection(
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
                     inbox_sender,
+                    &mut connection,
+                    request_id,
                     |response_sender| RuntimeEvent::IpcClipboardCopyPart {
                         held_copy_byte_count,
                         response_sender,
                     },
                 );
-                // No dispatcher left: the connection closes with no answer.
+                // No dispatcher left, or a refusal while the session restarts:
+                // the connection ends.
                 let Some(can_take_clipboard_tool_copy) = dispatch_response else {
                     return;
                 };
@@ -1203,6 +1399,8 @@ fn serve_connection(
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
                     inbox_sender,
+                    &mut connection,
+                    request_id,
                     |response_sender| RuntimeEvent::IpcClipboardCopy {
                         pane_id,
                         clipboard_targets,
@@ -1210,7 +1408,8 @@ fn serve_connection(
                         response_sender,
                     },
                 );
-                // No dispatcher left: the connection closes with no answer.
+                // No dispatcher left, or a refusal while the session restarts:
+                // the connection ends.
                 let Some(should_run_clipboard_tool) = dispatch_response else {
                     return;
                 };
@@ -1225,6 +1424,9 @@ fn serve_connection(
         if connection.send(&outgoing_response).is_err() {
             return;
         }
+        if prepared_request_kind.is_some() {
+            prepared_unanswered_request = Some(unanswered_request);
+        }
     }
 }
 
@@ -1236,18 +1438,34 @@ fn serve_connection(
 /// structure, while this thread reads the client's own frames. A `Keyboard`, a
 /// `Resize`, a `Paste`, a `SubmitCommand` and a `Mouse` round all cross to the
 /// dispatcher over the inbox, and this half writes nothing back for any of
-/// them: keyboard, resize, and paste requests are reflected by the next
-/// painted frame; a submitted command is reflected by the next painted frame
-/// or, for a rejected pane placement command, one
-/// [`SessionEvent::PlacementCommandRejected`] carrying its `command_id`; and
-/// a `Mouse` round is answered on the writing half by exactly one
+/// them: keyboard, resize, and paste requests are reflected by the next painted
+/// frame; a submitted command is reflected by the next painted frame or, for a
+/// rejected pane placement command, one
+/// [`SessionEvent::PlacementCommandRejected`] carrying its `command_id`; and a
+/// `Mouse` round is answered on the writing half by exactly one
 /// [`SessionEvent::MouseAnswer`] carrying that round's `request_id`, after one
 /// [`SessionEvent::PlacementCommandRejected`] for each floating pane move in
-/// the round that the session rejected. A `Ping` is read and dropped: nothing
-/// crosses for it, and nothing answers it. A
-/// request of any other kind, end of stream, a transport fault, an oversize
-/// frame, or a dispatcher that is gone all end the reading loop. Each read of
-/// the client's next bytes waits with no limit.
+/// the round that the session rejected. A `Resize` whose viewport holds more
+/// than [`MAX_VIEWPORT_CELL_COUNT`] cells is read and dropped, and the client
+/// keeps the viewport it had. A `Ping` is read and dropped: nothing crosses for
+/// it, and nothing answers it. A `PaintedUpdate` reaches the writing thread as
+/// the client's paint report
+/// ([`PaintReporter`](crate::runtime::delivery_queue::PaintReporter)), and
+/// nothing answers it. A request of any other kind, end of stream, a transport
+/// fault, an oversize frame, or a dispatcher that is gone all end the reading
+/// loop. Each read of the client's next bytes waits with no limit.
+///
+/// The writing thread paces painted frames by what the client painted. A frame
+/// or a resync snapshot at the head of the queue goes out only while the
+/// connection's paint window lets an update go out: no update waits for a
+/// paint report, or the client has reported a paint and the bytes written
+/// after the last update it reported are below the window. Every delivery
+/// behind that frame waits with it, and a newer frame takes the place of a
+/// frame at the tail of the queue. Example: a client that paints 60 times a second while
+/// a pane floods it reads the newest screen after each paint, not a queue of
+/// older ones. A report of an update this connection did not send closes the
+/// read direction, as a failed write does. Once the server closes the queue,
+/// the frames that wait go out regardless of the window.
 ///
 /// With a `heartbeat_interval`, the writing thread writes one
 /// [`SessionEvent::Pong`] whenever it has written nothing to the connection
@@ -1274,7 +1492,8 @@ fn serve_connection(
 /// After each delivery it reads, the writing thread takes the stream's
 /// owed-frame mark ([`WriterHandoff::take_owed_frame_mark`]). A mark that was
 /// set hands one [`RuntimeEvent::QueueRoomFreed`] naming `client_id` to the
-/// dispatcher while intake is open ([`Intake::hand_over_event`]). Example: a
+/// dispatcher unless the intake refuses requests
+/// ([`Intake::hand_over_event`]). Example: a
 /// frame that found the queue full on an idle session is followed by a newer
 /// frame once the writing thread reads the next delivery.
 ///
@@ -1338,18 +1557,18 @@ fn serve_connection(
 /// whether or not the frame decoded, and turning the setting off detaches that
 /// client at its next frame.
 ///
-/// This connection's place in the intake's attached count is held by the
-/// caller: taken before the `Attached` frame is written, dropped once this
-/// returns.
+/// `attached_connection` is this connection's place in the intake's attached
+/// count, taken before the `Attached` frame is written. It is dropped once the
+/// reading loop ends, before the detach is handed over: a dispatcher woken by
+/// that detach reads a count that no longer holds this connection.
 ///
 /// `served_connection` is this connection's entry in the [`Intake`]: the
 /// intake holds this connection's read direction through it, and the writing
 /// thread closes that read direction through the intake after a failed write.
-/// The client's record stays as it is: the image swap that cut the connection
-/// carries it across.
 fn stream_events(
     connection: Connection,
     attached_stream: AttachedStream,
+    attached_connection: AttachedConnection,
     inbox_sender: &Sender<RuntimeEvent>,
     live_setting: Option<OtherUsersSetting>,
     served_connection: &ServedConnection,
@@ -1372,10 +1591,13 @@ fn stream_events(
     let writer_intake = Arc::clone(&served_connection.intake);
     let connection_number = served_connection.connection_number;
     let writer_inbox_sender = inbox_sender.clone();
+    let paint_reporter = deliveries.create_paint_reporter();
     ending_notice.record_writer_started();
     std::thread::spawn(move || {
         let mut image_cache = ConnectionImageCache::new();
-        let has_write_failed = loop {
+        let mut painted_update_sender = PaintedUpdateSender::new();
+        let mut paint_window = PaintWindow::new();
+        let should_close_read_direction = loop {
             // The session is ending. This client is told at once: the
             // host-write bytes that wait for it go out first, and everything
             // still queued goes unwritten. A queue the server already closed
@@ -1406,28 +1628,55 @@ fn stream_events(
             if send_waiting_host_writes(&mut frame_writer, &writer_handoff).is_err() {
                 break true;
             }
-            let delivery_wait_result = match heartbeat_interval {
-                // The next `Pong` is due `heartbeat_interval` after the last
-                // frame that went out. A `Pong` that is due goes out before
-                // the next delivery is taken.
-                Some(heartbeat_interval) => {
-                    let time_left_before_pong = (frame_writer.get_last_frame_written_at()
-                        + heartbeat_interval)
-                        .saturating_duration_since(Instant::now());
-                    if time_left_before_pong.is_zero() {
-                        Err(mpsc::RecvTimeoutError::Timeout)
-                    } else {
-                        deliveries.recv_timeout(time_left_before_pong)
+            // The next `Pong` is due `heartbeat_interval` after the last frame
+            // that went out. A `Pong` that is due goes out before the next
+            // delivery is taken.
+            let pong_due_at = heartbeat_interval.map(|heartbeat_interval| {
+                frame_writer.get_last_frame_written_at() + heartbeat_interval
+            });
+            let paced_receive =
+                if pong_due_at.is_some_and(|pong_due_at| pong_due_at <= Instant::now()) {
+                    PacedReceive::TimedOut
+                } else {
+                    deliveries.recv_paced(
+                        pong_due_at,
+                        paint_window.can_send_update(frame_writer.get_written_byte_count()),
+                        &ending_notice,
+                    )
+                };
+            let delivery = match paced_receive {
+                PacedReceive::Delivery(delivery) => delivery,
+                PacedReceive::PaintedUpdateReported(painted_update_report) => {
+                    if let Err(paint_report_error) =
+                        paint_window.record_update_painted(painted_update_report)
+                    {
+                        tracing::warn!(
+                            %client_id,
+                            %paint_report_error,
+                            "paint report refused"
+                        );
+                        break true;
                     }
+                    let released_image_content_ids = image_cache.record_paint_report(
+                        painted_update_report.update_sequence,
+                        painted_update_report.shown_placement_request_id,
+                    );
+                    if send_image_releases(
+                        &mut frame_writer,
+                        &mut image_cache,
+                        client_id,
+                        &released_image_content_ids,
+                    )
+                    .is_err()
+                    {
+                        break true;
+                    }
+                    continue;
                 }
-                None => deliveries
-                    .recv()
-                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-            };
-            let delivery = match delivery_wait_result {
-                Ok(delivery) => delivery,
+                // The top of the next turn writes the goodbye.
+                PacedReceive::SessionEnding => continue,
                 // No frame went out for `heartbeat_interval`.
-                Err(mpsc::RecvTimeoutError::Timeout) => {
+                PacedReceive::TimedOut => {
                     if frame_writer.send(&SessionEvent::Pong).is_err() {
                         break true;
                     }
@@ -1435,8 +1684,9 @@ fn stream_events(
                 }
                 // The queue closed, which the server does when it detaches this
                 // client. The wait hands back everything queued before the
-                // close: the goodbye follows the events that preceded it.
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // close, held frames included: the goodbye follows the events
+                // that preceded it.
+                PacedReceive::Closed => {
                     if let Some(detach_goodbye) = build_detach_goodbye(&writer_is_link_lost) {
                         if send_waiting_host_writes(&mut frame_writer, &writer_handoff).is_ok() {
                             let _ = frame_writer.send(&detach_goodbye);
@@ -1446,19 +1696,29 @@ fn stream_events(
                 }
             };
             if writer_handoff.take_owed_frame_mark() {
-                writer_intake.hand_over_event(
-                    &writer_inbox_sender,
-                    RuntimeEvent::QueueRoomFreed { client_id },
-                );
+                let _ = writer_intake
+                    .hand_over_event(&writer_inbox_sender, RuntimeEvent::QueueRoomFreed);
             }
+            let write_started_at = Instant::now();
+            let previous_update_sequence = painted_update_sender.get_last_update_sequence();
             let send_result = match &delivery {
                 Delivery::Frame(render_snapshot) => send_painted_frame(
                     &mut frame_writer,
                     &mut image_cache,
+                    &mut painted_update_sender,
                     render_snapshot,
                     graphics_capabilities,
                     client_id,
-                ),
+                )
+                .map(|()| {
+                    record_sent_painted_update(
+                        &mut paint_window,
+                        &painted_update_sender,
+                        previous_update_sequence,
+                        &frame_writer,
+                        write_started_at,
+                    );
+                }),
                 Delivery::PanePlacementSnapshot {
                     request_id,
                     snapshot: placement_snapshot,
@@ -1466,6 +1726,7 @@ fn stream_events(
                     &mut frame_writer,
                     &mut image_cache,
                     *request_id,
+                    previous_update_sequence,
                     placement_snapshot,
                     graphics_capabilities,
                     client_id,
@@ -1522,6 +1783,7 @@ fn stream_events(
                 if send_painted_frame(
                     &mut frame_writer,
                     &mut image_cache,
+                    &mut painted_update_sender,
                     render_snapshot,
                     graphics_capabilities,
                     client_id,
@@ -1530,6 +1792,13 @@ fn stream_events(
                 {
                     break true;
                 }
+                record_sent_painted_update(
+                    &mut paint_window,
+                    &painted_update_sender,
+                    previous_update_sequence,
+                    &frame_writer,
+                    write_started_at,
+                );
             }
         };
         // The queue's receiver goes before the wake clears. A host write that
@@ -1537,9 +1806,10 @@ fn stream_events(
         // and removes this client's subscriber.
         drop(deliveries);
         writer_handoff.clear_queued_wake();
-        // A failed write closes the read direction: the reading loop then ends
-        // on a failed read and hands over the detach.
-        if has_write_failed {
+        // A failed write or a refused paint report closes the read direction:
+        // the reading loop then ends on a failed read and hands over the
+        // detach.
+        if should_close_read_direction {
             writer_intake.close_read_direction(connection_number);
         }
         ending_notice.record_writer_ended();
@@ -1598,6 +1868,17 @@ fn stream_events(
                 client_id,
                 key_input,
             },
+            IpcRequestKind::Resize { viewport_size, .. }
+                if viewport_size.compute_cell_count() > MAX_VIEWPORT_CELL_COUNT =>
+            {
+                tracing::debug!(
+                    %client_id,
+                    column_count = viewport_size.column_count,
+                    row_count = viewport_size.row_count,
+                    "a resize over the viewport cell limit"
+                );
+                continue;
+            }
             IpcRequestKind::Resize {
                 viewport_size,
                 pane_area,
@@ -1640,6 +1921,17 @@ fn stream_events(
                 destination_tab_id,
             },
             IpcRequestKind::Ping => continue,
+            IpcRequestKind::PaintedUpdate {
+                update_sequence,
+                shown_placement_request_id,
+            } => {
+                paint_reporter.report_painted_update(PaintedUpdateReport {
+                    update_sequence,
+                    shown_placement_request_id,
+                    reported_at: Instant::now(),
+                });
+                continue;
+            }
             // The client sends nothing more on this connection, and everything
             // it did send is handed over above.
             IpcRequestKind::Leaving {
@@ -1659,14 +1951,16 @@ fn stream_events(
             | IpcRequestKind::Prepare(_)
             | IpcRequestKind::Commit => break,
         };
-        if !served_connection
+        if served_connection
             .intake
             .hand_over_event(inbox_sender, runtime_event)
+            .is_err()
         {
             break;
         }
     }
-    served_connection.intake.hand_over_event(
+    drop(attached_connection);
+    let _ = served_connection.intake.hand_over_event(
         inbox_sender,
         RuntimeEvent::ClientDetached {
             client_id,
@@ -1677,18 +1971,109 @@ fn stream_events(
     );
 }
 
-/// One image record retained while its placement remains in this connection's frame.
-struct CachedConnectionImage {
-    /// Identity used by painted frames and image transfer events.
+/// One image whose pixels this connection's client holds.
+struct HeldConnectionImage {
+    /// The identity the client holds the pixels under.
     image_content_id: u64,
-    /// The image record uploaded for this identity. `None` remains a placeholder.
-    image_record: Option<Arc<ImageRecord>>,
+    /// The record the pixels were sent from. While the entry lives, no other
+    /// image takes the address of its decoded pixels.
+    #[expect(dead_code)]
+    image_record: Arc<ImageRecord>,
 }
 
-/// Image identities and records that belong to one attached connection.
+/// The images one painted frame or placement preview shows with their
+/// pixels.
+#[derive(Default)]
+struct ShownImages {
+    /// The RGBA byte count of each shown image, by the address of its decoded
+    /// pixels.
+    image_byte_count_by_address: HashMap<usize, u64>,
+    /// Each animation a shown image plays, in placement order, each once.
+    animations: Vec<Arc<DecodedAnimation>>,
+}
+
+/// A placement preview sent on this connection that its client may still
+/// hold.
+struct SentPlacementPreview {
+    /// The request the preview answered.
+    request_id: u64,
+    /// The number of the last painted update sent before the preview.
+    sent_after_update_sequence: u64,
+    /// The images the preview shows with their pixels.
+    shown_images: ShownImages,
+}
+
+/// The images a client keeps, chosen one by one while their RGBA bytes stay
+/// within [`MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT`].
+#[derive(Default)]
+struct ImageBudget {
+    /// The address of each kept image's decoded pixels.
+    kept_image_addresses: HashSet<usize>,
+    /// The RGBA bytes of every kept image.
+    kept_byte_count: u64,
+}
+
+impl ImageBudget {
+    /// Keep the image at `image_address`, whose RGBA bytes are
+    /// `image_byte_count`, when it is kept already or fits with the kept
+    /// images. Returns whether it is kept.
+    fn keep_image(&mut self, image_address: usize, image_byte_count: u64) -> bool {
+        if self.kept_image_addresses.contains(&image_address) {
+            return true;
+        }
+        match self.kept_byte_count.checked_add(image_byte_count) {
+            Some(kept_byte_count) if kept_byte_count <= MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT => {
+                self.kept_byte_count = kept_byte_count;
+                self.kept_image_addresses.insert(image_address);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Keep every frame of `animation` when the frames not kept already fit
+    /// with the kept images, and keep none of them otherwise.
+    fn keep_animation(&mut self, animation: &DecodedAnimation) {
+        let mut new_frame_byte_count_by_address = HashMap::new();
+        for animation_frame in animation.list_frames() {
+            let frame_image = animation_frame.get_decoded_image();
+            let frame_address = std::ptr::from_ref(frame_image).addr();
+            if !self.kept_image_addresses.contains(&frame_address) {
+                new_frame_byte_count_by_address
+                    .insert(frame_address, compute_image_byte_count(frame_image));
+            }
+        }
+        let kept_byte_count = new_frame_byte_count_by_address
+            .values()
+            .try_fold(self.kept_byte_count, |kept_byte_count, frame_byte_count| {
+                kept_byte_count.checked_add(*frame_byte_count)
+            })
+            .filter(|kept_byte_count| *kept_byte_count <= MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT);
+        if let Some(kept_byte_count) = kept_byte_count {
+            self.kept_byte_count = kept_byte_count;
+            self.kept_image_addresses
+                .extend(new_frame_byte_count_by_address.into_keys());
+        }
+    }
+}
+
+/// The image records one attached connection's client holds.
+///
+/// The client keeps each record the session sends until an
+/// `ImageContentReleased` names it or an `ImageCacheReset` arrives. The
+/// session keeps, in this order and while their RGBA bytes stay within
+/// [`MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT`]: the images that each placement
+/// preview the client may still hold shows, the images the last painted frame
+/// shows, and every frame of each animation those images play, an animation
+/// whole or not at all. Every other record the client holds is released.
 struct ConnectionImageCache {
-    /// Current records, keyed by pane and terminal-local placement identity.
-    cached_image_by_pane_and_placement_id: HashMap<(PaneId, u64), CachedConnectionImage>,
+    /// Every image whose pixels the client holds, by the address of its
+    /// decoded pixels.
+    held_image_by_address: HashMap<usize, HeldConnectionImage>,
+    /// The images the last painted frame shows with their pixels.
+    frame_shown_images: ShownImages,
+    /// The placement previews the client may still hold, oldest first.
+    sent_placement_previews: Vec<SentPlacementPreview>,
     /// The next nonzero connection-local content identity.
     next_image_content_id: u64,
     /// Whether the next successful frame must invalidate the client's records.
@@ -1699,210 +2084,295 @@ impl ConnectionImageCache {
     /// Build an empty cache whose first image identity is 1.
     fn new() -> Self {
         Self {
-            cached_image_by_pane_and_placement_id: HashMap::new(),
+            held_image_by_address: HashMap::new(),
+            frame_shown_images: ShownImages::default(),
+            sent_placement_previews: Vec::new(),
             next_image_content_id: 1,
             needs_image_cache_reset: false,
         }
     }
 
-    /// Assign stable content identities and list records this connection has not received.
+    /// Prepare `render_snapshot` for this connection.
+    ///
+    /// The images that the placement previews the client may still hold show
+    /// stay. Each image of the frame, in placement order, is shown when it
+    /// fits with them and the frame's earlier images, and travels without its
+    /// record otherwise. A shown image the client does not hold gets the next
+    /// content identity and an upload. Every held record the client no longer
+    /// keeps is listed for release.
     fn prepare_image_frame(&mut self, render_snapshot: &RenderSnapshot) -> PreparedImageFrame {
-        let image_placements: Vec<((PaneId, u64), &ImagePlacementSnapshot)> = render_snapshot
+        let image_placements: Vec<&ImagePlacementSnapshot> = render_snapshot
             .pane_snapshots
             .iter()
-            .flat_map(|pane_snapshot| {
-                pane_snapshot.image_placement_snapshots.iter().map(
-                    move |image_placement_snapshot| {
-                        (
-                            (
-                                pane_snapshot.pane_id,
-                                image_placement_snapshot.get_placement_id(),
-                            ),
-                            image_placement_snapshot,
-                        )
-                    },
-                )
-            })
+            .flat_map(|pane_snapshot| &pane_snapshot.image_placement_snapshots)
             .collect();
-        let (should_reset_image_cache, image_uploads) =
-            self.prepare_image_records(image_placements);
-
+        let should_reset_image_cache = self.reset_image_cache_when_due(&image_placements);
+        let mut image_budget = ImageBudget::default();
+        for sent_placement_preview in &self.sent_placement_previews {
+            keep_shown_images(&mut image_budget, &sent_placement_preview.shown_images);
+        }
+        let frame_shown_images = select_shown_images(&mut image_budget, &image_placements);
+        let image_uploads = self.hold_shown_images(&frame_shown_images, &image_placements);
+        self.frame_shown_images = frame_shown_images;
+        let released_image_content_ids = self.release_unkept_images();
         let painted_frame =
-            build_wire_frame_with_content_ids(render_snapshot, |pane_id, image_placement| {
-                self.find_image_content_id(pane_id, image_placement)
+            build_wire_frame_with_content_ids(render_snapshot, |_, image_placement| {
+                self.find_image_content_id(image_placement)
             });
         PreparedImageFrame {
             should_reset_image_cache,
+            released_image_content_ids,
             painted_frame,
             image_uploads,
         }
     }
 
-    /// Assign stable content identities and list image records not sent on this connection.
-    fn prepare_image_records(
+    /// Prepare the placement preview that answers request `request_id`, sent
+    /// after painted update `sent_after_update_sequence`, for this connection.
+    ///
+    /// The images the last painted frame and the earlier previews show stay.
+    /// Each image of the preview, in placement order, is shown when it fits
+    /// with them and the preview's earlier images, and travels without its
+    /// record otherwise. The preview counts as held by the client until
+    /// [`ConnectionImageCache::record_paint_report`] says otherwise.
+    fn prepare_placement_snapshot(
         &mut self,
-        image_placements: Vec<((PaneId, u64), &ImagePlacementSnapshot)>,
-    ) -> (bool, Vec<(u64, Arc<ImageRecord>)>) {
-        let changed_image_count = image_placements
+        request_id: u64,
+        sent_after_update_sequence: u64,
+        placement_snapshot: &PlacementSnapshot,
+    ) -> PreparedPlacementSnapshot {
+        let image_placements: Vec<&ImagePlacementSnapshot> = [
+            Some(&placement_snapshot.source_tab_snapshot),
+            placement_snapshot.destination_tab_snapshot.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|tab_snapshot| &tab_snapshot.pane_snapshots)
+        .flat_map(|pane_snapshot| &pane_snapshot.image_placement_snapshots)
+        .collect();
+        let should_reset_image_cache = self.reset_image_cache_when_due(&image_placements);
+        let mut image_budget = ImageBudget::default();
+        keep_shown_images(&mut image_budget, &self.frame_shown_images);
+        for sent_placement_preview in &self.sent_placement_previews {
+            keep_shown_images(&mut image_budget, &sent_placement_preview.shown_images);
+        }
+        let preview_shown_images = select_shown_images(&mut image_budget, &image_placements);
+        let image_uploads = self.hold_shown_images(&preview_shown_images, &image_placements);
+        self.sent_placement_previews.push(SentPlacementPreview {
+            request_id,
+            sent_after_update_sequence,
+            shown_images: preview_shown_images,
+        });
+        let released_image_content_ids = self.release_unkept_images();
+        let placement_snapshot = build_wire_placement_snapshot_with_content_ids(
+            placement_snapshot,
+            |_, image_placement| self.find_image_content_id(image_placement),
+        );
+        PreparedPlacementSnapshot {
+            should_reset_image_cache,
+            released_image_content_ids,
+            placement_snapshot,
+            image_uploads,
+        }
+    }
+
+    /// Take the client's report that it painted update `update_sequence`
+    /// while it held the placement preview of request
+    /// `shown_placement_request_id`, and return the content identities of the
+    /// records to release, in ascending order.
+    ///
+    /// A preview sent before that update leaves, unless the report names it.
+    /// A preview sent after it stays.
+    fn record_paint_report(
+        &mut self,
+        update_sequence: u64,
+        shown_placement_request_id: Option<u64>,
+    ) -> Vec<u64> {
+        let sent_placement_preview_count = self.sent_placement_previews.len();
+        self.sent_placement_previews
+            .retain(|sent_placement_preview| {
+                Some(sent_placement_preview.request_id) == shown_placement_request_id
+                    || sent_placement_preview.sent_after_update_sequence >= update_sequence
+            });
+        if self.sent_placement_previews.len() == sent_placement_preview_count {
+            return Vec::new();
+        }
+        self.release_unkept_images()
+    }
+
+    /// Forget every held image and preview, start content identities at 1 when
+    /// `image_placements` name more images the client does not hold than
+    /// identities are left or a reset is due, and return whether it did.
+    fn reset_image_cache_when_due(&mut self, image_placements: &[&ImagePlacementSnapshot]) -> bool {
+        let new_image_addresses: HashSet<usize> = image_placements
             .iter()
-            .filter(|(placement_key, image_placement)| {
-                self.cached_image_by_pane_and_placement_id
-                    .get(placement_key)
-                    .is_none_or(|cached_image| {
-                        !is_same_image_record(
-                            cached_image.image_record.as_ref(),
-                            image_placement.get_image_record(),
-                        )
-                    })
-            })
-            .count();
+            .filter_map(|image_placement| image_placement.get_image_record())
+            .map(get_image_address)
+            .filter(|image_address| !self.held_image_by_address.contains_key(image_address))
+            .collect();
         let available_image_content_count = if self.next_image_content_id == 0 {
             0
         } else {
             u64::MAX - self.next_image_content_id + 1
         };
         let should_reset_image_cache = self.needs_image_cache_reset
-            || u64::try_from(changed_image_count).map_or(true, |image_count| {
-                image_count > available_image_content_count
+            || u64::try_from(new_image_addresses.len()).map_or(true, |new_image_count| {
+                new_image_count > available_image_content_count
             });
         if should_reset_image_cache {
-            self.cached_image_by_pane_and_placement_id.clear();
-            self.next_image_content_id = 1;
+            self.clear_image_cache();
             self.needs_image_cache_reset = false;
         }
+        should_reset_image_cache
+    }
 
+    /// Give each image of `shown_images` that the client does not hold the
+    /// next content identity, hold it, and return the uploads in placement
+    /// order of `image_placements`.
+    fn hold_shown_images(
+        &mut self,
+        shown_images: &ShownImages,
+        image_placements: &[&ImagePlacementSnapshot],
+    ) -> Vec<(u64, Arc<ImageRecord>)> {
         let mut image_uploads = Vec::new();
-        let mut retained_placement_keys = HashSet::with_capacity(image_placements.len());
-        let mut image_content_id_by_memory_address = self
-            .cached_image_by_pane_and_placement_id
-            .values()
-            .filter_map(|cached_image| {
-                cached_image.image_record.as_ref().map(|image_record| {
-                    (
-                        Arc::as_ptr(&image_record.image),
-                        cached_image.image_content_id,
-                    )
-                })
-            })
-            .collect::<HashMap<_, _>>();
-        for (placement_key, image_placement) in image_placements {
-            retained_placement_keys.insert(placement_key);
-            let image_record = image_placement.clone_image_record();
-            let is_unchanged = self
-                .cached_image_by_pane_and_placement_id
-                .get(&placement_key)
-                .is_some_and(|cached_image| {
-                    is_same_image_record(
-                        cached_image.image_record.as_ref(),
-                        image_record.as_deref(),
-                    )
-                });
-            if is_unchanged {
+        for image_placement in image_placements {
+            let Some(image_record) = image_placement.clone_image_record() else {
+                continue;
+            };
+            let image_address = get_image_address(&image_record);
+            if !shown_images
+                .image_byte_count_by_address
+                .contains_key(&image_address)
+                || self.held_image_by_address.contains_key(&image_address)
+            {
                 continue;
             }
-            let image_content_id = image_record
-                .as_ref()
-                .and_then(|image_record| {
-                    image_content_id_by_memory_address
-                        .get(&Arc::as_ptr(&image_record.image))
-                        .copied()
-                })
-                .unwrap_or_else(|| {
-                    let image_content_id = self.next_image_content_id;
-                    self.next_image_content_id =
-                        self.next_image_content_id.checked_add(1).unwrap_or(0);
-                    if let Some(image_record) = image_record.as_ref() {
-                        image_content_id_by_memory_address
-                            .insert(Arc::as_ptr(&image_record.image), image_content_id);
-                        image_uploads.push((image_content_id, Arc::clone(image_record)));
-                    }
-                    image_content_id
-                });
-            self.cached_image_by_pane_and_placement_id.insert(
-                placement_key,
-                CachedConnectionImage {
+            let image_content_id = self.next_image_content_id;
+            self.next_image_content_id = self.next_image_content_id.checked_add(1).unwrap_or(0);
+            image_uploads.push((image_content_id, Arc::clone(&image_record)));
+            self.held_image_by_address.insert(
+                image_address,
+                HeldConnectionImage {
                     image_content_id,
                     image_record,
                 },
             );
         }
-        self.cached_image_by_pane_and_placement_id
-            .retain(|placement_key, _| retained_placement_keys.contains(placement_key));
-        (should_reset_image_cache, image_uploads)
+        image_uploads
     }
 
-    /// Prepare a placement preview and its connection-local image transfers.
-    fn prepare_placement_snapshot(
-        &mut self,
-        placement_snapshot: &PlacementSnapshot,
-    ) -> PreparedPlacementSnapshot {
-        let image_placements = [
-            Some(&placement_snapshot.source_tab_snapshot),
-            placement_snapshot.destination_tab_snapshot.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        .flat_map(|tab_snapshot| {
-            tab_snapshot
-                .pane_snapshots
-                .iter()
-                .flat_map(|pane_snapshot| {
-                    pane_snapshot.image_placement_snapshots.iter().map(
-                        move |image_placement_snapshot| {
-                            (
-                                (
-                                    pane_snapshot.pane_id,
-                                    image_placement_snapshot.get_placement_id(),
-                                ),
-                                image_placement_snapshot,
-                            )
-                        },
-                    )
-                })
-        })
-        .collect();
-        let (should_reset_image_cache, image_uploads) =
-            self.prepare_image_records(image_placements);
-        let placement_snapshot =
-            crate::runtime::frame::build_wire_placement_snapshot_with_content_ids(
-                placement_snapshot,
-                |pane_id, image_placement| self.find_image_content_id(pane_id, image_placement),
-            );
-        PreparedPlacementSnapshot {
-            should_reset_image_cache,
-            placement_snapshot,
-            image_uploads,
+    /// Release every held image the client no longer keeps, and return their
+    /// content identities in ascending order.
+    ///
+    /// The client keeps, in this order and within
+    /// [`MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT`]: the images each preview shows,
+    /// the images the last painted frame shows, and the frames of each
+    /// animation those images play, an animation whole or not at all.
+    fn release_unkept_images(&mut self) -> Vec<u64> {
+        let mut image_budget = ImageBudget::default();
+        let shown_image_lists: Vec<&ShownImages> = self
+            .sent_placement_previews
+            .iter()
+            .map(|sent_placement_preview| &sent_placement_preview.shown_images)
+            .chain([&self.frame_shown_images])
+            .collect();
+        for shown_images in &shown_image_lists {
+            keep_shown_images(&mut image_budget, shown_images);
+        }
+        for shown_images in &shown_image_lists {
+            for animation in &shown_images.animations {
+                image_budget.keep_animation(animation);
+            }
+        }
+        let mut released_image_content_ids = Vec::new();
+        self.held_image_by_address
+            .retain(|image_address, held_image| {
+                let is_kept = image_budget.kept_image_addresses.contains(image_address);
+                if !is_kept {
+                    released_image_content_ids.push(held_image.image_content_id);
+                }
+                is_kept
+            });
+        released_image_content_ids.sort_unstable();
+        released_image_content_ids
+    }
+
+    /// The content identity `image_placement` travels with on this
+    /// connection: the identity of its held image, `None` for an image the
+    /// client does not hold, and its own identity when it has no record.
+    fn find_image_content_id(&self, image_placement: &ImagePlacementSnapshot) -> Option<u64> {
+        match image_placement.get_image_record() {
+            Some(image_record) => self
+                .held_image_by_address
+                .get(&get_image_address(image_record))
+                .map(|held_image| held_image.image_content_id),
+            None => Some(image_placement.get_image_content_id()),
         }
     }
 
-    /// The connection-local content identity cached for `image_placement` in
-    /// `pane_id`, or the placement's own content identity when this connection
-    /// caches none for it.
-    fn find_image_content_id(
-        &self,
-        pane_id: PaneId,
-        image_placement: &ImagePlacementSnapshot,
-    ) -> u64 {
-        self.cached_image_by_pane_and_placement_id
-            .get(&(pane_id, image_placement.get_placement_id()))
-            .map_or(image_placement.get_image_content_id(), |cached_image| {
-                cached_image.image_content_id
-            })
-    }
-
-    /// Forget every connection-local image identity, start identities at 1
-    /// again, and mark the next frame to reset the client's image records.
+    /// Forget every held image and preview, start identities at 1 again, and
+    /// mark the next frame to reset the client's image records.
     fn clear_image_cache(&mut self) {
-        self.cached_image_by_pane_and_placement_id.clear();
+        self.held_image_by_address.clear();
+        self.frame_shown_images = ShownImages::default();
+        self.sent_placement_previews.clear();
         self.next_image_content_id = 1;
         self.needs_image_cache_reset = true;
     }
+}
+
+/// Keep each image of `shown_images` in `image_budget`.
+fn keep_shown_images(image_budget: &mut ImageBudget, shown_images: &ShownImages) {
+    for (image_address, image_byte_count) in &shown_images.image_byte_count_by_address {
+        image_budget.keep_image(*image_address, *image_byte_count);
+    }
+}
+
+/// The images of `image_placements` that `image_budget` keeps, chosen in
+/// placement order, and each animation they play.
+fn select_shown_images(
+    image_budget: &mut ImageBudget,
+    image_placements: &[&ImagePlacementSnapshot],
+) -> ShownImages {
+    let mut shown_images = ShownImages::default();
+    let mut shown_animation_addresses = HashSet::new();
+    for image_placement in image_placements {
+        let Some(image_record) = image_placement.get_image_record() else {
+            continue;
+        };
+        let image_address = get_image_address(image_record);
+        let image_byte_count = compute_image_byte_count(&image_record.image);
+        if !image_budget.keep_image(image_address, image_byte_count) {
+            continue;
+        }
+        shown_images
+            .image_byte_count_by_address
+            .insert(image_address, image_byte_count);
+        if let Some(animation) = &image_record.animation {
+            if shown_animation_addresses.insert(Arc::as_ptr(animation).addr()) {
+                shown_images.animations.push(Arc::clone(animation));
+            }
+        }
+    }
+    shown_images
+}
+
+/// The address of `image_record`'s decoded pixels.
+fn get_image_address(image_record: &ImageRecord) -> usize {
+    Arc::as_ptr(&image_record.image).addr()
+}
+
+/// The RGBA byte count of `decoded_image`.
+fn compute_image_byte_count(decoded_image: &DecodedImage) -> u64 {
+    u64::try_from(decoded_image.rgba_bytes.len()).unwrap_or(u64::MAX)
 }
 
 /// A painted frame plus the image records its connection still needs.
 struct PreparedImageFrame {
     /// Whether the client must discard every record before this frame.
     should_reset_image_cache: bool,
+    /// The records the client drops after this frame, in ascending order.
+    released_image_content_ids: Vec<u64>,
     /// Placement geometry and connection-local content identities.
     painted_frame: PaintedFrame,
     /// New content identities and the records uploaded under them.
@@ -1913,24 +2383,12 @@ struct PreparedImageFrame {
 struct PreparedPlacementSnapshot {
     /// Whether the client must discard every record before this preview.
     should_reset_image_cache: bool,
+    /// The records the client drops before this preview, in ascending order.
+    released_image_content_ids: Vec<u64>,
     /// The preview with connection-local image identities.
     placement_snapshot: koshi_ipc::placement::PanePlacementSnapshot,
     /// New content identities and the records uploaded under them.
     image_uploads: Vec<(u64, Arc<ImageRecord>)>,
-}
-
-/// Report whether two cached record slots hold the same retained image record.
-fn is_same_image_record(
-    cached_image_record: Option<&Arc<ImageRecord>>,
-    incoming_image_record: Option<&ImageRecord>,
-) -> bool {
-    match (cached_image_record, incoming_image_record) {
-        (Some(cached_image_record), Some(incoming_image_record)) => {
-            Arc::ptr_eq(&cached_image_record.image, &incoming_image_record.image)
-        }
-        (None, None) => true,
-        (Some(_), None) | (None, Some(_)) => false,
-    }
 }
 
 /// The goodbye a writing thread writes once the server closed its client's
@@ -1960,7 +2418,41 @@ fn send_waiting_host_writes(
     send_host_write(frame_writer, &host_write_bytes)
 }
 
-/// Send one painted frame and each new image record after it.
+/// Record in `paint_window` the update that `painted_update_sender` built
+/// last, when it built one after `previous_update_sequence`. The update's
+/// first byte was written at `write_started_at`, and `frame_writer` wrote its
+/// last byte, and the image transfers that follow it, just before.
+fn record_sent_painted_update(
+    paint_window: &mut PaintWindow,
+    painted_update_sender: &PaintedUpdateSender,
+    previous_update_sequence: u64,
+    frame_writer: &FrameWriter,
+    write_started_at: Instant,
+) {
+    let last_update_sequence = painted_update_sender.get_last_update_sequence();
+    if last_update_sequence == previous_update_sequence {
+        return;
+    }
+    paint_window.record_update_sent(
+        last_update_sequence,
+        frame_writer.get_written_byte_count(),
+        write_started_at,
+        Instant::now(),
+    );
+}
+
+/// Send one painted update and each new image record after it.
+///
+/// In this order: an `ImageCacheReset` when one is due, the update, the
+/// `ImageContentReleased` frames of the records the client no longer keeps,
+/// and the records the update shows that the client does not hold, as
+/// [`ConnectionImageCache::prepare_image_frame`] chooses them.
+///
+/// The update turns what `painted_update_sender` sent last into
+/// `render_snapshot`, as [`PaintedUpdateSender::build_update_frames`] builds
+/// it. An update that changes nothing is not sent, unless it follows an
+/// image cache reset or image records follow it. An update over the frame
+/// cap is not sent, and no release or record follows it.
 ///
 /// A client whose terminal has no native image protocol receives every image
 /// placement through [`hide_image_records`], and no image record.
@@ -1971,6 +2463,7 @@ fn send_waiting_host_writes(
 fn send_painted_frame(
     frame_writer: &mut FrameWriter,
     image_cache: &mut ConnectionImageCache,
+    painted_update_sender: &mut PaintedUpdateSender,
     render_snapshot: &RenderSnapshot,
     graphics_capabilities: GraphicsCapabilities,
     client_id: ClientId,
@@ -1980,15 +2473,16 @@ fn send_painted_frame(
         for pane_snapshot in &mut painted_frame.pane_snapshots {
             hide_image_records(&mut pane_snapshot.image_placement_snapshots);
         }
-        let painted_frame_event = SessionEvent::Painted {
-            frame: Box::new(painted_frame),
-        };
-        return match frame_writer.send(&painted_frame_event) {
-            Ok(()) => Ok(()),
-            Err(write_error) => {
-                report_image_send_error(image_cache, client_id, write_error, "the painted frame")
-            }
-        };
+        return send_painted_update(
+            frame_writer,
+            image_cache,
+            painted_update_sender,
+            render_snapshot,
+            &painted_frame,
+            false,
+            client_id,
+        )
+        .map(|_| ());
     }
     let prepared_image_frame = image_cache.prepare_image_frame(render_snapshot);
     if prepared_image_frame.should_reset_image_cache {
@@ -2001,17 +2495,90 @@ fn send_painted_frame(
             );
         }
     }
-    let painted_frame_event = SessionEvent::Painted {
-        frame: Box::new(prepared_image_frame.painted_frame),
-    };
+    let is_update_required = prepared_image_frame.should_reset_image_cache
+        || !prepared_image_frame.image_uploads.is_empty();
+    let is_update_held = send_painted_update(
+        frame_writer,
+        image_cache,
+        painted_update_sender,
+        render_snapshot,
+        &prepared_image_frame.painted_frame,
+        is_update_required,
+        client_id,
+    )?;
+    if !is_update_held {
+        return Ok(());
+    }
+    send_image_releases(
+        frame_writer,
+        image_cache,
+        client_id,
+        &prepared_image_frame.released_image_content_ids,
+    )?;
     send_image_uploads(
         frame_writer,
         image_cache,
         client_id,
-        &painted_frame_event,
+        &mut |frame_writer, image_cache| {
+            send_painted_update(
+                frame_writer,
+                image_cache,
+                painted_update_sender,
+                render_snapshot,
+                &prepared_image_frame.painted_frame,
+                true,
+                client_id,
+            )
+        },
         "the painted frame",
         prepared_image_frame.image_uploads,
     )
+}
+
+/// Build the painted update that turns what `painted_update_sender` sent last
+/// into `render_snapshot` and `painted_frame`, and send its parts as binary
+/// frames. An update that changes nothing sends no frame, unless
+/// `is_update_required` is `true`.
+///
+/// Returns `true` when the client holds the update: its parts went out, or
+/// it changed nothing. Returns `false` when the update does not fit the frame
+/// cap: it is logged and not sent, and `image_cache` is cleared.
+///
+/// # Errors
+/// The [`IpcError`] of a write that left the connection unusable.
+fn send_painted_update(
+    frame_writer: &mut FrameWriter,
+    image_cache: &mut ConnectionImageCache,
+    painted_update_sender: &mut PaintedUpdateSender,
+    render_snapshot: &RenderSnapshot,
+    painted_frame: &PaintedFrame,
+    is_update_required: bool,
+    client_id: ClientId,
+) -> Result<bool, IpcError> {
+    let part_payloads = match painted_update_sender.build_update_frames(
+        render_snapshot,
+        painted_frame,
+        is_update_required,
+    ) {
+        Ok(Some(part_payloads)) => part_payloads,
+        Ok(None) => return Ok(true),
+        Err(encode_error) => {
+            tracing::warn!(
+                %client_id,
+                %encode_error,
+                "painted update exceeded the frame cap"
+            );
+            image_cache.clear_image_cache();
+            return Ok(false);
+        }
+    };
+    for part_payload in part_payloads {
+        if let Err(write_error) = frame_writer.send_binary(&part_payload) {
+            tracing::warn!(%client_id, %write_error, "painted update write failed");
+            return Err(write_error);
+        }
+    }
+    Ok(true)
 }
 
 /// Send `host_write_bytes` as the frames [`build_wire_host_write_events`]
@@ -2032,7 +2599,15 @@ fn send_host_write(
     Ok(())
 }
 
-/// Send one placement preview and each new image record after it.
+/// Send one placement preview, the answer to request `request_id`, and each
+/// new image record after it.
+///
+/// In this order: an `ImageCacheReset` when one is due, the
+/// `ImageContentReleased` frames of the records the client no longer keeps,
+/// the preview, and the records it shows that the client does not hold, as
+/// [`ConnectionImageCache::prepare_placement_snapshot`] chooses them.
+/// `sent_after_update_sequence` is the number of the last painted update sent
+/// before the preview.
 ///
 /// A client whose terminal has no native image protocol receives every image
 /// placement through [`hide_image_records`], and no image record.
@@ -2044,6 +2619,7 @@ fn send_placement_snapshot(
     frame_writer: &mut FrameWriter,
     image_cache: &mut ConnectionImageCache,
     request_id: u64,
+    sent_after_update_sequence: u64,
     placement_snapshot: &PlacementSnapshot,
     graphics_capabilities: GraphicsCapabilities,
     client_id: ClientId,
@@ -2065,7 +2641,11 @@ fn send_placement_snapshot(
             ),
         };
     }
-    let prepared_placement_snapshot = image_cache.prepare_placement_snapshot(placement_snapshot);
+    let prepared_placement_snapshot = image_cache.prepare_placement_snapshot(
+        request_id,
+        sent_after_update_sequence,
+        placement_snapshot,
+    );
     if prepared_placement_snapshot.should_reset_image_cache {
         if let Err(write_error) = frame_writer.send(&SessionEvent::ImageCacheReset) {
             return report_image_send_error(
@@ -2076,30 +2656,86 @@ fn send_placement_snapshot(
             );
         }
     }
+    send_image_releases(
+        frame_writer,
+        image_cache,
+        client_id,
+        &prepared_placement_snapshot.released_image_content_ids,
+    )?;
     let placement_snapshot_event = SessionEvent::PanePlacementSnapshot {
         request_id,
         snapshot: Box::new(prepared_placement_snapshot.placement_snapshot),
     };
+    let mut send_placement_snapshot_event =
+        |frame_writer: &mut FrameWriter, image_cache: &mut ConnectionImageCache| match frame_writer
+            .send(&placement_snapshot_event)
+        {
+            Ok(()) => Ok(true),
+            Err(write_error) => report_image_send_error(
+                image_cache,
+                client_id,
+                write_error,
+                "the placement snapshot",
+            )
+            .map(|()| false),
+        };
+    if !send_placement_snapshot_event(frame_writer, image_cache)? {
+        return Ok(());
+    }
     send_image_uploads(
         frame_writer,
         image_cache,
         client_id,
-        &placement_snapshot_event,
+        &mut send_placement_snapshot_event,
         "the placement snapshot",
         prepared_placement_snapshot.image_uploads,
     )
 }
 
-/// Send `leading_event`, then each record in `image_uploads` as one
-/// `ImageContentStart` followed by its `ImageContentChunk` frames.
-/// `leading_event` is sent again before every
+/// Send `released_image_content_ids` as `ImageContentReleased` frames of at
+/// most [`MAX_RELEASED_IMAGE_CONTENT_COUNT`] identities each, in order. No
+/// identity sends no frame.
+///
+/// # Errors
+/// The [`IpcError`] of a write that left the connection unusable, as
+/// [`report_image_send_error`] sorts it.
+fn send_image_releases(
+    frame_writer: &mut FrameWriter,
+    image_cache: &mut ConnectionImageCache,
+    client_id: ClientId,
+    released_image_content_ids: &[u64],
+) -> Result<(), IpcError> {
+    for released_image_content_id_chunk in
+        released_image_content_ids.chunks(MAX_RELEASED_IMAGE_CONTENT_COUNT)
+    {
+        let image_release_event = SessionEvent::ImageContentReleased {
+            image_content_ids: released_image_content_id_chunk.to_vec(),
+        };
+        if let Err(write_error) = frame_writer.send(&image_release_event) {
+            return report_image_send_error(
+                image_cache,
+                client_id,
+                write_error,
+                "an image release",
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Send each record in `image_uploads` as one `ImageContentStart` followed by
+/// its image chunk frames ([`koshi_ipc::image_chunk`]). Each chunk frame
+/// writes its head, then the chunk straight from the record's RGBA bytes
+/// ([`FrameWriter::send_binary_with_head`]). The caller sent the frames that lead the
+/// records. `send_leading_frames` sends them again before every
 /// `MAX_FRAME_IMAGE_TRANSFER_COUNT`-th record: 9 records with a limit of 4 send
-/// the event, records 0-3, the event, records 4-7, the event, record 8.
-/// `leading_event_part` names `leading_event` in the warning a failed write
-/// logs, and a failed record write logs `an image transfer start after
+/// records 0-3, the leading frames, records 4-7, the leading frames, record 8.
+/// `send_leading_frames` returns `false` when the leading frames did not go
+/// out and the connection survives, which stops the sending and returns `Ok`.
+/// A failed record write logs `an image transfer start after
 /// <leading_event_part>` or `an image transfer chunk after <leading_event_part>`.
-/// A write the connection survives, a frame over the cap, stops the sending
-/// and returns `Ok`.
+/// A record write the connection survives, a frame over the cap, stops the
+/// sending and returns `Ok`.
 ///
 /// # Errors
 /// The [`IpcError`] of a write that left the connection unusable, as
@@ -2108,23 +2744,19 @@ fn send_image_uploads(
     frame_writer: &mut FrameWriter,
     image_cache: &mut ConnectionImageCache,
     client_id: ClientId,
-    leading_event: &SessionEvent,
+    send_leading_frames: &mut dyn FnMut(
+        &mut FrameWriter,
+        &mut ConnectionImageCache,
+    ) -> Result<bool, IpcError>,
     leading_event_part: &str,
     image_uploads: Vec<(u64, Arc<ImageRecord>)>,
 ) -> Result<(), IpcError> {
-    if let Err(write_error) = frame_writer.send(leading_event) {
-        return report_image_send_error(image_cache, client_id, write_error, leading_event_part);
-    }
     for (upload_index, (image_content_id, image_record)) in image_uploads.into_iter().enumerate() {
-        if upload_index != 0 && upload_index % MAX_FRAME_IMAGE_TRANSFER_COUNT == 0 {
-            if let Err(write_error) = frame_writer.send(leading_event) {
-                return report_image_send_error(
-                    image_cache,
-                    client_id,
-                    write_error,
-                    leading_event_part,
-                );
-            }
+        if upload_index != 0
+            && upload_index % MAX_FRAME_IMAGE_TRANSFER_COUNT == 0
+            && !send_leading_frames(frame_writer, image_cache)?
+        {
+            return Ok(());
         }
         let image_transfer_start_event = SessionEvent::ImageContentStart {
             image_transfer: build_wire_image_transfer(image_content_id, &image_record),
@@ -2140,15 +2772,11 @@ fn send_image_uploads(
         for (byte_offset, is_last_chunk, chunk_bytes) in
             build_wire_image_chunk_sources(&image_record)
         {
-            let image_transfer_chunk_event = SessionEvent::ImageContentChunk {
-                image_chunk: FrameImageChunk {
-                    image_transfer_id: image_content_id,
-                    byte_offset,
-                    is_last: is_last_chunk,
-                    chunk_bytes: chunk_bytes.to_vec(),
-                },
-            };
-            if let Err(write_error) = frame_writer.send(&image_transfer_chunk_event) {
+            let image_chunk_frame_head =
+                build_image_chunk_frame_head(image_content_id, byte_offset, is_last_chunk);
+            if let Err(write_error) =
+                frame_writer.send_binary_with_head(&image_chunk_frame_head, chunk_bytes)
+            {
                 return report_image_send_error(
                     image_cache,
                     client_id,
@@ -2279,58 +2907,64 @@ fn stamp_client_command_source(
     )
 }
 
-/// What a check of `executable_watch` runs once the program file prints another
-/// koshi version: [`restart_into_installed_version`] with that version, through
-/// `connection_intake` and `inbox_sender`.
+/// What a check of the watch `image_replacement` holds runs once the program
+/// file prints another koshi version: [`restart_into_installed_version`] with
+/// that version, through `connection_intake` and `inbox_sender`.
 fn build_installed_version_restart(
     connection_intake: &Arc<Intake>,
     inbox_sender: &Sender<RuntimeEvent>,
-    executable_watch: &Arc<ExecutableWatch>,
+    image_replacement: &Arc<ImageReplacement>,
 ) -> impl FnOnce(String) + Send + 'static {
     let restart_intake = Arc::clone(connection_intake);
     let restart_inbox_sender = inbox_sender.clone();
-    let restart_executable_watch = Arc::clone(executable_watch);
+    let restart_image_replacement = Arc::clone(image_replacement);
     move |installed_version| {
         restart_into_installed_version(
             &restart_intake,
             &restart_inbox_sender,
-            &restart_executable_watch,
+            &restart_image_replacement,
             &installed_version,
         );
     }
 }
 
-/// Ask the dispatcher to restart this session into its program file, which
-/// now holds koshi `installed_version`, through [`RuntimeEvent::IpcRestart`],
-/// and log the verdict: an accepted restart at info level, a refused one at
-/// warning level with the sentence it was refused with. A refusal that
-/// [`RestartRefusal::can_end_without_file_change`](crate::server::RestartRefusal::can_end_without_file_change)
-/// calls [`ExecutableWatch::schedule_restart_retry`] on `executable_watch`. A closed
-/// intake sends nothing.
+/// Restart this session into its program file, which now holds koshi
+/// `installed_version`. The restart check `image_replacement` holds runs on
+/// this thread first.
+///
+/// A check that refuses is logged at warning level with the sentence it
+/// refused with, and nothing reaches the dispatcher. That refusal calls
+/// [`ExecutableWatch::schedule_restart_retry`] on the watch when
+/// [`RestartRefusal::can_end_without_file_change`] holds for it. A check that
+/// passes asks the dispatcher through [`RuntimeEvent::IpcRestart`], and a
+/// dispatcher that takes the restart is logged at info level. An intake that
+/// refuses requests takes nothing.
 fn restart_into_installed_version(
     connection_intake: &Intake,
     inbox_sender: &Sender<RuntimeEvent>,
-    executable_watch: &ExecutableWatch,
+    image_replacement: &ImageReplacement,
     installed_version: &str,
 ) {
-    match request_dispatcher_response(connection_intake, inbox_sender, |response_sender| {
-        RuntimeEvent::IpcRestart { response_sender }
-    }) {
-        Some(Ok(())) => tracing::info!(
+    if let Err(restart_refusal) = (image_replacement.restart_check)() {
+        tracing::warn!(
+            installed_version,
+            %restart_refusal,
+            "the program file holds another koshi version, and the session cannot restart into it"
+        );
+        if restart_refusal.can_end_without_file_change() {
+            image_replacement.executable_watch.schedule_restart_retry();
+        }
+        return;
+    }
+    let dispatch_answer =
+        request_dispatcher_answer(connection_intake, inbox_sender, |response_sender| {
+            RuntimeEvent::IpcRestart { response_sender }
+        });
+    if dispatch_answer.is_ok() {
+        tracing::info!(
             installed_version,
             "the program file holds another koshi version; the session restarts into it"
-        ),
-        Some(Err(restart_refusal)) => {
-            tracing::warn!(
-                installed_version,
-                %restart_refusal,
-                "the program file holds another koshi version, and the session cannot restart into it"
-            );
-            if restart_refusal.can_end_without_file_change() {
-                executable_watch.schedule_restart_retry();
-            }
-        }
-        None => {}
+        );
     }
 }
 
@@ -2348,18 +2982,51 @@ fn build_request_failed_response(request_id: Option<u64>, message: String) -> Ip
 
 /// Hand one request to the dispatcher thread and wait for its answer: build
 /// the inbox event around a fresh reply channel, hand it over the intake, and
-/// block on the reply. `None` means no answer is coming: the intake is closed,
-/// or the dispatcher is gone.
-fn request_dispatcher_response<DispatcherResponse>(
+/// block on the reply.
+///
+/// # Errors
+/// The [`DispatchFailure`] of the hand-over, and
+/// [`DispatchFailure::DispatcherGone`] when the dispatcher drops the reply
+/// channel without an answer.
+fn request_dispatcher_answer<DispatcherResponse>(
     connection_intake: &Intake,
     inbox_sender: &Sender<RuntimeEvent>,
     build_runtime_event: impl FnOnce(mpsc::Sender<DispatcherResponse>) -> RuntimeEvent,
-) -> Option<DispatcherResponse> {
+) -> Result<DispatcherResponse, DispatchFailure> {
     let (response_sender, response_receiver) = mpsc::channel();
-    if !connection_intake.hand_over_event(inbox_sender, build_runtime_event(response_sender)) {
-        return None;
+    connection_intake.hand_over_event(inbox_sender, build_runtime_event(response_sender))?;
+    response_receiver
+        .recv()
+        .map_err(|_| DispatchFailure::DispatcherGone)
+}
+
+/// The dispatcher's answer to the request `request_id` read on `connection`,
+/// as [`request_dispatcher_answer`] gives it. `None` means the connection
+/// ends: the dispatcher is gone and nothing is written, or the intake refuses
+/// requests and `connection` carries the refusal of `request_id` with
+/// [`IpcErrorCode::Restarting`] and [`SESSION_RESTARTING_MESSAGE`].
+fn request_dispatcher_response<DispatcherResponse>(
+    connection_intake: &Intake,
+    inbox_sender: &Sender<RuntimeEvent>,
+    connection: &mut Connection,
+    request_id: Option<u64>,
+    build_runtime_event: impl FnOnce(mpsc::Sender<DispatcherResponse>) -> RuntimeEvent,
+) -> Option<DispatcherResponse> {
+    match request_dispatcher_answer(connection_intake, inbox_sender, build_runtime_event) {
+        Ok(dispatcher_response) => Some(dispatcher_response),
+        Err(DispatchFailure::Refused) => {
+            let restarting_refusal = IpcResponse {
+                request_id,
+                answer_result: IpcResult::Error(IpcErrorPayload {
+                    code: IpcErrorCode::Restarting,
+                    message: SESSION_RESTARTING_MESSAGE.to_owned(),
+                }),
+            };
+            let _ = connection.send(&restarting_refusal);
+            None
+        }
+        Err(DispatchFailure::DispatcherGone) => None,
     }
-    response_receiver.recv().ok()
 }
 
 #[cfg(test)]

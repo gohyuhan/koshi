@@ -13,11 +13,11 @@ use uuid::Uuid;
 
 use super::*;
 
-/// A fixed UUID ending in `suffix_byte`, so every id in one encoding stays
-/// distinguishable.
-fn build_test_uuid_with_suffix(suffix_byte: u8) -> Uuid {
+/// The UUID `00000000-0000-0000-0000-0000000000NN`, where `NN` is
+/// `suffix_number` in two decimal digits.
+fn build_test_uuid_with_suffix(suffix_number: u8) -> Uuid {
     Uuid::parse_str(&format!(
-        "00000000-0000-0000-0000-0000000000{suffix_byte:02}"
+        "00000000-0000-0000-0000-0000000000{suffix_number:02}"
     ))
     .expect("literal UUID parses")
 }

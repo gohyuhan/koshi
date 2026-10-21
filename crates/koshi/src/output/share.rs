@@ -124,12 +124,13 @@ const REMOTE_SECRET_LINE: &str =
 ///   `<this machine's address>` in place of the address.
 /// - A loopback address, such as `127.0.0.1:7654`: no command, and a line
 ///   saying that no other machine can connect to it.
-/// - Any other address, such as `192.168.1.20:7654`: one command with it, and
+/// - Any other address, such as `192.0.2.20:7654`: one command with it, and
 ///   a line saying this machine accepts connections on that address only.
 ///
-/// Example: `0.0.0.0:7654`, `alice`, `192.168.1.20` on `en0`, and the
-/// fingerprint `9c…1e` give
-/// `  koshi attach --remote 192.168.1.20:7654 --certificate-fingerprint 9c…1e --save-as alice [SESSION]   # en0`.
+/// Example: `0.0.0.0:7654`, `ada`, `192.0.2.20` on `en0`, and the fingerprint
+/// `9c1e` give one line: two spaces, this command, three spaces, and `# en0`:
+///
+/// `koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint 9c1e --save-as ada [SESSION]`
 fn render_connect_commands(
     token_identity: &str,
     remote_listen_address: SocketAddr,

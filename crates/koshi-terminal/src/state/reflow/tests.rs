@@ -4,8 +4,15 @@
 
 use super::*;
 
+use koshi_test_support::output_workloads::SeededSequence;
+
 use crate::engine::TerminalEngine;
+use crate::graphics::{
+    DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
+};
+use crate::grid::state::tests::build_line_cells;
 use crate::scrollback::{Scrollback, ScrollbackLimit};
+use crate::state::tests::process_terminal_bytes;
 use crate::style::Color;
 
 fn build_terminal_engine(column_count: u16, row_count: u16) -> TerminalEngine {
@@ -46,8 +53,9 @@ fn list_scrollback_row_texts(terminal_engine: &TerminalEngine) -> Vec<String> {
         .get_scrollback()
         .list_retained_lines()
         .iter()
-        .map(|(history_row_cells, _)| {
-            history_row_cells
+        .map(|row_snapshot| {
+            row_snapshot
+                .decode_text_cells()
                 .iter()
                 .filter(|cell| cell.get_display_width() != 0)
                 .map(Cell::get_character)
@@ -161,7 +169,7 @@ fn shrink_overflow_enters_history_and_widen_pulls_it_back() {
             .get_terminal_state()
             .get_scrollback()
             .list_retained_lines()[0]
-            .1
+            .get_row_metadata()
             .row_end,
         RowEnd::Soft,
         "the history row must remember it soft-wraps into the screen"
@@ -405,8 +413,7 @@ fn reflow_respects_the_scrollback_caps_and_stays_monotonic() {
     });
     terminal_state.scrollback =
         Scrollback::from_scrollback_limit(ScrollbackLimit::from_line_and_byte_limits(2, 100_000));
-    let mut vte_parser = vte::Parser::new();
-    vte_parser.advance(&mut terminal_state, b"abcdefgh12345678\r\nx");
+    process_terminal_bytes(&mut terminal_state, b"abcdefgh12345678\r\nx");
     // The first row scrolled into history as the line feed arrived.
     assert_eq!(terminal_state.scrollback.get_total_pushed_line_count(), 1);
 
@@ -428,6 +435,32 @@ fn reflow_respects_the_scrollback_caps_and_stays_monotonic() {
     });
     assert_eq!(terminal_state.scrollback.get_retained_line_count(), 1);
     assert_eq!(terminal_state.scrollback.get_total_pushed_line_count(), 2);
+}
+
+/// The rows one logical line of `content_cells` re-wraps into at
+/// `column_count`, each as its cells and its metadata: the line's cells of
+/// each row span, and the spacer in `background_style` of a soft-wide row.
+fn rewrap_line(
+    mut content_cells: Vec<Cell>,
+    column_count: u16,
+    background_style: Style,
+) -> Vec<(Vec<Cell>, RowMetadata)> {
+    if column_count <= 1 {
+        narrow_wide_glyphs(&mut content_cells);
+    }
+    let mut row_spans = Vec::new();
+    compute_rewrapped_row_spans(&content_cells, column_count, &mut row_spans);
+    row_spans
+        .iter()
+        .map(|row_span| {
+            let mut row_cells =
+                content_cells[row_span.first_cell_index..row_span.end_cell_index].to_vec();
+            if row_span.row_metadata.row_end == RowEnd::SoftWide {
+                row_cells.push(Cell::build_blank_with_style(background_style));
+            }
+            (row_cells, row_span.row_metadata)
+        })
+        .collect()
 }
 
 #[test]
@@ -484,41 +517,29 @@ fn content_cell_count_trims_only_fully_default_blanks() {
 
 #[test]
 fn locate_content_cell_offset_walks_soft_rows_and_parks_in_final_padding() {
-    let build_soft_row = |row_text: &str| {
-        (
-            row_text
-                .chars()
-                .map(|row_character| Cell::from_character(row_character, 1, Style::default()))
-                .collect::<Vec<_>>(),
-            RowMetadata {
-                row_end: RowEnd::Soft,
-                has_prompt_mark: false,
-            },
-        )
-    };
-    let build_hard_row = |row_text: &str| {
-        (
-            row_text
-                .chars()
-                .map(|row_character| Cell::from_character(row_character, 1, Style::default()))
-                .collect::<Vec<_>>(),
-            RowMetadata {
-                row_end: RowEnd::Hard,
-                has_prompt_mark: false,
-            },
-        )
-    };
-    let rewrapped_rows = vec![
-        build_soft_row("abcd"),
-        build_soft_row("efgh"),
-        build_hard_row("ij"),
-    ];
-    assert_eq!(locate_content_cell_offset(&rewrapped_rows, 0), (0, 0));
-    assert_eq!(locate_content_cell_offset(&rewrapped_rows, 3), (0, 3));
-    assert_eq!(locate_content_cell_offset(&rewrapped_rows, 4), (1, 0));
-    assert_eq!(locate_content_cell_offset(&rewrapped_rows, 9), (2, 1));
+    // `abcd` and `efgh` soft-wrapped, then `ij` ending hard.
+    let row_content_cell_counts = [4, 4, 2];
+    assert_eq!(
+        locate_content_cell_offset(&row_content_cell_counts, 0),
+        (0, 0)
+    );
+    assert_eq!(
+        locate_content_cell_offset(&row_content_cell_counts, 3),
+        (0, 3)
+    );
+    assert_eq!(
+        locate_content_cell_offset(&row_content_cell_counts, 4),
+        (1, 0)
+    );
+    assert_eq!(
+        locate_content_cell_offset(&row_content_cell_counts, 9),
+        (2, 1)
+    );
     // Past the content: parks in the final row's padding.
-    assert_eq!(locate_content_cell_offset(&rewrapped_rows, 11), (2, 3));
+    assert_eq!(
+        locate_content_cell_offset(&row_content_cell_counts, 11),
+        (2, 3)
+    );
 }
 
 /// Every logical line visible anywhere (history then screen), soft wraps
@@ -530,13 +551,21 @@ fn list_logical_lines(terminal_engine: &TerminalEngine) -> Vec<String> {
         .get_scrollback()
         .list_retained_lines()
         .iter()
-        .cloned()
+        .map(|row_snapshot| {
+            (
+                row_snapshot.decode_text_cells(),
+                row_snapshot.get_row_metadata(),
+            )
+        })
         .collect();
     let active_grid = terminal_state.get_active_grid();
     let (row_count, _) = active_grid.get_grid_dimensions();
     for row_index in 0..row_count {
         physical_rows.push((
-            active_grid.list_rows()[row_index as usize].clone(),
+            active_grid
+                .get_row_cells(row_index)
+                .expect("the row exists")
+                .to_vec(),
             RowMetadata {
                 row_end: active_grid.get_row_end(row_index),
                 has_prompt_mark: active_grid.has_prompt_mark(row_index),
@@ -651,7 +680,7 @@ fn a_wrapped_row_keeps_its_link_when_it_scrolls_into_history() {
         .get_scrollback()
         .list_retained_lines()
         .iter()
-        .map(|(_, row_metadata)| row_metadata.row_end)
+        .map(|row_snapshot| row_snapshot.get_row_metadata().row_end)
         .collect();
     assert_eq!(history_row_ends, vec![RowEnd::Soft]);
 
@@ -674,17 +703,9 @@ fn a_linefeed_scroll_still_ends_its_row_hard() {
         .get_scrollback()
         .list_retained_lines()
         .iter()
-        .map(|(_, row_metadata)| row_metadata.row_end)
+        .map(|row_snapshot| row_snapshot.get_row_metadata().row_end)
         .collect();
     assert_eq!(history_row_ends, vec![RowEnd::Hard]);
-}
-
-/// One default-styled narrow cell per char of `text`.
-fn build_cells(cell_text: &str) -> Vec<Cell> {
-    cell_text
-        .chars()
-        .map(|cell_character| Cell::from_character(cell_character, 1, Style::default()))
-        .collect()
 }
 
 /// A wide glyph as stored in the grid: the width-2 base and its width-0
@@ -706,7 +727,7 @@ fn list_screen_prompt_marks(terminal_state: &TerminalState) -> Vec<bool> {
 
 #[test]
 fn rewrap_line_at_zero_columns_wraps_at_one_column() {
-    let row_cells = build_cells("abc");
+    let row_cells = build_line_cells("abc");
     let wrapped_rows = rewrap_line(row_cells, 0, Style::default());
     let soft_row_metadata = RowMetadata {
         row_end: RowEnd::Soft,
@@ -715,9 +736,9 @@ fn rewrap_line_at_zero_columns_wraps_at_one_column() {
     assert_eq!(
         wrapped_rows,
         vec![
-            (build_cells("a"), soft_row_metadata),
-            (build_cells("b"), soft_row_metadata),
-            (build_cells("c"), RowMetadata::default()),
+            (build_line_cells("a"), soft_row_metadata),
+            (build_line_cells("b"), soft_row_metadata),
+            (build_line_cells("c"), RowMetadata::default()),
         ]
     );
 }
@@ -726,12 +747,12 @@ fn rewrap_line_at_zero_columns_wraps_at_one_column() {
 fn rewrap_line_leaves_a_spacer_in_the_fill_before_a_wide_glyph_at_the_last_column() {
     let mut red_background_style = Style::default();
     red_background_style.set_background_color(Color::Indexed(1));
-    let mut row_cells = build_cells("abc");
+    let mut row_cells = build_line_cells("abc");
     row_cells.extend(build_wide_cell_pair('\u{6f22}'));
 
     let wrapped_rows = rewrap_line(row_cells, 4, red_background_style);
 
-    let mut leading_row_cells = build_cells("abc");
+    let mut leading_row_cells = build_line_cells("abc");
     leading_row_cells.push(Cell::build_blank_with_style(red_background_style));
     assert_eq!(
         wrapped_rows,
@@ -778,25 +799,23 @@ fn rewrap_line_at_one_column_stores_a_wide_glyph_narrow_and_skips_its_continuati
 
 #[test]
 fn locate_content_cell_offset_skips_a_soft_wide_spacer() {
-    let mut leading_row_cells = build_cells("abc");
-    leading_row_cells.push(Cell::build_blank());
-    let mut following_row_cells = build_wide_cell_pair('\u{6f22}').to_vec();
-    following_row_cells.extend(build_cells("c"));
-    let rewrapped_rows = vec![
-        (
-            leading_row_cells,
-            RowMetadata {
-                row_end: RowEnd::SoftWide,
-                has_prompt_mark: false,
-            },
-        ),
-        (following_row_cells, RowMetadata::default()),
-    ];
+    // `abc` and its spacer ending soft-wide, then a wide glyph and `c`: the
+    // soft-wide row holds 3 content cells, the spacer not among them.
+    let row_content_cell_counts = [3, 3];
     // Offsets 0-2 are `abc`; the spacer holds none, so offset 3 is the wide
     // glyph at the start of the next row and offset 5 is the `c` after it.
-    assert_eq!(locate_content_cell_offset(&rewrapped_rows, 2), (0, 2));
-    assert_eq!(locate_content_cell_offset(&rewrapped_rows, 3), (1, 0));
-    assert_eq!(locate_content_cell_offset(&rewrapped_rows, 5), (1, 2));
+    assert_eq!(
+        locate_content_cell_offset(&row_content_cell_counts, 2),
+        (0, 2)
+    );
+    assert_eq!(
+        locate_content_cell_offset(&row_content_cell_counts, 3),
+        (1, 0)
+    );
+    assert_eq!(
+        locate_content_cell_offset(&row_content_cell_counts, 5),
+        (1, 2)
+    );
 }
 
 #[test]
@@ -805,8 +824,7 @@ fn prompt_mark_follows_its_row_when_the_line_above_wraps() {
         column_count: 8,
         row_count: 4,
     });
-    let mut vte_parser = vte::Parser::new();
-    vte_parser.advance(&mut terminal_state, b"abcdefg\r\n\x1b]133;A\x07$ ");
+    process_terminal_bytes(&mut terminal_state, b"abcdefg\r\n\x1b]133;A\x07$ ");
     assert_eq!(
         list_screen_prompt_marks(&terminal_state),
         vec![false, true, false, false]
@@ -822,7 +840,11 @@ fn prompt_mark_follows_its_row_when_the_line_above_wraps() {
         vec![false, false, true, false]
     );
     assert_eq!(
-        terminal_state.primary.list_rows()[2][0].get_character(),
+        terminal_state
+            .primary
+            .get_row_cells(2)
+            .expect("row 2 exists")[0]
+            .get_character(),
         '$'
     );
 
@@ -842,8 +864,7 @@ fn a_prompt_mark_on_a_wrapped_line_stays_on_its_first_row() {
         column_count: 4,
         row_count: 4,
     });
-    let mut vte_parser = vte::Parser::new();
-    vte_parser.advance(&mut terminal_state, b"\x1b]133;A\x07abcdefgh");
+    process_terminal_bytes(&mut terminal_state, b"\x1b]133;A\x07abcdefgh");
     assert_eq!(
         list_screen_prompt_marks(&terminal_state),
         vec![true, false, false, false]
@@ -874,8 +895,7 @@ fn a_prompt_mark_on_a_continuation_row_moves_to_the_lines_first_row() {
         column_count: 8,
         row_count: 4,
     });
-    let mut vte_parser = vte::Parser::new();
-    vte_parser.advance(&mut terminal_state, b"abcdefghij");
+    process_terminal_bytes(&mut terminal_state, b"abcdefghij");
     // Row 1 holds `ij`, the continuation of row 0's line.
     terminal_state
         .get_active_grid_mut()
@@ -983,8 +1003,8 @@ fn a_trailing_soft_history_row_becomes_a_hard_line_on_regrow() {
         column_count: 4,
         row_count: 0,
     });
-    terminal_state.scrollback.push_row(
-        &build_cells("ab"),
+    terminal_state.scrollback.push_row_cells(
+        &build_line_cells("ab"),
         RowMetadata {
             row_end: RowEnd::Soft,
             has_prompt_mark: false,
@@ -996,10 +1016,13 @@ fn a_trailing_soft_history_row_becomes_a_hard_line_on_regrow() {
         row_count: 2,
     });
 
-    let mut expected_regrown_cells = build_cells("ab");
+    let mut expected_regrown_cells = build_line_cells("ab");
     expected_regrown_cells.extend([Cell::build_blank(), Cell::build_blank()]);
     assert_eq!(
-        terminal_state.primary.list_rows()[0],
+        terminal_state
+            .primary
+            .get_row_cells(0)
+            .expect("row 0 exists"),
         expected_regrown_cells
     );
     assert_eq!(terminal_state.primary.get_row_end(0), RowEnd::Hard);
@@ -1019,7 +1042,7 @@ fn a_prompt_mark_on_an_empty_trailing_soft_row_survives_regrow() {
         column_count: 4,
         row_count: 0,
     });
-    terminal_state.scrollback.push_row(
+    terminal_state.scrollback.push_row_cells(
         &[],
         RowMetadata {
             row_end: RowEnd::Soft,
@@ -1033,7 +1056,10 @@ fn a_prompt_mark_on_an_empty_trailing_soft_row_survives_regrow() {
     });
 
     assert_eq!(
-        terminal_state.primary.list_rows()[0],
+        terminal_state
+            .primary
+            .get_row_cells(0)
+            .expect("row 0 exists"),
         vec![Cell::build_blank(); 4]
     );
     assert_eq!(terminal_state.primary.get_row_end(0), RowEnd::Hard);
@@ -1077,11 +1103,252 @@ fn a_blank_prompt_marked_row_below_the_cursor_enters_history_on_a_height_shrink(
         .get_scrollback()
         .list_retained_lines()
         .iter()
-        .map(|(_, row_metadata)| row_metadata.has_prompt_mark)
+        .map(|row_snapshot| row_snapshot.get_row_metadata().has_prompt_mark)
         .collect();
     assert_eq!(history_prompt_marks, vec![false]);
     assert!(terminal_engine
         .get_terminal_state()
         .get_active_grid()
         .has_prompt_mark(0));
+}
+
+#[test]
+fn a_short_hard_history_line_takes_the_new_width_with_the_cells_it_had() {
+    let mut terminal_engine = build_terminal_engine(20, 2);
+    feed_terminal_text(&mut terminal_engine, "README.md\r\nx\r\ny");
+
+    resize_terminal_engine(&mut terminal_engine, 12, 2);
+
+    let retained_lines = terminal_engine
+        .get_terminal_state()
+        .get_scrollback()
+        .list_retained_lines();
+    let mut expected_row_cells = build_line_cells("README.md");
+    expected_row_cells.resize(12, Cell::build_blank());
+    assert_eq!(retained_lines.len(), 1);
+    assert_eq!(
+        *retained_lines[0],
+        RowSnapshot::from_row_cells(&expected_row_cells, RowMetadata::default(), Vec::new())
+    );
+}
+
+/// A one-row image `column_count` cells wide at `image_anchor` in
+/// `graphics_protocol`.
+fn build_one_row_image_record(
+    graphics_protocol: GraphicsProtocol,
+    image_anchor: (u16, u16),
+    column_count: u16,
+) -> ImageRecord {
+    ImageRecord {
+        protocol: graphics_protocol,
+        image: (DecodedImage {
+            pixel_width: u32::from(column_count),
+            pixel_height: 1,
+            rgba_bytes: vec![255; usize::from(column_count) * 4],
+        })
+        .into(),
+        animation: None,
+        action: ImageAction::Display,
+        display: ImageDisplay {
+            requested_width: Some(ImageDimension::Cells(u32::from(column_count))),
+            requested_height: Some(ImageDimension::Cells(1)),
+            should_move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        anchor: image_anchor,
+    }
+}
+
+/// A terminal state at a seeded size, fed seeded output: ASCII and wide-glyph
+/// text, line ends, erases, background colors, prompt marks, cursor moves and
+/// one-row iTerm2 and Kitty images. Rows soft-wrap, soft-wrap around a wide
+/// glyph, end hard, are emptied after a wrap, and scroll into a history that
+/// one seed in three caps at 4 lines. The cursor ends on a seeded row and
+/// column.
+fn build_seeded_terminal_state(seeded_sequence: &mut SeededSequence) -> TerminalState {
+    let pty_size = PtySize {
+        column_count: seeded_sequence.compute_next_in_range(2, 9) as u16,
+        row_count: seeded_sequence.compute_next_in_range(1, 6) as u16,
+    };
+    let scrollback_limit = if seeded_sequence.compute_next_index(3) == 0 {
+        ScrollbackLimit::from_line_and_byte_limits(4, 100_000)
+    } else {
+        ScrollbackLimit::default()
+    };
+    let mut terminal_state = TerminalState::with_scrollback(pty_size, scrollback_limit);
+    for _output_step_number in 0..seeded_sequence.compute_next_in_range(10, 80) {
+        match seeded_sequence.compute_next_index(10) {
+            0 | 1 => {
+                let text_cell_count = seeded_sequence.compute_next_in_range(1, 20);
+                let ascii_text: String = (0..text_cell_count)
+                    .map(|_| char::from(b'a' + seeded_sequence.compute_next_index(26) as u8))
+                    .collect();
+                process_terminal_bytes(&mut terminal_state, ascii_text.as_bytes());
+            }
+            2 => {
+                let wide_glyph_count = seeded_sequence.compute_next_in_range(1, 6);
+                let wide_text = "世".repeat(wide_glyph_count);
+                process_terminal_bytes(&mut terminal_state, wide_text.as_bytes());
+            }
+            3 => process_terminal_bytes(&mut terminal_state, b"\r\n"),
+            4 => process_terminal_bytes(&mut terminal_state, b"\x1b]133;A\x07"),
+            5 => {
+                let pen_bytes: [&[u8]; 3] = [b"\x1b[41m", b"\x1b[44m", b"\x1b[0m"];
+                process_terminal_bytes(
+                    &mut terminal_state,
+                    pen_bytes[seeded_sequence.compute_next_index(3)],
+                );
+            }
+            6 => {
+                let erase_bytes: [&[u8]; 3] = [b"\x1b[K", b"\x1b[2K", b"\r\x1b[K"];
+                process_terminal_bytes(
+                    &mut terminal_state,
+                    erase_bytes[seeded_sequence.compute_next_index(3)],
+                );
+            }
+            7 => {
+                let cursor_move = format!(
+                    "\x1b[{};{}H",
+                    seeded_sequence.compute_next_in_range(1, usize::from(pty_size.row_count)),
+                    seeded_sequence.compute_next_in_range(1, usize::from(pty_size.column_count))
+                );
+                process_terminal_bytes(&mut terminal_state, cursor_move.as_bytes());
+            }
+            8 => {
+                let graphics_protocol = if seeded_sequence.compute_next_index(2) == 0 {
+                    GraphicsProtocol::Iterm2
+                } else {
+                    GraphicsProtocol::Kitty
+                };
+                let image_anchor = terminal_state.get_active_cursor_position();
+                let image_column_count = seeded_sequence.compute_next_in_range(1, 2) as u16;
+                let _ = terminal_state.apply_image_record(&build_one_row_image_record(
+                    graphics_protocol,
+                    image_anchor,
+                    image_column_count,
+                ));
+            }
+            _ => process_terminal_bytes(&mut terminal_state, b"\n"),
+        }
+    }
+    let cursor_move = format!(
+        "\x1b[{};{}H",
+        seeded_sequence.compute_next_in_range(1, usize::from(pty_size.row_count)),
+        seeded_sequence.compute_next_in_range(1, usize::from(pty_size.column_count))
+    );
+    process_terminal_bytes(&mut terminal_state, cursor_move.as_bytes());
+    terminal_state
+}
+
+#[test]
+fn a_resize_that_keeps_the_width_gives_the_rows_a_rewrap_gives() {
+    let mut kept_resize_count = 0;
+    let mut resize_count = 0;
+    for seed in 0..200 {
+        let mut seeded_sequence = SeededSequence::from_seed(seed);
+        let terminal_state = build_seeded_terminal_state(&mut seeded_sequence);
+        let (row_count, column_count) = terminal_state.primary.get_grid_dimensions();
+        for new_row_count in [1, row_count.saturating_sub(1), row_count + 1, row_count + 7] {
+            let pty_size = PtySize {
+                column_count,
+                row_count: new_row_count,
+            };
+            resize_count += 1;
+            if is_reflow_keeping_rows(&terminal_state, pty_size) {
+                kept_resize_count += 1;
+            }
+            assert_reflow_gives_the_rewrap(
+                &terminal_state,
+                pty_size,
+                &format!("seed {seed}: {column_count} × {row_count} to {new_row_count} rows"),
+            );
+        }
+    }
+    assert_eq!((kept_resize_count, resize_count), (436, 800));
+}
+
+/// Whether a reflow of `terminal_state` to `pty_size` keeps its rows with no
+/// re-wrap.
+fn is_reflow_keeping_rows(terminal_state: &TerminalState, pty_size: PtySize) -> bool {
+    let background_style = terminal_state
+        .primary_render
+        .style
+        .get_background_fill_style();
+    terminal_state
+        .keep_primary_rows(pty_size.column_count, background_style)
+        .is_some()
+}
+
+/// Asserts that the reflow of `terminal_state` to `pty_size` gives the state a
+/// re-wrap of every logical line gives. `case_name` names the case in the
+/// failure message.
+fn assert_reflow_gives_the_rewrap(
+    terminal_state: &TerminalState,
+    pty_size: PtySize,
+    case_name: &str,
+) {
+    let mut reflowed_terminal_state = terminal_state.clone();
+    reflowed_terminal_state.reflow_primary(pty_size);
+    let mut rewrapped_terminal_state = terminal_state.clone();
+    let background_style = rewrapped_terminal_state
+        .primary_render
+        .style
+        .get_background_fill_style();
+    let old_total_pushed_row_count = rewrapped_terminal_state
+        .scrollback
+        .get_total_pushed_line_count();
+    let old_retained_history_row_count = rewrapped_terminal_state
+        .scrollback
+        .get_retained_line_count();
+    let reflow_output =
+        rewrapped_terminal_state.rewrap_primary_rows(pty_size.column_count, background_style);
+    rewrapped_terminal_state.apply_reflow_output(
+        pty_size,
+        reflow_output,
+        old_total_pushed_row_count,
+        old_retained_history_row_count,
+    );
+    assert_eq!(
+        reflowed_terminal_state, rewrapped_terminal_state,
+        "{case_name}"
+    );
+}
+
+#[test]
+fn a_one_column_wide_glyph_is_rewrapped_narrow_at_an_unchanged_width() {
+    let pty_size = PtySize {
+        column_count: 1,
+        row_count: 2,
+    };
+    let mut terminal_state = TerminalState::from_pty_size(pty_size);
+    *terminal_state
+        .primary
+        .get_cell_mut(0, 0)
+        .expect("cell (0, 0) exists") = Cell::from_character('世', 2, Style::default());
+
+    assert!(!is_reflow_keeping_rows(&terminal_state, pty_size));
+    assert_reflow_gives_the_rewrap(&terminal_state, pty_size, "one column");
+}
+
+#[test]
+fn a_soft_ended_last_screen_row_is_rewrapped_at_an_unchanged_width() {
+    let pty_size = PtySize {
+        column_count: 3,
+        row_count: 2,
+    };
+    let mut terminal_state = TerminalState::from_pty_size(pty_size);
+    process_terminal_bytes(&mut terminal_state, b"ab\r\nxyz");
+    terminal_state.primary.set_row_end(1, RowEnd::Soft);
+
+    assert!(!is_reflow_keeping_rows(&terminal_state, pty_size));
+    for row_count in [1, 2, 4] {
+        assert_reflow_gives_the_rewrap(
+            &terminal_state,
+            PtySize {
+                column_count: 3,
+                row_count,
+            },
+            &format!("{row_count} rows"),
+        );
+    }
 }

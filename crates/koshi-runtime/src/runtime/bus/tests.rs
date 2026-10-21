@@ -4,7 +4,8 @@
 //! subscriber only, until a snapshot resyncs it. The quit and the restart each end
 //! the stream: each reaches a desynced subscriber as well as a live one, and
 //! each raises the bus's ending notice for the queues they do not fit, which
-//! keeps the first ending raised. Then the painted frame: it lands on a live
+//! keeps the first ending raised, and wakes a writer that waits on such a
+//! queue. Then the painted frame: it lands on a live
 //! subscriber's queue, is refused by a desynced one, and on a full queue is
 //! refused while the subscriber stays live. A frame or a resync snapshot that
 //! finds the queue full marks the subscriber's writer handoff owed a frame
@@ -19,6 +20,9 @@
 //!
 //! Then the wire conversion: one queue item becomes the frame the client is
 //! sent, and one host write becomes the frames that carry its bytes.
+
+use std::thread;
+use std::time::{Duration, Instant};
 
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
 use koshi_core::event::{
@@ -37,6 +41,7 @@ use koshi_renderer::snapshot::{ClientSnapshot, SessionSnapshot, TabSnapshot};
 use koshi_test_support::fixtures::build_counting_bytes;
 
 use super::*;
+use crate::runtime::delivery_queue::PacedReceive;
 
 impl EventBus {
     /// How many subscribers are registered. Counts subscribers whose receiver
@@ -359,9 +364,9 @@ fn the_dropped_count_holds_the_trigger_plus_every_withheld_event() {
 
 #[test]
 fn a_live_subscriber_whose_queue_is_full_misses_the_restart() {
-    // The queue is bounded, so the restart is dropped like any other event that
-    // does not fit. The ending notice holds it instead, which is what the
-    // client's writing thread reads rather than waiting on the queue.
+    // The queue is bounded: the restart is dropped like any other event that
+    // does not fit. The ending notice holds it, and the client's writing
+    // thread reads the notice.
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
@@ -382,6 +387,39 @@ fn a_live_subscriber_whose_queue_is_full_misses_the_restart() {
             .all(|delivery| *delivery == Delivery::Event(Event::TabCreated(TabCreated { tab_id }))),
         "the queue must hold its backlog and nothing else"
     );
+}
+
+#[test]
+fn an_ending_that_finds_a_full_queue_wakes_a_writer_held_on_the_frame_at_its_head() {
+    // The frame at the head is held while no frame may go, and the queue is
+    // full behind it: the restart finds no room. The bus wakes the waiting
+    // writer, and the writer reads the raised notice before its deadline.
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
+    assert!(bus.try_send_frame(subscriber_id, build_test_render_snapshot()));
+    let tab_id = TabId::new();
+    for _ in 1..SUBSCRIBER_QUEUE_CAPACITY {
+        bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+    }
+    let ending_notice = Arc::clone(bus.get_ending_notice());
+    let wait_deadline = Instant::now() + Duration::from_secs(5);
+
+    let publishing_thread = thread::spawn(move || {
+        bus.publish(&Event::Restarting);
+        bus
+    });
+    assert_eq!(
+        subscriber_receiver.recv_paced(Some(wait_deadline), false, &ending_notice),
+        PacedReceive::SessionEnding
+    );
+    assert!(
+        Instant::now() < wait_deadline,
+        "the bus's wake ends the wait before its deadline"
+    );
+    let bus = publishing_thread
+        .join()
+        .expect("the publishing thread finishes");
+    assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
 }
 
 #[test]
@@ -783,7 +821,7 @@ fn a_frame_that_does_not_fit_is_refused_and_leaves_the_subscriber_live() {
     assert!(!bus.try_send_frame(subscriber_id, build_test_render_snapshot()));
 
     // A refused frame is not a gap in the stream: the next frame supersedes it,
-    // so the subscriber keeps receiving instead of pausing for a snapshot.
+    // and the subscriber keeps receiving with no snapshot.
     assert!(!bus.has_desynced_subscribers());
     assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
     assert_eq!(bus.count_subscribers(), 1);
@@ -1424,18 +1462,27 @@ fn a_host_write_past_one_frame_becomes_full_parts_then_the_rest() {
 }
 
 #[test]
-fn a_switch_reaches_the_subscriber_as_the_session_it_names() {
+fn a_switch_reaches_the_subscriber_as_the_session_and_user_it_names() {
     let session_id = SessionId::new();
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
 
-    assert!(bus.try_send_switch(subscriber_id, session_id));
+    assert!(bus.try_send_switch(subscriber_id, session_id, Some(1001)));
 
     let queued_deliveries: Vec<Delivery> = subscriber_receiver.try_iter().collect();
-    assert_eq!(queued_deliveries, vec![Delivery::SwitchTo(session_id)]);
+    assert_eq!(
+        queued_deliveries,
+        vec![Delivery::SwitchTo {
+            session_id,
+            owner_user_id: Some(1001),
+        }]
+    );
     assert_eq!(
         build_wire_event(&queued_deliveries[0]),
-        Some(SessionEvent::SwitchTo { session_id })
+        Some(SessionEvent::SwitchTo {
+            session_id,
+            owner_user_id: Some(1001),
+        })
     );
     assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
     assert_eq!(bus.count_subscribers(), 1);
@@ -1469,7 +1516,7 @@ fn a_full_queue_desyncs_the_subscriber_and_drops_the_switch() {
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
 
-    assert!(!bus.try_send_switch(subscriber_id, SessionId::new()));
+    assert!(!bus.try_send_switch(subscriber_id, SessionId::new(), None));
 
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
     assert_eq!(bus.count_subscribers(), 1);
@@ -1486,7 +1533,7 @@ fn a_switch_for_an_unknown_subscriber_is_refused() {
     let mut bus = EventBus::new();
     let (_subscriber_id, subscriber_receiver, _) = bus.subscribe();
 
-    assert!(!bus.try_send_switch(SubscriberId::new(), SessionId::new()));
+    assert!(!bus.try_send_switch(SubscriberId::new(), SessionId::new(), None));
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
@@ -1510,7 +1557,7 @@ fn a_switch_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
         SUBSCRIBER_QUEUE_CAPACITY
     );
 
-    assert!(!bus.try_send_switch(subscriber_id, SessionId::new()));
+    assert!(!bus.try_send_switch(subscriber_id, SessionId::new(), None));
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
@@ -1526,7 +1573,7 @@ fn a_subscriber_whose_receiver_is_gone_is_removed_by_the_switch() {
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     drop(subscriber_receiver);
 
-    assert!(!bus.try_send_switch(subscriber_id, SessionId::new()));
+    assert!(!bus.try_send_switch(subscriber_id, SessionId::new(), None));
 
     assert!(!bus.has_subscriber(subscriber_id));
     assert_eq!(bus.count_subscribers(), 0);
@@ -1810,14 +1857,10 @@ fn every_event_with_no_wire_spelling_converts_to_nothing() {
 }
 
 #[test]
-fn a_frame_converts_to_the_painted_picture() {
-    let render_snapshot = build_test_render_snapshot();
-
+fn a_frame_has_no_json_spelling() {
     assert_eq!(
-        build_wire_event(&Delivery::Frame(render_snapshot.clone())),
-        Some(SessionEvent::Painted {
-            frame: Box::new(build_wire_frame(&render_snapshot)),
-        })
+        build_wire_event(&Delivery::Frame(build_test_render_snapshot())),
+        None
     );
 }
 

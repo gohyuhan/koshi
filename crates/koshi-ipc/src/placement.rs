@@ -1,8 +1,9 @@
 //! Bounded read-only placement previews.
 //!
 //! A placement preview carries the source and selected destination layout trees,
-//! solved slots, visible pane cells, and image references. It carries no
-//! scrollback metadata and does not change session state.
+//! solved slots, each visible pane's rows in the row encoding, and image
+//! references. It carries no scrollback metadata and does not change session
+//! state.
 
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 
@@ -14,7 +15,7 @@ use koshi_layout::tree::LayoutNode;
 use serde::{Deserialize, Serialize};
 
 use crate::frame::{
-    compute_frame_image_byte_count, FrameImageAction, FrameImagePlacement, FrameSlot, FrameWindow,
+    compute_frame_image_byte_count, FrameImageAction, FrameImagePlacement, FrameSlot,
 };
 
 /// The maximum number of layout leaves in one placement preview.
@@ -57,7 +58,6 @@ pub struct PanePlacementSnapshot {
 }
 
 const MAX_PLACEMENT_SNAPSHOT_LAYOUT_NODE_COUNT: usize = MAX_PLACEMENT_SNAPSHOT_PANE_COUNT * 2 - 1;
-const MAX_PLACEMENT_SNAPSHOT_COMBINING_CHARACTER_COUNT: usize = 32;
 
 struct PanePlacementValidationState {
     pane_ids: HashSet<PaneId>,
@@ -159,11 +159,31 @@ pub struct PanePlacementTabSnapshot {
 pub struct PanePlacementPaneSnapshot {
     /// The pane this content belongs to.
     pub pane_id: PaneId,
-    /// The visible terminal cells, without scrollback metadata.
-    pub terminal_window: Option<FrameWindow>,
-    /// Native-image placements whose records may follow in bounded events.
+    /// The visible terminal rows, without scrollback metadata.
+    pub terminal_window: Option<PlacementWindow>,
+    /// Native-image placements. A record the client does not hold follows the
+    /// preview as one `ImageContentStart` and its image chunk frames.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_placement_snapshots: Vec<FrameImagePlacement>,
+}
+
+/// One pane's visible rows in a placement preview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacementWindow {
+    /// The width of every row, in cells.
+    pub column_count: u16,
+    /// The rows, top row first.
+    pub encoded_rows: Vec<EncodedRow>,
+}
+
+/// One row in the row encoding, written on the wire as one base64 string.
+/// The first varint of the bytes counts the bytes after it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EncodedRow {
+    /// The encoded row.
+    #[serde(with = "crate::bytes")]
+    pub encoded_row_bytes: Vec<u8>,
 }
 
 /// The requesting client's retained view inputs.
@@ -214,7 +234,8 @@ pub enum PanePlacementSnapshotValidationError {
     PaneSnapshotMismatch,
     /// A pane slot has inconsistent geometry or visibility flags.
     PaneSlotMismatch,
-    /// The terminal window has invalid bounded grid data.
+    /// The terminal window has no column or no row, or more than 65 535
+    /// rows.
     TerminalWindowMismatch,
     /// An image placement is malformed or outside its terminal window.
     ImagePlacementMismatch,
@@ -457,52 +478,38 @@ fn validate_pane_snapshot(
     Ok(())
 }
 
+/// Check that `terminal_window` holds 1 to 65 535 rows of at least one
+/// column, and add its cells to `cell_count`. Each row's own width is checked
+/// where the row is decoded.
 fn validate_terminal_window(
-    terminal_window: &FrameWindow,
+    terminal_window: &PlacementWindow,
     cell_count: &mut u64,
 ) -> Result<(), PanePlacementSnapshotValidationError> {
     if terminal_window.column_count == 0
-        || terminal_window.row_snapshots.is_empty()
-        || terminal_window.row_snapshots.len() > usize::from(u16::MAX)
-        || terminal_window.view_row_offset != 0
+        || terminal_window.encoded_rows.is_empty()
+        || terminal_window.encoded_rows.len() > usize::from(u16::MAX)
     {
         return Err(PanePlacementSnapshotValidationError::TerminalWindowMismatch);
     }
-    for frame_row in &terminal_window.row_snapshots {
-        let mut row_cell_count = 0u64;
-        for frame_run in &frame_row.cell_runs {
-            if frame_run.repeat_count == 0
-                || frame_run.cell.cell_width > 2
-                || frame_run.cell.combining_characters.len()
-                    > MAX_PLACEMENT_SNAPSHOT_COMBINING_CHARACTER_COUNT
-            {
-                return Err(PanePlacementSnapshotValidationError::TerminalWindowMismatch);
-            }
-            row_cell_count = row_cell_count
-                .checked_add(u64::from(frame_run.repeat_count))
-                .ok_or(PanePlacementSnapshotValidationError::CellCountExceeded)?;
-        }
-        if row_cell_count != u64::from(terminal_window.column_count) {
-            return Err(PanePlacementSnapshotValidationError::TerminalWindowMismatch);
-        }
-        *cell_count = cell_count
-            .checked_add(row_cell_count)
-            .ok_or(PanePlacementSnapshotValidationError::CellCountExceeded)?;
-        if *cell_count > MAX_PLACEMENT_SNAPSHOT_CELL_COUNT {
-            return Err(PanePlacementSnapshotValidationError::CellCountExceeded);
-        }
+    let window_cell_count =
+        terminal_window.encoded_rows.len() as u64 * u64::from(terminal_window.column_count);
+    *cell_count = cell_count
+        .checked_add(window_cell_count)
+        .ok_or(PanePlacementSnapshotValidationError::CellCountExceeded)?;
+    if *cell_count > MAX_PLACEMENT_SNAPSHOT_CELL_COUNT {
+        return Err(PanePlacementSnapshotValidationError::CellCountExceeded);
     }
     Ok(())
 }
 
 fn validate_image_placement(
     image_placement: &FrameImagePlacement,
-    terminal_window: &FrameWindow,
+    terminal_window: &PlacementWindow,
     placement_validation: &mut PanePlacementValidationState,
 ) -> Result<(), PanePlacementSnapshotValidationError> {
     let terminal_window_size = Size {
         column_count: terminal_window.column_count,
-        row_count: u16::try_from(terminal_window.row_snapshots.len())
+        row_count: u16::try_from(terminal_window.encoded_rows.len())
             .map_err(|_| PanePlacementSnapshotValidationError::TerminalWindowMismatch)?,
     };
     let image_size = Size {
@@ -557,4 +564,4 @@ fn validate_image_placement(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

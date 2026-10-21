@@ -10,6 +10,10 @@ koshi-ipc.workspace = true
 koshi-pty.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+uuid.workspace = true
 
 [target."cfg(unix)".dependencies]
 libc.workspace = true
+
+[lints]
+workspace = true

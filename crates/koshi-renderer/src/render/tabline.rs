@@ -1,6 +1,8 @@
 //! The tab bar: the session block on the left, the mode tag on the right, and
 //! between them the tabs that fit the row with their scroll arrows.
 
+use ratatui::widgets::{Clear, Widget};
+
 use super::*;
 
 use crate::region::TablineInputs;
@@ -117,7 +119,7 @@ pub(crate) const TABLINE_ARROW_WIDTH: u16 = 1;
 pub(crate) struct TablineLayout {
     /// Cells the left session block occupies, measured from `tabline_area.x`.
     pub session_block_width: u16,
-    /// The column where the right block (scroll + mode tag) starts.
+    /// The column where the right block, the mode tag, starts.
     pub right_block_start_column: u16,
     /// The metadata index the visible window starts at. When no tab fits, it
     /// is still the index the window starts from.

@@ -216,11 +216,16 @@ impl TerminalState {
     }
 
     /// Reply to Request Mode, ANSI form (`CSI Ps $ p`): queue the report
-    /// `CSI Ps ; 0 $ y`. No ANSI (non-`?`) mode is stored, so every query
-    /// reports `0`, "not recognized".
+    /// `CSI Ps ; Pm $ y`. Insert mode (IRM, `4`) reports `1` (set) or `2`
+    /// (reset); every other ANSI (non-`?`) mode is not stored and reports `0`,
+    /// "not recognized".
     pub(super) fn report_ansi_mode(&mut self, csi_parameters: &vte::Params) {
         let ansi_mode_number = get_first_parameter_number(csi_parameters).unwrap_or(0);
-        let device_reply_bytes = format!("\x1b[{ansi_mode_number};0$y");
+        let ansi_mode_state_number = match ansi_mode_number {
+            4 => compute_mode_state_number(self.modes.is_insert_mode_enabled),
+            _ => 0,
+        };
+        let device_reply_bytes = format!("\x1b[{ansi_mode_number};{ansi_mode_state_number}$y");
         self.device_query_replies
             .extend_from_slice(device_reply_bytes.as_bytes());
     }

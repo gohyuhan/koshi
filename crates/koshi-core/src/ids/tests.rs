@@ -238,3 +238,83 @@ fn non_uuid_text_is_rejected_for_a_session_id() {
         Err("expected `session-<uuid>` or a bare UUID".to_string())
     );
 }
+
+#[test]
+fn an_owned_session_id_reads_a_user_id_then_a_session_id() {
+    let session_uuid = Uuid::parse_str("0192f0c1-0000-7000-8000-000000000001").expect("uuid");
+    let owned_session_id = OwnedSessionId {
+        owner_user_id: 1001,
+        session_id: SessionId::from_uuid(session_uuid),
+    };
+
+    assert_eq!(
+        parse_owned_session_id(&format!("1001/session-{session_uuid}")),
+        Ok(Some(owned_session_id))
+    );
+    assert_eq!(
+        parse_owned_session_id(&format!("1001/{session_uuid}")),
+        Ok(Some(owned_session_id))
+    );
+    assert_eq!(
+        parse_owned_session_id(&format!("0/session-{session_uuid}")),
+        Ok(Some(OwnedSessionId {
+            owner_user_id: 0,
+            session_id: SessionId::from_uuid(session_uuid),
+        }))
+    );
+    assert_eq!(
+        owned_session_id.to_string(),
+        format!("1001/session-{session_uuid}")
+    );
+}
+
+#[test]
+fn a_session_target_carries_the_owner_user_id_only_when_one_is_set() {
+    let session_id = SessionId::from_uuid(
+        Uuid::parse_str("0192f0c1-0000-7000-8000-000000000001").expect("uuid"),
+    );
+
+    assert_eq!(
+        format_session_target(session_id, Some(1001)),
+        "1001/session-0192f0c1-0000-7000-8000-000000000001"
+    );
+    assert_eq!(
+        format_session_target(session_id, None),
+        "session-0192f0c1-0000-7000-8000-000000000001"
+    );
+}
+
+#[test]
+fn text_with_no_slash_is_not_an_owned_session_id() {
+    assert_eq!(parse_owned_session_id("quiet-lake"), Ok(None));
+    assert_eq!(
+        parse_owned_session_id("session-0192f0c1-0000-7000-8000-000000000001"),
+        Ok(None)
+    );
+    assert_eq!(parse_owned_session_id(""), Ok(None));
+}
+
+#[test]
+fn an_owned_session_id_refuses_any_other_text_around_the_slash() {
+    let expected_error = Err(String::from(
+        "expected `<user id>/session-<uuid>`, such as `1001/session-<uuid>`",
+    ));
+    for refused_text in [
+        "01001/session-0192f0c1-0000-7000-8000-000000000001",
+        "+1001/session-0192f0c1-0000-7000-8000-000000000001",
+        "-1/session-0192f0c1-0000-7000-8000-000000000001",
+        "4294967296/session-0192f0c1-0000-7000-8000-000000000001",
+        "alice/session-0192f0c1-0000-7000-8000-000000000001",
+        "/session-0192f0c1-0000-7000-8000-000000000001",
+        "1001/",
+        "1001/quiet-lake",
+        "1001/pane-0192f0c1-0000-7000-8000-000000000001",
+        "1001/session-0192f0c1-0000-7000-8000-000000000001/extra",
+    ] {
+        assert_eq!(
+            parse_owned_session_id(refused_text),
+            expected_error,
+            "{refused_text}"
+        );
+    }
+}

@@ -15,7 +15,6 @@ use koshi_core::event::Event;
 use koshi_core::geometry::{AxisPercent, PaneArea, Point, SplitDirection};
 use koshi_core::lock::LockMode;
 use koshi_layout::tree::{LayoutNode, SplitNode};
-use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 
 use crate::client::{ClientOrigin, FloatingPanePosition, FloatingPaneView};
@@ -1114,8 +1113,7 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
             .panes
             .get_pane_record_by_id(pane_id)
             .expect("the pane record is carried");
-        assert_eq!(pane_record.get_pane_id(), pane_id);
-        assert_eq!(*pane_record.get_lifecycle(), PaneLifecycle::Spawning);
+        assert_eq!(pane_record, &PaneRecord::from_terminal_pane(pane_id));
     }
 
     assert_eq!(decoded_session.clients.count_clients(), 2);
@@ -1745,76 +1743,13 @@ fn requesting_then_completing_a_stop_walks_to_stopped() {
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Stopped);
 }
 
-/// A `Running` pane record registered in `session`, returned by id. It is live
-/// and a valid layout leaf: on its own it trips no pane-level consistency
-/// check.
-fn register_live_pane(session: &mut Session) -> PaneId {
+/// A terminal pane record registered in `session`, returned by id. It is a
+/// valid layout leaf or floating member.
+fn register_terminal_pane(session: &mut Session) -> PaneId {
     let pane_id = PaneId::new();
-    let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
-    pane_record
-        .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
-        .expect("Spawning -> Running is a legal transition");
     session
         .panes
-        .register_pane_record(pane_record)
-        .expect("a fresh pane id is unique");
-    pane_id
-}
-
-/// A `Removed` pane record registered in `session`, returned by id.
-fn register_removed_pane(session: &mut Session) -> PaneId {
-    let pane_id = PaneId::new();
-    let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
-    pane_record
-        .update_lifecycle(PaneLifecycleEvent::CloseRequested {
-            close_requested_at: SystemTime::UNIX_EPOCH,
-        })
-        .expect("Spawning -> Closing is a legal transition");
-    pane_record
-        .update_lifecycle(PaneLifecycleEvent::Cleaned)
-        .expect("Closing -> Removed is a legal transition");
-    session
-        .panes
-        .register_pane_record(pane_record)
-        .expect("a fresh pane id is unique");
-    pane_id
-}
-
-/// A `Closing` pane record registered in `session`, returned by id. It still
-/// holds a record and is still a legal layout leaf.
-fn register_closing_pane(session: &mut Session) -> PaneId {
-    let pane_id = PaneId::new();
-    let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
-    pane_record
-        .update_lifecycle(PaneLifecycleEvent::CloseRequested {
-            close_requested_at: SystemTime::UNIX_EPOCH,
-        })
-        .expect("Spawning -> Closing is a legal transition");
-    session
-        .panes
-        .register_pane_record(pane_record)
-        .expect("a fresh pane id is unique");
-    pane_id
-}
-
-/// An `Exited` pane record registered in `session`, returned by id. It holds
-/// exit code `Some(0)` at `UNIX_EPOCH`. It is not `Removed`: the orphan check
-/// fires when it is a leaf nowhere.
-fn register_exited_pane(session: &mut Session) -> PaneId {
-    let pane_id = PaneId::new();
-    let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
-    pane_record
-        .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
-        .expect("Spawning -> Running is a legal transition");
-    pane_record
-        .update_lifecycle(PaneLifecycleEvent::ProcessExited {
-            exit_code: Some(0),
-            exited_at: SystemTime::UNIX_EPOCH,
-        })
-        .expect("Running -> Exited is a legal transition");
-    session
-        .panes
-        .register_pane_record(pane_record)
+        .register_pane_record(PaneRecord::from_terminal_pane(pane_id))
         .expect("a fresh pane id is unique");
     pane_id
 }
@@ -1861,65 +1796,14 @@ fn a_session_with_no_tabs_panes_or_clients_is_consistent() {
 }
 
 #[test]
-fn a_closing_pane_still_in_the_layout_is_consistent() {
-    // Only a `Removed` pane is an illegal leaf. A pane in `Closing` keeps both
-    // its leaf and its registry record: neither side reports it.
+fn a_record_in_no_layout_is_reported() {
     let mut session = build_empty_session();
-    let closing_pane_id = register_closing_pane(&mut session);
-    let tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, closing_pane_id);
-    session.tabs.insert(tab.get_tab_id(), tab);
-
-    assert_eq!(session.validate_session_consistency(), Ok(()));
-}
-
-#[test]
-fn a_removed_pane_left_in_the_layout_is_reported() {
-    let mut session = build_empty_session();
-    let removed_pane_id = register_removed_pane(&mut session);
-    let tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, removed_pane_id);
-    let tab_id = tab.get_tab_id();
-    session.tabs.insert(tab_id, tab);
-
-    // A removed pane kept as a leaf breaks two invariants at once: it is an
-    // illegal leaf *and* a `Removed` record still in the registry.
-    assert_eq!(
-        session.validate_session_consistency(),
-        Err(vec![
-            SessionConsistencyError::RemovedPaneInLayout {
-                tab_id,
-                pane_id: removed_pane_id,
-            },
-            SessionConsistencyError::LingeringRemovedRecord {
-                pane_id: removed_pane_id
-            },
-        ])
-    );
-}
-
-#[test]
-fn a_live_record_in_no_layout_is_reported() {
-    let mut session = build_empty_session();
-    let orphan_pane_id = register_live_pane(&mut session);
+    let orphan_pane_id = register_terminal_pane(&mut session);
 
     assert_eq!(
         session.validate_session_consistency(),
         Err(vec![SessionConsistencyError::OrphanedPaneRecord {
             pane_id: orphan_pane_id,
-            pane_lifecycle: PaneLifecycle::Running,
-        }])
-    );
-}
-
-#[test]
-fn a_removed_record_with_no_layout_is_reported() {
-    let mut session = build_empty_session();
-    let removed_pane_id = register_removed_pane(&mut session);
-
-    // It is not a leaf: the layout-side check does not also fire.
-    assert_eq!(
-        session.validate_session_consistency(),
-        Err(vec![SessionConsistencyError::LingeringRemovedRecord {
-            pane_id: removed_pane_id,
         }])
     );
 }
@@ -1927,7 +1811,7 @@ fn a_removed_record_with_no_layout_is_reported() {
 #[test]
 fn a_pane_placed_in_two_tabs_is_reported() {
     let mut session = build_empty_session();
-    let shared_pane_id = register_live_pane(&mut session);
+    let shared_pane_id = register_terminal_pane(&mut session);
     let first_tab = Tab::from_root_pane(TabId::new(), "a".to_owned(), 0, shared_pane_id);
     let second_tab = Tab::from_root_pane(TabId::new(), "b".to_owned(), 1, shared_pane_id);
     let (first_tab_id, second_tab_id) = (first_tab.get_tab_id(), second_tab.get_tab_id());
@@ -1949,7 +1833,7 @@ fn a_pane_placed_in_two_tabs_is_reported() {
 #[test]
 fn a_tab_stored_under_the_wrong_key_is_reported() {
     let mut session = build_empty_session();
-    let pane_id = register_live_pane(&mut session);
+    let pane_id = register_terminal_pane(&mut session);
     let tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, pane_id);
     let tab_id = tab.get_tab_id();
     let wrong_tab_id = TabId::new();
@@ -1967,8 +1851,8 @@ fn a_tab_stored_under_the_wrong_key_is_reported() {
 #[test]
 fn two_tabs_sharing_a_bar_index_are_reported() {
     let mut session = build_empty_session();
-    let first_pane_id = register_live_pane(&mut session);
-    let second_pane_id = register_live_pane(&mut session);
+    let first_pane_id = register_terminal_pane(&mut session);
+    let second_pane_id = register_terminal_pane(&mut session);
     let first_tab = Tab::from_root_pane(TabId::new(), "a".to_owned(), 0, first_pane_id);
     let second_tab = Tab::from_root_pane(TabId::new(), "b".to_owned(), 0, second_pane_id);
     session.tabs.insert(first_tab.get_tab_id(), first_tab);
@@ -2321,7 +2205,7 @@ fn a_pane_appearing_twice_in_one_tabs_tree_is_reported() {
     // *single* tab's tree, not only one split across two tabs. Both entries name
     // the same tab id.
     let mut session = build_empty_session();
-    let doubled_pane_id = register_live_pane(&mut session);
+    let doubled_pane_id = register_terminal_pane(&mut session);
     let tab_id = TabId::new();
     let mut tab = Tab::from_root_pane(tab_id, "code".to_owned(), 0, doubled_pane_id);
     tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
@@ -2343,26 +2227,6 @@ fn a_pane_appearing_twice_in_one_tabs_tree_is_reported() {
 }
 
 #[test]
-fn an_exited_orphan_record_is_reported() {
-    // The orphan check covers `Exited` records, not just live ones: a dead
-    // placeholder pane that is a leaf nowhere is reported, and the reported
-    // lifecycle is the exact `Exited` state it holds.
-    let mut session = build_empty_session();
-    let orphan_pane_id = register_exited_pane(&mut session);
-
-    assert_eq!(
-        session.validate_session_consistency(),
-        Err(vec![SessionConsistencyError::OrphanedPaneRecord {
-            pane_id: orphan_pane_id,
-            pane_lifecycle: PaneLifecycle::Exited {
-                exit_code: Some(0),
-                exited_at: SystemTime::UNIX_EPOCH,
-            },
-        }])
-    );
-}
-
-#[test]
 fn every_violation_is_collected_in_one_pass() {
     let mut session = build_empty_session();
     // A layout leaf with no record.
@@ -2370,8 +2234,8 @@ fn every_violation_is_collected_in_one_pass() {
     let tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, ghost_pane_id);
     let tab_id = tab.get_tab_id();
     session.tabs.insert(tab_id, tab);
-    // A live record that is a leaf nowhere.
-    let orphan_pane_id = register_live_pane(&mut session);
+    // A record that is a leaf nowhere.
+    let orphan_pane_id = register_terminal_pane(&mut session);
 
     // Both faults surface from a single call.
     assert_eq!(
@@ -2383,7 +2247,6 @@ fn every_violation_is_collected_in_one_pass() {
             },
             SessionConsistencyError::OrphanedPaneRecord {
                 pane_id: orphan_pane_id,
-                pane_lifecycle: PaneLifecycle::Running,
             },
         ])
     );
@@ -2394,8 +2257,8 @@ fn validate_reports_two_orphan_records_in_id_order() {
     // The registry walks in id order: two faults of one kind come out the same
     // way round.
     let mut session = build_empty_session();
-    let first_registered_pane_id = register_live_pane(&mut session);
-    let second_registered_pane_id = register_live_pane(&mut session);
+    let first_registered_pane_id = register_terminal_pane(&mut session);
+    let second_registered_pane_id = register_terminal_pane(&mut session);
     let (lower_pane_id, higher_pane_id) = if first_registered_pane_id < second_registered_pane_id {
         (first_registered_pane_id, second_registered_pane_id)
     } else {
@@ -2407,11 +2270,9 @@ fn validate_reports_two_orphan_records_in_id_order() {
         Err(vec![
             SessionConsistencyError::OrphanedPaneRecord {
                 pane_id: lower_pane_id,
-                pane_lifecycle: PaneLifecycle::Running,
             },
             SessionConsistencyError::OrphanedPaneRecord {
                 pane_id: higher_pane_id,
-                pane_lifecycle: PaneLifecycle::Running,
             },
         ])
     );
@@ -2465,10 +2326,10 @@ fn build_floating_member(pane_id: PaneId) -> FloatingMember {
     }
 }
 
-/// A `Running` pane registered in `session` and added as its newest floating
+/// A terminal pane registered in `session` and added as its newest floating
 /// member, returned by id.
 fn register_floating_pane(session: &mut Session) -> PaneId {
-    let pane_id = register_live_pane(session);
+    let pane_id = register_terminal_pane(session);
     session
         .floating_set
         .add_member(build_floating_member(pane_id))
@@ -3073,31 +2934,9 @@ fn a_floating_member_with_no_registry_record_is_reported() {
 }
 
 #[test]
-fn a_removed_pane_left_in_the_floating_set_is_reported() {
-    let mut session = build_empty_session();
-    let removed_pane_id = register_removed_pane(&mut session);
-    session
-        .floating_set
-        .add_member(build_floating_member(removed_pane_id))
-        .expect("the floating set is empty");
-
-    assert_eq!(
-        session.validate_session_consistency(),
-        Err(vec![
-            SessionConsistencyError::RemovedPaneInFloatingSet {
-                pane_id: removed_pane_id
-            },
-            SessionConsistencyError::LingeringRemovedRecord {
-                pane_id: removed_pane_id
-            },
-        ])
-    );
-}
-
-#[test]
 fn a_pane_listed_twice_in_the_floating_set_is_reported() {
     let mut session = build_empty_session();
-    let repeated_pane_id = register_live_pane(&mut session);
+    let repeated_pane_id = register_terminal_pane(&mut session);
     let repeated_member_json =
         serde_json::to_value(build_floating_member(repeated_pane_id)).expect("the member encodes");
     session.floating_set = serde_json::from_value(serde_json::json!({
@@ -3118,7 +2957,7 @@ fn a_floating_set_past_the_session_limit_is_reported_and_one_at_the_limit_is_not
     let mut session = build_empty_session();
     let mut member_jsons: Vec<serde_json::Value> = (0..MAX_FLOATING_PANES_PER_SESSION)
         .map(|_| {
-            serde_json::to_value(build_floating_member(register_live_pane(&mut session)))
+            serde_json::to_value(build_floating_member(register_terminal_pane(&mut session)))
                 .expect("the member encodes")
         })
         .collect();
@@ -3128,7 +2967,7 @@ fn a_floating_set_past_the_session_limit_is_reported_and_one_at_the_limit_is_not
     assert_eq!(session.validate_session_consistency(), Ok(()));
 
     member_jsons.push(
-        serde_json::to_value(build_floating_member(register_live_pane(&mut session)))
+        serde_json::to_value(build_floating_member(register_terminal_pane(&mut session)))
             .expect("the member encodes"),
     );
     session.floating_set = serde_json::from_value(serde_json::json!({ "members": member_jsons }))
@@ -3341,7 +3180,7 @@ fn a_minimized_floating_pane_missing_from_the_focus_order_is_reported() {
 #[test]
 fn client_focuses_and_zooms_in_missing_tabs_are_reported_in_tab_id_order() {
     let mut session = build_empty_session();
-    let pane_id = register_live_pane(&mut session);
+    let pane_id = register_terminal_pane(&mut session);
     let tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, pane_id);
     let tab_id = tab.get_tab_id();
     session.tabs.insert(tab_id, tab);

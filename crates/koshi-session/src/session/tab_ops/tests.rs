@@ -14,7 +14,6 @@ use std::time::SystemTime;
 use koshi_core::geometry::{Size, SplitDirection};
 use koshi_core::ids::SessionId;
 use koshi_layout::tree::SplitNode;
-use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneRecord;
 
 use crate::client::{ClientOrigin, ClientRegistry};
@@ -68,11 +67,6 @@ fn build_client_on(session_id: SessionId, tab_id: TabId) -> Client {
     )
 }
 
-/// A `Spawning` terminal pane record for `pane_id`.
-fn build_pane_record(pane_id: PaneId) -> PaneRecord {
-    PaneRecord::from_terminal_pane(pane_id)
-}
-
 /// A session holding the given tabs and (registered) panes, with no clients
 /// attached yet. Attach clients afterward with [`Session::attach_client`] so
 /// each carries the session's own id.
@@ -89,7 +83,7 @@ fn build_session_with(tabs: Vec<Tab>, pane_ids: Vec<PaneId>) -> Session {
     for pane_id in pane_ids {
         let _ = session
             .panes
-            .register_pane_record(build_pane_record(pane_id));
+            .register_pane_record(PaneRecord::from_terminal_pane(pane_id));
     }
     session
 }
@@ -135,7 +129,7 @@ fn fixtures_build_a_consistent_session() {
 // --- commit_new_tab ---------------------------------------------------------
 
 #[test]
-fn commit_new_tab_registers_a_running_pane_and_emits_created_then_pane_created() {
+fn commit_new_tab_registers_its_pane_and_emits_created_then_pane_created() {
     let mut session = build_session_with(vec![], vec![]);
     let (new_tab_id, new_pane_id) = (TabId::new(), PaneId::new());
 
@@ -166,14 +160,10 @@ fn commit_new_tab_registers_a_running_pane_and_emits_created_then_pane_created()
         }
         unexpected_events => panic!("unexpected events: {unexpected_events:?}"),
     }
-    // The child was spawned before the commit, so the pane enters `Running`.
+    // The pane is registered with the empty spawn specification it was given.
     assert_eq!(
-        *session
-            .panes
-            .get_pane_record_by_id(new_pane_id)
-            .unwrap()
-            .get_lifecycle(),
-        PaneLifecycle::Running
+        session.panes.get_pane_record_by_id(new_pane_id),
+        Some(&PaneRecord::from_terminal_pane(new_pane_id))
     );
 }
 
@@ -1161,7 +1151,7 @@ fn focus_tab_skips_a_history_entry_that_is_not_a_leaf() {
     );
     let _ = session
         .panes
-        .register_pane_record(build_pane_record(stale_pane_id));
+        .register_pane_record(PaneRecord::from_terminal_pane(stale_pane_id));
     session
         .tabs
         .get_mut(&target_tab_id)
@@ -1869,7 +1859,7 @@ fn build_two_leaf_layout(left_pane_id: PaneId, right_pane_id: PaneId) -> LayoutN
 }
 
 #[test]
-fn commit_profile_tab_registers_every_pane_running_and_emits_created_events() {
+fn commit_profile_tab_registers_every_pane_and_emits_created_events() {
     let mut session = build_session_with(vec![], vec![]);
     let tab_id = TabId::new();
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
@@ -1892,23 +1882,14 @@ fn commit_profile_tab_registers_every_pane_running_and_emits_created_events() {
 
     // The first tab moves the session from Starting to Running.
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Running);
-    // Every pane in the profile is registered and live (each child was already
-    // spawned before the commit).
+    // Every pane in the profile is registered with its empty spawn specification.
     assert_eq!(
-        *session
-            .panes
-            .get_pane_record_by_id(first_pane_id)
-            .unwrap()
-            .get_lifecycle(),
-        PaneLifecycle::Running
+        session.panes.get_pane_record_by_id(first_pane_id),
+        Some(&PaneRecord::from_terminal_pane(first_pane_id))
     );
     assert_eq!(
-        *session
-            .panes
-            .get_pane_record_by_id(second_pane_id)
-            .unwrap()
-            .get_lifecycle(),
-        PaneLifecycle::Running
+        session.panes.get_pane_record_by_id(second_pane_id),
+        Some(&PaneRecord::from_terminal_pane(second_pane_id))
     );
     assert_eq!(session.panes.count_pane_records(), 2);
     // The tab carries the whole profile tree, not just its single root leaf.
@@ -2246,7 +2227,7 @@ fn a_new_tab_after_a_close_takes_the_freed_index_densely() {
 fn add_floating_pane(session: &mut Session, pane_id: PaneId) {
     let _ = session
         .panes
-        .register_pane_record(build_pane_record(pane_id));
+        .register_pane_record(PaneRecord::from_terminal_pane(pane_id));
     session
         .floating_set
         .add_member(build_default_floating_member(pane_id))

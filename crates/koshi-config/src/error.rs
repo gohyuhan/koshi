@@ -24,13 +24,18 @@ pub enum ConfigError {
     /// The config file could not be parsed.
     #[error("config parse error in {config_path}: {parse_error_detail}")]
     Parse {
+        /// The path of the config file that failed to parse.
         config_path: String,
+        /// The message of the first KDL sub-diagnostic, or the KDL error's own
+        /// message when it has none.
         parse_error_detail: String,
     },
     /// The config parsed but failed schema validation.
     #[error("invalid config key `{config_key}`: {validation_detail}")]
     Validation {
+        /// The config key that failed validation.
         config_key: String,
+        /// The plain-word reason the value is invalid.
         validation_detail: String,
     },
 }
@@ -44,12 +49,11 @@ pub(crate) fn build_validation_error(config_key: &str, validation_detail: &str) 
     }
 }
 
-/// A KDL syntax error with the config file path attached. Wraps the underlying
-/// [`kdl::KdlError`] — which already carries the source text and error spans —
-/// and adds `path` for the diagnostic header. The [`Diagnostic`] impl forwards
-/// the source code and related sub-diagnostics to the inner error — where the
-/// KDL crate carries each error's span — so a rendered report points a caret at
-/// the offending line.
+/// A KDL syntax error with the config file path attached. It holds the
+/// [`kdl::KdlError`], which carries the source text and the error spans, and
+/// `config_path` for the diagnostic header. The [`Diagnostic`] impl returns the
+/// inner error's source code and sub-diagnostics, each with its own span, and a
+/// rendered report points a caret at the failing line.
 #[derive(Debug, Error)]
 #[error("config parse error in {config_path}")]
 pub struct ConfigParseDiagnostic {

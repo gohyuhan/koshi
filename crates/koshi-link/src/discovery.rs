@@ -17,6 +17,7 @@
 //! entity — creation time, working directory, argv, lock state — belongs to
 //! `inspect`, which renders the `koshi-core` structs themselves.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -34,7 +35,9 @@ use koshi_ipc::validate::reclaim_stale_socket;
 use serde::Serialize;
 
 use crate::error::CliError;
-use crate::ipc_client::{self, DuplicatedForeignSession, ForeignSessionListing, UnreadPath};
+use crate::ipc_client::{
+    self, DuplicatedForeignSession, ForeignSessionAdvertisement, ForeignSessionListing, UnreadPath,
+};
 
 /// One `list-sessions` row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -46,12 +49,15 @@ pub struct SessionRow {
     /// The saved server this session runs on, by the name it was saved under
     /// or its `host:port` address. `None` for a session on this machine.
     pub server_name_or_address: Option<String>,
+    /// The user id that owns the folder of the shared directory advertising
+    /// this session, for a session another local user started. `None` for a
+    /// session of this user's and for a session on a saved server.
+    pub owner_user_id: Option<u32>,
 }
 
 impl SessionRow {
-    /// One row for `session_id`, naming `server_name_or_address`, with
-    /// `session_name` filtered by
-    /// [`sanitize_reported_text`].
+    /// One row for `session_id`, naming `server_name_or_address` and no owner,
+    /// with `session_name` filtered by [`sanitize_reported_text`].
     ///
     /// `SessionRow::from_session(id, "web\u{7f}srv", None).session_name` is
     /// `"websrv"`.
@@ -65,6 +71,7 @@ impl SessionRow {
             session_id,
             session_name: sanitize_reported_text(session_name),
             server_name_or_address,
+            owner_user_id: None,
         }
     }
 }
@@ -129,18 +136,41 @@ pub struct Discovered {
     /// [`SessionCensusPlan::unread_paths`] holds them. The sessions under each
     /// one are unknown.
     pub unread_path_count: usize,
+    /// The user id that owns the folder advertising each answered session
+    /// that another local user started, by the id the session was asked
+    /// under. A session of this user's is not in it, and neither is a session
+    /// of another user's asked by its id alone.
+    pub owner_user_id_by_session_id: HashMap<SessionId, u32>,
 }
 
 impl Discovered {
     /// One session, asked directly and answered — a complete census of the
-    /// only session the query is about.
+    /// only session the query is about. `owner_user_id` is the user id whose
+    /// folder of the shared directory the session was read from, or `None`.
     #[must_use]
-    pub fn from_overview(session_overview: SessionOverview) -> Discovered {
+    pub fn from_overview(
+        session_overview: SessionOverview,
+        owner_user_id: Option<u32>,
+    ) -> Discovered {
+        let owner_user_id_by_session_id = owner_user_id
+            .map(|owner_user_id| (session_overview.session.session_id, owner_user_id))
+            .into_iter()
+            .collect();
         Discovered {
             sessions: vec![session_overview],
             unasked_session_count: 0,
             unread_path_count: 0,
+            owner_user_id_by_session_id,
         }
+    }
+
+    /// The user id whose folder of the shared directory advertises the
+    /// session `session_id`, as
+    /// [`owner_user_id_by_session_id`](Self::owner_user_id_by_session_id)
+    /// holds it. `None` for a session of this user's.
+    #[must_use]
+    pub fn find_owner_user_id(&self, session_id: SessionId) -> Option<u32> {
+        self.owner_user_id_by_session_id.get(&session_id).copied()
     }
 
     /// Whether every running session answered, and every listing read
@@ -267,10 +297,10 @@ pub fn format_unread_path_count(unread_path_count: usize) -> String {
 /// asking, as [`plan_session_census`] gathers them.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SessionCensusPlan {
-    /// Each session to ask, with the control-socket address the shared
-    /// directory gives a session another local user started, or `None` for a
-    /// session of this user's. This user's sessions come first.
-    pub session_asks: Vec<(SessionId, Option<String>)>,
+    /// Each session to ask, with where the shared directory advertises a
+    /// session another local user started, or `None` for a session of this
+    /// user's. This user's sessions come first.
+    pub session_asks: Vec<(SessionId, Option<ForeignSessionAdvertisement>)>,
     /// Each session id the shared directory advertises more than once. None of
     /// them is asked.
     pub duplicated_sessions: Vec<DuplicatedForeignSession>,
@@ -288,8 +318,7 @@ pub struct SessionCensusPlan {
 /// Every session a census asks: this user's own, as
 /// [`list_own_sessions`](ipc_client::list_own_sessions) gives them from
 /// `runtime_directory`, and while `shared_sessions_base_directory` is given,
-/// the ones other local users started, as
-/// [`list_foreign_sessions`](ipc_client::list_foreign_sessions) lists them on
+/// the ones other local users started, as `list_foreign_sessions` lists them on
 /// Linux and macOS. On Windows `shared_sessions_base_directory` is not read.
 ///
 /// Example: a runtime directory with an endpoint file for `A`, and a shared
@@ -317,14 +346,13 @@ pub fn plan_session_census(
 impl SessionCensusPlan {
     /// The census plan of `own_session_listing`, as
     /// [`list_own_sessions`](ipc_client::list_own_sessions) gives it, and of
-    /// `foreign_session_listing`, as
-    /// [`list_foreign_sessions`](ipc_client::list_foreign_sessions) gives it,
-    /// or `None` when no shared directory is listed. An unread path that both
+    /// `foreign_session_listing`, as `list_foreign_sessions` gives it, or
+    /// `None` when no shared directory is listed. An unread path that both
     /// listings give is kept once.
     ///
     /// Example: own sessions `[A]`, and a foreign listing of `B` that holds 2
-    /// sessions past its caps, give the asks `[(A, None), (B, Some(<address of
-    /// B>))]` and an `unlisted_session_count` of 2.
+    /// sessions past its caps, give the asks `[(A, None), (B, Some(<where B is
+    /// advertised>))]` and an `unlisted_session_count` of 2.
     fn from_session_listings(
         own_session_listing: Result<Vec<SessionId>, UnreadPath>,
         foreign_session_listing: Option<ForeignSessionListing>,
@@ -345,7 +373,7 @@ impl SessionCensusPlan {
             foreign_session_listing
                 .foreign_sessions
                 .into_iter()
-                .map(|(session_id, socket_address)| (session_id, Some(socket_address))),
+                .map(|(session_id, advertisement)| (session_id, Some(advertisement))),
         );
         census_plan.duplicated_sessions = foreign_session_listing.duplicated_sessions;
         census_plan.unlisted_session_count = foreign_session_listing.unlisted_session_count;
@@ -369,7 +397,7 @@ impl SessionCensusPlan {
 /// sessions are asked at the same time through
 /// [`ask_sessions_at_once`](ipc_client::ask_sessions_at_once), and every
 /// exchange ends by one deadline,
-/// [`SESSION_ANSWER_TIMEOUT_DURATION`](ipc_client::SESSION_ANSWER_TIMEOUT_DURATION)
+/// [`SERVER_ANSWER_TIMEOUT_DURATION`](ipc_client::SERVER_ANSWER_TIMEOUT_DURATION)
 /// after the census starts: each connect, each write and read, and the
 /// recheck of a refused connect.
 /// Example: 30 sessions, one of them stopped with `SIGSTOP`, are answered in
@@ -383,8 +411,7 @@ impl SessionCensusPlan {
 /// that is listening but cannot finish the exchange, and one that is
 /// restarting, contribute no rows either, say so on stderr, and are counted.
 ///
-/// The sessions of other users are the ones
-/// [`list_foreign_sessions`](ipc_client::list_foreign_sessions) lists, each
+/// The sessions of other users are the ones `list_foreign_sessions` lists, each
 /// asked at the address it lists and never swept. Each id it finds advertised
 /// more than once is counted, and says so on stderr. So is the count of
 /// sessions past its caps, on one stderr line.
@@ -398,7 +425,7 @@ pub fn fetch_all_session_overviews(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
 ) -> Discovered {
-    let answer_deadline = Instant::now() + ipc_client::SESSION_ANSWER_TIMEOUT_DURATION;
+    let answer_deadline = Instant::now() + ipc_client::SERVER_ANSWER_TIMEOUT_DURATION;
     let census_plan = plan_session_census(runtime_directory, shared_sessions_base_directory);
     fetch_planned_session_overviews(runtime_directory, census_plan, answer_deadline)
 }
@@ -434,19 +461,32 @@ fn fetch_planned_session_overviews(
     let session_asks = census_plan.session_asks;
     let session_answers = ipc_client::ask_sessions_at_once(
         &session_asks,
-        answer_deadline,
-        |(session_id, foreign_socket_address)| match foreign_socket_address {
-            None => {
-                fetch_session_overview(runtime_directory, None, *session_id, Some(answer_deadline))
-            }
-            Some(foreign_socket_address) => ipc_client::fetch_foreign_session_overview(
+        Some(answer_deadline),
+        |(session_id, foreign_session_advertisement)| match foreign_session_advertisement {
+            None => fetch_session_overview(
+                runtime_directory,
+                None,
                 *session_id,
-                foreign_socket_address,
+                None,
+                Some(answer_deadline),
+            ),
+            Some(foreign_session_advertisement) => ipc_client::fetch_foreign_session_overview(
+                *session_id,
+                &foreign_session_advertisement.socket_address,
                 answer_deadline,
             ),
         },
     );
-    for ((session_id, _), session_answer) in session_asks.iter().zip(session_answers) {
+    for ((session_id, foreign_session_advertisement), session_answer) in
+        session_asks.iter().zip(session_answers)
+    {
+        if let (Some(foreign_session_advertisement), Ok(_)) =
+            (foreign_session_advertisement, &session_answer)
+        {
+            discovered_sessions
+                .owner_user_id_by_session_id
+                .insert(*session_id, foreign_session_advertisement.owner_user_id);
+        }
         record_discovery_answer(&mut discovered_sessions, *session_id, session_answer);
     }
     discovered_sessions.sort_sessions();
@@ -538,8 +578,8 @@ pub fn repeat_while_live_session_refuses<AttemptOutcome>(
     let endpoint_path = EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
     let mut attempt_outcome = make_attempt();
     while is_refused(&attempt_outcome) {
-        let recheck_time_left = recheck_end.saturating_duration_since(Instant::now());
-        if recheck_time_left.is_zero() {
+        let remaining_recheck_duration = recheck_end.saturating_duration_since(Instant::now());
+        if remaining_recheck_duration.is_zero() {
             break;
         }
         let is_process_live =
@@ -549,7 +589,9 @@ pub fn repeat_while_live_session_refuses<AttemptOutcome>(
         if !is_process_live {
             break;
         }
-        std::thread::sleep(recheck_time_left.min(REFUSED_SESSION_RECHECK_INTERVAL_DURATION));
+        std::thread::sleep(
+            remaining_recheck_duration.min(REFUSED_SESSION_RECHECK_INTERVAL_DURATION),
+        );
         if Instant::now() >= recheck_end {
             break;
         }
@@ -562,20 +604,23 @@ pub fn repeat_while_live_session_refuses<AttemptOutcome>(
 /// left behind if it is gone.
 ///
 /// Each attempt reads how to reach the session and asks it through
-/// [`run_session_exchange_with_restart_wait`](ipc_client::run_session_exchange_with_restart_wait):
-/// a session of this user's that refuses this build's protocol version is
-/// asked again once it has restarted, and one that refuses the connection
-/// token is asked again once it advertises another. A refused connect is made
-/// again through [`repeat_while_live_session_refuses`]. Nothing listening then
-/// is [`CliError::SessionNotFound`]. When that last attempt read this user's
-/// own endpoint file, the session's files go through
-/// `delete_stale_session_files`, and a session that function keeps is the
-/// [`CliError::IpcUnavailable`] it gives. Something listening that replies in
-/// the envelope of koshi 0.4.0 or older is [`CliError::PreviousReleaseServer`].
-/// Something listening that refuses the connection token is
-/// [`CliError::ConnectionTokenRefused`]: at once for another user's session,
-/// and after that wait for one of this user's. Something listening whose
-/// exchange failed in any other way is [`CliError::IpcUnavailable`].
+/// [`run_session_exchange_across_restart`](ipc_client::run_session_exchange_across_restart):
+/// a session of this user's that refuses this build's protocol version is asked
+/// again once it has restarted, and one that refuses the connection token is
+/// asked again once it advertises another. A session that refuses the request
+/// while it replaces its process image, or whose connection ends while its
+/// resume file shows it doing so, is asked again over the endpoint its new
+/// image advertises. A refused connect is made again through
+/// [`repeat_while_live_session_refuses`]. Nothing listening then is
+/// [`CliError::SessionNotFound`]. When that last attempt read this user's own
+/// endpoint file, the session's files go through `delete_stale_session_files`,
+/// and a session that function keeps is the [`CliError::IpcUnavailable`] it
+/// gives. Something listening that replies in the envelope of koshi 0.4.0 or
+/// older is [`CliError::PreviousReleaseServer`]. Something listening that
+/// refuses the connection token is [`CliError::ConnectionTokenRefused`]: at
+/// once for another user's session, and after that wait for one of this user's.
+/// Something listening whose exchange failed in any other way is
+/// [`CliError::IpcUnavailable`].
 ///
 /// With `answer_deadline`, each connect and every write and read after it end
 /// by that moment, as
@@ -586,36 +631,45 @@ pub fn repeat_while_live_session_refuses<AttemptOutcome>(
 ///
 /// `shared_sessions_base_directory` is searched for `session_id` when
 /// `runtime_directory` holds no endpoint file for it, through
-/// [`ipc_client::load_session_endpoint`].
+/// [`ipc_client::load_session_endpoint`]. A session named with an
+/// `owner_user_id` is read from that user's folder of
+/// `shared_sessions_base_directory` and asked once: no refused connect is made
+/// again, and no file is removed.
 pub fn fetch_session_overview(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
     session_id: SessionId,
+    owner_user_id: Option<u32>,
     answer_deadline: Option<Instant>,
 ) -> Result<SessionOverview, CliError> {
     let mut asked_endpoint_file: Option<EndpointFile> = None;
+    let mut ask_session = || {
+        asked_endpoint_file = None;
+        ipc_client::run_session_exchange_across_restart(
+            runtime_directory,
+            shared_sessions_base_directory,
+            session_id,
+            owner_user_id,
+            answer_deadline,
+            |session_endpoint| {
+                let session_overview_result = ipc_client::fetch_session_overview_from_endpoint(
+                    session_endpoint,
+                    session_id,
+                    answer_deadline,
+                );
+                asked_endpoint_file = Some(session_endpoint.clone());
+                session_overview_result
+            },
+        )
+    };
+    if owner_user_id.is_some() {
+        return ask_session();
+    }
     let session_overview_result = repeat_while_live_session_refuses(
         runtime_directory,
         session_id,
         answer_deadline,
-        || {
-            asked_endpoint_file = None;
-            ipc_client::run_session_exchange_with_restart_wait(
-                runtime_directory,
-                shared_sessions_base_directory,
-                session_id,
-                answer_deadline,
-                |session_endpoint| {
-                    let session_overview_result = ipc_client::fetch_session_overview_from_endpoint(
-                        session_endpoint,
-                        session_id,
-                        answer_deadline,
-                    );
-                    asked_endpoint_file = Some(session_endpoint.clone());
-                    session_overview_result
-                },
-            )
-        },
+        ask_session,
         |session_overview_result| {
             matches!(
                 session_overview_result,
@@ -701,18 +755,21 @@ fn delete_stale_session_files(
     Ok(())
 }
 
-/// The `list-sessions` answer: one row per running session. Every row's
-/// `server_name_or_address` is `None` — each session in `session_overviews` runs on this machine.
+/// The `list-sessions` answer: one row per session in `discovered_sessions`,
+/// in its order. Every row's `server_name_or_address` is `None`: each session
+/// runs on this machine. A row's `owner_user_id` is the one
+/// [`find_owner_user_id`](Discovered::find_owner_user_id) gives for its id.
 #[must_use]
-pub fn build_session_rows(session_overviews: &[SessionOverview]) -> Vec<SessionRow> {
-    session_overviews
+pub fn build_session_rows(discovered_sessions: &Discovered) -> Vec<SessionRow> {
+    discovered_sessions
+        .sessions
         .iter()
         .map(|session_overview| {
-            SessionRow::from_session(
-                session_overview.session.session_id,
-                &session_overview.session.session_name,
-                None,
-            )
+            let session_id = session_overview.session.session_id;
+            SessionRow {
+                owner_user_id: discovered_sessions.find_owner_user_id(session_id),
+                ..SessionRow::from_session(session_id, &session_overview.session.session_name, None)
+            }
         })
         .collect()
 }

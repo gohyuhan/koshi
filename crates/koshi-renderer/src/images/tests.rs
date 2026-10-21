@@ -26,7 +26,8 @@ use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::Style;
 use koshi_test_support::fixtures::build_cell_rect;
 
-use crate::render::tests::{build_core_regions, get_pane_snapshot_mut};
+use crate::render::tests::{build_core_regions, format_rendered_cells, get_pane_snapshot_mut};
+use crate::render::DrawnRows;
 use crate::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPaneSlot, GridView,
     ImagePlacementSnapshot, KeymapHints, PaneSlot, PaneSnapshot, RenderSnapshot,
@@ -79,10 +80,8 @@ fn build_render_snapshot(
             is_blinking: false,
             shape: None,
         },
-        terminal_grid_view: has_terminal_grid.then(|| GridView {
-            grid: Arc::new(Grid::build_blank(6, 38, Style::default())),
-            view_row_offset: 0,
-        }),
+        terminal_grid_view: has_terminal_grid
+            .then(|| GridView::from_grid(&Grid::build_blank(6, 38, Style::default()), 0)),
         image_placement_snapshots,
         is_reverse_video: false,
         mouse_tracking: MouseTracking::Off,
@@ -162,15 +161,27 @@ fn build_regions() -> CommittedRegions {
     )
 }
 
-/// The grid `pane_snapshot` shows, for in-place cell edits.
-fn get_pane_grid_mut(pane_snapshot: &mut PaneSnapshot) -> &mut Grid {
-    Arc::make_mut(
-        &mut pane_snapshot
-            .terminal_grid_view
-            .as_mut()
-            .expect("the pane shows a grid")
-            .grid,
-    )
+/// Apply `update_grid` to a grid holding the rows `pane_snapshot` shows, then
+/// show the updated rows.
+fn update_pane_grid(pane_snapshot: &mut PaneSnapshot, update_grid: impl FnOnce(&mut Grid)) {
+    let grid_view = pane_snapshot
+        .terminal_grid_view
+        .as_mut()
+        .expect("the pane shows a grid");
+    let mut terminal_grid = Grid::build_blank(
+        u16::try_from(grid_view.row_snapshots.len()).expect("the rows fit a grid"),
+        grid_view.column_count,
+        Style::default(),
+    );
+    for (row_index, row_snapshot) in (0..).zip(&grid_view.row_snapshots) {
+        for (column_index, cell) in (0..).zip(row_snapshot.decode_row_cells()) {
+            *terminal_grid
+                .get_cell_mut(row_index, column_index)
+                .expect("the cell is in the grid") = cell;
+        }
+    }
+    update_grid(&mut terminal_grid);
+    *grid_view = GridView::from_grid(&terminal_grid, grid_view.view_row_offset);
 }
 
 #[test]
@@ -189,17 +200,19 @@ fn image_cell_snapshot_keeps_exact_combining_characters() {
         true,
         false,
     );
-    let grid = get_pane_grid_mut(&mut snapshot.pane_snapshots[0]);
-    let mut first_cell = Cell::from_character('e', 1, Style::default());
-    first_cell.push_combining('\u{301}');
-    *grid.get_cell_mut(0, 0).unwrap() = first_cell;
-    let mut second_cell = Cell::from_character('e', 1, Style::default());
-    second_cell.push_combining('\u{300}');
-    *grid.get_cell_mut(0, 1).unwrap() = second_cell;
+    update_pane_grid(&mut snapshot.pane_snapshots[0], |grid| {
+        let mut first_cell = Cell::from_character('e', 1, Style::default());
+        first_cell.push_combining('\u{301}');
+        *grid.get_cell_mut(0, 0).unwrap() = first_cell;
+        let mut second_cell = Cell::from_character('e', 1, Style::default());
+        second_cell.push_combining('\u{300}');
+        *grid.get_cell_mut(0, 1).unwrap() = second_cell;
+    });
     let image_cell_snapshot = build_image_cell_snapshot(
         &snapshot,
         &build_regions(),
         ViewerChrome::default(),
+        build_screen_area(),
         build_screen_area(),
     )
     .unwrap();
@@ -224,6 +237,83 @@ fn image_cell_snapshot_keeps_exact_combining_characters() {
 }
 
 #[test]
+fn a_snapshot_of_part_of_the_viewport_holds_the_cells_of_the_whole_viewport_there() {
+    let mut snapshot = build_render_snapshot(
+        PaneId::new(),
+        Rect {
+            origin: Point { column: 1, row: 1 },
+            size: Size {
+                column_count: 8,
+                row_count: 5,
+            },
+        },
+        vec![],
+        true,
+        true,
+        false,
+    );
+    update_pane_grid(&mut snapshot.pane_snapshots[0], |grid| {
+        for (row_index, column_index, character) in [(0, 0, 'a'), (1, 2, 'b'), (4, 7, 'c')] {
+            *grid
+                .get_cell_mut(row_index, column_index)
+                .expect("the cell is in the grid") =
+                Cell::from_character(character, 1, Style::default());
+        }
+    });
+    let whole_viewport_snapshot = build_image_cell_snapshot(
+        &snapshot,
+        &build_regions(),
+        ViewerChrome::default(),
+        build_screen_area(),
+        build_screen_area(),
+    )
+    .expect("the snapshot fits");
+    let part_area = RatatuiRect::new(2, 1, 4, 3);
+
+    let part_snapshot = build_image_cell_snapshot(
+        &snapshot,
+        &build_regions(),
+        ViewerChrome::default(),
+        build_screen_area(),
+        part_area,
+    )
+    .expect("the snapshot fits");
+
+    assert_eq!(part_snapshot.screen_area, part_area);
+    for screen_row in 0..8 {
+        for screen_column in 0..40 {
+            let is_in_part = screen_column >= part_area.x
+                && screen_column < part_area.right()
+                && screen_row >= part_area.y
+                && screen_row < part_area.bottom();
+            assert_eq!(
+                part_snapshot.find_cell(screen_column, screen_row),
+                whole_viewport_snapshot
+                    .find_cell(screen_column, screen_row)
+                    .filter(|_| is_in_part),
+                "({screen_column}, {screen_row})"
+            );
+        }
+    }
+    assert_eq!(
+        part_snapshot.find_cell(3, 2).map(|cell| cell.character),
+        Some('b')
+    );
+    assert_eq!(
+        build_image_cell_snapshot(
+            &snapshot,
+            &build_regions(),
+            ViewerChrome::default(),
+            build_screen_area(),
+            RatatuiRect::new(38, 6, 5, 5),
+        )
+        .expect("the snapshot fits")
+        .screen_area,
+        RatatuiRect::new(38, 6, 2, 2)
+    );
+}
+
+#[test]
 fn image_cell_snapshot_matches_screen_reverse_and_selection() {
     let pane_id = PaneId::new();
     let mut snapshot = build_render_snapshot(
@@ -244,19 +334,22 @@ fn image_cell_snapshot_matches_screen_reverse_and_selection() {
     snapshot.pane_snapshots[0].selection_spans = Some(SelectionSpans {
         row_spans: vec![(0, 0, 0)],
     });
-    let grid = get_pane_grid_mut(&mut snapshot.pane_snapshots[0]);
-    let mut reversed = Style::default();
-    reversed.set_reverse(true);
-    *grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('a', 1, reversed);
-    *grid.get_cell_mut(0, 1).unwrap() = Cell::from_character('b', 1, Style::default());
-    let mut reversed_without_selection = Style::default();
-    reversed_without_selection.set_reverse(true);
-    *grid.get_cell_mut(0, 2).unwrap() = Cell::from_character('c', 1, reversed_without_selection);
+    update_pane_grid(&mut snapshot.pane_snapshots[0], |grid| {
+        let mut reversed_style = Style::default();
+        reversed_style.set_reverse(true);
+        *grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('a', 1, reversed_style);
+        *grid.get_cell_mut(0, 1).unwrap() = Cell::from_character('b', 1, Style::default());
+        let mut reversed_without_selection = Style::default();
+        reversed_without_selection.set_reverse(true);
+        *grid.get_cell_mut(0, 2).unwrap() =
+            Cell::from_character('c', 1, reversed_without_selection);
+    });
 
     let image_cell_snapshot = build_image_cell_snapshot(
         &snapshot,
         &build_regions(),
         ViewerChrome::default(),
+        build_screen_area(),
         build_screen_area(),
     )
     .unwrap();
@@ -723,6 +816,7 @@ fn image_placeholder_clips_all_four_buffer_edges() {
     let image_paint = ImagePaint::from_image_placement(
         PaneId::new(),
         1,
+        1,
         build_image_record(4, 4, 0),
         RatatuiRect {
             x: 0,
@@ -910,9 +1004,7 @@ fn unsupported_image_text_fills_the_visible_coverage() {
         .collect();
     draw_image_placeholders(&image_target_areas, &mut screen_buffer);
 
-    let rendered_placeholder_text: String = (0..26)
-        .map(|column_index| screen_buffer[(column_index, 0)].symbol())
-        .collect();
+    let rendered_placeholder_text = format_rendered_cells(&screen_buffer, 0, 0..26);
     assert_eq!(rendered_placeholder_text, TERMINAL_IMAGE_UNAVAILABLE);
 }
 
@@ -944,10 +1036,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
     *terminal_grid
         .get_cell_mut(0, 0)
         .expect("image target cell exists") = Cell::from_character('X', 1, Style::default());
-    snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(terminal_grid),
-        view_row_offset: 0,
-    });
+    snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView::from_grid(&terminal_grid, 0));
     let viewport_area = RatatuiRect {
         x: 0,
         y: 0,
@@ -966,15 +1055,14 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         None,
         ViewerChrome::default(),
         ImageRenderMode::Placeholder,
-        None,
+        &[],
         None,
         None,
         viewport_area,
+        DrawnRows::Every,
         &mut placeholder_buffer,
     );
-    let placeholder_text: String = (1..5)
-        .map(|column_index| placeholder_buffer[(column_index, 1)].symbol())
-        .collect();
+    let placeholder_text = format_rendered_cells(&placeholder_buffer, 1, 1..5);
     assert_eq!(placeholder_text, "term");
 
     let placement_presentation = crate::snapshot::PanePlacementPresentation {
@@ -996,10 +1084,11 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         None,
         ViewerChrome::default(),
         ImageRenderMode::Placeholder,
-        None,
+        &[],
         Some(&placement_presentation),
         None,
         viewport_area,
+        DrawnRows::Every,
         &mut placement_buffer,
     );
     assert_eq!(placement_buffer[(1, 1)].symbol(), "X");
@@ -1017,15 +1106,14 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         None,
         ViewerChrome::default(),
         ImageRenderMode::Native,
-        None,
+        &[],
         None,
         None,
         viewport_area,
+        DrawnRows::Every,
         &mut native_buffer,
     );
-    let native_text: String = (1..5)
-        .map(|column_index| native_buffer[(column_index, 1)].symbol())
-        .collect();
+    let native_text = format_rendered_cells(&native_buffer, 1, 1..5);
     assert_eq!(native_text, "X   ");
     assert!(native_buffer
         .content()
@@ -1041,18 +1129,17 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         None,
         ViewerChrome::default(),
         ImageRenderMode::Native,
-        Some(&[]),
+        &[(pane_id, 1)],
         None,
         None,
         viewport_area,
+        DrawnRows::Every,
         &mut unavailable_buffer,
     );
-    let unavailable_text: String = (1..5)
-        .map(|column_index| unavailable_buffer[(column_index, 1)].symbol())
-        .collect();
+    let unavailable_text = format_rendered_cells(&unavailable_buffer, 1, 1..5);
     assert_eq!(unavailable_text, "term");
 
-    let mut available_buffer = Buffer::empty(viewport_area);
+    let mut other_unavailable_buffer = Buffer::empty(viewport_area);
     crate::render::render_frame(
         &snapshot,
         &build_regions(),
@@ -1061,16 +1148,15 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         None,
         ViewerChrome::default(),
         ImageRenderMode::Native,
-        Some(&[(pane_id, 1)]),
+        &[(pane_id, 2)],
         None,
         None,
         viewport_area,
-        &mut available_buffer,
+        DrawnRows::Every,
+        &mut other_unavailable_buffer,
     );
-    let available_text: String = (1..5)
-        .map(|column_index| available_buffer[(column_index, 1)].symbol())
-        .collect();
-    assert_eq!(available_text, "X   ");
+    let other_unavailable_text = format_rendered_cells(&other_unavailable_buffer, 1, 1..5);
+    assert_eq!(other_unavailable_text, "X   ");
 }
 
 /// Put a floating pane with outer rect `outer_rect`, in pane-area cells, on
@@ -1090,10 +1176,10 @@ fn push_floating_pane(
         ));
     let mut pane_snapshot = render_snapshot.pane_snapshots[0].clone();
     pane_snapshot.pane_id = pane_id;
-    pane_snapshot.terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::build_blank(6, 38, Style::default())),
-        view_row_offset: 0,
-    });
+    pane_snapshot.terminal_grid_view = Some(GridView::from_grid(
+        &Grid::build_blank(6, 38, Style::default()),
+        0,
+    ));
     pane_snapshot.image_placement_snapshots = image_placement_snapshots;
     render_snapshot.pane_snapshots.push(pane_snapshot);
     pane_id
@@ -1347,18 +1433,20 @@ fn the_image_cell_snapshot_writes_no_floating_pane_cell_past_the_pane_area() {
         Vec::new(),
     );
     let floating_pane_snapshot = get_pane_snapshot_mut(&mut render_snapshot, floating_pane_id);
-    let floating_grid = get_pane_grid_mut(floating_pane_snapshot);
-    *floating_grid
-        .get_cell_mut(0, 0)
-        .expect("the cell is in the grid") = Cell::from_character('y', 1, Style::default());
-    *floating_grid
-        .get_cell_mut(1, 0)
-        .expect("the cell is in the grid") = Cell::from_character('z', 1, Style::default());
+    update_pane_grid(floating_pane_snapshot, |floating_grid| {
+        *floating_grid
+            .get_cell_mut(0, 0)
+            .expect("the cell is in the grid") = Cell::from_character('y', 1, Style::default());
+        *floating_grid
+            .get_cell_mut(1, 0)
+            .expect("the cell is in the grid") = Cell::from_character('z', 1, Style::default());
+    });
 
     let image_cell_snapshot = build_image_cell_snapshot(
         &render_snapshot,
         &build_core_regions(40, 8),
         ViewerChrome::default(),
+        build_screen_area(),
         build_screen_area(),
     )
     .expect("the snapshot fits");
@@ -1376,31 +1464,84 @@ fn the_image_cell_snapshot_writes_no_floating_pane_cell_past_the_pane_area() {
 }
 
 #[test]
-fn the_image_cell_snapshot_writes_each_floating_pane_over_the_tiled_cells() {
+fn a_snapshot_of_part_of_the_viewport_places_each_floating_pane_as_the_whole_viewport_does() {
     let mut render_snapshot = build_tiled_image_render_snapshot(Vec::new());
-    let tiled_grid = get_pane_grid_mut(&mut render_snapshot.pane_snapshots[0]);
-    for row_index in 0..6 {
-        for column_index in 0..38 {
-            *tiled_grid
-                .get_cell_mut(row_index, column_index)
-                .expect("the cell is in the grid") = Cell::from_character('x', 1, Style::default());
+    let floating_pane_id = push_floating_pane(
+        &mut render_snapshot,
+        build_cell_rect(4, 2, 6, 6),
+        Vec::new(),
+    );
+    let floating_pane_snapshot = get_pane_snapshot_mut(&mut render_snapshot, floating_pane_id);
+    update_pane_grid(floating_pane_snapshot, |floating_grid| {
+        *floating_grid
+            .get_cell_mut(0, 0)
+            .expect("the cell is in the grid") = Cell::from_character('y', 1, Style::default());
+    });
+    let whole_viewport_snapshot = build_image_cell_snapshot(
+        &render_snapshot,
+        &build_core_regions(40, 8),
+        ViewerChrome::default(),
+        build_screen_area(),
+        build_screen_area(),
+    )
+    .expect("the snapshot fits");
+    let part_area = RatatuiRect::new(3, 4, 5, 3);
+
+    let part_snapshot = build_image_cell_snapshot(
+        &render_snapshot,
+        &build_core_regions(40, 8),
+        ViewerChrome::default(),
+        build_screen_area(),
+        part_area,
+    )
+    .expect("the snapshot fits");
+
+    for screen_row in part_area.y..part_area.bottom() {
+        for screen_column in part_area.x..part_area.right() {
+            assert_eq!(
+                part_snapshot.find_cell(screen_column, screen_row),
+                whole_viewport_snapshot.find_cell(screen_column, screen_row),
+                "({screen_column}, {screen_row})"
+            );
         }
     }
+    assert_eq!(
+        part_snapshot.find_cell(5, 6).map(|cell| cell.character),
+        Some('y')
+    );
+}
+
+#[test]
+fn the_image_cell_snapshot_writes_each_floating_pane_over_the_tiled_cells() {
+    let mut render_snapshot = build_tiled_image_render_snapshot(Vec::new());
+    update_pane_grid(&mut render_snapshot.pane_snapshots[0], |tiled_grid| {
+        for row_index in 0..6 {
+            for column_index in 0..38 {
+                *tiled_grid
+                    .get_cell_mut(row_index, column_index)
+                    .expect("the cell is in the grid") =
+                    Cell::from_character('x', 1, Style::default());
+            }
+        }
+    });
     let floating_pane_id = push_floating_pane(
         &mut render_snapshot,
         build_cell_rect(4, 0, 6, 5),
         Vec::new(),
     );
     let floating_pane_snapshot = get_pane_snapshot_mut(&mut render_snapshot, floating_pane_id);
-    *get_pane_grid_mut(floating_pane_snapshot)
-        .get_cell_mut(0, 0)
-        .expect("the cell is in the grid") = Cell::from_character('y', 1, Style::default());
+    update_pane_grid(floating_pane_snapshot, |floating_grid| {
+        *floating_grid
+            .get_cell_mut(0, 0)
+            .expect("the cell is in the grid") = Cell::from_character('y', 1, Style::default());
+    });
 
     let read_character = |viewer_chrome: ViewerChrome, screen_column: u16, screen_row: u16| {
         build_image_cell_snapshot(
             &render_snapshot,
             &build_regions(),
             viewer_chrome,
+            build_screen_area(),
             build_screen_area(),
         )
         .expect("the snapshot fits")
@@ -1447,7 +1588,7 @@ fn a_tiled_image_a_floating_pane_meets_shows_no_unavailable_text_in_native_mode(
                 &placed_floating_panes,
                 build_screen_area(),
                 image_mode,
-                None,
+                &[],
                 None,
             )
         };
@@ -1502,7 +1643,7 @@ fn a_floating_panes_unavailable_image_shows_text_unless_a_later_floating_pane_co
                 covering_floating_panes,
                 build_screen_area(),
                 image_mode,
-                None,
+                &[],
             )
         };
 

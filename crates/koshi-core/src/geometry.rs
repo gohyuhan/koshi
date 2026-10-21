@@ -86,6 +86,13 @@ impl PixelCellSize {
 }
 
 impl Size {
+    /// The cells this size covers: `column_count` times `row_count`. `200x50`
+    /// → `10000`, and `65535x65535` → `4294836225`.
+    #[must_use]
+    pub fn compute_cell_count(self) -> u32 {
+        u32::from(self.column_count) * u32::from(self.row_count)
+    }
+
     /// The per-axis minimum of the two sizes: the smaller column count paired
     /// with the smaller row count. `40×10 min 20×24` → `20×10`.
     #[must_use]

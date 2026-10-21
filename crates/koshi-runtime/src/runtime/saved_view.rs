@@ -13,13 +13,18 @@
 //! them. Presenting the token of a client that is still attached finds that
 //! client ([`SavedViewStore::find_client_id_by_resume_token`]).
 //!
-//! The whole store lives in memory. Nothing here is written to disk, sent over
-//! a socket, or carried across a server restart: a restart drops every saved
-//! view, and every minted token then resumes nothing.
+//! The store lives in memory. An image swap writes it, hashes and filed views
+//! included, into the resume file
+//! ([`ResumeBody::saved_view_store`](crate::resume::ResumeBody::saved_view_store)),
+//! and the next image reads it back: a token minted before the swap takes its
+//! view back after it, and proves its client's id
+//! ([`SavedViewStore::find_client_id_by_resume_token`]). Nothing in the store
+//! is sent over a socket.
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
+use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use koshi_core::ids::{ClientId, PaneId, TabId};
@@ -35,7 +40,7 @@ const SAVED_VIEW_LIFETIME_DURATION: Duration = Duration::from_secs(24 * 60 * 60)
 const MAX_SAVED_VIEW_RECORD_COUNT: usize = 32;
 
 /// What one detached client was looking at.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedView {
     /// The tab the client was viewing.
     pub active_tab_id: TabId,
@@ -62,7 +67,7 @@ pub struct SavedView {
 
 /// One filed view: the sha256 of the token that takes it back, when it stops
 /// standing, and the view itself.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct SavedViewRecord {
     connection_token_hash: String,
     expires_at: SystemTime,
@@ -75,7 +80,7 @@ struct SavedViewRecord {
 /// `connection_token_hash_by_client_id` holds the hash minted for each attached client,
 /// waiting for that client to detach. `saved_view_records` holds the filed
 /// views, oldest first.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SavedViewStore {
     connection_token_hash_by_client_id: HashMap<ClientId, String>,
     saved_view_records: Vec<SavedViewRecord>,

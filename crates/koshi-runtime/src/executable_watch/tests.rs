@@ -326,7 +326,10 @@ fn start_watch_of_running_program(program_directory: &Path) -> (PathBuf, Arc<Exe
         &program_directory.join("started_runs"),
         "koshi 1.0.0",
     );
-    let executable_watch = Arc::new(ExecutableWatch::new(program_path.clone(), "1.0.0"));
+    let executable_watch = Arc::new(ExecutableWatch::from_executable_path(
+        program_path.clone(),
+        "1.0.0",
+    ));
     (program_path, executable_watch)
 }
 
@@ -402,7 +405,7 @@ fn a_program_file_whose_version_cannot_be_read_is_not_read_again_until_it_change
 #[test]
 fn a_missing_program_file_starts_no_version_read() {
     let program_directory = TempDir::new().expect("a test directory");
-    let executable_watch = Arc::new(ExecutableWatch::new(
+    let executable_watch = Arc::new(ExecutableWatch::from_executable_path(
         program_directory.path().join("absent"),
         "1.0.0",
     ));
@@ -425,7 +428,10 @@ fn a_program_file_that_appears_where_none_was_is_read() {
         program_directory
             .path()
             .join(if cfg!(windows) { "koshi.cmd" } else { "koshi" });
-    let executable_watch = Arc::new(ExecutableWatch::new(program_path.clone(), "1.0.0"));
+    let executable_watch = Arc::new(ExecutableWatch::from_executable_path(
+        program_path.clone(),
+        "1.0.0",
+    ));
     let run_log_path = program_directory.path().join("runs");
     replace_program(&program_path, &run_log_path, "koshi 9.9.9");
 
@@ -521,7 +527,7 @@ fn a_refused_hello_reads_the_program_file_the_server_started_from() {
         &run_log_path,
         "koshi 1.0.0",
     );
-    let executable_watch = Arc::new(ExecutableWatch::new(program_path, "0.5.0"));
+    let executable_watch = Arc::new(ExecutableWatch::from_executable_path(program_path, "0.5.0"));
     assert_eq!(run_executable_file_check(&executable_watch), None);
     assert_eq!(count_program_runs(&run_log_path), 0);
 

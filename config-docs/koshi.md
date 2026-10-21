@@ -17,7 +17,8 @@ launch.
 Settings use blocks. `theme`, `image-support`, `reduced-motion`,
 `stay-in-pane-placement-mode-after-placement`, `allow-beta-features`, `allow-other-users`,
 `remote-listen`, `remote-reconnect`, `remote-link-timeout-ms`,
-`shared-sessions-dir` and `auto-close-session` are top-level.
+`max-frames-per-second`, `shared-sessions-dir` and `auto-close-session` are
+top-level.
 
 **Whose settings they are:** some belong to the session and are shared by every
 terminal looking at it; the rest belong to the terminal you are sitting at,
@@ -105,10 +106,10 @@ On a floating pane's titlebar row:
   the pointer and stays inside the pane area. The move is sent when you
   release. A release where you pressed, a release that leaves the pane where
   it started, `Esc` during the drag, pane placement mode opening during the
-  drag, or a terminal that loses focus sends no move. `Esc` during the drag
-  also drops a key sequence you started. A pane you pinned does not move.
-  Until the session has moved the pane you released, a press on a grab handle
-  starts no new move.
+  drag, or a focus loss that your terminal reports sends no move. `Esc`
+  during the drag also drops a key sequence you started. A pane you pinned
+  does not move. Until the session has moved the pane you released, a press
+  on a grab handle starts no new move.
 - `[ ]` pins the pane at its cell, and `[⚪]` unpins it. `–` minimizes the
   pane, and `✕` closes it.
 
@@ -402,7 +403,7 @@ launch.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `auto-check` | boolean — check GitHub for a newer koshi at startup; a build from source checks nothing | `#true` | ≥ 0.1.0 |
+| `auto-check` | boolean — check GitHub for a newer koshi in the background while koshi runs, and offer a newer release found at the next start; a build from source checks nothing | `#true` | ≥ 0.1.0 |
 | `check-interval-days` | integer — days between checks | `14` | ≥ 0.1.0 |
 | `allow-prerelease` | boolean — offer pre-release builds too; a Homebrew install takes stable releases only | `#false` | ≥ 0.1.0 |
 
@@ -537,6 +538,32 @@ half times the longest one-way delay of the link can drop a link that works.
 |---|---|---|---|
 | `remote-link-timeout-ms` | integer, `1000` to `4294967295` — the milliseconds with no byte from the other side after which a link to a session on another machine has dropped | `30000` | ≥ 0.6.0 |
 
+## `max-frames-per-second`
+
+Each terminal reads this for itself. It is the most frames a second the session
+sends this terminal. Two terminals that view one session can set different
+values, and each one gets frames at its own rate.
+
+The session sends the terminal a frame at most once per second divided by this
+value, rounded up to the next nanosecond. A screen that changes faster than
+that reaches the terminal as its newest state at each frame. The frame after
+your own key, paste or mouse event goes at once, without that wait. The
+pane-move animation steps once per the same interval.
+
+Example: with `max-frames-per-second 60`, `cat` of a large log in a pane sends
+the terminal at most 60 frames a second, one at most every 16666667
+nanoseconds. A key you type during the flood shows in the next frame, with no
+wait.
+
+The value is an integer from `30` to `120`. A value outside that range is
+ignored with the warning `must be between 30 and 120`. A change applies at the
+next `koshi attach`, and when the session moves this terminal to another
+session. A link that drops and comes back keeps the value its attach read.
+
+| Key | Value / type | Default | Since |
+|---|---|---|---|
+| `max-frames-per-second` | integer, `30` to `120` — the most frames a second the session sends this terminal | `60` | ≥ 0.6.0 |
+
 ## `reduced-motion`
 
 Controls placement interpolation for this viewer. With `#false`, the pane
@@ -604,9 +631,14 @@ Every way of leaving counts: the quit keybinding (`<leader>q` by default),
 `koshi detach`, closing the terminal, and moving the terminal to another
 session with `koshi attach <session>` from inside a pane. A terminal that moves
 away has left, so a session it leaves empty ends. On Linux and macOS, a
-`SIGHUP`, such as one that `kill -HUP` sends, is a leaving too, unless koshi
-ignores `SIGHUP`, as one started with `nohup` does. Closing the terminal is a
-leaving either way.
+`SIGHUP`, `SIGTERM`, `SIGINT` or `SIGQUIT`, such as one that `kill` sends, is a
+leaving too, unless koshi ignores that signal, as `nohup` makes it ignore
+`SIGHUP`. koshi restores the terminal, then ends by that signal. On Windows, a
+Ctrl+C or Ctrl+Break signal is a leaving too, and koshi exits with
+`0xC000013A` after it restores the terminal. Closing the terminal is a leaving
+either way. On Linux and macOS, koshi ignores `SIGTSTP`, `SIGTTIN` and
+`SIGTTOU` while it holds the terminal: a `kill -TSTP` does not stop it, and is
+not a leaving.
 
 A terminal on another machine whose link drops has not left, so the session
 keeps running, also when that terminal was the last one. That terminal can
@@ -696,11 +728,16 @@ While this is on, your `koshi` lists the other users' sessions with limits:
   past that is not asked: standard error names how many, and a listing counts
   them among the sessions that did not answer.
 - A lookup by session id reads only that session's own path in each user's
-  folder, within the same limits.
-- A session id that two sockets advertise is reached through neither.
-  `koshi attach <id>` is refused with `session <id> is advertised 2 times in
-  the shared directory, by user ids 1001, 1002; koshi reaches none of them`,
-  and a listing counts that session among the sessions that did not answer.
+  folder, within the same limits. A lookup by `<user id>/<session id>`, such
+  as `1001/session-3f2a…`, reads that path only in the folders that user owns,
+  and reads no file of yours.
+- A session id that two sockets advertise is reached through neither by its
+  id alone. `koshi attach <id>` is refused with `session <id> is advertised 2
+  times in the shared directory, by user ids 1001, 1002; koshi reaches none of
+  them; name the owner to reach one, such as 1001/<id>`, and a listing counts
+  that session among the sessions that did not answer. The example names the
+  lowest user id whose folders advertise the id once. When the folders of every
+  owner advertise it more than once, the sentence ends at `none of them`.
 - A socket that another user names after one of your session ids is never
   taken for that session, also while that session restarts.
 - `koshi list-sessions` and `koshi server-version` ask up to 16 sessions at
@@ -789,6 +826,7 @@ reduced-motion #false
 stay-in-pane-placement-mode-after-placement #true
 remote-reconnect #true
 remote-link-timeout-ms 30000
+max-frames-per-second 60
 
 pane {
     min-cols 2

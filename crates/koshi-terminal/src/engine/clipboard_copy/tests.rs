@@ -3,6 +3,7 @@
 //! sequences that end a copy before it finishes.
 
 use super::*;
+use crate::engine::tests::build_clipboard_copy;
 
 /// The most decoded bytes the tests allow per copy, unless a test names its own.
 const TEST_MAXIMUM_COPY_BYTE_COUNT: usize = 1024;
@@ -17,14 +18,6 @@ fn read_clipboard_copies(
         ClipboardCopyParser::with_maximum_copy_byte_count(maximum_copy_byte_count);
     clipboard_copy_parser.process_terminal_bytes(terminal_bytes);
     clipboard_copy_parser.take_clipboard_copies()
-}
-
-/// A copy of `copied_bytes` for `clipboard_targets`.
-fn build_clipboard_copy(clipboard_targets: &str, copied_bytes: &[u8]) -> ClipboardCopy {
-    ClipboardCopy {
-        clipboard_targets: clipboard_targets.to_string(),
-        copied_bytes: copied_bytes.to_vec(),
-    }
 }
 
 #[test]

@@ -32,8 +32,8 @@ mod clipboard_copy;
 
 pub use crate::graphics::GraphicsTransportState;
 use crate::graphics::{
-    GraphicsError, GraphicsOperation, GraphicsParser, GraphicsProtocol, ImageRecord,
-    MAX_IMAGE_BYTE_COUNT,
+    count_valid_utf8_prefix_bytes, GraphicsError, GraphicsOperation, GraphicsParser,
+    GraphicsProtocol, ImageRecord, MAX_IMAGE_BYTE_COUNT,
 };
 use crate::scrollback::ScrollbackLimit;
 use crate::state::{ShellIntegrationFact, TerminalState};
@@ -505,6 +505,34 @@ impl C1InputNormalizer {
                 continue;
             }
 
+            if let Some(control_sequence_byte_count) =
+                self.find_complete_control_sequence_byte_count(&terminal_input_bytes[byte_index..])
+            {
+                let control_sequence_bytes =
+                    &terminal_input_bytes[byte_index..byte_index + control_sequence_byte_count];
+                let final_byte_index = control_sequence_byte_count - 1;
+                self.remaining_utf8_continuation_count = 0;
+                self.push_trailing_bytes(control_sequence_bytes);
+                if let Some(normalized_byte_buffer) = normalized_bytes.as_mut() {
+                    normalized_byte_buffer.extend_from_slice(control_sequence_bytes);
+                }
+                let synchronized_control = match control_sequence_bytes[final_byte_index] {
+                    b'h' => Some(SynchronizedControl::Begin),
+                    b'l' => Some(SynchronizedControl::End),
+                    _ => None,
+                };
+                if let Some(synchronized_control) = synchronized_control
+                    .filter(|control| self.is_synchronized_control_in_trailing_bytes(*control))
+                {
+                    let control_end_byte_index = normalized_bytes
+                        .as_ref()
+                        .map_or(byte_index + control_sequence_byte_count, Vec::len);
+                    synchronized_controls.push((control_end_byte_index, synchronized_control));
+                }
+                byte_index += control_sequence_byte_count;
+                continue;
+            }
+
             let terminal_input_byte = terminal_input_bytes[byte_index];
             let (replacement_bytes, synchronized_control) =
                 self.normalize_terminal_input_byte(terminal_input_byte);
@@ -548,30 +576,71 @@ impl C1InputNormalizer {
 
     /// The count of leading bytes in `terminal_input_bytes` that cannot change
     /// the normalizer state. `0` while a UTF-8 code point is still open.
+    ///
+    /// In the ground state that is the complete UTF-8 text before the first
+    /// `ESCAPE_BYTE`. Inside a control sequence it is every byte before the
+    /// first CAN, SUB, `ESCAPE_BYTE` or final byte (`0x40`–`0x7E`). Example — in
+    /// the ground state, `ab\u{e9}\x1b[1m` gives `4`; inside `ESC [`, `38;5;1m`
+    /// gives `6`.
     fn get_plain_terminal_input_byte_count(&self, terminal_input_bytes: &[u8]) -> usize {
         if self.remaining_utf8_continuation_count != 0 {
             return 0;
         }
-        let changes_input_state = |terminal_input_byte: u8| match self.input_state {
+        match self.input_state {
             C1InputState::Ground => {
-                terminal_input_byte == ESCAPE_BYTE || terminal_input_byte >= 0x80
+                let escape_byte_index = memchr::memchr(ESCAPE_BYTE, terminal_input_bytes)
+                    .unwrap_or(terminal_input_bytes.len());
+                count_valid_utf8_prefix_bytes(&terminal_input_bytes[..escape_byte_index])
             }
-            C1InputState::String(string_kind) => {
-                matches!(
-                    terminal_input_byte,
-                    CANCEL_BYTE | SUBSTITUTE_BYTE | ESCAPE_BYTE
-                ) || terminal_input_byte >= 0x80
-                    || (terminal_input_byte == 0x07 && matches!(string_kind, C1StringKind::Osc))
-            }
+            C1InputState::Csi => terminal_input_bytes
+                .iter()
+                .position(|terminal_input_byte| {
+                    matches!(
+                        *terminal_input_byte,
+                        CANCEL_BYTE | SUBSTITUTE_BYTE | ESCAPE_BYTE | 0x40..=0x7e
+                    )
+                })
+                .unwrap_or(terminal_input_bytes.len()),
+            C1InputState::String(string_kind) => terminal_input_bytes
+                .iter()
+                .position(|terminal_input_byte| {
+                    matches!(
+                        *terminal_input_byte,
+                        CANCEL_BYTE | SUBSTITUTE_BYTE | ESCAPE_BYTE
+                    ) || *terminal_input_byte >= 0x80
+                        || (*terminal_input_byte == 0x07
+                            && matches!(string_kind, C1StringKind::Osc))
+                })
+                .unwrap_or(terminal_input_bytes.len()),
             C1InputState::Escape
             | C1InputState::EscapeIntermediate
-            | C1InputState::Csi
-            | C1InputState::StringEscape(_) => true,
+            | C1InputState::StringEscape(_) => 0,
+        }
+    }
+
+    /// The byte count of the control sequence that opens
+    /// `terminal_input_bytes`, `ESC [` through its final byte (`0x40`–`0x7E`),
+    /// while the normalizer stands in the ground state. `None` in any other
+    /// state, and when a CAN, SUB or `ESCAPE_BYTE` comes before the final byte
+    /// or the bytes end first. Example — in the ground state, `\x1b[38;5;1mab`
+    /// gives `Some(9)`, and `\x1b[38;5` gives `None`.
+    fn find_complete_control_sequence_byte_count(
+        &self,
+        terminal_input_bytes: &[u8],
+    ) -> Option<usize> {
+        if self.input_state != C1InputState::Ground {
+            return None;
+        }
+        let [ESCAPE_BYTE, b'[', parameter_bytes @ ..] = terminal_input_bytes else {
+            return None;
         };
-        terminal_input_bytes
-            .iter()
-            .position(|terminal_input_byte| changes_input_state(*terminal_input_byte))
-            .unwrap_or(terminal_input_bytes.len())
+        let final_byte_index = parameter_bytes.iter().position(|parameter_byte| {
+            matches!(
+                *parameter_byte,
+                CANCEL_BYTE | SUBSTITUTE_BYTE | ESCAPE_BYTE | 0x40..=0x7e
+            )
+        })?;
+        matches!(parameter_bytes[final_byte_index], 0x40..=0x7e).then_some(final_byte_index + 3)
     }
 
     fn normalize_terminal_input_byte(
@@ -750,6 +819,10 @@ pub struct TerminalEngine {
     parser: vte::Parser<OSC_BUFFER_BYTE_CAPACITY>,
     /// The screen model the parser's decoded actions mutate.
     terminal_state: TerminalState,
+    /// The characters the parser printed since its last other action, held
+    /// until that action or the end of the bytes one advance reads. Empty
+    /// between calls.
+    printed_text: String,
     /// The canonical bytes that put another parser where `parser` stands, as
     /// [`get_undecoded_terminal_bytes`](TerminalEngine::get_undecoded_terminal_bytes) describes
     /// them. Eight-bit string controls are stored in their seven-bit `ESC` forms, which the VTE
@@ -808,6 +881,7 @@ impl TerminalEngine {
         TerminalEngine {
             parser: vte::Parser::<OSC_BUFFER_BYTE_CAPACITY>::new_with_size(),
             terminal_state,
+            printed_text: String::new(),
             undecoded_terminal_bytes: Vec::new(),
             undecoded_parser: vte::Parser::<OSC_BUFFER_BYTE_CAPACITY>::new_with_size(),
             is_at_sequence_boundary: true,
@@ -901,8 +975,10 @@ impl TerminalEngine {
                 &graphics_advance.terminal_inert_ranges,
             );
             if graphics_event_end_index > parser_byte_index {
-                self.parser.advance(
+                advance_terminal_parser(
+                    &mut self.parser,
                     &mut self.terminal_state,
+                    &mut self.printed_text,
                     &terminal_bytes[parser_byte_index..graphics_event_end_index],
                 );
                 parser_byte_index = graphics_event_end_index;
@@ -911,8 +987,10 @@ impl TerminalEngine {
             self.process_graphics_operation(graphics_event, cursor_position);
         }
         if parser_byte_index < terminal_bytes.len() {
-            self.parser.advance(
+            advance_terminal_parser(
+                &mut self.parser,
                 &mut self.terminal_state,
+                &mut self.printed_text,
                 &terminal_bytes[parser_byte_index..],
             );
         }
@@ -1359,22 +1437,23 @@ impl TerminalEngine {
     /// what it holds and restarts on a fresh parser at the last `ESCAPE_BYTE` in
     /// `normalized_bytes`; the last sequence opens there and everything before it is
     /// decoded. A chunk with no `ESCAPE_BYTE` carries on from where the previous
-    /// chunk stopped. A sequence spread over many chunks is read once.
+    /// chunk stopped: on a sequence boundary it opens no sequence, and the scan
+    /// keeps only its unfinished last code point. A sequence spread over many
+    /// chunks is read once.
     ///
     /// The scan holds at most [`MAX_UNDECODED_BYTE_COUNT`] bytes of one sequence. Past
     /// that it releases the buffer and holds nothing more until the sequence
     /// ends.
     fn capture_undecoded_terminal_bytes(&mut self, normalized_bytes: &[u8]) {
         let mut normalized_byte_index = 0;
-        if let Some(last_escape_byte_index) = normalized_bytes
-            .iter()
-            .rposition(|normalized_byte| *normalized_byte == ESCAPE_BYTE)
-        {
+        if let Some(last_escape_byte_index) = memchr::memrchr(ESCAPE_BYTE, normalized_bytes) {
             self.undecoded_parser = vte::Parser::<OSC_BUFFER_BYTE_CAPACITY>::new_with_size();
             self.undecoded_terminal_bytes.clear();
             self.is_at_sequence_boundary = false;
             self.is_in_string_body = false;
             normalized_byte_index = last_escape_byte_index;
+        } else if self.is_at_sequence_boundary {
+            normalized_byte_index = normalized_bytes.len();
         }
         // Each round runs to the action that ends a sequence or opens the body
         // of a device control string, or to the end of the normalized bytes.
@@ -1419,6 +1498,100 @@ impl TerminalEngine {
             let decoded_byte_count = self.undecoded_terminal_bytes.len() - incomplete_byte_count;
             self.undecoded_terminal_bytes.drain(..decoded_byte_count);
         }
+    }
+}
+
+/// Feed `terminal_bytes` through `parser` into `terminal_state`, handing each
+/// run of printed characters to the state at once. `printed_text` holds a run
+/// until it ends, and is empty again on return.
+pub(crate) fn advance_terminal_parser(
+    parser: &mut vte::Parser<OSC_BUFFER_BYTE_CAPACITY>,
+    terminal_state: &mut TerminalState,
+    printed_text: &mut String,
+    terminal_bytes: &[u8],
+) {
+    let mut print_run_collector = PrintRunCollector {
+        terminal_state,
+        printed_text,
+    };
+    parser.advance(&mut print_run_collector, terminal_bytes);
+    print_run_collector.print_collected_text();
+}
+
+/// A [`vte::Perform`] that collects each run of printed characters and hands
+/// it to [`TerminalState::print_text`] before the next other action reaches
+/// the state. Every other action goes to the state as it comes.
+struct PrintRunCollector<'a> {
+    /// The screen model every action reaches.
+    terminal_state: &'a mut TerminalState,
+    /// The characters printed since the last other action.
+    printed_text: &'a mut String,
+}
+
+impl PrintRunCollector<'_> {
+    /// Hand the collected characters to the state, and empty `printed_text`.
+    fn print_collected_text(&mut self) {
+        if !self.printed_text.is_empty() {
+            self.terminal_state.print_text(self.printed_text);
+            self.printed_text.clear();
+        }
+    }
+}
+
+impl vte::Perform for PrintRunCollector<'_> {
+    fn print(&mut self, character: char) {
+        self.printed_text.push(character);
+    }
+
+    fn execute(&mut self, control_byte: u8) {
+        self.print_collected_text();
+        self.terminal_state.execute(control_byte);
+    }
+
+    fn hook(
+        &mut self,
+        dcs_parameters: &vte::Params,
+        intermediates: &[u8],
+        should_ignore: bool,
+        action: char,
+    ) {
+        self.print_collected_text();
+        self.terminal_state
+            .hook(dcs_parameters, intermediates, should_ignore, action);
+    }
+
+    fn put(&mut self, dcs_byte: u8) {
+        self.print_collected_text();
+        self.terminal_state.put(dcs_byte);
+    }
+
+    fn unhook(&mut self) {
+        self.print_collected_text();
+        self.terminal_state.unhook();
+    }
+
+    fn osc_dispatch(&mut self, osc_parameters: &[&[u8]], is_bell_terminated: bool) {
+        self.print_collected_text();
+        self.terminal_state
+            .osc_dispatch(osc_parameters, is_bell_terminated);
+    }
+
+    fn csi_dispatch(
+        &mut self,
+        csi_parameters: &vte::Params,
+        intermediates: &[u8],
+        should_ignore: bool,
+        action: char,
+    ) {
+        self.print_collected_text();
+        self.terminal_state
+            .csi_dispatch(csi_parameters, intermediates, should_ignore, action);
+    }
+
+    fn esc_dispatch(&mut self, intermediates: &[u8], should_ignore: bool, final_byte: u8) {
+        self.print_collected_text();
+        self.terminal_state
+            .esc_dispatch(intermediates, should_ignore, final_byte);
     }
 }
 

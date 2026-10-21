@@ -1,22 +1,24 @@
 //! PTY output handling: the dispatcher's entry point for child output bytes.
 //!
-//! A [`RuntimeEvent::PtyOutput`](crate::runtime::event::RuntimeEvent::PtyOutput)
-//! carries the raw bytes one pane's child wrote, already keyed by pane id.
-//! [`Server::handle_pty_output`] routes them into that pane's
+//! Each chunk a pane's turn takes from its
+//! [`PaneOutputQueue`](crate::runtime::pty_inbox::PaneOutputQueue) holds the
+//! raw bytes that pane's child wrote. [`Server::handle_pty_output`] routes
+//! them into that pane's
 //! [`TerminalEngine`] — updating its
 //! grid, cursor, and modes — writes the engine's device-query replies
 //! (answers to DA/DSR/DECRQM: escape sequences the child sends to ask "what
 //! terminal are you" / "what's your status" / "is this mode on") back into
-//! the pane's PTY, and marks the screen stale for the event loop to schedule a
-//! repaint. Shell-integration events are published in marker order, and the
-//! `OSC 52` clipboard copies the engine read go to the clients that focus the
-//! pane. Bytes for a pane with no engine (one closed while the event sat in the
-//! inbox) are dropped without touching any state.
+//! the pane's PTY, and marks the view changed of every subscriber whose
+//! client shows the pane. Shell-integration events are published in marker
+//! order, and the `OSC 52` clipboard copies the engine read go to the clients
+//! that focus the pane. Bytes for a pane with no engine are dropped without
+//! touching any state.
 
 use std::time::Instant;
 
 use koshi_core::event::{Event, PaneCommandFinished, PaneCommandStarted};
 use koshi_core::ids::PaneId;
+use koshi_observability::repeated_warning::LOG_WINDOW_DURATION;
 use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::graphics::GraphicsError;
 use koshi_terminal::state::ShellIntegrationFact;
@@ -48,7 +50,8 @@ impl TerminalAdvanceStateBefore {
 impl Server {
     /// Feed one chunk of child output into `pane_id`'s terminal engine, write
     /// any device-query replies the chunk produced back into the pane's PTY,
-    /// and mark the screen stale.
+    /// and mark the view changed of every subscriber whose client shows the
+    /// pane (`mark_views_showing_pane`).
     ///
     /// Before the chunk is read, the engine takes the cell size of the tab
     /// that holds `pane_id`
@@ -57,10 +60,16 @@ impl Server {
     /// ([`Session::get_floating_cell_size`](koshi_session::session::state::Session::get_floating_cell_size)).
     /// With no such cell size, the engine keeps its own.
     ///
-    /// A `pane_id` with no engine — the pane closed while the chunk waited in
-    /// the inbox — is ignored: no engine is touched, nothing is published, and
-    /// nothing is invalidated. A reply write that fails is logged at error
-    /// level and dropped; the querying child gets no answer. Every graphics
+    /// The engine's next timed renders are recorded after it reads the chunk
+    /// (`Server::refresh_pane_render_deadlines`). A chunk whose bytes reach no
+    /// parser, as while the engine holds output under synchronized output
+    /// (`CSI ? 2026 h`), does nothing more: no reply is written, nothing is
+    /// published, and no view is marked.
+    ///
+    /// A `pane_id` with no engine is ignored: no engine is touched, nothing is
+    /// published, and no view is marked. A reply write that fails is dropped,
+    /// and the querying child gets no answer. The first such failure inside
+    /// each [`LOG_WINDOW_DURATION`] is logged at warn level. Every graphics
     /// error the chunk completed is logged at warn level with its typed reason.
     /// A graphics error dropped by the bounded queue is logged as a typed
     /// queue-full error with its count.
@@ -99,9 +108,11 @@ impl Server {
         }
         let terminal_advance_state_before =
             TerminalAdvanceStateBefore::capture_terminal_advance_state(terminal_engine);
+        let current_time = Instant::now();
         let (reply_bytes, shell_integration_facts, is_terminal_advanced) = terminal_engine
-            .process_pty_output_with_shell_integration_at(output_bytes, Instant::now());
-        if !is_terminal_advanced && !output_bytes.is_empty() {
+            .process_pty_output_with_shell_integration_at(output_bytes, current_time);
+        self.refresh_pane_render_deadlines(pane_id, current_time);
+        if !is_terminal_advanced {
             return;
         }
         self.finish_terminal_advance(
@@ -112,6 +123,10 @@ impl Server {
         );
     }
 
+    /// End `pane_id`'s synchronized-output hold when it is due at
+    /// `current_time`, and handle the output it released as
+    /// [`handle_pty_output`](Self::handle_pty_output) handles a chunk. A pane
+    /// with no engine, or with no hold due, changes nothing.
     pub(in crate::runtime) fn expire_synchronized_output(
         &mut self,
         pane_id: PaneId,
@@ -135,6 +150,12 @@ impl Server {
         );
     }
 
+    /// Handle what one terminal advance of `pane_id` produced, against
+    /// `terminal_advance_state_before`: log its graphics errors, write
+    /// `reply_bytes` back into the pane, clear the pane's selections when the
+    /// active screen changed, re-anchor held views when the scrollback gained
+    /// or lost lines, publish `shell_integration_facts` as events, send its
+    /// clipboard copies, and mark the views showing the pane changed.
     fn finish_terminal_advance(
         &mut self,
         pane_id: PaneId,
@@ -174,12 +195,18 @@ impl Server {
                 .get_pty_backend()
                 .write_pane_input(pane_id, &reply_bytes)
             {
-                tracing::error!(
-                    %pane_id,
-                    %write_error,
-                    reply_byte_count = reply_bytes.len(),
-                    "the answer to a pane's device query could not be written"
-                );
+                if self
+                    .device_reply_failure_warning
+                    .record_warning_if_due(Instant::now())
+                {
+                    tracing::warn!(
+                        %pane_id,
+                        %write_error,
+                        reply_byte_count = reply_bytes.len(),
+                        "the answer to a pane's device query could not be written; \
+                         the next failures inside {LOG_WINDOW_DURATION:?} are not logged"
+                    );
+                }
             }
         }
         if terminal_advance_state_before.active_screen != active_screen_after {
@@ -212,7 +239,7 @@ impl Server {
         if !clipboard_copies.is_empty() {
             self.copy_pane_clipboard_to_clients(pane_id, &clipboard_copies);
         }
-        self.render_scheduler.invalidate();
+        self.mark_views_showing_pane(pane_id);
     }
 }
 

@@ -1,8 +1,7 @@
 //! The gate's untouched initial value.
 //!
-//! The gate is one process-wide flag, so this answer holds only before any
-//! call to `set_beta_features_allowed`. This binary holds one test and nothing
-//! else calls it, which keeps the answer free of test order.
+//! This binary holds one test, and nothing in it calls
+//! `set_beta_features_allowed`.
 
 /// Beta features are off in a process that never enables them.
 #[test]

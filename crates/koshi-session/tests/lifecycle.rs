@@ -9,8 +9,6 @@
 //! backend and the session share one pane id per child, so a signal the backend
 //! drives lands on the pane the session tracks.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -20,10 +18,9 @@ use koshi_core::event::{
 };
 use koshi_core::geometry::{Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_core::process::{PtySize, ShellKind, SpawnSpec};
+use koshi_core::process::PtySize;
 use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
 use koshi_layout::tree::{LayoutNode, SplitNode};
-use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::state::PaneRecord;
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
 use koshi_session::session::cascade::{apply_child_exit, remove_pane_cascade};
@@ -32,6 +29,7 @@ use koshi_session::session::state::{Session, Tab};
 use koshi_session::session::tab_ops::close_tab;
 use koshi_test_support::event_assert::assert_events;
 use koshi_test_support::fake_pty::{ExitStatus, FakePtyBackend, PaneDeliveryRecorder, PtyBackend};
+use koshi_test_support::fixtures::build_spawn_spec;
 
 /// The viewport every client and layout solve uses.
 const TEST_VIEWPORT_SIZE: Size = Size {
@@ -51,18 +49,6 @@ fn build_minimum_viewport_rect() -> Rect {
         column_count: 1,
         row_count: 1,
     })
-}
-
-/// The spawn spec every fake child launches with: `/bin/zsh`, no arguments, no
-/// cwd override, and an empty environment.
-fn build_spawn_spec() -> SpawnSpec {
-    SpawnSpec {
-        program: PathBuf::from("/bin/zsh"),
-        arguments: Vec::new(),
-        working_directory: None,
-        environment_variables: BTreeMap::new(),
-        shell_kind: ShellKind::Zsh,
-    }
 }
 
 /// The initial PTY size for a spawned child.
@@ -90,17 +76,6 @@ fn spawn_test_child(fake_pty_backend: &FakePtyBackend) -> PaneId {
         .spawn_pane(pane_id, build_spawn_spec(), build_spawn_pty_size())
         .expect("spawn succeeds");
     pane_id
-}
-
-/// A `Running` terminal pane record sharing the id its fake child was minted
-/// with. The fresh `Spawning` record is walked to `Running` through the one
-/// legal transition, matching a child whose process has come live.
-fn build_running_pane_record(pane_id: PaneId) -> PaneRecord {
-    let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
-    pane_record
-        .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
-        .expect("Spawning -> Running is a legal transition");
-    pane_record
 }
 
 /// A single-pane tab at display position 0.
@@ -241,8 +216,8 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id)],
         vec![
-            build_running_pane_record(exited_pane_id),
-            build_running_pane_record(survivor_pane_id),
+            PaneRecord::from_terminal_pane(exited_pane_id),
+            PaneRecord::from_terminal_pane(survivor_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, tab_id, exited_pane_id);
@@ -277,12 +252,8 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
         .get_pane_record_by_id(exited_pane_id)
         .is_none());
     assert_eq!(
-        *session
-            .panes
-            .get_pane_record_by_id(survivor_pane_id)
-            .expect("the survivor stays")
-            .get_lifecycle(),
-        PaneLifecycle::Running
+        session.panes.get_pane_record_by_id(survivor_pane_id),
+        Some(&PaneRecord::from_terminal_pane(survivor_pane_id))
     );
     assert_eq!(
         session
@@ -330,8 +301,8 @@ fn a_signal_killed_child_reports_the_signal_and_no_exit_code() {
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id)],
         vec![
-            build_running_pane_record(exited_pane_id),
-            build_running_pane_record(survivor_pane_id),
+            PaneRecord::from_terminal_pane(exited_pane_id),
+            PaneRecord::from_terminal_pane(survivor_pane_id),
         ],
     );
 
@@ -380,8 +351,8 @@ fn a_second_exit_for_an_already_removed_pane_only_reports_the_exit() {
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id)],
         vec![
-            build_running_pane_record(exited_pane_id),
-            build_running_pane_record(survivor_pane_id),
+            PaneRecord::from_terminal_pane(exited_pane_id),
+            PaneRecord::from_terminal_pane(survivor_pane_id),
         ],
     );
 
@@ -432,8 +403,8 @@ fn child_exit_in_nonfocused_pane_leaves_focus_untouched() {
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id)],
         vec![
-            build_running_pane_record(exited_pane_id),
-            build_running_pane_record(survivor_pane_id),
+            PaneRecord::from_terminal_pane(exited_pane_id),
+            PaneRecord::from_terminal_pane(survivor_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, tab_id, survivor_pane_id);
@@ -494,8 +465,8 @@ fn child_exit_refocuses_every_client_that_watched_the_pane() {
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id)],
         vec![
-            build_running_pane_record(exited_pane_id),
-            build_running_pane_record(survivor_pane_id),
+            PaneRecord::from_terminal_pane(exited_pane_id),
+            PaneRecord::from_terminal_pane(survivor_pane_id),
         ],
     );
     let first_client = build_focused_client(session.session_id, tab_id, exited_pane_id);
@@ -545,8 +516,8 @@ fn child_exit_with_no_room_to_refocus_clears_focus() {
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id)],
         vec![
-            build_running_pane_record(exited_pane_id),
-            build_running_pane_record(survivor_pane_id),
+            PaneRecord::from_terminal_pane(exited_pane_id),
+            PaneRecord::from_terminal_pane(survivor_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, tab_id, exited_pane_id);
@@ -577,12 +548,8 @@ fn child_exit_with_no_room_to_refocus_clears_focus() {
     );
     // The survivor stays — the tab is not empty, only unfocusable at this size.
     assert_eq!(
-        *session
-            .panes
-            .get_pane_record_by_id(survivor_pane_id)
-            .expect("the survivor stays")
-            .get_lifecycle(),
-        PaneLifecycle::Running
+        session.panes.get_pane_record_by_id(survivor_pane_id),
+        Some(&PaneRecord::from_terminal_pane(survivor_pane_id))
     );
     // The overlay names the client's own viewport, its unreported pane area, and
     // the terminal as the cause: the shortage comes from the tab rect, not from
@@ -620,7 +587,7 @@ fn last_pane_exit_closes_the_tab_and_quits() {
     let tab_id = TabId::new();
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, only_pane_id)],
-        vec![build_running_pane_record(only_pane_id)],
+        vec![PaneRecord::from_terminal_pane(only_pane_id)],
     );
 
     fake_pty_backend
@@ -682,8 +649,8 @@ fn last_pane_exit_in_one_of_several_tabs_does_not_quit() {
             build_tab_at_index(other_tab_id, other_tab_pane_id, 1),
         ],
         vec![
-            build_running_pane_record(closing_pane_id),
-            build_running_pane_record(other_tab_pane_id),
+            PaneRecord::from_terminal_pane(closing_pane_id),
+            PaneRecord::from_terminal_pane(other_tab_pane_id),
         ],
     );
 
@@ -702,12 +669,8 @@ fn last_pane_exit_in_one_of_several_tabs_does_not_quit() {
     // session lifecycle is not driven toward shutdown.
     assert!(!session.tabs.contains_key(&closing_tab_id));
     assert_eq!(
-        *session
-            .panes
-            .get_pane_record_by_id(other_tab_pane_id)
-            .expect("the sibling pane stays")
-            .get_lifecycle(),
-        PaneLifecycle::Running
+        session.panes.get_pane_record_by_id(other_tab_pane_id),
+        Some(&PaneRecord::from_terminal_pane(other_tab_pane_id))
     );
     assert_eq!(session.get_lifecycle(), &SessionLifecycle::Starting);
     // The survivor closes ranks: it moves from display position 1 to 0, keeping
@@ -746,7 +709,7 @@ fn a_failing_last_pane_is_removed_and_the_session_quits() {
     let tab_id = TabId::new();
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, failed_pane_id)],
-        vec![build_running_pane_record(failed_pane_id)],
+        vec![PaneRecord::from_terminal_pane(failed_pane_id)],
     );
 
     fake_pty_backend
@@ -801,8 +764,8 @@ fn closing_the_focused_pane_removes_it_and_refocuses_a_survivor() {
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, closed_pane_id, survivor_pane_id)],
         vec![
-            build_running_pane_record(closed_pane_id),
-            build_running_pane_record(survivor_pane_id),
+            PaneRecord::from_terminal_pane(closed_pane_id),
+            PaneRecord::from_terminal_pane(survivor_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, tab_id, closed_pane_id);
@@ -895,9 +858,9 @@ fn closing_a_tab_removes_every_pane_without_killing_via_pty() {
             build_tab_at_index(other_tab_id, other_tab_pane_id, 1),
         ],
         vec![
-            build_running_pane_record(first_tab_pane_id),
-            build_running_pane_record(second_tab_pane_id),
-            build_running_pane_record(other_tab_pane_id),
+            PaneRecord::from_terminal_pane(first_tab_pane_id),
+            PaneRecord::from_terminal_pane(second_tab_pane_id),
+            PaneRecord::from_terminal_pane(other_tab_pane_id),
         ],
     );
 
@@ -921,12 +884,8 @@ fn closing_a_tab_removes_every_pane_without_killing_via_pty() {
         vec![other_tab_pane_id]
     );
     assert_eq!(
-        *session
-            .panes
-            .get_pane_record_by_id(other_tab_pane_id)
-            .expect("the sibling pane stays")
-            .get_lifecycle(),
-        PaneLifecycle::Running
+        session.panes.get_pane_record_by_id(other_tab_pane_id),
+        Some(&PaneRecord::from_terminal_pane(other_tab_pane_id))
     );
 
     // Each pane is reported closing then removed, in layout order, and the tab
@@ -980,8 +939,8 @@ fn child_exit_drops_the_pane_from_focus_history() {
     let mut session = build_session_with(
         vec![tab_state],
         vec![
-            build_running_pane_record(exited_pane_id),
-            build_running_pane_record(survivor_pane_id),
+            PaneRecord::from_terminal_pane(exited_pane_id),
+            PaneRecord::from_terminal_pane(survivor_pane_id),
         ],
     );
 
@@ -1038,8 +997,8 @@ fn output_for_a_removed_pane_is_dropped() {
             survivor_pane_id,
         )],
         vec![
-            build_running_pane_record(removed_pane_id),
-            build_running_pane_record(survivor_pane_id),
+            PaneRecord::from_terminal_pane(removed_pane_id),
+            PaneRecord::from_terminal_pane(survivor_pane_id),
         ],
     );
 
@@ -1116,7 +1075,7 @@ fn a_pane_with_no_pending_output_reads_back_nothing() {
     let tab_id = TabId::new();
     let session = build_session_with(
         vec![build_single_pane_tab(tab_id, pane_id)],
-        vec![build_running_pane_record(pane_id)],
+        vec![PaneRecord::from_terminal_pane(pane_id)],
     );
 
     // A spawn queues no output, so the live pane reads back no chunk at all —
@@ -1136,8 +1095,8 @@ fn the_session_still_validates_after_a_child_exit_refocuses_a_client() {
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id)],
         vec![
-            build_running_pane_record(exited_pane_id),
-            build_running_pane_record(survivor_pane_id),
+            PaneRecord::from_terminal_pane(exited_pane_id),
+            PaneRecord::from_terminal_pane(survivor_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, tab_id, exited_pane_id);
@@ -1169,8 +1128,8 @@ fn fixtures_build_a_consistent_session() {
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, first_pane_id, second_pane_id)],
         vec![
-            build_running_pane_record(first_pane_id),
-            build_running_pane_record(second_pane_id),
+            PaneRecord::from_terminal_pane(first_pane_id),
+            PaneRecord::from_terminal_pane(second_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, tab_id, first_pane_id);

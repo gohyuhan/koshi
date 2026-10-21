@@ -32,3 +32,6 @@ koshi-renderer.workspace = true
 koshi-terminal.workspace = true
 koshi-test-support.workspace = true
 tempfile.workspace = true
+
+[lints]
+workspace = true

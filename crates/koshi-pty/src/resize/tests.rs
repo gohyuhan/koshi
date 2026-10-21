@@ -1,9 +1,10 @@
 //! Tests for PTY resizing: size flooring, batch application, and error handling.
 //!
 //! [`compute_pty_size`] floors layout dimensions to the PTY minimum (2 cols,
-//! 1 row). [`resize_for_layout_change`] applies PTY resizes in input order, a
-//! backend error on one pane never stops the rest, and a pane with no content
-//! never reaches the recording backend.
+//! 1 row). [`resize_for_layout_change`] applies PTY resizes in input order, in
+//! one [`PtyBackend::resize_panes`] call. A backend error on one pane never
+//! stops the rest, and a pane with no content never reaches the recording
+//! backend.
 
 use std::sync::Mutex;
 
@@ -21,11 +22,13 @@ fn build_content_rect(column_count: u16, row_count: u16) -> Rect {
     })
 }
 
-/// A [`PtyBackend`] that records every `resize` it accepts and refuses every
-/// `resize` naming `failed_pane_id`.
+/// A [`PtyBackend`] that records every `resize` it accepts and every batch it
+/// is handed, and refuses every `resize` naming `failed_pane_id`.
 struct RecordingBackend {
     /// Every accepted resize, oldest first.
     accepted_resize_calls: Mutex<Vec<(PaneId, PtySize)>>,
+    /// The entries of every `resize_panes` call, oldest call first.
+    resize_batches: Mutex<Vec<Vec<(PaneId, PtySize)>>>,
     /// The pane whose resizes are refused with [`PtyError::UnknownPane`].
     failed_pane_id: Option<PaneId>,
 }
@@ -35,6 +38,7 @@ impl RecordingBackend {
     fn new() -> Self {
         Self {
             accepted_resize_calls: Mutex::new(Vec::new()),
+            resize_batches: Mutex::new(Vec::new()),
             failed_pane_id: None,
         }
     }
@@ -44,8 +48,17 @@ impl RecordingBackend {
     fn with_resize_failure_for(failed_pane_id: PaneId) -> Self {
         Self {
             accepted_resize_calls: Mutex::new(Vec::new()),
+            resize_batches: Mutex::new(Vec::new()),
             failed_pane_id: Some(failed_pane_id),
         }
+    }
+
+    /// The entries of every `resize_panes` call, oldest call first.
+    fn list_resize_batches(&self) -> Vec<Vec<(PaneId, PtySize)>> {
+        self.resize_batches
+            .lock()
+            .expect("resize batch lock")
+            .clone()
     }
 
     /// Every accepted resize, oldest first.
@@ -76,6 +89,17 @@ impl PtyBackend for RecordingBackend {
             .expect("resize log lock")
             .push((pane_id, pty_size));
         Ok(())
+    }
+
+    fn resize_panes(&self, pane_pty_sizes: &[(PaneId, PtySize)]) -> Vec<Result<(), PtyError>> {
+        self.resize_batches
+            .lock()
+            .expect("resize batch lock")
+            .push(pane_pty_sizes.to_vec());
+        pane_pty_sizes
+            .iter()
+            .map(|&(pane_id, pty_size)| self.resize_pane(pane_id, pty_size))
+            .collect()
     }
 
     fn write_pane_input(&self, _pane_id: PaneId, _input_bytes: &[u8]) -> Result<(), PtyError> {
@@ -153,7 +177,7 @@ fn compute_pty_size_passes_the_largest_rect_through_unchanged() {
 }
 
 #[test]
-fn an_empty_batch_yields_no_results_and_no_backend_calls() {
+fn an_empty_batch_yields_no_results_and_resizes_no_pane() {
     let recording_backend = RecordingBackend::new();
 
     let resize_results =
@@ -164,7 +188,7 @@ fn an_empty_batch_yields_no_results_and_no_backend_calls() {
 }
 
 #[test]
-fn a_pane_without_content_is_skipped_without_a_backend_call() {
+fn a_pane_without_content_is_skipped_and_resizes_no_pane() {
     let recording_backend = RecordingBackend::new();
     let pane_id = PaneId::new();
 
@@ -283,7 +307,27 @@ fn a_mixed_batch_preserves_order_and_skips_none_panes() {
             },
         ]
     );
-    // Only the two visible panes hit the recording_backend, in order.
+    // Only the two visible panes hit the recording_backend, in order, in
+    // one batch.
+    assert_eq!(
+        recording_backend.list_resize_batches(),
+        vec![vec![
+            (
+                first_pane_id,
+                PtySize {
+                    column_count: 10,
+                    row_count: 5
+                }
+            ),
+            (
+                last_pane_id,
+                PtySize {
+                    column_count: 20,
+                    row_count: 8
+                }
+            ),
+        ]]
+    );
     assert_eq!(
         recording_backend.list_resize_calls(),
         vec![

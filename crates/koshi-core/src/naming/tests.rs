@@ -112,12 +112,9 @@ fn exhausted_combinations_wrap_with_a_numeric_suffix() {
 
 #[test]
 fn wrap_suffix_numbering_matches_the_actual_wrap_round() {
-    // `is_name_taken` rejects by STRUCTURE — a round-0 name has exactly two
-    // hyphens (`T-word-word`), a wrapped one has three (`T-word-word-N`) —
-    // never by the specific number the assertion expects. A predicate like
-    // `!candidate_name.ends_with("-2")` instead describes the accepted *shape*, so a
-    // walk that reaches that shape at the wrong round (e.g. round 1 emitting
-    // "-1" instead of "-2") still satisfies it; this one does not.
+    // `is_round_zero_name_shape` reports every round-0 name, `T-word-word`
+    // with two hyphens, as taken, and no wrapped name, `T-word-word-N` with
+    // three. The first wrapped name is free, and the assertions pin its number.
     let is_round_zero_name_shape = |candidate_name: &str| candidate_name.matches('-').count() == 2;
 
     let first_wrap_name = generate_name_from_start(NameKind::Tab, is_round_zero_name_shape, 0);
@@ -238,20 +235,4 @@ fn a_taken_name_in_the_wrap_round_is_skipped_for_the_next_stride_candidate() {
     };
     let generated_name = generate_name_from_start(NameKind::Tab, is_candidate_name_taken, 0);
     assert_eq!(generated_name, "T-しずか-りす-2");
-}
-
-#[test]
-fn random_name_combination_index_with_bound_one_is_zero() {
-    assert_eq!(generate_random_name_combination_index(1), 0);
-}
-
-#[test]
-fn random_name_combination_index_stays_below_its_exclusive_bound() {
-    for _ in 0..1_000 {
-        let random_name_combination_index = generate_random_name_combination_index(7);
-        assert!(
-            random_name_combination_index < 7,
-            "{random_name_combination_index}"
-        );
-    }
 }

@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 use clap::Parser;
 use koshi::cli::{
     parse_session_reference, ActionsCommand, Cli, CliCommand, DebugCommand, InspectTarget,
-    KeysCommand, OutputFormat, TabReference,
+    KeysCommand, OutputFormat, SessionReference, TabReference,
 };
 use koshi::config_command;
 use koshi::doctor;
@@ -20,6 +20,7 @@ use koshi::updater;
 use koshi::version;
 use koshi_client::attach;
 use koshi_core::command::{CliExitCode, Command, CommandResult, DetachArgs};
+use koshi_core::ids::parse_owned_session_id;
 use koshi_daemon::pty_supervisor;
 use koshi_daemon::router;
 use koshi_daemon::session_server::{self, ResumeSupport};
@@ -34,6 +35,13 @@ use koshi_link::remote_client;
 const CLI_PARSER_STACK_SIZE_BYTES: usize = 2 * 1024 * 1024;
 
 fn main() -> ExitCode {
+    // `SIGCHLD` takes its default action in this process, whatever action the
+    // process that started it left: each child this process starts stays
+    // waitable until a wait collects it.
+    #[cfg(unix)]
+    // SAFETY: `signal` with `SIG_DFL` installs no handler.
+    let _ = unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) };
+
     // On Windows, the standard handles of this process pass to no child
     // process by inheritance.
     #[cfg(windows)]
@@ -97,8 +105,7 @@ fn parse_cli_arguments() -> Cli {
 /// session; outside one, the routing layer picks the target session from the
 /// explicit `--session`/`--tab`/`--pane`/`--client` flags, else defaults to
 /// the only running session. `--remote` names another machine and picks the
-/// target from that machine's sessions instead, by the same rules. A verb the
-/// socket does not serve yet reports IPC unavailable.
+/// target from that machine's sessions instead, by the same rules.
 fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     // A service command whose config migration fails prints the failure on
     // stderr and starts anyway. A session server also writes it to its log.
@@ -144,6 +151,31 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
                      such as `koshi attach --remote <server>`"
                 .to_string(),
         });
+    }
+
+    // `--remote` names a session by its id or name: `<user id>/<session id>`
+    // is refused with it, and so is any other text with a `/`.
+    if cli.remote_server_reference.is_some() {
+        let owned_session_id = match &cli.command {
+            Some(CliCommand::Attach {
+                session_argument: Some(session_argument),
+                ..
+            }) => parse_owned_session_id(session_argument)
+                .map_err(|detail| CliError::InvalidArgs { detail })?,
+            Some(cli_command) => match cli_command.get_target_session_reference() {
+                Some(SessionReference::OwnedSessionId(owned_session_id)) => Some(*owned_session_id),
+                _ => None,
+            },
+            None => None,
+        };
+        if let Some(owned_session_id) = owned_session_id {
+            return Err(CliError::InvalidArgs {
+                detail: format!(
+                    "--remote takes a session id or name, not `{owned_session_id}`, \
+                     which names a folder of this machine's shared directory"
+                ),
+            });
+        }
     }
 
     // `--allow-other-users` is refused on Windows, where only the user who
@@ -377,8 +409,8 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
 
     if cli.is_interactive_launch() {
         // The update offer runs before the terminal enters raw mode, and reads
-        // its answer from plain standard input. A failure never blocks the
-        // launch.
+        // its answer from plain standard input. The update check runs in a
+        // background thread, and a failure never blocks the launch.
         updater::prompt_startup_update();
         return koshi_client::app::run_default_client(cli.profile_name.as_deref());
     }
@@ -488,6 +520,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
             }
             Route::External {
                 session_id,
+                owner_user_id,
                 targets: resolved_targets,
             } => {
                 let (_, action_command) = cli_command
@@ -495,6 +528,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
                     .expect("every verb that is not an action returned above");
                 ipc_client::submit_external_command(
                     session_id,
+                    owner_user_id,
                     cli_command.get_source_client_id(),
                     action_command,
                 )?
@@ -606,7 +640,7 @@ fn run_discovery(
                     eprintln!("koshi: {window_note}");
                 }
             }
-            let mut session_rows = discovery::build_session_rows(session_overviews);
+            let mut session_rows = discovery::build_session_rows(&discovered_sessions);
             session_rows.extend(
                 remote_client::list_saved_server_session_rows()
                     .into_iter()
@@ -727,7 +761,9 @@ fn run_dump_state(output_format: OutputFormat) -> Result<(), CliError> {
 }
 
 /// Serve a `koshi debug dump-layout` from live state: find the sessions in
-/// scope, ask each for its layout, and print them.
+/// scope, ask each for its layout, up to
+/// [`MAX_SESSIONS_ASKED_AT_ONCE`](ipc_client::MAX_SESSIONS_ASKED_AT_ONCE) at
+/// the same time, and print them.
 ///
 /// `--tab` naming no running tab fails the lookup, and so does a tab that
 /// closes between that lookup and the session's answer. A session that refuses
@@ -756,18 +792,20 @@ fn run_dump_layout(
                 Some(tab_id),
             )?]
         }
-        None => discovered_sessions
-            .sessions
-            .iter()
-            .map(|session_overview| {
+        None => ipc_client::ask_sessions_at_once(
+            &discovered_sessions.sessions,
+            None,
+            |session_overview| {
                 ipc_client::fetch_layout(
                     &runtime_directory,
                     shared_sessions_base_directory.as_deref(),
                     session_overview.session.session_id,
                     None,
                 )
-            })
-            .collect::<Result<Vec<_>, CliError>>()?,
+            },
+        )
+        .into_iter()
+        .collect::<Result<Vec<_>, CliError>>()?,
     };
     print!("{}", output::render_layouts(&tab_layouts, output_format));
 
@@ -778,7 +816,9 @@ fn run_dump_layout(
 }
 
 /// Serve a `koshi debug events` from live state: find the sessions in scope,
-/// ask each for its recent events, narrow them, and print them.
+/// ask each for its recent events, up to
+/// [`MAX_SESSIONS_ASKED_AT_ONCE`](ipc_client::MAX_SESSIONS_ASKED_AT_ONCE) at
+/// the same time, narrow them, and print them.
 ///
 /// `since_duration` keeps the events recorded within that much of now, and
 /// keeps every event when it reaches back further than the clock can
@@ -803,10 +843,8 @@ fn run_debug_events(
     )?;
     let oldest_event_time = output::compute_oldest_event_time(SystemTime::now(), since_duration);
 
-    let session_events = discovered_sessions
-        .sessions
-        .iter()
-        .map(|session_overview| {
+    let session_events =
+        ipc_client::ask_sessions_at_once(&discovered_sessions.sessions, None, |session_overview| {
             let recent_events = ipc_client::fetch_recent_events(
                 &runtime_directory,
                 shared_sessions_base_directory.as_deref(),
@@ -822,6 +860,7 @@ fn run_debug_events(
                 ),
             })
         })
+        .into_iter()
         .collect::<Result<Vec<_>, CliError>>()?;
     print!(
         "{}",

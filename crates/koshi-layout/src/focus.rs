@@ -13,7 +13,7 @@
 use koshi_core::geometry::{Rect, SplitDirection};
 use koshi_core::ids::PaneId;
 
-use crate::solver::{compute_cell_area, is_content_visible, StackHeader};
+use crate::solver::{is_content_visible, StackHeader};
 use crate::tree::SplitNode;
 
 /// Focus targets after a removal, for the caller to rank against its own
@@ -58,12 +58,12 @@ pub fn compute_focus_candidates(
 
     // Largest absorbed area wins; on a tie the earlier pane in layout order
     // keeps it.
-    let mut largest_absorbed_pane: Option<(PaneId, u64)> = None;
+    let mut largest_absorbed_pane: Option<(PaneId, u32)> = None;
     for &(pane_id, pane_rect) in &visible_pane_rects {
         let Some(overlap_rect) = pane_rect.compute_intersection(removed_pane_rect) else {
             continue;
         };
-        let absorbed_cell_area = compute_cell_area(overlap_rect);
+        let absorbed_cell_area = overlap_rect.size.compute_cell_count();
         if largest_absorbed_pane.is_none_or(|(_, largest_absorbed_cell_area)| {
             absorbed_cell_area > largest_absorbed_cell_area
         }) {

@@ -6,9 +6,8 @@ use serde::Serialize;
 use super::*;
 use crate::event::SessionEvent;
 use crate::frame::{
-    FrameAttributes, FrameCell, FrameGraphicsProtocol, FrameImageAction, FrameImageChunk,
-    FrameImageDisplay, FrameImageRecordHeader, FrameImageTransfer, FrameRow, FrameRun, FrameSlot,
-    FrameStyle, FrameWindow,
+    FrameGraphicsProtocol, FrameImageAction, FrameImageDisplay, FrameImageRecordHeader,
+    FrameImageTransfer, FrameSlot,
 };
 use crate::protocol::{ConnectionToken, IpcRequestKind, IpcResult};
 use crate::router::{RouterRequestKind, RouterResult};
@@ -668,6 +667,10 @@ fn sample_supervisor_kinds() -> Vec<SupervisorRequestKind> {
         SupervisorRequestKind::PauseOutput,
         SupervisorRequestKind::ResumeOutput,
         SupervisorRequestKind::Shutdown,
+        SupervisorRequestKind::GrantPaneOutput {
+            pane_id: PaneId::new(),
+            granted_byte_count: 65536,
+        },
     ]
 }
 
@@ -717,9 +720,6 @@ fn sample_events() -> Vec<SessionEvent> {
     let command_id = CommandId::new();
 
     vec![
-        SessionEvent::Painted {
-            frame: Box::new(build_test_painted_frame()),
-        },
         SessionEvent::ImageCacheReset,
         SessionEvent::ImageContentStart {
             image_transfer: FrameImageTransfer {
@@ -735,13 +735,8 @@ fn sample_events() -> Vec<SessionEvent> {
                 image_byte_count: 4,
             },
         },
-        SessionEvent::ImageContentChunk {
-            image_chunk: FrameImageChunk {
-                image_transfer_id: 1,
-                byte_offset: 0,
-                is_last: true,
-                chunk_bytes: vec![0],
-            },
+        SessionEvent::ImageContentReleased {
+            image_content_ids: vec![1],
         },
         SessionEvent::PanePlacementSnapshot {
             request_id: 1,
@@ -824,6 +819,7 @@ fn sample_events() -> Vec<SessionEvent> {
         },
         SessionEvent::SwitchTo {
             session_id: SessionId::new(),
+            owner_user_id: None,
         },
         SessionEvent::PlacementCommandRejected {
             command_id: koshi_core::ids::CommandId::new(),
@@ -839,7 +835,9 @@ fn placement_snapshot_fixture_passes_validation() {
         .expect("the wire placement fixture must remain valid");
 }
 
-fn build_test_placement_snapshot() -> crate::placement::PanePlacementSnapshot {
+/// A placement preview that passes validation: a source tab and a destination
+/// tab of one 80x24 pane each, with the destination pane focused.
+pub(crate) fn build_test_placement_snapshot() -> crate::placement::PanePlacementSnapshot {
     use koshi_core::geometry::{Rect, Size};
     use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
     use koshi_layout::mode::LayoutMode;
@@ -854,41 +852,6 @@ fn build_test_placement_snapshot() -> crate::placement::PanePlacementSnapshot {
         row_count: 24,
     };
     let viewport_rect = Rect::from_size_at_origin(viewport_size);
-    let build_frame_cell = || FrameCell {
-        character: ' ',
-        combining_characters: Vec::new(),
-        cell_width: 1,
-        style: FrameStyle {
-            foreground_color: Default::default(),
-            background_color: Default::default(),
-            underline_color: None,
-            text_attributes: FrameAttributes {
-                is_bold: false,
-                is_italic: false,
-                is_reverse: false,
-                is_faint: false,
-                is_blinking: false,
-                is_concealed: false,
-                is_struck_through: false,
-                is_overlined: false,
-                underline_style: Default::default(),
-            },
-        },
-    };
-    let build_frame_window = || FrameWindow {
-        column_count: viewport_size.column_count,
-        row_snapshots: vec![
-            FrameRow {
-                cell_runs: vec![FrameRun {
-                    repeat_count: viewport_size.column_count,
-                    cell: build_frame_cell(),
-                }],
-                row_end: Default::default(),
-            };
-            usize::from(viewport_size.row_count)
-        ],
-        view_row_offset: 0,
-    };
     let build_tab_snapshot = |tab_id: TabId, pane_id: PaneId, tab_name: &str| {
         crate::placement::PanePlacementTabSnapshot {
             tab_id,
@@ -908,7 +871,10 @@ fn build_test_placement_snapshot() -> crate::placement::PanePlacementSnapshot {
             gap_cell_count: 0,
             pane_snapshots: vec![crate::placement::PanePlacementPaneSnapshot {
                 pane_id,
-                terminal_window: Some(build_frame_window()),
+                terminal_window: Some(crate::placement::tests::build_test_window(
+                    viewport_size.column_count,
+                    viewport_size.row_count,
+                )),
                 image_placement_snapshots: Vec::new(),
             }],
         }
@@ -1015,53 +981,6 @@ fn sample_router_results() -> Vec<RouterResult> {
             message: String::new(),
         }),
     ]
-}
-
-/// The smallest frame that still holds every record a painted frame needs.
-fn build_test_painted_frame() -> crate::frame::PaintedFrame {
-    use koshi_core::geometry::Size;
-    use koshi_core::ids::{ClientId, SessionId, TabId};
-
-    crate::frame::PaintedFrame {
-        is_recovery_notice_visible: false,
-        session_snapshot: crate::frame::FrameSession {
-            session_id: SessionId::new(),
-            session_revision: 17,
-            session_name: String::new(),
-            active_tab_snapshot: crate::frame::FrameTab {
-                tab_id: TabId::new(),
-                tab_name: String::new(),
-                pane_slots: Vec::new(),
-                tab_size: Size {
-                    column_count: 80,
-                    row_count: 24,
-                },
-                stack_headers: Vec::new(),
-                layout_mode: koshi_layout::mode::LayoutMode::Tiled,
-                is_every_pane_suppressed: false,
-                gap_cell_count: 0,
-            },
-            tab_snapshots: Vec::new(),
-            floating_pane_slots: Vec::new(),
-            floating_pane_ids: Vec::new(),
-        },
-        pane_snapshots: Vec::new(),
-        client_snapshot: crate::frame::FrameClient {
-            client_id: ClientId::new(),
-            client_revision: 19,
-            viewport_size: Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            active_tab_id: TabId::new(),
-            focused_pane_id: None,
-            active_tab_focused_pane_id: None,
-            lock_mode: koshi_core::lock::LockMode::default(),
-            last_applied_lock_command_id: None,
-            last_applied_floating_pane_move_command_id: None,
-            is_mouse_selection_enabled: false,
-        },
-    }
 }
 
 #[test]

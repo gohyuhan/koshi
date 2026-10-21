@@ -96,6 +96,10 @@ same machine or another one, and the panes are where you left them.
 
 ## Installation
 
+Every way below downloads Koshi from the GitHub account `gohyuhan`, and is as
+safe as that account. [config-docs/cli.md](config-docs/cli.md) states what
+`koshi update` checks.
+
 ### Linux
 
 ```bash
@@ -105,18 +109,16 @@ curl --proto "=https" --tlsv1.2 -sSfL \
 
 ### macOS
 
-Install with the release script:
-
-```bash
-curl --proto "=https" --tlsv1.2 -sSfL \
-  https://github.com/gohyuhan/koshi/releases/latest/download/install.sh | bash
-```
-
-Or install with Homebrew:
+Install with Homebrew:
 
 ```bash
 brew install gohyuhan/koshi/koshi
 ```
+
+`install.sh` does not install on macOS: it prints this Homebrew command and
+stops. A Koshi that `install.sh` installed before stays in `/usr/local/bin`
+and updates with `koshi update`. To move it to Homebrew, delete it with
+`sudo rm -f /usr/local/bin/koshi`, then run the Homebrew command.
 
 Homebrew adds the Koshi tap during installation. Upgrade Koshi with the other
 outdated packages:

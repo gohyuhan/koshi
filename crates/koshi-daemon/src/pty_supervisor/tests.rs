@@ -22,7 +22,10 @@
 use std::thread;
 use std::time::Instant;
 
-use koshi_ipc::supervisor::{SupervisorRequest, SUPERVISOR_PROTOCOL_VERSION};
+use koshi_ipc::supervisor::{
+    decode_pane_output_frame, SupervisorRequest, SUPERVISOR_PROTOCOL_VERSION,
+};
+use koshi_ipc::transport::ReceivedFrame;
 use koshi_pty::supervisor::SupervisorPtyBackend;
 
 use super::*;
@@ -39,6 +42,11 @@ const TEST_IDLE_EXIT_DURATION: Duration = Duration::from_millis(300);
 /// The idle window for the tests that let the link go and bring it back, long
 /// enough that none of them sits through it.
 const LONG_IDLE_EXIT_DURATION: Duration = Duration::from_secs(30);
+
+/// A protocol version whose links carry each chunk of pane output whole, as
+/// JSON, with no output window: the version before
+/// [`OUTPUT_WINDOW_PROTOCOL_VERSION`].
+const JSON_OUTPUT_PROTOCOL_VERSION: u32 = OUTPUT_WINDOW_PROTOCOL_VERSION - 1;
 
 /// The secret every test link presents.
 fn build_test_connection_token() -> ConnectionToken {
@@ -100,8 +108,8 @@ impl RunningSupervisor {
 }
 
 /// An address for one test's link, different on every call. On Unix it is a
-/// socket file inside `dir`; on Windows it is a pipe name that does not use
-/// `dir`, made of this process's id and a counter.
+/// socket file inside `runtime_directory`; on Windows it is a pipe name that
+/// does not use `runtime_directory`, made of this process's id and a counter.
 fn build_test_supervisor_address(runtime_directory: &Path) -> String {
     #[cfg(unix)]
     {
@@ -139,8 +147,11 @@ fn bind_test_listener() -> (tempfile::TempDir, String, Listener) {
 /// keeps the events it passes on the way to a response and the
 /// `receive_next_event` readers hand them back.
 struct TestLink {
-    /// The connection itself. Dropping it closes the socket outright.
-    connection: Connection,
+    /// The reading half of the connection. Dropping both halves closes the
+    /// socket outright.
+    frame_reader: FrameReader,
+    /// The writing half of the connection.
+    frame_writer: FrameWriter,
     /// The id the next request carries.
     next_request_id: u64,
     /// Events read while waiting for a response, oldest first.
@@ -151,14 +162,25 @@ impl TestLink {
     /// Open a link to `supervisor_address` without a token, so the supervisor's gate
     /// stays closed.
     fn connect_without_hello(supervisor_address: &str) -> TestLink {
+        TestLink::from_connection(
+            Connection::connect(supervisor_address).expect("the link opens"),
+            1,
+        )
+    }
+
+    /// A test link over `connection`, whose next request carries
+    /// `next_request_id`.
+    fn from_connection(connection: Connection, next_request_id: u64) -> TestLink {
+        let (frame_reader, frame_writer) = connection.split();
         TestLink {
-            connection: Connection::connect(supervisor_address).expect("the link opens"),
-            next_request_id: 1,
+            frame_reader,
+            frame_writer,
+            next_request_id,
             pending_events: Vec::new(),
         }
     }
 
-    /// Open a link to `address` and send the Hello that opens it.
+    /// Open a link to `supervisor_address` and send the Hello that opens it.
     fn connect_with_connection_token(supervisor_address: &str) -> TestLink {
         let mut link = TestLink::connect_without_hello(supervisor_address);
         assert_eq!(
@@ -180,7 +202,7 @@ impl TestLink {
     ) -> SupervisorResult {
         let request_id = self.next_request_id;
         self.next_request_id += 1;
-        self.connection
+        self.frame_writer
             .send(&SupervisorRequest {
                 request_id,
                 request_kind,
@@ -188,9 +210,9 @@ impl TestLink {
             .expect("the request is sent");
         loop {
             match self.receive_supervisor_message() {
-                SupervisorMessage::Response(response) => {
-                    assert_eq!(response.request_id, Some(request_id));
-                    return response.answer_result;
+                SupervisorMessage::Response(supervisor_response) => {
+                    assert_eq!(supervisor_response.request_id, Some(request_id));
+                    return supervisor_response.answer_result;
                 }
                 SupervisorMessage::Event(supervisor_event) => {
                     self.pending_events.push(supervisor_event)
@@ -199,11 +221,64 @@ impl TestLink {
         }
     }
 
+    /// Send one request and return its id, without waiting for an answer.
+    #[cfg(unix)]
+    fn send_request(&mut self, request_kind: SupervisorRequestKind) -> u64 {
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        self.frame_writer
+            .send(&SupervisorRequest {
+                request_id,
+                request_kind,
+            })
+            .expect("the request is sent");
+        request_id
+    }
+
+    /// The next response, keeping any event read on the way.
+    #[cfg(unix)]
+    fn receive_next_response(&mut self) -> SupervisorResponse {
+        loop {
+            match self.receive_supervisor_message() {
+                SupervisorMessage::Response(supervisor_response) => return supervisor_response,
+                SupervisorMessage::Event(supervisor_event) => {
+                    self.pending_events.push(supervisor_event)
+                }
+            }
+        }
+    }
+
+    /// Read `pane_id`'s output until `received_output_bytes` holds at least
+    /// `byte_count` bytes, appending each chunk. Grants the bytes back the
+    /// way a session server does: once `ungranted_byte_count` reaches
+    /// [`MINIMUM_OUTPUT_GRANT_BYTE_COUNT`](koshi_ipc::supervisor::MINIMUM_OUTPUT_GRANT_BYTE_COUNT),
+    /// in one grant.
+    #[cfg(unix)]
+    fn receive_output_with_grants(
+        &mut self,
+        pane_id: PaneId,
+        byte_count: usize,
+        received_output_bytes: &mut Vec<u8>,
+        ungranted_byte_count: &mut u32,
+    ) {
+        while received_output_bytes.len() < byte_count {
+            let output_bytes = self.receive_next_output(pane_id);
+            *ungranted_byte_count += u32::try_from(output_bytes.len()).expect("a frame fits u32");
+            received_output_bytes.extend_from_slice(&output_bytes);
+            if *ungranted_byte_count >= koshi_ipc::supervisor::MINIMUM_OUTPUT_GRANT_BYTE_COUNT {
+                self.send_request(SupervisorRequestKind::GrantPaneOutput {
+                    pane_id,
+                    granted_byte_count: std::mem::take(ungranted_byte_count),
+                });
+            }
+        }
+    }
+
     /// Send raw JSON as one frame, for a request no build has.
     fn send_raw_frame(&mut self, frame_text: &str) {
         let raw_frame: serde_json::Value =
             serde_json::from_str(frame_text).expect("the raw request is JSON");
-        self.connection
+        self.frame_writer
             .send(&raw_frame)
             .expect("the raw request is sent");
     }
@@ -217,8 +292,8 @@ impl TestLink {
         }
         match self.receive_supervisor_message() {
             SupervisorMessage::Event(supervisor_event) => supervisor_event,
-            SupervisorMessage::Response(response) => {
-                panic!("no request was in flight, yet a response arrived: {response:?}")
+            SupervisorMessage::Response(supervisor_response) => {
+                panic!("no request was in flight, yet a response arrived: {supervisor_response:?}")
             }
         }
     }
@@ -277,9 +352,28 @@ impl TestLink {
         }
     }
 
-    /// One frame from the supervisor, decoded as this build reads it.
+    /// One frame from the supervisor, decoded as this build reads it. A binary
+    /// frame is one chunk of one pane's output, returned as
+    /// [`SupervisorEvent::Output`]. A frame that does not arrive within
+    /// [`HANG_GUARD_DURATION`] fails the test.
     fn receive_supervisor_message(&mut self) -> SupervisorMessage {
-        self.connection.recv().expect("a frame arrives")
+        self.frame_reader
+            .set_deadline(Some(Instant::now() + HANG_GUARD_DURATION));
+        match self
+            .frame_reader
+            .recv_message_or_binary::<SupervisorMessage>()
+            .expect("a frame arrives")
+        {
+            ReceivedFrame::Message(supervisor_message) => supervisor_message,
+            ReceivedFrame::Binary(frame_bytes) => {
+                let (pane_id, output_bytes) =
+                    decode_pane_output_frame(frame_bytes).expect("a pane output frame decodes");
+                SupervisorMessage::Event(SupervisorEvent::Output {
+                    pane_id,
+                    output_bytes,
+                })
+            }
+        }
     }
 }
 
@@ -308,6 +402,15 @@ fn build_shell_spawn_spec(shell_script: &str) -> koshi_core::process::SpawnSpec 
     }
 }
 
+/// The bytes of `output_bytes` from 32 before `byte_offset` to 64 after it,
+/// cut at either end of `output_bytes`.
+#[cfg(unix)]
+fn slice_around_offset(output_bytes: &[u8], byte_offset: usize) -> &[u8] {
+    let slice_start = byte_offset.saturating_sub(32).min(output_bytes.len());
+    let slice_end = byte_offset.saturating_add(64).min(output_bytes.len());
+    &output_bytes[slice_start..slice_end]
+}
+
 /// The size every pane in these tests opens at.
 const TEST_PTY_SIZE: koshi_core::process::PtySize = koshi_core::process::PtySize {
     column_count: 80,
@@ -318,7 +421,7 @@ const TEST_PTY_SIZE: koshi_core::process::PtySize = koshi_core::process::PtySize
 ///
 /// A Windows pseudoconsole asks one as the pane starts and hands over nothing
 /// its child printed until the response reaches it. The supervisor's backend
-/// queues the send_response as the pane opens, and the pane's reader removes the query
+/// queues the answer as the pane opens, and the pane's reader removes the query
 /// from the output, so none reaches the link.
 const CURSOR_POSITION_QUERY_BYTES: &[u8] = b"\x1b[6n";
 
@@ -386,7 +489,7 @@ fn collect_sink_bytes_until(
     }
 }
 
-/// How many cursor-position queries `output` holds.
+/// How many cursor-position queries `output_bytes` holds.
 fn count_cursor_position_queries(output_bytes: &[u8]) -> usize {
     output_bytes
         .windows(CURSOR_POSITION_QUERY_BYTES.len())
@@ -482,11 +585,11 @@ fn a_request_kind_the_supervisor_does_not_have_is_refused_by_name_and_the_link_k
     let mut link = TestLink::connect_with_connection_token(&supervisor.supervisor_address);
 
     link.send_raw_frame(r#"{"request_id":99,"request_kind":{"Rehome":{"pane_id":1}}}"#);
-    let SupervisorMessage::Response(response) = link.receive_supervisor_message() else {
+    let SupervisorMessage::Response(supervisor_response) = link.receive_supervisor_message() else {
         panic!("the refusal is a response, not an event");
     };
     assert_eq!(
-        response,
+        supervisor_response,
         SupervisorResponse {
             request_id: Some(99),
             answer_result: SupervisorResult::Error(IpcErrorPayload {
@@ -515,11 +618,11 @@ fn bytes_that_are_not_a_readable_request_are_refused_and_the_link_keeps_serving(
     let mut link = TestLink::connect_with_connection_token(&supervisor.supervisor_address);
 
     link.send_raw_frame(r#"{"request_id":"not a number","request_kind":"ListPanes"}"#);
-    let SupervisorMessage::Response(response) = link.receive_supervisor_message() else {
+    let SupervisorMessage::Response(supervisor_response) = link.receive_supervisor_message() else {
         panic!("the refusal is a response, not an event");
     };
     assert_eq!(
-        response,
+        supervisor_response,
         SupervisorResponse {
             request_id: None,
             answer_result: SupervisorResult::Error(IpcErrorPayload {
@@ -552,11 +655,11 @@ fn a_request_kind_the_supervisor_does_not_have_is_refused_for_the_missing_hello_
     let mut link = TestLink::connect_without_hello(&supervisor.supervisor_address);
 
     link.send_raw_frame(r#"{"request_id":99,"request_kind":{"Rehome":{"pane_id":1}}}"#);
-    let SupervisorMessage::Response(response) = link.receive_supervisor_message() else {
+    let SupervisorMessage::Response(supervisor_response) = link.receive_supervisor_message() else {
         panic!("the refusal is a response, not an event");
     };
     assert_eq!(
-        response,
+        supervisor_response,
         SupervisorResponse {
             request_id: Some(99),
             answer_result: SupervisorResult::Error(IpcErrorPayload {
@@ -589,11 +692,11 @@ fn bytes_that_are_not_a_readable_request_before_a_hello_are_refused_and_the_link
     let mut link = TestLink::connect_without_hello(&supervisor.supervisor_address);
 
     link.send_raw_frame(r#"{"request_id":"not a number","request_kind":"ListPanes"}"#);
-    let SupervisorMessage::Response(response) = link.receive_supervisor_message() else {
+    let SupervisorMessage::Response(supervisor_response) = link.receive_supervisor_message() else {
         panic!("the refusal is a response, not an event");
     };
     assert_eq!(
-        response,
+        supervisor_response,
         SupervisorResponse {
             request_id: None,
             answer_result: SupervisorResult::Error(IpcErrorPayload {
@@ -711,7 +814,7 @@ fn killing_a_pane_the_supervisor_does_not_hold_is_refused_by_name() {
 
 #[test]
 fn a_pane_the_supervisor_does_not_hold_reports_no_live_working_directory() {
-    // Asking for a directory is answered rather than refused: the send_response for a
+    // Asking for a directory is answered rather than refused: the answer for a
     // pane nothing holds is the same as for one the operating system cannot
     // report on.
     let mut supervisor = RunningSupervisor::start_with_idle_exit_duration(TEST_IDLE_EXIT_DURATION);
@@ -1213,7 +1316,7 @@ fn output_held_for_a_swap_reaches_no_frame_on_this_link_and_arrives_whole_on_the
     );
 
     // The pane prints its second chunk inside this window. The round trip that
-    // follows reads every frame the supervisor wrote before its send_response, so
+    // follows reads every frame the supervisor wrote before its answer, so
     // anything written for the pane would be held here.
     thread::sleep(Duration::from_secs(2));
     assert_eq!(
@@ -1273,7 +1376,7 @@ fn output_held_for_a_swap_that_was_abandoned_reaches_the_same_link_again() {
     );
 
     // The pane prints its second chunk inside this window, and the round trip
-    // that follows reads every frame the supervisor wrote before its send_response.
+    // that follows reads every frame the supervisor wrote before its answer.
     thread::sleep(Duration::from_secs(2));
     assert_eq!(
         link.send_request_and_receive_result(SupervisorRequestKind::ListPanes),
@@ -1382,7 +1485,7 @@ fn shutting_down_closes_every_pane_the_supervisor_still_holds() {
     });
 }
 
-/// True while process `pid` is still around (`kill -0` succeeds).
+/// True while process `process_id` is still around (`kill -0` succeeds).
 #[cfg(unix)]
 fn is_process_alive(process_id: u32) -> bool {
     std::process::Command::new("kill")
@@ -1449,7 +1552,7 @@ fn a_panes_child_prints_through_the_link_once_its_terminal_is_answered() {
     // A real pane inside the supervisor, driven by the backend a session server
     // drives, with only the supervisor running. Nothing outside the pane
     // answers its terminal's cursor-position query, and a Windows pseudoconsole
-    // hands over nothing its child printed until that send_response lands.
+    // hands over nothing its child printed until that answer lands.
     let mut supervisor = RunningSupervisor::start_with_idle_exit_duration(LONG_IDLE_EXIT_DURATION);
     let recording_sink = RecordingSink::new();
     let pty_backend = SupervisorPtyBackend::connect(
@@ -1722,7 +1825,7 @@ fn a_pane_event_waits_until_a_hello_opens_the_link() {
         "a link with no accepted Hello must be handed nothing"
     );
 
-    link_sink.mark_link_open();
+    link_sink.mark_link_open(JSON_OUTPUT_PROTOCOL_VERSION);
     wait_until_condition("the held chunk went out", || {
         output_send_thread.is_finished()
     });
@@ -1774,7 +1877,7 @@ fn a_second_link_carries_no_pane_output_until_its_own_hello_opens_it() {
     let (first_frame_writer, mut first_peer_connection) =
         connect_test_link_pair(&supervisor_address, &supervisor_listener);
     link_sink.set_link_writer(first_frame_writer);
-    link_sink.mark_link_open();
+    link_sink.mark_link_open(JSON_OUTPUT_PROTOCOL_VERSION);
     assert!(
         link_sink.accept_output_bytes(pane_id, b"before the swap".to_vec()),
         "the opened link takes the chunk"
@@ -1807,7 +1910,7 @@ fn a_second_link_carries_no_pane_output_until_its_own_hello_opens_it() {
         "a link that has presented no token must be handed nothing, however the link before it ended"
     );
 
-    link_sink.mark_link_open();
+    link_sink.mark_link_open(JSON_OUTPUT_PROTOCOL_VERSION);
     wait_until_condition("the held chunk went out", || {
         output_send_thread.is_finished()
     });
@@ -2040,11 +2143,7 @@ fn a_second_link_is_answered_only_once_the_first_one_ends() {
         })
     );
 
-    let mut second_test_link = TestLink {
-        connection: second_connection,
-        next_request_id: 2,
-        pending_events: Vec::new(),
-    };
+    let mut second_test_link = TestLink::from_connection(second_connection, 2);
     assert_eq!(
         second_test_link.send_request_and_receive_result(SupervisorRequestKind::Shutdown),
         SupervisorResult::Done
@@ -2061,7 +2160,7 @@ fn an_answer_goes_out_on_a_link_that_no_hello_has_opened_and_that_is_holding_its
     let link_sink = LinkSink::new();
     let (frame_writer, mut peer_connection) =
         connect_test_link_pair(&supervisor_address, &supervisor_listener);
-    link_sink.set_link_writer(frame_writer);
+    let link_generation = link_sink.set_link_writer(frame_writer);
     link_sink.pause_event_output();
 
     let supervisor_response = SupervisorResponse {
@@ -2069,7 +2168,7 @@ fn an_answer_goes_out_on_a_link_that_no_hello_has_opened_and_that_is_holding_its
         answer_result: SupervisorResult::Panes(Vec::new()),
     };
     assert!(
-        link_sink.send_response(supervisor_response.clone()),
+        link_sink.send_response(link_generation, supervisor_response.clone()),
         "a link that is up takes the response"
     );
     assert_eq!(
@@ -2082,14 +2181,63 @@ fn an_answer_goes_out_on_a_link_that_no_hello_has_opened_and_that_is_holding_its
 
 #[test]
 fn an_answer_with_no_link_up_reports_the_link_is_gone() {
+    let (_runtime_directory, supervisor_address, supervisor_listener) = bind_test_listener();
     let link_sink = LinkSink::new();
+    let (frame_writer, _peer_connection) =
+        connect_test_link_pair(&supervisor_address, &supervisor_listener);
+    let link_generation = link_sink.set_link_writer(frame_writer);
+    link_sink.clear_link();
 
     assert!(
-        !link_sink.send_response(SupervisorResponse {
-            request_id: Some(1),
-            answer_result: SupervisorResult::Done,
-        }),
+        !link_sink.send_response(
+            link_generation,
+            SupervisorResponse {
+                request_id: Some(1),
+                answer_result: SupervisorResult::Done,
+            }
+        ),
         "a response with nowhere to go reports the link ended"
+    );
+}
+
+#[test]
+fn an_answer_for_a_replaced_link_is_dropped() {
+    // A Kill is answered from its own thread, after its close returns. An
+    // answer tagged with the generation of a link that a newer one replaced
+    // does not reach the newer link's peer.
+    let (_runtime_directory, supervisor_address, supervisor_listener) = bind_test_listener();
+    let link_sink = LinkSink::new();
+    let (first_frame_writer, first_peer_connection) =
+        connect_test_link_pair(&supervisor_address, &supervisor_listener);
+    let first_link_generation = link_sink.set_link_writer(first_frame_writer);
+    link_sink.clear_link();
+    drop(first_peer_connection);
+    let (second_frame_writer, mut second_peer_connection) =
+        connect_test_link_pair(&supervisor_address, &supervisor_listener);
+    let second_link_generation = link_sink.set_link_writer(second_frame_writer);
+    assert_eq!(second_link_generation, first_link_generation + 1);
+
+    assert!(
+        !link_sink.send_response(
+            first_link_generation,
+            SupervisorResponse {
+                request_id: Some(4),
+                answer_result: SupervisorResult::Done,
+            }
+        ),
+        "an answer for the replaced link reports that link ended"
+    );
+    let current_link_response = SupervisorResponse {
+        request_id: Some(1),
+        answer_result: SupervisorResult::Panes(Vec::new()),
+    };
+    assert!(link_sink.send_response(second_link_generation, current_link_response.clone()));
+    assert_eq!(
+        second_peer_connection
+            .recv::<SupervisorMessage>()
+            .expect("a frame arrives"),
+        SupervisorMessage::Response(current_link_response),
+        "the first frame the new peer reads is its own answer"
     );
 }
 
@@ -2105,7 +2253,7 @@ fn a_hold_asked_for_on_one_link_does_not_carry_to_the_next_one() {
     let (first_frame_writer, first_peer_connection) =
         connect_test_link_pair(&supervisor_address, &supervisor_listener);
     link_sink.set_link_writer(first_frame_writer);
-    link_sink.mark_link_open();
+    link_sink.mark_link_open(JSON_OUTPUT_PROTOCOL_VERSION);
     link_sink.pause_event_output();
     link_sink.clear_link();
     drop(first_peer_connection);
@@ -2113,7 +2261,7 @@ fn a_hold_asked_for_on_one_link_does_not_carry_to_the_next_one() {
     let (second_frame_writer, mut second_peer_connection) =
         connect_test_link_pair(&supervisor_address, &supervisor_listener);
     link_sink.set_link_writer(second_frame_writer);
-    link_sink.mark_link_open();
+    link_sink.mark_link_open(JSON_OUTPUT_PROTOCOL_VERSION);
     let output_send_thread = {
         let link_sink = Arc::clone(&link_sink);
         thread::spawn(move || link_sink.accept_output_bytes(pane_id, b"after the swap".to_vec()))
@@ -2147,7 +2295,7 @@ fn two_holds_on_one_link_are_lifted_by_one_resume() {
     let (frame_writer, mut peer_connection) =
         connect_test_link_pair(&supervisor_address, &supervisor_listener);
     link_sink.set_link_writer(frame_writer);
-    link_sink.mark_link_open();
+    link_sink.mark_link_open(JSON_OUTPUT_PROTOCOL_VERSION);
 
     link_sink.pause_event_output();
     link_sink.pause_event_output();
@@ -2194,7 +2342,7 @@ fn an_exit_written_to_a_link_leaves_the_pane_to_close_until_it_is_forgotten() {
     let (frame_writer, mut peer_connection) =
         connect_test_link_pair(&supervisor_address, &supervisor_listener);
     link_sink.set_link_writer(frame_writer);
-    link_sink.mark_link_open();
+    link_sink.mark_link_open(JSON_OUTPUT_PROTOCOL_VERSION);
 
     link_sink.accept_exit_status(pane_id, ExitStatus::ExitCode(3));
 
@@ -2237,4 +2385,539 @@ fn an_exit_for_a_pane_being_closed_leaves_no_pane_to_close_again() {
         Vec::<PaneId>::new(),
         "an exit nobody was handed names no pane whose entry is still to close"
     );
+}
+
+/// The next frame `peer_frame_reader` reads, which must be a pane output
+/// frame: its pane and its bytes.
+fn receive_pane_output_frame(peer_frame_reader: &mut FrameReader) -> (PaneId, Vec<u8>) {
+    match peer_frame_reader
+        .recv_message_or_binary::<SupervisorMessage>()
+        .expect("a frame arrives")
+    {
+        ReceivedFrame::Binary(frame_bytes) => {
+            decode_pane_output_frame(frame_bytes).expect("a pane output frame decodes")
+        }
+        ReceivedFrame::Message(supervisor_message) => {
+            panic!("a pane output frame was due, and this is {supervisor_message:?}")
+        }
+    }
+}
+
+/// A sink with one link open at [`OUTPUT_WINDOW_PROTOCOL_VERSION`], and the
+/// peer's reading half of that link. The peer's writing half is returned too:
+/// the link stays up while the caller holds it. Every read on the peer's
+/// reading half fails once [`HANG_GUARD_DURATION`] has passed.
+fn open_output_window_link(
+    supervisor_address: &str,
+    supervisor_listener: &Listener,
+    link_sink: &LinkSink,
+) -> (FrameReader, FrameWriter) {
+    let (frame_writer, peer_connection) =
+        connect_test_link_pair(supervisor_address, supervisor_listener);
+    link_sink.set_link_writer(frame_writer);
+    link_sink.mark_link_open(OUTPUT_WINDOW_PROTOCOL_VERSION);
+    let (mut peer_frame_reader, peer_frame_writer) = peer_connection.split();
+    peer_frame_reader.set_deadline(Some(Instant::now() + HANG_GUARD_DURATION));
+    (peer_frame_reader, peer_frame_writer)
+}
+
+#[test]
+fn a_chunk_larger_than_the_credit_goes_out_in_parts_as_grants_arrive() {
+    // The window is spent down to 10 bytes. A 25-byte chunk then goes out as a
+    // 10-byte frame, waits with no credit, and sends its last 15 bytes once a
+    // 15-byte grant arrives.
+    let (_runtime_directory, supervisor_address, supervisor_listener) = bind_test_listener();
+    let link_sink = LinkSink::new();
+    let (mut peer_frame_reader, _peer_frame_writer) =
+        open_output_window_link(&supervisor_address, &supervisor_listener, &link_sink);
+    let pane_id = PaneId::new();
+    let output_send_thread = {
+        let link_sink = Arc::clone(&link_sink);
+        thread::spawn(move || {
+            link_sink.accept_output_bytes(
+                pane_id,
+                vec![b'a'; PANE_OUTPUT_WINDOW_BYTE_COUNT as usize - 10],
+            ) && link_sink.accept_output_bytes(pane_id, vec![b'b'; 25])
+        })
+    };
+
+    assert_eq!(
+        receive_pane_output_frame(&mut peer_frame_reader),
+        (
+            pane_id,
+            vec![b'a'; PANE_OUTPUT_WINDOW_BYTE_COUNT as usize - 10]
+        )
+    );
+    assert_eq!(
+        receive_pane_output_frame(&mut peer_frame_reader),
+        (pane_id, vec![b'b'; 10])
+    );
+    thread::sleep(TEST_IDLE_EXIT_DURATION);
+    assert!(
+        !output_send_thread.is_finished(),
+        "a pane with no credit left waits for a grant"
+    );
+
+    link_sink.grant_pane_output(pane_id, 15);
+    assert_eq!(
+        receive_pane_output_frame(&mut peer_frame_reader),
+        (pane_id, vec![b'b'; 15])
+    );
+    assert!(output_send_thread
+        .join()
+        .expect("the output send thread ended"));
+}
+
+#[test]
+fn a_grant_never_raises_the_credit_past_the_window() {
+    let (_runtime_directory, supervisor_address, supervisor_listener) = bind_test_listener();
+    let link_sink = LinkSink::new();
+    let (mut peer_frame_reader, _peer_frame_writer) =
+        open_output_window_link(&supervisor_address, &supervisor_listener, &link_sink);
+    let pane_id = PaneId::new();
+
+    link_sink.grant_pane_output(pane_id, u32::MAX);
+    let output_send_thread = {
+        let link_sink = Arc::clone(&link_sink);
+        thread::spawn(move || {
+            link_sink.accept_output_bytes(
+                pane_id,
+                vec![b'a'; PANE_OUTPUT_WINDOW_BYTE_COUNT as usize + 1],
+            )
+        })
+    };
+
+    assert_eq!(
+        receive_pane_output_frame(&mut peer_frame_reader),
+        (pane_id, vec![b'a'; PANE_OUTPUT_WINDOW_BYTE_COUNT as usize]),
+        "one frame carries the window and no byte more"
+    );
+    thread::sleep(TEST_IDLE_EXIT_DURATION);
+    assert!(!output_send_thread.is_finished());
+    link_sink.grant_pane_output(pane_id, 1);
+    assert_eq!(
+        receive_pane_output_frame(&mut peer_frame_reader),
+        (pane_id, vec![b'a'; 1])
+    );
+    assert!(output_send_thread
+        .join()
+        .expect("the output send thread ended"));
+}
+
+#[test]
+fn a_new_link_gives_every_pane_a_full_window_again() {
+    // The session server that took the window is gone, and the image that
+    // links next starts with every byte of the window, granted or not.
+    let (_runtime_directory, supervisor_address, supervisor_listener) = bind_test_listener();
+    let link_sink = LinkSink::new();
+    let pane_id = PaneId::new();
+    let (mut first_peer_frame_reader, first_peer_frame_writer) =
+        open_output_window_link(&supervisor_address, &supervisor_listener, &link_sink);
+    let first_output_send_thread = {
+        let link_sink = Arc::clone(&link_sink);
+        thread::spawn(move || {
+            link_sink
+                .accept_output_bytes(pane_id, vec![b'a'; PANE_OUTPUT_WINDOW_BYTE_COUNT as usize])
+        })
+    };
+    assert_eq!(
+        receive_pane_output_frame(&mut first_peer_frame_reader),
+        (pane_id, vec![b'a'; PANE_OUTPUT_WINDOW_BYTE_COUNT as usize])
+    );
+    assert!(first_output_send_thread
+        .join()
+        .expect("the first output send thread ended"));
+
+    link_sink.clear_link();
+    drop(first_peer_frame_reader);
+    drop(first_peer_frame_writer);
+    let (mut second_peer_frame_reader, _second_peer_frame_writer) =
+        open_output_window_link(&supervisor_address, &supervisor_listener, &link_sink);
+    let second_output_send_thread = {
+        let link_sink = Arc::clone(&link_sink);
+        thread::spawn(move || {
+            link_sink
+                .accept_output_bytes(pane_id, vec![b'b'; PANE_OUTPUT_WINDOW_BYTE_COUNT as usize])
+        })
+    };
+
+    assert_eq!(
+        receive_pane_output_frame(&mut second_peer_frame_reader),
+        (pane_id, vec![b'b'; PANE_OUTPUT_WINDOW_BYTE_COUNT as usize])
+    );
+    assert!(second_output_send_thread
+        .join()
+        .expect("the second output send thread ended"));
+}
+
+#[test]
+fn a_grant_for_a_pane_being_closed_keeps_no_credit_for_it() {
+    let link_sink = LinkSink::new();
+    let closing_pane_id = PaneId::new();
+    let live_pane_id = PaneId::new();
+
+    link_sink.mark_pane_closing(closing_pane_id);
+    link_sink.grant_pane_output(closing_pane_id, 100);
+    link_sink.grant_pane_output(live_pane_id, 100);
+
+    let link_state = link_sink.link_state.lock().expect("supervisor link");
+    assert_eq!(
+        link_state.output_credit_by_pane_id,
+        HashMap::from([(live_pane_id, PANE_OUTPUT_WINDOW_BYTE_COUNT)])
+    );
+}
+
+#[test]
+fn a_link_below_the_output_window_protocol_carries_a_chunk_whole_as_json() {
+    let (_runtime_directory, supervisor_address, supervisor_listener) = bind_test_listener();
+    let link_sink = LinkSink::new();
+    let (frame_writer, mut peer_connection) =
+        connect_test_link_pair(&supervisor_address, &supervisor_listener);
+    link_sink.set_link_writer(frame_writer);
+    link_sink.mark_link_open(JSON_OUTPUT_PROTOCOL_VERSION);
+    let pane_id = PaneId::new();
+    let output_send_thread = {
+        let link_sink = Arc::clone(&link_sink);
+        thread::spawn(move || {
+            link_sink.accept_output_bytes(
+                pane_id,
+                vec![b'a'; PANE_OUTPUT_WINDOW_BYTE_COUNT as usize + 5],
+            )
+        })
+    };
+
+    assert_eq!(
+        peer_connection
+            .recv::<SupervisorMessage>()
+            .expect("a frame arrives"),
+        SupervisorMessage::Event(SupervisorEvent::Output {
+            pane_id,
+            output_bytes: vec![b'a'; PANE_OUTPUT_WINDOW_BYTE_COUNT as usize + 5],
+        })
+    );
+    assert!(output_send_thread
+        .join()
+        .expect("the output send thread ended"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_graceful_kill_does_not_hold_back_the_requests_after_it() {
+    // The child ignores the stop request, and the Kill spends its whole grace
+    // window. The request sent after it is answered first.
+    let mut supervisor = RunningSupervisor::start_with_idle_exit_duration(LONG_IDLE_EXIT_DURATION);
+    let mut link = TestLink::connect_with_connection_token(&supervisor.supervisor_address);
+    let pane_id = PaneId::new();
+    let SupervisorResult::Spawned { .. } =
+        link.send_request_and_receive_result(SupervisorRequestKind::Spawn {
+            pane_id,
+            spawn_spec: build_shell_spawn_spec(
+                "trap '' TERM; printf 'ready'; while :; do sleep 1; done",
+            ),
+            pty_size: TEST_PTY_SIZE,
+        })
+    else {
+        panic!("the supervisor opens the pane");
+    };
+    assert_eq!(link.receive_next_output(pane_id), b"ready".to_vec());
+
+    let kill_request_id = link.send_request(SupervisorRequestKind::Kill {
+        pane_id,
+        kill_policy: KillPolicy::GracefulTree {
+            timeout_duration: Duration::from_secs(1),
+        },
+    });
+    let resume_request_id = link.send_request(SupervisorRequestKind::ResumeOutput);
+
+    assert_eq!(
+        link.receive_next_response(),
+        SupervisorResponse {
+            request_id: Some(resume_request_id),
+            answer_result: SupervisorResult::Done,
+        },
+        "the request after the kill is answered while the kill still waits out its window"
+    );
+    assert_eq!(
+        link.receive_next_response(),
+        SupervisorResponse {
+            request_id: Some(kill_request_id),
+            answer_result: SupervisorResult::Done,
+        }
+    );
+
+    assert_eq!(
+        link.send_request_and_receive_result(SupervisorRequestKind::Shutdown),
+        SupervisorResult::Done
+    );
+    supervisor.join_supervisor_thread();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_grant_releases_a_pane_that_spent_its_window_and_gets_no_answer() {
+    // The pane prints 300000 bytes. The link carries the first window of them
+    // and no byte more until the peer grants room back.
+    const PRINTED_BYTE_COUNT: usize = 300_000;
+    let mut supervisor = RunningSupervisor::start_with_idle_exit_duration(LONG_IDLE_EXIT_DURATION);
+    let mut link = TestLink::connect_with_connection_token(&supervisor.supervisor_address);
+    let pane_id = PaneId::new();
+    let SupervisorResult::Spawned { .. } =
+        link.send_request_and_receive_result(SupervisorRequestKind::Spawn {
+            pane_id,
+            spawn_spec: build_shell_spawn_spec(&format!(
+                "head -c {PRINTED_BYTE_COUNT} /dev/zero | tr '\\000' a; sleep 30"
+            )),
+            pty_size: TEST_PTY_SIZE,
+        })
+    else {
+        panic!("the supervisor opens the pane");
+    };
+
+    let mut received_byte_count = 0;
+    while received_byte_count < PANE_OUTPUT_WINDOW_BYTE_COUNT as usize {
+        received_byte_count += link.receive_next_output(pane_id).len();
+    }
+    assert_eq!(received_byte_count, PANE_OUTPUT_WINDOW_BYTE_COUNT as usize);
+    thread::sleep(TEST_IDLE_EXIT_DURATION);
+    link.send_request_and_receive_result(SupervisorRequestKind::ListPanes);
+    assert_eq!(
+        link.pending_events,
+        Vec::new(),
+        "a pane that spent its window sends nothing more"
+    );
+
+    // A grant is answered with nothing: the next response the link reads
+    // answers the request after the grant.
+    link.send_request(SupervisorRequestKind::GrantPaneOutput {
+        pane_id,
+        granted_byte_count: PANE_OUTPUT_WINDOW_BYTE_COUNT,
+    });
+    let mut received_output_bytes = vec![b'a'; received_byte_count];
+    let mut ungranted_byte_count = 0;
+    link.receive_output_with_grants(
+        pane_id,
+        PRINTED_BYTE_COUNT,
+        &mut received_output_bytes,
+        &mut ungranted_byte_count,
+    );
+    assert_eq!(received_output_bytes.len(), PRINTED_BYTE_COUNT);
+    let shutdown_request_id = link.send_request(SupervisorRequestKind::Shutdown);
+    assert_eq!(
+        link.receive_next_response(),
+        SupervisorResponse {
+            request_id: Some(shutdown_request_id),
+            answer_result: SupervisorResult::Done,
+        }
+    );
+    supervisor.join_supervisor_thread();
+}
+
+/// A sink that hands every chunk to a consumer over a channel and keeps the
+/// largest backlog it saw: the bytes it took that the consumer had not yet
+/// reported parsed.
+#[cfg(unix)]
+struct BacklogRecordingSink {
+    /// Where each chunk goes, with its pane.
+    output_chunk_sender: Mutex<Sender<(PaneId, Vec<u8>)>>,
+    /// The bytes taken, and the bytes the consumer reported parsed.
+    backlog_counts: Mutex<BacklogCounts>,
+}
+
+/// The counts [`BacklogRecordingSink`] keeps.
+#[cfg(unix)]
+#[derive(Debug, Default)]
+struct BacklogCounts {
+    /// Every byte the sink took.
+    accepted_byte_count: usize,
+    /// Every byte the consumer reported parsed.
+    parsed_byte_count: usize,
+    /// The largest `accepted_byte_count - parsed_byte_count` seen.
+    largest_backlog_byte_count: usize,
+}
+
+#[cfg(unix)]
+impl PtySink for BacklogRecordingSink {
+    fn accept_output_bytes(&self, pane_id: PaneId, output_bytes: Vec<u8>) -> bool {
+        let mut backlog_counts = self.backlog_counts.lock().expect("backlog counts");
+        backlog_counts.accepted_byte_count += output_bytes.len();
+        backlog_counts.largest_backlog_byte_count = backlog_counts
+            .largest_backlog_byte_count
+            .max(backlog_counts.accepted_byte_count - backlog_counts.parsed_byte_count);
+        drop(backlog_counts);
+        let _ = self
+            .output_chunk_sender
+            .lock()
+            .expect("output chunk sender")
+            .send((pane_id, output_bytes));
+        true
+    }
+
+    fn accept_exit_status(&self, _pane_id: PaneId, _exit_status: ExitStatus) {}
+}
+
+#[cfg(unix)]
+#[test]
+fn a_slow_consumer_holds_at_most_one_window_of_a_fast_panes_output() {
+    // The pane prints 10 MiB as fast as its terminal takes it, and the
+    // consumer pauses a millisecond every fourth chunk. Every byte arrives,
+    // and the backlog never passes the pane's output window.
+    const PRINTED_BYTE_COUNT: usize = 10 * 1024 * 1024;
+    let mut supervisor = RunningSupervisor::start_with_idle_exit_duration(LONG_IDLE_EXIT_DURATION);
+    let (output_chunk_sender, output_chunk_receiver) = channel();
+    let backlog_recording_sink = Arc::new(BacklogRecordingSink {
+        output_chunk_sender: Mutex::new(output_chunk_sender),
+        backlog_counts: Mutex::new(BacklogCounts::default()),
+    });
+    let pty_backend = Arc::new(
+        SupervisorPtyBackend::connect(
+            &supervisor.supervisor_address,
+            build_test_connection_token(),
+            Arc::clone(&backlog_recording_sink) as Arc<dyn PtySink>,
+            &[],
+        )
+        .expect("the backend opens the link"),
+    );
+    let pane_id = PaneId::new();
+    pty_backend
+        .spawn_pane(
+            pane_id,
+            build_shell_spawn_spec(&format!(
+                "head -c {PRINTED_BYTE_COUNT} /dev/zero | tr '\\000' a; sleep 30"
+            )),
+            TEST_PTY_SIZE,
+        )
+        .expect("the supervisor opens the pane");
+
+    let mut consumed_byte_count = 0;
+    let mut consumed_chunk_count = 0;
+    while consumed_byte_count < PRINTED_BYTE_COUNT {
+        let (output_pane_id, output_bytes) = output_chunk_receiver
+            .recv_timeout(HANG_GUARD_DURATION)
+            .expect("the pane's output keeps arriving");
+        assert_eq!(output_pane_id, pane_id);
+        consumed_chunk_count += 1;
+        if consumed_chunk_count % 4 == 0 {
+            thread::sleep(Duration::from_millis(1));
+        }
+        consumed_byte_count += output_bytes.len();
+        backlog_recording_sink
+            .backlog_counts
+            .lock()
+            .expect("backlog counts")
+            .parsed_byte_count += output_bytes.len();
+        pty_backend.grant_pane_output(pane_id, output_bytes.len());
+    }
+
+    assert_eq!(consumed_byte_count, PRINTED_BYTE_COUNT);
+    let largest_backlog_byte_count = backlog_recording_sink
+        .backlog_counts
+        .lock()
+        .expect("backlog counts")
+        .largest_backlog_byte_count;
+    assert!(
+        largest_backlog_byte_count <= PANE_OUTPUT_WINDOW_BYTE_COUNT as usize,
+        "the backlog reached {largest_backlog_byte_count} bytes"
+    );
+    pty_backend
+        .kill_pane(pane_id, KillPolicy::Tree)
+        .expect("the pane closes");
+    pty_backend
+        .shutdown_supervisor()
+        .expect("the supervisor is told to end");
+    supervisor.join_supervisor_thread();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_swap_while_a_pane_prints_loses_no_byte_and_repeats_none() {
+    // The pane prints 348894 bytes, more than two output windows. The first
+    // link takes part of it under grants, holds the output and goes away; the
+    // next link takes the rest under fresh credit. Every byte arrives once,
+    // in order. The terminal's output processing is off (`stty -opost`), and
+    // each number arrives as `seq` wrote it: `45757\n`.
+    const LAST_PRINTED_NUMBER: u32 = 60_000;
+    let expected_output_bytes: Vec<u8> = (1..=LAST_PRINTED_NUMBER)
+        .flat_map(|printed_number| format!("{printed_number}\n").into_bytes())
+        .collect();
+    let mut supervisor = RunningSupervisor::start_with_idle_exit_duration(LONG_IDLE_EXIT_DURATION);
+    let mut departing_link =
+        TestLink::connect_with_connection_token(&supervisor.supervisor_address);
+    let pane_id = PaneId::new();
+    let SupervisorResult::Spawned { .. } =
+        departing_link.send_request_and_receive_result(SupervisorRequestKind::Spawn {
+            pane_id,
+            spawn_spec: build_shell_spawn_spec(&format!(
+                "stty -opost; seq 1 {LAST_PRINTED_NUMBER}; sleep 30"
+            )),
+            pty_size: TEST_PTY_SIZE,
+        })
+    else {
+        panic!("the supervisor opens the pane");
+    };
+
+    let mut received_output_bytes: Vec<u8> = Vec::new();
+    let mut ungranted_byte_count = 0;
+    departing_link.receive_output_with_grants(
+        pane_id,
+        150_000,
+        &mut received_output_bytes,
+        &mut ungranted_byte_count,
+    );
+    let pause_request_id = departing_link.send_request(SupervisorRequestKind::PauseOutput);
+    assert_eq!(
+        departing_link.receive_next_response(),
+        SupervisorResponse {
+            request_id: Some(pause_request_id),
+            answer_result: SupervisorResult::Done,
+        }
+    );
+    for supervisor_event in departing_link.pending_events.drain(..) {
+        let SupervisorEvent::Output {
+            pane_id: event_pane_id,
+            output_bytes,
+        } = supervisor_event
+        else {
+            panic!("only output is due, and this is {supervisor_event:?}");
+        };
+        assert_eq!(event_pane_id, pane_id);
+        received_output_bytes.extend_from_slice(&output_bytes);
+    }
+    drop(departing_link);
+    let swap_byte_offset = received_output_bytes.len();
+
+    let mut replacement_link =
+        TestLink::connect_with_connection_token(&supervisor.supervisor_address);
+    let mut ungranted_byte_count = 0;
+    replacement_link.receive_output_with_grants(
+        pane_id,
+        expected_output_bytes.len(),
+        &mut received_output_bytes,
+        &mut ungranted_byte_count,
+    );
+
+    let first_difference_offset = received_output_bytes
+        .iter()
+        .zip(&expected_output_bytes)
+        .position(|(received_byte, printed_byte)| received_byte != printed_byte)
+        .unwrap_or(expected_output_bytes.len());
+    assert!(
+        received_output_bytes == expected_output_bytes,
+        "the output across the swap at byte {swap_byte_offset} differs from byte \
+         {first_difference_offset}: {} bytes arrived, {} were printed; arrived {:?}, printed {:?}",
+        received_output_bytes.len(),
+        expected_output_bytes.len(),
+        String::from_utf8_lossy(slice_around_offset(
+            &received_output_bytes,
+            first_difference_offset
+        )),
+        String::from_utf8_lossy(slice_around_offset(
+            &expected_output_bytes,
+            first_difference_offset
+        )),
+    );
+    assert_eq!(
+        replacement_link.send_request_and_receive_result(SupervisorRequestKind::Shutdown),
+        SupervisorResult::Done
+    );
+    supervisor.join_supervisor_thread();
 }

@@ -325,6 +325,24 @@ fn a_version_refusal_is_protocol_version_refused_with_the_sentence_the_peer_sent
 }
 
 #[test]
+fn a_restarting_refusal_is_session_restarting_with_the_sentence_the_peer_sent() {
+    let refusal = IpcErrorPayload {
+        code: IpcErrorCode::Restarting,
+        message: "the session is restarting;\u{1b}[2J ask again in a moment".to_string(),
+    };
+
+    let peer_refusal_error = build_peer_refusal_error(&refusal);
+
+    let CliError::SessionRestarting { detail } = peer_refusal_error else {
+        panic!("expected SessionRestarting, got {peer_refusal_error:?}");
+    };
+    assert_eq!(
+        detail,
+        "the session is restarting;[2J ask again in a moment"
+    );
+}
+
+#[test]
 fn peer_text_reaches_the_message_filtered() {
     assert_eq!(
         extract_ipc_unavailable_detail(

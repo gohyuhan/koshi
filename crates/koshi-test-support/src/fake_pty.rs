@@ -2,11 +2,12 @@
 //!
 //! [`fake_pty::FakePtyBackend`] implements
 //! [`koshi_pty::backend::state::PtyBackend`] in memory without starting a shell.
-//! It records every pane spawn, input write, resize, and kill.
+//! It records every pane spawn, input write, resize, kill, and output grant.
 //!
 //! Tests read records with `list_spawned_pane_ids`, `get_spawn_spec`, `list_pane_write_bytes`,
-//! `list_pane_sizes`, and `list_pane_kill_policies`. They drive child output with `push_output` and
-//! child exit with `trigger_child_exit`, which deliver to the
+//! `list_pane_sizes`, `list_pane_kill_policies`, and `list_pane_output_grant_byte_counts`. They
+//! drive child output with `push_output` and child exit with `trigger_child_exit`, which deliver
+//! to the
 //! [`PtySink`](koshi_pty::backend::state::PtySink) the backend was built with.
 //! `hold_kills_at` makes every subsequent kill wait at a barrier first.
 //! [`fake_pty::PaneDeliveryRecorder`] is a sink that keeps those deliveries for
@@ -38,12 +39,16 @@ struct PaneRecord {
     resize_history: Vec<PtySize>,
     write_history: Vec<Vec<u8>>,
     kill_policies: Vec<KillPolicy>,
+    /// Every byte count [`grant_pane_output`](FakePtyBackend::grant_pane_output)
+    /// reported for this pane, oldest first.
+    output_grant_byte_counts: Vec<usize>,
     /// `true` between [`spawn_pane`](FakePtyBackend::spawn_pane) and the pane's first
     /// [`kill_pane`](FakePtyBackend::kill_pane). A `false` record remains available to
     /// [`get_spawn_spec`](FakePtyBackend::get_spawn_spec),
     /// [`list_pane_write_bytes`](FakePtyBackend::list_pane_write_bytes),
-    /// [`list_pane_sizes`](FakePtyBackend::list_pane_sizes), and
-    /// [`list_pane_kill_policies`](FakePtyBackend::list_pane_kill_policies).
+    /// [`list_pane_sizes`](FakePtyBackend::list_pane_sizes),
+    /// [`list_pane_kill_policies`](FakePtyBackend::list_pane_kill_policies), and
+    /// [`list_pane_output_grant_byte_counts`](FakePtyBackend::list_pane_output_grant_byte_counts).
     /// It also accepts [`push_output`](FakePtyBackend::push_output) and
     /// [`trigger_child_exit`](FakePtyBackend::trigger_child_exit). `kill_pane` returns
     /// [`PtyError::UnknownPane`], while `resize_pane` and `write_pane_input` return a configured
@@ -216,6 +221,17 @@ impl FakePtyBackend {
     pub fn list_pane_kill_policies(&self, pane_id: PaneId) -> Result<Vec<KillPolicy>, PtyError> {
         self.with_pane_record(pane_id, |pane_record| pane_record.kill_policies.clone())
     }
+
+    /// Return every parsed byte count reported for a pane in order, or
+    /// [`PtyError::UnknownPane`] if the pane was never spawned.
+    pub fn list_pane_output_grant_byte_counts(
+        &self,
+        pane_id: PaneId,
+    ) -> Result<Vec<usize>, PtyError> {
+        self.with_pane_record(pane_id, |pane_record| {
+            pane_record.output_grant_byte_counts.clone()
+        })
+    }
 }
 
 impl PtyBackend for FakePtyBackend {
@@ -225,8 +241,8 @@ impl PtyBackend for FakePtyBackend {
     /// order. The handle carries the same `pane_id`.
     ///
     /// A killed `pane_id` can be spawned again. The new spawn replaces the old record, replaces its
-    /// spawn specification, clears its writes, resizes, and kills, and adds the pane ID to the
-    /// spawn order again.
+    /// spawn specification, clears its writes, resizes, kills, and output grants, and adds the
+    /// pane ID to the spawn order again.
     ///
     /// # Errors
     ///
@@ -262,6 +278,7 @@ impl PtyBackend for FakePtyBackend {
                 resize_history: vec![pty_size],
                 write_history: Vec::new(),
                 kill_policies: Vec::new(),
+                output_grant_byte_counts: Vec::new(),
                 is_live: true,
             },
         );
@@ -328,8 +345,9 @@ impl PtyBackend for FakePtyBackend {
     /// first and otherwise return [`PtyError::UnknownPane`]. [`spawn_pane`](Self::spawn_pane) can
     /// reuse the id. The record remains available through [`get_spawn_spec`](Self::get_spawn_spec),
     /// [`list_pane_write_bytes`](Self::list_pane_write_bytes),
-    /// [`list_pane_sizes`](Self::list_pane_sizes), and
-    /// [`list_pane_kill_policies`](Self::list_pane_kill_policies).
+    /// [`list_pane_sizes`](Self::list_pane_sizes),
+    /// [`list_pane_kill_policies`](Self::list_pane_kill_policies), and
+    /// [`list_pane_output_grant_byte_counts`](Self::list_pane_output_grant_byte_counts).
     /// [`push_output`](Self::push_output) and [`trigger_child_exit`](Self::trigger_child_exit)
     /// still deliver for the pane.
     ///
@@ -361,6 +379,20 @@ impl PtyBackend for FakePtyBackend {
             .live_working_directories
             .get(&pane_id)
             .cloned()
+    }
+
+    /// Record `parsed_byte_count` in the pane's grant history. A pane that was
+    /// never spawned records nothing.
+    fn grant_pane_output(&self, pane_id: PaneId, parsed_byte_count: usize) {
+        if let Some(pane_record) = self
+            .backend_state
+            .lock()
+            .unwrap()
+            .pane_record_by_id
+            .get_mut(&pane_id)
+        {
+            pane_record.output_grant_byte_counts.push(parsed_byte_count);
+        }
     }
 }
 

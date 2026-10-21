@@ -15,12 +15,12 @@ use koshi_core::ids::{CommandId, SessionId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
 use koshi_layout::tree::{LayoutNode, SplitNode};
-use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_session::client::{ClientOrigin, ClientRegistry};
 use koshi_session::session::state::FloatingMember;
 use koshi_terminal::engine::TerminalEngine;
+use koshi_terminal::grid::row_snapshot::RowSnapshot;
 use koshi_terminal::state::CursorShape;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -209,7 +209,7 @@ fn build_snapshot_maps_session_tab_and_client() {
         .as_ref()
         .expect("grid view");
     assert_eq!(grid_view.view_row_offset, 0);
-    assert_eq!(grid_view.grid.get_grid_dimensions(), (24, 80));
+    assert_eq!(grid_view.get_view_dimensions(), (24, 80));
 }
 
 #[test]
@@ -294,24 +294,18 @@ fn build_snapshot_carries_the_live_terminal_grid_and_cursor() {
     assert_eq!(pane_snapshot.cursor_snapshot.column_index, 2);
     assert!(pane_snapshot.cursor_snapshot.is_visible);
 
-    // The shared grid handle carries the printed cells at offset 0.
+    // The shared row snapshots carry the printed cells at offset 0.
     let grid_view = pane_snapshot
         .terminal_grid_view
         .as_ref()
         .expect("grid view");
     assert_eq!(grid_view.view_row_offset, 0);
     assert_eq!(
-        grid_view
-            .grid
-            .get_cell(0, 0)
-            .map(|cell| cell.get_character()),
+        grid_view.get_cell(0, 0).map(|cell| cell.get_character()),
         Some('h')
     );
     assert_eq!(
-        grid_view
-            .grid
-            .get_cell(0, 1)
-            .map(|cell| cell.get_character()),
+        grid_view.get_cell(0, 1).map(|cell| cell.get_character()),
         Some('i')
     );
 
@@ -409,14 +403,13 @@ fn a_frozen_snapshot_keeps_its_grid_when_the_engine_writes_again() {
         .expect("terminal engine")
         .process_pty_output(b"\rB");
 
-    // Copy-on-write: the first frame's shared grid still shows the glyph from
-    // before the write. `get_active_grid_mut` cloned the buffer and left the
-    // frozen one unchanged.
-    let first_grid = &first_render_snapshot.pane_snapshots[0]
+    // The first frame's row snapshot still shows the glyph from before the
+    // write: the write took the row's snapshot away and left the frozen one
+    // unchanged.
+    let first_grid = first_render_snapshot.pane_snapshots[0]
         .terminal_grid_view
         .as_ref()
-        .expect("grid view")
-        .grid;
+        .expect("grid view");
     assert_eq!(
         first_grid.get_cell(0, 0).map(|cell| cell.get_character()),
         Some('A')
@@ -424,14 +417,102 @@ fn a_frozen_snapshot_keeps_its_grid_when_the_engine_writes_again() {
 
     // A fresh snapshot reflects the new write.
     let second_render_snapshot = server.build_snapshot(client_id).expect("snapshot");
-    let second_grid = &second_render_snapshot.pane_snapshots[0]
+    let second_grid = second_render_snapshot.pane_snapshots[0]
         .terminal_grid_view
         .as_ref()
-        .expect("grid view")
-        .grid;
+        .expect("grid view");
     assert_eq!(
         second_grid.get_cell(0, 0).map(|cell| cell.get_character()),
         Some('B')
+    );
+}
+
+/// A runtime whose one client views one pane of a 200×50 terminal engine.
+fn build_runtime_with_one_wide_pane() -> (Server, PaneId, ClientId) {
+    let mut server = build_test_runtime();
+    let (session, session_id, _tab_id, pane_id, client_id) = build_session_with_client(Size {
+        column_count: 200,
+        row_count: 50,
+    });
+    server.session_by_id.insert(session_id, session);
+    server.terminal_engine_by_pane_id.insert(
+        pane_id,
+        TerminalEngine::from_pty_size(PtySize {
+            column_count: 200,
+            row_count: 50,
+        }),
+    );
+    (server, pane_id, client_id)
+}
+
+/// The row snapshots of the first pane's grid view in `render_snapshot`.
+fn list_first_pane_row_snapshots(render_snapshot: &RenderSnapshot) -> &[Arc<RowSnapshot>] {
+    &render_snapshot.pane_snapshots[0]
+        .terminal_grid_view
+        .as_ref()
+        .expect("grid view")
+        .row_snapshots
+}
+
+/// The indexes of the rows that `first_row_snapshots` and
+/// `second_row_snapshots` hold as one shared snapshot.
+fn list_shared_row_indexes(
+    first_row_snapshots: &[Arc<RowSnapshot>],
+    second_row_snapshots: &[Arc<RowSnapshot>],
+) -> Vec<usize> {
+    first_row_snapshots
+        .iter()
+        .zip(second_row_snapshots)
+        .enumerate()
+        .filter(|(_, (first_row_snapshot, second_row_snapshot))| {
+            Arc::ptr_eq(first_row_snapshot, second_row_snapshot)
+        })
+        .map(|(row_index, _)| row_index)
+        .collect()
+}
+
+#[test]
+fn a_frame_after_a_write_to_row_seven_shares_every_other_row_with_the_frame_before() {
+    let (mut server, pane_id, client_id) = build_runtime_with_one_wide_pane();
+    let first_render_snapshot = server.build_snapshot(client_id).expect("snapshot");
+
+    let _ = server
+        .terminal_engine_by_pane_id
+        .get_mut(&pane_id)
+        .expect("terminal engine")
+        .process_pty_output(b"\x1b[8;1Hx");
+    let second_render_snapshot = server.build_snapshot(client_id).expect("snapshot");
+
+    let second_row_snapshots = list_first_pane_row_snapshots(&second_render_snapshot);
+    assert_eq!(second_row_snapshots.len(), 50);
+    assert_eq!(
+        list_shared_row_indexes(
+            list_first_pane_row_snapshots(&first_render_snapshot),
+            second_row_snapshots
+        ),
+        (0..50)
+            .filter(|row_index| *row_index != 7)
+            .collect::<Vec<usize>>()
+    );
+    assert_eq!(
+        second_row_snapshots[7].list_row_cells()[0].get_character(),
+        'x'
+    );
+}
+
+#[test]
+fn two_frames_with_no_write_between_them_share_every_row() {
+    let (server, _pane_id, client_id) = build_runtime_with_one_wide_pane();
+
+    let first_render_snapshot = server.build_snapshot(client_id).expect("snapshot");
+    let second_render_snapshot = server.build_snapshot(client_id).expect("snapshot");
+
+    assert_eq!(
+        list_shared_row_indexes(
+            list_first_pane_row_snapshots(&first_render_snapshot),
+            list_first_pane_row_snapshots(&second_render_snapshot)
+        ),
+        (0..50).collect::<Vec<usize>>()
     );
 }
 
@@ -948,7 +1029,7 @@ fn cross_tab_placement_snapshot_retains_a_suppressed_source_pane_for_transfer() 
         .terminal_grid_view
         .as_ref()
         .expect("the moved pane needs content for the destination preview");
-    assert_eq!(source_grid_view.grid.get_grid_dimensions(), (24, 80));
+    assert_eq!(source_grid_view.get_view_dimensions(), (24, 80));
     assert_eq!(
         crate::runtime::frame::build_wire_placement_snapshot(&placement_snapshot).validate(),
         Ok(())
@@ -1008,45 +1089,6 @@ fn build_snapshot_for_a_starving_viewer_solves_at_the_other_viewers_pane_area() 
             column_count: 40,
             row_count: 8
         }
-    );
-}
-
-#[test]
-fn an_exited_pane_stays_laid_out_and_visible() {
-    let mut server = build_test_runtime();
-    let (mut session, session_id, _tab_id, pane_id, client_id) = build_session_with_client(Size {
-        column_count: 80,
-        row_count: 24,
-    });
-    {
-        let pane_record = session
-            .panes
-            .get_pane_record_mut_by_id(pane_id)
-            .expect("pane record");
-        let _ = pane_record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
-        let _ = pane_record.update_lifecycle(PaneLifecycleEvent::ProcessExited {
-            exit_code: Some(0),
-            exited_at: SystemTime::now(),
-        });
-    }
-    server.session_by_id.insert(session_id, session);
-
-    let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
-    let pane_slot = &render_snapshot
-        .session_snapshot
-        .active_tab_snapshot
-        .pane_slots[0];
-    assert_eq!(pane_slot.pane_id, pane_id);
-    assert!(pane_slot.is_visible);
-    assert_eq!(
-        pane_slot.content_rect,
-        Some(Rect::from_origin_and_size(
-            Point { column: 1, row: 1 },
-            Size {
-                column_count: 78,
-                row_count: 20
-            },
-        ))
     );
 }
 
@@ -1379,8 +1421,12 @@ fn build_runtime_with_terminal_input(terminal_input_bytes: &[u8]) -> (Server, Pa
     (server, pane_id, client_id)
 }
 
-/// The highlight rows the frame carries for the client's only pane.
-fn get_selection_row_spans(server: &Server, client_id: ClientId) -> Option<Vec<(u16, u16, u16)>> {
+/// The highlight rows of the first pane in `client_id`'s frame, or `None` when
+/// that pane has none.
+pub(crate) fn find_selection_row_spans(
+    server: &Server,
+    client_id: ClientId,
+) -> Option<Vec<(u16, u16, u16)>> {
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     render_snapshot.pane_snapshots[0]
         .selection_spans
@@ -1399,7 +1445,7 @@ fn build_character_selection(anchor: GridPosition, cursor: GridPosition) -> Sele
 #[test]
 fn a_pane_with_no_highlight_carries_none() {
     let (server, _pane_id, client_id) = build_runtime_with_terminal_input(b"hello");
-    assert_eq!(get_selection_row_spans(&server, client_id), None);
+    assert_eq!(find_selection_row_spans(&server, client_id), None);
 }
 
 #[test]
@@ -1423,7 +1469,7 @@ fn a_highlight_on_one_row_is_one_span() {
         );
 
     assert_eq!(
-        get_selection_row_spans(&server, client_id),
+        find_selection_row_spans(&server, client_id),
         Some(vec![(0, 6, 10)])
     );
 }
@@ -1451,7 +1497,7 @@ fn a_highlight_over_three_rows_runs_with_the_text() {
         );
 
     assert_eq!(
-        get_selection_row_spans(&server, client_id),
+        find_selection_row_spans(&server, client_id),
         Some(vec![(1, 12, 79), (2, 0, 79), (3, 0, 33)])
     );
 }
@@ -1478,7 +1524,7 @@ fn a_block_highlight_is_the_same_columns_on_every_row() {
         );
 
     assert_eq!(
-        get_selection_row_spans(&server, client_id),
+        find_selection_row_spans(&server, client_id),
         Some(vec![(0, 4, 9), (1, 4, 9), (2, 4, 9)]),
         "a rectangle, not a run of text"
     );
@@ -1507,7 +1553,7 @@ fn a_block_dragged_leftward_still_covers_the_columns_between() {
         );
 
     assert_eq!(
-        get_selection_row_spans(&server, client_id),
+        find_selection_row_spans(&server, client_id),
         Some(vec![(0, 4, 9), (1, 4, 9)])
     );
 }
@@ -1537,7 +1583,7 @@ fn a_highlight_ending_on_a_wide_glyph_covers_its_whole_cell() {
         );
 
     assert_eq!(
-        get_selection_row_spans(&server, client_id),
+        find_selection_row_spans(&server, client_id),
         Some(vec![(0, 0, 1)])
     );
 }
@@ -1566,7 +1612,7 @@ fn word_and_line_highlights_run_with_the_text_like_a_character_one() {
             );
 
         assert_eq!(
-            get_selection_row_spans(&server, client_id),
+            find_selection_row_spans(&server, client_id),
             Some(vec![(1, 12, 79), (2, 0, 79), (3, 0, 33)]),
             "{selection_kind:?} resolves to the same rows as a character highlight"
         );
@@ -1596,7 +1642,7 @@ fn a_highlight_below_the_bottom_of_the_view_is_not_drawn() {
         );
 
     assert_eq!(
-        get_selection_row_spans(&server, client_id),
+        find_selection_row_spans(&server, client_id),
         None,
         "nothing of it is on screen"
     );
@@ -1632,7 +1678,7 @@ fn a_highlight_starting_past_the_last_column_draws_no_row() {
             ),
         );
 
-    assert_eq!(get_selection_row_spans(&server, client_id), None);
+    assert_eq!(find_selection_row_spans(&server, client_id), None);
 }
 
 #[test]
@@ -1662,7 +1708,7 @@ fn a_highlight_the_view_has_scrolled_past_is_not_drawn() {
         );
 
     assert_eq!(
-        get_selection_row_spans(&server, client_id),
+        find_selection_row_spans(&server, client_id),
         None,
         "nothing of it is on screen"
     );
@@ -1702,7 +1748,7 @@ fn scrolling_back_to_a_highlight_draws_it_again() {
     mutable_client.set_scroll_offset(pane_id, 7);
 
     assert_eq!(
-        get_selection_row_spans(&server, client_id),
+        find_selection_row_spans(&server, client_id),
         Some(vec![(1, 0, 3)]),
         "the same absolute row, now drawn at a screen row the scroll put it on"
     );
@@ -1736,7 +1782,7 @@ fn a_highlight_running_off_the_top_of_the_view_starts_at_the_first_visible_row()
 
     // Screen rows 0 and 1 are covered whole. Screen row 2 ends at column 5.
     assert_eq!(
-        get_selection_row_spans(&server, client_id),
+        find_selection_row_spans(&server, client_id),
         Some(vec![(0, 0, 79), (1, 0, 79), (2, 0, 5)])
     );
 }

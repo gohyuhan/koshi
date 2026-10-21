@@ -1014,6 +1014,34 @@ fn a_switch_left_to_the_file_is_read_from_the_config_directory_on_every_call() {
         "version 2\nallow-other-users #false\nshared-sessions-dir \"/var/run/koshi\"\n",
     )
     .expect("rewrite koshi.kdl");
-
     assert!(!(other_users_policy.is_enabled)());
+
+    fs::write(
+        config_directory.path().join("koshi.kdl"),
+        "version 2\nallow-other-users #true\nshared-sessions-dir \"/var/run/koshi\"\n",
+    )
+    .expect("rewrite koshi.kdl");
+    assert!((other_users_policy.is_enabled)());
+
+    let unparseable_config_text = "version 2\nallow-other-users #true {\n";
+    parse_app_config(
+        &config_directory.path().join("koshi.kdl"),
+        unparseable_config_text,
+    )
+    .expect_err("an unclosed block does not parse");
+    fs::write(
+        config_directory.path().join("koshi.kdl"),
+        unparseable_config_text,
+    )
+    .expect("rewrite koshi.kdl");
+    assert!(
+        !(other_users_policy.is_enabled)(),
+        "a file that does not parse turns the switch off"
+    );
+
+    fs::remove_file(config_directory.path().join("koshi.kdl")).expect("remove koshi.kdl");
+    assert!(
+        !(other_users_policy.is_enabled)(),
+        "an absent file turns the switch off"
+    );
 }

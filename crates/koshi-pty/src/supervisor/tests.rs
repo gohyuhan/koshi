@@ -80,20 +80,26 @@ enum SupervisorTestFrame {
     Message(SupervisorMessage),
     /// An exit sent after the pane-list request and before its answer.
     EventBeforePaneListAnswer(SupervisorEvent),
-    /// An answer whose result is a variant name this build does not have.
-    UnknownResponseVariant {
-        request_id: Option<u64>,
-        unknown_variant_name: String,
-    },
     /// An event whose variant name this build does not have.
     UnknownEventVariant(String),
+    /// One chunk of one pane's output as a binary frame.
+    BinaryOutput {
+        pane_id: PaneId,
+        output_bytes: Vec<u8>,
+    },
+    /// An event sent right after the answer to the first Spawn request.
+    EventAfterFirstSpawnAnswer(SupervisorEvent),
 }
 
 /// A hand-written supervisor on the other end of one link.
 ///
 /// It answers each request from `supervisor_results`, in order, and records the requests
-/// it was asked. `Message` frames are sent before the first request;
-/// `EventBeforePaneListAnswer` frames follow the pane-list request.
+/// it was asked. A [`GrantPaneOutput`](SupervisorRequestKind::GrantPaneOutput)
+/// is recorded and answered with nothing. `Message`, `UnknownEventVariant`
+/// and `BinaryOutput` frames are sent before the first request;
+/// `EventBeforePaneListAnswer` frames follow the pane-list request, and
+/// `EventAfterFirstSpawnAnswer` frames follow the first Spawn answer. Once
+/// `supervisor_results` runs out, the next request closes the link.
 struct FakeSupervisor {
     /// The address the backend connects to.
     supervisor_address: String,
@@ -130,89 +136,99 @@ impl FakeSupervisor {
         supervisor_results: Vec<SupervisorResult>,
         supervisor_frames: Vec<SupervisorTestFrame>,
     ) -> FakeSupervisor {
-        let runtime_directory = tempfile::tempdir().expect("an isolated test directory is created");
-        let supervisor_address = build_test_supervisor_address(runtime_directory.path());
-        let supervisor_listener =
-            Listener::bind(&supervisor_address).expect("the fake supervisor binds its link");
         let recorded_requests = Arc::new(Mutex::new(Vec::new()));
-
         let recorded_requests_for_thread = Arc::clone(&recorded_requests);
-        thread::Builder::new()
-            .name("fake-supervisor".to_string())
-            .spawn(move || {
-                let supervisor_connection =
-                    supervisor_listener.accept().expect("the backend connects");
-                let (mut frame_reader, mut frame_writer) = supervisor_connection.split();
-                let mut pane_list_events = Vec::new();
-                for supervisor_frame in supervisor_frames {
-                    let frame_send_result = match supervisor_frame {
-                        SupervisorTestFrame::Message(supervisor_message) => {
-                            frame_writer.send(&supervisor_message)
-                        }
-                        SupervisorTestFrame::EventBeforePaneListAnswer(supervisor_event) => {
-                            pane_list_events.push(supervisor_event);
-                            continue;
-                        }
-                        SupervisorTestFrame::UnknownResponseVariant {
-                            request_id,
+        let ScriptedFakeSupervisor {
+            supervisor_address,
+            _runtime_directory: runtime_directory,
+        } = ScriptedFakeSupervisor::start(move |mut frame_reader, mut frame_writer| {
+            let mut pane_list_events = Vec::new();
+            let mut spawn_answer_events = Vec::new();
+            for supervisor_frame in supervisor_frames {
+                let frame_send_result = match supervisor_frame {
+                    SupervisorTestFrame::Message(supervisor_message) => {
+                        frame_writer.send(&supervisor_message)
+                    }
+                    SupervisorTestFrame::EventBeforePaneListAnswer(supervisor_event) => {
+                        pane_list_events.push(supervisor_event);
+                        continue;
+                    }
+                    SupervisorTestFrame::UnknownEventVariant(unknown_variant_name) => frame_writer
+                        .send(&SupervisorMessage::<SupervisorResult, String>::Event(
                             unknown_variant_name,
-                        } => frame_writer.send(
-                            &SupervisorMessage::<String, SupervisorEvent>::Response(
-                                SupervisorResponse {
-                                    request_id,
-                                    answer_result: unknown_variant_name,
-                                },
-                            ),
-                        ),
-                        SupervisorTestFrame::UnknownEventVariant(unknown_variant_name) => {
-                            frame_writer.send(
-                                &SupervisorMessage::<SupervisorResult, String>::Event(
-                                    unknown_variant_name,
-                                ),
-                            )
-                        }
-                    };
-                    frame_send_result.expect("the fake supervisor sends its planted frame");
-                }
-                let mut supervisor_results = supervisor_results.into_iter();
-                while let Ok(supervisor_request) = frame_reader.recv::<SupervisorRequest>() {
-                    let is_pane_list_request = matches!(
-                        &supervisor_request.request_kind,
-                        SupervisorRequestKind::ListPanes
-                    );
-                    recorded_requests_for_thread
-                        .lock()
-                        .expect("recorded requests")
-                        .push((
-                            supervisor_request.request_id,
-                            supervisor_request.request_kind,
-                        ));
-                    let Some(supervisor_result) = supervisor_results.next() else {
-                        return;
-                    };
-                    if is_pane_list_request {
-                        for supervisor_event in pane_list_events.drain(..) {
-                            frame_writer
-                                .send(&SupervisorMessage::<SupervisorResult, _>::Event(
-                                    supervisor_event,
-                                ))
-                                .expect("the fake supervisor sends a pane-list exit");
-                        }
+                        )),
+                    SupervisorTestFrame::BinaryOutput {
+                        pane_id,
+                        output_bytes,
+                    } => frame_writer.send_binary_with_head(
+                        &koshi_ipc::supervisor::build_pane_output_frame_head(pane_id),
+                        &output_bytes,
+                    ),
+                    SupervisorTestFrame::EventAfterFirstSpawnAnswer(supervisor_event) => {
+                        spawn_answer_events.push(supervisor_event);
+                        continue;
                     }
-                    if frame_writer
-                        .send(&SupervisorMessage::<_, SupervisorEvent>::Response(
-                            SupervisorResponse {
-                                request_id: Some(supervisor_request.request_id),
-                                answer_result: supervisor_result,
-                            },
-                        ))
-                        .is_err()
-                    {
-                        return;
+                };
+                frame_send_result.expect("the fake supervisor sends its planted frame");
+            }
+            let mut supervisor_results = supervisor_results.into_iter();
+            while let Ok(supervisor_request) = frame_reader.recv::<SupervisorRequest>() {
+                let is_pane_list_request = matches!(
+                    &supervisor_request.request_kind,
+                    SupervisorRequestKind::ListPanes
+                );
+                let is_spawn_request = matches!(
+                    &supervisor_request.request_kind,
+                    SupervisorRequestKind::Spawn { .. }
+                );
+                let is_grant_request = matches!(
+                    &supervisor_request.request_kind,
+                    SupervisorRequestKind::GrantPaneOutput { .. }
+                );
+                recorded_requests_for_thread
+                    .lock()
+                    .expect("recorded requests")
+                    .push((
+                        supervisor_request.request_id,
+                        supervisor_request.request_kind,
+                    ));
+                if is_grant_request {
+                    continue;
+                }
+                let Some(supervisor_result) = supervisor_results.next() else {
+                    return;
+                };
+                if is_pane_list_request {
+                    for supervisor_event in pane_list_events.drain(..) {
+                        frame_writer
+                            .send(&SupervisorMessage::<SupervisorResult, _>::Event(
+                                supervisor_event,
+                            ))
+                            .expect("the fake supervisor sends a pane-list exit");
                     }
                 }
-            })
-            .expect("the fake supervisor thread starts");
+                if frame_writer
+                    .send(&SupervisorMessage::<_, SupervisorEvent>::Response(
+                        SupervisorResponse {
+                            request_id: Some(supervisor_request.request_id),
+                            answer_result: supervisor_result,
+                        },
+                    ))
+                    .is_err()
+                {
+                    return;
+                }
+                if is_spawn_request {
+                    for supervisor_event in spawn_answer_events.drain(..) {
+                        frame_writer
+                            .send(&SupervisorMessage::<SupervisorResult, _>::Event(
+                                supervisor_event,
+                            ))
+                            .expect("the fake supervisor sends a spawn-answer event");
+                    }
+                }
+            }
+        });
 
         FakeSupervisor {
             supervisor_address,
@@ -399,10 +415,10 @@ fn connect_test_backend(
 /// Wait until `is_condition_met` answers `true`. Fails the test after
 /// [`HANG_GUARD_DURATION`].
 fn wait_until_condition(condition_description: &str, is_condition_met: impl Fn() -> bool) {
-    let deadline = Instant::now() + HANG_GUARD_DURATION;
+    let hang_deadline = Instant::now() + HANG_GUARD_DURATION;
     while !is_condition_met() {
         assert!(
-            Instant::now() < deadline,
+            Instant::now() < hang_deadline,
             "{condition_description} never happened"
         );
         thread::sleep(Duration::from_millis(5));
@@ -411,23 +427,23 @@ fn wait_until_condition(condition_description: &str, is_condition_met: impl Fn()
 
 #[test]
 fn opening_the_link_sends_a_hello_and_asks_what_the_supervisor_holds() {
-    let peer = FakeSupervisor::start_with_supervisor_results(
+    let fake_supervisor = FakeSupervisor::start_with_supervisor_results(
         build_opening_supervisor_results(Vec::new()),
         Vec::new(),
     );
-    let sink = RecordingSink::new();
+    let recording_sink = RecordingSink::new();
 
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
 
     assert_eq!(
-        peer.list_requested_kinds(),
+        fake_supervisor.list_requested_kinds(),
         vec![
             SupervisorRequestKind::build_hello_request(ConnectionToken::from_secret("k7QxSecret")),
             SupervisorRequestKind::ListPanes,
         ]
     );
     assert_eq!(backend.list_carried_panes(), Vec::new());
-    assert_eq!(sink.list_exit_statuses(), Vec::new());
+    assert_eq!(recording_sink.list_exit_statuses(), Vec::new());
 }
 
 #[test]
@@ -435,22 +451,22 @@ fn carried_pane_the_supervisor_does_not_hold_is_reported_as_ended() {
     // No session server observed the child's status; the consumer still
     // learns the pane is gone.
     let gone_pane_id = PaneId::new();
-    let peer = FakeSupervisor::start_with_supervisor_results(
+    let fake_supervisor = FakeSupervisor::start_with_supervisor_results(
         build_opening_supervisor_results(Vec::new()),
         Vec::new(),
     );
-    let sink = RecordingSink::new();
+    let recording_sink = RecordingSink::new();
 
     let backend = SupervisorPtyBackend::connect(
-        &peer.supervisor_address,
+        &fake_supervisor.supervisor_address,
         ConnectionToken::from_secret("k7QxSecret"),
-        Arc::clone(&sink) as Arc<dyn PtySink>,
+        Arc::clone(&recording_sink) as Arc<dyn PtySink>,
         &[gone_pane_id],
     )
     .expect("the backend opens the link");
 
     assert_eq!(
-        sink.list_exit_statuses(),
+        recording_sink.list_exit_statuses(),
         vec![(gone_pane_id, ExitStatus::ExitCode(-1))]
     );
     assert_eq!(backend.list_carried_panes(), Vec::new());
@@ -474,7 +490,7 @@ fn exits_before_the_pane_list_answer_leave_only_running_panes_claimed() {
         },
     ]);
     supervisor_results.push(SupervisorResult::Done);
-    let peer = FakeSupervisor::start_with_supervisor_frames(
+    let fake_supervisor = FakeSupervisor::start_with_supervisor_frames(
         supervisor_results,
         vec![
             SupervisorTestFrame::EventBeforePaneListAnswer(SupervisorEvent::Exited {
@@ -487,18 +503,18 @@ fn exits_before_the_pane_list_answer_leave_only_running_panes_claimed() {
             }),
         ],
     );
-    let sink = RecordingSink::new();
+    let recording_sink = RecordingSink::new();
 
     let backend = SupervisorPtyBackend::connect(
-        &peer.supervisor_address,
+        &fake_supervisor.supervisor_address,
         ConnectionToken::from_secret("k7QxSecret"),
-        Arc::clone(&sink) as Arc<dyn PtySink>,
+        Arc::clone(&recording_sink) as Arc<dyn PtySink>,
         &[ended_listed_pane_id, ended_missing_pane_id, running_pane_id],
     )
     .expect("the backend opens the link");
 
     assert_eq!(
-        sink.list_exit_statuses(),
+        recording_sink.list_exit_statuses(),
         vec![
             (ended_listed_pane_id, ExitStatus::ExitCode(7)),
             (ended_missing_pane_id, ExitStatus::ExitCode(3)),
@@ -525,7 +541,7 @@ fn exits_before_the_pane_list_answer_leave_only_running_panes_claimed() {
     );
     assert_eq!(backend.take_pane_exit_statuses_at_connect(), HashMap::new());
     assert_eq!(
-        peer.list_requested_kinds(),
+        fake_supervisor.list_requested_kinds(),
         vec![
             SupervisorRequestKind::build_hello_request(ConnectionToken::from_secret("k7QxSecret")),
             SupervisorRequestKind::ListPanes,
@@ -634,19 +650,20 @@ fn opening_the_link_keeps_ends_and_kills_each_pane_difference() {
     // One answer per pane the opening kills.
     supervisor_results.push(SupervisorResult::Done);
     supervisor_results.push(SupervisorResult::Done);
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
 
     let backend = SupervisorPtyBackend::connect(
-        &peer.supervisor_address,
+        &fake_supervisor.supervisor_address,
         ConnectionToken::from_secret("k7QxSecret"),
-        Arc::clone(&sink) as Arc<dyn PtySink>,
+        Arc::clone(&recording_sink) as Arc<dyn PtySink>,
         &[first_kept_pane_id, gone_pane_id, second_kept_pane_id],
     )
     .expect("the backend opens the link");
 
     assert_eq!(
-        peer.list_requested_kinds(),
+        fake_supervisor.list_requested_kinds(),
         vec![
             SupervisorRequestKind::build_hello_request(ConnectionToken::from_secret("k7QxSecret")),
             SupervisorRequestKind::ListPanes,
@@ -662,7 +679,7 @@ fn opening_the_link_keeps_ends_and_kills_each_pane_difference() {
         "the panes nobody carried are killed in the order the supervisor listed them"
     );
     assert_eq!(
-        sink.list_exit_statuses(),
+        recording_sink.list_exit_statuses(),
         vec![(gone_pane_id, ExitStatus::ExitCode(-1))],
         "only the pane the supervisor no longer holds is reported ended"
     );
@@ -711,19 +728,20 @@ fn a_pane_the_supervisor_holds_that_no_caller_carried_is_killed() {
         },
     ]);
     supervisor_results.push(SupervisorResult::Done);
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
 
     let backend = SupervisorPtyBackend::connect(
-        &peer.supervisor_address,
+        &fake_supervisor.supervisor_address,
         ConnectionToken::from_secret("k7QxSecret"),
-        Arc::clone(&sink) as Arc<dyn PtySink>,
+        Arc::clone(&recording_sink) as Arc<dyn PtySink>,
         &[kept_pane_id],
     )
     .expect("the backend opens the link");
 
     assert_eq!(
-        peer.list_requested_kinds(),
+        fake_supervisor.list_requested_kinds(),
         vec![
             SupervisorRequestKind::build_hello_request(ConnectionToken::from_secret("k7QxSecret")),
             SupervisorRequestKind::ListPanes,
@@ -733,7 +751,7 @@ fn a_pane_the_supervisor_holds_that_no_caller_carried_is_killed() {
             },
         ]
     );
-    assert_eq!(sink.list_exit_statuses(), Vec::new());
+    assert_eq!(recording_sink.list_exit_statuses(), Vec::new());
     assert_eq!(
         backend.list_carried_panes(),
         vec![CarriedPtyPane {
@@ -752,9 +770,10 @@ fn spawning_a_pane_asks_the_supervisor_and_records_the_reported_child() {
     let pane_id = PaneId::new();
     let mut supervisor_results = build_opening_supervisor_results(Vec::new());
     supervisor_results.push(SupervisorResult::Spawned { process_id: 4242 });
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
 
     backend
         .spawn_pane(
@@ -787,9 +806,10 @@ fn supervisor_spawn_refusal_is_reported_as_spawn_failure() {
             message: "no terminal could be opened".to_string(),
         },
     ));
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
 
     assert_eq!(
         backend
@@ -816,9 +836,10 @@ fn resizing_records_the_size_only_once_the_supervisor_took_it() {
     let mut supervisor_results = build_opening_supervisor_results(Vec::new());
     supervisor_results.push(SupervisorResult::Spawned { process_id: 4242 });
     supervisor_results.push(SupervisorResult::Done);
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
     backend
         .spawn_pane(
             pane_id,
@@ -836,7 +857,7 @@ fn resizing_records_the_size_only_once_the_supervisor_took_it() {
         .expect("the pane is retuned");
 
     assert_eq!(
-        peer.list_requested_kinds().last(),
+        fake_supervisor.list_requested_kinds().last(),
         Some(&SupervisorRequestKind::Resize {
             pane_id,
             pty_size: wider_pty_size,
@@ -861,9 +882,10 @@ fn writing_to_a_pane_sends_exactly_the_bytes_it_was_given() {
     let mut supervisor_results = build_opening_supervisor_results(Vec::new());
     supervisor_results.push(SupervisorResult::Spawned { process_id: 4242 });
     supervisor_results.push(SupervisorResult::Done);
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
     backend
         .spawn_pane(pane_id, build_shell_spawn_spec("cat"), STANDARD_PTY_SIZE)
         .expect("the supervisor opens the pane");
@@ -873,7 +895,7 @@ fn writing_to_a_pane_sends_exactly_the_bytes_it_was_given() {
         .expect("the bytes reach the supervisor");
 
     assert_eq!(
-        peer.list_requested_kinds().last(),
+        fake_supervisor.list_requested_kinds().last(),
         Some(&SupervisorRequestKind::Write {
             pane_id,
             input_bytes: b"hello\n".to_vec(),
@@ -887,9 +909,10 @@ fn killing_a_pane_drops_it_from_this_backend() {
     let mut supervisor_results = build_opening_supervisor_results(Vec::new());
     supervisor_results.push(SupervisorResult::Spawned { process_id: 4242 });
     supervisor_results.push(SupervisorResult::Done);
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
     backend
         .spawn_pane(
             pane_id,
@@ -903,7 +926,7 @@ fn killing_a_pane_drops_it_from_this_backend() {
         .expect("the pane is closed");
 
     assert_eq!(
-        peer.list_requested_kinds().last(),
+        fake_supervisor.list_requested_kinds().last(),
         Some(&SupervisorRequestKind::Kill {
             pane_id,
             kill_policy: KillPolicy::Tree,
@@ -920,13 +943,13 @@ fn killing_a_pane_drops_it_from_this_backend() {
 #[test]
 fn a_pane_this_backend_does_not_drive_is_refused_before_the_link_is_touched() {
     let unknown_pane_id = PaneId::new();
-    let peer = FakeSupervisor::start_with_supervisor_results(
+    let fake_supervisor = FakeSupervisor::start_with_supervisor_results(
         build_opening_supervisor_results(Vec::new()),
         Vec::new(),
     );
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
-    let opening = peer.list_requested_kinds();
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
+    let opening = fake_supervisor.list_requested_kinds();
 
     assert_eq!(
         backend.resize_pane(unknown_pane_id, STANDARD_PTY_SIZE),
@@ -948,7 +971,7 @@ fn a_pane_this_backend_does_not_drive_is_refused_before_the_link_is_touched() {
     );
     assert_eq!(backend.find_live_working_directory(unknown_pane_id), None);
     assert_eq!(
-        peer.list_requested_kinds(),
+        fake_supervisor.list_requested_kinds(),
         opening,
         "a pane this backend does not drive costs no round trip"
     );
@@ -964,9 +987,10 @@ fn a_closed_pane_is_refused_while_the_backend_still_drives_another_one() {
     supervisor_results.push(SupervisorResult::Spawned { process_id: 4242 });
     supervisor_results.push(SupervisorResult::Spawned { process_id: 4243 });
     supervisor_results.push(SupervisorResult::Done);
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
     backend
         .spawn_pane(
             closed_pane_id,
@@ -984,7 +1008,7 @@ fn a_closed_pane_is_refused_while_the_backend_still_drives_another_one() {
     backend
         .kill_pane(closed_pane_id, KillPolicy::Tree)
         .expect("the pane is closed");
-    let asked_so_far = peer.list_requested_kinds();
+    let asked_so_far = fake_supervisor.list_requested_kinds();
 
     assert_eq!(
         backend.resize_pane(closed_pane_id, STANDARD_PTY_SIZE),
@@ -1000,7 +1024,7 @@ fn a_closed_pane_is_refused_while_the_backend_still_drives_another_one() {
     );
     assert_eq!(backend.find_live_working_directory(closed_pane_id), None);
     assert_eq!(
-        peer.list_requested_kinds(),
+        fake_supervisor.list_requested_kinds(),
         asked_so_far,
         "a pane this backend no longer drives costs no round trip"
     );
@@ -1021,7 +1045,7 @@ fn a_closed_pane_is_refused_while_the_backend_still_drives_another_one() {
 #[test]
 fn output_and_exit_events_reach_the_sink_in_the_order_they_arrive() {
     let pane_id = PaneId::new();
-    let peer = FakeSupervisor::start_with_supervisor_results(
+    let fake_supervisor = FakeSupervisor::start_with_supervisor_results(
         build_opening_supervisor_results(Vec::new()),
         vec![
             SupervisorEvent::Output {
@@ -1038,19 +1062,19 @@ fn output_and_exit_events_reach_the_sink_in_the_order_they_arrive() {
             },
         ],
     );
-    let sink = RecordingSink::new();
-    let _backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let recording_sink = RecordingSink::new();
+    let _backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
 
     wait_until_condition("the planted exit reached the sink", || {
-        !sink.list_exit_statuses().is_empty()
+        !recording_sink.list_exit_statuses().is_empty()
     });
 
     assert_eq!(
-        sink.list_output_chunks(),
+        recording_sink.list_output_chunks(),
         vec![(pane_id, b"first".to_vec()), (pane_id, b"second".to_vec()),]
     );
     assert_eq!(
-        sink.list_exit_statuses(),
+        recording_sink.list_exit_statuses(),
         vec![(pane_id, ExitStatus::ExitCode(0))]
     );
 }
@@ -1109,7 +1133,7 @@ fn a_sink_refusal_stops_one_pane_while_other_panes_keep_being_delivered() {
     // one pane, exit included. The link keeps carrying the rest.
     let refused_pane_id = PaneId::new();
     let live_pane_id = PaneId::new();
-    let peer = FakeSupervisor::start_with_supervisor_results(
+    let fake_supervisor = FakeSupervisor::start_with_supervisor_results(
         build_opening_supervisor_results(Vec::new()),
         vec![
             SupervisorEvent::Output {
@@ -1134,25 +1158,25 @@ fn a_sink_refusal_stops_one_pane_while_other_panes_keep_being_delivered() {
             },
         ],
     );
-    let sink = RefusingSink::from_refused_pane_id(refused_pane_id);
+    let refusing_sink = RefusingSink::from_refused_pane_id(refused_pane_id);
     let _backend = SupervisorPtyBackend::connect(
-        &peer.supervisor_address,
+        &fake_supervisor.supervisor_address,
         ConnectionToken::from_secret("k7QxSecret"),
-        Arc::clone(&sink) as Arc<dyn PtySink>,
+        Arc::clone(&refusing_sink) as Arc<dyn PtySink>,
         &[],
     )
     .expect("the backend opens the link");
 
     wait_until_condition("the live pane's exit reached the sink", || {
-        !sink.list_exit_statuses().is_empty()
+        !refusing_sink.list_exit_statuses().is_empty()
     });
 
     assert_eq!(
-        sink.list_output_chunks(),
+        refusing_sink.list_output_chunks(),
         vec![(live_pane_id, b"kept".to_vec())]
     );
     assert_eq!(
-        sink.list_exit_statuses(),
+        refusing_sink.list_exit_statuses(),
         vec![(live_pane_id, ExitStatus::ExitCode(0))]
     );
 }
@@ -1168,15 +1192,15 @@ fn holding_the_readers_still_asks_the_supervisor_to_hold_pane_output() {
     supervisor_results.push(SupervisorResult::Spawned { process_id: 4242 });
     supervisor_results.push(SupervisorResult::Done);
     supervisor_results.push(SupervisorResult::Done);
-    let peer = FakeSupervisor::start_with_supervisor_results(
+    let fake_supervisor = FakeSupervisor::start_with_supervisor_results(
         supervisor_results,
         vec![SupervisorEvent::Output {
             pane_id,
             output_bytes: b"before".to_vec(),
         }],
     );
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
     backend
         .spawn_pane(
             pane_id,
@@ -1187,7 +1211,7 @@ fn holding_the_readers_still_asks_the_supervisor_to_hold_pane_output() {
 
     assert_eq!(backend.pause_readers(), Ok(()));
     assert_eq!(
-        sink.list_output_chunks(),
+        recording_sink.list_output_chunks(),
         vec![(pane_id, b"before".to_vec())],
         "a pause that answered has already handed the consumer every chunk \
          written before that answer"
@@ -1207,7 +1231,7 @@ fn holding_the_readers_still_asks_the_supervisor_to_hold_pane_output() {
     backend.resume_readers();
 
     assert_eq!(
-        peer.list_requested_kinds(),
+        fake_supervisor.list_requested_kinds(),
         vec![
             SupervisorRequestKind::build_hello_request(ConnectionToken::from_secret("k7QxSecret")),
             SupervisorRequestKind::ListPanes,
@@ -1233,9 +1257,10 @@ fn a_supervisor_that_cannot_hold_its_output_fails_the_pause() {
             message: "PauseOutput is not a request kind this supervisor has".to_string(),
         },
     ));
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
 
     assert_eq!(
         backend.pause_readers(),
@@ -1251,9 +1276,10 @@ fn a_supervisor_that_cannot_hold_its_output_fails_the_pause() {
 fn a_pause_answered_with_something_else_is_refused() {
     let mut supervisor_results = build_opening_supervisor_results(Vec::new());
     supervisor_results.push(SupervisorResult::Panes(Vec::new()));
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
 
     assert_eq!(
         backend.pause_readers(),
@@ -1268,12 +1294,12 @@ fn a_broken_link_fails_the_request_in_flight() {
     // The fake supervisor runs out of supervisor_results and closes, which is what a
     // supervisor that died mid-request looks like from here.
     let pane_id = PaneId::new();
-    let peer = FakeSupervisor::start_with_supervisor_results(
+    let fake_supervisor = FakeSupervisor::start_with_supervisor_results(
         build_opening_supervisor_results(Vec::new()),
         Vec::new(),
     );
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
 
     assert_eq!(
         backend
@@ -1294,9 +1320,10 @@ fn an_answer_that_does_not_fit_its_request_is_refused() {
     let pane_id = PaneId::new();
     let mut supervisor_results = build_opening_supervisor_results(Vec::new());
     supervisor_results.push(SupervisorResult::Done);
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
 
     assert_eq!(
         backend
@@ -1316,28 +1343,29 @@ fn an_answer_that_does_not_fit_its_request_is_refused() {
 fn shutting_the_supervisor_down_is_requested_once() {
     let mut supervisor_results = build_opening_supervisor_results(Vec::new());
     supervisor_results.push(SupervisorResult::Done);
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
 
     backend
         .shutdown_supervisor()
         .expect("the supervisor is told to end");
 
     assert_eq!(
-        peer.list_requested_kinds().last(),
+        fake_supervisor.list_requested_kinds().last(),
         Some(&SupervisorRequestKind::Shutdown)
     );
 }
 
 #[test]
 fn shutting_down_over_a_broken_link_still_returns_success() {
-    let peer = FakeSupervisor::start_with_supervisor_results(
+    let fake_supervisor = FakeSupervisor::start_with_supervisor_results(
         build_opening_supervisor_results(Vec::new()),
         Vec::new(),
     );
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
 
     assert_eq!(backend.shutdown_supervisor(), Ok(()));
 }
@@ -1351,13 +1379,14 @@ fn supervisor_shutdown_refusal_still_returns_success() {
             message: "a pane could not be closed".to_string(),
         },
     ));
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
 
     assert_eq!(backend.shutdown_supervisor(), Ok(()));
     assert_eq!(
-        peer.list_requested_kinds().last(),
+        fake_supervisor.list_requested_kinds().last(),
         Some(&SupervisorRequestKind::Shutdown)
     );
 }
@@ -1371,9 +1400,10 @@ fn asking_a_pane_for_its_working_directory_returns_the_supervisor_answer() {
     supervisor_results.push(SupervisorResult::Cwd(Some(PathBuf::from("/tmp/work"))));
     supervisor_results.push(SupervisorResult::Cwd(None));
     supervisor_results.push(SupervisorResult::Done);
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
     backend
         .spawn_pane(
             pane_id,
@@ -1388,7 +1418,7 @@ fn asking_a_pane_for_its_working_directory_returns_the_supervisor_answer() {
         "the directory the supervisor named must reach the caller unchanged"
     );
     assert_eq!(
-        peer.list_requested_kinds().last(),
+        fake_supervisor.list_requested_kinds().last(),
         Some(&SupervisorRequestKind::LiveCwd { pane_id }),
         "the pane asked about must be the pane named"
     );
@@ -1416,9 +1446,10 @@ fn supervisor_kill_refusal_still_drops_the_pane() {
             message: "the pane could not be closed".to_string(),
         },
     ));
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
     backend
         .spawn_pane(
             pane_id,
@@ -1459,9 +1490,10 @@ fn supervisor_resize_refusal_leaves_the_pane_at_its_old_size() {
             message: "the terminal could not be retuned".to_string(),
         },
     ));
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
     backend
         .spawn_pane(
             pane_id,
@@ -1549,9 +1581,10 @@ fn request_ids_start_at_one_and_count_up_by_one() {
     let pane_id = PaneId::new();
     let mut supervisor_results = build_opening_supervisor_results(Vec::new());
     supervisor_results.push(SupervisorResult::Spawned { process_id: 4242 });
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
 
     backend
         .spawn_pane(
@@ -1561,12 +1594,12 @@ fn request_ids_start_at_one_and_count_up_by_one() {
         )
         .expect("the supervisor opens the pane");
 
-    assert_eq!(peer.list_request_ids(), vec![1, 2, 3]);
+    assert_eq!(fake_supervisor.list_request_ids(), vec![1, 2, 3]);
 }
 
 #[test]
 fn a_hello_the_supervisor_refuses_fails_the_opening() {
-    let peer = FakeSupervisor::start_with_supervisor_results(
+    let fake_supervisor = FakeSupervisor::start_with_supervisor_results(
         vec![SupervisorResult::Error(
             koshi_ipc::protocol::IpcErrorPayload {
                 code: koshi_ipc::protocol::IpcErrorCode::BadToken,
@@ -1575,12 +1608,12 @@ fn a_hello_the_supervisor_refuses_fails_the_opening() {
         )],
         Vec::new(),
     );
-    let sink = RecordingSink::new();
+    let recording_sink = RecordingSink::new();
 
     let supervisor_error = SupervisorPtyBackend::connect(
-        &peer.supervisor_address,
+        &fake_supervisor.supervisor_address,
         ConnectionToken::from_secret("k7QxSecret"),
-        Arc::clone(&sink) as Arc<dyn PtySink>,
+        Arc::clone(&recording_sink) as Arc<dyn PtySink>,
         &[],
     )
     .err()
@@ -1593,7 +1626,7 @@ fn a_hello_the_supervisor_refuses_fails_the_opening() {
         }
     );
     assert_eq!(
-        peer.list_requested_kinds(),
+        fake_supervisor.list_requested_kinds(),
         vec![SupervisorRequestKind::build_hello_request(
             ConnectionToken::from_secret("k7QxSecret")
         )],
@@ -1603,14 +1636,14 @@ fn a_hello_the_supervisor_refuses_fails_the_opening() {
 
 #[test]
 fn a_hello_answered_with_something_else_fails_the_opening() {
-    let peer =
+    let fake_supervisor =
         FakeSupervisor::start_with_supervisor_results(vec![SupervisorResult::Done], Vec::new());
-    let sink = RecordingSink::new();
+    let recording_sink = RecordingSink::new();
 
     let supervisor_error = SupervisorPtyBackend::connect(
-        &peer.supervisor_address,
+        &fake_supervisor.supervisor_address,
         ConnectionToken::from_secret("k7QxSecret"),
-        Arc::clone(&sink) as Arc<dyn PtySink>,
+        Arc::clone(&recording_sink) as Arc<dyn PtySink>,
         &[],
     )
     .err()
@@ -1627,7 +1660,7 @@ fn a_hello_answered_with_something_else_fails_the_opening() {
 #[test]
 fn a_supervisor_answering_in_protocol_one_is_linked_and_driven_in_protocol_one() {
     let pane_id = PaneId::new();
-    let peer = RawFrameFakeSupervisor::start(vec![
+    let fake_supervisor = RawFrameFakeSupervisor::start(vec![
         vec![serde_json::json!({
             "Response": {
                 "request_id": null,
@@ -1652,15 +1685,17 @@ fn a_supervisor_answering_in_protocol_one_is_linked_and_driven_in_protocol_one()
             build_previous_answer(3, serde_json::json!("Done")),
         ],
     ]);
-    let sink = RecordingSink::new();
+    let recording_sink = RecordingSink::new();
 
     let backend = SupervisorPtyBackend::connect(
-        &peer.supervisor_address,
+        &fake_supervisor.supervisor_address,
         ConnectionToken::from_secret("k7QxSecret"),
-        Arc::clone(&sink) as Arc<dyn PtySink>,
+        Arc::clone(&recording_sink) as Arc<dyn PtySink>,
         &[pane_id],
     )
     .expect("the backend links in protocol 1");
+    // A link of protocol 1 has no output window: the grant writes no frame.
+    backend.grant_pane_output(pane_id, 200 * 1024);
     backend
         .write_pane_input(pane_id, b"ls\r")
         .expect("the supervisor takes the bytes");
@@ -1677,7 +1712,7 @@ fn a_supervisor_answering_in_protocol_one_is_linked_and_driven_in_protocol_one()
         }]
     );
     assert_eq!(
-        peer.list_recorded_frames_by_link(),
+        fake_supervisor.list_recorded_frames_by_link(),
         vec![
             vec![serialize_current_supervisor_request(&SupervisorRequest {
                 request_id: 1,
@@ -1711,14 +1746,14 @@ fn a_supervisor_answering_in_protocol_one_is_linked_and_driven_in_protocol_one()
 #[test]
 fn a_hello_answer_neither_protocol_reads_fails_after_the_second_link() {
     let unreadable_frame = serde_json::json!({"Banner": "not a supervisor"});
-    let peer =
+    let fake_supervisor =
         RawFrameFakeSupervisor::start(vec![vec![unreadable_frame.clone()], vec![unreadable_frame]]);
-    let sink = RecordingSink::new();
+    let recording_sink = RecordingSink::new();
 
     let supervisor_error = SupervisorPtyBackend::connect(
-        &peer.supervisor_address,
+        &fake_supervisor.supervisor_address,
         ConnectionToken::from_secret("k7QxSecret"),
-        Arc::clone(&sink) as Arc<dyn PtySink>,
+        Arc::clone(&recording_sink) as Arc<dyn PtySink>,
         &[],
     )
     .err()
@@ -1737,7 +1772,7 @@ fn a_hello_answer_neither_protocol_reads_fails_after_the_second_link() {
         )),
     };
     assert_eq!(
-        peer.list_recorded_frames_by_link(),
+        fake_supervisor.list_recorded_frames_by_link(),
         vec![
             vec![serialize_current_supervisor_request(&hello_request)],
             vec![serialize_previous_supervisor_request(&hello_request)
@@ -1748,7 +1783,7 @@ fn a_hello_answer_neither_protocol_reads_fails_after_the_second_link() {
 
 #[test]
 fn a_pane_list_answered_with_something_else_fails_the_opening() {
-    let peer = FakeSupervisor::start_with_supervisor_results(
+    let fake_supervisor = FakeSupervisor::start_with_supervisor_results(
         vec![
             SupervisorResult::Hello {
                 protocol_version: 1,
@@ -1757,12 +1792,12 @@ fn a_pane_list_answered_with_something_else_fails_the_opening() {
         ],
         Vec::new(),
     );
-    let sink = RecordingSink::new();
+    let recording_sink = RecordingSink::new();
 
     let connect_error = SupervisorPtyBackend::connect(
-        &peer.supervisor_address,
+        &fake_supervisor.supervisor_address,
         ConnectionToken::from_secret("k7QxSecret"),
-        Arc::clone(&sink) as Arc<dyn PtySink>,
+        Arc::clone(&recording_sink) as Arc<dyn PtySink>,
         &[],
     )
     .err()
@@ -1780,12 +1815,12 @@ fn a_pane_list_answered_with_something_else_fails_the_opening() {
 fn an_address_nobody_listens_on_fails_the_opening() {
     let runtime_directory = tempfile::tempdir().expect("an isolated test directory is created");
     let supervisor_address = build_test_supervisor_address(runtime_directory.path());
-    let sink = RecordingSink::new();
+    let recording_sink = RecordingSink::new();
 
     let supervisor_error = SupervisorPtyBackend::connect(
         &supervisor_address,
         ConnectionToken::from_secret("k7QxSecret"),
-        Arc::clone(&sink) as Arc<dyn PtySink>,
+        Arc::clone(&recording_sink) as Arc<dyn PtySink>,
         &[],
     )
     .err()
@@ -1805,27 +1840,38 @@ fn an_address_nobody_listens_on_fails_the_opening() {
     );
 }
 
-#[test]
-fn an_answer_naming_no_request_fails_the_request_in_flight() {
-    let peer = FakeSupervisor::start_with_supervisor_frames(
-        build_opening_supervisor_results(Vec::new()),
-        vec![SupervisorTestFrame::Message(SupervisorMessage::Response(
-            SupervisorResponse {
-                request_id: None,
-                answer_result: SupervisorResult::Done,
-            },
-        ))],
-    );
-    let sink = RecordingSink::new();
-
-    let supervisor_error = SupervisorPtyBackend::connect(
-        &peer.supervisor_address,
+/// Connect a backend to a supervisor that answers the Hello frame with
+/// `hello_answer_frame` and serves no second link, and return the failure
+/// [`SupervisorPtyBackend::connect`] reports.
+fn connect_to_supervisor_answering_hello_with(hello_answer_frame: serde_json::Value) -> PtyError {
+    let fake_supervisor = RawFrameFakeSupervisor::start(vec![vec![hello_answer_frame]]);
+    SupervisorPtyBackend::connect(
+        &fake_supervisor.supervisor_address,
         ConnectionToken::from_secret("k7QxSecret"),
-        Arc::clone(&sink) as Arc<dyn PtySink>,
+        RecordingSink::new() as Arc<dyn PtySink>,
         &[],
     )
     .err()
-    .expect("an answer naming no request fails the opening");
+    .expect("the Hello's answer fails the opening")
+}
+
+/// The JSON frame of `supervisor_response`, as the current protocol writes
+/// it.
+fn serialize_supervisor_response(supervisor_response: SupervisorResponse) -> serde_json::Value {
+    serde_json::to_value(SupervisorMessage::<_, SupervisorEvent>::Response(
+        supervisor_response,
+    ))
+    .expect("a supervisor response serializes")
+}
+
+#[test]
+fn an_answer_naming_no_request_fails_the_request_in_flight() {
+    let supervisor_error = connect_to_supervisor_answering_hello_with(
+        serialize_supervisor_response(SupervisorResponse {
+            request_id: None,
+            answer_result: SupervisorResult::Done,
+        }),
+    );
 
     assert_eq!(
         supervisor_error,
@@ -1838,25 +1884,12 @@ fn an_answer_naming_no_request_fails_the_request_in_flight() {
 
 #[test]
 fn an_answer_to_a_request_not_yet_sent_fails_the_request_in_flight() {
-    let peer = FakeSupervisor::start_with_supervisor_frames(
-        build_opening_supervisor_results(Vec::new()),
-        vec![SupervisorTestFrame::Message(SupervisorMessage::Response(
-            SupervisorResponse {
-                request_id: Some(7),
-                answer_result: SupervisorResult::Done,
-            },
-        ))],
+    let supervisor_error = connect_to_supervisor_answering_hello_with(
+        serialize_supervisor_response(SupervisorResponse {
+            request_id: Some(7),
+            answer_result: SupervisorResult::Done,
+        }),
     );
-    let sink = RecordingSink::new();
-
-    let supervisor_error = SupervisorPtyBackend::connect(
-        &peer.supervisor_address,
-        ConnectionToken::from_secret("k7QxSecret"),
-        Arc::clone(&sink) as Arc<dyn PtySink>,
-        &[],
-    )
-    .err()
-    .expect("an answer to a request not yet sent fails the opening");
 
     assert_eq!(
         supervisor_error,
@@ -1870,49 +1903,46 @@ fn an_answer_to_a_request_not_yet_sent_fails_the_request_in_flight() {
 #[test]
 fn an_answer_to_an_earlier_request_is_passed_over() {
     // Request ids start at 1, so an answer to request 0 reads as the answer
-    // to a request whose wait already ran out.
-    let peer = FakeSupervisor::start_with_supervisor_frames(
-        build_opening_supervisor_results(Vec::new()),
-        vec![SupervisorTestFrame::Message(SupervisorMessage::Response(
-            SupervisorResponse {
-                request_id: Some(0),
-                answer_result: SupervisorResult::Done,
+    // to a request whose wait already ran out. It arrives while the Hello is
+    // in flight, and the Hello still takes its own answer.
+    let fake_supervisor = ScriptedFakeSupervisor::start(|mut frame_reader, mut frame_writer| {
+        let hello_request = receive_scripted_request(&mut frame_reader);
+        send_scripted_answer(&mut frame_writer, 0, SupervisorResult::Done);
+        send_scripted_answer(
+            &mut frame_writer,
+            hello_request.request_id,
+            SupervisorResult::Hello {
+                protocol_version: 1,
             },
-        ))],
-    );
-    let sink = RecordingSink::new();
+        );
+        let pane_list_request = receive_scripted_request(&mut frame_reader);
+        send_scripted_answer(
+            &mut frame_writer,
+            pane_list_request.request_id,
+            SupervisorResult::Panes(Vec::new()),
+        );
+        drain_scripted_link(&mut frame_reader);
+    });
 
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let backend = SupervisorPtyBackend::connect(
+        &fake_supervisor.supervisor_address,
+        ConnectionToken::from_secret("k7QxSecret"),
+        RecordingSink::new(),
+        &[],
+    )
+    .expect("the backend opens the link");
 
-    assert_eq!(
-        peer.list_requested_kinds(),
-        vec![
-            SupervisorRequestKind::build_hello_request(ConnectionToken::from_secret("k7QxSecret")),
-            SupervisorRequestKind::ListPanes,
-        ]
-    );
     assert_eq!(backend.list_carried_panes(), Vec::new());
 }
 
 #[test]
 fn an_answer_variant_this_build_does_not_name_is_refused() {
-    let peer = FakeSupervisor::start_with_supervisor_frames(
-        Vec::new(),
-        vec![SupervisorTestFrame::UnknownResponseVariant {
-            request_id: Some(1),
-            unknown_variant_name: "Floating".to_string(),
-        }],
-    );
-    let sink = RecordingSink::new();
-
-    let supervisor_error = SupervisorPtyBackend::connect(
-        &peer.supervisor_address,
-        ConnectionToken::from_secret("k7QxSecret"),
-        Arc::clone(&sink) as Arc<dyn PtySink>,
-        &[],
-    )
-    .err()
-    .expect("an answer this build has no name for fails the opening");
+    let supervisor_error = connect_to_supervisor_answering_hello_with(serde_json::json!({
+        "Response": {
+            "request_id": 1,
+            "answer_result": "Floating",
+        },
+    }));
 
     assert_eq!(
         supervisor_error,
@@ -1926,7 +1956,7 @@ fn an_answer_variant_this_build_does_not_name_is_refused() {
 #[test]
 fn an_event_variant_this_build_does_not_name_is_passed_over() {
     let pane_id = PaneId::new();
-    let peer = FakeSupervisor::start_with_supervisor_frames(
+    let fake_supervisor = FakeSupervisor::start_with_supervisor_frames(
         build_opening_supervisor_results(Vec::new()),
         vec![
             SupervisorTestFrame::UnknownEventVariant("Bell".to_string()),
@@ -1936,18 +1966,18 @@ fn an_event_variant_this_build_does_not_name_is_passed_over() {
             })),
         ],
     );
-    let sink = RecordingSink::new();
+    let recording_sink = RecordingSink::new();
 
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
 
     wait_until_condition("the chunk after the unknown event reached the sink", || {
-        !sink.list_output_chunks().is_empty()
+        !recording_sink.list_output_chunks().is_empty()
     });
     assert_eq!(
-        sink.list_output_chunks(),
+        recording_sink.list_output_chunks(),
         vec![(pane_id, b"after".to_vec())]
     );
-    assert_eq!(sink.list_exit_statuses(), Vec::new());
+    assert_eq!(recording_sink.list_exit_statuses(), Vec::new());
     assert_eq!(backend.list_carried_panes(), Vec::new());
 }
 
@@ -1965,13 +1995,14 @@ fn an_orphan_the_supervisor_will_not_kill_does_not_stop_the_opening() {
             message: "the pane could not be closed".to_string(),
         },
     ));
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
 
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
 
     assert_eq!(
-        peer.list_requested_kinds(),
+        fake_supervisor.list_requested_kinds(),
         vec![
             SupervisorRequestKind::build_hello_request(ConnectionToken::from_secret("k7QxSecret")),
             SupervisorRequestKind::ListPanes,
@@ -1986,7 +2017,7 @@ fn an_orphan_the_supervisor_will_not_kill_does_not_stop_the_opening() {
         Vec::new(),
         "a pane nobody carried is not driven, whatever the kill answered"
     );
-    assert_eq!(sink.list_exit_statuses(), Vec::new());
+    assert_eq!(recording_sink.list_exit_statuses(), Vec::new());
 }
 
 #[test]
@@ -2000,9 +2031,10 @@ fn supervisor_write_refusal_reaches_the_caller_and_keeps_the_pane() {
             message: "the child is gone".to_string(),
         },
     ));
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
     backend
         .spawn_pane(pane_id, build_shell_spawn_spec("cat"), STANDARD_PTY_SIZE)
         .expect("the supervisor opens the pane");
@@ -2033,9 +2065,10 @@ fn a_write_answered_with_something_else_is_refused() {
     let mut supervisor_results = build_opening_supervisor_results(Vec::new());
     supervisor_results.push(SupervisorResult::Spawned { process_id: 4242 });
     supervisor_results.push(SupervisorResult::Cwd(None));
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
     backend
         .spawn_pane(pane_id, build_shell_spawn_spec("cat"), STANDARD_PTY_SIZE)
         .expect("the supervisor opens the pane");
@@ -2053,9 +2086,10 @@ fn kill_over_a_broken_link_still_drops_the_pane() {
     let pane_id = PaneId::new();
     let mut supervisor_results = build_opening_supervisor_results(Vec::new());
     supervisor_results.push(SupervisorResult::Spawned { process_id: 4242 });
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
     backend
         .spawn_pane(
             pane_id,
@@ -2088,9 +2122,10 @@ fn supervisor_working_directory_refusal_returns_none() {
             message: "no such pane".to_string(),
         },
     ));
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
     backend
         .spawn_pane(
             pane_id,
@@ -2101,7 +2136,7 @@ fn supervisor_working_directory_refusal_returns_none() {
 
     assert_eq!(backend.find_live_working_directory(pane_id), None);
     assert_eq!(
-        peer.list_requested_kinds().last(),
+        fake_supervisor.list_requested_kinds().last(),
         Some(&SupervisorRequestKind::LiveCwd { pane_id })
     );
 }
@@ -2116,15 +2151,16 @@ fn supervisor_resume_refusal_leaves_the_link_serving() {
         },
     ));
     supervisor_results.push(SupervisorResult::Done);
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
 
     backend.resume_readers();
 
     assert_eq!(backend.shutdown_supervisor(), Ok(()));
     assert_eq!(
-        peer.list_requested_kinds(),
+        fake_supervisor.list_requested_kinds(),
         vec![
             SupervisorRequestKind::build_hello_request(ConnectionToken::from_secret("k7QxSecret")),
             SupervisorRequestKind::ListPanes,
@@ -2138,9 +2174,10 @@ fn supervisor_resume_refusal_leaves_the_link_serving() {
 fn a_shutdown_answered_with_something_else_is_refused() {
     let mut supervisor_results = build_opening_supervisor_results(Vec::new());
     supervisor_results.push(SupervisorResult::Panes(Vec::new()));
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
 
     assert_eq!(
         backend.shutdown_supervisor(),
@@ -2152,17 +2189,17 @@ fn a_shutdown_answered_with_something_else_is_refused() {
 
 #[test]
 fn flushing_the_writers_never_fails() {
-    let peer = FakeSupervisor::start_with_supervisor_results(
+    let fake_supervisor = FakeSupervisor::start_with_supervisor_results(
         build_opening_supervisor_results(Vec::new()),
         Vec::new(),
     );
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
-    let opening_request_kinds = peer.list_requested_kinds();
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
+    let opening_request_kinds = fake_supervisor.list_requested_kinds();
 
     assert_eq!(backend.flush_writers(), Ok(()));
     assert_eq!(
-        peer.list_requested_kinds(),
+        fake_supervisor.list_requested_kinds(),
         opening_request_kinds,
         "flushing asks the supervisor nothing"
     );
@@ -2175,9 +2212,10 @@ fn spawning_into_a_live_pane_id_panics_in_debug_builds() {
     let pane_id = PaneId::new();
     let mut supervisor_results = build_opening_supervisor_results(Vec::new());
     supervisor_results.push(SupervisorResult::Spawned { process_id: 4242 });
-    let peer = FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
-    let sink = RecordingSink::new();
-    let backend = connect_test_backend(&peer, Arc::clone(&sink));
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
     backend
         .spawn_pane(
             pane_id,
@@ -2191,4 +2229,533 @@ fn spawning_into_a_live_pane_id_panics_in_debug_builds() {
         build_shell_spawn_spec("sleep 30"),
         STANDARD_PTY_SIZE,
     );
+}
+
+/// A supervisor whose whole side of one link is `serve_link`, which reads and
+/// writes that link's frames itself.
+struct ScriptedFakeSupervisor {
+    /// The address the backend connects to.
+    supervisor_address: String,
+    /// The socket file's directory. Outlives the link on Unix.
+    _runtime_directory: tempfile::TempDir,
+}
+
+impl ScriptedFakeSupervisor {
+    /// Start a supervisor that accepts one link and hands its two halves to
+    /// `serve_link` on a thread of its own.
+    fn start(
+        serve_link: impl FnOnce(FrameReader, FrameWriter) + Send + 'static,
+    ) -> ScriptedFakeSupervisor {
+        let runtime_directory = tempfile::tempdir().expect("an isolated test directory is created");
+        let supervisor_address = build_test_supervisor_address(runtime_directory.path());
+        let supervisor_listener =
+            Listener::bind(&supervisor_address).expect("the fake supervisor binds its link");
+        thread::Builder::new()
+            .name("scripted-fake-supervisor".to_string())
+            .spawn(move || {
+                let supervisor_connection =
+                    supervisor_listener.accept().expect("the backend connects");
+                let (frame_reader, frame_writer) = supervisor_connection.split();
+                serve_link(frame_reader, frame_writer);
+            })
+            .expect("the fake supervisor thread starts");
+        ScriptedFakeSupervisor {
+            supervisor_address,
+            _runtime_directory: runtime_directory,
+        }
+    }
+}
+
+/// Read the next request on a scripted link.
+fn receive_scripted_request(frame_reader: &mut FrameReader) -> SupervisorRequest {
+    frame_reader
+        .recv::<SupervisorRequest>()
+        .expect("the backend sends a request")
+}
+
+/// Answer request `request_id` with `supervisor_result` on a scripted link.
+fn send_scripted_answer(
+    frame_writer: &mut FrameWriter,
+    request_id: u64,
+    supervisor_result: SupervisorResult,
+) {
+    frame_writer
+        .send(&SupervisorMessage::<_, SupervisorEvent>::Response(
+            SupervisorResponse {
+                request_id: Some(request_id),
+                answer_result: supervisor_result,
+            },
+        ))
+        .expect("the fake supervisor answers");
+}
+
+/// Answer a scripted link's Hello at `protocol_version` and its pane list
+/// with `supervisor_panes`.
+fn answer_scripted_opening(
+    frame_reader: &mut FrameReader,
+    frame_writer: &mut FrameWriter,
+    protocol_version: u32,
+    supervisor_panes: Vec<SupervisorPane>,
+) {
+    let hello_request = receive_scripted_request(frame_reader);
+    send_scripted_answer(
+        frame_writer,
+        hello_request.request_id,
+        SupervisorResult::Hello { protocol_version },
+    );
+    let pane_list_request = receive_scripted_request(frame_reader);
+    send_scripted_answer(
+        frame_writer,
+        pane_list_request.request_id,
+        SupervisorResult::Panes(supervisor_panes),
+    );
+}
+
+/// Read frames on a scripted link until the backend closes it.
+fn drain_scripted_link(frame_reader: &mut FrameReader) {
+    while frame_reader.recv::<SupervisorRequest>().is_ok() {}
+}
+
+/// The responses a `connect` needs from a supervisor that speaks
+/// [`OUTPUT_WINDOW_PROTOCOL_VERSION`], holding no pane.
+fn build_output_window_opening_results() -> Vec<SupervisorResult> {
+    vec![
+        SupervisorResult::Hello {
+            protocol_version: OUTPUT_WINDOW_PROTOCOL_VERSION,
+        },
+        SupervisorResult::Panes(Vec::new()),
+    ]
+}
+
+#[test]
+fn a_binary_output_frame_reaches_the_sink_as_that_panes_output() {
+    let pane_id = PaneId::new();
+    let fake_supervisor = FakeSupervisor::start_with_supervisor_frames(
+        build_opening_supervisor_results(Vec::new()),
+        vec![SupervisorTestFrame::BinaryOutput {
+            pane_id,
+            output_bytes: b"hi\x00\xff".to_vec(),
+        }],
+    );
+    let recording_sink = RecordingSink::new();
+
+    let _backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
+
+    wait_until_condition("the binary output reached the sink", || {
+        !recording_sink.list_output_chunks().is_empty()
+    });
+    assert_eq!(
+        recording_sink.list_output_chunks(),
+        vec![(pane_id, b"hi\x00\xff".to_vec())]
+    );
+}
+
+#[test]
+fn parsed_output_is_granted_back_once_it_reaches_the_minimum_grant() {
+    let pane_id = PaneId::new();
+    let mut supervisor_results = build_output_window_opening_results();
+    supervisor_results.push(SupervisorResult::Spawned { process_id: 4242 });
+    supervisor_results.push(SupervisorResult::Done);
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
+    backend
+        .spawn_pane(
+            pane_id,
+            build_shell_spawn_spec("sleep 30"),
+            STANDARD_PTY_SIZE,
+        )
+        .expect("the supervisor opens the pane");
+
+    // 40 KiB stays below the 64 KiB minimum; the next 30 KiB passes it, and
+    // the whole 70 KiB goes out in one grant. The count starts again at 0
+    // after a grant: the 10 bytes after it send nothing.
+    backend.grant_pane_output(pane_id, 40 * 1024);
+    backend.grant_pane_output(pane_id, 30 * 1024);
+    backend.grant_pane_output(pane_id, 10);
+    // The Write is answered only after the supervisor read every frame
+    // written before it.
+    backend
+        .write_pane_input(pane_id, b"x")
+        .expect("the write is answered");
+
+    assert_eq!(
+        fake_supervisor.list_requested_kinds()[3..],
+        [
+            SupervisorRequestKind::GrantPaneOutput {
+                pane_id,
+                granted_byte_count: 70 * 1024,
+            },
+            SupervisorRequestKind::Write {
+                pane_id,
+                input_bytes: b"x".to_vec(),
+            },
+        ]
+    );
+    assert_eq!(fake_supervisor.list_request_ids(), vec![1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn a_link_below_the_output_window_protocol_grants_nothing() {
+    let pane_id = PaneId::new();
+    let supervisor_results = vec![
+        SupervisorResult::Hello {
+            protocol_version: OUTPUT_WINDOW_PROTOCOL_VERSION - 1,
+        },
+        SupervisorResult::Panes(Vec::new()),
+        SupervisorResult::Spawned { process_id: 4242 },
+        SupervisorResult::Done,
+    ];
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
+    backend
+        .spawn_pane(
+            pane_id,
+            build_shell_spawn_spec("sleep 30"),
+            STANDARD_PTY_SIZE,
+        )
+        .expect("the supervisor opens the pane");
+
+    backend.grant_pane_output(pane_id, 200 * 1024);
+    // A request after the grant is answered by the next result, so the
+    // supervisor read nothing between the two.
+    backend
+        .write_pane_input(pane_id, b"x")
+        .expect("the write is answered");
+
+    let requested_kinds = fake_supervisor.list_requested_kinds();
+    assert_eq!(requested_kinds.len(), 4);
+    assert_eq!(
+        requested_kinds[3],
+        SupervisorRequestKind::Write {
+            pane_id,
+            input_bytes: b"x".to_vec(),
+        }
+    );
+}
+
+#[test]
+fn a_grant_for_a_pane_this_backend_does_not_drive_sends_nothing() {
+    let driven_pane_id = PaneId::new();
+    let mut supervisor_results = build_output_window_opening_results();
+    supervisor_results.push(SupervisorResult::Spawned { process_id: 4242 });
+    supervisor_results.push(SupervisorResult::Done);
+    let fake_supervisor =
+        FakeSupervisor::start_with_supervisor_results(supervisor_results, Vec::new());
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
+    backend
+        .spawn_pane(
+            driven_pane_id,
+            build_shell_spawn_spec("sleep 30"),
+            STANDARD_PTY_SIZE,
+        )
+        .expect("the supervisor opens the pane");
+
+    backend.grant_pane_output(PaneId::new(), 200 * 1024);
+    backend
+        .write_pane_input(driven_pane_id, b"x")
+        .expect("the write is answered");
+
+    let requested_kinds = fake_supervisor.list_requested_kinds();
+    assert_eq!(requested_kinds.len(), 4);
+    assert_eq!(
+        requested_kinds[3],
+        SupervisorRequestKind::Write {
+            pane_id: driven_pane_id,
+            input_bytes: b"x".to_vec(),
+        }
+    );
+}
+
+#[test]
+fn resizing_several_panes_writes_every_request_before_reading_an_answer() {
+    // The fake reads both Resize requests before it answers either, and then
+    // answers them newest first.
+    let first_pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
+    let undriven_pane_id = PaneId::new();
+    let first_pty_size = PtySize {
+        column_count: 100,
+        row_count: 30,
+    };
+    let second_pty_size = PtySize {
+        column_count: 60,
+        row_count: 20,
+    };
+    let supervisor_panes = vec![
+        SupervisorPane {
+            pane_id: first_pane_id,
+            process_id: 4241,
+            pty_size: STANDARD_PTY_SIZE,
+        },
+        SupervisorPane {
+            pane_id: second_pane_id,
+            process_id: 4242,
+            pty_size: STANDARD_PTY_SIZE,
+        },
+    ];
+    let (resize_request_sender, resize_request_receiver) = channel();
+    let fake_supervisor =
+        ScriptedFakeSupervisor::start(move |mut frame_reader, mut frame_writer| {
+            answer_scripted_opening(&mut frame_reader, &mut frame_writer, 1, supervisor_panes);
+            let first_resize_request = receive_scripted_request(&mut frame_reader);
+            let second_resize_request = receive_scripted_request(&mut frame_reader);
+            send_scripted_answer(
+                &mut frame_writer,
+                second_resize_request.request_id,
+                SupervisorResult::Done,
+            );
+            send_scripted_answer(
+                &mut frame_writer,
+                first_resize_request.request_id,
+                SupervisorResult::Done,
+            );
+            let _ = resize_request_sender.send(vec![
+                first_resize_request.request_kind,
+                second_resize_request.request_kind,
+            ]);
+            drain_scripted_link(&mut frame_reader);
+        });
+    let backend = SupervisorPtyBackend::connect(
+        &fake_supervisor.supervisor_address,
+        ConnectionToken::from_secret("k7QxSecret"),
+        RecordingSink::new(),
+        &[first_pane_id, second_pane_id],
+    )
+    .expect("the backend opens the link");
+
+    let resize_results = backend.resize_panes(&[
+        (first_pane_id, first_pty_size),
+        (undriven_pane_id, first_pty_size),
+        (second_pane_id, second_pty_size),
+    ]);
+
+    assert_eq!(
+        resize_results,
+        vec![
+            Ok(()),
+            Err(PtyError::UnknownPane {
+                pane_id: undriven_pane_id
+            }),
+            Ok(()),
+        ]
+    );
+    assert_eq!(
+        resize_request_receiver
+            .recv_timeout(HANG_GUARD_DURATION)
+            .expect("the fake read both resizes"),
+        vec![
+            SupervisorRequestKind::Resize {
+                pane_id: first_pane_id,
+                pty_size: first_pty_size,
+            },
+            SupervisorRequestKind::Resize {
+                pane_id: second_pane_id,
+                pty_size: second_pty_size,
+            },
+        ]
+    );
+    let mut carried_panes = backend.list_carried_panes();
+    carried_panes.sort_by_key(|carried_pane| carried_pane.process_id);
+    assert_eq!(
+        carried_panes
+            .iter()
+            .map(|carried_pane| carried_pane.pty_size)
+            .collect::<Vec<_>>(),
+        vec![first_pty_size, second_pty_size]
+    );
+}
+
+#[test]
+fn a_write_is_not_held_behind_a_kill_waiting_for_its_answer() {
+    // The fake reads two requests before it answers either: a graceful Kill
+    // on one thread and a Write on another. It answers the Write first.
+    let killed_pane_id = PaneId::new();
+    let written_pane_id = PaneId::new();
+    let supervisor_panes = vec![
+        SupervisorPane {
+            pane_id: killed_pane_id,
+            process_id: 4241,
+            pty_size: STANDARD_PTY_SIZE,
+        },
+        SupervisorPane {
+            pane_id: written_pane_id,
+            process_id: 4242,
+            pty_size: STANDARD_PTY_SIZE,
+        },
+    ];
+    let fake_supervisor =
+        ScriptedFakeSupervisor::start(move |mut frame_reader, mut frame_writer| {
+            answer_scripted_opening(&mut frame_reader, &mut frame_writer, 1, supervisor_panes);
+            let held_requests = [
+                receive_scripted_request(&mut frame_reader),
+                receive_scripted_request(&mut frame_reader),
+            ];
+            for answered_kind_name in ["Write", "Kill"] {
+                let held_request = held_requests
+                    .iter()
+                    .find(|held_request| {
+                        held_request.request_kind.get_request_kind_name() == answered_kind_name
+                    })
+                    .expect("both requests arrived");
+                send_scripted_answer(
+                    &mut frame_writer,
+                    held_request.request_id,
+                    SupervisorResult::Done,
+                );
+            }
+            drain_scripted_link(&mut frame_reader);
+        });
+    let backend = Arc::new(
+        SupervisorPtyBackend::connect(
+            &fake_supervisor.supervisor_address,
+            ConnectionToken::from_secret("k7QxSecret"),
+            RecordingSink::new(),
+            &[killed_pane_id, written_pane_id],
+        )
+        .expect("the backend opens the link"),
+    );
+
+    let kill_thread = {
+        let backend = Arc::clone(&backend);
+        thread::spawn(move || {
+            backend.kill_pane(
+                killed_pane_id,
+                KillPolicy::Graceful {
+                    timeout_duration: Duration::from_secs(3),
+                },
+            )
+        })
+    };
+    assert_eq!(backend.write_pane_input(written_pane_id, b"x"), Ok(()));
+    assert_eq!(kill_thread.join().expect("the kill thread ended"), Ok(()));
+}
+
+#[test]
+fn the_link_closing_reports_every_pane_still_driven_as_ended_once() {
+    let exited_pane_id = PaneId::new();
+    let running_pane_id = PaneId::new();
+    let mut supervisor_results = build_opening_supervisor_results(Vec::new());
+    supervisor_results.push(SupervisorResult::Spawned { process_id: 4241 });
+    supervisor_results.push(SupervisorResult::Spawned { process_id: 4242 });
+    let fake_supervisor = FakeSupervisor::start_with_supervisor_frames(
+        supervisor_results,
+        vec![SupervisorTestFrame::EventAfterFirstSpawnAnswer(
+            SupervisorEvent::Exited {
+                pane_id: exited_pane_id,
+                exit_status: ExitStatus::ExitCode(0),
+            },
+        )],
+    );
+    let recording_sink = RecordingSink::new();
+    let backend = connect_test_backend(&fake_supervisor, Arc::clone(&recording_sink));
+    for pane_id in [exited_pane_id, running_pane_id] {
+        backend
+            .spawn_pane(
+                pane_id,
+                build_shell_spawn_spec("sleep 30"),
+                STANDARD_PTY_SIZE,
+            )
+            .expect("the supervisor opens the pane");
+    }
+
+    // The fake has no answer left: it closes the link on this request.
+    assert_eq!(
+        backend.write_pane_input(running_pane_id, b"x"),
+        Err(PtyError::Io {
+            detail: "the supervisor link closed while Write was in flight".to_string(),
+        })
+    );
+    wait_until_condition("the running pane was reported as ended", || {
+        recording_sink.list_exit_statuses().len() == 2
+    });
+    thread::sleep(Duration::from_millis(50));
+
+    assert_eq!(
+        recording_sink.list_exit_statuses(),
+        vec![
+            (exited_pane_id, ExitStatus::ExitCode(0)),
+            (running_pane_id, UNOBSERVED_EXIT),
+        ],
+        "the pane whose exit arrived keeps that exit, and is not reported again"
+    );
+    assert_eq!(backend.list_carried_panes(), Vec::new());
+    assert_eq!(
+        backend.pause_readers(),
+        Err(PtyError::Io {
+            detail: "PauseOutput could not be sent: the supervisor link is closed".to_string(),
+        })
+    );
+    assert_eq!(fake_supervisor.list_requested_kinds().len(), 5);
+}
+
+#[test]
+fn a_pane_opened_as_the_link_closes_is_either_refused_or_reported_ended() {
+    // The fake answers the Spawn and closes the link at once. Whichever of the
+    // two the backend sees first, the pane is never left driven with nothing
+    // carrying its output: either the spawn fails, or the pane is reported
+    // as ended.
+    let pane_id = PaneId::new();
+    let fake_supervisor =
+        ScriptedFakeSupervisor::start(move |mut frame_reader, mut frame_writer| {
+            answer_scripted_opening(&mut frame_reader, &mut frame_writer, 1, Vec::new());
+            let spawn_request = receive_scripted_request(&mut frame_reader);
+            send_scripted_answer(
+                &mut frame_writer,
+                spawn_request.request_id,
+                SupervisorResult::Spawned { process_id: 4242 },
+            );
+        });
+    let recording_sink = RecordingSink::new();
+    let backend = SupervisorPtyBackend::connect(
+        &fake_supervisor.supervisor_address,
+        ConnectionToken::from_secret("k7QxSecret"),
+        Arc::clone(&recording_sink) as Arc<dyn PtySink>,
+        &[],
+    )
+    .expect("the backend opens the link");
+
+    let spawn_result = backend.spawn_pane(
+        pane_id,
+        build_shell_spawn_spec("sleep 30"),
+        STANDARD_PTY_SIZE,
+    );
+    wait_until_condition("the link closed", || {
+        backend.pause_readers()
+            == Err(PtyError::Io {
+                detail: "PauseOutput could not be sent: the supervisor link is closed".to_string(),
+            })
+    });
+
+    // The link reader records the close and takes every driven pane out under
+    // one lock. A spawn that saw the close never drove its pane, and a pane
+    // driven before the close is reported once the reader has taken it out.
+    match spawn_result {
+        Ok(()) => {
+            wait_until_condition("the opened pane was reported as ended", || {
+                !recording_sink.list_exit_statuses().is_empty()
+            });
+            assert_eq!(
+                recording_sink.list_exit_statuses(),
+                vec![(pane_id, UNOBSERVED_EXIT)]
+            );
+        }
+        Err(spawn_error) => {
+            assert_eq!(
+                spawn_error,
+                PtyError::Spawn {
+                    detail: format!(
+                        "the supervisor link closed after pane {pane_id} was opened, so \
+                         nothing carries its output"
+                    ),
+                }
+            );
+            assert_eq!(recording_sink.list_exit_statuses(), Vec::new());
+        }
+    }
+    assert_eq!(backend.list_carried_panes(), Vec::new());
 }

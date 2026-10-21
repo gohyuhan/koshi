@@ -1,30 +1,33 @@
 //! Tests for the remote listener's connection-attempt table: how many
-//! connections one address may open inside a window, that an address crossing
-//! its limit is logged once rather than once per attempt, that a window ends
-//! on its own, and that the table cannot grow past the count it is bounded at.
+//! connections one address may have unadmitted inside a window, that an
+//! admitted connection stops counting, that an address crossing its limit is
+//! logged once rather than once per attempt, that a window ends on its own,
+//! and that the table cannot grow past the count it is bounded at.
 //!
 //! Also [`RemoteConnectionEndReport`], which reports a bridged connection ended once, the two
 //! functions that read and write one frame, the frames an admitted connection
 //! sends, what [`bind_remote_listener`] refuses, the refusal of a caller
-//! offering TLS 1.2 alone, and the check of the router's program file that
-//! each accepted connection runs.
+//! offering TLS 1.2 alone, the check of the router's program file that
+//! each accepted connection runs, and the open of a session's bridge while
+//! that session replaces its process image.
 //!
 //! [`serve_remote_connection`] is served over real TLS on loopback in two places: the
 //! answers a caller reads before it is admitted, and one admitted client held
 //! open while its session keeps emitting events.
 
 use std::io::Cursor;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use super::*;
 
 use koshi_core::ids::SessionId;
+use koshi_ipc::protocol::{MIN_PROTOCOL_VERSION, PROTOCOL_VERSION};
 use koshi_ipc::remote_state::CERTIFICATE_FILE_FORMAT;
 use koshi_test_support::fixtures::{build_test_runtime_directory, write_printing_program};
 
-/// The address `10.0.0.<last_ipv4_octet>`, for naming distinct callers in a test.
+/// The address `192.0.2.<last_ipv4_octet>`, for naming distinct callers in a test.
 fn build_test_caller_ip_address(last_ipv4_octet: u8) -> IpAddr {
-    IpAddr::V4(Ipv4Addr::new(10, 0, 0, last_ipv4_octet))
+    IpAddr::V4(Ipv4Addr::new(192, 0, 2, last_ipv4_octet))
 }
 
 /// A self-signed certificate naming `koshi`, generated fresh for one test
@@ -49,11 +52,13 @@ fn an_address_inside_its_limit_is_served_every_time() {
     let mut peer_address_rate_table = PeerAddressRateTable::new();
     let current_time = Instant::now();
 
-    for attempt_index in 1..=MAX_ATTEMPT_COUNT {
+    for attempt_index in 1..=MAX_UNADMITTED_ATTEMPT_COUNT {
         assert_eq!(
             peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), current_time),
-            PeerAddressAttemptDecision::Serve,
-            "attempt {attempt_index} of {MAX_ATTEMPT_COUNT} is inside the limit"
+            PeerAddressAttemptDecision::Serve {
+                window_started_at: current_time,
+            },
+            "attempt {attempt_index} of {MAX_UNADMITTED_ATTEMPT_COUNT} is inside the limit"
         );
     }
 }
@@ -64,10 +69,12 @@ fn crossing_the_limit_is_logged_once_and_then_dropped_in_silence() {
     let mut peer_address_rate_table = PeerAddressRateTable::new();
     let current_time = Instant::now();
 
-    for _ in 1..=MAX_ATTEMPT_COUNT {
+    for _ in 1..=MAX_UNADMITTED_ATTEMPT_COUNT {
         assert_eq!(
             peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), current_time),
-            PeerAddressAttemptDecision::Serve
+            PeerAddressAttemptDecision::Serve {
+                window_started_at: current_time,
+            }
         );
     }
 
@@ -90,11 +97,11 @@ fn a_window_that_has_passed_lets_the_same_address_back_in() {
     let mut peer_address_rate_table = PeerAddressRateTable::new();
     let window_started_at = Instant::now();
 
-    for _ in 1..=MAX_ATTEMPT_COUNT {
+    for _ in 1..=MAX_UNADMITTED_ATTEMPT_COUNT {
         assert_eq!(
             peer_address_rate_table
                 .decide_attempt(build_test_caller_ip_address(1), window_started_at),
-            PeerAddressAttemptDecision::Serve
+            PeerAddressAttemptDecision::Serve { window_started_at }
         );
     }
     assert_eq!(
@@ -115,7 +122,9 @@ fn a_window_that_has_passed_lets_the_same_address_back_in() {
         add_seconds_to_instant(window_started_at, RATE_WINDOW_DURATION.as_secs() + 1);
     assert_eq!(
         peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), after_window_end),
-        PeerAddressAttemptDecision::Serve
+        PeerAddressAttemptDecision::Serve {
+            window_started_at: after_window_end,
+        }
     );
 }
 
@@ -124,10 +133,12 @@ fn each_address_is_counted_on_its_own() {
     let mut peer_address_rate_table = PeerAddressRateTable::new();
     let current_time = Instant::now();
 
-    for _ in 1..=MAX_ATTEMPT_COUNT {
+    for _ in 1..=MAX_UNADMITTED_ATTEMPT_COUNT {
         assert_eq!(
             peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), current_time),
-            PeerAddressAttemptDecision::Serve
+            PeerAddressAttemptDecision::Serve {
+                window_started_at: current_time,
+            }
         );
     }
     assert_eq!(
@@ -138,7 +149,9 @@ fn each_address_is_counted_on_its_own() {
     // A second address has opened nothing: its first attempt is served.
     assert_eq!(
         peer_address_rate_table.decide_attempt(build_test_caller_ip_address(2), current_time),
-        PeerAddressAttemptDecision::Serve
+        PeerAddressAttemptDecision::Serve {
+            window_started_at: current_time,
+        }
     );
 }
 
@@ -208,6 +221,124 @@ fn a_full_table_drops_the_address_whose_window_opened_first() {
         peer_address_rate_table.window_by_peer_ip_address.len(),
         MAX_RATE_TABLE_ENTRY_COUNT
     );
+}
+
+/// One connection from `::1` counted in a fresh [`PeerAddressRateTable`].
+fn build_test_counted_attempt() -> CountedAttempt {
+    let peer_ip_address = IpAddr::V6(Ipv6Addr::LOCALHOST);
+    let mut peer_address_rate_table = PeerAddressRateTable::new();
+    let PeerAddressAttemptDecision::Serve { window_started_at } =
+        peer_address_rate_table.decide_attempt(peer_ip_address, Instant::now())
+    else {
+        panic!("a fresh table serves the first attempt");
+    };
+    CountedAttempt {
+        peer_address_rate_table: Arc::new(Mutex::new(peer_address_rate_table)),
+        peer_ip_address,
+        window_started_at,
+    }
+}
+
+#[test]
+fn an_admitted_attempt_stops_counting_and_lets_one_more_from_its_address_in() {
+    let mut peer_address_rate_table = PeerAddressRateTable::new();
+    let current_time = Instant::now();
+    for _ in 1..=MAX_UNADMITTED_ATTEMPT_COUNT {
+        assert_eq!(
+            peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), current_time),
+            PeerAddressAttemptDecision::Serve {
+                window_started_at: current_time,
+            }
+        );
+    }
+
+    peer_address_rate_table.remove_attempt(build_test_caller_ip_address(1), current_time);
+
+    assert_eq!(
+        peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), current_time),
+        PeerAddressAttemptDecision::Serve {
+            window_started_at: current_time,
+        }
+    );
+    assert_eq!(
+        peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), current_time),
+        PeerAddressAttemptDecision::DropAndSay
+    );
+}
+
+#[test]
+fn a_dropped_attempt_is_not_counted_and_the_limit_is_logged_once_per_window() {
+    let mut peer_address_rate_table = PeerAddressRateTable::new();
+    let current_time = Instant::now();
+    for _ in 1..=MAX_UNADMITTED_ATTEMPT_COUNT {
+        peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), current_time);
+    }
+    assert_eq!(
+        peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), current_time),
+        PeerAddressAttemptDecision::DropAndSay
+    );
+    for _ in 0..5 {
+        assert_eq!(
+            peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), current_time),
+            PeerAddressAttemptDecision::DropInSilence
+        );
+    }
+
+    for _ in 1..=MAX_UNADMITTED_ATTEMPT_COUNT {
+        peer_address_rate_table.remove_attempt(build_test_caller_ip_address(1), current_time);
+    }
+
+    for attempt_index in 1..=MAX_UNADMITTED_ATTEMPT_COUNT {
+        assert_eq!(
+            peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), current_time),
+            PeerAddressAttemptDecision::Serve {
+                window_started_at: current_time,
+            },
+            "attempt {attempt_index} is served: the six dropped ones were never counted"
+        );
+    }
+    assert_eq!(
+        peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), current_time),
+        PeerAddressAttemptDecision::DropInSilence,
+        "this window already logged its limit"
+    );
+}
+
+#[test]
+fn an_attempt_counted_in_a_window_that_has_passed_is_not_taken_out_of_the_next_one() {
+    let mut peer_address_rate_table = PeerAddressRateTable::new();
+    let first_window_started_at = Instant::now();
+    peer_address_rate_table
+        .decide_attempt(build_test_caller_ip_address(1), first_window_started_at);
+    let next_window_started_at = first_window_started_at + RATE_WINDOW_DURATION;
+    for _ in 1..=MAX_UNADMITTED_ATTEMPT_COUNT {
+        assert_eq!(
+            peer_address_rate_table
+                .decide_attempt(build_test_caller_ip_address(1), next_window_started_at),
+            PeerAddressAttemptDecision::Serve {
+                window_started_at: next_window_started_at,
+            }
+        );
+    }
+
+    peer_address_rate_table
+        .remove_attempt(build_test_caller_ip_address(1), first_window_started_at);
+
+    assert_eq!(
+        peer_address_rate_table
+            .decide_attempt(build_test_caller_ip_address(1), next_window_started_at),
+        PeerAddressAttemptDecision::DropAndSay
+    );
+}
+
+#[test]
+fn removing_an_attempt_of_an_address_the_table_does_not_hold_changes_nothing() {
+    let mut peer_address_rate_table = PeerAddressRateTable::new();
+    let current_time = Instant::now();
+
+    peer_address_rate_table.remove_attempt(build_test_caller_ip_address(1), current_time);
+
+    assert_eq!(peer_address_rate_table.window_by_peer_ip_address.len(), 0);
 }
 
 #[test]
@@ -357,11 +488,11 @@ fn an_address_whose_window_is_exactly_over_starts_a_fresh_one() {
     // attempt arriving at exactly that reading opens a new window and is served.
     let mut peer_address_rate_table = PeerAddressRateTable::new();
     let window_started_at = Instant::now();
-    for _ in 1..=MAX_ATTEMPT_COUNT {
+    for _ in 1..=MAX_UNADMITTED_ATTEMPT_COUNT {
         assert_eq!(
             peer_address_rate_table
                 .decide_attempt(build_test_caller_ip_address(1), window_started_at),
-            PeerAddressAttemptDecision::Serve
+            PeerAddressAttemptDecision::Serve { window_started_at }
         );
     }
     assert_eq!(
@@ -382,7 +513,9 @@ fn an_address_whose_window_is_exactly_over_starts_a_fresh_one() {
             build_test_caller_ip_address(1),
             window_started_at + RATE_WINDOW_DURATION,
         ),
-        PeerAddressAttemptDecision::Serve,
+        PeerAddressAttemptDecision::Serve {
+            window_started_at: window_started_at + RATE_WINDOW_DURATION,
+        },
         "at exactly {RATE_WINDOW_DURATION:?} the window is over"
     );
 }
@@ -666,8 +799,11 @@ fn one_admitted_connection_lists_and_then_attaches() {
     // The frame loop answers a `List` and reads the next frame: one connection
     // lists the sessions and then attaches to one.
     let session_id = SessionId::new();
-    let session_endpoint_path = PathBuf::from("endpoint-of-the-session");
-    let held_session_endpoint_path = session_endpoint_path.clone();
+    let located_session = LocatedSession {
+        runtime_directory: PathBuf::from("/home/user/.koshi"),
+        session_id,
+    };
+    let held_located_session = located_session.clone();
     let (router_events_sender, router_events_receiver) = mpsc::channel();
     let dispatcher_thread = std::thread::spawn(move || loop {
         match router_events_receiver.recv() {
@@ -690,7 +826,7 @@ fn one_admitted_connection_lists_and_then_attaches() {
                 assert_eq!(scope, TokenScope::HostWide);
                 assert_eq!(remote_connection_id, 7);
                 assert_eq!(session_selector, SessionSelector::SessionId(session_id));
-                let _ = response_sender.send(Ok(held_session_endpoint_path.clone()));
+                let _ = response_sender.send(Ok(held_located_session.clone()));
             }
             _ => return,
         }
@@ -719,10 +855,7 @@ fn one_admitted_connection_lists_and_then_attaches() {
         &router_events_sender,
     );
 
-    assert_eq!(
-        attached_session,
-        Some((session_endpoint_path, Some(30_000)))
-    );
+    assert_eq!(attached_session, Some((located_session, Some(30_000))));
     assert_eq!(
         parse_remote_server_frames(&writer.written_frame_bytes),
         vec![RemoteServerFrame::Sessions {
@@ -759,14 +892,14 @@ fn a_second_hello_on_an_admitted_connection_is_refused() {
         remote_connection_id: 3,
     };
 
-    let attached_session_endpoint_path = process_admitted_remote_frames(
+    let attached_session = process_admitted_remote_frames(
         &mut reader,
         &mut writer,
         &admitted_connection,
         &router_events_sender,
     );
 
-    assert_eq!(attached_session_endpoint_path, None);
+    assert_eq!(attached_session, None);
     assert_eq!(
         parse_remote_server_frames(&writer.written_frame_bytes),
         vec![RemoteServerFrame::Refused {
@@ -789,14 +922,14 @@ fn the_hello_of_koshi_0_4_0_on_an_admitted_connection_is_refused() {
         remote_connection_id: 3,
     };
 
-    let attached_session_endpoint_path = process_admitted_remote_frames(
+    let attached_session = process_admitted_remote_frames(
         &mut reader,
         &mut writer,
         &admitted_connection,
         &router_events_sender,
     );
 
-    assert_eq!(attached_session_endpoint_path, None);
+    assert_eq!(attached_session, None);
     assert_eq!(
         parse_remote_server_frames(&writer.written_frame_bytes),
         vec![RemoteServerFrame::Refused {
@@ -805,10 +938,18 @@ fn the_hello_of_koshi_0_4_0_on_an_admitted_connection_is_refused() {
     );
 }
 
+/// A located session under `/home/user/.koshi`, with a fresh session id.
+fn build_located_session() -> LocatedSession {
+    LocatedSession {
+        runtime_directory: PathBuf::from("/home/user/.koshi"),
+        session_id: SessionId::new(),
+    }
+}
+
 /// What [`process_admitted_remote_frames`] did with one admitted Attach.
 struct ServedAttach {
     /// What the frame loop returned.
-    attached_session: Option<(PathBuf, Option<u32>)>,
+    attached_session: Option<(LocatedSession, Option<u32>)>,
     /// Every frame the frame loop wrote.
     written_server_frames: Vec<RemoteServerFrame>,
     /// How many times the frame loop asked the dispatcher where the session
@@ -820,7 +961,7 @@ struct ServedAttach {
 /// against a stand-in dispatcher that answers its Locate with
 /// `locate_answer`, and hand back what the frame loop did.
 fn serve_attach_against_locate_answer(
-    locate_answer: Result<PathBuf, LocateRefusal>,
+    locate_answer: Result<LocatedSession, LocateRefusal>,
     link_timeout_ms: Option<u32>,
 ) -> ServedAttach {
     let session_id = SessionId::new();
@@ -908,17 +1049,15 @@ fn an_attach_arriving_while_the_router_restarts_is_refused_with_the_restarting_s
 }
 
 #[test]
-fn an_attach_the_dispatcher_locates_hands_back_the_session_endpoint_file_and_its_link_timeout() {
-    let session_endpoint_path = PathBuf::from("/home/user/.koshi/session-5000.json");
+fn an_attach_the_dispatcher_locates_hands_back_the_located_session_and_its_link_timeout() {
+    let located_session = build_located_session();
 
-    let served_attach = serve_attach_against_locate_answer(
-        Ok(session_endpoint_path.clone()),
-        Some(MIN_LINK_TIMEOUT_MS),
-    );
+    let served_attach =
+        serve_attach_against_locate_answer(Ok(located_session.clone()), Some(MIN_LINK_TIMEOUT_MS));
 
     assert_eq!(
         served_attach.attached_session,
-        Some((session_endpoint_path, Some(MIN_LINK_TIMEOUT_MS)))
+        Some((located_session, Some(MIN_LINK_TIMEOUT_MS)))
     );
     assert_eq!(served_attach.written_server_frames, Vec::new());
     assert_eq!(served_attach.locate_ask_count, 1);
@@ -927,7 +1066,7 @@ fn an_attach_the_dispatcher_locates_hands_back_the_session_endpoint_file_and_its
 #[test]
 fn an_attach_naming_a_link_timeout_below_the_minimum_is_refused_before_the_dispatcher_is_asked() {
     let served_attach = serve_attach_against_locate_answer(
-        Ok(PathBuf::from("/home/user/.koshi/session-5000.json")),
+        Ok(build_located_session()),
         Some(MIN_LINK_TIMEOUT_MS - 1),
     );
 
@@ -946,13 +1085,13 @@ fn an_attach_naming_a_link_timeout_below_the_minimum_is_refused_before_the_dispa
 
 #[test]
 fn an_attach_naming_no_link_timeout_hands_back_none_for_it() {
-    let session_endpoint_path = PathBuf::from("/home/user/.koshi/session-5000.json");
+    let located_session = build_located_session();
 
-    let served_attach = serve_attach_against_locate_answer(Ok(session_endpoint_path.clone()), None);
+    let served_attach = serve_attach_against_locate_answer(Ok(located_session.clone()), None);
 
     assert_eq!(
         served_attach.attached_session,
-        Some((session_endpoint_path, None))
+        Some((located_session, None))
     );
     assert_eq!(served_attach.written_server_frames, Vec::new());
     assert_eq!(served_attach.locate_ask_count, 1);
@@ -977,14 +1116,14 @@ fn bytes_an_admitted_connection_sends_that_are_not_a_frame_are_refused() {
         remote_connection_id: 5,
     };
 
-    let attached_session_endpoint_path = process_admitted_remote_frames(
+    let attached_session = process_admitted_remote_frames(
         &mut reader,
         &mut writer,
         &admitted_connection,
         &router_events_sender,
     );
 
-    assert_eq!(attached_session_endpoint_path, None);
+    assert_eq!(attached_session, None);
     assert_eq!(
         parse_remote_server_frames(&writer.written_frame_bytes),
         vec![RemoteServerFrame::Refused {
@@ -1005,14 +1144,14 @@ fn an_admitted_connection_that_hangs_up_is_answered_with_nothing() {
         remote_connection_id: 9,
     };
 
-    let attached_session_endpoint_path = process_admitted_remote_frames(
+    let attached_session = process_admitted_remote_frames(
         &mut reader,
         &mut writer,
         &admitted_connection,
         &router_events_sender,
     );
 
-    assert_eq!(attached_session_endpoint_path, None);
+    assert_eq!(attached_session, None);
     assert_eq!(
         writer.written_frame_bytes,
         Vec::<u8>::new(),
@@ -1035,14 +1174,14 @@ fn an_admitted_connection_ends_unanswered_when_the_dispatcher_is_gone() {
         remote_connection_id: 4,
     };
 
-    let attached_session_endpoint_path = process_admitted_remote_frames(
+    let attached_session = process_admitted_remote_frames(
         &mut reader,
         &mut writer,
         &admitted_connection,
         &router_events_sender,
     );
 
-    assert_eq!(attached_session_endpoint_path, None);
+    assert_eq!(attached_session, None);
     assert_eq!(writer.written_frame_bytes, Vec::<u8>::new());
 }
 
@@ -1144,7 +1283,10 @@ fn a_remote_connection_makes_the_restart_due_when_the_program_file_holds_another
         &program_directory.path().join("started_runs"),
         "koshi 1.0.0",
     );
-    let executable_watch = Arc::new(ExecutableWatch::new(program_path.clone(), "1.0.0"));
+    let executable_watch = Arc::new(ExecutableWatch::from_executable_path(
+        program_path.clone(),
+        "1.0.0",
+    ));
     let replacement_path = write_printing_program(
         program_directory.path(),
         "replacement",
@@ -1185,36 +1327,20 @@ mod admission_answers {
 
     use super::*;
 
-    use koshi_ipc::protocol::{MIN_PROTOCOL_VERSION, PROTOCOL_VERSION};
+    use koshi_ipc::error::IpcError;
     use koshi_ipc::remote_wire;
 
     /// How long the client gives the whole dial: the connect, the TLS
     /// handshake, the opening frame and the one frame answering it.
     const REMOTE_DIAL_TIMEOUT_DURATION: Duration = Duration::from_secs(10);
 
-    /// Serve exactly one TLS connection on loopback with the real
-    /// [`serve_remote_connection`] and a stand-in dispatcher.
+    /// Start a stand-in dispatcher and hand back the sender its events go to.
     ///
-    /// `should_admit_connection` says what the stand-in dispatcher answers an
+    /// `should_admit_connection` says what it answers an
     /// [`AdmissionAsk::Admit`] with: a host-wide scope numbered 7 when it is
     /// true, and a refusal when it is false. Every listing is empty and every
     /// locate is refused.
-    ///
-    /// Returns the address the client dials and the fingerprint of the
-    /// certificate the listener presents.
-    fn start_test_remote_listener(should_admit_connection: bool) -> TestRemoteListener {
-        let certificate_file = build_test_certificate();
-        let certificate_fingerprint =
-            tls::compute_certificate_fingerprint(&certificate_file.cert_der);
-        let tls_config = Arc::new(
-            build_remote_server_tls_config(&certificate_file).expect("the TLS config builds"),
-        );
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind the test listener");
-        let remote_listen_address = listener
-            .local_addr()
-            .expect("read the bound address")
-            .to_string();
-
+    fn spawn_test_admission_dispatcher(should_admit_connection: bool) -> Sender<RouterEvent> {
         let (dispatcher_events_sender, dispatcher_events_receiver) = mpsc::channel::<RouterEvent>();
         std::thread::spawn(move || {
             while let Ok(RouterEvent::Admission(admission_ask)) = dispatcher_events_receiver.recv()
@@ -1244,6 +1370,35 @@ mod admission_answers {
                 }
             }
         });
+        dispatcher_events_sender
+    }
+
+    /// A loopback listener presenting a fresh test certificate, the TLS
+    /// configuration it serves with, and the fingerprint of that certificate.
+    fn bind_test_tls_listener() -> (TcpListener, Arc<ServerConfig>, String) {
+        let certificate_file = build_test_certificate();
+        let certificate_fingerprint =
+            tls::compute_certificate_fingerprint(&certificate_file.cert_der);
+        let tls_config = Arc::new(
+            build_remote_server_tls_config(&certificate_file).expect("the TLS config builds"),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind the test listener");
+        (listener, tls_config, certificate_fingerprint)
+    }
+
+    /// Serve exactly one TLS connection on loopback with the real
+    /// [`serve_remote_connection`] and the stand-in dispatcher
+    /// [`spawn_test_admission_dispatcher`] starts for `should_admit_connection`.
+    ///
+    /// Returns the address the client dials and the fingerprint of the
+    /// certificate the listener presents.
+    fn start_test_remote_listener(should_admit_connection: bool) -> TestRemoteListener {
+        let (listener, tls_config, certificate_fingerprint) = bind_test_tls_listener();
+        let remote_listen_address = listener
+            .local_addr()
+            .expect("read the bound address")
+            .to_string();
+        let dispatcher_events_sender = spawn_test_admission_dispatcher(should_admit_connection);
 
         std::thread::spawn(move || {
             let (accepted_socket, _) = listener.accept().expect("the listener accepts the client");
@@ -1254,6 +1409,40 @@ mod admission_answers {
                 &tls_config,
                 &dispatcher_events_sender,
                 admission_slot,
+                build_test_counted_attempt(),
+            );
+        });
+
+        TestRemoteListener {
+            remote_listen_address,
+            certificate_fingerprint,
+        }
+    }
+
+    /// Serve every TLS connection on loopback with the real
+    /// [`run_remote_accept_loop`] and the stand-in dispatcher
+    /// [`spawn_test_admission_dispatcher`] starts for `should_admit_connection`.
+    /// The program file the accept loop watches does not exist.
+    fn start_test_remote_accept_loop(should_admit_connection: bool) -> TestRemoteListener {
+        let (listener, tls_config, certificate_fingerprint) = bind_test_tls_listener();
+        let remote_listen_address = listener
+            .local_addr()
+            .expect("read the bound address")
+            .to_string();
+        let dispatcher_events_sender = spawn_test_admission_dispatcher(should_admit_connection);
+        let program_directory = build_test_runtime_directory();
+        let executable_watch = Arc::new(ExecutableWatch::from_executable_path(
+            program_directory.path().join("koshi-that-is-not-there"),
+            "1.0.0",
+        ));
+
+        std::thread::spawn(move || {
+            let _program_directory = program_directory;
+            run_remote_accept_loop(
+                &listener,
+                &tls_config,
+                &dispatcher_events_sender,
+                &executable_watch,
             );
         });
 
@@ -1409,6 +1598,60 @@ mod admission_answers {
     }
 
     #[test]
+    fn admitted_callers_from_one_address_never_use_up_its_limit() {
+        let test_remote_listener = start_test_remote_accept_loop(true);
+
+        for dial_index in 1..=2 * MAX_UNADMITTED_ATTEMPT_COUNT {
+            let response_frame = request_test_remote_listener(
+                &test_remote_listener,
+                &build_remote_hello(
+                    MIN_REMOTE_PROTOCOL_VERSION,
+                    REMOTE_PROTOCOL_VERSION,
+                    "testSecret",
+                ),
+            );
+            assert_eq!(
+                response_frame,
+                RemoteServerFrame::Welcome {
+                    remote_protocol_version: REMOTE_PROTOCOL_VERSION,
+                },
+                "dial {dial_index} is welcomed"
+            );
+        }
+    }
+
+    #[test]
+    fn callers_refused_admission_use_up_their_address_limit() {
+        let test_remote_listener = start_test_remote_accept_loop(false);
+        let wrong_secret_hello = build_remote_hello(
+            MIN_REMOTE_PROTOCOL_VERSION,
+            REMOTE_PROTOCOL_VERSION,
+            "wrongSecret",
+        );
+        for _ in 1..=MAX_UNADMITTED_ATTEMPT_COUNT {
+            assert_eq!(
+                request_test_remote_listener(&test_remote_listener, &wrong_secret_hello),
+                RemoteServerFrame::Refused {
+                    message: REMOTE_REFUSED.to_string(),
+                }
+            );
+        }
+
+        let dropped_dial = remote_wire::open_remote_connection(
+            &test_remote_listener.remote_listen_address,
+            &test_remote_listener.certificate_fingerprint,
+            &wrong_secret_hello,
+            REMOTE_DIAL_TIMEOUT_DURATION,
+            None,
+        );
+
+        let Err(IpcError::TlsHandshakeFailed { server_address, .. }) = dropped_dial else {
+            panic!("the dial past the limit is dropped before its TLS handshake");
+        };
+        assert_eq!(server_address, test_remote_listener.remote_listen_address);
+    }
+
+    #[test]
     fn an_admitted_caller_is_welcomed_with_the_remote_protocol_version_both_ends_speak() {
         let test_remote_listener = start_test_remote_listener(true);
 
@@ -1456,7 +1699,7 @@ mod bridge_round_trip {
     };
     use koshi_core::event::Event;
     use koshi_core::geometry::Size;
-    use koshi_core::ids::CommandId;
+    use koshi_core::ids::{CommandId, PaneId};
     use koshi_core::key::{Key, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags};
     use koshi_ipc::endpoint::compute_socket_address;
     use koshi_ipc::error::IpcError;
@@ -1467,12 +1710,15 @@ mod bridge_round_trip {
     use koshi_link::remote_client;
     use koshi_pty::backend::state::PtyBackend;
     use koshi_runtime::ipc_server::IpcServer;
+    use koshi_runtime::runtime::driver::DispatchPassOutcome;
     use koshi_runtime::runtime::event::RuntimeEvent;
+    use koshi_runtime::runtime::painted_update::{PaintedUpdateReceiver, SessionFrame};
     use koshi_runtime::runtime::pty_inbox::InboxSink;
     use koshi_runtime::server::Server;
     use koshi_test_support::fake_pty::FakePtyBackend;
     use koshi_test_support::fixtures::{
-        build_test_runtime_directory, send_committed_request, send_committed_request_through_halves,
+        build_paint_report_request, build_test_runtime_directory, send_committed_request,
+        send_committed_request_through_halves,
     };
     use koshi_test_support::throttle::pump_throttled;
     use tempfile::TempDir;
@@ -1602,6 +1848,35 @@ mod bridge_round_trip {
             EndpointFile::resolve_endpoint_file_path(self.runtime_directory.path(), self.session_id)
         }
 
+        /// This session as a remote attach locates it: its runtime directory and
+        /// its id.
+        fn get_located_session(&self) -> LocatedSession {
+            LocatedSession {
+                runtime_directory: self.runtime_directory.path().to_path_buf(),
+                session_id: self.session_id,
+            }
+        }
+
+        /// The id of the session's first pane, once the session has spawned it.
+        ///
+        /// # Panics
+        ///
+        /// Panics when the session has not spawned its pane within
+        /// [`SESSION_SERVER_START_TIMEOUT_DURATION`].
+        fn wait_for_spawned_pane_id(&self) -> PaneId {
+            let wait_deadline = Instant::now() + SESSION_SERVER_START_TIMEOUT_DURATION;
+            loop {
+                if let Some(pane_id) = self.fake_pty_backend.list_spawned_pane_ids().first() {
+                    return *pane_id;
+                }
+                assert!(
+                    Instant::now() < wait_deadline,
+                    "the session never spawned a pane"
+                );
+                std::thread::sleep(SESSION_SERVER_POLL_INTERVAL_DURATION);
+            }
+        }
+
         /// The bytes the session's only pane has been written, once the pane
         /// has had at least one write and the writes stop changing for
         /// `PANE_WRITE_SETTLE_DURATION`.
@@ -1612,16 +1887,7 @@ mod bridge_round_trip {
         /// had no write, within [`SESSION_SERVER_START_TIMEOUT_DURATION`].
         fn wait_for_settled_pane_write_bytes(&self) -> Vec<Vec<u8>> {
             let wait_deadline = Instant::now() + SESSION_SERVER_START_TIMEOUT_DURATION;
-            let pane_id = loop {
-                if let Some(pane_id) = self.fake_pty_backend.list_spawned_pane_ids().first() {
-                    break *pane_id;
-                }
-                assert!(
-                    Instant::now() < wait_deadline,
-                    "the session never spawned a pane"
-                );
-                std::thread::sleep(SESSION_SERVER_POLL_INTERVAL_DURATION);
-            };
+            let pane_id = self.wait_for_spawned_pane_id();
             let mut settled_write_bytes = Vec::new();
             loop {
                 std::thread::sleep(PANE_WRITE_SETTLE_DURATION);
@@ -1688,8 +1954,13 @@ mod bridge_round_trip {
             }
         }
 
-        fn get_session_endpoint_path(&self) -> PathBuf {
-            EndpointFile::resolve_endpoint_file_path(self.runtime_directory.path(), self.session_id)
+        /// This session as a remote attach locates it: its runtime directory and
+        /// its id.
+        fn get_located_session(&self) -> LocatedSession {
+            LocatedSession {
+                runtime_directory: self.runtime_directory.path().to_path_buf(),
+                session_id: self.session_id,
+            }
         }
     }
 
@@ -1726,41 +1997,10 @@ mod bridge_round_trip {
         .expect("the control socket binds");
         session_server.attach_ipc_server(ipc_server);
 
-        loop {
-            let current_time = Instant::now();
-            let runtime_event = match session_server.compute_next_render_wakeup(current_time) {
-                Some(render_wakeup_timeout) => match session_server
-                    .get_inbox_receiver()
-                    .recv_timeout(render_wakeup_timeout)
-                {
-                    Ok(runtime_event) => Some(runtime_event),
-                    Err(mpsc::RecvTimeoutError::Timeout) => None,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                },
-                None => match session_server.get_inbox_receiver().recv() {
-                    Ok(runtime_event) => Some(runtime_event),
-                    Err(_) => break,
-                },
-            };
-            let mut should_quit = false;
-            if let Some(runtime_event) = runtime_event {
-                should_quit |= session_server
-                    .handle_runtime_event(runtime_event)
-                    .is_break();
-            }
-            while let Ok(runtime_event) = session_server.get_inbox_receiver().try_recv() {
-                should_quit |= session_server
-                    .handle_runtime_event(runtime_event)
-                    .is_break();
-            }
-            session_server.push_due_frames(Instant::now());
-            if should_quit
-                || session_server.is_quit_requested()
-                || !session_server.has_active_panes()
-            {
-                break;
-            }
-        }
+        while session_server.run_dispatch_pass() == DispatchPassOutcome::Served
+            && !session_server.is_quit_requested()
+            && session_server.has_active_panes()
+        {}
         session_server.shutdown();
     }
 
@@ -1777,8 +2017,8 @@ mod bridge_round_trip {
     /// Serve one TLS connection on loopback with the real [`serve_remote_connection`],
     /// answering its admission questions the way the router does: the secret
     /// is admitted host-wide as connection `7`, and every locate answers
-    /// `session_endpoint_path`.
-    fn start_test_remote_listener(session_endpoint_path: PathBuf) -> TestRemoteListener {
+    /// `located_session`.
+    fn start_test_remote_listener(located_session: LocatedSession) -> TestRemoteListener {
         let certificate_file = build_test_certificate();
         let certificate_fingerprint =
             tls::compute_certificate_fingerprint(&certificate_file.cert_der);
@@ -1816,7 +2056,7 @@ mod bridge_round_trip {
                     AdmissionAsk::Locate {
                         response_sender, ..
                     } => {
-                        let _ = response_sender.send(Ok(session_endpoint_path.clone()));
+                        let _ = response_sender.send(Ok(located_session.clone()));
                     }
                     AdmissionAsk::RemoveConnection {
                         remote_connection_id,
@@ -1836,6 +2076,7 @@ mod bridge_round_trip {
                 &tls_config,
                 &dispatcher_events_sender,
                 admission_slot,
+                build_test_counted_attempt(),
             );
         });
 
@@ -1927,6 +2168,7 @@ mod bridge_round_trip {
         reader: &mut FrameReader,
         writer: &mut FrameWriter,
         link_timeout_ms: Option<u32>,
+        graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities,
     ) {
         send_committed_request_through_halves(
             reader,
@@ -1938,9 +2180,10 @@ mod bridge_round_trip {
                     resume_client_id: None,
                     resume_token: None,
                     pane_area: None,
-                    graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
+                    graphics_capabilities,
                     cell_size: None,
                     link_timeout_ms,
+                    max_frames_per_second: 60,
                 },
             },
         );
@@ -2002,7 +2245,7 @@ mod bridge_round_trip {
     fn a_bridged_keyboard_request_reaches_the_pane_with_the_field_that_decides_its_byte() {
         let running_session = RunningSession::start_running_session();
         let test_remote_listener =
-            start_test_remote_listener(running_session.get_session_endpoint_path());
+            start_test_remote_listener(running_session.get_located_session());
 
         let remote_link = connect_test_remote_client(&test_remote_listener);
         let (mut reader, mut writer) = remote_client::attach_remote_session(
@@ -2020,7 +2263,12 @@ mod bridge_round_trip {
             unexpected_response => panic!("the Hello was answered with {unexpected_response:?}"),
         }
 
-        send_committed_attach(&mut reader, &mut writer, None);
+        send_committed_attach(
+            &mut reader,
+            &mut writer,
+            None,
+            koshi_ipc::protocol::GraphicsCapabilities::default(),
+        );
         let attach_response: IpcResponse = reader.recv().expect("the session answers the attach");
         let IpcResult::Attached { .. } = attach_response.answer_result else {
             panic!(
@@ -2074,10 +2322,88 @@ mod bridge_round_trip {
     }
 
     #[test]
+    fn an_image_reaches_a_remote_client_over_tls_as_raw_chunks() {
+        let running_session = RunningSession::start_running_session();
+        let test_remote_listener =
+            start_test_remote_listener(running_session.get_located_session());
+        let remote_link = connect_test_remote_client(&test_remote_listener);
+        let (mut reader, mut writer) = remote_client::attach_remote_session(
+            remote_link,
+            SessionSelector::SessionId(running_session.session_id),
+            VIEWER_LINK_TIMEOUT_DURATION,
+        )
+        .expect("the attach request is written");
+        let _hello_response: IpcResponse = reader.recv().expect("the session answers the Hello");
+        send_committed_attach(
+            &mut reader,
+            &mut writer,
+            None,
+            koshi_ipc::protocol::GraphicsCapabilities {
+                supports_kitty: true,
+                supports_iterm: false,
+                supports_sixel: false,
+            },
+        );
+        let attach_response: IpcResponse = reader.recv().expect("the session answers the attach");
+        let IpcResult::Attached { .. } = attach_response.answer_result else {
+            panic!(
+                "expected an attach reply, got {:?}",
+                attach_response.answer_result
+            );
+        };
+        let pane_id = running_session.wait_for_spawned_pane_id();
+
+        // A 2x1 Kitty image of one red pixel and one blue pixel, in one cell.
+        running_session
+            .fake_pty_backend
+            .push_output(
+                pane_id,
+                b"\x1b_Ga=T,i=7,f=32,s=2,v=1,c=1,r=1,C=1,q=2;/wAA/wAA//8=\x1b\\".to_vec(),
+            )
+            .expect("the pane is spawned");
+
+        // Each painted update is reported painted, as a viewer reports each
+        // update it paints, until the image's last chunk arrives.
+        let mut painted_update_receiver = PaintedUpdateReceiver::new();
+        let image_read_deadline = Instant::now() + EVENT_DELIVERY_TIMEOUT_DURATION;
+        let mut received_rgba_bytes = Vec::new();
+        loop {
+            reader.set_deadline(Some(image_read_deadline));
+            let received_frame = reader
+                .recv_message_or_binary::<SessionEvent>()
+                .expect("the image reaches the remote client in time");
+            match painted_update_receiver
+                .accept_session_frame(received_frame)
+                .expect("a painted update part that applies")
+            {
+                Some(SessionFrame::Painted(received_painted_frame)) => {
+                    let update_sequence = received_painted_frame.update_sequence;
+                    writer
+                        .send(&build_paint_report_request(update_sequence))
+                        .expect("the paint report is written");
+                }
+                Some(SessionFrame::ImageChunk(image_chunk_frame)) => {
+                    assert_eq!(
+                        image_chunk_frame.get_byte_offset(),
+                        received_rgba_bytes.len() as u64
+                    );
+                    received_rgba_bytes.extend_from_slice(image_chunk_frame.get_chunk_bytes());
+                    if image_chunk_frame.is_last_chunk() {
+                        break;
+                    }
+                }
+                Some(SessionFrame::Event(_)) | None => {}
+            }
+        }
+
+        assert_eq!(received_rgba_bytes, [255, 0, 0, 255, 0, 0, 255, 255]);
+    }
+
+    #[test]
     fn a_bridged_client_keeps_receiving_events_while_the_link_is_held_open() {
         let running_session = RunningSession::start_running_session();
         let test_remote_listener =
-            start_test_remote_listener(running_session.get_session_endpoint_path());
+            start_test_remote_listener(running_session.get_located_session());
 
         // Dial through the real TLS listener and attach, the way
         // `koshi attach --remote` does.
@@ -2098,7 +2424,12 @@ mod bridge_round_trip {
             unexpected_response => panic!("the Hello was answered with {unexpected_response:?}"),
         }
 
-        send_committed_attach(&mut reader, &mut writer, None);
+        send_committed_attach(
+            &mut reader,
+            &mut writer,
+            None,
+            koshi_ipc::protocol::GraphicsCapabilities::default(),
+        );
         let attach_response: IpcResponse = reader.recv().expect("the session answers the attach");
         let IpcResult::Attached { client_id, .. } = attach_response.answer_result else {
             panic!(
@@ -2117,7 +2448,9 @@ mod bridge_round_trip {
 
         // Drive the session for the whole hold, one focus change at a time,
         // and read each one's event off the remote connection inside
-        // `EVENT_DELIVERY_TIMEOUT_DURATION`.
+        // `EVENT_DELIVERY_TIMEOUT_DURATION`. Each painted update is applied and
+        // reported painted, as a viewer reports each update it paints.
+        let mut painted_update_receiver = PaintedUpdateReceiver::new();
         let hold_end_time = Instant::now() + LINK_HOLD_DURATION;
         let mut focus_round_count: u32 = 0;
         while Instant::now() < hold_end_time {
@@ -2141,20 +2474,33 @@ mod bridge_round_trip {
             };
 
             // Read frames until this round's focus event arrives. Painted
-            // frames and other structure events on the way are read past.
+            // updates and other structure events on the way are read past.
             let session_event_deadline = Instant::now() + EVENT_DELIVERY_TIMEOUT_DURATION;
             loop {
                 reader.set_deadline(Some(session_event_deadline));
-                let session_event: SessionEvent = match reader.recv() {
-                    Ok(session_event) => session_event,
+                let received_frame = match reader.recv_message_or_binary::<SessionEvent>() {
+                    Ok(received_frame) => received_frame,
                     Err(receive_error) => panic!(
                         "round {focus_round_count}: the remote stream gave no frame within \
                          {EVENT_DELIVERY_TIMEOUT_DURATION:?}: {receive_error}"
                     ),
                 };
-                match session_event {
-                    SessionEvent::TabFocused { tab_id, .. } if tab_id == focused_tab_id => break,
-                    _ => {}
+                match painted_update_receiver
+                    .accept_session_frame(received_frame)
+                    .expect("a painted update part that applies")
+                {
+                    Some(SessionFrame::Event(SessionEvent::TabFocused { tab_id, .. }))
+                        if tab_id == focused_tab_id =>
+                    {
+                        break
+                    }
+                    Some(SessionFrame::Painted(received_painted_frame)) => {
+                        let update_sequence = received_painted_frame.update_sequence;
+                        writer
+                            .send(&build_paint_report_request(update_sequence))
+                            .expect("the paint report is written");
+                    }
+                    Some(SessionFrame::Event(_) | SessionFrame::ImageChunk(_)) | None => {}
                 }
             }
             focus_round_count += 1;
@@ -2173,8 +2519,7 @@ mod bridge_round_trip {
         // reported ended no sooner than `ADMITTED_FRAME_TIMEOUT_DURATION`, less
         // `MAX_EARLY_TIMEOUT_DURATION`, after the dial started, and the
         // client's link reads the end of the stream.
-        let test_remote_listener =
-            start_test_remote_listener(PathBuf::from("/home/user/no-session.json"));
+        let test_remote_listener = start_test_remote_listener(build_located_session());
 
         let dial_started_at = Instant::now();
         let mut remote_link = connect_test_remote_client(&test_remote_listener);
@@ -2205,7 +2550,7 @@ mod bridge_round_trip {
         // session's Hello answer arrives through the bridge.
         let running_session = RunningSession::start_running_session();
         let test_remote_listener =
-            start_test_remote_listener(running_session.get_session_endpoint_path());
+            start_test_remote_listener(running_session.get_located_session());
         let remote_link = connect_test_remote_client(&test_remote_listener);
 
         let (mut reader, _writer) = remote_client::attach_remote_session(
@@ -2236,7 +2581,7 @@ mod bridge_round_trip {
     fn assert_discovery_after_admitted_frame_silence_is_answered(link_timeout_ms: Option<u32>) {
         let running_session = RunningSession::start_running_session();
         let test_remote_listener =
-            start_test_remote_listener(running_session.get_session_endpoint_path());
+            start_test_remote_listener(running_session.get_located_session());
         let remote_client::RemoteLink {
             mut frame_reader,
             mut frame_writer,
@@ -2293,7 +2638,7 @@ mod bridge_round_trip {
         // session's answer to that Attach arrives through the bridge.
         let running_session = RunningSession::start_running_session();
         let test_remote_listener =
-            start_test_remote_listener(running_session.get_session_endpoint_path());
+            start_test_remote_listener(running_session.get_located_session());
         let remote_link = connect_test_remote_client(&test_remote_listener);
         let (mut reader, mut writer) = remote_client::attach_remote_session(
             remote_link,
@@ -2305,7 +2650,12 @@ mod bridge_round_trip {
 
         std::thread::sleep(SHORT_LINK_TIMEOUT_DURATION + SILENCE_PAST_TIMEOUT_DURATION);
         reader.set_deadline(Some(Instant::now() + BRIDGE_END_TIMEOUT_DURATION));
-        send_committed_attach(&mut reader, &mut writer, Some(MIN_LINK_TIMEOUT_MS));
+        send_committed_attach(
+            &mut reader,
+            &mut writer,
+            Some(MIN_LINK_TIMEOUT_MS),
+            koshi_ipc::protocol::GraphicsCapabilities::default(),
+        );
 
         let attach_response: IpcResponse = reader.recv().expect("the session answers the attach");
         assert_eq!(attach_response.request_id, Some(2));
@@ -2323,7 +2673,7 @@ mod bridge_round_trip {
         // only reason left for the refusal.
         let running_session = RunningSession::start_running_session();
         let test_remote_listener =
-            start_test_remote_listener(running_session.get_session_endpoint_path());
+            start_test_remote_listener(running_session.get_located_session());
         let remote_client::RemoteLink {
             mut frame_reader,
             mut frame_writer,
@@ -2363,7 +2713,7 @@ mod bridge_round_trip {
         // the client's link reads the end of the stream.
         let running_session = RunningSession::start_running_session();
         let test_remote_listener =
-            start_test_remote_listener(running_session.get_session_endpoint_path());
+            start_test_remote_listener(running_session.get_located_session());
         let remote_link = connect_test_remote_client(&test_remote_listener);
         let (mut reader, mut writer) = remote_client::attach_remote_session(
             remote_link,
@@ -2411,7 +2761,7 @@ mod bridge_round_trip {
         // reported ended, and the client's next ping fails.
         let flooding_session = FloodingSession::start_flooding_session();
         let test_remote_listener =
-            start_test_remote_listener(flooding_session.get_session_endpoint_path());
+            start_test_remote_listener(flooding_session.get_located_session());
         let remote_link = connect_test_remote_client(&test_remote_listener);
         let (_reader, mut writer) = remote_client::attach_remote_session(
             remote_link,
@@ -2456,7 +2806,7 @@ mod bridge_round_trip {
         // the 1 s link timeout, while some bytes cross every 100 ms.
         let running_session = RunningSession::start_running_session();
         let test_remote_listener =
-            start_test_remote_listener(running_session.get_session_endpoint_path());
+            start_test_remote_listener(running_session.get_located_session());
         let relay_address = start_throttled_relay(&test_remote_listener.remote_listen_address);
         let remote_link = connect_test_remote_client_at(&relay_address, &test_remote_listener);
         let (mut reader, mut writer) = remote_client::attach_remote_session(
@@ -2466,7 +2816,12 @@ mod bridge_round_trip {
         )
         .expect("the attach request is written");
         let _hello_response: IpcResponse = reader.recv().expect("the session answers the Hello");
-        send_committed_attach(&mut reader, &mut writer, Some(MIN_LINK_TIMEOUT_MS));
+        send_committed_attach(
+            &mut reader,
+            &mut writer,
+            Some(MIN_LINK_TIMEOUT_MS),
+            koshi_ipc::protocol::GraphicsCapabilities::default(),
+        );
         let attach_response: IpcResponse = reader.recv().expect("the session answers the attach");
         let IpcResult::Attached { .. } = attach_response.answer_result else {
             panic!(
@@ -2475,7 +2830,9 @@ mod bridge_round_trip {
             );
         };
         // The client reads every frame the session writes, as a viewer does.
-        std::thread::spawn(move || while reader.recv::<SessionEvent>().is_ok() {});
+        std::thread::spawn(
+            move || while reader.recv_message_or_binary::<SessionEvent>().is_ok() {},
+        );
 
         let pasted_text = "x".repeat(SLOW_PASTE_BYTE_COUNT);
         let paste_started_at = Instant::now();
@@ -2588,4 +2945,125 @@ fn a_refusal_after_admission_gets_the_whole_refusal_window() {
             message: REMOTE_REFUSED.to_string(),
         }]
     );
+}
+
+/// Write an empty resume file for `session_id` in `runtime_directory`, stamped
+/// `age_duration` old.
+fn write_aged_resume_file(runtime_directory: &Path, session_id: SessionId, age_duration: Duration) {
+    std::fs::File::create(koshi_ipc::endpoint::resolve_resume_file_path(
+        runtime_directory,
+        session_id,
+    ))
+    .expect("write the resume file")
+    .set_modified(std::time::SystemTime::now() - age_duration)
+    .expect("age the resume file");
+}
+
+#[test]
+fn a_bridge_to_a_session_replacing_its_image_opens_once_the_new_image_advertises_its_socket() {
+    let runtime_directory = build_test_runtime_directory();
+    let located_session = LocatedSession {
+        runtime_directory: runtime_directory.path().to_path_buf(),
+        session_id: SessionId::new(),
+    };
+    write_aged_resume_file(
+        runtime_directory.path(),
+        located_session.session_id,
+        Duration::ZERO,
+    );
+    let new_image_located_session = located_session.clone();
+    let new_image_thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        let socket_address = koshi_ipc::endpoint::compute_socket_address(
+            &new_image_located_session.runtime_directory,
+            new_image_located_session.session_id,
+        );
+        let session_listener =
+            koshi_ipc::transport::Listener::bind(&socket_address).expect("bind the new image");
+        let connection_token = ConnectionToken::generate();
+        EndpointFile {
+            socket_address,
+            connection_token: connection_token.clone(),
+            process_id: std::process::id(),
+        }
+        .write_to_path(&EndpointFile::resolve_endpoint_file_path(
+            &new_image_located_session.runtime_directory,
+            new_image_located_session.session_id,
+        ))
+        .expect("advertise the new image");
+        let mut bridged_connection = session_listener.accept().expect("accept the bridge");
+        let bridged_hello: IpcRequest = bridged_connection.recv().expect("read the Hello");
+        let (_new_image_reader, mut new_image_writer) = bridged_connection.split_raw();
+        new_image_writer
+            .write_all(b"new image")
+            .expect("write to the bridge");
+        (connection_token, bridged_hello, new_image_writer)
+    });
+
+    let session_bridge = open_local_session_bridge_across_restart(
+        &located_session,
+        (MIN_PROTOCOL_VERSION, PROTOCOL_VERSION),
+    );
+
+    let (connection_token, bridged_hello, _new_image_writer) =
+        new_image_thread.join().expect("the new image thread exits");
+    let (mut bridge_reader, _bridge_writer, _bridge_read_closer) =
+        session_bridge.expect("the bridge opens to the new image");
+    let mut bridged_bytes = [0; 9];
+    bridge_reader
+        .read_exact(&mut bridged_bytes)
+        .expect("read from the bridge");
+    assert_eq!(&bridged_bytes, b"new image");
+    assert_eq!(
+        bridged_hello,
+        build_bridged_hello(connection_token, (MIN_PROTOCOL_VERSION, PROTOCOL_VERSION))
+    );
+}
+
+#[test]
+fn a_bridge_to_a_session_whose_swap_window_passes_with_nothing_advertised_does_not_open() {
+    let runtime_directory = build_test_runtime_directory();
+    let located_session = LocatedSession {
+        runtime_directory: runtime_directory.path().to_path_buf(),
+        session_id: SessionId::new(),
+    };
+    let remaining_window_duration = Duration::from_millis(300);
+    write_aged_resume_file(
+        runtime_directory.path(),
+        located_session.session_id,
+        koshi_ipc::endpoint::RESTART_WINDOW_DURATION - remaining_window_duration,
+    );
+    let open_started_at = Instant::now();
+
+    let session_bridge = open_local_session_bridge_across_restart(
+        &located_session,
+        (MIN_PROTOCOL_VERSION, PROTOCOL_VERSION),
+    );
+
+    let open_duration = open_started_at.elapsed();
+    assert!(session_bridge.is_none(), "nothing is advertised");
+    assert!(
+        open_duration >= remaining_window_duration,
+        "the open waited {open_duration:?}, less than the window left"
+    );
+    assert!(
+        open_duration < remaining_window_duration + Duration::from_secs(5),
+        "the open waited {open_duration:?}, past the window"
+    );
+}
+
+#[test]
+fn a_bridge_to_a_session_that_is_not_replacing_its_image_and_advertises_nothing_does_not_open() {
+    let runtime_directory = build_test_runtime_directory();
+    let located_session = LocatedSession {
+        runtime_directory: runtime_directory.path().to_path_buf(),
+        session_id: SessionId::new(),
+    };
+
+    let session_bridge = open_local_session_bridge_across_restart(
+        &located_session,
+        (MIN_PROTOCOL_VERSION, PROTOCOL_VERSION),
+    );
+
+    assert!(session_bridge.is_none(), "nothing is advertised");
 }

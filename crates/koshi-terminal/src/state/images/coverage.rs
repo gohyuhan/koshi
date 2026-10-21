@@ -1,7 +1,7 @@
 //! Native image sources and the image portions carried by grid cells.
 
 use super::*;
-use crate::grid::state::{Cell, ImageCellFragment};
+use crate::grid::state::{Cell, CellExtra, ImageCellFragment};
 
 #[cfg(test)]
 mod tests;
@@ -142,10 +142,10 @@ impl TerminalState {
 
     pub(in crate::state) fn rebuild_native_fragment_count_by_image_source_id(&mut self) {
         let mut fragment_count_by_image_source_id = HashMap::new();
-        for terminal_cell in self.list_native_cells() {
+        for (_, cell_extra) in self.list_native_cell_extras() {
             #[cfg(test)]
             REBUILD_CELL_VISITS.with(|visits| visits.set(visits.get() + 1));
-            for image_fragment in terminal_cell.get_image_fragments() {
+            for image_fragment in cell_extra.get_image_fragments() {
                 *fragment_count_by_image_source_id
                     .entry(image_fragment.image_source_id)
                     .or_insert(0) += 1;
@@ -166,19 +166,15 @@ impl TerminalState {
         {
             return false;
         }
-        let active_grid = match self.active_screen {
-            Screen::Primary => Arc::make_mut(&mut self.primary),
-            Screen::Alternate => Arc::make_mut(&mut self.alternate),
-        };
+        let (active_grid, native_fragment_count_by_image_source_id) =
+            self.get_active_grid_and_fragment_count_by_image_source_id();
         let mut has_removed_native_image_source = false;
         for column_index in first_column_index..last_column_index {
             let Some(terminal_cell) = active_grid.get_cell_mut(row_index, column_index) else {
                 break;
             };
-            has_removed_native_image_source |= clear_native_fragments(
-                terminal_cell,
-                &mut self.native_fragment_count_by_image_source_id,
-            );
+            has_removed_native_image_source |=
+                clear_native_fragments(terminal_cell, native_fragment_count_by_image_source_id);
         }
         has_removed_native_image_source
     }
@@ -198,25 +194,21 @@ impl TerminalState {
         }
         let active_grid = match self.active_screen {
             Screen::Primary => &self.primary,
-            Screen::Alternate => &self.alternate,
+            Screen::Alternate => self.alternate.get_active_grid(),
         };
-        let row_end_index = usize::from(last_row_index).min(active_grid.list_rows().len());
-        let Some(grid_rows) = active_grid
-            .list_rows()
-            .get(usize::from(first_row_index)..row_end_index)
-        else {
-            return false;
-        };
-        let terminal_cells = grid_rows.iter().flat_map(|grid_row_cells| {
-            let row_end_column = usize::from(last_column_index).min(grid_row_cells.len());
-            grid_row_cells
-                .get(usize::from(first_column_index)..row_end_column)
-                .unwrap_or_default()
-                .iter()
-        });
+        let image_fragment_lists = (first_row_index..last_row_index)
+            .filter_map(|row_index| active_grid.get_row_cells(row_index))
+            .flat_map(|grid_row_cells| {
+                let row_end_column = usize::from(last_column_index).min(grid_row_cells.len());
+                grid_row_cells
+                    .get(usize::from(first_column_index)..row_end_column)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(Cell::get_image_fragments)
+            });
         discard_native_fragment_references(
             &mut self.native_fragment_count_by_image_source_id,
-            terminal_cells,
+            image_fragment_lists,
         )
     }
 
@@ -237,7 +229,12 @@ impl TerminalState {
         let scrollback_lines = self.scrollback.take_retained_lines();
         let has_removed_native_image_source = discard_native_fragment_references(
             &mut self.native_fragment_count_by_image_source_id,
-            scrollback_lines.iter().flat_map(|(row_cells, _)| row_cells),
+            scrollback_lines.iter().flat_map(|row_snapshot| {
+                row_snapshot
+                    .list_image_cells()
+                    .iter()
+                    .map(|image_cell| image_cell.cell_extra.get_image_fragments())
+            }),
         );
         self.finish_native_fragment_removal(has_removed_native_image_source);
     }
@@ -246,8 +243,8 @@ impl TerminalState {
         &mut self,
     ) -> (&mut Grid, &mut HashMap<u64, usize>) {
         let active_grid = match self.active_screen {
-            Screen::Primary => Arc::make_mut(&mut self.primary),
-            Screen::Alternate => Arc::make_mut(&mut self.alternate),
+            Screen::Primary => &mut self.primary,
+            Screen::Alternate => self.alternate.get_active_grid_mut(),
         };
         (
             active_grid,
@@ -264,29 +261,43 @@ impl TerminalState {
         });
     }
 
-    fn list_native_cells(&self) -> impl Iterator<Item = &Cell> {
+    /// The continuation tail of every cell that carries image data, with the
+    /// screen it belongs to: the primary screen's cells, the alternate
+    /// screen's grid cells, then every history row's image cells, which belong
+    /// to the primary screen.
+    fn list_native_cell_extras(&self) -> impl Iterator<Item = (Screen, &CellExtra)> {
         self.primary
-            .list_rows()
-            .iter()
-            .chain(self.alternate.list_rows())
+            .list_row_cells()
             .flatten()
+            .filter_map(|cell| Some((Screen::Primary, cell.get_image_cell_extra()?)))
+            .chain(
+                self.alternate
+                    .get_allocated_grid()
+                    .into_iter()
+                    .flat_map(Grid::list_row_cells)
+                    .flatten()
+                    .filter_map(|cell| Some((Screen::Alternate, cell.get_image_cell_extra()?))),
+            )
             .chain(
                 self.scrollback
                     .list_retained_lines()
                     .iter()
-                    .flat_map(|(cells, _)| cells),
+                    .flat_map(|row_snapshot| row_snapshot.list_image_cells())
+                    .map(|image_cell| (Screen::Primary, &image_cell.cell_extra)),
             )
     }
 
     pub(super) fn get_native_fragment_storage_byte_count(&self) -> usize {
-        self.list_native_cells()
-            .map(Cell::compute_image_fragment_storage_bytes)
+        self.list_native_cell_extras()
+            .map(|(_, cell_extra)| cell_extra.compute_image_fragment_storage_bytes())
             .sum()
     }
 
+    /// The native image placements the image cells in `view_image_rows` draw,
+    /// for a view whose top row is absolute row `view_top_row_index`.
     pub(super) fn list_native_image_placements(
         &self,
-        terminal_grid: &Grid,
+        view_image_rows: &[Vec<(u16, &CellExtra)>],
         view_top_row_index: u64,
     ) -> Vec<AbsoluteImagePlacement> {
         let native_image_source_by_image_placement_id = self
@@ -302,9 +313,9 @@ impl TerminalState {
             .collect::<HashMap<_, _>>();
         let mut image_placement_runs_by_image_source_id: HashMap<u64, Vec<ImagePlacement>> =
             HashMap::new();
-        for (row_index, grid_row_cells) in terminal_grid.list_rows().iter().enumerate() {
-            for (column_index, terminal_cell) in grid_row_cells.iter().enumerate() {
-                for image_fragment in terminal_cell.get_image_fragments() {
+        for (row_index, row_image_cells) in view_image_rows.iter().enumerate() {
+            for &(column_index, cell_extra) in row_image_cells {
+                for image_fragment in cell_extra.get_image_fragments() {
                     let Some(native_image_source) = native_image_source_by_image_placement_id
                         .get(&image_fragment.image_source_id)
                     else {
@@ -317,7 +328,7 @@ impl TerminalState {
                         image_placements,
                         native_image_source,
                         row_index as u16,
-                        column_index as u16,
+                        column_index,
                         image_fragment.source_row_index,
                         image_fragment.source_column_index,
                     );
@@ -399,46 +410,27 @@ impl TerminalState {
             }
         }
         let mut fragment_storage_byte_count = 0usize;
-        for (screen, row_cells) in self
-            .primary
-            .list_rows()
-            .iter()
-            .map(|row| (Screen::Primary, row.as_slice()))
-            .chain(
-                self.alternate
-                    .list_rows()
-                    .iter()
-                    .map(|row| (Screen::Alternate, row.as_slice())),
-            )
-            .chain(
-                self.scrollback
-                    .list_retained_lines()
-                    .iter()
-                    .map(|(row, _)| (Screen::Primary, row.as_slice())),
-            )
-        {
-            for terminal_cell in row_cells {
-                fragment_storage_byte_count = fragment_storage_byte_count
-                    .saturating_add(terminal_cell.compute_image_fragment_storage_bytes());
-                if fragment_storage_byte_count > MAX_IMAGE_STORAGE_BYTE_COUNT {
-                    return Err("native image fragment storage exceeds its limit".to_owned());
-                }
-                let mut seen_image_placement_ids = HashSet::new();
-                for image_fragment in terminal_cell.get_image_fragments() {
-                    let native_image_source = native_image_source_by_image_placement_id
-                        .get(&image_fragment.image_source_id)
-                        .ok_or("native image fragment has no source")?;
-                    let image_size = native_image_source.placement.plan.geometry.full_size;
-                    if native_image_source.screen != screen
-                        || image_fragment.source_row_index >= image_size.row_count
-                        || image_fragment.source_column_index >= image_size.column_count
-                        || !seen_image_placement_ids.insert(image_fragment.image_source_id)
-                    {
-                        return Err(
-                            "native image fragment has invalid screen, coordinates, or identity"
-                                .to_owned(),
-                        );
-                    }
+        for (screen, cell_extra) in self.list_native_cell_extras() {
+            fragment_storage_byte_count = fragment_storage_byte_count
+                .saturating_add(cell_extra.compute_image_fragment_storage_bytes());
+            if fragment_storage_byte_count > MAX_IMAGE_STORAGE_BYTE_COUNT {
+                return Err("native image fragment storage exceeds its limit".to_owned());
+            }
+            let mut seen_image_placement_ids = HashSet::new();
+            for image_fragment in cell_extra.get_image_fragments() {
+                let native_image_source = native_image_source_by_image_placement_id
+                    .get(&image_fragment.image_source_id)
+                    .ok_or("native image fragment has no source")?;
+                let image_size = native_image_source.placement.plan.geometry.full_size;
+                if native_image_source.screen != screen
+                    || image_fragment.source_row_index >= image_size.row_count
+                    || image_fragment.source_column_index >= image_size.column_count
+                    || !seen_image_placement_ids.insert(image_fragment.image_source_id)
+                {
+                    return Err(
+                        "native image fragment has invalid screen, coordinates, or identity"
+                            .to_owned(),
+                    );
                 }
             }
         }
@@ -460,12 +452,10 @@ fn set_native_fragment(
                 existing_fragment.image_source_id == image_fragment.image_source_id
             });
     if !is_overlay_protocol {
-        for existing_fragment in terminal_cell.get_image_fragments() {
-            let _ = decrement_native_fragment_count(
-                fragment_count_by_image_source_id,
-                existing_fragment.image_source_id,
-            );
-        }
+        let _ = discard_native_fragment_references(
+            fragment_count_by_image_source_id,
+            std::iter::once(terminal_cell.get_image_fragments()),
+        );
     }
     terminal_cell.set_image_fragment(image_fragment, is_overlay_protocol);
     if !is_existing_fragment_replaced {
@@ -475,43 +465,37 @@ fn set_native_fragment(
     }
 }
 
-fn decrement_native_fragment_count(
-    fragment_count_by_image_source_id: &mut HashMap<u64, usize>,
-    image_placement_id: u64,
-) -> bool {
-    if let Some(fragment_count) = fragment_count_by_image_source_id.get_mut(&image_placement_id) {
-        *fragment_count -= 1;
-        if *fragment_count == 0 {
-            fragment_count_by_image_source_id.remove(&image_placement_id);
-            return true;
-        }
-    }
-    false
-}
-
 pub(super) fn clear_native_fragments(
     terminal_cell: &mut Cell,
     fragment_count_by_image_source_id: &mut HashMap<u64, usize>,
 ) -> bool {
     let has_removed_native_image_source = discard_native_fragment_references(
         fragment_count_by_image_source_id,
-        std::iter::once(&*terminal_cell),
+        std::iter::once(terminal_cell.get_image_fragments()),
     );
     terminal_cell.clear_image_fragments();
     has_removed_native_image_source
 }
 
+/// Take one count off `fragment_count_by_image_source_id` for each fragment
+/// in `image_fragment_lists`. A fragment whose source has no count changes
+/// nothing. Returns whether a source's count reached `0` and the source left
+/// the map.
 pub(in crate::state) fn discard_native_fragment_references<'a>(
     fragment_count_by_image_source_id: &mut HashMap<u64, usize>,
-    terminal_cells: impl Iterator<Item = &'a Cell>,
+    image_fragment_lists: impl Iterator<Item = &'a [ImageCellFragment]>,
 ) -> bool {
     let mut has_removed_native_image_source = false;
-    for terminal_cell in terminal_cells {
-        for image_fragment in terminal_cell.get_image_fragments() {
-            has_removed_native_image_source |= decrement_native_fragment_count(
-                fragment_count_by_image_source_id,
-                image_fragment.image_source_id,
-            );
+    for image_fragment in image_fragment_lists.flatten() {
+        let image_source_id = image_fragment.image_source_id;
+        let Some(fragment_count) = fragment_count_by_image_source_id.get_mut(&image_source_id)
+        else {
+            continue;
+        };
+        *fragment_count -= 1;
+        if *fragment_count == 0 {
+            fragment_count_by_image_source_id.remove(&image_source_id);
+            has_removed_native_image_source = true;
         }
     }
     has_removed_native_image_source

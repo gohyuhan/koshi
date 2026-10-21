@@ -2435,6 +2435,22 @@ fn parse_session_reference_reads_an_id_a_name_and_refuses_an_empty_value() {
 }
 
 #[test]
+fn parse_session_reference_reads_an_owned_id_and_refuses_any_other_slash_form() {
+    let uuid = build_fixed_test_uuid();
+    assert_eq!(
+        parse_session_reference(&format!("1001/session-{uuid}")),
+        Ok(SessionReference::OwnedSessionId(OwnedSessionId {
+            owner_user_id: 1001,
+            session_id: SessionId::from_uuid(uuid),
+        }))
+    );
+    assert_eq!(
+        parse_session_reference("1001/work"),
+        Err("expected `<user id>/session-<uuid>`, such as `1001/session-<uuid>`".to_string())
+    );
+}
+
+#[test]
 fn parse_tab_reference_reads_an_id_a_name_and_refuses_an_empty_value() {
     let uuid = build_fixed_test_uuid();
     assert_eq!(
@@ -2557,6 +2573,14 @@ fn a_session_reference_prints_as_the_user_named_it() {
         "work"
     );
     assert_eq!(SessionReference::SessionName(String::new()).to_string(), "");
+    assert_eq!(
+        SessionReference::OwnedSessionId(OwnedSessionId {
+            owner_user_id: 1001,
+            session_id: SessionId::from_uuid(uuid),
+        })
+        .to_string(),
+        format!("1001/session-{uuid}")
+    );
 }
 
 // --- Action mapping ---
@@ -3399,7 +3423,7 @@ fn focus_tab_index_rejects_a_negative_number() {
 
 #[test]
 fn focus_tab_index_rejects_an_overflowing_number() {
-    // One digit past `usize::MAX` (18446744073709551615 on a 64-bit target).
+    // One past `usize::MAX` (18446744073709551615 on a 64-bit target).
     let cli_error = parse_cli_error(&["koshi", "focus-tab", "--index", "18446744073709551616"]);
     assert_eq!(cli_error.kind(), ErrorKind::ValueValidation);
 }

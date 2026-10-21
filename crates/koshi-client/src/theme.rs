@@ -1,8 +1,8 @@
 //! Turning a viewer's configured palette into the colors it paints with.
 //!
-//! A config theme names each chrome role as `#RRGGBB` text; the renderer wants
-//! truecolor values. [`resolve_theme`] is that one conversion, run once when a
-//! viewer's config loads or reloads rather than once per frame.
+//! A config theme names each chrome role as `#RRGGBB` text, and the renderer
+//! paints truecolor values. [`resolve_theme`] converts one into the other once
+//! each time a viewer's config loads or reloads.
 
 use koshi_config::types::{RgbColor, ThemeConfig};
 use koshi_renderer::theme::Theme;
@@ -15,7 +15,7 @@ mod tests;
 /// each palette role's `#RRGGBB` value becomes the matching truecolor field.
 /// For example, a theme with `ramp_start "#ff0000"` yields a `Theme` whose
 /// first tab ribbon paints red. Resolving the default config theme yields
-/// exactly [`Theme::default`], so a default config reproduces the stock look.
+/// exactly [`Theme::default`].
 #[must_use]
 pub fn resolve_theme(theme_config: &ThemeConfig) -> Theme {
     let theme_colors = &theme_config.colors;

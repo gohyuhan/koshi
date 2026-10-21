@@ -270,7 +270,7 @@ fn a_host_name_remote_listen_is_skipped_with_a_warning() {
         parse_warnings,
         vec![
             "ignored `remote-listen`: `localhost:7654` is not an IP address and port, such as \
-             `192.168.1.20:7654`"
+             `192.0.2.20:7654`"
                 .to_string()
         ]
     );
@@ -278,13 +278,13 @@ fn a_host_name_remote_listen_is_skipped_with_a_warning() {
 
 #[test]
 fn a_remote_listen_with_no_port_is_skipped_with_a_warning() {
-    let (app_config_layer, parse_warnings) = parse_with_warnings("remote-listen \"192.168.1.20\"");
+    let (app_config_layer, parse_warnings) = parse_with_warnings("remote-listen \"192.0.2.20\"");
     assert_eq!(app_config_layer.remote_listen_address, None);
     assert_eq!(
         parse_warnings,
         vec![
-            "ignored `remote-listen`: `192.168.1.20` is not an IP address and port, such as \
-             `192.168.1.20:7654`"
+            "ignored `remote-listen`: `192.0.2.20` is not an IP address and port, such as \
+             `192.0.2.20:7654`"
                 .to_string()
         ]
     );
@@ -514,9 +514,14 @@ fn parse_update_applies_every_configured_field() {
         parse_config("update {\n    auto-check #false\n    check-interval-days 30\n    allow-prerelease #true\n}")
             .update
             .expect("update section present");
-    assert_eq!(update.should_auto_check_for_updates, Some(false));
-    assert_eq!(update.check_interval_days, Some(30));
-    assert_eq!(update.should_allow_prerelease_updates, Some(true));
+    assert_eq!(
+        update,
+        PartialUpdateConfig {
+            should_auto_check_for_updates: Some(false),
+            check_interval_days: Some(30),
+            should_allow_prerelease_updates: Some(true),
+        }
+    );
 }
 
 #[test]
@@ -535,20 +540,21 @@ fn a_non_boolean_allow_prerelease_is_a_validation_error() {
 
 #[test]
 fn update_block_sets_only_the_fields_it_lists() {
-    let update = parse_config("update {\n    auto-check #true\n}")
-        .update
-        .expect("update section present");
-    assert_eq!(update.should_auto_check_for_updates, Some(true));
-    assert_eq!(update.check_interval_days, None);
+    assert_eq!(
+        parse_config("update {\n    auto-check #true\n}").update,
+        Some(PartialUpdateConfig {
+            should_auto_check_for_updates: Some(true),
+            ..PartialUpdateConfig::default()
+        })
+    );
 }
 
 #[test]
 fn empty_update_block_sets_an_all_none_section() {
-    let update = parse_config("update {\n}")
-        .update
-        .expect("update section present");
-    assert_eq!(update.should_auto_check_for_updates, None);
-    assert_eq!(update.check_interval_days, None);
+    assert_eq!(
+        parse_config("update {\n}").update,
+        Some(PartialUpdateConfig::default())
+    );
 }
 
 #[test]
@@ -715,11 +721,14 @@ fn syntax_error_is_a_parse_error() {
 
 #[test]
 fn scrollback_section_parses_both_fields() {
-    let scrollback = parse_config("scrollback {\n    max-lines 50000\n    max-bytes 1048576\n}")
-        .scrollback
-        .expect("scrollback section present");
-    assert_eq!(scrollback.maximum_line_count, Some(50000));
-    assert_eq!(scrollback.maximum_byte_count, Some(1_048_576));
+    assert_eq!(
+        parse_config("scrollback {\n    max-lines 50000\n    max-bytes 1048576\n}").scrollback,
+        Some(PartialScrollbackConfig {
+            maximum_line_count: Some(50_000),
+            maximum_byte_count: Some(1_048_576),
+            should_scroll_to_input: None,
+        })
+    );
 }
 
 #[test]
@@ -916,6 +925,88 @@ fn a_repeated_remote_link_timeout_line_keeps_the_first_and_warns() {
         parse_warnings,
         vec!["ignored duplicate `remote-link-timeout-ms` section".to_string()]
     );
+}
+
+#[test]
+fn max_frames_per_second_records_each_value_from_30_to_120() {
+    for max_frames_per_second in [30, 60, 120] {
+        assert_eq!(
+            parse_config(&format!("max-frames-per-second {max_frames_per_second}"))
+                .max_frames_per_second,
+            Some(max_frames_per_second)
+        );
+    }
+}
+
+#[test]
+fn a_repeated_max_frames_per_second_line_keeps_the_first_and_warns() {
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("max-frames-per-second 30\nmax-frames-per-second 120");
+    assert_eq!(app_config_layer.max_frames_per_second, Some(30));
+    assert_eq!(
+        parse_warnings,
+        vec!["ignored duplicate `max-frames-per-second` section".to_string()]
+    );
+}
+
+#[test]
+fn a_misspelled_max_frames_per_second_names_the_real_key() {
+    let (app_config_layer, parse_warnings) = parse_with_warnings("max-frame-per-second 30");
+    assert_eq!(app_config_layer.max_frames_per_second, None);
+    assert_eq!(
+        parse_warnings,
+        vec![
+            "ignored unknown key `max-frame-per-second`; did you mean `max-frames-per-second`?"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn an_absent_max_frames_per_second_leaves_60() {
+    assert_eq!(parse_config("").max_frames_per_second, None);
+    assert_eq!(ClientConfig::default().max_frames_per_second, 60);
+}
+
+#[test]
+fn a_max_frames_per_second_out_of_range_or_not_an_integer_is_skipped_with_a_warning() {
+    for (config_text, expected_warning) in [
+        (
+            "max-frames-per-second 29",
+            "ignored `max-frames-per-second`: must be between 30 and 120",
+        ),
+        (
+            "max-frames-per-second 121",
+            "ignored `max-frames-per-second`: must be between 30 and 120",
+        ),
+        (
+            "max-frames-per-second 0",
+            "ignored `max-frames-per-second`: must be between 30 and 120",
+        ),
+        (
+            "max-frames-per-second -60",
+            "ignored `max-frames-per-second`: must be between 30 and 120",
+        ),
+        (
+            "max-frames-per-second 65596",
+            "ignored `max-frames-per-second`: must be between 30 and 120",
+        ),
+        (
+            "max-frames-per-second \"60\"",
+            "ignored `max-frames-per-second`: expected an integer",
+        ),
+    ] {
+        let (app_config_layer, parse_warnings) = parse_with_warnings(config_text);
+        assert_eq!(
+            app_config_layer.max_frames_per_second, None,
+            "{config_text}"
+        );
+        assert_eq!(
+            parse_warnings,
+            vec![expected_warning.to_string()],
+            "{config_text}"
+        );
+    }
 }
 
 #[test]
@@ -1333,16 +1424,18 @@ fn a_comments_only_file_sets_no_layer_and_no_warnings() {
 
 #[test]
 fn carriage_return_line_endings_parse_like_line_feeds() {
-    // A file written on Windows arrives with CRLF; it must parse identically to
-    // the same content with plain LF, on every platform.
-    let lf = "scrollback {\n    max-lines 123\n}\n";
-    let crlf = "scrollback {\r\n    max-lines 123\r\n}\r\n";
-    let from_lf = parse_config(lf).scrollback.expect("lf scrollback present");
-    let from_crlf = parse_config(crlf)
+    // Text with CRLF line endings parses to the same values as the same text
+    // with LF line endings.
+    let line_feed_config_text = "scrollback {\n    max-lines 123\n}\n";
+    let carriage_return_config_text = "scrollback {\r\n    max-lines 123\r\n}\r\n";
+    let line_feed_scrollback = parse_config(line_feed_config_text)
+        .scrollback
+        .expect("lf scrollback present");
+    let carriage_return_scrollback = parse_config(carriage_return_config_text)
         .scrollback
         .expect("crlf scrollback present");
-    assert_eq!(from_lf.maximum_line_count, Some(123));
-    assert_eq!(from_crlf.maximum_line_count, Some(123));
+    assert_eq!(line_feed_scrollback.maximum_line_count, Some(123));
+    assert_eq!(carriage_return_scrollback.maximum_line_count, Some(123));
 }
 
 #[test]
@@ -1356,9 +1449,8 @@ fn a_whitespace_only_file_sets_no_layer_and_no_warnings() {
 
 #[test]
 fn a_leading_byte_order_mark_is_tolerated() {
-    // An editor that saves UTF-8 with a leading BOM prepends U+FEFF; the file
-    // must still parse, with the first section read exactly as if the BOM were
-    // absent, on every platform.
+    // Text that starts with a UTF-8 byte order mark (U+FEFF) parses as if the
+    // mark were absent.
     let (app_config_layer, parse_warnings) =
         parse_with_warnings("\u{feff}scrollback {\n    max-lines 5\n}");
     assert_eq!(
@@ -1427,8 +1519,7 @@ fn the_first_unsupported_schema_version_is_rejected_at_the_boundary() {
 #[test]
 fn a_repeated_field_inside_one_section_keeps_the_last_value() {
     // Two `min-cols` lines in one `pane` block is not a duplicate section: the
-    // subsequent value wins and no warning is raised, matching KDL's last-node-wins
-    // reading of repeated fields.
+    // subsequent value wins and no warning is raised.
     let (app_config_layer, parse_warnings) =
         parse_with_warnings("pane {\n    min-cols 5\n    min-cols 10\n}");
     assert_eq!(
@@ -1483,11 +1574,8 @@ fn an_unterminated_quote_is_a_parse_error_not_a_panic() {
 
 #[test]
 fn hostile_byte_sequences_never_panic_and_a_subsequent_valid_parse_still_succeeds() {
-    // The parser is a trust boundary: user-authored bytes must always return a
-    // result, never panic. Each of these malformed inputs is parsed only for
-    // its no-panic effect (a panic would fail the test); the value is ignored.
-    // Deeply nested blocks are excluded: the KDL parser recurses per nesting
-    // level and 100 nested `{` overflow a test thread's stack.
+    // Each malformed input below returns a result and does not panic. A panic
+    // fails the test, and the result is discarded.
     let hostile_config_sources: &[&str] = &[
         "\0",
         "{",
@@ -1504,15 +1592,14 @@ fn hostile_byte_sequences_never_panic_and_a_subsequent_valid_parse_still_succeed
         ),
         &"\u{4f60}\u{597d}".repeat(500),
         "version\tupdate\tpane",
+        &"a {".repeat(5000),
+        &"{".repeat(5000),
     ];
     for config_source_text in hostile_config_sources {
-        // Discarded on purpose: the only property under test is that the call
-        // returns instead of panicking or aborting.
         let _ = parse_app_config(Path::new("koshi.kdl"), config_source_text);
     }
 
-    // After the barrage, an ordinary config still parses to the right value —
-    // the parser holds no poisoned state between calls.
+    // After the malformed inputs, a valid config still parses to its value.
     let valid_config = parse_config("scrollback {\n    max-lines 4242\n}");
     assert_eq!(
         valid_config
@@ -1684,9 +1771,12 @@ fn a_scrollback_cap_above_usize_max_becomes_usize_max() {
 
 #[test]
 fn scroll_lines_at_the_u16_ceiling_is_accepted_and_one_past_is_skipped() {
-    let at_max = parse_config("mouse {\n    scroll-lines 65535\n}");
+    let maximum_scroll_lines_config = parse_config("mouse {\n    scroll-lines 65535\n}");
     assert_eq!(
-        at_max.mouse.expect("mouse present").scroll_line_count,
+        maximum_scroll_lines_config
+            .mouse
+            .expect("mouse present")
+            .scroll_line_count,
         Some(65535)
     );
 
@@ -1833,8 +1923,8 @@ fn an_unknown_field_in_each_section_suggests_its_nearest_key() {
 
 #[test]
 fn a_section_written_with_a_value_instead_of_a_block_is_named_in_the_warnings() {
-    // `scrollback 5000` reads as a section with no block, so nothing of it is
-    // applied. The warning says so rather than leaving the user guessing.
+    // `scrollback 5000` reads as a section with no block: nothing of it is
+    // applied, and a warning names the section.
     let (app_config_layer, parse_warnings) = parse_with_warnings("scrollback 5000");
 
     assert_eq!(

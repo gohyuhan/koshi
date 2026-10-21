@@ -8,6 +8,19 @@
 //! big-endian length, then that many bytes of JSON encoding one message from
 //! [`protocol`](crate::protocol).
 //!
+//! Bit 31 of the length marks a binary frame, whose payload is raw bytes, and
+//! bits 0 to 30 hold the payload's byte count. A JSON frame has bit 31 clear.
+//! [`FrameWriter::send_binary`](crate::transport::FrameWriter::send_binary)
+//! writes one, and
+//! [`FrameReader::recv_message_or_binary`](crate::transport::FrameReader::recv_message_or_binary)
+//! and
+//! [`Connection::recv_message_or_binary`](crate::transport::Connection::recv_message_or_binary)
+//! read JSON and binary frames alike. Every other read takes JSON frames
+//! only, and a binary frame there is
+//! [`IpcError::UnexpectedBinaryFrame`](crate::error::IpcError::UnexpectedBinaryFrame).
+//!
+//! Example — the payload `01 02 03` travels as `80 00 00 03 01 02 03`.
+//!
 //! [`Connection::is_peer_same_user`](crate::transport::Connection::is_peer_same_user)
 //! reports whether a connected peer runs as the same OS user this process
 //! does.
@@ -56,7 +69,7 @@ use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[cfg(windows)]
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use interprocess::local_socket as socket;
@@ -116,10 +129,24 @@ use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED
 use crate::error::IpcError;
 use crate::wire::{has_exactly_json_fields, Answer};
 
-/// The largest frame either side sends or accepts: 16 MiB. A received length
-/// over it is refused before the payload is allocated; a message that encodes
-/// past it is refused with nothing written.
+/// The largest frame payload either side sends or accepts: 16 MiB, for JSON
+/// and binary frames alike. A received length over it is refused before the
+/// payload is allocated; a message that encodes past it is refused with
+/// nothing written.
 pub const MAX_FRAME_BYTE_COUNT: u32 = 16 * 1024 * 1024;
+
+/// Bit 31 of a frame's length prefix: set on a binary frame, clear on a JSON
+/// frame.
+pub(crate) const BINARY_FRAME_FLAG: u32 = 1 << 31;
+
+/// One frame [`FrameReader::recv_message_or_binary`] reads.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReceivedFrame<Message> {
+    /// A JSON frame, parsed as `Message`.
+    Message(Message),
+    /// The payload of a binary frame.
+    Binary(Vec<u8>),
+}
 
 /// The rights a caller opens a pipe end with: `FILE_GENERIC_READ` and
 /// `FILE_WRITE_DATA`, `0x0012008b`. It holds no `FILE_APPEND_DATA` (`0x4`),
@@ -300,6 +327,8 @@ fn open_pipe_caller_end(
     let connect_deadline = Instant::now() + connect_wait_duration;
     let pipe_path = format_pipe_path(socket_address)?;
     loop {
+        // SAFETY: `pipe_path` is NUL-terminated, and `CreateFileW` accepts NULL
+        // security attributes and a NULL template.
         let pipe_handle = unsafe {
             CreateFileW(
                 pipe_path.as_ptr(),
@@ -312,19 +341,22 @@ fn open_pipe_caller_end(
             )
         };
         if pipe_handle != INVALID_HANDLE_VALUE {
+            // SAFETY: `pipe_handle` is the valid handle that `CreateFileW`
+            // returned, and nothing else owns it.
             return Ok(unsafe { OwnedHandle::from_raw_handle(pipe_handle) });
         }
         let open_error = io::Error::last_os_error();
         if open_error.raw_os_error() != Some(ERROR_PIPE_BUSY as i32) {
             return Err(open_error);
         }
-        let time_left = connect_deadline.saturating_duration_since(Instant::now());
-        if time_left < MINIMUM_STEP_TIME_LEFT_DURATION {
+        let remaining_duration = connect_deadline.saturating_duration_since(Instant::now());
+        if remaining_duration < MINIMUM_STEP_REMAINING_DURATION {
             return Err(io::Error::from(io::ErrorKind::TimedOut));
         }
-        let wait_milliseconds = u32::try_from(time_left.as_millis())
+        let wait_milliseconds = u32::try_from(remaining_duration.as_millis())
             .unwrap_or(u32::MAX)
             .min(NMPWAIT_WAIT_FOREVER - 1);
+        // SAFETY: `pipe_path` is NUL-terminated.
         if unsafe { WaitNamedPipeW(pipe_path.as_ptr(), wait_milliseconds) } == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -350,11 +382,14 @@ fn open_pipe_caller_end(
 /// anonymous logon token.
 #[cfg(windows)]
 fn wrap_pipe_handle(pipe_handle: OwnedHandle) -> io::Result<socket::Stream> {
+    // SAFETY: `GetCurrentThread` gives this thread's pseudo handle, which
+    // needs no closing.
     if unsafe { ImpersonateAnonymousToken(GetCurrentThread()) } == 0 {
         return Err(io::Error::last_os_error());
     }
     let wrap_outcome = DuplexPipeStream::<pipe_mode::Bytes>::try_from(pipe_handle);
     assert!(
+        // SAFETY: `RevertToSelf` takes no arguments.
         unsafe { RevertToSelf() } != 0,
         "RevertToSelf failed: the thread still impersonates the anonymous logon token"
     );
@@ -385,6 +420,8 @@ fn create_pipe_instance(
     if is_first_instance {
         open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
     }
+    // SAFETY: `pipe_path` is NUL-terminated, and `security_attributes` and the
+    // descriptor in `access` live for the call.
     let pipe_instance = unsafe {
         CreateNamedPipeW(
             pipe_path.as_ptr(),
@@ -400,6 +437,8 @@ fn create_pipe_instance(
     if pipe_instance == INVALID_HANDLE_VALUE {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: `pipe_instance` is the valid handle that `CreateNamedPipeW`
+    // returned, and nothing else owns it.
     Ok(unsafe { OwnedHandle::from_raw_handle(pipe_instance) })
 }
 
@@ -412,13 +451,20 @@ fn create_pipe_instance(
 /// wait.
 #[cfg(windows)]
 fn wait_for_pipe_caller(pipe_instance: &OwnedHandle) -> io::Result<()> {
+    // SAFETY: `CreateEventW` accepts NULL security attributes and a NULL name.
     let connect_event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
     if connect_event.is_null() {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: `connect_event` is the non-NULL handle that `CreateEventW`
+    // returned, and nothing else owns it.
     let connect_event = unsafe { OwnedHandle::from_raw_handle(connect_event) };
+    // SAFETY: an all-zero `OVERLAPPED` is valid.
     let mut connect_overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
     connect_overlapped.hEvent = connect_event.as_raw_handle();
+    // SAFETY: `pipe_instance` is open, and `connect_overlapped` outlives the
+    // connect: a pending connect ends in `GetOverlappedResult` below, which
+    // waits for it.
     if unsafe { ConnectNamedPipe(pipe_instance.as_raw_handle(), &mut connect_overlapped) } != 0 {
         return Ok(());
     }
@@ -432,6 +478,8 @@ fn wait_for_pipe_caller(pipe_instance: &OwnedHandle) -> io::Result<()> {
         _ => return Err(connect_error),
     }
     let mut transferred_byte_count: u32 = 0;
+    // SAFETY: `connect_overlapped` belongs to the pending connect, and
+    // `transferred_byte_count` is a writable `u32`.
     let is_connected = unsafe {
         GetOverlappedResult(
             pipe_instance.as_raw_handle(),
@@ -462,14 +510,26 @@ pub struct Connection {
     /// Set by [`ReadCloser::close`]. Every read after it reports
     /// [`IpcError::Disconnected`] without touching the socket.
     is_read_closed: Arc<AtomicBool>,
+    /// The pipe's read direction, shared with the reading half this
+    /// connection splits into and with every [`ReadCloser`] taken from it.
+    #[cfg(windows)]
+    pipe_read_watch: Arc<PipeReadWatch>,
 }
 
 impl Connection {
     /// Wrap a connected stream, with its read direction open.
     fn from_socket_stream(socket_stream: socket::Stream) -> Connection {
+        #[cfg(windows)]
+        let socket::Stream::NamedPipe(pipe_stream) = &socket_stream;
+        #[cfg(windows)]
+        let pipe_read_watch = Arc::new(PipeReadWatch::from_pipe_handle(PipeHandle(
+            pipe_stream.inner().as_handle().as_raw_handle(),
+        )));
         Connection {
             socket_stream: WritableSocketEnd::from_socket_end(socket_stream),
             is_read_closed: Arc::new(AtomicBool::new(false)),
+            #[cfg(windows)]
+            pipe_read_watch,
         }
     }
 
@@ -562,7 +622,7 @@ impl Connection {
     /// Send one message as one frame. Blocks until the bytes are handed to
     /// the OS.
     pub fn send<Message: Serialize>(&mut self, message: &Message) -> Result<(), IpcError> {
-        write_message(&mut self.socket_stream, message)
+        write_message(&mut self.socket_stream, message).map(|_| ())
     }
 
     /// Read one frame and parse its message as `Message`. Blocks until a
@@ -572,7 +632,7 @@ impl Connection {
         if self.is_read_closed.load(Ordering::SeqCst) {
             return Err(IpcError::Disconnected);
         }
-        read_message(&mut *self.socket_stream)
+        read_message(&mut self.build_frame_source())
     }
 
     /// Read one frame and parse it as an [`Answer`] carrying `Response`, as
@@ -584,7 +644,36 @@ impl Connection {
         if self.is_read_closed.load(Ordering::SeqCst) {
             return Err(IpcError::Disconnected);
         }
-        read_answer(&mut *self.socket_stream)
+        read_answer(&mut self.build_frame_source())
+    }
+
+    /// Read one frame: a JSON frame parsed as `Message`, or a binary frame's
+    /// payload. Blocks until a whole frame arrives. A connection whose read
+    /// direction is closed reports [`IpcError::Disconnected`].
+    pub fn recv_message_or_binary<Message: DeserializeOwned>(
+        &mut self,
+    ) -> Result<ReceivedFrame<Message>, IpcError> {
+        if self.is_read_closed.load(Ordering::SeqCst) {
+            return Err(IpcError::Disconnected);
+        }
+        read_message_or_binary(&mut self.build_frame_source())
+    }
+
+    /// The reader this connection's frames are read through: the socket on
+    /// Unix, and on Windows the pipe with each read run through the
+    /// connection's `PipeReadWatch`.
+    fn build_frame_source(&mut self) -> impl Read + '_ {
+        #[cfg(unix)]
+        {
+            &mut *self.socket_stream
+        }
+        #[cfg(windows)]
+        {
+            WatchedPipeReader {
+                socket_stream: &mut self.socket_stream,
+                pipe_read_watch: &self.pipe_read_watch,
+            }
+        }
     }
 
     /// Take the handle on this connection's read direction, for another thread
@@ -601,6 +690,8 @@ impl Connection {
             is_closed: Arc::clone(&self.is_read_closed),
             #[cfg(unix)]
             duplicated_socket: duplicate_unix_socket(&self.socket_stream)?,
+            #[cfg(windows)]
+            pipe_read_watch: Arc::clone(&self.pipe_read_watch),
         })
     }
 
@@ -619,23 +710,33 @@ impl Connection {
             let peer_user_id = credentials.euid().ok_or_else(|| IpcError::Transport {
                 error_detail: "the socket reported no peer user id".to_string(),
             })?;
-            Ok(peer_user_id == unsafe { libc::geteuid() })
+            // SAFETY: `geteuid` takes no arguments and always succeeds.
+            let effective_user_id = unsafe { libc::geteuid() };
+            Ok(peer_user_id == effective_user_id)
         }
         #[cfg(windows)]
         {
             let process_id = credentials.pid().ok_or_else(|| IpcError::Transport {
                 error_detail: "the pipe reported no peer process id".to_string(),
             })?;
+            // SAFETY: `OpenProcess` takes its arguments by value and reads no
+            // memory.
             let peer_process_handle =
                 unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
             if peer_process_handle.is_null() {
                 return Err(convert_io_error(io::Error::last_os_error()));
             }
+            // SAFETY: `peer_process_handle` is the non-NULL handle that
+            // `OpenProcess` returned, and nothing else owns it.
             let peer_process_handle = unsafe { OwnedHandle::from_raw_handle(peer_process_handle) };
             let peer_token_buffer =
                 read_token_information_buffer(peer_process_handle.as_raw_handle(), TokenUser)?;
             let own_token_buffer =
+                // SAFETY: `GetCurrentProcess` takes no arguments and gives a
+                // pseudo handle that needs no closing.
                 read_token_information_buffer(unsafe { GetCurrentProcess() }, TokenUser)?;
+            // SAFETY: both buffers were filled for `TokenUser` and live for the
+            // call.
             Ok(unsafe {
                 EqualSid(
                     get_user_sid_from_token_buffer(&peer_token_buffer),
@@ -661,12 +762,17 @@ impl Connection {
         let (reader_half, writer_half) = self.socket_stream.split();
         (
             FrameReader {
-                reader_half: Box::new(LocalSocketReader::from_recv_half(reader_half)),
+                reader_half: Box::new(LocalSocketReader::from_recv_half(
+                    reader_half,
+                    #[cfg(windows)]
+                    self.pipe_read_watch,
+                )),
                 is_closed: self.is_read_closed,
             },
             FrameWriter {
                 writer_half: Box::new(LocalSocketWriter::from_send_half(writer_half)),
                 last_frame_written_at: Instant::now(),
+                written_byte_count: 0,
             },
         )
     }
@@ -679,7 +785,14 @@ impl Connection {
     #[must_use]
     pub fn split_raw(self) -> (RawReader, RawWriter) {
         let (reader_half, writer_half) = self.socket_stream.split();
-        (RawReader(reader_half), RawWriter(writer_half))
+        (
+            RawReader {
+                recv_half: reader_half,
+                #[cfg(windows)]
+                pipe_read_watch: self.pipe_read_watch,
+            },
+            RawWriter(writer_half),
+        )
     }
 }
 
@@ -825,7 +938,7 @@ pub trait Deadlined: Send {
 
 /// The least time left a step under a deadline starts with: 1 ms. Less time
 /// left than this counts as no time left.
-const MINIMUM_STEP_TIME_LEFT_DURATION: Duration = Duration::from_millis(1);
+const MINIMUM_STEP_REMAINING_DURATION: Duration = Duration::from_millis(1);
 
 /// The time left until `deadline`. A read or write under `deadline` runs out
 /// of time once this fails.
@@ -833,15 +946,15 @@ const MINIMUM_STEP_TIME_LEFT_DURATION: Duration = Duration::from_millis(1);
 /// # Errors
 /// [`io::ErrorKind::TimedOut`] with the text `this step ran out of time` when
 /// less than 1 ms is left.
-pub fn compute_time_left_until(deadline: Instant) -> io::Result<Duration> {
-    let time_left = deadline.saturating_duration_since(Instant::now());
-    if time_left < MINIMUM_STEP_TIME_LEFT_DURATION {
+pub fn compute_remaining_duration_until(deadline: Instant) -> io::Result<Duration> {
+    let remaining_duration = deadline.saturating_duration_since(Instant::now());
+    if remaining_duration < MINIMUM_STEP_REMAINING_DURATION {
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
             "this step ran out of time",
         ));
     }
-    Ok(time_left)
+    Ok(remaining_duration)
 }
 
 /// The instant one socket call that starts now must end by: the earlier of
@@ -877,6 +990,10 @@ struct LocalSocketReader {
     /// Dropped before `recv_half`: its thread stops before the pipe closes.
     #[cfg(windows)]
     pipe_step_canceller: PipeStepCanceller,
+    /// The pipe's read direction, shared with the connection's
+    /// [`ReadCloser`]s.
+    #[cfg(windows)]
+    pipe_read_watch: Arc<PipeReadWatch>,
     /// The socket's own reading half.
     recv_half: socket::RecvHalf,
     /// When every read must be finished by, or `None` for no limit.
@@ -886,15 +1003,18 @@ struct LocalSocketReader {
 }
 
 impl LocalSocketReader {
-    /// A reader over `recv_half` with no deadline and no idle timeout.
-    fn from_recv_half(recv_half: socket::RecvHalf) -> LocalSocketReader {
-        #[cfg(windows)]
-        let socket::RecvHalf::NamedPipe(pipe_half) = &recv_half;
+    /// A reader over `recv_half` with no deadline and no idle timeout. On
+    /// Windows each read runs through `pipe_read_watch`, the read direction of
+    /// the pipe `recv_half` reads.
+    fn from_recv_half(
+        recv_half: socket::RecvHalf,
+        #[cfg(windows)] pipe_read_watch: Arc<PipeReadWatch>,
+    ) -> LocalSocketReader {
         LocalSocketReader {
             #[cfg(windows)]
-            pipe_step_canceller: PipeStepCanceller::from_pipe_handle(PipeHandle(
-                pipe_half.as_handle().as_raw_handle(),
-            )),
+            pipe_step_canceller: PipeStepCanceller::from_pipe_handle(pipe_read_watch.pipe_handle),
+            #[cfg(windows)]
+            pipe_read_watch,
             recv_half,
             deadline: None,
             idle_timeout: None,
@@ -931,21 +1051,28 @@ impl Read for LocalSocketReader {
     /// On Unix each attempt first sets the socket's receive timeout to the
     /// time left; a timed-out attempt is tried again with the new time left
     /// until less than 1 ms is left. On Windows the read runs while
-    /// `PipeStepCanceller` watches that instant.
+    /// `PipeStepCanceller` watches that instant, and runs through the pipe's
+    /// `PipeReadWatch`: a read direction a [`ReadCloser`] closed gives
+    /// `Ok(0)`.
     ///
     /// # Errors
     /// [`io::ErrorKind::TimedOut`] with the text `this step ran out of time`
     /// once that instant is reached; otherwise the read's own failure.
     fn read(&mut self, read_buffer: &mut [u8]) -> io::Result<usize> {
         let Some(step_deadline) = compute_step_deadline(self.deadline, self.idle_timeout) else {
+            #[cfg(unix)]
             return self.recv_half.read(read_buffer);
+            #[cfg(windows)]
+            return self
+                .pipe_read_watch
+                .run_pipe_read(|| self.recv_half.read(read_buffer));
         };
         let recv_half = &self.recv_half;
         #[cfg(unix)]
         {
             run_socket_step_until(
                 step_deadline,
-                |time_left| recv_half.set_timeout(Some(time_left)),
+                |remaining_duration| recv_half.set_timeout(Some(remaining_duration)),
                 || {
                     let mut recv_half_reference = recv_half;
                     recv_half_reference.read(read_buffer)
@@ -954,10 +1081,13 @@ impl Read for LocalSocketReader {
         }
         #[cfg(windows)]
         {
+            let pipe_read_watch = &self.pipe_read_watch;
             self.pipe_step_canceller
                 .run_pipe_step_until(step_deadline, || {
-                    let mut recv_half_reference = recv_half;
-                    recv_half_reference.read(read_buffer)
+                    pipe_read_watch.run_pipe_read(|| {
+                        let mut recv_half_reference = recv_half;
+                        recv_half_reference.read(read_buffer)
+                    })
                 })
         }
     }
@@ -1039,7 +1169,7 @@ impl Write for LocalSocketWriter {
         {
             run_socket_step_until(
                 step_deadline,
-                |time_left| send_half.set_timeout(Some(time_left)),
+                |remaining_duration| send_half.set_timeout(Some(remaining_duration)),
                 || {
                     let mut send_half_reference = send_half;
                     send_half_reference.write(write_bytes)
@@ -1082,8 +1212,8 @@ fn run_socket_step_until<StepOutput>(
     mut run_step: impl FnMut() -> io::Result<StepOutput>,
 ) -> io::Result<StepOutput> {
     loop {
-        let time_left = compute_time_left_until(deadline)?;
-        let _ = set_socket_timeout(time_left);
+        let remaining_duration = compute_remaining_duration_until(deadline)?;
+        let _ = set_socket_timeout(remaining_duration);
         match run_step() {
             Err(step_error) if is_io_timeout(&step_error) => {}
             step_outcome => return step_outcome,
@@ -1096,15 +1226,21 @@ fn run_socket_step_until<StepOutput>(
 #[cfg(windows)]
 const PIPE_CANCEL_REPEAT_INTERVAL_DURATION: Duration = Duration::from_millis(10);
 
-/// A named pipe's handle, carried to the thread of a [`PipeStepCanceller`].
+/// A named pipe's handle, carried to the thread of a [`PipeStepCanceller`]
+/// and held by a [`PipeReadWatch`].
 #[cfg(windows)]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct PipeHandle(HANDLE);
 
 // SAFETY: a pipe handle names a kernel object; any thread of the process may
 // pass it to `CancelIoEx`.
 #[cfg(windows)]
 unsafe impl Send for PipeHandle {}
+
+// SAFETY: the handle is only ever passed by value to `CancelIoEx`, which any
+// thread may call at the same time as another.
+#[cfg(windows)]
+unsafe impl Sync for PipeHandle {}
 
 /// What a [`PipeStepCanceller`] and its thread share.
 #[cfg(windows)]
@@ -1163,13 +1299,13 @@ impl PipeStepCanceller {
         deadline: Instant,
         run_step: impl FnOnce() -> io::Result<StepOutput>,
     ) -> io::Result<StepOutput> {
-        compute_time_left_until(deadline)?;
+        compute_remaining_duration_until(deadline)?;
         self.start_canceller_thread()?;
         self.set_running_step_deadline(Some(deadline));
         let step_outcome = run_step();
         self.set_running_step_deadline(None);
         if step_outcome.is_err() {
-            compute_time_left_until(deadline)?;
+            compute_remaining_duration_until(deadline)?;
         }
         step_outcome
     }
@@ -1251,6 +1387,120 @@ fn run_pipe_step_canceller(
     }
 }
 
+/// The read direction of one named pipe, shared by the [`Connection`], the
+/// reading half it splits into, and every [`ReadCloser`] taken from it.
+///
+/// Each read on the pipe runs through [`run_pipe_read`](Self::run_pipe_read).
+/// [`close_read_direction`](Self::close_read_direction) ends the read that
+/// runs at that moment, and every read from then on gives `Ok(0)`, the end of
+/// the stream.
+///
+/// Example: a session's reading thread waits in a read on a client's pipe, and
+/// the session's writing thread closes the read direction. The read ends with
+/// `Ok(0)`, and the reading thread sees the end of the stream.
+#[cfg(windows)]
+#[derive(Debug)]
+struct PipeReadWatch {
+    /// The pipe the reads run on.
+    pipe_handle: PipeHandle,
+    /// Whether the read direction is closed and whether a read runs, under
+    /// one lock.
+    read_state: Mutex<PipeReadState>,
+    /// Notified each time a read ends.
+    read_ended: Condvar,
+}
+
+/// What a [`PipeReadWatch`] holds under its lock.
+#[cfg(windows)]
+#[derive(Debug, Default)]
+struct PipeReadState {
+    /// Set by [`PipeReadWatch::close_read_direction`]; never cleared.
+    is_read_closed: bool,
+    /// Set while a read runs on the pipe.
+    is_read_running: bool,
+}
+
+#[cfg(windows)]
+impl PipeReadWatch {
+    /// A watch over `pipe_handle`, with the read direction open and no read
+    /// running.
+    fn from_pipe_handle(pipe_handle: PipeHandle) -> PipeReadWatch {
+        PipeReadWatch {
+            pipe_handle,
+            read_state: Mutex::new(PipeReadState::default()),
+            read_ended: Condvar::new(),
+        }
+    }
+
+    /// Run `run_read`, one read on the pipe. A read direction closed before
+    /// the read starts gives `Ok(0)` and runs no read. A read that ends while
+    /// the read direction is closed gives `Ok(0)`, whatever it read or failed
+    /// with.
+    fn run_pipe_read(&self, run_read: impl FnOnce() -> io::Result<usize>) -> io::Result<usize> {
+        {
+            let mut read_state = self.lock_read_state();
+            if read_state.is_read_closed {
+                return Ok(0);
+            }
+            read_state.is_read_running = true;
+        }
+        let read_outcome = run_read();
+        let mut read_state = self.lock_read_state();
+        read_state.is_read_running = false;
+        self.read_ended.notify_all();
+        if read_state.is_read_closed {
+            return Ok(0);
+        }
+        read_outcome
+    }
+
+    /// Close the read direction, and return once no read runs on the pipe.
+    /// A read that runs is cancelled with `CancelIoEx`, again every
+    /// [`PIPE_CANCEL_REPEAT_INTERVAL_DURATION`] until it ends. The cancel also
+    /// ends a write waiting on the pipe at that moment.
+    fn close_read_direction(&self) {
+        let mut read_state = self.lock_read_state();
+        read_state.is_read_closed = true;
+        while read_state.is_read_running {
+            // SAFETY: a read runs, so the reader that holds the pipe is not
+            // dropped, and the handle is open.
+            unsafe { CancelIoEx(self.pipe_handle.0, std::ptr::null()) };
+            read_state = self
+                .read_ended
+                .wait_timeout(read_state, PIPE_CANCEL_REPEAT_INTERVAL_DURATION)
+                .expect("pipe read watch")
+                .0;
+        }
+    }
+
+    /// Lock the watch's state.
+    ///
+    /// # Panics
+    /// When a thread panicked while it held the lock.
+    fn lock_read_state(&self) -> MutexGuard<'_, PipeReadState> {
+        self.read_state.lock().expect("pipe read watch")
+    }
+}
+
+/// A whole [`Connection`]'s pipe, read with each read run through the
+/// connection's [`PipeReadWatch`].
+#[cfg(windows)]
+struct WatchedPipeReader<'connection> {
+    /// The connection's pipe.
+    socket_stream: &'connection mut socket::Stream,
+    /// The connection's read direction.
+    pipe_read_watch: &'connection PipeReadWatch,
+}
+
+#[cfg(windows)]
+impl Read for WatchedPipeReader<'_> {
+    /// Read from the pipe, as [`PipeReadWatch::run_pipe_read`] states.
+    fn read(&mut self, read_buffer: &mut [u8]) -> io::Result<usize> {
+        self.pipe_read_watch
+            .run_pipe_read(|| self.socket_stream.read(read_buffer))
+    }
+}
+
 /// The reading half of a stream, with a deadline and an idle timeout it may be
 /// given later.
 pub trait DeadlinedRead: Read + Deadlined {}
@@ -1284,6 +1534,7 @@ pub fn build_frame_halves(
         FrameWriter {
             writer_half,
             last_frame_written_at: Instant::now(),
+            written_byte_count: 0,
         },
     )
 }
@@ -1353,6 +1604,19 @@ impl FrameReader {
         }
         read_answer(&mut self.reader_half)
     }
+
+    /// Read one frame: a JSON frame parsed as `Message`, or a binary frame's
+    /// payload. Blocks until a whole frame arrives. The peer closing its
+    /// writing end, and a read direction this side closed, are both
+    /// [`IpcError::Disconnected`].
+    pub fn recv_message_or_binary<Message: DeserializeOwned>(
+        &mut self,
+    ) -> Result<ReceivedFrame<Message>, IpcError> {
+        if self.is_closed.load(Ordering::SeqCst) {
+            return Err(IpcError::Disconnected);
+        }
+        read_message_or_binary(&mut self.reader_half)
+    }
 }
 
 /// The handle on one connection's read direction, held by a thread other than
@@ -1360,7 +1624,8 @@ impl FrameReader {
 /// [`Connection::create_read_closer`].
 ///
 /// The handle keeps working after the connection is split: it closes the read
-/// direction of both a [`Connection`] and the [`FrameReader`] it splits into.
+/// direction of a [`Connection`], and of the [`FrameReader`] or the
+/// [`RawReader`] it splits into.
 #[derive(Debug)]
 pub struct ReadCloser {
     /// Shared with the connection this handle came from.
@@ -1369,23 +1634,33 @@ pub struct ReadCloser {
     /// shutting this one's read direction shuts the connection's.
     #[cfg(unix)]
     duplicated_socket: UnixStream,
+    /// The pipe's read direction, shared with the connection and the reading
+    /// half it splits into.
+    #[cfg(windows)]
+    pipe_read_watch: Arc<PipeReadWatch>,
 }
 
 impl ReadCloser {
     /// Close the connection's read direction: every [`Connection::recv`] and
-    /// [`FrameReader::recv`] from here reports [`IpcError::Disconnected`]. The
-    /// writing direction stays open; a reply written after this goes out.
+    /// [`FrameReader::recv`] from here reports [`IpcError::Disconnected`], and
+    /// every [`RawReader`] read gives `Ok(0)`. A read the reader is already
+    /// blocked in ends the same way.
     ///
-    /// On Unix a read the reader is already blocked in ends as well: the
-    /// socket's read direction is shut. A Windows named pipe has no half-close:
-    /// a read already waiting on the pipe ends when its peer sends the next
-    /// frame or hangs up, and every read after that one reports end of stream.
+    /// On Unix the socket's read direction is shut. On Windows the read
+    /// waiting on the pipe is cancelled, and the close returns once it has
+    /// ended, as `PipeReadWatch::close_read_direction` states. That cancel
+    /// also ends a write waiting on the pipe at that moment.
+    ///
+    /// The writing direction stays open: a write that starts after the close
+    /// returns goes out.
     ///
     /// Closing an already-closed read direction changes nothing.
     pub fn close(&self) {
         self.is_closed.store(true, Ordering::SeqCst);
         #[cfg(unix)]
         let _ = self.duplicated_socket.shutdown(Shutdown::Read);
+        #[cfg(windows)]
+        self.pipe_read_watch.close_read_direction();
     }
 }
 
@@ -1400,9 +1675,12 @@ fn duplicate_unix_socket(socket_stream: &socket::Stream) -> Result<UnixStream, I
 /// The writing half of a split [`Connection`]. Reads nothing.
 pub struct FrameWriter {
     writer_half: Box<dyn DeadlinedWrite>,
-    /// When the last frame [`FrameWriter::send`] wrote went out whole, or
-    /// when this half was built while none has.
+    /// When the last frame this half wrote went out whole, or when this half
+    /// was built while none has.
     last_frame_written_at: Instant,
+    /// The bytes of every frame this half wrote whole, each frame's 4-byte
+    /// length prefix included.
+    written_byte_count: u64,
 }
 
 impl FrameWriter {
@@ -1441,27 +1719,87 @@ impl FrameWriter {
     /// whole sets [`get_last_frame_written_at`](Self::get_last_frame_written_at)
     /// to the time it finished; a failed send leaves it as it was.
     pub fn send<Message: Serialize>(&mut self, message: &Message) -> Result<(), IpcError> {
-        write_message(&mut self.writer_half, message)?;
+        let frame_byte_count = write_message(&mut self.writer_half, message)?;
         self.last_frame_written_at = Instant::now();
+        self.written_byte_count += frame_byte_count as u64;
         Ok(())
     }
 
-    /// When the last frame [`send`](Self::send) wrote went out whole, or when
-    /// this half was built while none has.
+    /// Send `payload_bytes` as one binary frame, under the same deadline, idle
+    /// timeout and [`get_last_frame_written_at`](Self::get_last_frame_written_at)
+    /// rules as [`send`](Self::send). A payload past [`MAX_FRAME_BYTE_COUNT`]
+    /// is [`IpcError::FrameTooLarge`] with nothing written.
+    pub fn send_binary(&mut self, payload_bytes: &[u8]) -> Result<(), IpcError> {
+        self.send_binary_with_head(payload_bytes, &[])
+    }
+
+    /// Send one binary frame whose payload is `frame_head` then `frame_body`,
+    /// under the same rules as [`send_binary`](Self::send_binary). The length
+    /// prefix and `frame_head` go out in one write and `frame_body` in a
+    /// second, straight from the caller's buffer.
+    ///
+    /// Example: a head of 18 bytes and a body of 1048576 bytes write 22
+    /// bytes, then 1048576 bytes.
+    pub fn send_binary_with_head(
+        &mut self,
+        frame_head: &[u8],
+        frame_body: &[u8],
+    ) -> Result<(), IpcError> {
+        let frame_byte_count = write_binary_frame(&mut self.writer_half, frame_head, frame_body)?;
+        self.last_frame_written_at = Instant::now();
+        self.written_byte_count += frame_byte_count as u64;
+        Ok(())
+    }
+
+    /// When the last frame [`send`](Self::send),
+    /// [`send_binary`](Self::send_binary) or
+    /// [`send_binary_with_head`](Self::send_binary_with_head) wrote went out
+    /// whole, or when this half was built while none has.
     #[must_use]
     pub fn get_last_frame_written_at(&self) -> Instant {
         self.last_frame_written_at
+    }
+
+    /// The bytes of every frame [`send`](Self::send),
+    /// [`send_binary`](Self::send_binary) and
+    /// [`send_binary_with_head`](Self::send_binary_with_head) wrote whole,
+    /// each frame's 4-byte length prefix included. A failed send adds
+    /// nothing.
+    ///
+    /// Example: `send(&"hi")` then `send_binary(&[1, 2, 3])` gives
+    /// `(4 + 4) + (4 + 3)`, 15.
+    #[must_use]
+    pub fn get_written_byte_count(&self) -> u64 {
+        self.written_byte_count
     }
 }
 
 /// The reading half of a [`Connection::split_raw`]: the bytes as they arrive,
 /// with no frame shape read off them.
 #[derive(Debug)]
-pub struct RawReader(socket::RecvHalf);
+pub struct RawReader {
+    /// The socket's own reading half.
+    recv_half: socket::RecvHalf,
+    /// The pipe's read direction, shared with the connection's
+    /// [`ReadCloser`]s.
+    #[cfg(windows)]
+    pipe_read_watch: Arc<PipeReadWatch>,
+}
 
 impl Read for RawReader {
+    /// Read the bytes that arrived. A read direction a [`ReadCloser`] closed
+    /// gives `Ok(0)`, the end of the stream. On Windows the read runs through
+    /// the pipe's `PipeReadWatch`.
     fn read(&mut self, raw_buffer: &mut [u8]) -> io::Result<usize> {
-        self.0.read(raw_buffer)
+        #[cfg(unix)]
+        {
+            self.recv_half.read(raw_buffer)
+        }
+        #[cfg(windows)]
+        {
+            self.pipe_read_watch
+                .run_pipe_read(|| self.recv_half.read(raw_buffer))
+        }
     }
 }
 
@@ -1508,13 +1846,14 @@ impl Write for FrameBuffer {
 }
 
 /// Encode `message` and write it as one frame: 4-byte big-endian length, then
-/// the JSON bytes. The whole frame goes out in one `write_all`. A message
-/// past [`MAX_FRAME_BYTE_COUNT`] is refused with nothing written, and its encoding
+/// the JSON bytes. The whole frame goes out in one `write_all`. Returns the
+/// frame's byte count, the length prefix included. A message past
+/// [`MAX_FRAME_BYTE_COUNT`] is refused with nothing written, and its encoding
 /// stops at the byte that crossed the cap.
 pub(crate) fn write_message<Message: Serialize>(
     writer: &mut impl Write,
     message: &Message,
-) -> Result<(), IpcError> {
+) -> Result<usize, IpcError> {
     let mut frame_buffer = FrameBuffer {
         frame_bytes: vec![0u8; 4],
         overflow_byte_count: None,
@@ -1534,26 +1873,75 @@ pub(crate) fn write_message<Message: Serialize>(
     frame_buffer.frame_bytes[..4].copy_from_slice(&frame_byte_count.to_be_bytes());
     writer
         .write_all(&frame_buffer.frame_bytes)
-        .map_err(convert_io_error)
+        .map_err(convert_io_error)?;
+    Ok(frame_buffer.frame_bytes.len())
 }
 
-/// Read one frame and parse its JSON payload as `Message`. The length prefix is
+/// Write one binary frame whose payload is `frame_head` then `frame_body`:
+/// the 4-byte big-endian byte count with [`BINARY_FRAME_FLAG`] set and
+/// `frame_head` go out in one `write_all`, then `frame_body` in a second
+/// `write_all` when it holds a byte. Returns the frame's byte count, the
+/// length prefix included. A payload past [`MAX_FRAME_BYTE_COUNT`] is refused
+/// with nothing written.
+pub(crate) fn write_binary_frame(
+    writer: &mut impl Write,
+    frame_head: &[u8],
+    frame_body: &[u8],
+) -> Result<usize, IpcError> {
+    let payload_byte_count = frame_head.len() + frame_body.len();
+    let prefixed_payload_byte_count = u32::try_from(payload_byte_count)
+        .ok()
+        .filter(|payload_byte_count| *payload_byte_count <= MAX_FRAME_BYTE_COUNT)
+        .ok_or(IpcError::FrameTooLarge {
+            frame_byte_count: payload_byte_count as u64,
+            maximum_frame_byte_count: MAX_FRAME_BYTE_COUNT,
+        })?;
+    let mut leading_bytes = Vec::with_capacity(4 + frame_head.len());
+    leading_bytes
+        .extend_from_slice(&(prefixed_payload_byte_count | BINARY_FRAME_FLAG).to_be_bytes());
+    leading_bytes.extend_from_slice(frame_head);
+    writer.write_all(&leading_bytes).map_err(convert_io_error)?;
+    if !frame_body.is_empty() {
+        writer.write_all(frame_body).map_err(convert_io_error)?;
+    }
+    Ok(4 + payload_byte_count)
+}
+
+/// Read one JSON frame and parse its payload as `Message`. The length prefix is
 /// checked against [`MAX_FRAME_BYTE_COUNT`] before the payload buffer is allocated.
 pub(crate) fn read_message<Message: DeserializeOwned>(
     reader: &mut impl Read,
 ) -> Result<Message, IpcError> {
-    let payload_bytes = read_frame_payload(reader)?;
-    serde_json::from_slice(&payload_bytes).map_err(|parse_error| IpcError::MalformedFrame {
-        error_detail: parse_error.to_string(),
-    })
+    let payload_bytes = read_json_frame_payload(reader)?;
+    parse_message(&payload_bytes)
 }
 
-/// Read one frame and parse its JSON payload as [`parse_answer`] does.
+/// Read one frame: a JSON frame parsed as `Message`, or a binary frame's
+/// payload. The length prefix is checked against [`MAX_FRAME_BYTE_COUNT`]
+/// before the payload buffer is allocated.
+pub(crate) fn read_message_or_binary<Message: DeserializeOwned>(
+    reader: &mut impl Read,
+) -> Result<ReceivedFrame<Message>, IpcError> {
+    let frame_header = read_frame_header(reader)?;
+    let payload_bytes = read_frame_payload(reader, frame_header.payload_byte_count)?;
+    if frame_header.is_binary_frame {
+        return Ok(ReceivedFrame::Binary(payload_bytes));
+    }
+    parse_message(&payload_bytes).map(ReceivedFrame::Message)
+}
+
+/// Read one JSON frame and parse its payload as [`parse_answer`] does.
 pub(crate) fn read_answer<Response: DeserializeOwned>(
     reader: &mut impl Read,
 ) -> Result<Answer<Response>, IpcError> {
-    let payload_bytes = read_frame_payload(reader)?;
+    let payload_bytes = read_json_frame_payload(reader)?;
     parse_answer(&payload_bytes)
+}
+
+fn parse_message<Message: DeserializeOwned>(payload_bytes: &[u8]) -> Result<Message, IpcError> {
+    serde_json::from_slice(payload_bytes).map_err(|parse_error| IpcError::MalformedFrame {
+        error_detail: parse_error.to_string(),
+    })
 }
 
 /// Parse `answer_bytes` as an [`Answer`] carrying `Response`.
@@ -1581,25 +1969,56 @@ pub fn parse_answer<Response: DeserializeOwned>(
     })
 }
 
-/// Read one frame's payload. The length prefix is checked against
-/// [`MAX_FRAME_BYTE_COUNT`] before the payload buffer is allocated.
-fn read_frame_payload(reader: &mut impl Read) -> Result<Vec<u8>, IpcError> {
-    let mut frame_header_bytes = [0u8; 4];
+/// What one frame's length prefix says.
+struct FrameHeader {
+    /// Whether bit 31 marks the frame binary.
+    is_binary_frame: bool,
+    /// The payload's byte count, bits 0 to 30, at most [`MAX_FRAME_BYTE_COUNT`].
+    payload_byte_count: u32,
+}
+
+/// Read one frame's 4-byte length prefix. A byte count past
+/// [`MAX_FRAME_BYTE_COUNT`] is [`IpcError::FrameTooLarge`], with the payload
+/// left unread.
+fn read_frame_header(reader: &mut impl Read) -> Result<FrameHeader, IpcError> {
+    let mut length_prefix_bytes = [0u8; 4];
     reader
-        .read_exact(&mut frame_header_bytes)
+        .read_exact(&mut length_prefix_bytes)
         .map_err(convert_io_error)?;
-    let frame_byte_count = u32::from_be_bytes(frame_header_bytes);
-    if frame_byte_count > MAX_FRAME_BYTE_COUNT {
+    let length_prefix = u32::from_be_bytes(length_prefix_bytes);
+    let payload_byte_count = length_prefix & !BINARY_FRAME_FLAG;
+    if payload_byte_count > MAX_FRAME_BYTE_COUNT {
         return Err(IpcError::FrameTooLarge {
-            frame_byte_count: u64::from(frame_byte_count),
+            frame_byte_count: u64::from(payload_byte_count),
             maximum_frame_byte_count: MAX_FRAME_BYTE_COUNT,
         });
     }
-    let mut payload_bytes = vec![0u8; frame_byte_count as usize];
+    Ok(FrameHeader {
+        is_binary_frame: length_prefix & BINARY_FRAME_FLAG != 0,
+        payload_byte_count,
+    })
+}
+
+/// Read the `payload_byte_count` bytes of one frame's payload.
+fn read_frame_payload(
+    reader: &mut impl Read,
+    payload_byte_count: u32,
+) -> Result<Vec<u8>, IpcError> {
+    let mut payload_bytes = vec![0u8; payload_byte_count as usize];
     reader
         .read_exact(&mut payload_bytes)
         .map_err(convert_io_error)?;
     Ok(payload_bytes)
+}
+
+/// Read one JSON frame's payload. A binary frame is
+/// [`IpcError::UnexpectedBinaryFrame`], with its payload left unread.
+fn read_json_frame_payload(reader: &mut impl Read) -> Result<Vec<u8>, IpcError> {
+    let frame_header = read_frame_header(reader)?;
+    if frame_header.is_binary_frame {
+        return Err(IpcError::UnexpectedBinaryFrame);
+    }
+    read_frame_payload(reader, frame_header.payload_byte_count)
 }
 
 /// Read one part of `process_handle`'s token: the bytes `GetTokenInformation`
@@ -1613,12 +2032,17 @@ fn read_token_information_buffer(
     token_information_class: TOKEN_INFORMATION_CLASS,
 ) -> Result<Vec<u64>, IpcError> {
     let mut token_handle: HANDLE = std::ptr::null_mut();
+    // SAFETY: `process_handle` is open, and `token_handle` is a writable
+    // `HANDLE`.
     if unsafe { OpenProcessToken(process_handle, TOKEN_QUERY, &mut token_handle) } == 0 {
         return Err(convert_io_error(io::Error::last_os_error()));
     }
+    // SAFETY: `OpenProcessToken` succeeded, so `token_handle` is open and
+    // nothing else owns it.
     let token_handle = unsafe { OwnedHandle::from_raw_handle(token_handle) };
-    // The first call writes no data; it reports the byte count to allocate.
     let mut required_buffer_byte_count: u32 = 0;
+    // SAFETY: a NULL buffer of length `0` makes the call write only the byte
+    // count it needs, to `required_buffer_byte_count`.
     unsafe {
         GetTokenInformation(
             token_handle.as_raw_handle(),
@@ -1629,6 +2053,7 @@ fn read_token_information_buffer(
         );
     }
     let mut token_buffer = vec![0u64; (required_buffer_byte_count as usize).div_ceil(8).max(1)];
+    // SAFETY: `token_buffer` is writable for the byte length passed.
     let is_token_information_filled = unsafe {
         GetTokenInformation(
             token_handle.as_raw_handle(),
@@ -1646,16 +2071,28 @@ fn read_token_information_buffer(
 
 /// The user SID inside a buffer [`read_token_information_buffer`] filled for
 /// `TokenUser`. It stays valid only while that buffer lives.
+///
+/// # Safety
+/// `token_buffer` is a buffer that [`read_token_information_buffer`] filled
+/// for `TokenUser`.
 #[cfg(windows)]
-fn get_user_sid_from_token_buffer(token_buffer: &[u64]) -> PSID {
+unsafe fn get_user_sid_from_token_buffer(token_buffer: &[u64]) -> PSID {
+    // SAFETY: the caller passes a buffer that starts with a `TOKEN_USER`,
+    // aligned to 8 bytes.
     unsafe { (*token_buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid }
 }
 
 /// The owner SID inside a buffer [`read_token_information_buffer`] filled for
 /// `TokenOwner`: the owner the token gives the objects it creates. It stays
 /// valid only while that buffer lives.
+///
+/// # Safety
+/// `token_buffer` is a buffer that [`read_token_information_buffer`] filled
+/// for `TokenOwner`.
 #[cfg(windows)]
-fn get_owner_sid_from_token_buffer(token_buffer: &[u64]) -> PSID {
+unsafe fn get_owner_sid_from_token_buffer(token_buffer: &[u64]) -> PSID {
+    // SAFETY: the caller passes a buffer that starts with a `TOKEN_OWNER`,
+    // aligned to 8 bytes.
     unsafe { (*token_buffer.as_ptr().cast::<TOKEN_OWNER>()).Owner }
 }
 
@@ -1687,8 +2124,12 @@ fn build_pipe_access() -> Result<SecurityDescriptor, IpcError> {
 #[cfg(windows)]
 fn format_own_user_sid() -> Result<String, IpcError> {
     let own_token_buffer =
+        // SAFETY: `GetCurrentProcess` takes no arguments and gives a pseudo
+        // handle that needs no closing.
         read_token_information_buffer(unsafe { GetCurrentProcess() }, TokenUser)?;
     let mut sid_text_pointer: *mut u16 = std::ptr::null_mut();
+    // SAFETY: `own_token_buffer` was filled for `TokenUser`, and
+    // `sid_text_pointer` is a writable pointer.
     let is_converted = unsafe {
         ConvertSidToStringSidW(
             get_user_sid_from_token_buffer(&own_token_buffer),
@@ -1699,6 +2140,8 @@ fn format_own_user_sid() -> Result<String, IpcError> {
         return Err(convert_io_error(io::Error::last_os_error()));
     }
     let _sid_text_allocation = LocalAllocation(sid_text_pointer.cast());
+    // SAFETY: `ConvertSidToStringSidW` succeeded, so `sid_text_pointer` is a
+    // NUL-terminated string that `_sid_text_allocation` keeps alive.
     Ok(unsafe { U16CStr::from_ptr_str(sid_text_pointer) }.to_string_lossy())
 }
 
@@ -1714,6 +2157,8 @@ fn format_own_user_sid() -> Result<String, IpcError> {
 fn is_pipe_owned_by_own_user(pipe_handle: &OwnedHandle) -> Result<bool, IpcError> {
     let mut owner_sid: PSID = std::ptr::null_mut();
     let mut pipe_security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `pipe_handle` is open, and each out pointer is a writable local
+    // or NULL.
     let lookup_status = unsafe {
         GetSecurityInfo(
             pipe_handle.as_raw_handle(),
@@ -1732,8 +2177,13 @@ fn is_pipe_owned_by_own_user(pipe_handle: &OwnedHandle) -> Result<bool, IpcError
         )));
     }
     let _pipe_security_descriptor_allocation = LocalAllocation(pipe_security_descriptor);
+    // SAFETY: `GetCurrentProcess` takes no arguments and gives a pseudo handle
+    // that needs no closing.
     let own_process_handle = unsafe { GetCurrentProcess() };
     let user_token_buffer = read_token_information_buffer(own_process_handle, TokenUser)?;
+    // SAFETY: `owner_sid` points into the descriptor that
+    // `_pipe_security_descriptor_allocation` keeps alive, and
+    // `user_token_buffer` was filled for `TokenUser`.
     if unsafe {
         EqualSid(
             owner_sid,
@@ -1744,6 +2194,9 @@ fn is_pipe_owned_by_own_user(pipe_handle: &OwnedHandle) -> Result<bool, IpcError
         return Ok(true);
     }
     let owner_token_buffer = read_token_information_buffer(own_process_handle, TokenOwner)?;
+    // SAFETY: `owner_sid` points into the descriptor that
+    // `_pipe_security_descriptor_allocation` keeps alive, and
+    // `owner_token_buffer` was filled for `TokenOwner`.
     let is_default_owner = unsafe {
         EqualSid(
             owner_sid,
@@ -1761,6 +2214,8 @@ struct LocalAllocation(*mut std::ffi::c_void);
 #[cfg(windows)]
 impl Drop for LocalAllocation {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is memory a Windows function allocated for this
+        // caller to free with `LocalFree`, and this drop frees it once.
         unsafe { LocalFree(self.0) };
     }
 }

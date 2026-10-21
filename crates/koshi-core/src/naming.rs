@@ -15,7 +15,7 @@
 //! every combination is taken, the walk repeats with a numeric wrap suffix
 //! (`T-swift-otter-2`, then `-3`, and so on). Every call returns a free name.
 
-use std::hash::{BuildHasher, Hasher, RandomState};
+use crate::random::generate_random_number;
 
 /// Which kind of entity a generated name labels; picks the name's one-letter
 /// type tag.
@@ -266,7 +266,7 @@ pub fn generate_name(name_kind: NameKind, is_name_taken: impl Fn(&str) -> bool) 
     generate_name_from_start(
         name_kind,
         is_name_taken,
-        generate_random_name_combination_index(TOTAL_NAME_COMBINATIONS),
+        (generate_random_number() % TOTAL_NAME_COMBINATIONS as u64) as usize,
     )
 }
 
@@ -316,13 +316,6 @@ fn generate_name_from_start(
         // again with the next wrap number.
         wrap_round += 1;
     }
-}
-
-/// A random combination index below `exclusive_combination_index_bound`. Each call builds a fresh [`RandomState`] and
-/// uses its hash output as the entropy source.
-fn generate_random_name_combination_index(exclusive_combination_index_bound: usize) -> usize {
-    let entropy = RandomState::new().build_hasher().finish();
-    (entropy % exclusive_combination_index_bound as u64) as usize
 }
 
 #[cfg(test)]

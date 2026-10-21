@@ -1,8 +1,8 @@
 //! Process lifecycle and spawn types.
 //!
-//! The PTY layer, the pane layer, and the session close policy all read these
-//! types. They are OS-agnostic: how a [`KillPolicy`] maps to actual signals or
-//! Win32 calls is the PTY layer's concern.
+//! The PTY layer, the pane layer and the runtime read these types. They are
+//! OS-agnostic: how a [`KillPolicy`] maps to actual signals or Win32 calls is
+//! the PTY layer's concern.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

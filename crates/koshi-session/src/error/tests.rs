@@ -9,11 +9,8 @@
 //! [`FloatingSetError::TooManyPanes`] carry no id and are checked against a fixed
 //! literal.
 
-use std::time::SystemTime;
-
 use super::*;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_pane::pane::lifecycle::PaneLifecycle;
 
 use crate::session::lifecycle::{SessionLifecycle, SessionLifecycleEvent};
 
@@ -49,17 +46,12 @@ fn pane_not_in_registry_display_names_the_tab_and_pane() {
 }
 
 #[test]
-fn orphaned_pane_record_display_names_the_pane_and_lifecycle() {
+fn orphaned_pane_record_display_names_the_pane() {
     let pane_id = PaneId::new();
-    let consistency_error = SessionConsistencyError::OrphanedPaneRecord {
-        pane_id,
-        pane_lifecycle: PaneLifecycle::Running,
-    };
+    let consistency_error = SessionConsistencyError::OrphanedPaneRecord { pane_id };
     assert_eq!(
         consistency_error.to_string(),
-        format!(
-            "pane {pane_id:?} is Running but absent from every layout and from the floating panes"
-        )
+        format!("pane {pane_id:?} is absent from every layout and from the floating panes")
     );
 }
 
@@ -156,38 +148,6 @@ fn duplicate_tab_index_display_names_the_largest_index() {
 }
 
 #[test]
-fn removed_pane_in_layout_display_names_the_tab_and_pane() {
-    let tab_id = TabId::new();
-    let pane_id = PaneId::new();
-    let consistency_error = SessionConsistencyError::RemovedPaneInLayout { tab_id, pane_id };
-    assert_eq!(
-        consistency_error.to_string(),
-        format!("tab {tab_id:?} layout still holds removed pane {pane_id:?}")
-    );
-}
-
-#[test]
-fn orphaned_pane_record_display_carries_the_exit_code_and_time() {
-    // The struct variant renders its own fields, so the exit code is part of
-    // the message.
-    let pane_id = PaneId::new();
-    let exited_at = SystemTime::UNIX_EPOCH;
-    let consistency_error = SessionConsistencyError::OrphanedPaneRecord {
-        pane_id,
-        pane_lifecycle: PaneLifecycle::Exited {
-            exit_code: Some(2),
-            exited_at,
-        },
-    };
-    assert_eq!(
-        consistency_error.to_string(),
-        format!(
-            "pane {pane_id:?} is Exited {{ exit_code: Some(2), exited_at: {exited_at:?} }} but absent from every layout and from the floating panes"
-        )
-    );
-}
-
-#[test]
 fn focus_tab_missing_display_names_the_client_and_tab() {
     let client_id = ClientId::new();
     let tab_id = TabId::new();
@@ -246,16 +206,6 @@ fn active_tab_missing_display_names_the_client_and_tab() {
 }
 
 #[test]
-fn lingering_removed_record_display_names_the_pane() {
-    let pane_id = PaneId::new();
-    let consistency_error = SessionConsistencyError::LingeringRemovedRecord { pane_id };
-    assert_eq!(
-        consistency_error.to_string(),
-        format!("removed pane {pane_id:?} still has a registry record")
-    );
-}
-
-#[test]
 fn tab_key_mismatch_display_names_the_key_then_the_tabs_own_id() {
     let stored_tab_id = TabId::new();
     let reported_tab_id = TabId::new();
@@ -280,22 +230,6 @@ fn client_session_mismatch_display_names_the_client_and_the_session_it_carries()
     assert_eq!(
         consistency_error.to_string(),
         format!("client {client_id:?} belongs to session {found_session_id:?}, not this one")
-    );
-}
-
-#[test]
-fn orphaned_pane_record_display_carries_a_closing_lifecycle() {
-    // Every state but `Removed` reaches this variant, `Closing` included, and
-    // the state's own fields land in the message.
-    let pane_id = PaneId::new();
-    let close_requested_at = SystemTime::UNIX_EPOCH;
-    let consistency_error = SessionConsistencyError::OrphanedPaneRecord {
-        pane_id,
-        pane_lifecycle: PaneLifecycle::Closing { close_requested_at },
-    };
-    assert_eq!(
-        consistency_error.to_string(),
-        format!("pane {pane_id:?} is Closing {{ close_requested_at: {close_requested_at:?} }} but absent from every layout and from the floating panes")
     );
 }
 
@@ -404,10 +338,6 @@ fn floating_member_errors_display_the_pane() {
     assert_eq!(
         SessionConsistencyError::FloatingPaneNotInRegistry { pane_id }.to_string(),
         format!("floating pane {pane_id:?} has no registry record")
-    );
-    assert_eq!(
-        SessionConsistencyError::RemovedPaneInFloatingSet { pane_id }.to_string(),
-        format!("floating panes still hold removed pane {pane_id:?}")
     );
     assert_eq!(
         SessionConsistencyError::DuplicateFloatingPane { pane_id }.to_string(),

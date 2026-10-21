@@ -12,8 +12,6 @@
 
 use super::*;
 
-use std::sync::Arc;
-
 use ratatui::buffer::CellWidth;
 use ratatui::style::{Color, Modifier};
 
@@ -162,10 +160,7 @@ fn build_text_grid_view(row_count: u16, column_count: u16, first_row_text: &str)
             .expect("the text fits the grid") =
             Cell::from_character(character, 1, TerminalStyle::default());
     }
-    GridView {
-        grid: Arc::new(grid),
-        view_row_offset: 0,
-    }
+    GridView::from_grid(&grid, 0)
 }
 
 /// Paint `render_snapshot` over the compiled-in region solve of its client's
@@ -188,10 +183,11 @@ fn render_core_frame(
         None,
         viewer_chrome,
         image_render_mode,
-        None,
+        &[],
         None,
         None,
         viewport_area,
+        DrawnRows::Every,
         &mut render_buffer,
     );
     render_buffer
@@ -405,7 +401,7 @@ fn a_floating_pane_draws_its_box_titlebar_separator_and_cells_over_the_tiled_pan
 }
 
 #[test]
-fn wide_glyphs_cut_by_a_floating_pane_are_blanked_and_the_border_beside_them_is_written() {
+fn a_wide_glyph_cut_by_a_floating_pane_is_blanked_and_one_that_ends_before_the_box_stays() {
     let mut render_snapshot = build_forty_by_twelve_render_snapshot();
     let tiled_pane_id = render_snapshot
         .session_snapshot
@@ -420,18 +416,15 @@ fn wide_glyphs_cut_by_a_floating_pane_are_blanked_and_the_border_beside_them_is_
         Cell::from_character('世', 2, glyph_style);
     *grid.get_cell_mut(4, 5).expect("the glyph fits the grid") =
         Cell::from_character(' ', 0, glyph_style);
-    // Grid cell `(5, 3)` is frame cell `(4, 7)`: `世ﾞ` has a cell width of `3`
-    // and covers columns `4` to `6`.
+    // Grid cell `(5, 3)` is frame cell `(4, 7)`: `世ﾞ` measures 3 columns in a
+    // 2-column cell, so it draws `世` in columns `4` and `5`, left of the box.
     let mut marked_glyph_cell = Cell::from_character('世', 2, glyph_style);
     marked_glyph_cell.push_combining('\u{FF9E}');
     *grid.get_cell_mut(5, 3).expect("the glyph fits the grid") = marked_glyph_cell;
     *grid.get_cell_mut(5, 4).expect("the glyph fits the grid") =
         Cell::from_character(' ', 0, glyph_style);
     get_pane_snapshot_mut(&mut render_snapshot, tiled_pane_id).terminal_grid_view =
-        Some(GridView {
-            grid: Arc::new(grid),
-            view_row_offset: 0,
-        });
+        Some(GridView::from_grid(&grid, 0));
     let previous_buffer = render_default_core_frame(&render_snapshot);
     // The floating pane's left border is column `6`.
     push_floating_pane(&mut render_snapshot, build_cell_rect(6, 2, 26, 6), "htop");
@@ -439,13 +432,11 @@ fn wide_glyphs_cut_by_a_floating_pane_are_blanked_and_the_border_beside_them_is_
     let render_buffer = render_default_core_frame(&render_snapshot);
 
     assert_eq!(previous_buffer[(5, 6)].symbol(), "世");
-    assert_eq!(previous_buffer[(4, 7)].symbol(), "世\u{FF9E}");
-    for (column_index, row_index) in [(5, 6), (4, 7)] {
-        assert_eq!(render_buffer[(column_index, row_index)].symbol(), " ");
-        assert_eq!(
-            render_buffer[(column_index, row_index)].modifier,
-            Modifier::BOLD
-        );
+    assert_eq!(previous_buffer[(4, 7)].symbol(), "世");
+    assert_eq!(render_buffer[(5, 6)].symbol(), " ");
+    assert_eq!(render_buffer[(5, 6)].modifier, Modifier::BOLD);
+    assert_eq!(render_buffer[(4, 7)].symbol(), "世");
+    for row_index in [6, 7] {
         assert_eq!(render_buffer[(6, row_index)].symbol(), "│");
     }
     let written_cells: Vec<(u16, u16, &str)> = previous_buffer
@@ -456,10 +447,7 @@ fn wide_glyphs_cut_by_a_floating_pane_are_blanked_and_the_border_beside_them_is_
             (column_index, row_index, written_cell.symbol())
         })
         .collect();
-    assert_eq!(
-        written_cells,
-        [(5, 6, " "), (6, 6, "│"), (4, 7, " "), (6, 7, "│")]
-    );
+    assert_eq!(written_cells, [(5, 6, " "), (6, 6, "│"), (6, 7, "│")]);
 }
 
 #[test]
@@ -483,10 +471,7 @@ fn the_khmer_sign_beyyal_beside_a_floating_pane_stays_and_a_wide_glyph_after_it_
     *grid.get_cell_mut(5, 5).expect("the glyph fits the grid") =
         Cell::from_character(' ', 0, TerminalStyle::default());
     get_pane_snapshot_mut(&mut render_snapshot, tiled_pane_id).terminal_grid_view =
-        Some(GridView {
-            grid: Arc::new(grid),
-            view_row_offset: 0,
-        });
+        Some(GridView::from_grid(&grid, 0));
     let previous_buffer = render_default_core_frame(&render_snapshot);
     // The floating pane's left border is column `6`.
     push_floating_pane(&mut render_snapshot, build_cell_rect(6, 2, 26, 6), "htop");

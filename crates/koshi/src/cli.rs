@@ -29,7 +29,7 @@ use koshi_core::command::{
     ToggleLockModeArgs, WriteToPaneArgs,
 };
 use koshi_core::geometry::Direction;
-use koshi_core::ids::parse_prefixed_uuid;
+use koshi_core::ids::{parse_owned_session_id, parse_prefixed_uuid, OwnedSessionId};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::{ShellKind, SpawnSpec};
 
@@ -115,21 +115,26 @@ impl From<DirectionArgument> for Direction {
 }
 
 /// A session named on the command line: a `session-<uuid>` id (or bare
-/// UUID), or a display name to look up against the running sessions.
+/// UUID), `<user id>/<session id>`, or a display name to look up against the
+/// running sessions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionReference {
     /// An exact session id.
     SessionId(SessionId),
+    /// An exact session id in the folder of another user of this machine, such
+    /// as `1001/session-<uuid>`.
+    OwnedSessionId(OwnedSessionId),
     /// A display name; it must match exactly one running session.
     SessionName(String),
 }
 
 impl fmt::Display for SessionReference {
-    /// Writes the reference as the user named it: the session id for `Id`,
-    /// the display name for `Name`.
+    /// Writes the reference as the user named it: the session id, the user id
+    /// and the session id joined by `/`, or the display name.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SessionReference::SessionId(session_id) => session_id.fmt(formatter),
+            SessionReference::OwnedSessionId(owned_session_id) => owned_session_id.fmt(formatter),
             SessionReference::SessionName(session_name) => formatter.write_str(session_name),
         }
     }
@@ -145,11 +150,17 @@ pub enum TabReference {
     TabName(String),
 }
 
-/// Parse a session argument: an id when the value reads as one, else a
-/// display name. An empty value is `Err("expected a session id or name")`.
+/// Parse a session argument: `<user id>/<session id>` for a value with a `/`,
+/// read by [`parse_owned_session_id`], an id when the value reads as one, else
+/// a display name. An empty value is `Err("expected a session id or name")`,
+/// and a value with a `/` that is not that form is the error
+/// [`parse_owned_session_id`] gives.
 pub fn parse_session_reference(session_argument: &str) -> Result<SessionReference, String> {
     if session_argument.is_empty() {
         return Err("expected a session id or name".to_string());
+    }
+    if let Some(owned_session_id) = parse_owned_session_id(session_argument)? {
+        return Ok(SessionReference::OwnedSessionId(owned_session_id));
     }
     Ok(match parse_prefixed_uuid(session_argument, "session") {
         Ok(uuid) => SessionReference::SessionId(SessionId::from_uuid(uuid)),
@@ -385,7 +396,7 @@ pub enum CliCommand {
         /// Pane to close; defaults to the focused pane.
         #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
         pane_id: Option<PaneId>,
-        /// Kill the pane's child immediately, overriding its close policy.
+        /// Kill the pane's child immediately instead of asking it to stop first.
         #[arg(long = "force")]
         should_force_close: bool,
     },
@@ -499,7 +510,7 @@ pub enum CliCommand {
         /// session, else the only running one.
         #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
         session_reference: Option<SessionReference>,
-        /// Kill every pane's child immediately, overriding each close policy.
+        /// Kill every pane's child immediately instead of asking it to stop first.
         #[arg(long = "force")]
         should_force_close: bool,
     },
@@ -709,7 +720,8 @@ pub enum CliCommand {
         runtime_directory: Option<PathBuf>,
         /// Wait for the router lock instead of yielding to the router that
         /// holds it. A router restarting into a newly installed binary passes
-        /// this.
+        /// this, and so does a command that starts a second router once the
+        /// first one it started ended with no router answering.
         #[arg(long = "wait-for-lock")]
         should_wait_for_lock: bool,
     },

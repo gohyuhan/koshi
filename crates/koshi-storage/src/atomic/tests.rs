@@ -4,8 +4,8 @@ use super::*;
 use crate::error::StorageError;
 use tempfile::TempDir;
 
-/// Names every entry in `directory_path` (staging names are random, so tests assert the
-/// exact surviving set rather than matching a fixed staging path).
+/// The name of every entry in `directory_path`, in the order the directory
+/// lists them.
 fn list_directory_entries(directory_path: &Path) -> Vec<String> {
     std::fs::read_dir(directory_path)
         .unwrap()
@@ -549,5 +549,57 @@ fn a_filesystem_root_is_refused_before_a_staging_file_is_created() {
     assert_eq!(
         detail,
         format!("no parent directory for {}", root.display())
+    );
+}
+
+#[test]
+fn write_atomic_streamed_writes_every_piece_in_order() {
+    let test_directory = TempDir::new().unwrap();
+    let destination_path = test_directory.path().join("resume.json");
+    let file_bytes: Vec<u8> = (0..300_000u32)
+        .map(|byte_index| (byte_index % 251) as u8)
+        .collect();
+
+    write_atomic_streamed(&destination_path, |file_writer| {
+        for file_piece in file_bytes.chunks(997) {
+            file_writer.write_all(file_piece)?;
+        }
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(std::fs::read(&destination_path).unwrap(), file_bytes);
+    assert_eq!(
+        list_directory_entries(test_directory.path()),
+        vec!["resume.json"]
+    );
+}
+
+#[test]
+fn a_streamed_write_that_fails_leaves_the_old_file_and_no_staging_file() {
+    let test_directory = TempDir::new().unwrap();
+    let destination_path = test_directory.path().join("cfg.kdl");
+    std::fs::write(&destination_path, b"a=1\n").unwrap();
+
+    let storage_error = write_atomic_streamed(&destination_path, |file_writer| {
+        file_writer.write_all(&[b'x'; 100_000])?;
+        Err(std::io::Error::other("the encoder stopped"))
+    })
+    .expect_err("a failed write replaces nothing");
+
+    let StorageError::Io { detail } = storage_error else {
+        panic!("expected an Io error, got {storage_error:?}");
+    };
+    assert_eq!(
+        detail,
+        format!(
+            "write temp for {}: the encoder stopped",
+            destination_path.display()
+        )
+    );
+    assert_eq!(std::fs::read(&destination_path).unwrap(), b"a=1\n");
+    assert_eq!(
+        list_directory_entries(test_directory.path()),
+        vec!["cfg.kdl"]
     );
 }

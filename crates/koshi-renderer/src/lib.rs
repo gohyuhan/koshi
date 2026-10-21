@@ -26,5 +26,5 @@ pub use images::{
 };
 pub use render::{
     compute_content_rect, compute_pane_area, get_cursor_position, get_cursor_style,
-    is_placement_target_pane, render_frame,
+    is_placement_target_pane, list_changed_screen_rows, render_frame, DrawnRows,
 };

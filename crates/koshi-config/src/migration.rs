@@ -206,15 +206,12 @@ fn migrate_with_registry(
     let mut schema_version = source_schema_version;
     let mut migrated_source = config_source_text.to_string();
     while schema_version < current_schema_version {
-        let schema = find_schema_by_version(config_schemas, schema_version)?;
         let next_schema_version = schema_version + 1;
-        let migrate_to_next_schema =
-            schema
-                .migrate_to_next_schema
-                .ok_or(MigrationError::MissingStep {
-                    from_schema_version: schema_version,
-                    to_schema_version: next_schema_version,
-                })?;
+        let schema = find_schema_by_version(config_schemas, schema_version)
+            .expect("validate_schema_registry found every supported version");
+        let migrate_to_next_schema = schema
+            .migrate_to_next_schema
+            .expect("validate_schema_registry found a step below the current version");
         migrated_source = migrate_to_next_schema(config_path, &migrated_source)?;
         let declared_schema_version = parse_config_schema_version(config_path, &migrated_source)?;
         if declared_schema_version != next_schema_version {
@@ -225,7 +222,8 @@ fn migrate_with_registry(
                 ),
             });
         }
-        let next_schema = find_schema_by_version(config_schemas, next_schema_version)?;
+        let next_schema = find_schema_by_version(config_schemas, next_schema_version)
+            .expect("validate_schema_registry found every supported version");
         let migrated_problems =
             (next_schema.list_schema_problems)(config_file_kind, config_path, &migrated_source)?;
         if migrated_problems.len() > source_problem_count {
@@ -361,8 +359,8 @@ fn build_version_error(
 }
 
 /// The [`MigrationError::Version`] for a file that declares `schema_version`
-/// when this build reads up to `current_schema_version`: `schema version 3 is
-/// newer than this koshi supports (2)`.
+/// when this build reads up to `current_schema_version`: `config schema
+/// version 3 is newer than this koshi supports (2)`.
 fn build_newer_version_error(
     config_path: &Path,
     schema_version: u32,
@@ -370,9 +368,11 @@ fn build_newer_version_error(
 ) -> MigrationError {
     build_version_error(
         config_path,
-        format!(
-            "schema version {schema_version} is newer than this koshi supports ({current_schema_version})"
-        ),
+        ConfigVersionDiagnostic::TooNew {
+            declared_schema_version: schema_version,
+            supported_schema_version: current_schema_version,
+        }
+        .to_string(),
     )
 }
 

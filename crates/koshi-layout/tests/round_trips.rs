@@ -38,13 +38,6 @@ fn build_test_template() -> TemplateNode {
     })
 }
 
-fn build_tab_rect() -> Rect {
-    Rect::from_size_at_origin(Size {
-        column_count: 80,
-        row_count: 24,
-    })
-}
-
 #[test]
 fn a_template_instantiates_solves_and_yields_content_rects() {
     let template = build_test_template();
@@ -61,23 +54,23 @@ fn a_template_instantiates_solves_and_yields_content_rects() {
     // The two root children split 80 columns evenly. The stack spends one of
     // its 24 rows on the collapsed member's header and gives 23 to the
     // active member.
-    let layout_solution = solve_layout(&layout_tree, build_tab_rect());
+    let layout_solve = solve_layout(&layout_tree, build_cell_rect(0, 0, 80, 24));
     assert_eq!(
-        layout_solution.pane_rects,
+        layout_solve.pane_rects,
         vec![
             (pane_ids[0], build_cell_rect(0, 0, 40, 24)),
             (pane_ids[1], build_cell_rect(40, 0, 40, 1)),
             (pane_ids[2], build_cell_rect(40, 1, 40, 23)),
         ]
     );
-    assert_eq!(layout_solution.stack_headers.len(), 1);
-    assert_eq!(layout_solution.stack_headers[0].pane_id, pane_ids[1]);
-    assert!(layout_solution.suppressed_pane_ids.is_empty());
+    assert_eq!(layout_solve.stack_headers.len(), 1);
+    assert_eq!(layout_solve.stack_headers[0].pane_id, pane_ids[1]);
+    assert!(layout_solve.suppressed_pane_ids.is_empty());
 
     // Every showing pane loses one cell per side to its border; the
     // collapsed member stands on a header strip and shows nothing.
     assert_eq!(
-        list_content_rects(&layout_solution),
+        list_content_rects(&layout_solve),
         vec![
             (pane_ids[0], Some(build_cell_rect(1, 1, 38, 22))),
             (pane_ids[1], None),
@@ -99,9 +92,10 @@ fn a_gap_between_split_children_reaches_the_content_rects() {
 
     // Two columns come off the axis before either child is sized: 78 columns
     // split into 39 and 39, with columns 39 and 40 belonging to no pane.
-    let layout_solution = solve_layout_with_sizing(&layout_tree, build_tab_rect(), sizing);
+    let layout_solve =
+        solve_layout_with_sizing(&layout_tree, build_cell_rect(0, 0, 80, 24), sizing);
     assert_eq!(
-        layout_solution.pane_rects,
+        layout_solve.pane_rects,
         vec![
             (pane_ids[0], build_cell_rect(0, 0, 39, 24)),
             (pane_ids[1], build_cell_rect(41, 0, 39, 1)),
@@ -109,7 +103,7 @@ fn a_gap_between_split_children_reaches_the_content_rects() {
         ]
     );
     assert_eq!(
-        list_content_rects(&layout_solution),
+        list_content_rects(&layout_solve),
         vec![
             (pane_ids[0], Some(build_cell_rect(1, 1, 37, 22))),
             (pane_ids[1], None),
@@ -128,25 +122,25 @@ fn fullscreen_gives_a_collapsed_stack_member_the_only_content_rect() {
     let fullscreen_layout_mode = LayoutMode::Fullscreen {
         focused_pane_id: pane_ids[1],
     };
-    let layout_solution = solve_layout_with_mode(
+    let layout_solve = solve_layout_with_mode(
         &layout_tree,
         fullscreen_layout_mode,
-        build_tab_rect(),
+        build_cell_rect(0, 0, 80, 24),
         PaneSizing::default(),
     );
     assert_eq!(
-        layout_solution.pane_rects,
+        layout_solve.pane_rects,
         vec![
             (pane_ids[0], Rect::build_empty_at_origin()),
-            (pane_ids[1], build_tab_rect()),
+            (pane_ids[1], build_cell_rect(0, 0, 80, 24)),
             (pane_ids[2], Rect::build_empty_at_origin()),
         ]
     );
-    assert!(layout_solution.stack_headers.is_empty());
-    assert!(!layout_solution.is_every_pane_suppressed);
+    assert!(layout_solve.stack_headers.is_empty());
+    assert!(!layout_solve.is_every_pane_suppressed);
 
     assert_eq!(
-        list_content_rects(&layout_solution),
+        list_content_rects(&layout_solve),
         vec![
             (pane_ids[0], None),
             (pane_ids[1], Some(build_cell_rect(1, 1, 78, 22))),
@@ -171,16 +165,16 @@ fn a_tab_below_the_pane_floor_suppresses_the_fullscreen_pane() {
     let fullscreen_layout_mode = LayoutMode::Fullscreen {
         focused_pane_id: pane_ids[1],
     };
-    let layout_solution = solve_layout_with_mode(
+    let layout_solve = solve_layout_with_mode(
         &layout_tree,
         fullscreen_layout_mode,
         undersized_tab_rect,
         PaneSizing::default(),
     );
-    assert_eq!(layout_solution.suppressed_pane_ids, vec![pane_ids[1]]);
-    assert!(layout_solution.is_every_pane_suppressed);
+    assert_eq!(layout_solve.suppressed_pane_ids, vec![pane_ids[1]]);
+    assert!(layout_solve.is_every_pane_suppressed);
     assert_eq!(
-        list_content_rects(&layout_solution),
+        list_content_rects(&layout_solve),
         vec![
             (pane_ids[0], None),
             (pane_ids[1], None),

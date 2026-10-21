@@ -5,118 +5,20 @@
 //! of [`MAX_HOST_WRITE_BYTE_COUNT`] bytes fits one frame.
 
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
-use koshi_core::geometry::{Direction, Point, Rect, Size};
+use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
-use koshi_core::lock::LockMode;
-use koshi_core::mouse::{MouseAnswer, MouseTracking};
-use koshi_layout::mode::LayoutMode;
+use koshi_core::mouse::MouseAnswer;
 use serde_json::json;
 
 use crate::error::IpcError;
 use crate::frame::{
-    FrameClient, FrameCursor, FrameCursorShape, FrameGraphicsProtocol, FrameImageAction,
-    FrameImageChunk, FrameImageRecordHeader, FrameImageTransfer, FramePane, FrameScrollback,
-    FrameSession, FrameSlot, FrameTab, FrameTabMetadata,
+    FrameGraphicsProtocol, FrameImageAction, FrameImageRecordHeader, FrameImageTransfer,
 };
 use crate::protocol::tests::build_fixed_test_uuid;
 
 use super::*;
 
-/// A one-pane frame at fixed ids, so its encoding is byte-stable. The pane
-/// shows no terminal content this frame, so its `window` is `None`; the frame's
-/// own wire shape is pinned in the frame module's tests.
-fn build_test_painted_frame() -> PaintedFrame {
-    let tab_id = TabId::from_uuid(build_fixed_test_uuid());
-    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
-
-    PaintedFrame {
-        is_recovery_notice_visible: false,
-        session_snapshot: FrameSession {
-            session_id: SessionId::from_uuid(build_fixed_test_uuid()),
-            session_revision: 0,
-            session_name: "quiet-lake".to_string(),
-            active_tab_snapshot: FrameTab {
-                tab_id,
-                tab_name: "edit".to_string(),
-                pane_slots: vec![FrameSlot {
-                    pane_id,
-                    outer_rect: Rect {
-                        origin: Point { column: 0, row: 0 },
-                        size: Size {
-                            column_count: 4,
-                            row_count: 3,
-                        },
-                    },
-                    content_rect: Some(Rect {
-                        origin: Point { column: 1, row: 1 },
-                        size: Size {
-                            column_count: 2,
-                            row_count: 1,
-                        },
-                    }),
-                    is_visible: true,
-                    is_suppressed: false,
-                }],
-                tab_size: Size {
-                    column_count: 4,
-                    row_count: 3,
-                },
-                stack_headers: Vec::new(),
-                layout_mode: LayoutMode::Tiled,
-                is_every_pane_suppressed: false,
-                gap_cell_count: 0,
-            },
-            tab_snapshots: vec![FrameTabMetadata {
-                tab_id,
-                tab_name: "edit".to_string(),
-                tab_index: 0,
-                is_active: true,
-            }],
-            floating_pane_slots: Vec::new(),
-            floating_pane_ids: Vec::new(),
-        },
-        pane_snapshots: vec![FramePane {
-            pane_id,
-            pane_title: Some("vim".to_string()),
-            cursor_snapshot: FrameCursor {
-                row_index: 0,
-                column_index: 1,
-                is_visible: true,
-                is_blinking: false,
-                shape: Some(FrameCursorShape::Bar),
-            },
-            terminal_window: None,
-            image_placement_snapshots: Vec::new(),
-            is_reverse_video: false,
-            mouse_tracking: MouseTracking::Off,
-            is_alternate_scroll_enabled: false,
-            is_on_alt_screen: false,
-            view_top_row_index: 7,
-            selection_spans: None,
-            has_selection: false,
-            scrollback_metadata: FrameScrollback {
-                retained_line_count: 12,
-            },
-        }],
-        client_snapshot: FrameClient {
-            client_id: ClientId::from_uuid(build_fixed_test_uuid()),
-            client_revision: 0,
-            viewport_size: Size {
-                column_count: 4,
-                row_count: 3,
-            },
-            active_tab_id: tab_id,
-            focused_pane_id: Some(pane_id),
-            active_tab_focused_pane_id: Some(pane_id),
-            lock_mode: LockMode::Normal,
-            last_applied_lock_command_id: None,
-            last_applied_floating_pane_move_command_id: None,
-            is_mouse_selection_enabled: false,
-        },
-    }
-}
-
-/// One valid image transfer header for the fixed pane in [`build_test_painted_frame`].
+/// One valid image transfer header.
 fn build_test_image_transfer() -> FrameImageTransfer {
     FrameImageTransfer {
         image_content_id: 1,
@@ -143,6 +45,9 @@ fn list_test_events() -> Vec<SessionEvent> {
 
     vec![
         SessionEvent::ImageCacheReset,
+        SessionEvent::ImageContentReleased {
+            image_content_ids: vec![3, 1, 4],
+        },
         SessionEvent::PaneCreated {
             pane_id,
             tab_id: Some(tab_id),
@@ -195,6 +100,7 @@ fn list_test_events() -> Vec<SessionEvent> {
         },
         SessionEvent::SwitchTo {
             session_id: SessionId::from_uuid(build_fixed_test_uuid()),
+            owner_user_id: Some(1001),
         },
         SessionEvent::PlacementCommandRejected { command_id },
         SessionEvent::Pong,
@@ -213,45 +119,56 @@ fn every_event_survives_a_round_trip_field_for_field() {
 }
 
 #[test]
-fn a_painted_frame_survives_a_round_trip_field_for_field() {
-    let expected_event = SessionEvent::Painted {
-        frame: Box::new(build_test_painted_frame()),
+fn an_image_content_start_survives_a_round_trip() {
+    let expected_event = SessionEvent::ImageContentStart {
+        image_transfer: build_test_image_transfer(),
     };
 
-    let serialized_event_json = serde_json::to_string(&expected_event).expect("event encodes");
+    let serialized_event_json =
+        serde_json::to_string(&expected_event).expect("the image event encodes");
     let decoded_event: SessionEvent =
-        serde_json::from_str(&serialized_event_json).expect("event decodes");
-
+        serde_json::from_str(&serialized_event_json).expect("the image event decodes");
     assert_eq!(decoded_event, expected_event);
 }
 
 #[test]
-fn an_image_content_start_and_chunk_survive_a_round_trip() {
+fn a_placement_preview_and_its_refusal_survive_a_round_trip() {
     let expected_events = [
-        SessionEvent::ImageContentStart {
-            image_transfer: build_test_image_transfer(),
+        SessionEvent::PanePlacementSnapshot {
+            request_id: 5,
+            snapshot: Box::new(crate::wire::tests::build_test_placement_snapshot()),
         },
-        SessionEvent::ImageContentChunk {
-            image_chunk: FrameImageChunk {
-                image_transfer_id: 1,
-                byte_offset: 0,
-                is_last: true,
-                chunk_bytes: vec![0, 1, 2, 3, 4, 5, 6, 7],
+        SessionEvent::PanePlacementRefused {
+            request_id: 6,
+            refusal: IpcErrorPayload {
+                code: crate::protocol::IpcErrorCode::ResourceLimit,
+                message: "the preview is larger than its limit".to_string(),
             },
         },
     ];
 
     for expected_event in expected_events {
-        let serialized_event_json =
-            serde_json::to_string(&expected_event).expect("the image event encodes");
+        let serialized_event_json = serde_json::to_string(&expected_event).expect("event encodes");
         let decoded_event: SessionEvent =
-            serde_json::from_str(&serialized_event_json).expect("the image event decodes");
+            serde_json::from_str(&serialized_event_json).expect("event decodes");
+
         assert_eq!(decoded_event, expected_event);
     }
 }
 
 #[test]
-fn image_content_events_have_the_pinned_wire_shape() {
+fn an_image_content_release_has_the_pinned_wire_shape() {
+    assert_eq!(
+        serde_json::to_value(SessionEvent::ImageContentReleased {
+            image_content_ids: vec![3, 1, 4],
+        })
+        .expect("the image release encodes"),
+        json!({"ImageContentReleased": {"image_content_ids": [3, 1, 4]}})
+    );
+}
+
+#[test]
+fn an_image_content_start_has_the_pinned_wire_shape() {
     assert_eq!(
         serde_json::to_value(SessionEvent::ImageContentStart {
             image_transfer: build_test_image_transfer(),
@@ -292,27 +209,6 @@ fn image_content_events_have_the_pinned_wire_shape() {
                         "anchor_cell": [0, 0]
                     },
                     "image_byte_count": 8
-                }
-            }
-        })
-    );
-    assert_eq!(
-        serde_json::to_value(SessionEvent::ImageContentChunk {
-            image_chunk: FrameImageChunk {
-                image_transfer_id: 1,
-                byte_offset: 0,
-                is_last: true,
-                chunk_bytes: vec![0, 1, 2, 3, 4, 5, 6, 7],
-            },
-        })
-        .expect("the image chunk encodes"),
-        json!({
-            "ImageContentChunk": {
-                "image_chunk": {
-                    "image_transfer_id": 1,
-                    "byte_offset": 0,
-                    "is_last": true,
-                    "chunk_bytes": "AAECAwQFBgc="
                 }
             }
         })
@@ -422,33 +318,9 @@ fn a_host_write_survives_a_round_trip() {
 }
 
 #[test]
-fn a_painted_frame_carrying_an_unknown_field_ignores_it() {
-    let mut encoded_json = serde_json::to_value(SessionEvent::Painted {
-        frame: Box::new(build_test_painted_frame()),
-    })
-    .expect("event encodes");
-    encoded_json["Painted"]["frame"]["pane_snapshots"][0]
-        .as_object_mut()
-        .expect("a pane encodes as an object")
-        .insert("zoomed".to_string(), serde_json::Value::Bool(true));
-
-    // Decoded from text, the way the transport does it.
-    let decoded_event: SessionEvent = serde_json::from_str(&encoded_json.to_string())
-        .expect("a field this build does not know is ignored");
-
-    assert_eq!(
-        decoded_event,
-        SessionEvent::Painted {
-            frame: Box::new(build_test_painted_frame()),
-        },
-        "the extra field left nothing behind in the decoded event"
-    );
-}
-
-#[test]
 fn an_absent_optional_field_round_trips_as_absent() {
     let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
-    let sent = [
+    let sent_events = [
         SessionEvent::PaneProcessExited {
             pane_id,
             exit_code: None,
@@ -462,11 +334,12 @@ fn an_absent_optional_field_round_trips_as_absent() {
         },
     ];
 
-    for event in sent {
-        let encoded_json = serde_json::to_string(&event).expect("event encodes");
-        let received: SessionEvent = serde_json::from_str(&encoded_json).expect("event decodes");
+    for sent_event in sent_events {
+        let encoded_json = serde_json::to_string(&sent_event).expect("event encodes");
+        let received_event: SessionEvent =
+            serde_json::from_str(&encoded_json).expect("event decodes");
 
-        assert_eq!(received, event);
+        assert_eq!(received_event, sent_event);
     }
 }
 
@@ -483,6 +356,7 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
             .collect::<Vec<serde_json::Value>>(),
         vec![
             json!("ImageCacheReset"),
+            json!({ "ImageContentReleased": { "image_content_ids": [3, 1, 4] } }),
             json!({ "PaneCreated": { "pane_id": wire_identifier, "tab_id": wire_identifier } }),
             json!({ "PaneProcessExited": { "pane_id": wire_identifier, "exit_code": 130, "signal": null } }),
             json!({ "PaneClosing": { "pane_id": wire_identifier } }),
@@ -515,7 +389,7 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
             json!("Restarting"),
             json!("Detached"),
             json!({ "Resync": { "dropped_event_count": 4 } }),
-            json!({ "SwitchTo": { "session_id": wire_identifier } }),
+            json!({ "SwitchTo": { "session_id": wire_identifier, "owner_user_id": 1001 } }),
             json!({ "PlacementCommandRejected": { "command_id": wire_identifier } }),
             json!("Pong"),
         ]
@@ -567,6 +441,20 @@ fn an_event_this_build_has_no_name_for_reads_as_unknown() {
 }
 
 #[test]
+fn a_switch_without_its_user_id_is_refused() {
+    let decoded_event_result: Result<SessionEvent, _> = serde_json::from_str(
+        r#"{"SwitchTo":{"session_id":"00000000-0000-0000-0000-000000000001"}}"#,
+    );
+
+    let decode_error =
+        decoded_event_result.expect_err("a switch without its user id decoded instead of failing");
+    assert_eq!(
+        decode_error.to_string(),
+        "missing field `owner_user_id` at line 1 column 65"
+    );
+}
+
+#[test]
 fn an_event_missing_a_field_this_version_needs_is_refused() {
     let decoded_event_result: Result<SessionEvent, _> = serde_json::from_str(
         r#"{"PaneCreated":{"pane_id":"00000000-0000-0000-0000-000000000001"}}"#,
@@ -582,20 +470,11 @@ fn an_event_missing_a_field_this_version_needs_is_refused() {
 
 #[test]
 fn the_payload_frames_wire_shape_belongs_to_this_protocol_version() {
-    // The three frames `list_test_events` leaves out, pinned the same way: a
+    // Three frames `list_test_events` leaves out, pinned the same way: a
     // change to any name or type below turns this red.
     let wire_identifier = "00000000-0000-0000-0000-000000000001";
     let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
 
-    assert_eq!(
-        serde_json::to_value(SessionEvent::Painted {
-            frame: Box::new(build_test_painted_frame()),
-        })
-        .expect("event encodes"),
-        json!({ "Painted": {
-            "frame": serde_json::to_value(build_test_painted_frame()).expect("frame encodes")
-        } })
-    );
     assert_eq!(
         serde_json::to_value(SessionEvent::MouseAnswer {
             request_id: 9,

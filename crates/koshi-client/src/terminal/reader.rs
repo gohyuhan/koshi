@@ -22,14 +22,6 @@ pub(super) struct InputReader<Source = PlatformEventSource> {
 }
 
 impl InputReader<PlatformEventSource> {
-    /// Build a reader around one platform event source.
-    pub(super) fn from_event_source(event_source: PlatformEventSource) -> Self {
-        Self {
-            event_source,
-            buffered_terminal_events: VecDeque::with_capacity(32),
-        }
-    }
-
     /// Build a handle that interrupts this reader's platform wait.
     pub(super) fn create_waker(&self) -> PlatformWaker {
         self.event_source.create_waker()
@@ -37,7 +29,18 @@ impl InputReader<PlatformEventSource> {
 }
 
 impl<Source: EventSource> InputReader<Source> {
-    /// Wait until an event accepted by `event_filter` is buffered.
+    /// A reader over `event_source` with nothing buffered.
+    pub(super) fn from_event_source(event_source: Source) -> Self {
+        Self {
+            event_source,
+            buffered_terminal_events: VecDeque::with_capacity(32),
+        }
+    }
+
+    /// Wait until an event accepted by `event_filter` is buffered. Every event
+    /// read on the way stays buffered in arrival order. Returns `true` once
+    /// such an event is buffered, and `false` when `timeout_duration` passes
+    /// first.
     pub(super) fn wait_for_event(
         &mut self,
         timeout_duration: Option<Duration>,
@@ -74,21 +77,24 @@ impl<Source: EventSource> InputReader<Source> {
         }
     }
 
-    /// Return the first event accepted by `event_filter`.
+    /// Remove and return the first event accepted by `event_filter`, from the
+    /// buffered events first, and then from the event source, with no time
+    /// limit. Every rejected event read from the source stays buffered.
     pub(super) fn read_matching_event(
         &mut self,
         mut event_filter: impl FnMut(&Event) -> bool,
     ) -> io::Result<Event> {
         loop {
-            if let Some(buffered_terminal_event_index) = self
+            if let Some(buffered_terminal_event) = self
                 .buffered_terminal_events
                 .iter()
                 .position(&mut event_filter)
+                .and_then(|buffered_terminal_event_index| {
+                    self.buffered_terminal_events
+                        .remove(buffered_terminal_event_index)
+                })
             {
-                return self
-                    .buffered_terminal_events
-                    .remove(buffered_terminal_event_index)
-                    .ok_or_else(|| io::Error::other("buffered terminal event disappeared"));
+                return Ok(buffered_terminal_event);
             }
             if let Some(terminal_event) = self.event_source.try_read_event(None)? {
                 if event_filter(&terminal_event) {

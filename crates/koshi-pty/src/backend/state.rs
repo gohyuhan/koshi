@@ -15,10 +15,16 @@ use crate::error::PtyError;
 
 /// The exit status a pane reports for a child whose end nothing observed.
 ///
-/// Reported by a `waitpid` that answers `ECHILD`, by a `portable-pty` wait that
-/// fails, and for a pane the supervisor no longer holds when a new link settles
-/// its pane list.
+/// Reported on Unix by a `waitid` that fails, such as with `ECHILD`, or that
+/// names neither an exit code nor a signal; on Windows by a wait for the pane
+/// program's exit code that fails; for a pane the supervisor no longer holds
+/// when a new link settles its pane list; and for every pane a supervisor link
+/// still drove when that link closed.
 pub const UNOBSERVED_EXIT: ExitStatus = ExitStatus::ExitCode(-1);
+
+/// How many bytes of input one pane may hold queued for its child, written by
+/// [`PtyBackend::write_pane_input`] and not yet taken by its terminal: 64 MiB.
+pub const MAX_QUEUED_PANE_INPUT_BYTE_COUNT: usize = 64 * 1024 * 1024;
 
 /// The PTY backend: spawns children in PTYs and drives their I/O and teardown.
 ///
@@ -28,13 +34,15 @@ pub const UNOBSERVED_EXIT: ExitStatus = ExitStatus::ExitCode(-1);
 /// built with.
 pub trait PtyBackend: Send + Sync {
     /// Spawn a child in a new PTY of the given size for `pane_id`. The child's
-    /// output and exit status go to the backend's [`PtySink`]. The caller owns the pane identity; the backend keys its records
-    /// by `pane_id`, and `resize_pane`/`write_pane_input`/`kill_pane` calls with that id address
+    /// output and exit status go to the backend's [`PtySink`]. The caller owns
+    /// the pane identity; the backend keys its records by `pane_id`, and
+    /// `resize_pane`/`write_pane_input`/`kill_pane` calls with that id address
     /// this pane.
     ///
     /// `pane_id` must not already be live in the backend; spawning over a live
     /// id orphans the previous child's PTY and I/O threads. A caller re-running
-    /// a command in an existing pane must [`kill_pane`](PtyBackend::kill_pane) it first.
+    /// a command in an existing pane must [`kill_pane`](PtyBackend::kill_pane)
+    /// it first.
     /// An implementation either refuses the call with [`PtyError::Spawn`] or
     /// asserts in a debug build.
     fn spawn_pane(
@@ -45,17 +53,50 @@ pub trait PtyBackend: Send + Sync {
     ) -> Result<(), PtyError>;
     /// Resize an existing pane's PTY.
     fn resize_pane(&self, pane_id: PaneId, pty_size: PtySize) -> Result<(), PtyError>;
+    /// Resize several panes' PTYs. Returns one result per entry of
+    /// `pane_pty_sizes`, in its order, each the result
+    /// [`resize_pane`](PtyBackend::resize_pane) gives that entry.
+    ///
+    /// The default calls [`resize_pane`](PtyBackend::resize_pane) once per
+    /// entry, in order.
+    fn resize_panes(&self, pane_pty_sizes: &[(PaneId, PtySize)]) -> Vec<Result<(), PtyError>> {
+        pane_pty_sizes
+            .iter()
+            .map(|&(pane_id, pty_size)| self.resize_pane(pane_id, pty_size))
+            .collect()
+    }
     /// Write bytes to a pane's child stdin.
+    ///
+    /// # Errors
+    /// A backend that queues the bytes for a writer thread returns
+    /// [`PtyError::InputQueueFull`] when the bytes it holds queued for the
+    /// pane, plus `input_bytes`, would pass
+    /// [`MAX_QUEUED_PANE_INPUT_BYTE_COUNT`]. Nothing of `input_bytes` is
+    /// queued then.
     fn write_pane_input(&self, pane_id: PaneId, input_bytes: &[u8]) -> Result<(), PtyError>;
     /// Terminate a pane's child according to `kill_policy`.
     ///
     /// After the call, no exit for the pane reaches a [`PtySink`] and its
     /// output stops being forwarded.
+    ///
+    /// A backend that holds the pane's terminal lets go of it once the
+    /// signals are sent, which hangs the terminal up on Unix. The call returns
+    /// once the child has ended, or once
+    /// [`GRACEFUL_TIMEOUT_DURATION`](koshi_core::constant::GRACEFUL_TIMEOUT_DURATION)
+    /// has passed after that with the child still running. That child is left
+    /// running, and is reaped when it ends.
     fn kill_pane(&self, pane_id: PaneId, kill_policy: KillPolicy) -> Result<(), PtyError>;
     /// The live working directory of `pane_id`'s child, asked from the OS
     /// (Linux `/proc/<pid>/cwd`, macOS `proc_pidinfo`). `None` when the pane
     /// has no live child or the platform has no lookup (Windows).
     fn find_live_working_directory(&self, pane_id: PaneId) -> Option<PathBuf>;
+    /// Report that the consumer parsed `parsed_byte_count` more bytes of
+    /// `pane_id`'s output.
+    ///
+    /// A backend whose panes print in another process gives that process room
+    /// for that many more bytes of the pane's output. The default does
+    /// nothing.
+    fn grant_pane_output(&self, _pane_id: PaneId, _parsed_byte_count: usize) {}
 }
 
 /// Where a backend delivers a pane's child output and exit status.
@@ -65,19 +106,21 @@ pub trait PtyBackend: Send + Sync {
 pub trait PtySink: Send + Sync {
     /// Take one chunk of `pane_id`'s child output. Returning `false` means this
     /// consumer is done with `pane_id`: the reader stops reading it and nothing
-    /// more is delivered for it — not even [`accept_exit_status`](PtySink::accept_exit_status). Every
-    /// other pane keeps running.
+    /// more is delivered for it — not even
+    /// [`accept_exit_status`](PtySink::accept_exit_status). Every other pane
+    /// keeps running.
     fn accept_output_bytes(&self, pane_id: PaneId, output_bytes: Vec<u8>) -> bool;
 
     /// Take `pane_id`'s final exit status, delivered at most once.
     ///
     /// Called on one of the pane's own threads; which one is not fixed. The
-    /// call may close the pane through [`PtyBackend::kill_pane`]; the backend does
-    /// not join the thread it is running on.
+    /// call may close the pane through [`PtyBackend::kill_pane`]; the backend
+    /// does not join the thread it is running on.
     ///
-    /// It comes after the last [`accept_output_bytes`](PtySink::accept_output_bytes) call for that pane:
-    /// a consumer sees everything the child printed before it sees the child
-    /// end. On Windows the backend closes the pane's terminal once the child
+    /// It comes after the last
+    /// [`accept_output_bytes`](PtySink::accept_output_bytes) call for that
+    /// pane: a consumer sees everything the child printed before it sees the
+    /// child end. On Windows the backend closes the pane's terminal once the child
     /// ends: the console flushes what it still holds, the reader drains it to
     /// its end, and the exit follows.
     ///
@@ -113,7 +156,9 @@ pub struct CarriedPtyPane {
     pub process_id: u32,
     /// The last size the pane's terminal was set to.
     pub pty_size: PtySize,
-    /// How the pane's child ended, if this process's watcher reaped it. `None`
-    /// while the child runs, and the next image waits on the process id itself.
+    /// How the pane's child ended, when the next image cannot wait for it: an
+    /// earlier image reaped the child, or its end could not be waited on.
+    /// `None` while the child runs, and while it stays a zombie of this
+    /// process: the next image waits on the process id itself.
     pub exit_status: Option<ExitStatus>,
 }

@@ -5,12 +5,15 @@
 //! DEC private modes, OSC title / reported_working_directory / shell markers, charset designation,
 //! DECSCUSR, the soft and hard resets, and malformed or hostile input.
 
-use super::glyph::MAX_GRAPHEME_CONTINUATION_COUNT;
 use super::*;
-use crate::graphics::{DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord};
-use crate::grid::state::RowMetadata;
+use crate::graphics::{
+    DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
+};
+use crate::grid::state::{RowMetadata, MAX_GRAPHEME_CONTINUATION_COUNT};
+use crate::scrollback::tests::list_line_texts;
 use crate::scrollback::{Scrollback, ScrollbackLimit};
-use crate::state::{Charset, RenderState, TerminalModes};
+use crate::state::tests::{process_terminal_bytes, switch_to_alternate_screen};
+use crate::state::{AlternateScreen, Charset, RenderState, TerminalModes};
 use crate::style::{Color, Style, UnderlineStyle};
 use koshi_core::process::PtySize;
 use std::path::Path;
@@ -19,7 +22,7 @@ use std::path::PathBuf;
 use vte::Perform;
 
 /// Build a per-pane terminal state of `column_count × row_count`.
-fn build_terminal_state(column_count: u16, row_count: u16) -> TerminalState {
+pub(crate) fn build_terminal_state(column_count: u16, row_count: u16) -> TerminalState {
     TerminalState::from_pty_size(PtySize {
         column_count,
         row_count,
@@ -277,12 +280,6 @@ fn driven_through_the_parser_newline_and_carriage_return() {
 
 // --- CSI cursor + erase (driven through the parser) ---
 
-/// Feed `input_bytes` through a fresh parser into `terminal_state`.
-fn process_terminal_bytes(terminal_state: &mut TerminalState, input_bytes: &[u8]) {
-    let mut parser = vte::Parser::<{ crate::engine::OSC_BUFFER_BYTE_CAPACITY }>::new_with_size();
-    parser.advance(terminal_state, input_bytes);
-}
-
 /// Row `row_index` of the active grid as a string; blank cells read as spaces.
 fn get_row_text(terminal_state: &TerminalState, row_index: u16) -> String {
     let (_, column_count) = terminal_state.get_active_grid().get_grid_dimensions();
@@ -528,6 +525,44 @@ fn glyph_writes_preserve_overlapped_kitty_placements() {
     assert_eq!(get_terminal_glyph(&terminal_state, 2, 2), Some('B'));
     assert_eq!(get_terminal_glyph(&terminal_state, 4, 4), Some('C'));
     assert_eq!(terminal_state.list_image_placements(), expected_placements);
+}
+
+#[test]
+fn a_printed_run_over_image_cells_leaves_the_state_single_character_prints_leave() {
+    let mut native_image_record = build_image_record((1, 2), 3, 2);
+    native_image_record.protocol = GraphicsProtocol::Sixel;
+    native_image_record.display = ImageDisplay {
+        requested_width: Some(ImageDimension::Cells(3)),
+        requested_height: Some(ImageDimension::Cells(2)),
+        should_move_cursor: false,
+        ..ImageDisplay::default()
+    };
+    for (image_record, image_cell_position) in [
+        (build_image_record((1, 2), 3, 2), (1, 6)),
+        (native_image_record, (1, 2)),
+    ] {
+        let mut terminal_state = build_terminal_state(8, 4);
+        terminal_state
+            .apply_image_record(&image_record)
+            .expect("the image fits the grid");
+        let (image_row_index, image_column_index) = image_cell_position;
+        process_terminal_bytes(&mut terminal_state, "\x1b[2;7H\u{10EEEE}".as_bytes());
+        terminal_state.move_cursor_to(image_row_index, image_column_index);
+        assert!(terminal_state
+            .get_active_grid()
+            .get_cell(image_row_index, image_column_index)
+            .is_some_and(|cell| cell.get_image_cell_extra().is_some()));
+        let mut single_character_state = terminal_state.clone();
+
+        terminal_state.print_text("abcdefg");
+        print_text(&mut single_character_state, "abcdefg");
+
+        assert_eq!(terminal_state, single_character_state);
+        assert!(terminal_state
+            .get_active_grid()
+            .get_cell(image_row_index, image_column_index)
+            .is_some_and(|cell| cell.get_image_cell_extra().is_none()));
+    }
 }
 
 #[test]
@@ -824,14 +859,14 @@ fn ed_3_on_the_alternate_screen_leaves_primary_scrollback_intact() {
     terminal_state.apply_linefeed();
     assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 2); // populated from the primary
 
-    terminal_state.active_screen = Screen::Alternate;
+    switch_to_alternate_screen(&mut terminal_state);
     process_terminal_bytes(&mut terminal_state, b"\x1b[3J"); // ED 3 while on the alternate screen
     assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 2); // primary history untouched
 }
 
 // --- SGR: set graphic rendition (pen colors + text attributes) ---
 
-/// The default pen with the setters in `f` applied.
+/// The default pen after `style_mutator` runs on it.
 fn build_style_with_mutator(style_mutator: impl FnOnce(&mut Style)) -> Style {
     let mut style = Style::default();
     style_mutator(&mut style);
@@ -1089,17 +1124,17 @@ fn sgr_faint_sets_the_faint_attribute() {
 
 #[test]
 fn sgr_blink_slow_and_rapid_both_set_one_flag() {
-    let mut slow = build_terminal_state(5, 2);
-    process_terminal_bytes(&mut slow, b"\x1b[5m"); // 5: slow blink
+    let mut slow_blink_state = build_terminal_state(5, 2);
+    process_terminal_bytes(&mut slow_blink_state, b"\x1b[5m"); // 5: slow blink
     assert_eq!(
-        slow.get_active_render().style,
+        slow_blink_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_blinking(true))
     );
 
-    let mut rapid = build_terminal_state(5, 2);
-    process_terminal_bytes(&mut rapid, b"\x1b[6m"); // 6: rapid blink — same flag
+    let mut rapid_blink_state = build_terminal_state(5, 2);
+    process_terminal_bytes(&mut rapid_blink_state, b"\x1b[6m"); // 6: rapid blink — same flag
     assert_eq!(
-        rapid.get_active_render().style,
+        rapid_blink_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_blinking(true))
     );
 }
@@ -1316,7 +1351,7 @@ fn sgr_new_attributes_stamp_onto_printed_glyphs() {
 fn decsc_restores_the_new_sgr_attributes() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[2;58;5;208m"); // faint + underline color
-    process_terminal_bytes(&mut terminal_state, b"\x1b7"); // DECSC snapshots the whole render terminal_state
+    process_terminal_bytes(&mut terminal_state, b"\x1b7"); // DECSC snapshots the whole render state
     process_terminal_bytes(&mut terminal_state, b"\x1b[0m"); // wipe the pen
     assert_eq!(terminal_state.get_active_render().style, Style::default());
     process_terminal_bytes(&mut terminal_state, b"\x1b8"); // DECRC restores it
@@ -1783,6 +1818,82 @@ fn printing_wraps_at_the_right_horizontal_margin() {
 }
 
 #[test]
+fn a_printed_run_with_side_margins_leaves_the_state_single_character_prints_leave() {
+    // Margins at columns 2 to 6 of 10. From column 0, `abcdefg` fills columns
+    // 0 to 6, and `hij` wraps to columns 2 to 4 of the next row.
+    let mut terminal_state = build_terminal_state(10, 3);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[3;7s\x1b[1;1H");
+    terminal_state.print_text("abcdefghij");
+    assert_eq!(get_row_text(&terminal_state, 0), "abcdefg   ");
+    assert_eq!(get_row_text(&terminal_state, 1), "  hij     ");
+    assert_eq!(terminal_state.get_active_cursor_position(), (1, 5));
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
+
+    for cursor_column_index in 0..10 {
+        for printed_text in ["a", "ab", "abcdefghij", "abcdefghijklmnopqrst"] {
+            let mut run_state = build_terminal_state(10, 3);
+            process_terminal_bytes(&mut run_state, b"\x1b[?69h\x1b[3;7s");
+            run_state.move_cursor_to(0, cursor_column_index);
+            let mut single_character_state = run_state.clone();
+
+            run_state.print_text(printed_text);
+            print_text(&mut single_character_state, printed_text);
+
+            assert_eq!(
+                run_state, single_character_state,
+                "cursor column {cursor_column_index}, text {printed_text:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn printed_runs_leave_the_state_single_character_prints_leave_in_every_setup_and_cell() {
+    // `process_terminal_bytes` panics when the printed runs and the
+    // single-character prints of its bytes leave different states.
+    let setup_byte_sequences: [&[u8]; 9] = [
+        b"",
+        b"\x1b[?69h\x1b[3;7s",
+        b"\x1b[?7l",
+        b"\x1b[?69h\x1b[3;7s\x1b[?7l",
+        b"\x1b[4h",
+        b"\x1b(0",
+        b"\x1b[2;3r",
+        "\x1b[1;1H\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}"
+            .as_bytes(),
+        "\x1b[?69h\x1b[3;7s\x1b[1;1H\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}\u{4E2D}".as_bytes(),
+    ];
+    let printed_texts = [
+        "a",
+        "ab",
+        "abcde",
+        "abcdefghijklmnopqrstuvwxy",
+        "ab\u{301}c",
+        "a\u{4E2D}b",
+        "abc\u{2764}\u{FE0F}d",
+    ];
+    for setup_bytes in setup_byte_sequences {
+        for row_number in 1..=3 {
+            for column_number in 1..=10 {
+                for printed_text in printed_texts {
+                    let mut terminal_state = build_terminal_state(10, 3);
+                    let cursor_position_bytes = format!("\x1b[{row_number};{column_number}H");
+                    process_terminal_bytes(
+                        &mut terminal_state,
+                        &[
+                            setup_bytes,
+                            cursor_position_bytes.as_bytes(),
+                            printed_text.as_bytes(),
+                        ]
+                        .concat(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn printing_outside_horizontal_margins_wraps_at_the_grid_edge() {
     let mut terminal_state = build_terminal_state(8, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[3;6s\x1b[1;8HXY");
@@ -1914,6 +2025,170 @@ fn ich_inserts_blank_cells_shifting_the_line_right() {
     let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 2)); // cursor unchanged
     assert!(!terminal_state.get_active_cursor().is_wrap_pending);
+}
+
+#[test]
+fn insert_mode_shifts_the_line_right_before_each_printed_glyph() {
+    let mut terminal_state = build_terminal_state(5, 1);
+    process_terminal_bytes(&mut terminal_state, b"abcde\x1b[1;2H\x1b[4hXY");
+
+    assert_eq!(get_row_text(&terminal_state, 0), "aXYbc");
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 3));
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
+}
+
+#[test]
+fn insert_mode_shifts_the_line_by_two_cells_for_a_wide_glyph() {
+    let mut terminal_state = build_terminal_state(6, 1);
+    process_terminal_bytes(&mut terminal_state, b"abcdef\x1b[1;2H\x1b[4h");
+    terminal_state.print('中');
+
+    let active_grid = terminal_state.get_active_grid();
+    assert_eq!(
+        active_grid.get_cell(0, 1),
+        Some(&Cell::from_character('中', 2, Style::default()))
+    );
+    assert_eq!(
+        active_grid.get_cell(0, 2).map(Cell::get_display_width),
+        Some(0)
+    );
+    assert_eq!(get_terminal_glyph(&terminal_state, 0, 3), Some('b'));
+    assert_eq!(get_terminal_glyph(&terminal_state, 0, 4), Some('c'));
+    assert_eq!(get_terminal_glyph(&terminal_state, 0, 5), Some('d'));
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 3));
+}
+
+#[test]
+fn insert_mode_at_the_last_column_drops_the_last_cell_then_wraps_and_inserts() {
+    let mut terminal_state = build_terminal_state(5, 2);
+    process_terminal_bytes(&mut terminal_state, b"abcde\r\nvwxyz\x1b[1;5H\x1b[4hX");
+
+    assert_eq!(get_row_text(&terminal_state, 0), "abcdX");
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 4));
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
+
+    process_terminal_bytes(&mut terminal_state, b"Y");
+
+    assert_eq!(get_row_text(&terminal_state, 0), "abcdX");
+    assert_eq!(get_row_text(&terminal_state, 1), "Yvwxy");
+    assert_eq!(terminal_state.get_active_cursor_position(), (1, 1));
+}
+
+#[test]
+fn insert_mode_inside_horizontal_margins_shifts_up_to_the_right_margin() {
+    let mut terminal_state = build_terminal_state(8, 1);
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"abcdefgh\x1b[?69h\x1b[3;6s\x1b[1;3H\x1b[4hX",
+    );
+
+    assert_eq!(get_row_text(&terminal_state, 0), "abXcdegh");
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 3));
+}
+
+#[test]
+fn insert_mode_outside_horizontal_margins_overwrites_in_place() {
+    let mut terminal_state = build_terminal_state(8, 1);
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"abcdefgh\x1b[?69h\x1b[3;6s\x1b[4h\x1b[1;1HX\x1b[1;8HY",
+    );
+
+    assert_eq!(get_row_text(&terminal_state, 0), "XbcdefgY");
+}
+
+#[test]
+fn reset_mode_4_returns_printing_to_overwrite() {
+    let mut terminal_state = build_terminal_state(5, 1);
+    process_terminal_bytes(&mut terminal_state, b"abcde\x1b[1;2H\x1b[4hX\x1b[4lY");
+
+    assert_eq!(get_row_text(&terminal_state, 0), "aXYcd");
+    assert!(!terminal_state.modes.is_insert_mode_enabled);
+}
+
+#[test]
+fn a_mode_list_sets_and_resets_insert_mode_at_its_position_in_the_list() {
+    let mut terminal_state = build_terminal_state(5, 1);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[20;4h");
+    assert!(terminal_state.modes.is_insert_mode_enabled);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[4;20l");
+    assert!(!terminal_state.modes.is_insert_mode_enabled);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?4h");
+    assert!(!terminal_state.modes.is_insert_mode_enabled);
+}
+
+#[test]
+fn a_combining_mark_in_insert_mode_folds_onto_its_base_without_shifting() {
+    let mut terminal_state = build_terminal_state(5, 1);
+    process_terminal_bytes(&mut terminal_state, b"abc\x1b[1;1H\x1b[4h");
+    print_text(&mut terminal_state, "e\u{301}");
+
+    assert_eq!(get_row_text(&terminal_state, 0), "eabc ");
+    assert_eq!(
+        terminal_state
+            .get_active_grid()
+            .get_cell(0, 0)
+            .map(Cell::list_combining_characters),
+        Some(&['\u{301}'][..])
+    );
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 1));
+}
+
+#[test]
+fn a_soft_reset_and_a_hard_reset_each_turn_insert_mode_off() {
+    let mut terminal_state = build_terminal_state(5, 1);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[4h\x1b[!p");
+    assert!(!terminal_state.modes.is_insert_mode_enabled);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[4h\x1bc");
+    assert!(!terminal_state.modes.is_insert_mode_enabled);
+}
+
+#[test]
+fn a_soft_reset_turns_autowrap_back_on() {
+    let mut terminal_state = build_terminal_state(5, 1);
+    process_terminal_bytes(&mut terminal_state, b"\x1b[?7l\x1b[!p");
+    assert!(terminal_state.modes.is_autowrap_enabled);
+}
+
+#[test]
+fn the_xterm_reset_strings_leave_a_long_line_wrapping() {
+    // `reset` with `TERM=xterm-256color` writes `rs1` (`ESC c`), then `rs2`
+    // (`ESC [ ! p ESC [ ? 3 ; 4 l ESC [ 4 l ESC >`).
+    let mut terminal_state = build_terminal_state(5, 2);
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"\x1b[?7l\x1bc\x1b[!p\x1b[?3;4l\x1b[4l\x1b>abcdefg",
+    );
+    assert_eq!(get_row_text(&terminal_state, 0), "abcde");
+    assert_eq!(get_row_text(&terminal_state, 1), "fg   ");
+}
+
+#[test]
+fn ich_and_dch_left_of_the_left_margin_change_nothing() {
+    let mut terminal_state = build_terminal_state(8, 1);
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"abcdefgh\x1b[?69h\x1b[3;6s\x1b[1;1H\x1b[2@\x1b[2P",
+    );
+
+    assert_eq!(get_row_text(&terminal_state, 0), "abcdefgh");
+    assert_eq!(terminal_state.get_active_cursor_position(), (0, 0));
+}
+
+#[test]
+fn ich_and_dch_right_of_the_right_margin_keep_the_wrap_latch() {
+    let mut terminal_state = build_terminal_state(8, 2);
+    process_terminal_bytes(
+        &mut terminal_state,
+        b"abcdefgh\x1b[?69h\x1b[3;6s\x1b[1;8HX\x1b[@\x1b[P",
+    );
+
+    assert_eq!(get_row_text(&terminal_state, 0), "abcdefgX");
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
+
+    process_terminal_bytes(&mut terminal_state, b"Y");
+
+    assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some('Y'));
 }
 
 #[test]
@@ -2511,7 +2786,7 @@ fn osc_7_a_new_valid_report_updates_the_cwd() {
 #[test]
 fn osc_7_rejects_a_path_with_a_nul_byte() {
     // `%00` decodes to a NUL: the report is rejected and the previous good
-    // reported_working_directory is left intact.
+    // working directory is left intact.
     let mut terminal_state = build_terminal_state(5, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b]7;file:///good\x07");
     process_terminal_bytes(&mut terminal_state, b"\x1b]7;file:///a%00b\x07");
@@ -2526,7 +2801,7 @@ fn osc_7_rejects_a_path_with_a_nul_byte() {
 
 #[test]
 fn osc_7_cwd_survives_a_screen_switch() {
-    // Entering the alternate screen keeps the reported reported_working_directory.
+    // Entering the alternate screen keeps the reported working directory.
     let mut terminal_state = build_terminal_state(5, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b]7;file:///work\x07");
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1049h"); // enter the alternate screen
@@ -2778,27 +3053,27 @@ fn dec_1049_then_47_in_one_decset_saves_the_primary_and_seeds_the_alternate_once
 }
 
 #[test]
-fn verify_params_iter_yields_correct_param_groups() {
+fn a_private_mode_list_yields_one_parameter_group_per_mode() {
     // `vte::Params::iter()` yields one `&[u16]` per parameter: the top-level
     // value followed by its colon-separated subparameters. A DEC mode with no
     // subparameters is a one-element slice.
     use vte::{Parser, Perform};
 
-    struct Inspector {
-        results: Vec<Vec<u16>>,
+    struct PrivateModeParameterRecorder {
+        parameter_groups: Vec<Vec<u16>>,
     }
 
-    impl Perform for Inspector {
+    impl Perform for PrivateModeParameterRecorder {
         fn csi_dispatch(
             &mut self,
             csi_parameters: &vte::Params,
             intermediates: &[u8],
-            _ignore: bool,
+            _should_ignore: bool,
             _action: char,
         ) {
             if intermediates == b"?" {
                 for parameter in csi_parameters.iter() {
-                    self.results.push(parameter.to_vec());
+                    self.parameter_groups.push(parameter.to_vec());
                 }
             }
         }
@@ -2811,39 +3086,25 @@ fn verify_params_iter_yields_correct_param_groups() {
     }
 
     let mut parser = Parser::new();
-    let mut insp = Inspector { results: vec![] };
-
-    // Test 1: multi-param with simple params — each param is a single u16
-    parser.advance(&mut insp, b"\x1b[?1049;25h");
-    assert_eq!(insp.results.len(), 2);
-    assert_eq!(insp.results[0], vec![1049]);
-    assert_eq!(insp.results[1], vec![25]);
-    insp.results.clear();
-
-    // Test 2: different order
-    parser.advance(&mut insp, b"\x1b[?47;1049h");
-    assert_eq!(insp.results.len(), 2);
-    assert_eq!(insp.results[0], vec![47]);
-    assert_eq!(insp.results[1], vec![1049]);
-    insp.results.clear();
-
-    // Test 3: missing param defaults to 0 per ANSI spec
-    parser.advance(&mut insp, b"\x1b[?h");
-    assert_eq!(insp.results.len(), 1);
-    assert_eq!(insp.results[0], vec![0]);
-    insp.results.clear();
-
-    // Test 4: single param
-    parser.advance(&mut insp, b"\x1b[?25h");
-    assert_eq!(insp.results.len(), 1);
-    assert_eq!(insp.results[0], vec![25]);
-    insp.results.clear();
-
-    // Test 5: duplicate modes
-    parser.advance(&mut insp, b"\x1b[?1049;1049h");
-    assert_eq!(insp.results.len(), 2);
-    assert_eq!(insp.results[0], vec![1049]);
-    assert_eq!(insp.results[1], vec![1049]);
+    let mut parameter_recorder = PrivateModeParameterRecorder {
+        parameter_groups: Vec::new(),
+    };
+    for (csi_text, expected_parameter_groups) in [
+        // Two parameters, each a single value, in either order.
+        ("\x1b[?1049;25h", vec![vec![1049], vec![25]]),
+        ("\x1b[?47;1049h", vec![vec![47], vec![1049]]),
+        // A missing parameter reads as 0.
+        ("\x1b[?h", vec![vec![0]]),
+        ("\x1b[?25h", vec![vec![25]]),
+        // A repeated mode stays two parameters.
+        ("\x1b[?1049;1049h", vec![vec![1049], vec![1049]]),
+    ] {
+        parser.advance(&mut parameter_recorder, csi_text.as_bytes());
+        assert_eq!(
+            std::mem::take(&mut parameter_recorder.parameter_groups),
+            expected_parameter_groups
+        );
+    }
 }
 
 #[test]
@@ -3029,13 +3290,13 @@ fn dec_47_reentry_resumes_where_the_alternate_left_off() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47h"); // enter the alternate (its own cursor at home)
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;4Hxy"); // draw on the alternate; cursor ends at (2, 5)
-    let alt = terminal_state.get_active_cursor();
-    assert_eq!((alt.row, alt.column), (2, 5));
+    let alternate_cursor = terminal_state.get_active_cursor();
+    assert_eq!((alternate_cursor.row, alternate_cursor.column), (2, 5));
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47l"); // pop back to the primary (alternate kept intact)
     process_terminal_bytes(&mut terminal_state, b"zz"); // primary output — must not disturb the alternate cursor
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47h"); // re-enter: must resume at (2, 5), not reseed from the primary
-    let alt = terminal_state.get_active_cursor();
-    assert_eq!((alt.row, alt.column), (2, 5));
+    let alternate_cursor = terminal_state.get_active_cursor();
+    assert_eq!((alternate_cursor.row, alternate_cursor.column), (2, 5));
     process_terminal_bytes(&mut terminal_state, b"w"); // resumes exactly where the alternate left off
     assert_eq!(get_terminal_glyph(&terminal_state, 2, 5), Some('w'));
 }
@@ -3163,7 +3424,7 @@ fn active_screen_flips_on_alternate_switch() {
     assert_eq!(terminal_state.get_active_screen(), Screen::Primary);
 }
 
-// --- Unicode display-pixel_width: wide glyphs, combining marks, ambiguous width ---
+// --- Unicode display width: wide glyphs, combining marks, ambiguous width ---
 
 #[test]
 fn wide_char_occupies_two_cells_and_advances_by_two() {
@@ -3456,7 +3717,7 @@ fn the_khmer_sign_beyyal_takes_one_column_and_a_combining_mark_after_it() {
 }
 
 #[test]
-fn combining_mark_attaches_to_a_parked_get_terminal_glyph() {
+fn combining_mark_attaches_to_a_parked_glyph() {
     let mut terminal_state = build_terminal_state(3, 2);
     print_text(&mut terminal_state, "abc"); // row 0 full, cursor parked at column 2 with the wrap latch
     assert!(terminal_state.get_active_cursor().is_wrap_pending);
@@ -3545,12 +3806,12 @@ fn overwriting_a_wide_base_with_a_narrow_clears_the_orphan_continuation() {
         Some(1)
     );
     // The stale continuation must be blanked, not left as a width-0 orphan.
-    let cont = terminal_state
+    let continuation_cell = terminal_state
         .get_active_grid()
         .get_cell(0, 1)
         .expect("in bounds");
-    assert_eq!(cont.get_character(), ' ');
-    assert_eq!(cont.get_display_width(), 1);
+    assert_eq!(continuation_cell.get_character(), ' ');
+    assert_eq!(continuation_cell.get_display_width(), 1);
 }
 
 #[test]
@@ -3586,12 +3847,12 @@ fn a_wide_write_splitting_an_adjacent_wide_clears_its_far_half() {
         Some(0)
     ); // new continuation
        // The old glyph's far continuation at column 2 is orphaned → blanked.
-    let far = terminal_state
+    let far_continuation_cell = terminal_state
         .get_active_grid()
         .get_cell(0, 2)
         .expect("in bounds");
-    assert_eq!(far.get_character(), ' ');
-    assert_eq!(far.get_display_width(), 1);
+    assert_eq!(far_continuation_cell.get_character(), ' ');
+    assert_eq!(far_continuation_cell.get_display_width(), 1);
 }
 
 // --- Cursor motion across a wide glyph (a pair spans two columns, and motion
@@ -3698,12 +3959,12 @@ fn el_to_cursor_ending_on_a_wide_base_clears_the_orphan_continuation() {
     terminal_state.print('中'); // column 0 base, column 1 continuation
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;1H"); // cursor home (0, 0) = the base
     process_terminal_bytes(&mut terminal_state, b"\x1b[1K"); // erase SOL→cursor: clears column 0, orphans column 1
-    let cont = terminal_state
+    let continuation_cell = terminal_state
         .get_active_grid()
         .get_cell(0, 1)
         .expect("in bounds");
-    assert_eq!(cont.get_character(), ' ');
-    assert_eq!(cont.get_display_width(), 1);
+    assert_eq!(continuation_cell.get_character(), ' ');
+    assert_eq!(continuation_cell.get_display_width(), 1);
 }
 
 #[test]
@@ -4108,12 +4369,12 @@ fn an_overlong_ignored_sgr_shaped_csi_breaks_a_cluster_run() {
     // like every other non-printing CSI.
     let mut terminal_state = build_terminal_state(6, 2);
     terminal_state.print('e'); // base
-    let mut seq = Vec::from(&b"\x1b["[..]);
+    let mut sgr_sequence_bytes = Vec::from(&b"\x1b["[..]);
     for _ in 0..40 {
-        seq.extend_from_slice(b"0;"); // 40 params overflow vte's 32-param buffer
+        sgr_sequence_bytes.extend_from_slice(b"0;"); // 40 params overflow vte's 32-param buffer
     }
-    seq.push(b'm');
-    process_terminal_bytes(&mut terminal_state, &seq);
+    sgr_sequence_bytes.push(b'm');
+    process_terminal_bytes(&mut terminal_state, &sgr_sequence_bytes);
     terminal_state.print('\u{301}'); // combining acute must NOT fold onto 'e'
     let cell = terminal_state
         .get_active_grid()
@@ -4296,7 +4557,7 @@ fn a_boundary_zero_width_char_breaks_the_cluster_run() {
 }
 
 #[test]
-fn vs15_demotes_a_wide_emoji_base_to_a_narrow_text_get_terminal_glyph() {
+fn vs15_demotes_a_wide_emoji_base_to_a_narrow_text_glyph() {
     let mut terminal_state = build_terminal_state(6, 2);
     terminal_state.print('\u{26A1}'); // ⚡ high voltage, default emoji presentation → width 2
     assert_eq!(
@@ -4366,8 +4627,7 @@ fn linefeed_pushes_the_top_primary_line_into_scrollback() {
         .list_retained_lines()
         .front()
         .expect("one retained row")
-        .0
-        .as_slice();
+        .decode_text_cells();
     assert_eq!(captured[0].get_character(), 'a');
     assert_eq!(captured[1].get_character(), 'b');
 }
@@ -4375,7 +4635,7 @@ fn linefeed_pushes_the_top_primary_line_into_scrollback() {
 #[test]
 fn linefeed_on_the_alternate_screen_does_not_feed_scrollback() {
     let mut terminal_state = build_terminal_state(4, 2);
-    terminal_state.active_screen = Screen::Alternate; // the alternate never feeds history
+    switch_to_alternate_screen(&mut terminal_state); // the alternate never feeds history
     terminal_state.apply_linefeed(); // alt cursor 0 -> 1
     terminal_state.apply_linefeed(); // at the bottom: the alternate scrolls, but feeds nothing
     assert!(terminal_state.get_scrollback().is_empty());
@@ -4425,8 +4685,7 @@ fn linefeed_on_a_full_height_single_row_screen_always_scrolls() {
         .list_retained_lines()
         .front()
         .expect("one retained row")
-        .0
-        .as_slice();
+        .decode_text_cells();
     assert_eq!(captured[0].get_character(), 'a');
     assert_eq!(captured[1].get_character(), 'a');
     assert_eq!(terminal_state.get_active_cursor().row, 0); // pinned to the only row
@@ -4446,16 +4705,10 @@ fn ordinary_linefeeds_evict_the_oldest_scrollback_row_at_the_line_cap() {
         terminal_state.execute(b'\r');
     }
     assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 1);
-    let history: String = terminal_state
-        .get_scrollback()
-        .list_retained_lines()
-        .front()
-        .expect("one retained row")
-        .0
-        .iter()
-        .map(Cell::get_character)
-        .collect();
-    assert_eq!(history, "cc");
+    assert_eq!(
+        list_line_texts(terminal_state.get_scrollback().list_retained_lines()),
+        vec!["cc"]
+    );
     assert_eq!(get_row_text(&terminal_state, 0), "  "); // the only row is blank after the last scroll
 }
 
@@ -4470,8 +4723,7 @@ fn su_on_a_top_anchored_region_feeds_scrollback() {
         .list_retained_lines()
         .front()
         .expect("one retained row")
-        .0
-        .as_slice();
+        .decode_text_cells();
     assert_eq!(captured[0].get_character(), 'a');
     assert_eq!(captured[1].get_character(), 'b');
 }
@@ -4482,13 +4734,10 @@ fn su_by_n_captures_each_departing_top_row_oldest_first() {
     fill_three_by_three_grid(&mut terminal_state); // rows "abc" / "def" / "ghi"
     process_terminal_bytes(&mut terminal_state, b"\x1b[2S"); // SU by 2: rows 0 and 1 scroll off the top
     assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 2);
-    let history: Vec<String> = terminal_state
-        .get_scrollback()
-        .list_retained_lines()
-        .iter()
-        .map(|(row, _)| row.iter().map(Cell::get_character).collect())
-        .collect();
-    assert_eq!(history, vec!["abc", "def"]); // oldest (top) first
+    assert_eq!(
+        list_line_texts(terminal_state.get_scrollback().list_retained_lines()),
+        vec!["abc", "def"]
+    ); // oldest (top) first
 }
 
 #[test]
@@ -4502,7 +4751,7 @@ fn su_on_a_region_below_the_top_does_not_feed() {
 #[test]
 fn su_on_the_alternate_screen_does_not_feed() {
     let mut terminal_state = build_terminal_state(3, 2);
-    terminal_state.active_screen = Screen::Alternate;
+    switch_to_alternate_screen(&mut terminal_state);
     process_terminal_bytes(&mut terminal_state, b"\x1b[S");
     assert!(terminal_state.get_scrollback().is_empty());
 }
@@ -4519,8 +4768,7 @@ fn dl_with_the_cursor_on_row_0_feeds_scrollback() {
         .list_retained_lines()
         .front()
         .expect("one retained row")
-        .0
-        .as_slice();
+        .decode_text_cells();
     assert_eq!(captured[0].get_character(), 'a');
     assert_eq!(captured[1].get_character(), 'b');
 }
@@ -4533,7 +4781,7 @@ fn dl_below_row_0_is_an_interior_delete_and_does_not_feed() {
     assert!(terminal_state.get_scrollback().is_empty());
 }
 
-// --- Bracketed paste + mouse mode terminal_state (DEC private modes) ---
+// --- Bracketed paste + mouse mode state (DEC private modes) ---
 
 #[test]
 fn modes_start_at_their_defaults() {
@@ -4690,7 +4938,7 @@ fn sixel_modes_start_with_scrolling_and_private_registers() {
 }
 
 #[test]
-fn sixel_private_modes_set_and_reset_their_terminal_state() {
+fn sixel_private_modes_set_and_reset_their_flags() {
     let mut terminal_state = build_terminal_state(5, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?80;1070;8452h");
     assert!(!terminal_state.modes.is_sixel_scrolling_enabled);
@@ -5232,7 +5480,7 @@ fn g2_and_g3_are_designated_but_not_selectable() {
 
 #[test]
 fn charset_is_carried_into_the_alternate_screen() {
-    // Entering the alternate clones the primary's render terminal_state, charset
+    // Entering the alternate clones the primary's render state, charset
     // designations included: a child that did `ESC ( 0` keeps drawing
     // line-drawing glyphs after `?47h`.
     let mut terminal_state = build_terminal_state(8, 3);
@@ -5273,7 +5521,7 @@ fn decrc_without_a_save_resets_the_charset_to_ascii() {
 
 #[test]
 fn dec_1049_entry_inherits_the_primary_charset() {
-    // `?1049h` clones the primary's render terminal_state into the alternate, charset
+    // `?1049h` clones the primary's render state into the alternate, charset
     // designations included: an app that did `ESC ( 0` then entered keeps
     // drawing line-drawing glyphs.
     let mut terminal_state = build_terminal_state(8, 3);
@@ -5301,7 +5549,7 @@ fn dec_1049_entry_does_not_leak_a_prior_alternate_charset() {
 
 #[test]
 fn an_alternate_designation_does_not_leak_to_the_primary() {
-    // Render terminal_state is per-screen: a designation made on the alternate leaves
+    // Render state is per-screen: a designation made on the alternate leaves
     // the primary's untouched after exit.
     let mut terminal_state = build_terminal_state(8, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1047h"); // enter the alternate (clones primary's ASCII)
@@ -5331,9 +5579,9 @@ fn dec_1049_exit_restores_the_charset_via_decrc() {
 
 #[test]
 fn the_alternate_render_is_recloned_from_primary_on_each_entry() {
-    // Every alternate entry clones the primary's render terminal_state. A designation
+    // Every alternate entry clones the primary's render state. A designation
     // the alternate made in a prior session is discarded on re-entry; the
-    // alternate resumes its buffer with the primary's render terminal_state.
+    // alternate resumes its buffer with the primary's render state.
     let mut terminal_state = build_terminal_state(8, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47h"); // enter (clone primary's ASCII)
     process_terminal_bytes(&mut terminal_state, b"\x1b(0"); // alt G0 = DEC line drawing
@@ -5381,7 +5629,7 @@ fn decrc_without_a_save_resets_the_gl_slot_to_g0() {
 
 #[test]
 fn the_gl_slot_is_carried_into_the_alternate() {
-    // The GL selection is part of the render terminal_state a `?47` entry clones into
+    // The GL selection is part of the render state a `?47` entry clones into
     // the alternate: the alternate inherits GL = G1.
     let mut terminal_state = build_terminal_state(8, 3);
     process_terminal_bytes(&mut terminal_state, b"\x0e"); // SO -> GL = G1 on the primary
@@ -5393,7 +5641,7 @@ fn the_gl_slot_is_carried_into_the_alternate() {
 
 #[test]
 fn an_alternate_pen_change_does_not_leak_to_the_primary() {
-    // The pen is per-screen render terminal_state: the alternate inherits the primary's
+    // The pen is per-screen render state: the alternate inherits the primary's
     // pen on entry, and a color set on the alternate stays there after exit.
     let mut terminal_state = build_terminal_state(8, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[31m"); // primary pen: red fg
@@ -5450,7 +5698,7 @@ fn mixed_mode_47_then_1049_keeps_the_charset() {
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('─')); // shared charset intact
 }
 
-// --- Cross-subsystem render-terminal_state integration (the render terminal_state vs other
+// --- Cross-subsystem render-state integration (the render state vs other
 // features) ---
 
 #[test]
@@ -5507,7 +5755,7 @@ fn erase_preserves_the_active_charset() {
 
 #[test]
 fn resize_preserves_per_screen_charsets() {
-    // Render terminal_state is per-screen and untouched by resize: the primary keeps its
+    // Render state is per-screen and untouched by resize: the primary keeps its
     // designation and the alternate keeps its own, independently.
     let mut terminal_state = build_terminal_state(8, 4);
     process_terminal_bytes(&mut terminal_state, b"\x1b(0"); // primary G0 = DEC line drawing
@@ -5608,7 +5856,7 @@ fn dec_line_drawing_passes_multibyte_utf8_through() {
 }
 
 #[test]
-fn a_combining_mark_folds_onto_a_line_drawing_get_terminal_glyph() {
+fn a_combining_mark_folds_onto_a_line_drawing_glyph() {
     // The remapped glyph anchors the grapheme cluster. A following combining
     // mark folds onto it as a single-cell cluster.
     let mut terminal_state = build_terminal_state(8, 2);
@@ -5985,7 +6233,7 @@ fn a_cursor_style_survives_the_alternate_screen() {
 #[test]
 fn unsupported_dec_modes_are_ignored() {
     // ?2 (VT52), ?3 (132-column), ?8 (auto-repeat) are ignored: no panic, other
-    // mode terminal_state untouched, printing still works afterward.
+    // mode state untouched, printing still works afterward.
     let mut terminal_state = build_terminal_state(5, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?2h");
     process_terminal_bytes(&mut terminal_state, b"\x1b[?3h");
@@ -6228,21 +6476,24 @@ fn seven_and_eight_bit_index_controls_match() {
 
 #[test]
 fn ind_and_nel_scroll_the_active_region_at_its_bottom() {
-    let mut ind = build_terminal_state(3, 3);
-    fill_three_by_three_grid(&mut ind);
-    process_terminal_bytes(&mut ind, b"\x1b[2;3r\x1b[3;2H\x1bD");
-    assert_eq!(get_row_text(&ind, 0), "abc");
-    assert_eq!(get_row_text(&ind, 1), "ghi");
-    assert_eq!(get_row_text(&ind, 2), "   ");
-    assert_eq!(ind.get_active_cursor_position(), (2, 1));
+    let mut index_terminal_state = build_terminal_state(3, 3);
+    fill_three_by_three_grid(&mut index_terminal_state);
+    process_terminal_bytes(&mut index_terminal_state, b"\x1b[2;3r\x1b[3;2H\x1bD");
+    assert_eq!(get_row_text(&index_terminal_state, 0), "abc");
+    assert_eq!(get_row_text(&index_terminal_state, 1), "ghi");
+    assert_eq!(get_row_text(&index_terminal_state, 2), "   ");
+    assert_eq!(index_terminal_state.get_active_cursor_position(), (2, 1));
 
-    let mut nel = build_terminal_state(3, 3);
-    fill_three_by_three_grid(&mut nel);
-    process_terminal_bytes(&mut nel, b"\x1b[2;3r\x1b[3;2H\x1bE");
-    assert_eq!(get_row_text(&nel, 0), "abc");
-    assert_eq!(get_row_text(&nel, 1), "ghi");
-    assert_eq!(get_row_text(&nel, 2), "   ");
-    assert_eq!(nel.get_active_cursor_position(), (2, 0));
+    let mut next_line_terminal_state = build_terminal_state(3, 3);
+    fill_three_by_three_grid(&mut next_line_terminal_state);
+    process_terminal_bytes(&mut next_line_terminal_state, b"\x1b[2;3r\x1b[3;2H\x1bE");
+    assert_eq!(get_row_text(&next_line_terminal_state, 0), "abc");
+    assert_eq!(get_row_text(&next_line_terminal_state, 1), "ghi");
+    assert_eq!(get_row_text(&next_line_terminal_state, 2), "   ");
+    assert_eq!(
+        next_line_terminal_state.get_active_cursor_position(),
+        (2, 0)
+    );
 }
 
 #[test]
@@ -6262,10 +6513,14 @@ fn decstr_resets_only_its_active_dec_state() {
         b"\x1b[?1;5;7;12;1000;1006;1007;2004h\x1b[5 q",
     );
     terminal_state.get_active_cursor_mut().is_wrap_pending = true;
-    let history_row = terminal_state.get_active_grid().list_rows()[0].clone();
+    let history_row = terminal_state
+        .get_active_grid()
+        .get_row_cells(0)
+        .expect("row 0 exists")
+        .to_vec();
     terminal_state
         .scrollback
-        .push_row(&history_row, RowMetadata::default());
+        .push_row_cells(&history_row, RowMetadata::default());
 
     let grid = terminal_state.get_active_grid().clone();
     let tab_stops = terminal_state.tab_stops.clone();
@@ -6290,7 +6545,7 @@ fn decstr_resets_only_its_active_dec_state() {
     assert_eq!(*terminal_state.get_active_render(), RenderState::new());
     assert_eq!(terminal_state.get_scroll_region(), None);
     assert!(!terminal_state.modes.is_application_cursor_keys_enabled);
-    assert!(!terminal_state.modes.is_autowrap_enabled);
+    assert!(terminal_state.modes.is_autowrap_enabled);
     assert_eq!(terminal_state.modes.mouse_tracking, mouse_tracking);
     assert_eq!(terminal_state.modes.mouse_encoding, mouse_encoding);
     assert_eq!(
@@ -6332,7 +6587,7 @@ fn decstr_resets_only_the_active_screen() {
     assert_eq!(terminal_state.active_screen, Screen::Alternate);
     assert_eq!(
         terminal_state
-            .alternate
+            .get_active_grid()
             .get_cell(1, 7)
             .map(Cell::get_character),
         Some('a')
@@ -6390,16 +6645,20 @@ fn ris_restores_display_state_but_keeps_session_metadata() {
         ScrollbackLimit::from_line_and_byte_limits(1, 1024),
     );
     print_text(&mut terminal_state, "primary");
-    let history_row = terminal_state.get_active_grid().list_rows()[0].clone();
+    let history_row = terminal_state
+        .get_active_grid()
+        .get_row_cells(0)
+        .expect("row 0 exists")
+        .to_vec();
     terminal_state
         .scrollback
-        .push_row(&history_row, RowMetadata::default());
+        .push_row_cells(&history_row, RowMetadata::default());
     terminal_state
         .scrollback
-        .push_row(&history_row, RowMetadata::default());
+        .push_row_cells(&history_row, RowMetadata::default());
     terminal_state
         .scrollback
-        .push_row(&history_row, RowMetadata::default());
+        .push_row_cells(&history_row, RowMetadata::default());
     process_terminal_bytes(
         &mut terminal_state,
         b"\x1b]2;reset me\x07\x1b]7;file://localhost/work\x07\x1b[c",
@@ -6420,17 +6679,17 @@ fn ris_restores_display_state_but_keeps_session_metadata() {
 
     assert_eq!(terminal_state.active_screen, Screen::Primary);
     assert_eq!(terminal_state.primary.get_grid_dimensions(), (3, 20));
-    assert_eq!(terminal_state.alternate.get_grid_dimensions(), (3, 20));
-    for screen_grid in [
-        terminal_state.primary.as_ref(),
-        terminal_state.alternate.as_ref(),
-    ] {
-        for row_cells in screen_grid.list_rows() {
-            for cell in row_cells {
-                assert_eq!(cell.get_character(), ' ');
-                assert_eq!(cell.get_display_width(), 1);
-                assert_eq!(cell.get_style(), Style::default());
-            }
+    assert_eq!(
+        terminal_state.alternate,
+        AlternateScreen::Blank {
+            fill_style: Style::default()
+        }
+    );
+    for row_cells in terminal_state.primary.list_row_cells() {
+        for cell in row_cells {
+            assert_eq!(cell.get_character(), ' ');
+            assert_eq!(cell.get_display_width(), 1);
+            assert_eq!(cell.get_style(), Style::default());
         }
     }
     for screen_cursor in [
@@ -6465,13 +6724,17 @@ fn ris_restores_display_state_but_keeps_session_metadata() {
     );
     assert_eq!(terminal_state.device_query_replies, device_query_replies);
 
-    let blank_row = terminal_state.primary.list_rows()[0].clone();
+    let blank_row = terminal_state
+        .primary
+        .get_row_cells(0)
+        .expect("row 0 exists")
+        .to_vec();
     terminal_state
         .scrollback
-        .push_row(&blank_row, RowMetadata::default());
+        .push_row_cells(&blank_row, RowMetadata::default());
     terminal_state
         .scrollback
-        .push_row(&blank_row, RowMetadata::default());
+        .push_row_cells(&blank_row, RowMetadata::default());
     assert_eq!(terminal_state.scrollback.get_retained_line_count(), 1);
 }
 
@@ -6564,7 +6827,7 @@ fn printing_into_a_one_by_one_grid_scrolls_each_glyph_into_history() {
             .list_retained_lines()
             .front()
             .expect("a row")
-            .0[0]
+            .decode_text_cells()[0]
             .get_character(),
         'a'
     );
@@ -6964,13 +7227,10 @@ fn su_past_the_region_height_blanks_the_region_and_feeds_every_row() {
     assert_eq!(get_row_text(&terminal_state, 1), "   ");
     assert_eq!(get_row_text(&terminal_state, 2), "   ");
     assert_eq!(terminal_state.get_active_cursor_position(), (1, 1)); // cursor unmoved
-    let scrollback_rows: Vec<String> = terminal_state
-        .get_scrollback()
-        .list_retained_lines()
-        .iter()
-        .map(|(row_cells, _)| row_cells.iter().map(Cell::get_character).collect())
-        .collect();
-    assert_eq!(scrollback_rows, vec!["abc", "def", "ghi"]); // oldest (top) first
+    assert_eq!(
+        list_line_texts(terminal_state.get_scrollback().list_retained_lines()),
+        vec!["abc", "def", "ghi"]
+    ); // oldest (top) first
 }
 
 #[test]
@@ -7126,7 +7386,7 @@ fn osc133_finish_without_a_running_command_reports_nothing() {
     assert_eq!(terminal_state.take_shell_integration_facts(), vec![]);
 }
 
-// --- RIS and the shell marker terminal_state ---
+// --- RIS and the shell marker state ---
 
 #[test]
 fn ris_returns_the_shell_marker_state_to_prompt_and_keeps_pending_facts() {
