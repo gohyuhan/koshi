@@ -23,8 +23,8 @@ use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, CommandSource, CopyArgs, FocusPaneArgs, FocusTabArgs,
     GridPosition, LockModeArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs, NewPanePlacement,
     NewTabArgs, PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, PlacementRevision,
-    ResizePaneArgs, ScrollPaneArgs, Selection, SelectionKind, TabTarget, VisualCommand,
-    WriteToPaneArgs,
+    ResizePaneArgs, ScrollPaneArgs, Selection, SelectionKind, TabTarget, TiledPlacementTarget,
+    VisualCommand, WriteToPaneArgs,
 };
 use koshi_core::constant::{GRACEFUL_TIMEOUT_DURATION, MAX_FLOATING_PANES_PER_SESSION};
 use koshi_core::geometry::{
@@ -443,11 +443,11 @@ fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
         }),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: pane_id,
-            placement_target: PanePlacementTarget::Split {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                 destination_tab_id: tab_id,
                 anchor: PanePlacementAnchor::Tab,
                 direction: Direction::Right,
-            },
+            }),
             expected_placement_revision: None,
         }),
         Command::ScrollPane(ScrollPaneArgs {
@@ -1149,6 +1149,53 @@ fn write_to_a_suppressed_pane_still_reaches_its_shell() {
             .unwrap(),
         vec![vec![b'l', b's']]
     );
+}
+
+#[test]
+fn keys_reach_a_pane_when_the_tab_grows_after_the_focused_pane_closed_with_no_room() {
+    let ResizeFixture {
+        mut runtime,
+        client_id,
+        root_pane_id,
+        split_pane_id,
+        ..
+    } = build_resize_fixture();
+    let small_viewport_size = Size {
+        column_count: 3,
+        row_count: 3,
+    };
+    let large_viewport_size = Size {
+        column_count: 80,
+        row_count: 24,
+    };
+    runtime.handle_client_resize(client_id, small_viewport_size, None, None);
+    runtime.handle_client_resize(client_id, large_viewport_size, None, None);
+    assert_eq!(
+        runtime.find_typed_pane(client_id),
+        Some(split_pane_id),
+        "a shrink and a regrow keep the focus on the split pane"
+    );
+
+    runtime.handle_client_resize(client_id, small_viewport_size, None, None);
+    let command_envelope =
+        build_sessionless_cli_command_envelope(Command::ClosePane(ClosePaneArgs {
+            pane_id: Some(split_pane_id),
+            should_force_close: true,
+            should_kill_process_tree: false,
+        }));
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(command_envelope)),
+        Ok(vec![
+            "PaneClosing",
+            "PaneRemoved",
+            "LayoutChanged",
+            "PaneFocused",
+            "TerminalTooSmallEntered"
+        ])
+    );
+    runtime.handle_client_resize(client_id, large_viewport_size, None, None);
+
+    assert_eq!(runtime.find_typed_pane(client_id), Some(root_pane_id));
 }
 
 /// The client's scroll offset for the pane — `0` follows live output.
@@ -7866,9 +7913,9 @@ fn move_pane_swaps_the_focused_pane_with_its_directional_neighbor_and_announces_
                     source_pane_id: split_pane_id,
                     source_tab_id: Some(tab_id),
                     destination_tab_id: Some(tab_id),
-                    placement_target: PanePlacementTarget::Swap {
+                    placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
                         target_pane_id: root_pane_id,
-                    },
+                    }),
                 })
             );
         }
@@ -7980,9 +8027,9 @@ fn a_same_tab_swap_placement_exchanges_pane_occupants() {
         CommandSource::from_key_binding(client_id),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: root_pane_id,
-            placement_target: PanePlacementTarget::Swap {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
                 target_pane_id: split_pane_id,
-            },
+            }),
             expected_placement_revision: None,
         }),
     );
@@ -8034,9 +8081,9 @@ fn a_confirmed_same_tab_swap_advances_session_and_client_placement_revisions() {
         CommandSource::from_key_binding(client_id),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: root_pane_id,
-            placement_target: PanePlacementTarget::Swap {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
                 target_pane_id: split_pane_id,
-            },
+            }),
             expected_placement_revision: Some(PlacementRevision {
                 session_revision: session_revision_before,
                 client_revision: client_revision_before,
@@ -8087,9 +8134,9 @@ fn swapping_a_pane_with_itself_is_a_no_op() {
         CommandSource::from_key_binding(client_id),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: split_pane_id,
-            placement_target: PanePlacementTarget::Swap {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
                 target_pane_id: split_pane_id,
-            },
+            }),
             expected_placement_revision: None,
         }),
     );
@@ -8123,9 +8170,9 @@ fn swapping_panes_in_different_tabs_exchanges_slots_without_lifecycle_events() {
         CommandSource::from_key_binding(client_id),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: first_pane_id,
-            placement_target: PanePlacementTarget::Swap {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
                 target_pane_id: second_pane_id,
-            },
+            }),
             expected_placement_revision: None,
         }),
     );
@@ -8285,9 +8332,9 @@ fn swapping_a_sole_source_pane_reflows_source_viewers_without_closing_source_tab
         CommandSource::from_key_binding(acting_client_id),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: source_root_pane_id,
-            placement_target: PanePlacementTarget::Swap {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
                 target_pane_id: destination_pane_id,
-            },
+            }),
             expected_placement_revision: None,
         }),
     )) {
@@ -8367,11 +8414,11 @@ fn placing_a_sole_pane_in_another_tab_closes_only_the_empty_source_tab() {
         CommandSource::from_key_binding(client_id),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: first_pane_id,
-            placement_target: PanePlacementTarget::Split {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                 destination_tab_id: second_tab_id,
                 anchor: PanePlacementAnchor::Tab,
                 direction: Direction::Right,
-            },
+            }),
             expected_placement_revision: None,
         }),
     );
@@ -8399,11 +8446,11 @@ fn placing_a_sole_pane_in_another_tab_closes_only_the_empty_source_tab() {
                     source_pane_id: first_pane_id,
                     source_tab_id: Some(first_tab_id),
                     destination_tab_id: Some(second_tab_id),
-                    placement_target: PanePlacementTarget::Split {
+                    placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                         destination_tab_id: second_tab_id,
                         anchor: PanePlacementAnchor::Tab,
                         direction: Direction::Right,
-                    },
+                    }),
                 })
             );
         }
@@ -8522,11 +8569,11 @@ fn placing_a_sole_pane_reflows_the_tab_where_source_viewers_land() {
         CommandSource::from_key_binding(acting_client_id),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id,
-            placement_target: PanePlacementTarget::Split {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                 destination_tab_id,
                 anchor: PanePlacementAnchor::Tab,
                 direction: Direction::Right,
-            },
+            }),
             expected_placement_revision: None,
         }),
     ));
@@ -8661,11 +8708,11 @@ fn place_pane_with_an_unknown_destination_anchor_rejects_without_mutating_sessio
         CommandSource::from_key_binding(client_id),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: first_pane_id,
-            placement_target: PanePlacementTarget::Split {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                 destination_tab_id: second_tab_id,
                 anchor: PanePlacementAnchor::Pane(PaneId::new()),
                 direction: Direction::Right,
-            },
+            }),
             expected_placement_revision: None,
         }),
     );
@@ -8698,11 +8745,11 @@ fn place_pane_refuses_when_the_session_revision_cannot_advance() {
         CommandSource::from_key_binding(client_id),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: first_pane_id,
-            placement_target: PanePlacementTarget::Split {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                 destination_tab_id: second_tab_id,
                 anchor: PanePlacementAnchor::Tab,
                 direction: Direction::Right,
-            },
+            }),
             expected_placement_revision: None,
         }),
     );
@@ -8735,11 +8782,11 @@ fn place_pane_refuses_when_an_affected_client_revision_cannot_advance() {
         CommandSource::from_key_binding(client_id),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: first_pane_id,
-            placement_target: PanePlacementTarget::Split {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                 destination_tab_id: second_tab_id,
                 anchor: PanePlacementAnchor::Tab,
                 direction: Direction::Right,
-            },
+            }),
             expected_placement_revision: None,
         }),
     );
@@ -8773,9 +8820,9 @@ fn a_stale_place_pane_confirmation_is_rejected_without_mutating_session_state() 
         CommandSource::from_key_binding(client_id),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: first_pane_id,
-            placement_target: PanePlacementTarget::Swap {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
                 target_pane_id: second_pane_id,
-            },
+            }),
             expected_placement_revision,
         }),
     );
@@ -8798,9 +8845,9 @@ fn a_stale_place_pane_confirmation_is_rejected_without_mutating_session_state() 
         CommandSource::from_key_binding(client_id),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: first_pane_id,
-            placement_target: PanePlacementTarget::Swap {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
                 target_pane_id: second_pane_id,
-            },
+            }),
             expected_placement_revision,
         }),
     );
@@ -8872,11 +8919,11 @@ fn placement_commits_model_state_when_a_destination_pty_resize_fails() {
         CommandSource::from_key_binding(client_id),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: moved_pane_id,
-            placement_target: PanePlacementTarget::Split {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                 destination_tab_id,
                 anchor: PanePlacementAnchor::Tab,
                 direction: Direction::Right,
-            },
+            }),
             expected_placement_revision: None,
         }),
     );
@@ -13793,11 +13840,12 @@ fn a_client_viewing_another_tab_still_shrinks_every_floating_pane() {
     register_pane_record(session, other_pane_id);
     register_session_tab(session, other_tab_id, other_pane_id);
 
-    // The other tab records no focus, so bob lands on no pane, and its pane
-    // has no PTY to resize.
+    // The other tab records no focus, so bob lands on its first pane. That
+    // pane has no PTY to resize.
+    let bob_client_id = ClientId::new();
     let attach_events = runtime.handle_client_attach(
         session_id,
-        ClientId::new(),
+        bob_client_id,
         Size {
             column_count: 80,
             row_count: 24,
@@ -13811,7 +13859,15 @@ fn a_client_viewing_another_tab_still_shrinks_every_floating_pane() {
 
     assert_eq!(
         attach_events,
-        vec![build_pty_resized(floating_pane_id, 46, 9)]
+        vec![
+            Event::PaneFocused(PaneFocused {
+                client_id: bob_client_id,
+                tab_id: Some(other_tab_id),
+                pane_id: other_pane_id,
+                previous_pane_id: None,
+            }),
+            build_pty_resized(floating_pane_id, 46, 9),
+        ]
     );
 }
 
@@ -13915,6 +13971,12 @@ fn a_client_moving_to_another_session_regrows_the_floating_panes_it_left() {
         vec![
             build_pty_resized(tiled_pane_id, 118, 38),
             build_pty_resized(floating_pane_id, 70, 20),
+            Event::PaneFocused(PaneFocused {
+                client_id: bob_client_id,
+                tab_id: Some(other_tab_id),
+                pane_id: other_pane_id,
+                previous_pane_id: None,
+            }),
         ]
     );
 }
@@ -14213,6 +14275,72 @@ fn reattaching_keeps_the_pane_the_client_already_focused() {
         "a client that already focused a pane keeps it"
     );
     assert_eq!(emitted_events, Vec::new(), "no focus change is announced");
+}
+
+#[test]
+fn attaching_passes_over_a_focus_history_entry_collapsed_to_a_stack_header() {
+    // The tab is `stack(A, B expanded)` and its focus history is `A`. `A`
+    // draws only its header, so a client that lands there types into nothing.
+    let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
+    let viewport_size = Size {
+        column_count: 80,
+        row_count: 24,
+    };
+    runtime
+        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (session_id, tab_id, collapsed_pane_id) = get_only_session_slot(&runtime);
+    let expanded_pane_id = PaneId::new();
+    let session = runtime
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the session");
+    register_pane_record(session, expanded_pane_id);
+    let tab = session.tabs.get_mut(&tab_id).expect("the tab");
+    tab.update_layout(LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+        vec![collapsed_pane_id, expanded_pane_id],
+        1,
+    )));
+    assert_eq!(
+        tab.list_focus_mru(),
+        [collapsed_pane_id],
+        "test setup: the collapsed member heads the focus history"
+    );
+
+    let client_id = ClientId::new();
+    let emitted_events = runtime.handle_client_attach(
+        session_id,
+        client_id,
+        viewport_size,
+        None,
+        tab_id,
+        None,
+        SystemTime::now(),
+        false,
+    );
+
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .expect("the client attached")
+            .get_focused_pane_id(tab_id),
+        Some(expanded_pane_id)
+    );
+    assert_eq!(
+        emitted_events,
+        vec![Event::PaneFocused(PaneFocused {
+            client_id,
+            tab_id: Some(tab_id),
+            pane_id: expanded_pane_id,
+            previous_pane_id: None,
+        })]
+    );
+    assert_eq!(
+        session.tabs[&tab_id].list_focus_mru(),
+        [expanded_pane_id, collapsed_pane_id]
+    );
 }
 
 #[test]
@@ -19670,9 +19798,9 @@ fn moving_or_swapping_a_floating_pane_is_refused() {
         (
             Command::PlacePane(PlacePaneArgs {
                 source_pane_id: floating_pane_id,
-                placement_target: PanePlacementTarget::Swap {
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
                     target_pane_id: tiled_pane_id,
-                },
+                }),
                 expected_placement_revision: None,
             }),
             format!("{floating_pane_id} is floating; a swap exchanges tiled slots"),
@@ -19680,9 +19808,9 @@ fn moving_or_swapping_a_floating_pane_is_refused() {
         (
             Command::PlacePane(PlacePaneArgs {
                 source_pane_id: tiled_pane_id,
-                placement_target: PanePlacementTarget::Swap {
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
                     target_pane_id: floating_pane_id,
-                },
+                }),
                 expected_placement_revision: None,
             }),
             format!("{floating_pane_id} is floating; a swap exchanges tiled slots"),
@@ -19690,11 +19818,11 @@ fn moving_or_swapping_a_floating_pane_is_refused() {
         (
             Command::PlacePane(PlacePaneArgs {
                 source_pane_id: floating_pane_id,
-                placement_target: PanePlacementTarget::Split {
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                     destination_tab_id: tab_id,
                     anchor: PanePlacementAnchor::Tab,
                     direction: Direction::Right,
-                },
+                }),
                 expected_placement_revision: None,
             }),
             format!("{floating_pane_id} is floating and holds no tiled slot"),
@@ -22214,11 +22342,11 @@ fn a_key_or_mouse_of_a_client_in_another_session_changes_nothing_there() {
         CommandSource::from_mouse(alice_client_id),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: other_tiled_pane_id,
-            placement_target: PanePlacementTarget::Split {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                 destination_tab_id: other_tab_id,
                 anchor: PanePlacementAnchor::Tab,
                 direction: Direction::Right,
-            },
+            }),
             expected_placement_revision: None,
         }),
     );
@@ -23445,5 +23573,443 @@ fn every_view_of_a_client_names_the_floating_pane_that_takes_its_input() {
             .map(|client_focus| client_focus.focused_pane_id)
             .collect::<Vec<Option<PaneId>>>(),
         vec![Some(floating_pane_id)]
+    );
+}
+
+// --- Undock --------------------------------------------------------------------
+
+/// Split the fixture's tiled pane from alice's key binding and return the new
+/// pane, which takes alice's focus.
+fn split_alice_tiled_pane(
+    runtime: &mut Server,
+    session_id: SessionId,
+    alice_client_id: ClientId,
+    tiled_pane_id: PaneId,
+) -> PaneId {
+    let split_result = runtime.dispatch(build_command_envelope(
+        CommandSource::from_key_binding(alice_client_id),
+        Command::NewPane(build_new_pane_args()),
+    ));
+    let CommandResult::Ok { .. } = split_result else {
+        panic!("expected the split to apply, got {split_result:?}");
+    };
+    find_other_pane_id(runtime, session_id, &[tiled_pane_id])
+}
+
+/// A `PlacePane` that undocks `source_pane_id` to `top_left_cell`, checked
+/// against `expected_placement_revision`.
+fn build_undock_command(
+    source_pane_id: PaneId,
+    top_left_cell: Option<Point>,
+    expected_placement_revision: Option<PlacementRevision>,
+) -> Command {
+    Command::PlacePane(PlacePaneArgs {
+        source_pane_id,
+        placement_target: PanePlacementTarget::Floating { top_left_cell },
+        expected_placement_revision,
+    })
+}
+
+#[test]
+fn undocking_a_split_pane_floats_it_with_its_pty_and_gives_the_issuer_its_input() {
+    let FloatingCommandFixture {
+        mut runtime,
+        fake_pty_backend,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+    } = build_floating_command_fixture();
+    let tiled_pty_size_before_split = runtime.pty_size_by_pane_id[&tiled_pane_id];
+    let undocked_pane_id =
+        split_alice_tiled_pane(&mut runtime, session_id, alice_client_id, tiled_pane_id);
+    let undocked_pty_size_count_before = fake_pty_backend
+        .list_pane_sizes(undocked_pane_id)
+        .expect("the split pane spawned")
+        .len();
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(alice_client_id),
+        build_undock_command(undocked_pane_id, None, None),
+    );
+    let command_id = command_envelope.command_id;
+    let CommandResult::Ok { emitted_events, .. } = runtime.dispatch(command_envelope) else {
+        panic!("expected the undock to apply");
+    };
+
+    // 48x13 on alice's 80x22 pane area: PTY 46x9.
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::PanePlacementCommitted(PanePlacementCommitted {
+                command_id,
+                source_pane_id: undocked_pane_id,
+                source_tab_id: Some(tab_id),
+                destination_tab_id: None,
+                placement_target: PanePlacementTarget::Floating {
+                    top_left_cell: None
+                },
+            }),
+            Event::LayoutChanged(LayoutChanged { tab_id }),
+            Event::PaneFocused(PaneFocused {
+                client_id: alice_client_id,
+                tab_id: Some(tab_id),
+                pane_id: tiled_pane_id,
+                previous_pane_id: Some(undocked_pane_id),
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id: alice_client_id,
+                tab_id: None,
+                pane_id: undocked_pane_id,
+                previous_pane_id: Some(tiled_pane_id),
+            }),
+            Event::PtyResized(PtyResized {
+                pane_id: tiled_pane_id,
+                pty_size: tiled_pty_size_before_split,
+            }),
+            Event::PtyResized(PtyResized {
+                pane_id: undocked_pane_id,
+                pty_size: PtySize {
+                    column_count: 46,
+                    row_count: 9,
+                },
+            }),
+        ]
+    );
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(
+        session.tabs[&tab_id].get_layout_tree(),
+        &LayoutNode::Pane(tiled_pane_id)
+    );
+    assert_eq!(
+        session.floating_set.list_members(),
+        &[FloatingMember {
+            pane_id: undocked_pane_id,
+            desired_size: DEFAULT_FLOATING_PANE_SIZE,
+            solved_size: Size {
+                column_count: 48,
+                row_count: 13,
+            },
+        }]
+    );
+    assert_eq!(
+        session
+            .panes
+            .get_pane_record_by_id(undocked_pane_id)
+            .map(PaneRecord::get_pane_id),
+        Some(undocked_pane_id)
+    );
+    assert!(runtime.live_pane_ids.contains(&undocked_pane_id));
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_sizes(undocked_pane_id)
+            .expect("the undocked pane stays live")
+            .len(),
+        undocked_pty_size_count_before + 1
+    );
+    let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
+    assert_eq!(
+        alice_client.get_focused_floating_pane_id(),
+        Some(undocked_pane_id)
+    );
+    assert_eq!(
+        alice_client.list_floating_pane_focus_order(),
+        [undocked_pane_id]
+    );
+    assert_eq!(
+        alice_client.get_floating_pane_view(undocked_pane_id),
+        FloatingPaneView::default()
+    );
+    assert_eq!(
+        alice_client
+            .list_floating_pane_views()
+            .get(&undocked_pane_id),
+        None
+    );
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+}
+
+#[test]
+fn undocking_to_a_cell_stores_that_cell_for_the_issuer_alone() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let bob_client_id = attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+    );
+    let undocked_pane_id =
+        split_alice_tiled_pane(&mut runtime, session_id, alice_client_id, tiled_pane_id);
+    let top_left_cell = Point { column: 5, row: 3 };
+    let session_revision_before = runtime.session_by_id[&session_id].get_placement_revision();
+    let alice_revision_before =
+        get_attached_client(&runtime, session_id, alice_client_id).get_placement_revision();
+    let bob_revision_before =
+        get_attached_client(&runtime, session_id, bob_client_id).get_placement_revision();
+
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(build_command_envelope(
+            CommandSource::from_key_binding(alice_client_id),
+            build_undock_command(undocked_pane_id, Some(top_left_cell), None),
+        ))),
+        Ok(vec![
+            "PanePlacementCommitted",
+            "LayoutChanged",
+            "PaneFocused",
+            "PaneFocused",
+            "PtyResized",
+            "PtyResized"
+        ])
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, alice_client_id)
+            .get_floating_pane_view(undocked_pane_id),
+        FloatingPaneView {
+            position: FloatingPanePosition::Moved(top_left_cell),
+            is_minimized: false,
+        }
+    );
+    let bob_client = get_attached_client(&runtime, session_id, bob_client_id);
+    assert_eq!(
+        bob_client.list_floating_pane_views().get(&undocked_pane_id),
+        None
+    );
+    assert_eq!(
+        bob_client.list_floating_pane_focus_order(),
+        [] as [PaneId; 0]
+    );
+    assert_eq!(bob_client.get_focused_floating_pane_id(), None);
+    assert_eq!(
+        bob_client.get_placement_revision(),
+        bob_revision_before + 1,
+        "bob views the source tab"
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, alice_client_id).get_placement_revision(),
+        alice_revision_before + 1
+    );
+    assert_eq!(
+        runtime.session_by_id[&session_id].get_placement_revision(),
+        session_revision_before + 1
+    );
+}
+
+#[test]
+fn undocking_the_sole_pane_of_a_tab_closes_the_tab_and_keeps_the_pane() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let new_tab_result = runtime.dispatch(build_command_envelope(
+        CommandSource::from_key_binding(alice_client_id),
+        Command::NewTab(NewTabArgs::default()),
+    ));
+    let CommandResult::Ok { .. } = new_tab_result else {
+        panic!("expected the new tab to open, got {new_tab_result:?}");
+    };
+    let undocked_pane_id = find_other_pane_id(&runtime, session_id, &[tiled_pane_id]);
+    let undock_tab_id =
+        get_attached_client(&runtime, session_id, alice_client_id).get_active_tab_id();
+
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(build_command_envelope(
+            CommandSource::from_key_binding(alice_client_id),
+            build_undock_command(undocked_pane_id, None, None),
+        ))),
+        Ok(vec![
+            "PanePlacementCommitted",
+            "TabClosed",
+            "TabFocused",
+            "PaneFocused",
+            "PtyResized"
+        ])
+    );
+    let session = &runtime.session_by_id[&session_id];
+    assert!(!session.tabs.contains_key(&undock_tab_id));
+    assert_eq!(
+        session
+            .floating_set
+            .list_members()
+            .iter()
+            .map(|floating_member| floating_member.pane_id)
+            .collect::<Vec<PaneId>>(),
+        vec![undocked_pane_id]
+    );
+    let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
+    assert_eq!(alice_client.get_active_tab_id(), tab_id);
+    assert_eq!(
+        alice_client.get_focused_floating_pane_id(),
+        Some(undocked_pane_id)
+    );
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+}
+
+#[test]
+fn undock_refusals_name_the_reason_and_change_nothing() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let session_records_before = serialize_session_records(&runtime);
+
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(build_command_envelope(
+            CommandSource::from_key_binding(alice_client_id),
+            build_undock_command(tiled_pane_id, None, None),
+        ))),
+        Err((
+            RejectReason::InvalidState,
+            Some(
+                "the last pane of the last tab cannot be undocked; a session needs one tiled pane"
+            )
+        ))
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+
+    let undocked_pane_id =
+        split_alice_tiled_pane(&mut runtime, session_id, alice_client_id, tiled_pane_id);
+    let session_records_before = serialize_session_records(&runtime);
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(build_command_envelope(
+            CommandSource::from_key_binding(alice_client_id),
+            build_undock_command(
+                undocked_pane_id,
+                None,
+                Some(PlacementRevision {
+                    session_revision: u64::MAX,
+                    client_revision: u64::MAX,
+                }),
+            ),
+        ))),
+        Err((
+            RejectReason::InvalidState,
+            Some("placement preview is stale; refresh and confirm again")
+        ))
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let session_records_before = serialize_session_records(&runtime);
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(build_command_envelope(
+            CommandSource::from_key_binding(alice_client_id),
+            build_undock_command(floating_pane_id, None, None),
+        ))),
+        Err((
+            RejectReason::InvalidState,
+            Some(format!("{floating_pane_id} is already floating").as_str())
+        ))
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+
+    for _ in 1..MAX_FLOATING_PANES_PER_SESSION {
+        create_floating_pane(
+            &mut runtime,
+            CommandSource::from_key_binding(alice_client_id),
+            build_floating_new_pane_args(None, None, false),
+        );
+    }
+    let session_records_before = serialize_session_records(&runtime);
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(build_command_envelope(
+            CommandSource::from_key_binding(alice_client_id),
+            build_undock_command(undocked_pane_id, None, None),
+        ))),
+        Err((
+            RejectReason::InvalidState,
+            Some("a session holds at most 12 floating panes")
+        ))
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
+fn undocking_while_no_client_has_a_floating_viewport_sizes_the_pty_to_the_floating_minimum() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let undocked_pane_id =
+        split_alice_tiled_pane(&mut runtime, session_id, alice_client_id, tiled_pane_id);
+    // `pane { min-cols 20 min-rows 6 }`: the floating minimum is 22x10, PTY 20x6.
+    runtime.config.pane.minimum_column_count = 20;
+    runtime.config.pane.minimum_row_count = 6;
+    runtime.handle_client_resize(
+        alice_client_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        Some(PaneArea::Starving),
+        None,
+    );
+
+    let CommandResult::Ok { emitted_events, .. } = runtime.dispatch(build_command_envelope(
+        CommandSource::from_key_binding(alice_client_id),
+        build_undock_command(undocked_pane_id, None, None),
+    )) else {
+        panic!("expected the undock to apply");
+    };
+
+    assert_eq!(
+        list_event_names(&emitted_events),
+        [
+            "PanePlacementCommitted",
+            "LayoutChanged",
+            "PaneFocused",
+            "PaneFocused",
+            "PtyResized"
+        ]
+    );
+    assert_eq!(
+        emitted_events[2],
+        Event::PaneFocused(PaneFocused {
+            client_id: alice_client_id,
+            tab_id: Some(tab_id),
+            pane_id: tiled_pane_id,
+            previous_pane_id: Some(undocked_pane_id),
+        })
+    );
+    assert_eq!(
+        emitted_events[4],
+        Event::PtyResized(PtyResized {
+            pane_id: undocked_pane_id,
+            pty_size: PtySize {
+                column_count: 20,
+                row_count: 6,
+            },
+        })
+    );
+    assert_eq!(
+        get_floating_member(&runtime, session_id, undocked_pane_id).solved_size,
+        Size {
+            column_count: 22,
+            row_count: 10,
+        }
     );
 }

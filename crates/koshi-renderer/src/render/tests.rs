@@ -285,7 +285,7 @@ fn render_snapshot_with_viewer_chrome(
 fn render_placement_preview(
     render_snapshot: &RenderSnapshot,
     placement_presentation: &PanePlacementPresentation,
-    placement_target: Option<&PanePlacementTarget>,
+    placement_target: Option<&TiledPlacementTarget>,
     viewer_chrome: ViewerChrome,
     buffer_area: RatatuiRect,
 ) -> Buffer {
@@ -1157,7 +1157,7 @@ fn placement_preview_distinguishes_pane_roles_and_keeps_content_visible() {
     *target_grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('T', 1, TermStyle::default());
     render_snapshot.pane_snapshots[1].terminal_grid_view =
         Some(GridView::from_grid(&target_grid, 0));
-    let placement_target = PanePlacementTarget::Split {
+    let placement_target = TiledPlacementTarget::Split {
         destination_tab_id: render_snapshot.client_snapshot.active_tab_id,
         anchor: PanePlacementAnchor::Pane(target_pane_id),
         direction: koshi_core::geometry::Direction::Down,
@@ -1229,7 +1229,7 @@ fn whole_tab_insertion_keeps_destination_message_out_of_moving_pane() {
             row_count: 8,
         },
     );
-    let placement_target = PanePlacementTarget::Split {
+    let placement_target = TiledPlacementTarget::Split {
         destination_tab_id: render_snapshot.client_snapshot.active_tab_id,
         anchor: PanePlacementAnchor::Tab,
         direction: koshi_core::geometry::Direction::Right,

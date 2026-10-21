@@ -510,27 +510,9 @@ impl Server {
             None
         };
 
-        // A client with no focus in the tab it now views starts on that tab's
-        // most recent pane, which a session records when the tab is created. A
-        // client that already focused a pane here keeps it.
-        let landed_pane_id = session
-            .tabs
-            .get(&active_tab_id)
-            .and_then(|tab| tab.list_focus_mru().first().copied());
-        if let (Some(pane_id), Some(client)) = (
-            landed_pane_id,
-            session.clients.get_client_mut_by_id(client_id),
-        ) {
-            if client.get_focused_pane_id(active_tab_id).is_none() {
-                client.update_focused_pane(active_tab_id, pane_id);
-                emitted_events.push(Event::PaneFocused(PaneFocused {
-                    client_id,
-                    tab_id: Some(active_tab_id),
-                    pane_id,
-                    previous_pane_id: None,
-                }));
-            }
-        }
+        // A client with no focus in the tab it now views lands on that tab's
+        // landing pane. A client that already focused a pane here keeps it.
+        tab_ops::land_focus(session, client_id, active_tab_id, &mut emitted_events);
 
         let mut affected_tab_ids = vec![active_tab_id];
         if let Some(previous_tab_id) = previous_tab_id {

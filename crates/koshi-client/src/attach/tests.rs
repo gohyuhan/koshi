@@ -40,7 +40,7 @@ use koshi_config::types::{KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::command::{
     ClearSelectionArgs, CliExitCode, CloseTabArgs, FocusTabArgs, GridPosition, NewTabArgs,
     PanePlacementTarget, PlacePaneArgs, PlacementRevision, Selection, SelectionKind,
-    SetSelectionArgs, TabTarget, VisualCommand,
+    SetSelectionArgs, TabTarget, TiledPlacementTarget, VisualCommand,
 };
 use koshi_core::constant::{DEFAULT_MAX_FRAMES_PER_SECOND, MIN_LINK_TIMEOUT_MS};
 use koshi_core::geometry::{Direction, PaneArea, Point, Rect, SplitDirection};
@@ -54,7 +54,7 @@ use koshi_core::mouse::{MouseAnswer, MouseButton, MouseKind, MouseTracking, Scro
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::{compute_socket_address, EndpointFile};
 use koshi_ipc::frame::{
-    FrameClient, FrameGraphicsProtocol, FrameImageAction, FrameImageDisplay,
+    FrameClient, FrameFloatingPaneSlot, FrameGraphicsProtocol, FrameImageAction, FrameImageDisplay,
     FrameImageRecordHeader, FrameImageTransfer, FrameSession, FrameSlot, FrameTab, PaintedFrame,
 };
 use koshi_ipc::placement::PanePlacementPaneSnapshot;
@@ -5780,8 +5780,8 @@ fn draw_pane_placement_mode<B: Backend>(
 
 /// Set the target of the open pane placement mode to a swap with a new pane,
 /// and return that target.
-fn set_placement_swap_target(client: &mut Client) -> PanePlacementTarget {
-    let placement_target = PanePlacementTarget::Swap {
+fn set_placement_swap_target(client: &mut Client) -> TiledPlacementTarget {
+    let placement_target = TiledPlacementTarget::Swap {
         target_pane_id: PaneId::new(),
     };
     client
@@ -6281,7 +6281,7 @@ fn confirming_keyboard_placement_repaints_without_resize() {
         source_tab_id: active_tab_id,
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap { target_pane_id }),
+        placement_target: Some(TiledPlacementTarget::Swap { target_pane_id }),
         pending_placement_command: None,
     });
     client.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
@@ -6297,7 +6297,9 @@ fn confirming_keyboard_placement_repaints_without_resize() {
             &client,
             Command::PlacePane(PlacePaneArgs {
                 source_pane_id,
-                placement_target: PanePlacementTarget::Swap { target_pane_id },
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
+                    target_pane_id
+                }),
                 expected_placement_revision: Some(PlacementRevision {
                     session_revision: 0,
                     client_revision: 0,
@@ -6377,7 +6379,7 @@ fn mouse_placement_confirmation_clears_confirming_preview_without_resize() {
         source_tab_id: active_tab_id,
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap { target_pane_id }),
+        placement_target: Some(TiledPlacementTarget::Swap { target_pane_id }),
         pending_placement_command: None,
     });
     client.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilDragEnds;
@@ -6392,7 +6394,9 @@ fn mouse_placement_confirmation_clears_confirming_preview_without_resize() {
             &client,
             Command::PlacePane(PlacePaneArgs {
                 source_pane_id,
-                placement_target: PanePlacementTarget::Swap { target_pane_id },
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
+                    target_pane_id
+                }),
                 expected_placement_revision: Some(PlacementRevision {
                     session_revision: 0,
                     client_revision: 0,
@@ -6475,7 +6479,7 @@ fn enter_submits_keyboard_placement_and_repaints_without_resize() {
         source_tab_id: active_tab_id,
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap { target_pane_id }),
+        placement_target: Some(TiledPlacementTarget::Swap { target_pane_id }),
         pending_placement_command: None,
     });
     client.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
@@ -6511,7 +6515,9 @@ fn enter_submits_keyboard_placement_and_repaints_without_resize() {
         command_envelope.command,
         Command::PlacePane(PlacePaneArgs {
             source_pane_id,
-            placement_target: PanePlacementTarget::Swap { target_pane_id },
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
+                target_pane_id
+            }),
             expected_placement_revision: Some(PlacementRevision {
                 session_revision: 0,
                 client_revision: 0,
@@ -6786,7 +6792,7 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
         placement_target: (placement_mode_lifetime == PlacementModeLifetime::UntilCancelled)
-            .then_some(PanePlacementTarget::Swap { target_pane_id }),
+            .then_some(TiledPlacementTarget::Swap { target_pane_id }),
         pending_placement_command: None,
     });
     client.placement_state.placement_mode_lifetime = placement_mode_lifetime;
@@ -6895,7 +6901,9 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
             && placement_envelope.command
                 == Command::PlacePane(PlacePaneArgs {
                     source_pane_id,
-                    placement_target: PanePlacementTarget::Swap { target_pane_id },
+                    placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
+                        target_pane_id,
+                    }),
                     expected_placement_revision: Some(PlacementRevision {
                         session_revision: 0,
                         client_revision: 0,
@@ -6908,7 +6916,9 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
                     source_pane_id,
                     source_tab_id: Some(active_tab_id),
                     destination_tab_id: Some(active_tab_id),
-                    placement_target: PanePlacementTarget::Swap { target_pane_id },
+                    placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
+                        target_pane_id,
+                    }),
                 },
             ))
             .map_err(|send_error| send_error.to_string())?;
@@ -7089,7 +7099,7 @@ fn placement_presentation_describes_both_swap_destinations() {
         source_tab_id: active_tab_id,
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap { target_pane_id }),
+        placement_target: Some(TiledPlacementTarget::Swap { target_pane_id }),
         pending_placement_command: None,
     });
 
@@ -7177,7 +7187,7 @@ fn placement_presentation_names_group_tab_and_cross_tab_results() {
         source_tab_id,
         destination_tab_id: source_tab_id,
         placement_direction: Direction::Down,
-        placement_target: Some(PanePlacementTarget::Split {
+        placement_target: Some(TiledPlacementTarget::Split {
             destination_tab_id: source_tab_id,
             anchor: PanePlacementAnchor::Group(vec![first_target_pane_id, second_target_pane_id]),
             direction: Direction::Down,
@@ -7231,7 +7241,7 @@ fn placement_presentation_names_group_tab_and_cross_tab_results() {
         .placement_mode
         .as_mut()
         .expect("placement mode")
-        .placement_target = Some(PanePlacementTarget::Split {
+        .placement_target = Some(TiledPlacementTarget::Split {
         destination_tab_id: source_tab_id,
         anchor: PanePlacementAnchor::Tab,
         direction: Direction::Right,
@@ -7273,7 +7283,7 @@ fn placement_presentation_names_group_tab_and_cross_tab_results() {
         .as_mut()
         .expect("placement mode");
     placement_mode.destination_tab_id = destination_tab_id;
-    placement_mode.placement_target = Some(PanePlacementTarget::Swap {
+    placement_mode.placement_target = Some(TiledPlacementTarget::Swap {
         target_pane_id: cross_tab_target_pane_id,
     });
     let cross_tab_presentation =
@@ -10800,7 +10810,7 @@ fn run_attachment_with_committed_swap_notice(
             source_tab_id: active_tab_id,
             destination_tab_id: active_tab_id,
             placement_direction: Direction::Right,
-            placement_target: Some(PanePlacementTarget::Swap {
+            placement_target: Some(TiledPlacementTarget::Swap {
                 target_pane_id: right_pane_id,
             }),
             pending_placement_command: Some(crate::tests::build_pending_placement_command(
@@ -10842,9 +10852,9 @@ fn run_attachment_with_committed_swap_notice(
             source_pane_id: left_pane_id,
             source_tab_id: Some(active_tab_id),
             destination_tab_id: Some(active_tab_id),
-            placement_target: PanePlacementTarget::Swap {
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
                 target_pane_id: right_pane_id,
-            },
+            }),
         })?;
         producer_sender
             .send(Incoming::Painted {
@@ -11231,7 +11241,7 @@ fn a_frame_at_newer_revisions_drops_the_preview_and_its_slide_while_the_placemen
         source_tab_id: active_tab_id,
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap { target_pane_id }),
+        placement_target: Some(TiledPlacementTarget::Swap { target_pane_id }),
         pending_placement_command: Some(crate::tests::build_pending_placement_command(
             CommandId::new(),
         )),
@@ -11259,7 +11269,7 @@ fn a_frame_at_newer_revisions_drops_the_preview_and_its_slide_while_the_placemen
         base_snapshot: preview_snapshot.clone(),
         from_snapshot: preview_snapshot,
         to_snapshot: swapped_preview_snapshot,
-        placement_target: Some(PanePlacementTarget::Swap { target_pane_id }),
+        placement_target: Some(TiledPlacementTarget::Swap { target_pane_id }),
         started_at,
     });
 
@@ -12554,5 +12564,636 @@ fn two_presses_read_further_apart_than_a_double_click_stay_single_clicks_however
         pending_mouse_actions,
         vec![clear_selection_action.clone(), clear_selection_action],
         "a double click would also highlight the word under the second press"
+    );
+}
+
+/// Two frames of one `60x20` tab, drawn centered in the `80x22` pane area at
+/// offset `(10, 1)`. The first holds `left_pane_id` at `(0, 0)` `29x20` and
+/// `undocked_pane_id` at `(31, 0)` `29x20`. The second holds `left_pane_id`
+/// alone at `(0, 0)` `60x20`, and `undocked_pane_id` floating at `(16, 4)`
+/// `48x13`.
+fn build_undocked_pane_frames(
+    left_pane_id: PaneId,
+    undocked_pane_id: PaneId,
+) -> (PaintedFrame, PaintedFrame) {
+    let build_frame_slot = |pane_id, outer_rect: Rect| FrameSlot {
+        pane_id,
+        outer_rect,
+        content_rect: Some(outer_rect.compute_inner_with_border()),
+        is_visible: true,
+        is_suppressed: false,
+    };
+    let half_size = Size {
+        column_count: 29,
+        row_count: 20,
+    };
+    let mut initial_frame = build_test_painted_frame();
+    initial_frame.session_snapshot.active_tab_snapshot.tab_size = Size {
+        column_count: 60,
+        row_count: 20,
+    };
+    initial_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots = vec![
+        build_frame_slot(
+            left_pane_id,
+            Rect::from_origin_and_size(Point { column: 0, row: 0 }, half_size),
+        ),
+        build_frame_slot(
+            undocked_pane_id,
+            Rect::from_origin_and_size(Point { column: 31, row: 0 }, half_size),
+        ),
+    ];
+    let mut undocked_frame = initial_frame.clone();
+    undocked_frame.session_snapshot.session_revision = 1;
+    undocked_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots = vec![build_frame_slot(
+        left_pane_id,
+        Rect::from_origin_and_size(
+            Point { column: 0, row: 0 },
+            Size {
+                column_count: 60,
+                row_count: 20,
+            },
+        ),
+    )];
+    let floating_pane_slot = FloatingPaneSlot::from_outer_rect(
+        undocked_pane_id,
+        Rect::from_origin_and_size(
+            Point { column: 16, row: 4 },
+            Size {
+                column_count: 48,
+                row_count: 13,
+            },
+        ),
+        false,
+    );
+    undocked_frame.session_snapshot.floating_pane_slots = vec![FrameFloatingPaneSlot {
+        pane_id: undocked_pane_id,
+        outer_rect: floating_pane_slot.outer_rect,
+        content_rect: floating_pane_slot.content_rect,
+        is_pinned: false,
+    }];
+    undocked_frame.session_snapshot.floating_pane_ids = vec![undocked_pane_id];
+    (initial_frame, undocked_frame)
+}
+
+/// Paint the first of [`build_undocked_pane_frames`] at `started_at`, record
+/// the committed placement of its tab, and queue the second frame. Returns
+/// the tab id and the queued second frame.
+fn paint_undocked_pane_frames<B: Backend>(
+    client: &mut Client,
+    screen: &mut Screen<B>,
+    undocked_pane_id: PaneId,
+    started_at: Instant,
+) -> (TabId, RenderSnapshot) {
+    let (initial_frame, undocked_frame) =
+        build_undocked_pane_frames(PaneId::new(), undocked_pane_id);
+    screen.pending_snapshot = Some(build_render_snapshot(&build_received_painted_frame(
+        initial_frame.clone(),
+    )));
+    screen
+        .commit_pending_snapshot(client, started_at)
+        .expect("the first frame paints");
+    let active_tab_id = initial_frame.client_snapshot.active_tab_id;
+    screen.note_committed_placement([Some(active_tab_id), None]);
+    let undocked_snapshot = build_render_snapshot(&build_received_painted_frame(undocked_frame));
+    screen.pending_snapshot = Some(undocked_snapshot.clone());
+    (active_tab_id, undocked_snapshot)
+}
+
+#[test]
+fn an_undocked_pane_slides_from_its_tiled_box_to_its_floating_box() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let undocked_pane_id = PaneId::new();
+    let started_at = Instant::now();
+    let (active_tab_id, undocked_snapshot) =
+        paint_undocked_pane_frames(&mut client, &mut screen, undocked_pane_id, started_at);
+
+    let undocked_mouse_frame = screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the undocked frame paints");
+    assert_eq!(
+        screen.shown_undock_floating_pane_slots,
+        vec![FloatingPaneSlot::from_outer_rect(
+            undocked_pane_id,
+            Rect::from_origin_and_size(
+                Point { column: 41, row: 1 },
+                Size {
+                    column_count: 29,
+                    row_count: 20,
+                },
+            ),
+            false,
+        )],
+        "the slide starts at the tiled box moved by the (10, 1) letterbox offset"
+    );
+    assert_eq!(
+        undocked_mouse_frame.session_snapshot.floating_pane_slots,
+        undocked_snapshot.session_snapshot.floating_pane_slots,
+        "mouse input is placed against the floating box during the slide"
+    );
+
+    let halfway_time = started_at + Duration::from_millis(80);
+    assert_eq!(
+        screen.compute_next_placement_animation_wakeup_at(
+            halfway_time,
+            FRAME_INTERVAL_DURATION_AT_60_FRAMES_PER_SECOND
+        ),
+        Some(FRAME_INTERVAL_DURATION_AT_60_FRAMES_PER_SECOND)
+    );
+    screen
+        .refresh_at(&mut client, Some(active_tab_id), halfway_time)
+        .expect("the slide repaints without a session frame");
+    assert_eq!(
+        screen.shown_undock_floating_pane_slots,
+        vec![FloatingPaneSlot::from_outer_rect(
+            undocked_pane_id,
+            Rect::from_origin_and_size(
+                Point { column: 19, row: 4 },
+                Size {
+                    column_count: 46,
+                    row_count: 14,
+                },
+            ),
+            false,
+        )],
+        "80 ms into 160 ms the ease-out has covered 0.875 of the way"
+    );
+
+    let end_time = started_at + PLACEMENT_ANIMATION_DURATION;
+    screen
+        .refresh_at(&mut client, Some(active_tab_id), end_time)
+        .expect("the slide's last repaint draws the floating box");
+    assert_eq!(screen.shown_undock_floating_pane_slots, Vec::new());
+    assert_eq!(
+        screen.compute_next_placement_animation_wakeup_at(
+            end_time,
+            FRAME_INTERVAL_DURATION_AT_60_FRAMES_PER_SECOND
+        ),
+        None
+    );
+    assert_eq!(
+        screen.refresh_at(
+            &mut client,
+            Some(active_tab_id),
+            end_time + FRAME_INTERVAL_DURATION_AT_60_FRAMES_PER_SECOND
+        ),
+        None,
+        "a finished slide draws nothing more"
+    );
+}
+
+#[test]
+fn reduced_motion_draws_an_undocked_pane_at_its_floating_box_at_once() {
+    let mut client = build_test_client();
+    client.client_config.should_reduce_motion = true;
+    let mut screen = build_test_screen();
+    let undocked_pane_id = PaneId::new();
+    let started_at = Instant::now();
+    paint_undocked_pane_frames(&mut client, &mut screen, undocked_pane_id, started_at);
+
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the undocked frame paints");
+
+    assert_eq!(screen.shown_undock_floating_pane_slots, Vec::new());
+    assert_eq!(
+        screen.compute_next_placement_animation_wakeup_at(
+            started_at,
+            FRAME_INTERVAL_DURATION_AT_60_FRAMES_PER_SECOND
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_frame_that_floats_one_pane_and_drops_another_slides_only_the_floated_pane() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let left_pane_id = PaneId::new();
+    let undocked_pane_id = PaneId::new();
+    let started_at = Instant::now();
+    let (initial_frame, mut undocked_frame) =
+        build_undocked_pane_frames(left_pane_id, undocked_pane_id);
+    undocked_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[0]
+        .pane_id = PaneId::new();
+    let slide_start_slot = FloatingPaneSlot::from_outer_rect(
+        undocked_pane_id,
+        Rect::from_origin_and_size(
+            Point { column: 41, row: 1 },
+            Size {
+                column_count: 29,
+                row_count: 20,
+            },
+        ),
+        false,
+    );
+    let mut slide_start_frame = undocked_frame.clone();
+    slide_start_frame.session_snapshot.floating_pane_slots = vec![FrameFloatingPaneSlot {
+        pane_id: undocked_pane_id,
+        outer_rect: slide_start_slot.outer_rect,
+        content_rect: slide_start_slot.content_rect,
+        is_pinned: false,
+    }];
+    screen.pending_snapshot = Some(build_render_snapshot(&build_received_painted_frame(
+        initial_frame,
+    )));
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the first frame paints");
+
+    screen.pending_snapshot = Some(build_render_snapshot(&build_received_painted_frame(
+        undocked_frame,
+    )));
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the frame that floats one pane paints");
+
+    assert_eq!(
+        screen.shown_undock_floating_pane_slots,
+        vec![slide_start_slot],
+        "the left pane leaves the tab without a floating slot, so only the floated pane slides"
+    );
+    let mut slide_start_client = build_test_client();
+    let mut slide_start_screen = build_test_screen();
+    slide_start_screen.pending_snapshot = Some(build_render_snapshot(
+        &build_received_painted_frame(slide_start_frame),
+    ));
+    slide_start_screen
+        .commit_pending_snapshot(&mut slide_start_client, started_at)
+        .expect("the frame with the floating pane at the slide's start paints");
+    assert_eq!(
+        screen.paint_driver.backend.buffer(),
+        slide_start_screen.paint_driver.backend.buffer(),
+        "the screen draws the floated pane at the slide's box"
+    );
+}
+
+#[test]
+fn a_frame_that_floats_two_panes_slides_both_from_their_tiled_boxes() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let left_pane_id = PaneId::new();
+    let undocked_pane_id = PaneId::new();
+    let started_at = Instant::now();
+    let (initial_frame, mut undocked_frame) =
+        build_undocked_pane_frames(left_pane_id, undocked_pane_id);
+    undocked_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[0]
+        .pane_id = PaneId::new();
+    let left_floating_pane_slot = FloatingPaneSlot::from_outer_rect(
+        left_pane_id,
+        Rect::from_origin_and_size(
+            Point { column: 18, row: 5 },
+            Size {
+                column_count: 48,
+                row_count: 13,
+            },
+        ),
+        false,
+    );
+    undocked_frame.session_snapshot.floating_pane_slots.insert(
+        0,
+        FrameFloatingPaneSlot {
+            pane_id: left_pane_id,
+            outer_rect: left_floating_pane_slot.outer_rect,
+            content_rect: left_floating_pane_slot.content_rect,
+            is_pinned: false,
+        },
+    );
+    undocked_frame
+        .session_snapshot
+        .floating_pane_ids
+        .insert(0, left_pane_id);
+    screen.pending_snapshot = Some(build_render_snapshot(&build_received_painted_frame(
+        initial_frame,
+    )));
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the first frame paints");
+
+    screen.pending_snapshot = Some(build_render_snapshot(&build_received_painted_frame(
+        undocked_frame,
+    )));
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the frame that floats both panes paints");
+
+    let tiled_half_size = Size {
+        column_count: 29,
+        row_count: 20,
+    };
+    assert_eq!(
+        screen.shown_undock_floating_pane_slots,
+        vec![
+            FloatingPaneSlot::from_outer_rect(
+                left_pane_id,
+                Rect::from_origin_and_size(Point { column: 10, row: 1 }, tiled_half_size),
+                false,
+            ),
+            FloatingPaneSlot::from_outer_rect(
+                undocked_pane_id,
+                Rect::from_origin_and_size(Point { column: 41, row: 1 }, tiled_half_size),
+                false,
+            ),
+        ],
+        "each pane starts its own slide at its tiled box moved by the (10, 1) letterbox offset"
+    );
+}
+
+#[test]
+fn a_paint_retry_keeps_one_slide_per_floated_pane() {
+    let mut client = build_test_client();
+    let mut screen = build_failing_screen();
+    let undocked_pane_id = PaneId::new();
+    let started_at = Instant::now();
+    paint_undocked_pane_frames(&mut client, &mut screen, undocked_pane_id, started_at);
+    screen.paint_driver.backend.should_fail_draw = true;
+    assert_eq!(
+        screen.commit_pending_snapshot(&mut client, started_at),
+        None,
+        "the backend rejects the frame, and the frame stays pending"
+    );
+    screen.paint_driver.backend.should_fail_draw = false;
+
+    screen
+        .commit_pending_snapshot(&mut client, started_at + Duration::from_millis(80))
+        .expect("the pending frame paints on the next attempt");
+
+    assert_eq!(
+        screen.shown_undock_floating_pane_slots,
+        vec![FloatingPaneSlot::from_outer_rect(
+            undocked_pane_id,
+            Rect::from_origin_and_size(
+                Point { column: 19, row: 4 },
+                Size {
+                    column_count: 46,
+                    row_count: 14,
+                },
+            ),
+            false,
+        )],
+        "the slide that the rejected attempt started runs on from that attempt's time"
+    );
+}
+
+/// The frames of [`build_undocked_pane_frames`] for a tab whose only pane is
+/// `undocked_pane_id`: the first frame's tab holds the pane alone at
+/// `(31, 0)` `29x20`. The second frame shows another tab, holding
+/// `landing_pane_id` at `(0, 0)` `60x20`, with `undocked_pane_id` floating at
+/// `(16, 4)` `48x13`.
+fn build_sole_pane_undock_frames(
+    landing_pane_id: PaneId,
+    undocked_pane_id: PaneId,
+) -> (PaintedFrame, PaintedFrame) {
+    let (mut initial_frame, mut undocked_frame) =
+        build_undocked_pane_frames(landing_pane_id, undocked_pane_id);
+    initial_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots
+        .retain(|pane_slot| pane_slot.pane_id == undocked_pane_id);
+    let landing_tab_id = TabId::new();
+    undocked_frame.session_snapshot.active_tab_snapshot.tab_id = landing_tab_id;
+    undocked_frame.client_snapshot.active_tab_id = landing_tab_id;
+    (initial_frame, undocked_frame)
+}
+
+#[test]
+fn an_undock_slide_with_no_tab_slide_keeps_the_screen_waking() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let undocked_pane_id = PaneId::new();
+    let started_at = Instant::now();
+    let (initial_frame, undocked_frame) =
+        build_sole_pane_undock_frames(PaneId::new(), undocked_pane_id);
+    let source_tab_id = initial_frame.client_snapshot.active_tab_id;
+    let landing_tab_id = undocked_frame.client_snapshot.active_tab_id;
+    screen.pending_snapshot = Some(build_render_snapshot(&build_received_painted_frame(
+        initial_frame,
+    )));
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the first frame paints");
+    screen.note_committed_placement([Some(source_tab_id), None]);
+    screen.pending_snapshot = Some(build_render_snapshot(&build_received_painted_frame(
+        undocked_frame,
+    )));
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the undocked frame paints");
+    assert!(
+        screen.committed_placement_animation.is_none(),
+        "the landing tab is not a tab the placement changed"
+    );
+
+    let halfway_time = started_at + Duration::from_millis(80);
+    assert_eq!(
+        screen.compute_next_placement_animation_wakeup_at(
+            halfway_time,
+            FRAME_INTERVAL_DURATION_AT_60_FRAMES_PER_SECOND
+        ),
+        Some(FRAME_INTERVAL_DURATION_AT_60_FRAMES_PER_SECOND)
+    );
+    screen
+        .refresh_at(&mut client, Some(landing_tab_id), halfway_time)
+        .expect("the slide repaints without a session frame");
+    assert_eq!(
+        screen.shown_undock_floating_pane_slots,
+        vec![FloatingPaneSlot::from_outer_rect(
+            undocked_pane_id,
+            Rect::from_origin_and_size(
+                Point { column: 19, row: 4 },
+                Size {
+                    column_count: 46,
+                    row_count: 14,
+                },
+            ),
+            false,
+        )]
+    );
+}
+
+#[test]
+fn an_attached_viewer_redraws_an_undock_slide_with_no_new_session_frame() {
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let session_id = SessionId::new();
+    let undocked_pane_id = PaneId::new();
+    let (mut initial_frame, mut undocked_frame) =
+        build_sole_pane_undock_frames(PaneId::new(), undocked_pane_id);
+    let source_tab_id = initial_frame.client_snapshot.active_tab_id;
+    for painted_frame in [&mut initial_frame, &mut undocked_frame] {
+        painted_frame.session_snapshot.session_id = session_id;
+        painted_frame.client_snapshot.client_id = client_id;
+    }
+    client.set_session_id(session_id);
+
+    let draw_count = Arc::new(AtomicUsize::new(0));
+    let failing_backend = FailingBackend::from_terminal_size_with_draw_count(
+        TEST_VIEWPORT_SIZE,
+        Arc::clone(&draw_count),
+    );
+    let mut screen = Screen::from_backend_and_viewport_size(failing_backend, TEST_VIEWPORT_SIZE);
+    let (request_sender, _request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
+    let producer_sender = incoming_sender.clone();
+    let producer_draw_count = Arc::clone(&draw_count);
+    let producer_thread = thread::spawn(move || -> Result<(), String> {
+        let send_incoming = |incoming: Incoming| {
+            producer_sender
+                .send(incoming)
+                .map_err(|send_error| send_error.to_string())
+        };
+        send_incoming(Incoming::Painted {
+            connection_index: INITIAL_CONNECTION_INDEX,
+            received_painted_frame: Box::new(build_received_painted_frame(initial_frame)),
+        })?;
+        if !wait_for_draw_count(&producer_draw_count, 1) {
+            let _ = send_incoming(build_input_incoming(RuntimeEvent::Quit, Instant::now()));
+            return Err(String::from("the first frame was not drawn"));
+        }
+        send_incoming(build_session_event_incoming(
+            SessionEvent::PanePlacementCommitted {
+                command_id: CommandId::new(),
+                source_pane_id: undocked_pane_id,
+                source_tab_id: Some(source_tab_id),
+                destination_tab_id: None,
+                placement_target: PanePlacementTarget::Floating {
+                    top_left_cell: None,
+                },
+            },
+        ))?;
+        send_incoming(Incoming::Painted {
+            connection_index: INITIAL_CONNECTION_INDEX,
+            received_painted_frame: Box::new(build_received_painted_frame(undocked_frame)),
+        })?;
+        if !wait_for_draw_count(&producer_draw_count, 2) {
+            let _ = send_incoming(build_input_incoming(RuntimeEvent::Quit, Instant::now()));
+            return Err(String::from("the undocked frame was not drawn"));
+        }
+        if !wait_for_draw_count(&producer_draw_count, 3) {
+            let _ = send_incoming(build_input_incoming(RuntimeEvent::Quit, Instant::now()));
+            return Err(String::from(
+                "no slide frame was drawn without a new session event",
+            ));
+        }
+        send_incoming(build_session_event_incoming(SessionEvent::Detached))
+    });
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+    let attachment_ending = run_attachment(
+        &build_local_home(),
+        session_id,
+        client_id,
+        ConnectionToken::generate(),
+        None,
+        &mut client,
+        &mut screen,
+        &mut uplink,
+        TEXT_ONLY_ATTACH_SETTINGS,
+        &mut cell_size_query,
+        &mut Vec::new(),
+        incoming_sender,
+        incoming_receiver,
+    );
+    producer_thread
+        .join()
+        .expect("the frame producer finished")
+        .expect("the attachment drew both frames and a slide frame");
+
+    assert_eq!(attachment_ending, AttachmentEnding::Detached);
+}
+
+#[test]
+fn a_connection_reset_ends_running_undock_slides() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let undocked_pane_id = PaneId::new();
+    let started_at = Instant::now();
+    let (active_tab_id, _) =
+        paint_undocked_pane_frames(&mut client, &mut screen, undocked_pane_id, started_at);
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the undocked frame paints");
+
+    screen.reset_connection();
+    let halfway_time = started_at + Duration::from_millis(80);
+    assert_eq!(
+        screen.compute_next_placement_animation_wakeup_at(
+            halfway_time,
+            FRAME_INTERVAL_DURATION_AT_60_FRAMES_PER_SECOND
+        ),
+        None
+    );
+    screen
+        .refresh_at(&mut client, Some(active_tab_id), halfway_time)
+        .expect("the screen repaints the floating box");
+
+    assert_eq!(screen.shown_undock_floating_pane_slots, Vec::new());
+}
+
+#[test]
+fn a_placement_preview_ends_running_undock_slides() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let undocked_pane_id = PaneId::new();
+    let started_at = Instant::now();
+    let (active_tab_id, undocked_snapshot) =
+        paint_undocked_pane_frames(&mut client, &mut screen, undocked_pane_id, started_at);
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the undocked frame paints");
+    let left_pane_id = undocked_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[0]
+        .pane_id;
+    client.placement_state.placement_snapshot =
+        Some(Arc::new(crate::tests::build_test_placement_snapshot(
+            undocked_snapshot.session_snapshot.session_id,
+            undocked_snapshot.client_snapshot.client_id,
+            left_pane_id,
+            active_tab_id,
+            active_tab_id,
+            undocked_snapshot.session_snapshot.session_revision,
+            undocked_snapshot.client_snapshot.client_revision,
+        )));
+    screen.set_placement_snapshot(Some(build_same_tab_screen_placement_snapshot(
+        &undocked_snapshot,
+        left_pane_id,
+        undocked_snapshot
+            .session_snapshot
+            .active_tab_snapshot
+            .clone(),
+        undocked_snapshot.session_snapshot.session_revision,
+    )));
+
+    let halfway_time = started_at + Duration::from_millis(80);
+    screen
+        .refresh_at(&mut client, Some(active_tab_id), halfway_time)
+        .expect("the placement preview paints");
+
+    assert_eq!(
+        screen.shown_undock_floating_pane_slots,
+        Vec::new(),
+        "the preview draws the floated pane at its floating box"
+    );
+    assert_eq!(
+        screen.compute_next_placement_animation_wakeup_at(
+            halfway_time,
+            FRAME_INTERVAL_DURATION_AT_60_FRAMES_PER_SECOND
+        ),
+        None
     );
 }

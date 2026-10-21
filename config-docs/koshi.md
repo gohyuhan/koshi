@@ -567,11 +567,12 @@ session. A link that drops and comes back keeps the value its attach read.
 ## `reduced-motion`
 
 Controls placement interpolation for this viewer. With `#false`, the pane
-placement preview slides to each new destination, and a pane that another viewer
-places slides to its new place on this screen in 160 ms. `#true` shows the
-selected destination and confirmation state without moving the preview through
-intermediate rectangles, and draws another viewer's accepted placement at its
-final place at once.
+placement preview slides to each new destination, a pane that another viewer
+places slides to its new place on this screen in 160 ms, and a pane that this
+viewer undocks slides from its tiled place to its floating place in 160 ms.
+`#true` shows the selected destination and confirmation state without moving
+the preview through intermediate rectangles, and draws another viewer's
+accepted placement and an undocked pane at their final places at once.
 
 Example: another viewer swaps panes `A` and `B` in the tab you watch. With
 `reduced-motion #false`, `A` and `B` slide past each other. With
@@ -579,7 +580,7 @@ Example: another viewer swaps panes `A` and `B` in the tab you watch. With
 
 | Setting | Meaning | Default | Since |
 |---|---|---|---|
-| `reduced-motion` | boolean — skip placement preview interpolation and the slide after another viewer's accepted placement | `#false` | ≥ 0.5.0 |
+| `reduced-motion` | boolean — skip placement preview interpolation, the slide after another viewer's accepted placement, and the slide of an undocked pane | `#false` | ≥ 0.5.0 |
 
 ## `stay-in-pane-placement-mode-after-placement`
 

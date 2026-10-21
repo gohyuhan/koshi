@@ -37,7 +37,7 @@ use ratatui::layout::{Position, Rect as RatatuiRect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
+use koshi_core::command::{PanePlacementAnchor, TiledPlacementTarget};
 use koshi_core::display_width::compute_text_display_width;
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{PaneId, TabId};
@@ -187,7 +187,7 @@ pub fn render_frame(
     image_render_mode: ImageRenderMode,
     unavailable_image_keys: &[ImagePlacementKey],
     placement_presentation: Option<&PanePlacementPresentation>,
-    placement_target: Option<&PanePlacementTarget>,
+    placement_target: Option<&TiledPlacementTarget>,
     viewport_area: RatatuiRect,
     drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
@@ -674,7 +674,7 @@ fn draw_panes(
     render_snapshot: &RenderSnapshot,
     theme: &Theme,
     viewer_chrome: ViewerChrome,
-    placement_target: Option<&PanePlacementTarget>,
+    placement_target: Option<&TiledPlacementTarget>,
     layout_origin: Point,
     drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
@@ -864,11 +864,11 @@ fn draw_pane_scroll_position(
 pub fn is_placement_target_pane(
     pane_id: PaneId,
     displayed_tab_id: TabId,
-    placement_target: Option<&PanePlacementTarget>,
+    placement_target: Option<&TiledPlacementTarget>,
 ) -> bool {
     match placement_target {
-        Some(PanePlacementTarget::Swap { target_pane_id }) => pane_id == *target_pane_id,
-        Some(PanePlacementTarget::Split {
+        Some(TiledPlacementTarget::Swap { target_pane_id }) => pane_id == *target_pane_id,
+        Some(TiledPlacementTarget::Split {
             destination_tab_id,
             anchor,
             ..
@@ -877,7 +877,7 @@ pub fn is_placement_target_pane(
             PanePlacementAnchor::Group(target_pane_ids) => target_pane_ids.contains(&pane_id),
             PanePlacementAnchor::Tab => true,
         },
-        Some(PanePlacementTarget::Split { .. }) | None => false,
+        Some(TiledPlacementTarget::Split { .. }) | None => false,
     }
 }
 
@@ -1176,7 +1176,7 @@ fn draw_stack_headers(
     render_snapshot: &RenderSnapshot,
     theme: &Theme,
     viewer_chrome: ViewerChrome,
-    placement_target: Option<&PanePlacementTarget>,
+    placement_target: Option<&TiledPlacementTarget>,
     layout_origin: Point,
     drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,

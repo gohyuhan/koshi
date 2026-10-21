@@ -53,8 +53,8 @@ use ratatui::layout::{Position, Rect as RatatuiRect};
 use koshi_config::types::WheelScroll;
 use koshi_core::command::{
     ClearSelectionArgs, ClosePaneArgs, Command, CopyArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
-    GridPosition, MoveFloatingPaneArgs, PanePlacementAnchor, PanePlacementTarget, Selection,
-    SelectionKind, SetPaneMinimizedArgs, SetPanePinnedArgs, SetSelectionArgs, TabTarget,
+    GridPosition, MoveFloatingPaneArgs, PanePlacementAnchor, Selection, SelectionKind,
+    SetPaneMinimizedArgs, SetPanePinnedArgs, SetSelectionArgs, TabTarget, TiledPlacementTarget,
     VisualCommand,
 };
 use koshi_core::geometry::{Direction, Point, Rect, Size};
@@ -625,7 +625,7 @@ impl Client {
     /// Select `placement_target` from a placement drag. A target on the source
     /// pane, or one that leaves the source tab unchanged, clears the target.
     /// Does nothing while a submitted placement waits for the session.
-    fn set_mouse_placement_target(&mut self, placement_target: Option<PanePlacementTarget>) {
+    fn set_mouse_placement_target(&mut self, placement_target: Option<TiledPlacementTarget>) {
         if self.is_placement_confirmation_pending() {
             return;
         }
@@ -643,8 +643,8 @@ impl Client {
             && placement_target.as_ref().is_some_and(|placement_target| {
                 matches!(
                     placement_target,
-                    PanePlacementTarget::Swap { target_pane_id }
-                        | PanePlacementTarget::Split {
+                    TiledPlacementTarget::Swap { target_pane_id }
+                        | TiledPlacementTarget::Split {
                             anchor: PanePlacementAnchor::Pane(target_pane_id),
                             ..
                         } if *target_pane_id == placement_mode.source_pane_id
@@ -663,7 +663,7 @@ impl Client {
         &self,
         screen_point: Point,
         mouse_frame: &MouseFrame,
-    ) -> Option<PanePlacementTarget> {
+    ) -> Option<TiledPlacementTarget> {
         let placement_mode = self.placement_state.placement_mode.as_ref()?;
         let placement_snapshot = self.get_placement_snapshot()?;
         if placement_snapshot.destination_tab_id != placement_mode.destination_tab_id {
@@ -725,7 +725,7 @@ impl Client {
                         destination_layout_rect,
                     )
                 })?;
-            return Some(PanePlacementTarget::Split {
+            return Some(TiledPlacementTarget::Split {
                 destination_tab_id,
                 anchor: PanePlacementAnchor::Pane(target_pane_id),
                 direction: compute_nearest_edge_direction(screen_point, target_rect),
@@ -737,7 +737,7 @@ impl Client {
             .swap_slots
             .iter()
             .find(|swap_slot| swap_slot.pane_id == target_pane_id)?;
-        Some(PanePlacementTarget::Swap {
+        Some(TiledPlacementTarget::Swap {
             target_pane_id: swap_slot.pane_id,
         })
     }
@@ -2342,7 +2342,7 @@ fn find_mouse_insertion_target(
     destination_size: Size,
     destination_tab_id: TabId,
     placement_destinations: &PlacementDestinations,
-) -> Option<PanePlacementTarget> {
+) -> Option<TiledPlacementTarget> {
     placement_destinations
         .insertion_spans
         .iter()
@@ -2357,7 +2357,7 @@ fn find_mouse_insertion_target(
                 .then_some((insertion_span, span_rect))
         })
         .min_by_key(|(_, span_rect)| span_rect.area())
-        .map(|(insertion_span, span_rect)| PanePlacementTarget::Split {
+        .map(|(insertion_span, span_rect)| TiledPlacementTarget::Split {
             destination_tab_id,
             anchor: insertion_span.anchor.clone(),
             direction: compute_nearest_edge_direction(screen_point, span_rect),

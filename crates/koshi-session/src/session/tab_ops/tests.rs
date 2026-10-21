@@ -1171,6 +1171,103 @@ fn focus_tab_skips_a_history_entry_that_is_not_a_leaf() {
     );
 }
 
+/// A tab at display `tab_index` holding one stack of `collapsed_pane_id` and
+/// `expanded_pane_id`, with `expanded_pane_id` expanded.
+fn build_stacked_tab(
+    tab_id: TabId,
+    collapsed_pane_id: PaneId,
+    expanded_pane_id: PaneId,
+    tab_index: usize,
+) -> Tab {
+    let mut tab = Tab::from_root_pane(tab_id, "code".to_owned(), tab_index, collapsed_pane_id);
+    tab.update_layout(LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+        vec![collapsed_pane_id, expanded_pane_id],
+        1,
+    )));
+    tab
+}
+
+#[test]
+fn focus_tab_skips_a_history_entry_collapsed_to_a_stack_header() {
+    // The newest history entry is a stack member collapsed to its header,
+    // which draws no content: the landing passes over it to the expanded
+    // member.
+    let (first_tab_id, target_tab_id) = (TabId::new(), TabId::new());
+    let (first_pane_id, collapsed_pane_id, expanded_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut session = build_session_with(
+        vec![
+            build_single_pane_tab(first_tab_id, first_pane_id, 0),
+            build_stacked_tab(target_tab_id, collapsed_pane_id, expanded_pane_id, 1),
+        ],
+        vec![first_pane_id, collapsed_pane_id, expanded_pane_id],
+    );
+    let target_tab = session.tabs.get_mut(&target_tab_id).unwrap();
+    target_tab.record_focus_mru(expanded_pane_id);
+    target_tab.record_focus_mru(collapsed_pane_id);
+    let client_id = attach_client_on(&mut session, first_tab_id);
+
+    let emitted_events = focus_tab(&mut session, client_id, TabTarget::Id(target_tab_id));
+
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .unwrap()
+            .get_focused_pane_id(target_tab_id),
+        Some(expanded_pane_id)
+    );
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::TabFocused(TabFocused {
+                client_id,
+                tab_id: target_tab_id,
+                previous_tab_id: first_tab_id,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: Some(target_tab_id),
+                pane_id: expanded_pane_id,
+                previous_pane_id: None,
+            }),
+        ]
+    );
+    assert_eq!(
+        session.tabs[&target_tab_id].list_focus_mru(),
+        [expanded_pane_id, collapsed_pane_id]
+    );
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+}
+
+#[test]
+fn focus_tab_without_a_focus_history_lands_on_the_expanded_stack_member() {
+    // With no focus history, the landing takes the first expanded leaf in
+    // layout order, not the collapsed member listed before it.
+    let (first_tab_id, target_tab_id) = (TabId::new(), TabId::new());
+    let (first_pane_id, collapsed_pane_id, expanded_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut session = build_session_with(
+        vec![
+            build_single_pane_tab(first_tab_id, first_pane_id, 0),
+            build_stacked_tab(target_tab_id, collapsed_pane_id, expanded_pane_id, 1),
+        ],
+        vec![first_pane_id, collapsed_pane_id, expanded_pane_id],
+    );
+    let client_id = attach_client_on(&mut session, first_tab_id);
+
+    let _ = focus_tab(&mut session, client_id, TabTarget::Id(target_tab_id));
+
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .unwrap()
+            .get_focused_pane_id(target_tab_id),
+        Some(expanded_pane_id)
+    );
+}
+
 #[test]
 fn focus_tab_lands_on_nothing_when_no_leaf_has_a_record() {
     // Every leaf of the target tab is missing from the registry: the switch

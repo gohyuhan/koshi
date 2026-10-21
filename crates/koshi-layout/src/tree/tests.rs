@@ -148,6 +148,82 @@ fn an_empty_split_has_no_leaves() {
 }
 
 #[test]
+fn expanded_leaves_of_a_tree_with_no_stack_are_every_leaf() {
+    let (left_pane_id, upper_right_pane_id, lower_right_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let layout_tree =
+        build_nested_layout_tree(left_pane_id, upper_right_pane_id, lower_right_pane_id);
+
+    assert_eq!(
+        layout_tree.list_expanded_leaf_pane_ids(),
+        [left_pane_id, upper_right_pane_id, lower_right_pane_id]
+    );
+    assert_eq!(
+        LayoutNode::Pane(left_pane_id).list_expanded_leaf_pane_ids(),
+        [left_pane_id]
+    );
+    assert_eq!(
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            Vec::new(),
+        ))
+        .list_expanded_leaf_pane_ids(),
+        []
+    );
+}
+
+#[test]
+fn expanded_leaves_skip_the_collapsed_members_of_a_stack() {
+    let (outside_pane_id, first_stack_pane_id, second_stack_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let layout_tree =
+        build_stack_beside_pane(outside_pane_id, first_stack_pane_id, second_stack_pane_id);
+
+    assert_eq!(
+        layout_tree.list_expanded_leaf_pane_ids(),
+        [outside_pane_id, first_stack_pane_id]
+    );
+}
+
+#[test]
+fn expanded_leaves_skip_every_leaf_of_a_collapsed_subtree() {
+    let (first_pane_id, nested_first_pane_id, nested_second_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut stack_node =
+        build_nested_stack_layout(first_pane_id, nested_first_pane_id, nested_second_pane_id);
+    assert_eq!(
+        LayoutNode::Split(stack_node.clone()).list_expanded_leaf_pane_ids(),
+        [nested_first_pane_id]
+    );
+
+    stack_node.active_child_index = 0;
+
+    assert_eq!(
+        LayoutNode::Split(stack_node).list_expanded_leaf_pane_ids(),
+        [first_pane_id]
+    );
+}
+
+#[test]
+fn expanded_leaves_of_a_stack_with_an_active_index_past_its_end_hold_its_last_member() {
+    let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
+    let stack_node = SplitNode {
+        direction: SplitDirection::Stacked,
+        children: vec![
+            LayoutNode::Pane(first_pane_id),
+            LayoutNode::Pane(second_pane_id),
+        ],
+        weights: vec![SizeWeight::default(); 2],
+        active_child_index: 5,
+    };
+
+    assert_eq!(
+        LayoutNode::Split(stack_node).list_expanded_leaf_pane_ids(),
+        [second_pane_id]
+    );
+}
+
+#[test]
 fn path_to_a_bare_pane_is_empty() {
     let pane_id = PaneId::new();
     assert_eq!(

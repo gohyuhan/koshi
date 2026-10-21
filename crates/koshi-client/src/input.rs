@@ -28,7 +28,7 @@ use koshi_config::types::BoundAction;
 use koshi_core::action::{ActionReference, ClientActionKind};
 use koshi_core::command::{
     Command, FocusPaneArgs, FocusTarget, MoveFloatingPaneArgs, PanePlacementAnchor,
-    PanePlacementTarget, PlacePaneArgs, PlacementRevision,
+    PanePlacementTarget, PlacePaneArgs, PlacementRevision, TiledPlacementTarget,
 };
 use koshi_core::geometry::{Direction, Point, Rect};
 use koshi_core::ids::{CommandId, PaneId, TabId};
@@ -41,7 +41,7 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::neighbor::select_directional_neighbor;
 use koshi_layout::placement::{
     is_same_tab_placement_noop as is_layout_placement_noop, list_placement_destinations,
-    InsertionSpan, PlacementDestinations,
+    InsertionSpan, PlacementDestinations, PlacementTarget,
 };
 use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
 use koshi_renderer::snapshot::MouseFrame;
@@ -352,6 +352,31 @@ impl Client {
                 }
                 PlacementInputAction::Consumed
             }
+            ClientActionKind::UndockOrDockPane => self.submit_undock_pane(),
+        }
+    }
+
+    /// Send `PlacePane` that floats the pane holding this viewer's input in
+    /// the newest painted frame at the default placement, with no expected
+    /// placement revision. Returns `Consumed`, sending nothing, when that
+    /// frame focuses no pane.
+    ///
+    /// `<C-p> u` with tiled pane `pane-7` focused sends
+    /// `PlacePane { source_pane_id: pane-7, placement_target: Floating {
+    /// top_left_cell: None }, expected_placement_revision: None }`.
+    fn submit_undock_pane(&self) -> PlacementInputAction {
+        let Some(source_pane_id) = self.focused_pane_id else {
+            return PlacementInputAction::Consumed;
+        };
+        PlacementInputAction::SubmitCommand {
+            command_id: CommandId::new(),
+            command: Command::PlacePane(PlacePaneArgs {
+                source_pane_id,
+                placement_target: PanePlacementTarget::Floating {
+                    top_left_cell: None,
+                },
+                expected_placement_revision: None,
+            }),
         }
     }
 
@@ -768,13 +793,13 @@ impl Client {
         };
         let is_whole_tab_target_selected = matches!(
             placement_mode.placement_target,
-            Some(PanePlacementTarget::Split {
+            Some(TiledPlacementTarget::Split {
                 anchor: PanePlacementAnchor::Tab,
                 ..
             })
         );
         let placement_target = if is_insertion_target && is_whole_tab_target_selected {
-            Some(PanePlacementTarget::Split {
+            Some(TiledPlacementTarget::Split {
                 destination_tab_id,
                 anchor: PanePlacementAnchor::Tab,
                 direction,
@@ -806,13 +831,13 @@ impl Client {
                     &placement_destinations.insertion_spans,
                     target_pane_id,
                 )
-                .map(|insertion_span| PanePlacementTarget::Split {
+                .map(|insertion_span| TiledPlacementTarget::Split {
                     destination_tab_id,
                     anchor: insertion_span.anchor.clone(),
                     direction,
                 })
             } else {
-                Some(PanePlacementTarget::Swap { target_pane_id })
+                Some(TiledPlacementTarget::Swap { target_pane_id })
             }
         };
         let placement_target = match placement_target {
@@ -857,7 +882,7 @@ impl Client {
         )
         .insertion_spans;
         insertion_spans.retain(|insertion_span| {
-            let placement_target = PanePlacementTarget::Split {
+            let placement_target = TiledPlacementTarget::Split {
                 destination_tab_id,
                 anchor: insertion_span.anchor.clone(),
                 direction: placement_direction,
@@ -880,7 +905,7 @@ impl Client {
         let next_span_index =
             current_span_index.map_or(0, |span_index| (span_index + 1) % insertion_spans.len());
         let insertion_span = &insertion_spans[next_span_index];
-        let placement_target = PanePlacementTarget::Split {
+        let placement_target = TiledPlacementTarget::Split {
             destination_tab_id,
             anchor: insertion_span.anchor.clone(),
             direction: placement_direction,
@@ -913,7 +938,7 @@ impl Client {
             return;
         }
         placement_mode.placement_direction = Direction::Right;
-        placement_mode.placement_target = Some(PanePlacementTarget::Split {
+        placement_mode.placement_target = Some(TiledPlacementTarget::Split {
             destination_tab_id: placement_snapshot.destination_tab_id,
             anchor: PanePlacementAnchor::Tab,
             direction: Direction::Right,
@@ -948,7 +973,7 @@ impl Client {
         }
         let command = Command::PlacePane(PlacePaneArgs {
             source_pane_id: placement_mode.source_pane_id,
-            placement_target,
+            placement_target: PanePlacementTarget::Tiled(placement_target),
             expected_placement_revision: Some(PlacementRevision {
                 session_revision: self.placement_state.session_placement_revision,
                 client_revision: self.placement_state.client_placement_revision,
@@ -1125,12 +1150,12 @@ impl Client {
 /// Return whether an interactive target preserves the source tab's layout.
 pub(crate) fn is_same_tab_placement_noop(
     placement_snapshot: &PanePlacementSnapshot,
-    placement_target: &PanePlacementTarget,
+    placement_target: &TiledPlacementTarget,
 ) -> bool {
     if placement_snapshot.source_tab_id != placement_snapshot.destination_tab_id {
         return false;
     }
-    if let PanePlacementTarget::Split {
+    if let TiledPlacementTarget::Split {
         destination_tab_id, ..
     } = placement_target
     {
@@ -1138,7 +1163,7 @@ pub(crate) fn is_same_tab_placement_noop(
             return false;
         }
     }
-    let layout_target = crate::terminal::build_layout_placement_target(placement_target);
+    let layout_target = PlacementTarget::from_tiled_placement_target(placement_target);
     let source_tab_snapshot = &placement_snapshot.source_tab_snapshot;
     let tab_rect = Rect::from_size_at_origin(source_tab_snapshot.tab_size);
     let pane_sizing = PaneSizing {
@@ -1199,20 +1224,20 @@ pub(crate) fn build_placement_destinations(
 /// `candidate_pane_rects`, where a collapsed stack member's slot is its header
 /// strip, or a group's or the tab's span from `insertion_spans`.
 fn find_placement_target_rect(
-    placement_target: &PanePlacementTarget,
+    placement_target: &TiledPlacementTarget,
     candidate_pane_rects: &[(PaneId, Rect)],
     insertion_spans: &[InsertionSpan],
 ) -> Option<Rect> {
     match placement_target {
-        PanePlacementTarget::Swap { target_pane_id }
-        | PanePlacementTarget::Split {
+        TiledPlacementTarget::Swap { target_pane_id }
+        | TiledPlacementTarget::Split {
             anchor: PanePlacementAnchor::Pane(target_pane_id),
             ..
         } => candidate_pane_rects
             .iter()
             .find(|(pane_id, _)| pane_id == target_pane_id)
             .map(|(_, pane_rect)| *pane_rect),
-        PanePlacementTarget::Split {
+        TiledPlacementTarget::Split {
             anchor: PanePlacementAnchor::Group(pane_ids),
             ..
         } => insertion_spans
@@ -1221,7 +1246,7 @@ fn find_placement_target_rect(
                 insertion_span.anchor == PanePlacementAnchor::Group(pane_ids.clone())
             })
             .map(|insertion_span| insertion_span.span_rect),
-        PanePlacementTarget::Split {
+        TiledPlacementTarget::Split {
             anchor: PanePlacementAnchor::Tab,
             ..
         } => insertion_spans
@@ -1244,7 +1269,7 @@ fn find_directional_target_pane_id(
     placement_destinations: &PlacementDestinations,
     destination_tab_snapshot: &PanePlacementTabSnapshot,
     source_pane_id: PaneId,
-    current_placement_target: Option<&PanePlacementTarget>,
+    current_placement_target: Option<&TiledPlacementTarget>,
     direction: Direction,
 ) -> Option<PaneId> {
     let mut candidate_pane_rects: Vec<(PaneId, Rect)> = placement_destinations
@@ -1308,13 +1333,13 @@ fn compute_span_cell_count(insertion_span: &InsertionSpan) -> u32 {
 
 /// Return the insertion anchor named by a placement target.
 fn resolve_placement_target_anchor(
-    placement_target: &PanePlacementTarget,
+    placement_target: &TiledPlacementTarget,
 ) -> Option<PanePlacementAnchor> {
     match placement_target {
-        PanePlacementTarget::Swap { target_pane_id } => {
+        TiledPlacementTarget::Swap { target_pane_id } => {
             Some(PanePlacementAnchor::Pane(*target_pane_id))
         }
-        PanePlacementTarget::Split { anchor, .. } => Some(anchor.clone()),
+        TiledPlacementTarget::Split { anchor, .. } => Some(anchor.clone()),
     }
 }
 

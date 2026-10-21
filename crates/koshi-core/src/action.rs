@@ -321,6 +321,12 @@ pub enum ClientActionKind {
     ConfirmFloatingPaneMove,
     /// Discard the draft and leave floating pane move mode.
     CancelFloatingPaneMove,
+    /// Undock the pane that takes the viewer's input: send a
+    /// [`PlacePane`](crate::command::Command::PlacePane) whose target is
+    /// [`PanePlacementTarget::Floating`](crate::command::PanePlacementTarget::Floating)
+    /// with no top-left cell and no expected placement revision. A frame that
+    /// focuses no pane sends nothing.
+    UndockOrDockPane,
 }
 
 /// Everything the registry knows about one action: how to show it, what it can
@@ -529,6 +535,14 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreClient(ClientActionKind::BeginPanePlacement),
+        ),
+        build_core_action_seed(
+            "undock-or-dock-pane",
+            "Undock Or Dock Pane",
+            "Make the focused tiled or stacked pane a floating pane",
+            PaneSession,
+            vec![Pane],
+            CoreClient(ClientActionKind::UndockOrDockPane),
         ),
         build_core_action_seed(
             "select-pane-target-left",

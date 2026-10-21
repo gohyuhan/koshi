@@ -101,8 +101,8 @@ use koshi_config::layer::{PartialColorPalette, PartialKeybindingsConfig, Partial
 use koshi_config::types::RgbColor;
 use koshi_core::command::{
     ClearSelectionArgs, Command, CommandEnvelope, CommandSource, FocusPaneArgs, FocusTarget,
-    NewPaneArgs, NewPanePlacement, PanePlacementAnchor, PanePlacementTarget, ScrollPaneArgs,
-    SetSelectionArgs, VisualCommand,
+    NewPaneArgs, NewPanePlacement, PanePlacementAnchor, ScrollPaneArgs, SetSelectionArgs,
+    TiledPlacementTarget, VisualCommand,
 };
 use koshi_core::geometry::{Direction, PaneArea, Rect as CoreRect, Size, SplitDirection};
 use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
@@ -3555,7 +3555,7 @@ fn proposed_same_tab_swap_replaces_slots_without_mutating_the_snapshot() {
 
     let proposed_snapshot = build_proposed_placement_snapshot(
         &placement_snapshot,
-        &PanePlacementTarget::Swap { target_pane_id },
+        &TiledPlacementTarget::Swap { target_pane_id },
     )
     .expect("the swap target is in the tab");
 
@@ -3583,7 +3583,7 @@ fn placement_interpolation_returns_both_ends_and_the_exact_midpoint() {
         build_same_tab_placement_snapshot(tab_id, source_pane_id, target_pane_id);
     let proposed_snapshot = build_proposed_placement_snapshot(
         &placement_snapshot,
-        &PanePlacementTarget::Swap { target_pane_id },
+        &TiledPlacementTarget::Swap { target_pane_id },
     )
     .expect("the swap target is in the tab");
     let halfway_snapshot =
@@ -3628,7 +3628,7 @@ fn pane_insertion_preview_shows_both_messages_and_terminal_contents() {
     let target_pane_id = PaneId::new();
     let placement_snapshot =
         build_same_tab_placement_snapshot(tab_id, source_pane_id, target_pane_id);
-    let placement_target = PanePlacementTarget::Split {
+    let placement_target = TiledPlacementTarget::Split {
         destination_tab_id: tab_id,
         anchor: PanePlacementAnchor::Pane(target_pane_id),
         direction: Direction::Down,
@@ -3775,7 +3775,7 @@ fn placement_render_snapshot_replaces_the_active_pane_layout() {
         build_same_tab_placement_snapshot(tab_id, source_pane_id, target_pane_id);
     let proposed_snapshot = build_proposed_placement_snapshot(
         &placement_snapshot,
-        &PanePlacementTarget::Swap { target_pane_id },
+        &TiledPlacementTarget::Swap { target_pane_id },
     )
     .expect("the test target is in the source tab");
     render_snapshot.session_snapshot.active_tab_snapshot =
@@ -3952,7 +3952,7 @@ fn target_outline_skips_a_group_member_with_an_empty_rect() {
         });
     let tab_size = placement_tab_snapshot.tab_snapshot.tab_size;
     let layout_rect = Rect::new(0, 0, tab_size.column_count, tab_size.row_count);
-    let placement_target = PanePlacementTarget::Split {
+    let placement_target = TiledPlacementTarget::Split {
         destination_tab_id: tab_id,
         anchor: PanePlacementAnchor::Group(vec![right_pane_id, collapsed_pane_id]),
         direction: Direction::Right,

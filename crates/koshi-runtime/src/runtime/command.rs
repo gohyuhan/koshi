@@ -31,9 +31,10 @@ use koshi_core::{
         CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
         LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs,
         NewPanePlacement, NewTabArgs, PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs,
-        ResizePaneArgs, ScrollPaneArgs, Selection, SelectionKind, SetAllFloatingPanesMinimizedArgs,
-        SetPaneMinimizedArgs, SetPanePinnedArgs, SetSelectionArgs, SwitchSessionArgs, TabTarget,
-        ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
+        PlacementRevision, ResizePaneArgs, ScrollPaneArgs, Selection, SelectionKind,
+        SetAllFloatingPanesMinimizedArgs, SetPaneMinimizedArgs, SetPanePinnedArgs,
+        SetSelectionArgs, SwitchSessionArgs, TabTarget, TiledPlacementTarget, ToggleLockModeArgs,
+        VisualCommand, WriteToPaneArgs,
     },
     constant::GRACEFUL_TIMEOUT_DURATION,
     event::{
@@ -71,10 +72,8 @@ use koshi_session::session::{
     focus::build_pane_focused_event,
     lifecycle::SessionLifecycle,
     pane_ops::{self, NewPaneSpec},
-    placement::commit_cross_tab_placement,
-    state::{
-        compute_floating_pane_minimum_size, solve_floating_pane_size, FloatingMember, Session,
-    },
+    placement::{commit_cross_tab_placement, commit_undock_placement, PlacementCommitError},
+    state::{compute_floating_pane_minimum_size, FloatingMember, Session},
     tab_ops,
 };
 
@@ -451,6 +450,14 @@ struct PlacePaneTarget {
     client_id: ClientId,
 }
 
+/// The resolved source tab and acting client of an undock: a
+/// [`Command::PlacePane`] whose target is [`PanePlacementTarget::Floating`].
+struct UndockPaneTarget {
+    session_id: SessionId,
+    source_tab_id: TabId,
+    client_id: ClientId,
+}
+
 impl Server {
     /// Dispatch one command and report its outcome.
     ///
@@ -735,7 +742,7 @@ impl Server {
 
     /// Mark the process for teardown, keeping the graceful window: the event loop exits as above,
     /// and teardown asks each pane's process group to stop and waits up to
-    /// [`GRACEFUL_TIMEOUT_DURATION`](koshi_core::constant::GRACEFUL_TIMEOUT_DURATION) before
+    /// [`GRACEFUL_TIMEOUT_DURATION`] before
     /// group-killing it; a stop request that cannot be delivered goes straight to the group-kill.
     pub(crate) fn request_graceful_quit(&mut self) {
         self.is_quit_requested = true;
@@ -1062,13 +1069,14 @@ impl Server {
     ///
     /// First sets [`Session::get_floating_cell_size`] on each floating pane's
     /// terminal engine; with no reported cell size, each engine keeps its own.
-    /// With no [`Session::get_shared_floating_viewport`] — no client attached,
-    /// or no client with a floating viewport — every solved size and every PTY
-    /// size stays as it is. Otherwise [`FloatingSet::update_member_sizes`]
-    /// solves each pane with the pane minimum of [`Server::get_pane_sizing`],
-    /// and each pane's PTY takes [`compute_floating_pane_content_size`] of its
-    /// outer size: `40x12` → `38x8`. A session this server does not hold
-    /// changes nothing.
+    /// With a [`Session::get_shared_floating_viewport`],
+    /// [`FloatingSet::update_member_sizes`] solves each pane with the pane
+    /// minimum of [`Server::get_pane_sizing`]. With none — no client attached,
+    /// or no client with a floating viewport — every solved size stays as it
+    /// is. Then each pane's PTY takes [`compute_floating_pane_content_size`] of
+    /// its solved outer size: `40x12` → `38x8`. A pane undocked while no client
+    /// has a floating viewport resizes from its tiled size to the floating
+    /// minimum. A session this server does not hold changes nothing.
     ///
     /// [`FloatingSet::update_member_sizes`]: koshi_session::session::state::FloatingSet::update_member_sizes
     fn reflow_floating_panes(
@@ -1091,12 +1099,11 @@ impl Server {
                 }
             }
         }
-        let Some(shared_floating_viewport) = session.get_shared_floating_viewport() else {
-            return;
-        };
-        session
-            .floating_set
-            .update_member_sizes(shared_floating_viewport, pane_minimum_size);
+        if let Some(shared_floating_viewport) = session.get_shared_floating_viewport() {
+            session
+                .floating_set
+                .update_member_sizes(shared_floating_viewport, pane_minimum_size);
+        }
         let content_rects: Vec<(PaneId, Option<Rect>)> = session
             .floating_set
             .list_members()

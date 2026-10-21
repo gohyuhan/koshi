@@ -474,7 +474,7 @@ fn focus_repair_reaches_a_client_viewing_another_tab() {
 }
 
 #[test]
-fn removing_a_focused_pane_with_no_room_to_refocus_clears_focus() {
+fn removing_a_focused_pane_with_no_room_to_refocus_lands_on_the_surviving_pane() {
     let tab_id = TabId::new();
     let (removed_pane_id, surviving_pane_id) = (PaneId::new(), PaneId::new());
     let mut session = build_session_with(
@@ -492,8 +492,7 @@ fn removing_a_focused_pane_with_no_room_to_refocus_clears_focus() {
     let client_id = client.get_client_id();
     session.attach_client(client);
 
-    // A rect narrower than `MIN_PANE_SIZE` suppresses the survivor, so focus
-    // recovery finds no focusable pane though the tab still holds one.
+    // A rect narrower than `MIN_PANE_SIZE` leaves the survivor no room.
     let tiny = Rect::from_size_at_origin(Size {
         column_count: 1,
         row_count: 1,
@@ -510,19 +509,189 @@ fn removing_a_focused_pane_with_no_room_to_refocus_clears_focus() {
         None,
     );
 
-    // The overlay is reported with the viewport and the two-row fallback area,
-    // and the client's stale focus on the gone pane is cleared.
-    let entered = emitted_events
-        .iter()
-        .find_map(|event| match event {
-            Event::TerminalTooSmallEntered(entered) => Some(entered),
-            _ => None,
-        })
-        .expect("the too-small event was emitted");
-    assert_eq!(entered.client_id, client_id);
-    assert_eq!(entered.viewport_size, TEST_VIEWPORT_SIZE);
-    assert_eq!(entered.pane_area, None);
-    assert_eq!(entered.cause, TerminalTooSmallCause::Terminal);
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::PaneClosing(PaneClosing {
+                pane_id: removed_pane_id
+            }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: removed_pane_id,
+                tab_id: Some(tab_id),
+            }),
+            Event::LayoutChanged(LayoutChanged { tab_id }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: Some(tab_id),
+                pane_id: surviving_pane_id,
+                previous_pane_id: Some(removed_pane_id),
+            }),
+            Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
+                client_id,
+                viewport_size: TEST_VIEWPORT_SIZE,
+                pane_area: None,
+                cause: TerminalTooSmallCause::Terminal,
+            }),
+        ]
+    );
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .unwrap()
+            .get_focused_pane_id(tab_id),
+        Some(surviving_pane_id)
+    );
+    assert_eq!(
+        session.tabs[&tab_id].list_focus_mru().first(),
+        Some(&surviving_pane_id)
+    );
+    assert_eq!(
+        session.tabs[&tab_id].get_layout_tree().list_leaf_pane_ids(),
+        vec![surviving_pane_id]
+    );
+}
+
+#[test]
+fn removing_a_focused_stack_member_with_no_room_lands_on_the_expanded_member() {
+    // Stack `[A, B, C]`, `C` expanded, focus history `C, A, B`. Removing `C`
+    // expands `B`. With no room for any pane, the landing passes over `A`,
+    // the newer history entry that stays collapsed to its header.
+    let tab_id = TabId::new();
+    let (first_pane_id, second_pane_id, removed_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut tab = build_single_pane_tab(tab_id, first_pane_id);
+    tab.update_layout(LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+        vec![first_pane_id, second_pane_id, removed_pane_id],
+        2,
+    )));
+    tab.record_focus_mru(second_pane_id);
+    tab.record_focus_mru(first_pane_id);
+    tab.record_focus_mru(removed_pane_id);
+    let mut session = build_session_with(
+        vec![tab],
+        vec![
+            PaneRecord::from_terminal_pane(first_pane_id),
+            PaneRecord::from_terminal_pane(second_pane_id),
+            PaneRecord::from_terminal_pane(removed_pane_id),
+        ],
+    );
+    let client = build_focused_client(session.session_id, tab_id, removed_pane_id);
+    let client_id = client.get_client_id();
+    session.attach_client(client);
+
+    // A rect narrower than `MIN_PANE_SIZE` leaves no member room.
+    let tiny = Rect::from_size_at_origin(Size {
+        column_count: 1,
+        row_count: 1,
+    });
+    let emitted_events = remove_pane_cascade(
+        &mut session,
+        tab_id,
+        removed_pane_id,
+        tiny,
+        PaneSizing {
+            minimum_size: MIN_PANE_SIZE,
+            gap_cell_count: 0,
+        },
+        None,
+    );
+
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::PaneClosing(PaneClosing {
+                pane_id: removed_pane_id
+            }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: removed_pane_id,
+                tab_id: Some(tab_id),
+            }),
+            Event::LayoutChanged(LayoutChanged { tab_id }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: Some(tab_id),
+                pane_id: second_pane_id,
+                previous_pane_id: Some(removed_pane_id),
+            }),
+            Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
+                client_id,
+                viewport_size: TEST_VIEWPORT_SIZE,
+                pane_area: None,
+                cause: TerminalTooSmallCause::Terminal,
+            }),
+        ]
+    );
+    let layout_tree = session.tabs[&tab_id].get_layout_tree();
+    assert_eq!(
+        layout_tree.list_leaf_pane_ids(),
+        vec![first_pane_id, second_pane_id]
+    );
+    assert_eq!(
+        layout_tree.list_expanded_leaf_pane_ids(),
+        vec![second_pane_id]
+    );
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .unwrap()
+            .get_focused_pane_id(tab_id),
+        Some(second_pane_id)
+    );
+    assert_eq!(
+        session.tabs[&tab_id].list_focus_mru(),
+        [second_pane_id, first_pane_id]
+    );
+}
+
+#[test]
+fn removing_a_focused_pane_whose_survivors_have_no_pane_record_clears_focus() {
+    let tab_id = TabId::new();
+    let (removed_pane_id, unrecorded_pane_id) = (PaneId::new(), PaneId::new());
+    let mut session = build_session_with(
+        vec![build_two_pane_tab(
+            tab_id,
+            removed_pane_id,
+            unrecorded_pane_id,
+        )],
+        vec![PaneRecord::from_terminal_pane(removed_pane_id)],
+    );
+    let client = build_focused_client(session.session_id, tab_id, removed_pane_id);
+    let client_id = client.get_client_id();
+    session.attach_client(client);
+
+    let emitted_events = remove_pane_cascade(
+        &mut session,
+        tab_id,
+        removed_pane_id,
+        build_viewport_rect(),
+        PaneSizing {
+            minimum_size: MIN_PANE_SIZE,
+            gap_cell_count: 0,
+        },
+        None,
+    );
+
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::PaneClosing(PaneClosing {
+                pane_id: removed_pane_id
+            }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: removed_pane_id,
+                tab_id: Some(tab_id),
+            }),
+            Event::LayoutChanged(LayoutChanged { tab_id }),
+            Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
+                client_id,
+                viewport_size: TEST_VIEWPORT_SIZE,
+                pane_area: None,
+                cause: TerminalTooSmallCause::Terminal,
+            }),
+        ]
+    );
     assert_eq!(
         session
             .clients
@@ -530,18 +699,6 @@ fn removing_a_focused_pane_with_no_room_to_refocus_clears_focus() {
             .unwrap()
             .get_focused_pane_id(tab_id),
         None
-    );
-    // The survivor stays — the tab is not empty, only unfocusable at this size.
-    assert_eq!(
-        session
-            .panes
-            .get_pane_record_by_id(surviving_pane_id)
-            .map(PaneRecord::get_pane_id),
-        Some(surviving_pane_id)
-    );
-    assert_eq!(
-        session.tabs[&tab_id].get_layout_tree().list_leaf_pane_ids(),
-        vec![surviving_pane_id]
     );
 }
 

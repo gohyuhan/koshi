@@ -267,8 +267,8 @@ pub fn close_tab(session: &mut Session, tab_id: TabId) -> Vec<Event> {
 /// tab the session no longer holds — and re-focusing the already-active tab are
 /// no-ops with no events. A pane focus this client already holds in the target
 /// tab is left as it is, so switching back restores the pane it was on. Holding
-/// none there, it lands on the target tab's focus history head, else on the
-/// first leaf in layout order, taking the first that has a registry record.
+/// none there, it lands on the target tab's landing pane
+/// ([`find_landing_pane`]).
 /// Returns one [`Event::TabFocused`], followed by one [`Event::PaneFocused`]
 /// when the client lands on a pane.
 #[must_use]
@@ -301,31 +301,39 @@ pub fn focus_tab(session: &mut Session, client_id: ClientId, tab_target: TabTarg
 }
 
 /// The pane a client landing on `tab_id` focuses: the tab's focus history
-/// newest-first, then its leaves in layout order, taking the first entry that
-/// is a leaf of `tab_id` and has a record in the pane registry.
+/// newest-first, then its expanded leaves in layout order, taking the first
+/// entry that is an expanded leaf of `tab_id`
+/// ([`LayoutNode::list_expanded_leaf_pane_ids`]) and has a record in the pane
+/// registry. A stack member collapsed to its header is never the landing pane.
 ///
-/// `None` when the session does not hold `tab_id`, and when no leaf of the tab
-/// has a registry record.
-fn find_landing_pane(session: &Session, tab_id: TabId) -> Option<PaneId> {
+/// Example: a tab holding `stack(a, b expanded)` with focus history `a, b`
+/// lands on `b`.
+///
+/// `None` when the session does not hold `tab_id`, and when no expanded leaf
+/// of the tab has a registry record.
+///
+/// [`LayoutNode::list_expanded_leaf_pane_ids`]: koshi_layout::tree::LayoutNode::list_expanded_leaf_pane_ids
+#[must_use]
+pub fn find_landing_pane(session: &Session, tab_id: TabId) -> Option<PaneId> {
     let tab = session.tabs.get(&tab_id)?;
-    let leaf_pane_ids = tab.get_layout_tree().list_leaf_pane_ids();
+    let expanded_leaf_pane_ids = tab.get_layout_tree().list_expanded_leaf_pane_ids();
     tab.list_focus_mru()
         .iter()
         .copied()
-        .chain(leaf_pane_ids.iter().copied())
+        .chain(expanded_leaf_pane_ids.iter().copied())
         .find(|pane_id| {
-            leaf_pane_ids.contains(pane_id)
+            expanded_leaf_pane_ids.contains(pane_id)
                 && session.panes.get_pane_record_by_id(*pane_id).is_some()
         })
 }
 
-/// Focus `tab_id`'s landing pane for `client_id` and record it as the tab's
-/// most-recent focus, appending one [`Event::PaneFocused`] carrying no prior
-/// pane to `events`.
+/// Focus `tab_id`'s landing pane ([`find_landing_pane`]) for `client_id` and
+/// record it as the tab's most-recent focus, appending one
+/// [`Event::PaneFocused`] carrying no prior pane to `emitted_events`.
 ///
 /// Changes nothing and appends nothing when the client already focuses a pane
 /// in `tab_id`, when it is not attached, or when the tab has no landing pane.
-fn land_focus(
+pub fn land_focus(
     session: &mut Session,
     client_id: ClientId,
     tab_id: TabId,

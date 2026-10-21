@@ -24,7 +24,7 @@ use ratatui::widgets::Widget;
 use crate::attach::ViewerPaint;
 use crate::input::InputReadClock;
 use crate::{is_focused_pane_floating, Client};
-use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
+use koshi_core::command::{PanePlacementAnchor, TiledPlacementTarget};
 use koshi_core::constant::limit_viewport_size;
 use koshi_core::geometry::{PixelCellSize, Point, Rect as CoreRect, Size};
 use koshi_core::ids::{ClientId, PaneId};
@@ -46,9 +46,9 @@ use koshi_layout::placement::{place_pane_across_tabs, place_pane_within_tab, Pla
 use koshi_layout::solver::solve_layout_with_mode;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{
-    CommittedRegions, CursorStyle, KeymapHints, PanePlacementPresentation, PaneSlot, PaneSnapshot,
-    PlacementPaneSnapshot, PlacementSnapshot, PlacementTabSnapshot, RenderSnapshot, TabSnapshot,
-    ViewerChrome,
+    CommittedRegions, CursorStyle, FloatingPaneSlot, KeymapHints, PanePlacementPresentation,
+    PaneSlot, PaneSnapshot, PlacementPaneSnapshot, PlacementSnapshot, PlacementTabSnapshot,
+    RenderSnapshot, TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{
@@ -133,7 +133,7 @@ pub(crate) struct SnapshotWidget<'a> {
     /// The placement snapshot at the current animation time.
     pub(crate) placement_display_snapshot: Option<&'a PlacementSnapshot>,
     /// The target selected by the viewer's placement interaction.
-    pub(crate) placement_target: Option<&'a PanePlacementTarget>,
+    pub(crate) placement_target: Option<&'a TiledPlacementTarget>,
     /// The whole-pane visual explanation for the viewer's placement.
     pub(crate) placement_presentation: Option<&'a PanePlacementPresentation>,
     /// The rows of the buffer the frame draws.
@@ -274,17 +274,74 @@ pub(crate) fn find_displayed_placement_tab_snapshot(
     }
 }
 
-/// Build the frame shown while a committed placement slides: `render_snapshot`
-/// with `animated_tab_snapshot` as its active tab.
+/// Build the frame shown while a committed placement or a floated pane
+/// slides: `render_snapshot` with `animated_tab_snapshot`, when `Some`, as its
+/// active tab, and with each of `animated_floating_pane_slots` in place of the
+/// floating pane slot that names the same pane.
 pub(crate) fn build_committed_placement_render_snapshot(
     render_snapshot: &RenderSnapshot,
-    animated_tab_snapshot: TabSnapshot,
+    animated_tab_snapshot: Option<TabSnapshot>,
+    animated_floating_pane_slots: &[FloatingPaneSlot],
 ) -> RenderSnapshot {
     let mut committed_placement_render_snapshot = render_snapshot.clone();
-    committed_placement_render_snapshot
+    if let Some(animated_tab_snapshot) = animated_tab_snapshot {
+        committed_placement_render_snapshot
+            .session_snapshot
+            .active_tab_snapshot = animated_tab_snapshot;
+    }
+    for floating_pane_slot in &mut committed_placement_render_snapshot
         .session_snapshot
-        .active_tab_snapshot = animated_tab_snapshot;
+        .floating_pane_slots
+    {
+        let animated_floating_pane_slot =
+            animated_floating_pane_slots
+                .iter()
+                .find(|animated_floating_pane_slot| {
+                    animated_floating_pane_slot.pane_id == floating_pane_slot.pane_id
+                });
+        if let Some(animated_floating_pane_slot) = animated_floating_pane_slot {
+            *floating_pane_slot = *animated_floating_pane_slot;
+        }
+    }
     committed_placement_render_snapshot
+}
+
+/// The outer box of `pane_id` in `tab_snapshot`, counted from the origin of a
+/// pane area of `pane_area_size` that draws the tab centered: the tab's slot
+/// moved by the tab's letterbox offset. `None` when the tab shows no content
+/// for the pane.
+///
+/// A `40x22` slot at `(40, 0)` in an `80x22` tab drawn in a `100x30` pane area
+/// gives `(50, 4)` `40x22`.
+pub(crate) fn find_tiled_pane_rect_in_pane_area(
+    tab_snapshot: &TabSnapshot,
+    pane_area_size: Size,
+    pane_id: PaneId,
+) -> Option<CoreRect> {
+    let pane_slot = tab_snapshot
+        .pane_slots
+        .iter()
+        .find(|pane_slot| pane_slot.pane_id == pane_id && pane_slot.is_visible)?;
+    let tab_area = koshi_renderer::compute_content_rect(
+        Rect {
+            x: 0,
+            y: 0,
+            width: pane_area_size.column_count,
+            height: pane_area_size.row_count,
+        },
+        tab_snapshot.tab_size,
+    );
+    Some(CoreRect::from_origin_and_size(
+        Point {
+            column: pane_slot
+                .outer_rect
+                .origin
+                .column
+                .saturating_add(tab_area.x),
+            row: pane_slot.outer_rect.origin.row.saturating_add(tab_area.y),
+        },
+        pane_slot.outer_rect.size,
+    ))
 }
 
 /// Draw the target border at the destination pane's original slot. If
@@ -295,13 +352,13 @@ fn draw_placement_target_outline(
     placement_snapshot: &PlacementSnapshot,
     placement_display_snapshot: &PlacementSnapshot,
     displayed_render_snapshot: &RenderSnapshot,
-    placement_target: &PanePlacementTarget,
+    placement_target: &TiledPlacementTarget,
     theme: &Theme,
     committed_regions: &CommittedRegions,
     render_area: Rect,
     render_buffer: &mut Buffer,
 ) {
-    if let PanePlacementTarget::Split {
+    if let TiledPlacementTarget::Split {
         destination_tab_id, ..
     } = placement_target
     {
@@ -372,7 +429,7 @@ fn is_point_on_rect_border(column_index: u16, row_index: u16, pane_rect: Rect) -
 /// Build the local proposed layouts without changing the retained snapshot.
 pub(crate) fn build_placement_preview_snapshot(
     placement_snapshot: &PlacementSnapshot,
-    placement_target: Option<&PanePlacementTarget>,
+    placement_target: Option<&TiledPlacementTarget>,
 ) -> PlacementSnapshot {
     placement_target
         .and_then(|placement_target| {
@@ -383,10 +440,10 @@ pub(crate) fn build_placement_preview_snapshot(
 
 fn build_proposed_placement_snapshot(
     placement_snapshot: &PlacementSnapshot,
-    placement_target: &PanePlacementTarget,
+    placement_target: &TiledPlacementTarget,
 ) -> Option<PlacementSnapshot> {
-    let layout_target = build_layout_placement_target(placement_target);
-    if let PanePlacementTarget::Split {
+    let layout_target = PlacementTarget::from_tiled_placement_target(placement_target);
+    if let TiledPlacementTarget::Split {
         destination_tab_id, ..
     } = placement_target
     {
@@ -608,8 +665,8 @@ fn interpolate_placement_tab_snapshot(
     animated_tab_snapshot
 }
 
-/// Interpolate the committed tab a viewer draws while another viewer's
-/// accepted pane placement slides into place.
+/// Interpolate the committed tab a viewer draws while a committed pane
+/// placement slides into place.
 ///
 /// A pane with a content rect in both tabs moves from its `from_tab_snapshot`
 /// rects to its `to_tab_snapshot` rects. Every other pane keeps its
@@ -691,7 +748,7 @@ fn interpolate_optional_rect(
 
 /// Interpolate a rectangle drawn in both frames: origin and size each move
 /// `progress` of the way from `from_rect` to `to_rect`.
-fn interpolate_rect(from_rect: CoreRect, to_rect: CoreRect, progress: f32) -> CoreRect {
+pub(crate) fn interpolate_rect(from_rect: CoreRect, to_rect: CoreRect, progress: f32) -> CoreRect {
     CoreRect::from_origin_and_size(
         interpolate_point(from_rect.origin, to_rect.origin, progress),
         interpolate_size(from_rect.size, to_rect.size, progress),
@@ -722,25 +779,6 @@ fn interpolate_coordinate(from_coordinate: u16, to_coordinate: u16, progress: f3
     (from_coordinate + (to_coordinate - from_coordinate) * progress)
         .round()
         .clamp(0.0, f32::from(u16::MAX)) as u16
-}
-
-/// Convert a placement target into the layout crate's `PlacementTarget`:
-/// `Swap` stays `Swap`, and `Split` becomes `Insert` with the same anchor and
-/// direction.
-pub(crate) fn build_layout_placement_target(
-    placement_target: &PanePlacementTarget,
-) -> PlacementTarget {
-    match placement_target {
-        PanePlacementTarget::Swap { target_pane_id } => PlacementTarget::Swap {
-            target_pane_id: *target_pane_id,
-        },
-        PanePlacementTarget::Split {
-            anchor, direction, ..
-        } => PlacementTarget::Insert {
-            anchor: anchor.clone(),
-            direction: *direction,
-        },
-    }
 }
 
 /// Build a solved tab snapshot for one proposed layout tree. Returns `None` when a
@@ -889,13 +927,13 @@ fn project_axis(
 /// nothing. Returns `None` when no target pane covers cells.
 fn build_target_outline_rect(
     base_tab_snapshot: &PlacementTabSnapshot,
-    placement_target: &PanePlacementTarget,
+    placement_target: &TiledPlacementTarget,
     tab_size: Size,
     layout_rect: Rect,
 ) -> Option<Rect> {
     if matches!(
         placement_target,
-        PanePlacementTarget::Split {
+        TiledPlacementTarget::Split {
             anchor: PanePlacementAnchor::Tab,
             ..
         }

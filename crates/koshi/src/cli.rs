@@ -26,7 +26,7 @@ use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
     MovePaneArgs, MoveTabArgs, NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor,
     PanePlacementTarget, PlacePaneArgs, ResizePaneArgs, ScrollPaneArgs, TabTarget,
-    ToggleLockModeArgs, WriteToPaneArgs,
+    TiledPlacementTarget, ToggleLockModeArgs, WriteToPaneArgs,
 };
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{parse_owned_session_id, parse_prefixed_uuid, OwnedSessionId};
@@ -1239,14 +1239,14 @@ impl CliCommand {
                 "place-pane",
                 Command::PlacePane(PlacePaneArgs {
                     source_pane_id: *pane_id,
-                    placement_target: PanePlacementTarget::Split {
+                    placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                         destination_tab_id: resolved_targets
                             .tab_id
                             .or(resolve_tab_reference_id(&Some(tab_reference.clone())))
                             .expect("clap and target routing require --tab"),
                         anchor: PanePlacementAnchor::Tab,
                         direction: Direction::from(*direction),
-                    },
+                    }),
                     expected_placement_revision: None,
                 }),
             ),

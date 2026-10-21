@@ -25,6 +25,7 @@ use koshi_core::command::{
     CloseTabArgs, Command, CommandEnvelope, CommandSource, DetachArgs, FocusPaneArgs, FocusTabArgs,
     FocusTarget, LockModeArgs, MoveFloatingPaneArgs, NewPaneArgs, NewPanePlacement, NewTabArgs,
     PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, PlacementRevision, TabTarget,
+    TiledPlacementTarget,
 };
 use koshi_core::event::{Event, QuitCause};
 use koshi_core::geometry::{Direction, Point, Size};
@@ -1364,7 +1365,9 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
                             CommandSource::from_key_binding(client_id),
                             Command::PlacePane(PlacePaneArgs {
                                 source_pane_id,
-                                placement_target: PanePlacementTarget::Swap { target_pane_id },
+                                placement_target: PanePlacementTarget::Tiled(
+                                    TiledPlacementTarget::Swap { target_pane_id },
+                                ),
                                 expected_placement_revision: Some(PlacementRevision {
                                     session_revision: session_revision_before,
                                     client_revision: client_revision_before,
@@ -1404,7 +1407,9 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
                 source_pane_id,
                 source_tab_id: Some(active_tab_id),
                 destination_tab_id: Some(active_tab_id),
-                placement_target: PanePlacementTarget::Swap { target_pane_id },
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
+                    target_pane_id,
+                }),
             });
             for committed_client_frames in [
                 &committed_session_frames,
@@ -1537,7 +1542,9 @@ fn a_pane_swap_confirmed_before_another_viewers_new_pane_is_rejected_to_its_view
                             CommandSource::from_key_binding(client_id),
                             Command::PlacePane(PlacePaneArgs {
                                 source_pane_id,
-                                placement_target: PanePlacementTarget::Swap { target_pane_id },
+                                placement_target: PanePlacementTarget::Tiled(
+                                    TiledPlacementTarget::Swap { target_pane_id },
+                                ),
                                 expected_placement_revision: Some(PlacementRevision {
                                     session_revision: session_revision_before,
                                     client_revision: client_revision_before,
@@ -1662,11 +1669,13 @@ fn an_accepted_pane_insertion_delivers_its_frame_without_a_resize() {
                             CommandSource::from_key_binding(client_id),
                             Command::PlacePane(PlacePaneArgs {
                                 source_pane_id,
-                                placement_target: PanePlacementTarget::Split {
-                                    destination_tab_id: active_tab_id,
-                                    anchor: PanePlacementAnchor::Pane(target_pane_id),
-                                    direction: Direction::Down,
-                                },
+                                placement_target: PanePlacementTarget::Tiled(
+                                    TiledPlacementTarget::Split {
+                                        destination_tab_id: active_tab_id,
+                                        anchor: PanePlacementAnchor::Pane(target_pane_id),
+                                        direction: Direction::Down,
+                                    },
+                                ),
                                 expected_placement_revision: Some(PlacementRevision {
                                     session_revision: session_revision_before,
                                     client_revision: client_revision_before,

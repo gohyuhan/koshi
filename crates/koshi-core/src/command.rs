@@ -299,9 +299,26 @@ pub enum PanePlacementAnchor {
     Tab,
 }
 
-/// The checked destination of [`Command::PlacePane`].
+/// The checked destination of [`Command::PlacePane`]: a slot in a tab's tiled
+/// layout, or the session's floating panes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PanePlacementTarget {
+    /// Place the source pane in a tab's tiled layout.
+    Tiled(TiledPlacementTarget),
+    /// Make the tiled or stacked source pane a floating pane of its session:
+    /// undock it. The pane keeps its id, its PTY and its terminal state.
+    Floating {
+        /// The acting client's top-left cell of the floating pane, counted
+        /// from that client's pane-area origin. `None` draws the pane at that
+        /// client's default placement.
+        top_left_cell: Option<Point>,
+    },
+}
+
+/// A destination in a tab's tiled layout. Pane placement mode previews only
+/// these destinations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TiledPlacementTarget {
     /// Exchange the source pane with the pane in the destination slot.
     Swap {
         /// The pane whose slot receives the source pane.

@@ -46,7 +46,7 @@ use koshi_core::action::{
     MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT, MOVE_FLOATING_PANE_HINT, MOVE_FOCUSED_PANE_HINT,
     MOVE_TILED_PANE_HINT,
 };
-use koshi_core::command::{Command, PanePlacementTarget};
+use koshi_core::command::{Command, TiledPlacementTarget};
 use koshi_core::geometry::Direction;
 use koshi_core::key::PendingKeySequence;
 use koshi_core::lock::LockMode;
@@ -116,7 +116,7 @@ pub(crate) struct PlacementMode {
     /// The edge used by the last insertion selection.
     pub(crate) placement_direction: Direction,
     /// The checked target selected from the retained destination snapshot.
-    pub(crate) placement_target: Option<PanePlacementTarget>,
+    pub(crate) placement_target: Option<TiledPlacementTarget>,
     /// The command Enter or a mouse drop sent for `placement_target`, until the
     /// session answers it. `None` before a confirmation.
     pub(crate) pending_placement_command: Option<PendingPlacementCommand>,
@@ -297,8 +297,9 @@ pub(crate) enum PlacementInputAction {
     },
     /// Send `command` under `command_id`, issued by this viewer's key
     /// binding: the `PlacePane` that placement mode recorded as pending, the
-    /// `MoveFloatingPane` that floating pane move mode recorded as sent, or
-    /// the `FocusPane` that focuses the floating pane it selected.
+    /// `PlacePane` that floats the focused pane, the `MoveFloatingPane` that
+    /// floating pane move mode recorded as sent, or the `FocusPane` that
+    /// focuses the floating pane it selected.
     SubmitCommand {
         /// The id the command carries.
         command_id: CommandId,
@@ -938,7 +939,7 @@ impl Client {
 
     /// The checked target currently selected by placement mode.
     #[must_use]
-    pub(crate) fn get_placement_target(&self) -> Option<PanePlacementTarget> {
+    pub(crate) fn get_placement_target(&self) -> Option<TiledPlacementTarget> {
         self.placement_state
             .placement_mode
             .as_ref()

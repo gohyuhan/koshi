@@ -677,6 +677,12 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             vec![Pane],
         ),
         (
+            "core:undock-or-dock-pane".to_string(),
+            ClientActionKind::UndockOrDockPane,
+            PaneSession,
+            vec![Pane],
+        ),
+        (
             "core:select-pane-target-left".to_string(),
             ClientActionKind::SelectPaneTarget(Direction::Left),
             Client,
@@ -1021,6 +1027,7 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:select-previous-placement-tab",
         "core:toggle-lock",
         "core:toggle-pane-fullscreen",
+        "core:undock-or-dock-pane",
         "core:unlock",
         "core:write-to-pane",
     ];

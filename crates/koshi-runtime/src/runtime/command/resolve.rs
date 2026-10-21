@@ -277,9 +277,19 @@ impl Server {
             Command::MovePane(command_args) => self
                 .resolve_move_pane_target(command_args, command_source, session)
                 .map(drop),
-            Command::PlacePane(command_args) => self
-                .resolve_place_pane_target(command_args, command_source, session)
-                .map(drop),
+            Command::PlacePane(command_args) => match &command_args.placement_target {
+                PanePlacementTarget::Tiled(tiled_placement_target) => self
+                    .resolve_tiled_placement_target(
+                        command_args,
+                        tiled_placement_target,
+                        command_source,
+                        session,
+                    )
+                    .map(drop),
+                PanePlacementTarget::Floating { .. } => self
+                    .resolve_undock_pane_target(command_args, command_source, session)
+                    .map(drop),
+            },
             Command::ScrollPane(command_args) => self
                 .resolve_scroll_pane_target(command_args, command_source, session)
                 .map(drop),
@@ -423,24 +433,27 @@ impl Server {
     }
 
     /// Resolve the source pane, destination tab, and acting client of a checked
-    /// placement. A swap's destination tab is the tab of its target pane, which
-    /// may be the source tab. The destination target must stay inside the source
-    /// pane's session, and the selected client must be attached there.
-    pub(super) fn resolve_place_pane_target(
+    /// placement into a tab's tiled layout, `tiled_placement_target`. A swap's
+    /// destination tab is the tab of its target pane, which may be the source
+    /// tab. The destination target must stay inside the source pane's session,
+    /// and the selected client must be attached there
+    /// ([`Self::resolve_placement_client`]).
+    pub(super) fn resolve_tiled_placement_target(
         &self,
         command_args: &PlacePaneArgs,
+        tiled_placement_target: &TiledPlacementTarget,
         command_source: &CommandSource,
         session: Option<&Session>,
     ) -> Result<PlacePaneTarget, Rejection> {
         let source_pane_target =
             self.resolve_pane_target(Some(command_args.source_pane_id), command_source, session)?;
         let Some(source_tab_id) = source_pane_target.tab_id else {
-            let floating_source_help = match &command_args.placement_target {
-                PanePlacementTarget::Swap { .. } => format!(
+            let floating_source_help = match tiled_placement_target {
+                TiledPlacementTarget::Swap { .. } => format!(
                     "{} is floating; a swap exchanges tiled slots",
                     command_args.source_pane_id
                 ),
-                PanePlacementTarget::Split { .. } => format!(
+                TiledPlacementTarget::Split { .. } => format!(
                     "{} is floating and holds no tiled slot",
                     command_args.source_pane_id
                 ),
@@ -454,8 +467,8 @@ impl Server {
             .session_by_id
             .get(&source_pane_target.session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
-        let destination_tab_id = match &command_args.placement_target {
-            PanePlacementTarget::Swap { target_pane_id } => {
+        let destination_tab_id = match tiled_placement_target {
+            TiledPlacementTarget::Swap { target_pane_id } => {
                 let destination_pane_target = self.resolve_pane_target(
                     Some(*target_pane_id),
                     command_source,
@@ -472,7 +485,7 @@ impl Server {
                 };
                 destination_tab_id
             }
-            PanePlacementTarget::Split {
+            TiledPlacementTarget::Split {
                 destination_tab_id,
                 anchor,
                 ..
@@ -482,12 +495,104 @@ impl Server {
                 *destination_tab_id
             }
         };
+        let client_id = Self::resolve_placement_client(
+            owner_session,
+            command_args.expected_placement_revision,
+            command_source,
+        )?;
+        Ok(PlacePaneTarget {
+            session_id: source_pane_target.session_id,
+            source_tab_id,
+            destination_tab_id,
+            client_id,
+        })
+    }
+
+    /// Resolve the source pane, its tab, and the acting client of an undock:
+    /// a [`Command::PlacePane`] whose target is
+    /// [`PanePlacementTarget::Floating`].
+    ///
+    /// Each refusal is [`RejectReason::InvalidState`] and changes nothing,
+    /// checked in this order:
+    /// - a floating source: `<pane-id> is already floating`;
+    /// - a source that is the only pane of the session's only tab: `the last
+    ///   pane of the last tab cannot be undocked; a session needs one tiled
+    ///   pane`. Floating panes do not count;
+    /// - a session that holds
+    ///   [`MAX_FLOATING_PANES_PER_SESSION`](koshi_core::constant::MAX_FLOATING_PANES_PER_SESSION)
+    ///   floating panes: `a session holds at most 12 floating panes`.
+    ///
+    /// The acting client and the revision check are
+    /// [`Self::resolve_placement_client`]'s.
+    pub(super) fn resolve_undock_pane_target(
+        &self,
+        command_args: &PlacePaneArgs,
+        command_source: &CommandSource,
+        session: Option<&Session>,
+    ) -> Result<UndockPaneTarget, Rejection> {
+        let source_pane_target =
+            self.resolve_pane_target(Some(command_args.source_pane_id), command_source, session)?;
+        let Some(source_tab_id) = source_pane_target.tab_id else {
+            return Err(Rejection::from_reason_and_help(
+                RejectReason::InvalidState,
+                &format!("{} is already floating", command_args.source_pane_id),
+            ));
+        };
+        let owner_session = self
+            .session_by_id
+            .get(&source_pane_target.session_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+        let source_tab = owner_session
+            .tabs
+            .get(&source_tab_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
+        let is_last_tiled_pane = owner_session.tabs.len() == 1
+            && source_tab.get_layout_tree().list_leaf_pane_ids()
+                == vec![command_args.source_pane_id];
+        if is_last_tiled_pane {
+            return Err(Rejection::from_reason_and_help(
+                RejectReason::InvalidState,
+                &PlacementCommitError::LastTiledPane.to_string(),
+            ));
+        }
+        if owner_session.floating_set.is_full() {
+            return Err(Rejection::from_reason_and_help(
+                RejectReason::InvalidState,
+                &FloatingSetError::TooManyPanes.to_string(),
+            ));
+        }
+        let client_id = Self::resolve_placement_client(
+            owner_session,
+            command_args.expected_placement_revision,
+            command_source,
+        )?;
+        Ok(UndockPaneTarget {
+            session_id: source_pane_target.session_id,
+            source_tab_id,
+            client_id,
+        })
+    }
+
+    /// Resolve the acting client of a [`Command::PlacePane`] in
+    /// `owner_session`: the target client the command source names, else the
+    /// issuing client while it is attached there, else, for a CLI source, the
+    /// sole attached client ([`Self::resolve_view_client`]).
+    ///
+    /// With `expected_placement_revision` set, the session's placement
+    /// revision and the acting client's must equal it, else
+    /// [`RejectReason::InvalidState`] `placement preview is stale; refresh and
+    /// confirm again`.
+    fn resolve_placement_client(
+        owner_session: &Session,
+        expected_placement_revision: Option<PlacementRevision>,
+        command_source: &CommandSource,
+    ) -> Result<ClientId, Rejection> {
         let client_id = Self::resolve_view_client(
             command_source.get_target_client_id(),
             command_source,
             owner_session,
         )?;
-        if let Some(expected_placement_revision) = command_args.expected_placement_revision {
+        if let Some(expected_placement_revision) = expected_placement_revision {
             let client = Self::require_client(owner_session, client_id)?;
             if expected_placement_revision.session_revision
                 != owner_session.get_placement_revision()
@@ -499,12 +604,7 @@ impl Server {
                 ));
             }
         }
-        Ok(PlacePaneTarget {
-            session_id: source_pane_target.session_id,
-            source_tab_id,
-            destination_tab_id,
-            client_id,
-        })
+        Ok(client_id)
     }
 
     /// Resolve the client and the pane a scroll command changes: a tiled pane
@@ -898,10 +998,9 @@ impl Server {
     ///   ([`Self::resolve_view_client`]). With `client_id` unset and no client
     ///   attached, there is none.
     /// - The desired size is `size`, or [`DEFAULT_FLOATING_PANE_SIZE`]. It is
-    ///   solved against the shared floating viewport
-    ///   ([`solve_floating_pane_size`]); with no shared floating viewport the
-    ///   pane takes the floating minimum
-    ///   ([`compute_floating_pane_minimum_size`]).
+    ///   solved against the shared floating viewport; with no shared floating
+    ///   viewport the pane takes the floating minimum
+    ///   ([`Session::compute_new_floating_pane_size`]).
     /// - The PTY takes [`compute_floating_pane_content_size`] of the solved
     ///   outer size.
     /// - The designated client's position is `Moved(top_left_cell)`,
@@ -944,13 +1043,8 @@ impl Server {
             )?)
         };
         let desired_size = size.unwrap_or(DEFAULT_FLOATING_PANE_SIZE);
-        let pane_minimum_size = self.get_pane_sizing().minimum_size;
-        let solved_size = match session.get_shared_floating_viewport() {
-            Some(shared_floating_viewport) => {
-                solve_floating_pane_size(desired_size, shared_floating_viewport, pane_minimum_size)
-            }
-            None => compute_floating_pane_minimum_size(pane_minimum_size),
-        };
+        let solved_size = session
+            .compute_new_floating_pane_size(desired_size, self.get_pane_sizing().minimum_size);
         let content_size = compute_floating_pane_content_size(solved_size);
         let designated_position = match (top_left_cell, is_pinned, designated_client_id) {
             (None, false, _) => FloatingPanePosition::Default,

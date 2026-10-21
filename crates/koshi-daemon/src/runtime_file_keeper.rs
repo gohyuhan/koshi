@@ -1,8 +1,7 @@
 //! The thread that holds the runtime files of a server that runs for days:
 //! a shared `flock` on each folder that holds one of its files, and an access
-//! time [`ACCESS_TIME_LEAD_DURATION`] ahead of the clock on each file, set
-//! again every [`KEEPER_PASS_INTERVAL_DURATION`]. Modification times stay as
-//! they are.
+//! time `ACCESS_TIME_LEAD_DURATION` ahead of the clock on each file, set again
+//! every `KEEPER_PASS_INTERVAL_DURATION`. Modification times stay as they are.
 //!
 //! Example: the router's keeper starts at 12:00 on 1 March. It holds a shared
 //! lock on `/tmp/koshi-1000` and sets the access time of `router.json`,

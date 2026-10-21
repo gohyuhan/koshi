@@ -778,6 +778,7 @@ fn user_prefix_of_default_sequences_warns_without_revert() {
             build_ambiguous_prefix(Key::Char('m'), "begin-pane-placement"),
             build_ambiguous_prefix(Key::Char('n'), "new-pane"),
             build_ambiguous_prefix(Key::Char('s'), "new-pane-stacked"),
+            build_ambiguous_prefix(Key::Char('u'), "undock-or-dock-pane"),
             build_ambiguous_prefix(Key::Char('x'), "close-pane-tree"),
             build_ambiguous_prefix(Key::Named(NamedKey::Left), "focus-pane-left"),
             build_ambiguous_prefix(Key::Named(NamedKey::Right), "focus-pane-right"),
