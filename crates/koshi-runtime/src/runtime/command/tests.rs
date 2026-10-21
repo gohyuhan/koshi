@@ -1151,6 +1151,53 @@ fn write_to_a_suppressed_pane_still_reaches_its_shell() {
     );
 }
 
+#[test]
+fn keys_reach_a_pane_when_the_tab_grows_after_the_focused_pane_closed_with_no_room() {
+    let ResizeFixture {
+        mut runtime,
+        client_id,
+        root_pane_id,
+        split_pane_id,
+        ..
+    } = build_resize_fixture();
+    let small_viewport_size = Size {
+        column_count: 3,
+        row_count: 3,
+    };
+    let large_viewport_size = Size {
+        column_count: 80,
+        row_count: 24,
+    };
+    runtime.handle_client_resize(client_id, small_viewport_size, None, None);
+    runtime.handle_client_resize(client_id, large_viewport_size, None, None);
+    assert_eq!(
+        runtime.find_typed_pane(client_id),
+        Some(split_pane_id),
+        "a shrink and a regrow keep the focus on the split pane"
+    );
+
+    runtime.handle_client_resize(client_id, small_viewport_size, None, None);
+    let command_envelope =
+        build_sessionless_cli_command_envelope(Command::ClosePane(ClosePaneArgs {
+            pane_id: Some(split_pane_id),
+            should_force_close: true,
+            should_kill_process_tree: false,
+        }));
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(command_envelope)),
+        Ok(vec![
+            "PaneClosing",
+            "PaneRemoved",
+            "LayoutChanged",
+            "PaneFocused",
+            "TerminalTooSmallEntered"
+        ])
+    );
+    runtime.handle_client_resize(client_id, large_viewport_size, None, None);
+
+    assert_eq!(runtime.find_typed_pane(client_id), Some(root_pane_id));
+}
+
 /// The client's scroll offset for the pane — `0` follows live output.
 fn get_client_scroll_offset(runtime: &Server, client_id: ClientId, pane_id: PaneId) -> usize {
     runtime
@@ -13793,11 +13840,12 @@ fn a_client_viewing_another_tab_still_shrinks_every_floating_pane() {
     register_pane_record(session, other_pane_id);
     register_session_tab(session, other_tab_id, other_pane_id);
 
-    // The other tab records no focus, so bob lands on no pane, and its pane
-    // has no PTY to resize.
+    // The other tab records no focus, so bob lands on its first pane. That
+    // pane has no PTY to resize.
+    let bob_client_id = ClientId::new();
     let attach_events = runtime.handle_client_attach(
         session_id,
-        ClientId::new(),
+        bob_client_id,
         Size {
             column_count: 80,
             row_count: 24,
@@ -13811,7 +13859,15 @@ fn a_client_viewing_another_tab_still_shrinks_every_floating_pane() {
 
     assert_eq!(
         attach_events,
-        vec![build_pty_resized(floating_pane_id, 46, 9)]
+        vec![
+            Event::PaneFocused(PaneFocused {
+                client_id: bob_client_id,
+                tab_id: Some(other_tab_id),
+                pane_id: other_pane_id,
+                previous_pane_id: None,
+            }),
+            build_pty_resized(floating_pane_id, 46, 9),
+        ]
     );
 }
 
@@ -13915,6 +13971,12 @@ fn a_client_moving_to_another_session_regrows_the_floating_panes_it_left() {
         vec![
             build_pty_resized(tiled_pane_id, 118, 38),
             build_pty_resized(floating_pane_id, 70, 20),
+            Event::PaneFocused(PaneFocused {
+                client_id: bob_client_id,
+                tab_id: Some(other_tab_id),
+                pane_id: other_pane_id,
+                previous_pane_id: None,
+            }),
         ]
     );
 }
@@ -14213,6 +14275,72 @@ fn reattaching_keeps_the_pane_the_client_already_focused() {
         "a client that already focused a pane keeps it"
     );
     assert_eq!(emitted_events, Vec::new(), "no focus change is announced");
+}
+
+#[test]
+fn attaching_passes_over_a_focus_history_entry_collapsed_to_a_stack_header() {
+    // The tab is `stack(A, B expanded)` and its focus history is `A`. `A`
+    // draws only its header, so a client that lands there types into nothing.
+    let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
+    let viewport_size = Size {
+        column_count: 80,
+        row_count: 24,
+    };
+    runtime
+        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (session_id, tab_id, collapsed_pane_id) = get_only_session_slot(&runtime);
+    let expanded_pane_id = PaneId::new();
+    let session = runtime
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the session");
+    register_pane_record(session, expanded_pane_id);
+    let tab = session.tabs.get_mut(&tab_id).expect("the tab");
+    tab.update_layout(LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+        vec![collapsed_pane_id, expanded_pane_id],
+        1,
+    )));
+    assert_eq!(
+        tab.list_focus_mru(),
+        [collapsed_pane_id],
+        "test setup: the collapsed member heads the focus history"
+    );
+
+    let client_id = ClientId::new();
+    let emitted_events = runtime.handle_client_attach(
+        session_id,
+        client_id,
+        viewport_size,
+        None,
+        tab_id,
+        None,
+        SystemTime::now(),
+        false,
+    );
+
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .expect("the client attached")
+            .get_focused_pane_id(tab_id),
+        Some(expanded_pane_id)
+    );
+    assert_eq!(
+        emitted_events,
+        vec![Event::PaneFocused(PaneFocused {
+            client_id,
+            tab_id: Some(tab_id),
+            pane_id: expanded_pane_id,
+            previous_pane_id: None,
+        })]
+    );
+    assert_eq!(
+        session.tabs[&tab_id].list_focus_mru(),
+        [expanded_pane_id, collapsed_pane_id]
+    );
 }
 
 #[test]

@@ -190,6 +190,43 @@ fn find_tab_by_pane_id_finds_the_tab_holding_each_leaf_and_none_for_other_panes(
 }
 
 #[test]
+fn focus_repair_tab_rect_takes_the_viewers_then_every_client_then_80x24() {
+    let mut session = build_empty_session();
+    let (viewed_tab_id, unviewed_tab_id) = (TabId::new(), TabId::new());
+    let build_rect_at_origin = |column_count, row_count| {
+        Rect::from_size_at_origin(Size {
+            column_count,
+            row_count,
+        })
+    };
+    assert_eq!(
+        session.compute_focus_repair_tab_rect(viewed_tab_id),
+        build_rect_at_origin(80, 24),
+        "no client reports a pane area"
+    );
+
+    attach_viewer(&mut session, TabId::new(), 120, 42);
+    assert_eq!(
+        session.compute_focus_repair_tab_rect(viewed_tab_id),
+        build_rect_at_origin(120, 40),
+        "no client views the tab, one 120x40 pane area is attached elsewhere"
+    );
+
+    attach_viewer(&mut session, viewed_tab_id, 80, 24);
+    attach_viewer(&mut session, viewed_tab_id, 100, 32);
+    assert_eq!(
+        session.compute_focus_repair_tab_rect(viewed_tab_id),
+        build_rect_at_origin(80, 22),
+        "the tab's viewers have 80x22 and 100x30 pane areas"
+    );
+    assert_eq!(
+        session.compute_focus_repair_tab_rect(unviewed_tab_id),
+        build_rect_at_origin(80, 22),
+        "the per-axis minimum of every attached client's pane area"
+    );
+}
+
+#[test]
 fn shared_floating_viewport_takes_the_per_axis_minimum_across_every_tab() {
     let mut session = build_empty_session();
 

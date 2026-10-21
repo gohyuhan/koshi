@@ -216,8 +216,23 @@ pane of its tab, the tab closes, and every client on that tab goes to the
 nearest tab.
 
 The pane takes this client's input. Only this client shows the new floating
-pane, centered in the pane area at 60% of its width and height. With motion
-on, the pane slides from its tiled place to its floating place in 160 ms.
+pane. With motion on, the pane slides from its tiled place to its floating
+place in 160 ms.
+
+The pane asks for 60% of the width and 60% of the height of the smallest
+pane area of the attached clients, rounded down. A client with a pane area
+smaller than `4x5` does not count. The session raises each axis to at least
+`min-cols` plus 2 columns and `min-rows` plus 4 rows, for the border and the
+titlebar. Then it cuts each axis to the smallest pane area. If no client
+counts, the pane takes that minimum. Example: clients with pane areas `80x22`
+and `120x38` give a `48x13` pane. With `min-cols 20` and `min-rows 6`, an
+`80x12` pane area gives a `48x10` pane.
+
+This client draws the pane at the center of its own pane area. Each floating
+pane that the session already holds moves the pane 2 columns right and 1 row
+down. If the next step goes past the right or bottom edge, the count starts
+again at the center. Example: in an `80x22` pane area, a `48x13` pane is at
+`(16, 4)`. With one floating pane already in the session, it is at `(18, 5)`.
 
 Example: tab `#1` holds `A | B` with `B` focused. `<C-p> u` gives tab `#1`
 with `A` alone and `B` floating above it, focused.

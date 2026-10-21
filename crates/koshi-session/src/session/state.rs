@@ -481,6 +481,32 @@ impl Session {
             .reduce(Size::compute_minimum_axes)
     }
 
+    /// The rect at the origin that focus repair solves `tab_id` in when a
+    /// pane leaves the tab. Its size is [`Session::get_tab_size`], else the
+    /// per-axis minimum of every attached client's [`Client::get_pane_area`],
+    /// else `80x24`. Only focus repair reads it: no PTY is spawned or resized
+    /// from it.
+    ///
+    /// A tab viewed by an `80x22` and a `100x30` pane area → `(0, 0)` `80x22`;
+    /// a tab no client views, with one `120x40` client attached elsewhere →
+    /// `(0, 0)` `120x40`; no client reporting a pane area → `(0, 0)` `80x24`.
+    #[must_use]
+    pub fn compute_focus_repair_tab_rect(&self, tab_id: TabId) -> Rect {
+        let tab_size = self
+            .get_tab_size(tab_id)
+            .or_else(|| {
+                self.clients
+                    .list_attached_clients()
+                    .filter_map(Client::get_pane_area)
+                    .reduce(Size::compute_minimum_axes)
+            })
+            .unwrap_or(Size {
+                column_count: 80,
+                row_count: 24,
+            });
+        Rect::from_size_at_origin(tab_size)
+    }
+
     /// The cell size of the earliest-attached client viewing `tab_id` that
     /// reported one, ties broken by the lower client id. `None` when no client
     /// viewing `tab_id` reported a cell size.

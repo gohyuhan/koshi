@@ -274,14 +274,14 @@ pub(crate) fn find_displayed_placement_tab_snapshot(
     }
 }
 
-/// Build the frame shown while a committed placement slides: `render_snapshot`
-/// with `animated_tab_snapshot`, when `Some`, as its active tab, and with
-/// `animated_floating_pane_slot`, when `Some`, in place of the floating pane
-/// slot that names the same pane.
+/// Build the frame shown while a committed placement or a floated pane
+/// slides: `render_snapshot` with `animated_tab_snapshot`, when `Some`, as its
+/// active tab, and with each of `animated_floating_pane_slots` in place of the
+/// floating pane slot that names the same pane.
 pub(crate) fn build_committed_placement_render_snapshot(
     render_snapshot: &RenderSnapshot,
     animated_tab_snapshot: Option<TabSnapshot>,
-    animated_floating_pane_slot: Option<FloatingPaneSlot>,
+    animated_floating_pane_slots: &[FloatingPaneSlot],
 ) -> RenderSnapshot {
     let mut committed_placement_render_snapshot = render_snapshot.clone();
     if let Some(animated_tab_snapshot) = animated_tab_snapshot {
@@ -289,14 +289,18 @@ pub(crate) fn build_committed_placement_render_snapshot(
             .session_snapshot
             .active_tab_snapshot = animated_tab_snapshot;
     }
-    if let Some(animated_floating_pane_slot) = animated_floating_pane_slot {
-        for floating_pane_slot in &mut committed_placement_render_snapshot
-            .session_snapshot
-            .floating_pane_slots
-        {
-            if floating_pane_slot.pane_id == animated_floating_pane_slot.pane_id {
-                *floating_pane_slot = animated_floating_pane_slot;
-            }
+    for floating_pane_slot in &mut committed_placement_render_snapshot
+        .session_snapshot
+        .floating_pane_slots
+    {
+        let animated_floating_pane_slot =
+            animated_floating_pane_slots
+                .iter()
+                .find(|animated_floating_pane_slot| {
+                    animated_floating_pane_slot.pane_id == floating_pane_slot.pane_id
+                });
+        if let Some(animated_floating_pane_slot) = animated_floating_pane_slot {
+            *floating_pane_slot = *animated_floating_pane_slot;
         }
     }
     committed_placement_render_snapshot

@@ -369,8 +369,8 @@ struct CommittedPlacementAnimation {
     started_at: Instant,
 }
 
-/// The viewer-owned slide of a pane that an accepted placement floated, from
-/// the tiled box this viewer drew it in to its floating box.
+/// The viewer-owned slide of a pane that this viewer drew tiled and a newer
+/// frame draws floating, from its tiled box to its floating box.
 #[derive(Debug)]
 struct UndockAnimation {
     /// The floated pane.
@@ -581,7 +581,7 @@ fn format_placement_direction_label(direction: Direction) -> &'static str {
 ///
 /// Every draw goes through here. `draw` paints a session frame and returns its
 /// mouse view. `refresh` commits a pending frame or redraws when viewer paint or
-/// placement snapshots change, or while a committed placement or an undocked
+/// placement snapshots change, or while a committed placement or a floated
 /// pane slides. Enter or mouse release changes the in-pane message to
 /// `Placing this pane…` until the session rejects the command, or commits
 /// it and a painted frame carries the new placement revision.
@@ -621,14 +621,12 @@ struct Screen<B: Backend> {
     committed_placement_tab_ids: Vec<TabId>,
     /// The slide after a committed placement, if one is active.
     committed_placement_animation: Option<CommittedPlacementAnimation>,
-    /// The pane an accepted placement floated, waiting for the next session
-    /// frame.
-    undocked_pane_id: Option<PaneId>,
-    /// The slide of a floated pane to its floating box, if one is active.
-    undock_animation: Option<UndockAnimation>,
-    /// The floating pane slot the undock slide drew in the last successful
-    /// paint, or `None` when that paint drew no undock slide.
-    shown_undock_floating_pane_slot: Option<FloatingPaneSlot>,
+    /// The running slides of floated panes, one per pane, in the order they
+    /// started.
+    undock_animations: Vec<UndockAnimation>,
+    /// The floating pane slots the floated-pane slides drew in the last
+    /// successful paint, in slide order. Empty when that paint drew none.
+    shown_undock_floating_pane_slots: Vec<FloatingPaneSlot>,
     /// The region solve and input revision committed with the frame on the
     /// screen. It starts with the compiled-in two-row solve.
     committed_regions: CommittedRegions,
@@ -677,9 +675,8 @@ impl<B: Backend> Screen<B> {
             shown_tab_snapshot: None,
             committed_placement_tab_ids: Vec::new(),
             committed_placement_animation: None,
-            undocked_pane_id: None,
-            undock_animation: None,
-            shown_undock_floating_pane_slot: None,
+            undock_animations: Vec::new(),
+            shown_undock_floating_pane_slots: Vec::new(),
             committed_regions: CommittedRegions::build_core(viewport_size, 0),
             shown_viewer_paint: None,
             pending_snapshot: None,
@@ -770,10 +767,9 @@ impl<B: Backend> Screen<B> {
             placement_display_snapshot.is_some(),
             current_time,
         );
-        let undocked_pane_id = self.undocked_pane_id.take();
-        let undock_floating_pane_slot = self.update_undock_animation(
+        self.start_undock_animations(current_time);
+        let undock_floating_pane_slots = self.update_undock_animations(
             client,
-            undocked_pane_id,
             placement_display_snapshot.is_some(),
             current_time,
         );
@@ -785,7 +781,7 @@ impl<B: Backend> Screen<B> {
             snapshot,
             placement_render_snapshot,
             committed_placement_tab_snapshot,
-            undock_floating_pane_slot,
+            &undock_floating_pane_slots,
         );
         let displayed_snapshot = displayed_render_snapshot.as_ref().unwrap_or(snapshot);
         let frame_paint = ViewerPaint::from_client(
@@ -838,7 +834,7 @@ impl<B: Backend> Screen<B> {
         self.shown_viewer_paint = Some(frame_paint);
         self.shown_placement_snapshot = self.placement_snapshot.clone();
         self.shown_placement_render_snapshot = placement_render_snapshot.cloned();
-        self.shown_undock_floating_pane_slot = undock_floating_pane_slot;
+        self.shown_undock_floating_pane_slots = undock_floating_pane_slots;
         self.shown_tab_snapshot = Some(
             displayed_snapshot
                 .session_snapshot
@@ -860,8 +856,8 @@ impl<B: Backend> Screen<B> {
     }
 
     /// Commit a pending frame or redraw the last frame when viewer paint or a
-    /// placement snapshot changes, or while a committed placement or an
-    /// undocked pane slides. Enter or mouse release changes the in-pane message to
+    /// placement snapshot changes, or while a committed placement or a
+    /// floated pane slides. Enter or mouse release changes the in-pane message to
     /// `Placing this pane…` until the session rejects the command, or commits
     /// it and a painted frame carries the new placement revision.
     ///
@@ -902,9 +898,8 @@ impl<B: Backend> Screen<B> {
             placement_display_snapshot.is_some(),
             current_time,
         );
-        let undock_floating_pane_slot = self.update_undock_animation(
+        let undock_floating_pane_slots = self.update_undock_animations(
             client,
-            None,
             placement_display_snapshot.is_some(),
             current_time,
         );
@@ -930,7 +925,7 @@ impl<B: Backend> Screen<B> {
             && self.shown_placement_snapshot == self.placement_snapshot
             && self.shown_placement_render_snapshot.as_ref() == placement_render_snapshot
             && is_committed_tab_shown
-            && self.shown_undock_floating_pane_slot == undock_floating_pane_slot
+            && self.shown_undock_floating_pane_slots == undock_floating_pane_slots
             && !self.image_output_state.has_unselected_results()
         {
             return None;
@@ -939,7 +934,7 @@ impl<B: Backend> Screen<B> {
             snapshot,
             placement_render_snapshot,
             committed_placement_tab_snapshot,
-            undock_floating_pane_slot,
+            &undock_floating_pane_slots,
         );
         let displayed_snapshot = displayed_render_snapshot.as_ref().unwrap_or(snapshot);
         if !is_frame_committed(terminal::paint_frame_with_writer(
@@ -964,7 +959,7 @@ impl<B: Backend> Screen<B> {
         self.shown_viewer_paint = Some(viewer_paint);
         self.shown_placement_snapshot = self.placement_snapshot.clone();
         self.shown_placement_render_snapshot = placement_render_snapshot.cloned();
-        self.shown_undock_floating_pane_slot = undock_floating_pane_slot;
+        self.shown_undock_floating_pane_slots = undock_floating_pane_slots;
         self.shown_tab_snapshot = Some(
             displayed_snapshot
                 .session_snapshot
@@ -1134,87 +1129,99 @@ impl<B: Backend> Screen<B> {
         ))
     }
 
-    /// Start or advance the slide of a floated pane, and return its floating
-    /// pane slot as drawn at `current_time`.
+    /// Start one slide at `current_time` for each pane that the pending frame
+    /// draws floating and the tab this screen drew last shows tiled with
+    /// content. A pane whose slide runs already keeps it. Each slide runs from
+    /// the pane's tiled box, counted from the pane-area origin of the last
+    /// paint ([`terminal::find_tiled_pane_rect_in_pane_area`]).
     ///
-    /// The frame is the pending frame, else the last drawn frame. A slide
-    /// starts when `undocked_pane_id` is `Some`, the tab this screen drew last
-    /// shows the pane with content, and the frame draws the pane floating. It
-    /// runs from the pane's tiled box, counted from the pane-area origin of
-    /// the last paint ([`terminal::find_tiled_pane_rect_in_pane_area`]), to
-    /// the frame's floating box. Returns `None` and ends the slide when
-    /// `is_placement_shown` is `true`, reduced motion is on,
-    /// `PLACEMENT_ANIMATION_DURATION` has passed, or the frame draws the pane
-    /// in no floating slot.
-    ///
-    /// A pane drawn at `(0, 0)` `40x22` that floats to `(16, 4)` `48x13` draws
-    /// at `(8, 2)` `44x17` at progress `0.5`.
-    fn update_undock_animation(
-        &mut self,
-        client: &Client,
-        undocked_pane_id: Option<PaneId>,
-        is_placement_shown: bool,
-        current_time: Instant,
-    ) -> Option<FloatingPaneSlot> {
-        let snapshot = self
-            .pending_snapshot
-            .as_ref()
-            .or(self.last_snapshot.as_ref())?;
-        if is_placement_shown || client.get_client_config().should_reduce_motion {
-            self.undock_animation = None;
-            return None;
-        }
-        if let (Some(pane_id), Some(shown_tab_snapshot)) =
-            (undocked_pane_id, self.shown_tab_snapshot.as_ref())
-        {
-            let is_pane_drawn_floating = snapshot
-                .session_snapshot
-                .floating_pane_slots
+    /// A screen that drew `A | B | C` and a pending frame that draws `B` and
+    /// `C` floating start two slides. A pane that leaves the tab and is not
+    /// floating in the pending frame starts none.
+    fn start_undock_animations(&mut self, current_time: Instant) {
+        let (Some(pending_snapshot), Some(shown_tab_snapshot)) = (
+            self.pending_snapshot.as_ref(),
+            self.shown_tab_snapshot.as_ref(),
+        ) else {
+            return;
+        };
+        let pane_area_size = self.committed_regions.solved_regions.pane_rect.size;
+        for floating_pane_slot in &pending_snapshot.session_snapshot.floating_pane_slots {
+            let pane_id = floating_pane_slot.pane_id;
+            let is_sliding = self
+                .undock_animations
                 .iter()
-                .any(|floating_pane_slot| floating_pane_slot.pane_id == pane_id);
-            let from_outer_rect = terminal::find_tiled_pane_rect_in_pane_area(
+                .any(|undock_animation| undock_animation.pane_id == pane_id);
+            if is_sliding {
+                continue;
+            }
+            if let Some(from_outer_rect) = terminal::find_tiled_pane_rect_in_pane_area(
                 shown_tab_snapshot,
-                self.committed_regions.solved_regions.pane_rect.size,
+                pane_area_size,
                 pane_id,
-            );
-            if let Some(from_outer_rect) = from_outer_rect.filter(|_| is_pane_drawn_floating) {
-                self.undock_animation = Some(UndockAnimation {
+            ) {
+                self.undock_animations.push(UndockAnimation {
                     pane_id,
                     from_outer_rect,
                     started_at: current_time,
                 });
             }
         }
-        let undock_animation = self.undock_animation.as_ref()?;
-        let progress =
-            compute_placement_animation_progress(undock_animation.started_at, current_time);
-        let floating_pane_slot = snapshot
-            .session_snapshot
-            .floating_pane_slots
-            .iter()
-            .find(|floating_pane_slot| floating_pane_slot.pane_id == undock_animation.pane_id);
-        let floating_pane_slot = match floating_pane_slot {
-            Some(floating_pane_slot) if progress < 1.0 => floating_pane_slot,
-            _ => {
-                self.undock_animation = None;
-                return None;
-            }
-        };
-        Some(FloatingPaneSlot::from_outer_rect(
-            floating_pane_slot.pane_id,
-            terminal::interpolate_rect(
-                undock_animation.from_outer_rect,
-                floating_pane_slot.outer_rect,
-                progress,
-            ),
-            floating_pane_slot.is_pinned,
-        ))
     }
 
-    /// Record the pane an accepted placement floated. The next session frame
-    /// that draws it floating slides it from the tiled box this screen drew.
-    fn note_undocked_pane(&mut self, pane_id: PaneId) {
-        self.undocked_pane_id = Some(pane_id);
+    /// Advance every floated-pane slide and return the floating pane slots
+    /// they draw at `current_time`, in slide order.
+    ///
+    /// The frame is the pending frame, else the last drawn frame. Every slide
+    /// ends, and the result is empty, when `is_placement_shown` is `true` or
+    /// reduced motion is on. A slide ends once `PLACEMENT_ANIMATION_DURATION`
+    /// has passed, or when the frame draws its pane in no floating slot. Each
+    /// other slide draws its pane between its tiled box and the frame's
+    /// floating box.
+    ///
+    /// A pane drawn at `(0, 0)` `40x22` that floats to `(16, 4)` `48x13` draws
+    /// at `(8, 2)` `44x17` at progress `0.5`.
+    fn update_undock_animations(
+        &mut self,
+        client: &Client,
+        is_placement_shown: bool,
+        current_time: Instant,
+    ) -> Vec<FloatingPaneSlot> {
+        let Some(snapshot) = self
+            .pending_snapshot
+            .as_ref()
+            .or(self.last_snapshot.as_ref())
+        else {
+            return Vec::new();
+        };
+        if is_placement_shown || client.get_client_config().should_reduce_motion {
+            self.undock_animations.clear();
+            return Vec::new();
+        }
+        let floating_pane_slots = &snapshot.session_snapshot.floating_pane_slots;
+        let mut animated_floating_pane_slots = Vec::new();
+        self.undock_animations.retain(|undock_animation| {
+            let progress =
+                compute_placement_animation_progress(undock_animation.started_at, current_time);
+            let floating_pane_slot = floating_pane_slots
+                .iter()
+                .find(|floating_pane_slot| floating_pane_slot.pane_id == undock_animation.pane_id);
+            let floating_pane_slot = match floating_pane_slot {
+                Some(floating_pane_slot) if progress < 1.0 => floating_pane_slot,
+                _ => return false,
+            };
+            animated_floating_pane_slots.push(FloatingPaneSlot::from_outer_rect(
+                floating_pane_slot.pane_id,
+                terminal::interpolate_rect(
+                    undock_animation.from_outer_rect,
+                    floating_pane_slot.outer_rect,
+                    progress,
+                ),
+                floating_pane_slot.is_pinned,
+            ));
+            true
+        });
+        animated_floating_pane_slots
     }
 
     /// Record the tabs a committed placement ([`CommittedPlacementAnimation`])
@@ -1271,7 +1278,7 @@ impl<B: Backend> Screen<B> {
     }
 
     /// Return the next redraw interval for an active placement preview
-    /// interpolation, committed-placement slide or undock slide: the shorter of
+    /// interpolation, committed-placement slide or floated-pane slide: the shorter of
     /// `frame_interval` and the time the animation has left. `None` when no
     /// animation runs.
     fn compute_next_placement_animation_wakeup_at(
@@ -1290,8 +1297,8 @@ impl<B: Backend> Screen<B> {
                     .map(|committed_placement_animation| committed_placement_animation.started_at),
             )
             .chain(
-                self.undock_animation
-                    .as_ref()
+                self.undock_animations
+                    .iter()
                     .map(|undock_animation| undock_animation.started_at),
             )
             .min()?;
@@ -1352,8 +1359,7 @@ impl<B: Backend> Screen<B> {
         self.shown_placement_render_snapshot = None;
         self.committed_placement_tab_ids.clear();
         self.committed_placement_animation = None;
-        self.undocked_pane_id = None;
-        self.undock_animation = None;
+        self.undock_animations.clear();
     }
 
     /// Select the compiled-in region solve for a painted frame's viewport.
@@ -1384,25 +1390,27 @@ fn get_frame_placement_revision(frame_snapshot: &RenderSnapshot) -> PlacementRev
 /// Return the frame painted in place of `snapshot`:
 ///
 /// - with `placement_render_snapshot`, `snapshot` showing that preview's tab;
-/// - else with `committed_placement_tab_snapshot`, `snapshot` with that slide
-///   frame as its active tab;
+/// - else with `committed_placement_tab_snapshot` or a non-empty
+///   `undock_floating_pane_slots`, `snapshot` with that slide frame, if any,
+///   as its active tab, and each of `undock_floating_pane_slots` in place of
+///   the floating pane slot that names the same pane;
 /// - else `None`, and `snapshot` is painted as it is.
 fn build_displayed_render_snapshot(
     snapshot: &RenderSnapshot,
     placement_render_snapshot: Option<&PlacementSnapshot>,
     committed_placement_tab_snapshot: Option<TabSnapshot>,
-    undock_floating_pane_slot: Option<FloatingPaneSlot>,
+    undock_floating_pane_slots: &[FloatingPaneSlot],
 ) -> Option<RenderSnapshot> {
     if let Some(placement_snapshot) = placement_render_snapshot {
         return terminal::build_placement_render_snapshot(snapshot, placement_snapshot);
     }
-    if committed_placement_tab_snapshot.is_none() && undock_floating_pane_slot.is_none() {
+    if committed_placement_tab_snapshot.is_none() && undock_floating_pane_slots.is_empty() {
         return None;
     }
     Some(terminal::build_committed_placement_render_snapshot(
         snapshot,
         committed_placement_tab_snapshot,
-        undock_floating_pane_slot,
+        undock_floating_pane_slots,
     ))
 }
 
@@ -2854,7 +2862,6 @@ fn run_attachment<B: Backend, W: Write>(
                         }
                         Ok(SessionEvent::PanePlacementCommitted {
                             command_id,
-                            source_pane_id,
                             source_tab_id,
                             destination_tab_id,
                             ..
@@ -2862,9 +2869,6 @@ fn run_attachment<B: Backend, W: Write>(
                             if !client.note_placement_command_committed(command_id) {
                                 screen
                                     .note_committed_placement([source_tab_id, destination_tab_id]);
-                            }
-                            if destination_tab_id.is_none() {
-                                screen.note_undocked_pane(source_pane_id);
                             }
                         }
                         Ok(SessionEvent::PlacementCommandRejected { command_id }) => {

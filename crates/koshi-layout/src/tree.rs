@@ -60,6 +60,32 @@ impl LayoutNode {
         }
     }
 
+    /// The leaf pane ids that no stack collapses, in layout order: a `Stacked`
+    /// split contributes its active member's leaves only, and a directional
+    /// split contributes every child's. Example: `horizontal(stack(a, b
+    /// expanded), c)` yields `[b, c]`.
+    #[must_use]
+    pub fn list_expanded_leaf_pane_ids(&self) -> Vec<PaneId> {
+        let mut expanded_leaf_pane_ids = Vec::new();
+        self.collect_expanded_leaf_pane_ids(&mut expanded_leaf_pane_ids);
+        expanded_leaf_pane_ids
+    }
+
+    /// Recursively appends the leaf pane IDs of this subtree that no stack
+    /// collapses to `expanded_leaf_pane_ids`, in layout order.
+    fn collect_expanded_leaf_pane_ids(&self, expanded_leaf_pane_ids: &mut Vec<PaneId>) {
+        match self {
+            Self::Pane(pane_id) => expanded_leaf_pane_ids.push(*pane_id),
+            Self::Split(split_node) => {
+                for (split_child_index, child_node) in split_node.children.iter().enumerate() {
+                    if !split_node.is_child_collapsed(split_child_index) {
+                        child_node.collect_expanded_leaf_pane_ids(expanded_leaf_pane_ids);
+                    }
+                }
+            }
+        }
+    }
+
     /// `true` when some leaf of this subtree references `pane_id`.
     #[must_use]
     pub fn has_pane(&self, pane_id: PaneId) -> bool {

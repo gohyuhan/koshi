@@ -64,7 +64,8 @@ pub enum PlacementCommitError {
 /// 1. The member joins the floating set as its newest member.
 /// 2. The leaf leaves the tab as a closed pane's leaf does in
 ///    [`remove_pane_cascade`](crate::session::cascade::remove_pane_cascade),
-///    ranking focus against `source_tab_rect` with `pane_sizing`: the tab's
+///    ranking focus against the tab solved in
+///    [`Session::compute_focus_repair_tab_rect`] with `pane_sizing`: the tab's
 ///    tree collapses and normalizes, every zoom on the pane ends, and every
 ///    client focused on the pane in the tab takes the inheriting focus. A tab
 ///    left with no pane closes, and its viewers move to the nearest surviving
@@ -96,7 +97,6 @@ pub fn commit_undock_placement(
     source_tab_id: TabId,
     floating_member: FloatingMember,
     acting_view: (ClientId, FloatingPanePosition),
-    source_tab_rect: Rect,
     pane_sizing: PaneSizing,
 ) -> Result<Vec<Event>, PlacementCommitError> {
     let source_pane_id = floating_member.pane_id;
@@ -118,6 +118,7 @@ pub fn commit_undock_placement(
     }
     session.floating_set.add_member(floating_member)?;
 
+    let source_tab_rect = session.compute_focus_repair_tab_rect(source_tab_id);
     let mut emitted_events = remove_pane_from_tab(
         session,
         source_tab_id,
@@ -159,18 +160,18 @@ pub fn commit_undock_placement(
 ///
 /// Every client zoomed on a pane that left its tab returns to its tiled view.
 /// Every client focused on such a pane in the tab it left takes the pane that
-/// [`repair_focus`](crate::session::focus::repair_focus) picks from the tab's
-/// current tree solved in `source_tab_rect` or `destination_tab_rect` with
-/// `pane_sizing`, ranked against the rect the departed pane held. That pane
-/// becomes the tab's most recent focus, and an [`Event::PaneFocused`] names
-/// it. With no eligible pane, the client's focus in that tab ends and an
-/// [`Event::TerminalTooSmallEntered`] is emitted.
-// Carries one placement: the tabs and the pane it moves (`source_tab_id`,
-// `destination_tab_id`, `source_pane_id`), the trees the layout crate built
-// (`prepared_placement`), the client that follows the pane
-// (`acting_client_id`), and the geometry focus repair ranks against
-// (`source_tab_rect`, `destination_tab_rect`, `pane_sizing`).
-#[allow(clippy::too_many_arguments)]
+/// [`repair_focus`](crate::session::focus::repair_focus) picks, with
+/// `pane_sizing`, from the tab's current tree, ranked against the rect the
+/// departed pane held. Both solves use
+/// [`Session::compute_focus_repair_tab_rect`] of the tab: the departed rect
+/// with the clients as they were before the placement, the current tree with
+/// the acting client already in the destination tab. That pane becomes the
+/// tab's most recent focus, and an [`Event::PaneFocused`] names it. With no
+/// eligible pane, the client focuses the tab's landing pane in the same way,
+/// and an [`Event::TerminalTooSmallEntered`] follows.
+///
+/// A source tab viewed by an `80x3` acting client and an `80x22` client is
+/// ranked at `80x3` for the departed rect and at `80x22` for the panes left.
 pub fn commit_cross_tab_placement(
     session: &mut Session,
     source_tab_id: TabId,
@@ -178,8 +179,6 @@ pub fn commit_cross_tab_placement(
     source_pane_id: PaneId,
     prepared_placement: CrossTabPlacement,
     acting_client_id: ClientId,
-    source_tab_rect: Rect,
-    destination_tab_rect: Rect,
     pane_sizing: PaneSizing,
 ) -> Result<Vec<Event>, PlacementCommitError> {
     if source_tab_id == destination_tab_id {
@@ -265,23 +264,13 @@ pub fn commit_cross_tab_placement(
         return Err(PlacementCommitError::PaneOwnershipConflict);
     }
     let is_source_tab_closing = prepared_placement.source_tree.is_none();
-    let source_pane_rect = find_solved_pane_rect(
-        session,
-        source_tab_id,
-        source_pane_id,
-        source_tab_rect,
-        pane_sizing,
-    );
+    let source_pane_rect =
+        find_solved_pane_rect(session, source_tab_id, source_pane_id, pane_sizing);
     let destination_departures: Vec<(PaneId, Rect)> = destination_moved_pane_ids
         .iter()
         .map(|&pane_id| {
-            let pane_rect = find_solved_pane_rect(
-                session,
-                destination_tab_id,
-                pane_id,
-                destination_tab_rect,
-                pane_sizing,
-            );
+            let pane_rect =
+                find_solved_pane_rect(session, destination_tab_id, pane_id, pane_sizing);
             (pane_id, pane_rect)
         })
         .collect();
@@ -349,6 +338,7 @@ pub fn commit_cross_tab_placement(
         }
     }
     if !is_source_tab_closing {
+        let source_tab_rect = session.compute_focus_repair_tab_rect(source_tab_id);
         emitted_events.extend(repair_focus_after_pane_left(
             session,
             source_tab_id,
@@ -358,6 +348,7 @@ pub fn commit_cross_tab_placement(
             pane_sizing,
         ));
     }
+    let destination_tab_rect = session.compute_focus_repair_tab_rect(destination_tab_id);
     for (departed_pane_id, departed_pane_rect) in destination_departures {
         emitted_events.extend(repair_focus_after_pane_left(
             session,
@@ -376,19 +367,20 @@ pub fn commit_cross_tab_placement(
     Ok(emitted_events)
 }
 
-/// The rect `pane_id` holds in `tab_id`'s current tree solved against
-/// `tab_rect` with `pane_sizing`. An empty rect at the origin when the tab is
-/// absent or holds no leaf for `pane_id`.
+/// The rect `pane_id` holds in `tab_id`'s current tree solved with
+/// `pane_sizing` in [`Session::compute_focus_repair_tab_rect`] of the tab. An
+/// empty rect at the origin when the tab is absent or holds no leaf for
+/// `pane_id`.
 fn find_solved_pane_rect(
     session: &Session,
     tab_id: TabId,
     pane_id: PaneId,
-    tab_rect: Rect,
     pane_sizing: PaneSizing,
 ) -> Rect {
     let Some(tab) = session.tabs.get(&tab_id) else {
         return Rect::build_empty_at_origin();
     };
+    let tab_rect = session.compute_focus_repair_tab_rect(tab_id);
     solve_layout_with_sizing(tab.get_layout_tree(), tab_rect, pane_sizing)
         .pane_rects
         .into_iter()

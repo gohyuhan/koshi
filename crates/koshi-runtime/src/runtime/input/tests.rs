@@ -20,7 +20,9 @@ use koshi_config::conflict::KeymapVerdict;
 use koshi_config::layer::{PartialKeybindingsConfig, PartialKoshiConfig, PartialLayoutDefaults};
 use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::action::ActionReference;
-use koshi_core::command::{Command, FocusPaneArgs, FocusTarget, NewPaneArgs, NewPanePlacement};
+use koshi_core::command::{
+    ClosePaneArgs, Command, FocusPaneArgs, FocusTarget, NewPaneArgs, NewPanePlacement,
+};
 use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::SessionId;
 use koshi_core::key::{
@@ -1989,6 +1991,136 @@ fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
             .list_pane_write_bytes(original_pane_id)
             .expect("writes"),
         vec![vec![b'y']]
+    );
+}
+
+/// Stack `[A, B, C]` with `C` expanded and focus history `C, A, B`. The
+/// terminal shrinks to `3x3`, a command-line close removes `C`, and the
+/// terminal grows back to `80x24`. Removing `C` expands `B`. The client
+/// lands on `B`, not on `A`, the newer history entry that stays collapsed,
+/// and `l` reaches `B`.
+#[test]
+fn a_key_reaches_the_expanded_stack_member_after_a_close_in_a_too_small_terminal() {
+    let (mut server, fake_pty_backend, client_id, mut viewer) = build_test_server();
+    let first_pane_id = get_only_pane_id(&server);
+    let stack_new_pane = Command::NewPane(NewPaneArgs {
+        placement: NewPanePlacement::Stacked {
+            source_pane_id: None,
+            tab_id: None,
+        },
+        working_directory: None,
+        spawn_spec: None,
+        client_id: Some(client_id),
+    });
+
+    // Each new member expands and takes the client's focus.
+    dispatch_test_command(
+        &mut server,
+        client_id,
+        stack_new_pane.clone(),
+        &["PaneCreated", "LayoutChanged", "PaneFocused", "PtyResized"],
+    );
+    let second_pane_id = get_focused_pane_id(&server, client_id);
+    dispatch_test_command(
+        &mut server,
+        client_id,
+        stack_new_pane,
+        &["PaneCreated", "LayoutChanged", "PaneFocused", "PtyResized"],
+    );
+    let closed_pane_id = get_focused_pane_id(&server, client_id);
+    // Focus `A`, then `C`: the history reads `C, A, B`, and `C` is expanded.
+    dispatch_test_command(
+        &mut server,
+        client_id,
+        Command::FocusPane(FocusPaneArgs {
+            focus_target: FocusTarget::Pane(first_pane_id),
+            client_id: Some(client_id),
+        }),
+        &["LayoutChanged", "PtyResized", "PaneFocused"],
+    );
+    dispatch_test_command(
+        &mut server,
+        client_id,
+        Command::FocusPane(FocusPaneArgs {
+            focus_target: FocusTarget::Pane(closed_pane_id),
+            client_id: Some(client_id),
+        }),
+        &["LayoutChanged", "PaneFocused"],
+    );
+    let tab_id = get_active_tab_id(&server, client_id);
+    let session = server.get_session_for_client(client_id).expect("session");
+    let session_id = session.session_id;
+    assert_eq!(
+        session.tabs[&tab_id].get_layout_tree(),
+        &LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+            vec![first_pane_id, second_pane_id, closed_pane_id],
+            2,
+        )),
+        "test setup: `C` is the expanded member"
+    );
+    assert_eq!(
+        session.tabs[&tab_id].list_focus_mru(),
+        [closed_pane_id, first_pane_id, second_pane_id],
+        "test setup: the focus history reads `C, A, B`"
+    );
+
+    server.handle_client_resize(
+        client_id,
+        Size {
+            column_count: 3,
+            row_count: 3,
+        },
+        None,
+        None,
+    );
+    let close_command_envelope = CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::ClosePane(ClosePaneArgs {
+            pane_id: Some(closed_pane_id),
+            should_force_close: false,
+            should_kill_process_tree: false,
+        }),
+    );
+    assert_eq!(
+        get_command_outcome(&server.dispatch(close_command_envelope)),
+        Ok(vec![
+            "PaneClosing",
+            "PaneRemoved",
+            "LayoutChanged",
+            "PaneFocused",
+            "TerminalTooSmallEntered",
+        ])
+    );
+    assert_eq!(get_focused_pane_id(&server, client_id), second_pane_id);
+
+    server.handle_client_resize(
+        client_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        None,
+        None,
+    );
+    apply_key_press(
+        &mut server,
+        &mut viewer,
+        build_key_chord(BindingModifierFlags::NONE, 'l'),
+        Instant::now(),
+    );
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(second_pane_id)
+            .expect("writes"),
+        vec![vec![b'l']]
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(first_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
     );
 }
 

@@ -508,7 +508,7 @@ fn child_exit_refocuses_every_client_that_watched_the_pane() {
 }
 
 #[test]
-fn child_exit_with_no_room_to_refocus_clears_focus() {
+fn child_exit_with_no_room_to_refocus_lands_on_the_survivor() {
     let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
     let exited_pane_id = spawn_test_child(&fake_pty_backend);
     let survivor_pane_id = spawn_test_child(&fake_pty_backend);
@@ -536,17 +536,16 @@ fn child_exit_with_no_room_to_refocus_clears_focus() {
         build_minimum_viewport_rect(),
     );
 
-    // The too-small overlay is reported and the client's stale focus on the gone
-    // pane is cleared rather than left dangling on a removed pane.
+    // The client focuses the survivor, which has no room at this size.
     assert_eq!(
         session
             .clients
             .get_client_by_id(client_id)
             .expect("the client stays attached")
             .get_focused_pane_id(tab_id),
-        None
+        Some(survivor_pane_id)
     );
-    // The survivor stays — the tab is not empty, only unfocusable at this size.
+    // The survivor stays: the tab is not empty, only undrawn at this size.
     assert_eq!(
         session.panes.get_pane_record_by_id(survivor_pane_id),
         Some(&PaneRecord::from_terminal_pane(survivor_pane_id))
@@ -570,6 +569,12 @@ fn child_exit_with_no_room_to_refocus_clears_focus() {
                 tab_id: Some(tab_id),
             }),
             Event::LayoutChanged(LayoutChanged { tab_id }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: Some(tab_id),
+                pane_id: survivor_pane_id,
+                previous_pane_id: Some(exited_pane_id),
+            }),
             Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
                 client_id,
                 viewport_size: TEST_VIEWPORT_SIZE,

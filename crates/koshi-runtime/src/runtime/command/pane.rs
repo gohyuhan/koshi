@@ -453,10 +453,9 @@ impl Server {
             command_args.should_kill_process_tree,
         );
 
-        // The tab is solved against `compute_focus_repair_tab_size`; focus candidates
-        // rank by geometry also when no client views the tab.
-        let tab_rect =
-            Rect::from_size_at_origin(Self::compute_focus_repair_tab_size(session, tab_id));
+        // The tab is solved against `Session::compute_focus_repair_tab_rect`;
+        // focus candidates rank by geometry also when no client views the tab.
+        let tab_rect = session.compute_focus_repair_tab_rect(tab_id);
         let affected_client_ids = list_clients_affected_by_tabs(
             session,
             &list_tabs_affected_by_pane_close(session, tab_id, pane_target.pane_id),
@@ -743,10 +742,10 @@ impl Server {
             }
         };
 
-        // The tab is solved against `compute_focus_repair_tab_size`; focus repair
-        // ranks candidates by geometry also when no client views the tab.
-        let tab_rect =
-            Rect::from_size_at_origin(Self::compute_focus_repair_tab_size(session, tab_id));
+        // The tab is solved against `Session::compute_focus_repair_tab_rect`;
+        // focus repair ranks candidates by geometry also when no client views
+        // the tab.
+        let tab_rect = session.compute_focus_repair_tab_rect(tab_id);
         let affected_client_ids = list_clients_affected_by_tabs(
             session,
             &list_tabs_affected_by_pane_close(session, tab_id, pane_id),
@@ -1139,12 +1138,6 @@ impl Server {
         }
         ensure_session_placement_revision_capacity(session)?;
         ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
-        let source_focus_repair_rect = Rect::from_size_at_origin(
-            Self::compute_focus_repair_tab_size(session, placement_target.source_tab_id),
-        );
-        let destination_focus_repair_rect = Rect::from_size_at_origin(
-            Self::compute_focus_repair_tab_size(session, placement_target.destination_tab_id),
-        );
 
         let pty_backend = Arc::clone(self.get_pty_backend());
         let mut emitted_events = {
@@ -1159,8 +1152,6 @@ impl Server {
                 command_args.source_pane_id,
                 prepared_placement,
                 placement_target.client_id,
-                source_focus_repair_rect,
-                destination_focus_repair_rect,
                 pane_sizing,
             )
             .map_err(|_| Rejection::from_reason(RejectReason::InvalidState))?;
@@ -1243,10 +1234,6 @@ impl Server {
             .session_by_id
             .get_mut(&undock_target.session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
-        let source_tab_rect = Rect::from_size_at_origin(Self::compute_focus_repair_tab_size(
-            session,
-            undock_target.source_tab_id,
-        ));
         let affected_client_ids = list_clients_affected_by_tabs(
             session,
             &list_tabs_affected_by_pane_close(
@@ -1276,7 +1263,6 @@ impl Server {
             undock_target.source_tab_id,
             floating_member,
             (undock_target.client_id, acting_position),
-            source_tab_rect,
             pane_sizing,
         )
         .map_err(|placement_commit_error| {
@@ -1948,32 +1934,6 @@ impl Server {
             .get_pane_area()
             .ok_or_else(build_no_room_rejection)?;
         admit_tab_size(tab_size, Some(sole_client.get_client_id()))
-    }
-
-    /// The tab size `tab_id` is solved against when focus repair ranks the
-    /// panes left after a pane leaves the tab (a close, a child exit, a move to
-    /// another tab, or an undock): the tab's own size when attached clients
-    /// view it, else the smallest pane area among all attached clients that
-    /// report one, else a nominal 80x24. Every leg is a drawable pane region.
-    ///
-    /// The 80x24 leg is reached when no attached client contributes a pane
-    /// area. The value ranks the surviving panes for focus repair and nothing
-    /// else: no PTY is spawned or resized from it, and the next attach
-    /// re-solves the tab against the client's real terminal.
-    fn compute_focus_repair_tab_size(session: &Session, tab_id: TabId) -> Size {
-        session
-            .get_tab_size(tab_id)
-            .or_else(|| {
-                session
-                    .clients
-                    .list_attached_clients()
-                    .filter_map(|client| client.get_pane_area())
-                    .reduce(Size::compute_minimum_axes)
-            })
-            .unwrap_or(Size {
-                column_count: 80,
-                row_count: 24,
-            })
     }
 }
 

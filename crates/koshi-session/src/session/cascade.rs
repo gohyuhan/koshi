@@ -34,7 +34,7 @@ use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
 use crate::client::{compute_default_pane_area_size, Client};
 use crate::session::focus::{build_pane_focused_event, repair_focus, FocusRepairResult};
 use crate::session::state::Session;
-use crate::session::tab_ops::close_and_refocus_tab;
+use crate::session::tab_ops::{close_and_refocus_tab, find_landing_pane};
 
 /// Remove `pane_id` from `tab_id` and follow the consequences up the tree.
 ///
@@ -173,15 +173,29 @@ pub(crate) fn remove_pane_from_tab(
 /// a pane that is no longer a leaf of that tab, to the pane that inherits it.
 ///
 /// `departed_pane_rect` is the rect the pane held in the tab's tree before
-/// it left, solved against `tab_rect`. The tab's current tree is solved
-/// against `tab_rect` with `pane_sizing`, the candidates are ranked against
+/// it left, as the caller solved it. Its tab size can differ from
+/// `tab_rect`: when an `80x3` client moves a pane out of a tab that an
+/// `80x22` client also views, the departed rect is solved at `80x3` and
+/// `tab_rect` is `80x22`. The tab's current tree is solved against
+/// `tab_rect` with `pane_sizing`, the candidates are ranked against
 /// `departed_pane_rect`, and [`repair_focus`] picks one verdict that every
-/// such client takes:
-/// - [`FocusRepairResult::Focused`] focuses that pane, records it as the tab's
-///   most-recent focus, and emits [`Event::PaneFocused`] naming the departed
-///   pane as `previous_pane_id`;
-/// - [`FocusRepairResult::TerminalTooSmall`] forgets the client's focus and
-///   zoom in the tab and emits [`Event::TerminalTooSmallEntered`].
+/// such client takes. The inheriting pane is the verdict's pane for
+/// [`FocusRepairResult::Focused`], and the tab's landing pane
+/// ([`find_landing_pane`]) for [`FocusRepairResult::TerminalTooSmall`]. No
+/// inheriting pane is a stack member collapsed to its header. Each client
+/// then:
+/// 1. focuses the inheriting pane, records it as the tab's most-recent focus,
+///    and emits [`Event::PaneFocused`] naming the departed pane as
+///    `previous_pane_id`. With no inheriting pane, the client's focus and zoom
+///    in the tab are removed and no [`Event::PaneFocused`] is emitted;
+/// 2. for [`FocusRepairResult::TerminalTooSmall`], emits
+///    [`Event::TerminalTooSmallEntered`].
+///
+/// A tab `A | B` solved at `3x1` has no room for `A`: a client focused on `B`
+/// when `B` leaves focuses `A`, and its keys reach `A` once the tab has room
+/// for it. A stack `[A, B, C]` with `C` expanded and focus history `C, A, B`,
+/// solved at `3x1`: a client focused on `C` when `C` leaves focuses `B`, the
+/// member the removal expands, and not the collapsed `A`.
 ///
 /// A client whose floating pane takes its input keeps that input. A tab id the
 /// session does not hold changes nothing and emits no events.
@@ -223,36 +237,44 @@ pub(crate) fn repair_focus_after_pane_left(
     // The verdict reads the tab, the registry and the candidates, nothing
     // client-specific: every repaired client inherits the same pane.
     let verdict = repair_focus(tab, &session.panes, candidates);
+    let inheriting_pane_id = match verdict {
+        FocusRepairResult::Focused(focused_pane_id) => Some(focused_pane_id),
+        FocusRepairResult::TerminalTooSmall => find_landing_pane(session, tab_id),
+    };
 
     let mut emitted_events = Vec::new();
     for client_id in repaired_client_ids {
-        match verdict {
-            FocusRepairResult::Focused(new_pane_id) => {
+        match inheriting_pane_id {
+            Some(inheriting_pane_id) => {
                 let previous_pane_id = session
                     .clients
                     .get_client_mut_by_id(client_id)
-                    .and_then(|client| client.update_focused_pane(tab_id, new_pane_id));
+                    .and_then(|client| client.update_focused_pane(tab_id, inheriting_pane_id));
                 if let Some(tab) = session.tabs.get_mut(&tab_id) {
-                    tab.record_focus_mru(new_pane_id);
+                    tab.record_focus_mru(inheriting_pane_id);
                 }
                 emitted_events.push(Event::PaneFocused(PaneFocused {
                     client_id,
                     tab_id: Some(tab_id),
-                    pane_id: new_pane_id,
+                    pane_id: inheriting_pane_id,
                     previous_pane_id,
                 }));
             }
-            FocusRepairResult::TerminalTooSmall => {
-                let cause = resolve_terminal_too_small_cause(session, tab_id, client_id, tab_rect);
+            None => {
                 if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
                     client.remove_focused_pane(tab_id);
-                    emitted_events.push(Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
-                        client_id,
-                        viewport_size: client.get_viewport_size(),
-                        pane_area: client.get_reported_pane_area(),
-                        cause,
-                    }));
                 }
+            }
+        }
+        if verdict == FocusRepairResult::TerminalTooSmall {
+            let cause = resolve_terminal_too_small_cause(session, tab_id, client_id, tab_rect);
+            if let Some(client) = session.clients.get_client_by_id(client_id) {
+                emitted_events.push(Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
+                    client_id,
+                    viewport_size: client.get_viewport_size(),
+                    pane_area: client.get_reported_pane_area(),
+                    cause,
+                }));
             }
         }
     }

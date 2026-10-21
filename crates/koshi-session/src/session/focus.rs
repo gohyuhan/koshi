@@ -32,8 +32,8 @@ pub enum FocusRepairResult {
     Focused(PaneId),
     /// The tab's layout still holds panes, but none is eligible: every pane is
     /// suppressed (zero-area, too little room to draw), or every visible pane
-    /// is missing from the registry. The caller shows the terminal-too-small
-    /// overlay.
+    /// is missing from the registry. The caller focuses the tab's landing pane
+    /// and reports the terminal-too-small overlay.
     TerminalTooSmall,
 }
 
