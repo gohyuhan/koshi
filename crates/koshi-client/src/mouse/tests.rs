@@ -5,10 +5,12 @@
 //! highlighting text; the run of clicks that picks a highlight's shape; the
 //! capture that keeps a gesture with the pane its press landed on; plain pane
 //! drags swap, Shift-pane drags insert, edge scroll a held text drag drives on
-//! the clock; and the gestures a new frame ends.
+//! the clock; and the gestures a new frame ends. For floating panes: the
+//! grab-handle move, the pin toggle, minimize and close buttons, a corner
+//! resize, floating pane move mode, and dock/undock mode.
 //!
-//! Each test builds a frame by hand — one tab, one or two panes, no chrome
-//! beyond the tabline and hint bar.
+//! Each test builds a frame by hand: one tab, its tiled panes and its floating
+//! panes, and no chrome beyond the tabline and hint bar.
 
 use super::*;
 
@@ -17,6 +19,7 @@ use std::sync::Arc;
 use koshi_config::layer::{PartialKoshiConfig, PartialMouseConfig};
 use koshi_config::types::WheelScroll;
 use koshi_core::action::ClientActionKind;
+use koshi_core::command::{PanePlacementTarget, PlacePaneArgs, PlacementRevision};
 use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, NamedKey};
@@ -33,10 +36,16 @@ use koshi_renderer::snapshot::{
     ClientSnapshot, CommittedRegions, FloatingPaneSlot, MousePane, PaneSlot, RenderSnapshot,
     SessionSnapshot, TabMetadata, TabSnapshot,
 };
+use koshi_test_support::fixtures::build_cell_rect;
 
 use crate::input::KeyOutcome;
-use crate::tests::{build_core_bound_action, build_test_client, TEST_VIEWPORT_SIZE};
-use crate::{Client, PlacementMode, PlacementModeLifetime};
+use crate::tests::{
+    build_core_bound_action, build_test_client, float_placement_source_pane,
+    get_source_tab_snapshot_mut, TEST_VIEWPORT_SIZE,
+};
+use crate::{
+    Client, DockUndockMode, PlacementDrag, PlacementMode, PlacementModeLifetime, TiledPaneSelection,
+};
 
 /// A client on the stock settings whose mouse-select mode is on.
 fn build_mouse_select_client() -> Client {
@@ -221,10 +230,20 @@ fn build_mouse_placement_snapshot(
         0,
     );
     placement_snapshot.destination_tab_snapshot = None;
-    placement_snapshot.source_tab_snapshot.layout_tree = layout_tree;
     let frame_tab_snapshot = mouse_frame.session_snapshot.active_tab_snapshot.clone();
-    placement_snapshot.source_tab_snapshot.tab_name = frame_tab_snapshot.tab_name;
-    placement_snapshot.source_tab_snapshot.pane_slots = frame_tab_snapshot
+    let source_tab_snapshot = get_source_tab_snapshot_mut(&mut placement_snapshot);
+    source_tab_snapshot.pane_snapshots = layout_tree
+        .list_leaf_pane_ids()
+        .into_iter()
+        .map(|pane_id| PanePlacementPaneSnapshot {
+            pane_id,
+            terminal_window: None,
+            image_placement_snapshots: Vec::new(),
+        })
+        .collect();
+    source_tab_snapshot.layout_tree = layout_tree;
+    source_tab_snapshot.tab_name = frame_tab_snapshot.tab_name;
+    source_tab_snapshot.pane_slots = frame_tab_snapshot
         .pane_slots
         .into_iter()
         .map(|pane_slot| koshi_ipc::frame::FrameSlot {
@@ -235,24 +254,11 @@ fn build_mouse_placement_snapshot(
             is_suppressed: pane_slot.is_suppressed,
         })
         .collect();
-    placement_snapshot.source_tab_snapshot.tab_size = frame_tab_snapshot.tab_size;
-    placement_snapshot.source_tab_snapshot.stack_headers = frame_tab_snapshot.stack_headers;
-    placement_snapshot.source_tab_snapshot.layout_mode = frame_tab_snapshot.layout_mode;
-    placement_snapshot
-        .source_tab_snapshot
-        .is_every_pane_suppressed = frame_tab_snapshot.is_every_pane_suppressed;
-    placement_snapshot.source_tab_snapshot.gap_cell_count = frame_tab_snapshot.gap_cell_count;
-    placement_snapshot.source_tab_snapshot.pane_snapshots = placement_snapshot
-        .source_tab_snapshot
-        .layout_tree
-        .list_leaf_pane_ids()
-        .into_iter()
-        .map(|pane_id| PanePlacementPaneSnapshot {
-            pane_id,
-            terminal_window: None,
-            image_placement_snapshots: Vec::new(),
-        })
-        .collect();
+    source_tab_snapshot.tab_size = frame_tab_snapshot.tab_size;
+    source_tab_snapshot.stack_headers = frame_tab_snapshot.stack_headers;
+    source_tab_snapshot.layout_mode = frame_tab_snapshot.layout_mode;
+    source_tab_snapshot.is_every_pane_suppressed = frame_tab_snapshot.is_every_pane_suppressed;
+    source_tab_snapshot.gap_cell_count = frame_tab_snapshot.gap_cell_count;
     placement_snapshot
 }
 
@@ -263,18 +269,16 @@ fn build_cross_tab_mouse_placement_snapshot(
     destination_tab_id: TabId,
     destination_pane_ids: [PaneId; 2],
 ) -> PanePlacementSnapshot {
-    let source_tab_id = mouse_frame.client_snapshot.active_tab_id;
     let mut placement_snapshot = build_mouse_placement_snapshot(
         mouse_frame,
         source_pane_id,
         LayoutNode::Pane(source_pane_id),
     );
-    placement_snapshot
-        .source_tab_snapshot
+    let source_tab_snapshot = get_source_tab_snapshot_mut(&mut placement_snapshot);
+    source_tab_snapshot
         .pane_slots
         .retain(|pane_slot| pane_slot.pane_id == source_pane_id);
-    placement_snapshot
-        .source_tab_snapshot
+    source_tab_snapshot
         .pane_snapshots
         .retain(|pane_snapshot| pane_snapshot.pane_id == source_pane_id);
 
@@ -319,7 +323,6 @@ fn build_cross_tab_mouse_placement_snapshot(
         gap_cell_count: frame_tab_snapshot.gap_cell_count,
         pane_snapshots: destination_pane_snapshots,
     };
-    placement_snapshot.source_tab_id = source_tab_id;
     placement_snapshot.destination_tab_id = destination_tab_id;
     placement_snapshot.destination_tab_snapshot = Some(destination_tab_snapshot);
     placement_snapshot
@@ -832,7 +835,7 @@ fn a_placement_drag_onto_the_right_arrow_before_a_repaint_steps_from_the_strip_t
     let mut client = build_test_client();
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id: active_tab_id,
+        source_tab_id: Some(active_tab_id),
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
@@ -2379,8 +2382,8 @@ fn grabbing_a_border_with_no_pane_beside_it_starts_no_resize() {
 
 #[test]
 fn the_drag_anchor_only_walks_over_the_cells_the_session_accepted() {
-    // The pointer travelled three cells, the session took two — the pane it
-    // would have shrunk hit its minimum size on the third. The anchor advances
+    // The pointer travelled three cells, and the session took two: the pane
+    // the drag shrinks hit its minimum size on the third. The anchor advances
     // by those two, so the very next move asks for the one cell still owed.
     let left_pane_id = PaneId::new();
     let right_pane_id = PaneId::new();
@@ -2543,6 +2546,7 @@ fn a_left_release_ends_a_border_drag_and_a_strip_peek_drag_and_sends_nothing() {
         Some(LeftButtonGesture::BorderResize(ResizeDrag {
             pane_id: resized_pane_id,
             border_side: Direction::Up,
+            corner_horizontal_side: None,
             last_accepted_position: divider_point,
         }))
     );
@@ -2971,7 +2975,7 @@ fn submitted_mouse_placement_consumes_mouse_input_until_the_frame_reconciles() {
     );
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: pane_id,
-        source_tab_id: active_tab_id,
+        source_tab_id: Some(active_tab_id),
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(TiledPlacementTarget::Swap {
@@ -3166,6 +3170,7 @@ fn ending_the_gestures_drops_the_left_gesture_and_the_capture_and_leaves_the_poi
         Some(LeftButtonGesture::BorderResize(ResizeDrag {
             pane_id: resized_pane_id,
             border_side: Direction::Up,
+            corner_horizontal_side: None,
             last_accepted_position: divider_point,
         }))
     );
@@ -3547,6 +3552,7 @@ fn ending_the_selection_leaves_a_border_drag_and_the_capture_alone() {
         Some(LeftButtonGesture::BorderResize(ResizeDrag {
             pane_id: resized_pane_id,
             border_side: Direction::Up,
+            corner_horizontal_side: None,
             last_accepted_position: divider_point,
         })),
         "a border drag is not a selection"
@@ -3803,7 +3809,7 @@ fn plain_drag_swaps_and_shift_drag_inserts_at_the_same_pane() {
     client.visible_tab_ids = vec![active_tab_id];
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id: active_tab_id,
+        source_tab_id: Some(active_tab_id),
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
@@ -3960,7 +3966,7 @@ fn placement_target_uses_fixed_base_geometry_while_the_preview_moves_panes() {
     client.visible_tab_ids = vec![active_tab_id];
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id: active_tab_id,
+        source_tab_id: Some(active_tab_id),
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
@@ -4000,7 +4006,7 @@ fn cross_tab_mouse_target_uses_the_destination_pane_under_the_pointer() {
     client.visible_tab_ids = vec![source_tab_id, destination_tab_id];
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id,
+        source_tab_id: Some(source_tab_id),
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
@@ -4052,7 +4058,7 @@ fn shifted_drag_across_a_tab_submits_insertion_when_drop_matches_press_position(
     client.visible_tab_ids = vec![source_tab_id, destination_tab_id];
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id,
+        source_tab_id: Some(source_tab_id),
         destination_tab_id: source_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
@@ -4127,7 +4133,7 @@ fn shifted_drag_across_a_tab_submits_insertion_when_drop_matches_press_position(
         Some(crate::tests::build_expected_submit_placement(
             &client,
             Command::PlacePane(koshi_core::command::PlacePaneArgs {
-                source_pane_id,
+                source_pane_id: Some(source_pane_id),
                 placement_target: koshi_core::command::PanePlacementTarget::Tiled(placement_target),
                 expected_placement_revision: Some(koshi_core::command::PlacementRevision {
                     session_revision: 0,
@@ -4187,7 +4193,7 @@ fn stack_header_drag_selects_group_for_insertion_and_pane_for_swap() {
     client.visible_tab_ids = vec![active_tab_id];
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id: active_tab_id,
+        source_tab_id: Some(active_tab_id),
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Up,
         placement_target: None,
@@ -4294,7 +4300,7 @@ fn a_stack_header_press_in_pane_placement_mode_picks_that_collapsed_member_as_th
     client.visible_tab_ids = vec![active_tab_id];
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: plain_pane_id,
-        source_tab_id: active_tab_id,
+        source_tab_id: Some(active_tab_id),
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
@@ -4338,7 +4344,7 @@ fn build_client_previewing_mouse_frame_tab(
     client.visible_tab_ids = vec![active_tab_id, previewed_tab_id];
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id: active_tab_id,
+        source_tab_id: Some(active_tab_id),
         destination_tab_id: previewed_tab_id,
         placement_direction: Direction::Right,
         placement_target,
@@ -4380,7 +4386,7 @@ fn a_pane_press_on_a_previewed_tab_picks_that_pane_without_focusing_it() {
             .placement_state
             .placement_mode
             .as_ref()
-            .map(|placement_mode| placement_mode.source_tab_id),
+            .and_then(|placement_mode| placement_mode.source_tab_id),
         Some(previewed_tab_id)
     );
 }
@@ -4463,10 +4469,7 @@ fn shift_drag_into_a_group_gap_selects_the_group_anchor() {
         solve_layout_with_mode(&layout_tree, LayoutMode::Tiled, tab_rect, pane_sizing);
     for pane_slot in &mut mouse_frame.session_snapshot.active_tab_snapshot.pane_slots {
         let pane_rect = layout_solve
-            .pane_rects
-            .iter()
-            .find(|(pane_id, _)| *pane_id == pane_slot.pane_id)
-            .map(|(_, pane_rect)| *pane_rect)
+            .find_pane_rect(pane_slot.pane_id)
             .expect("the layout solves every test pane");
         pane_slot.outer_rect = pane_rect;
         pane_slot.content_rect = Some(Rect::from_origin_and_size(
@@ -4484,10 +4487,7 @@ fn shift_drag_into_a_group_gap_selects_the_group_anchor() {
         build_mouse_placement_snapshot(&mouse_frame, source_pane_id, layout_tree);
     placement_snapshot.pane_sizing.gap_cell_count = pane_sizing.gap_cell_count;
     let group_left_rect = layout_solve
-        .pane_rects
-        .iter()
-        .find(|(pane_id, _)| *pane_id == group_left_pane_id)
-        .map(|(_, pane_rect)| *pane_rect)
+        .find_pane_rect(group_left_pane_id)
         .expect("the left group pane is solved");
     let group_gap_point = Point {
         column: group_left_rect
@@ -4500,7 +4500,7 @@ fn shift_drag_into_a_group_gap_selects_the_group_anchor() {
     client.visible_tab_ids = vec![active_tab_id];
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id: active_tab_id,
+        source_tab_id: Some(active_tab_id),
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
@@ -4559,7 +4559,7 @@ fn a_non_left_placement_release_cancels_mouse_capture_without_submitting() {
     client.visible_tab_ids = vec![tab_id];
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: pane_id,
-        source_tab_id: tab_id,
+        source_tab_id: Some(tab_id),
         destination_tab_id: tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
@@ -5644,7 +5644,8 @@ fn losing_the_outer_terminals_focus_drops_a_handle_drag_and_keeps_a_sent_move() 
         advance_time_by_seconds(current_time, 1),
     );
 
-    assert!(client.cancel_floating_pane_move_drag());
+    client.handle_outer_terminal_focus_lost();
+    assert_eq!(client.left_button_gesture, None);
     assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
     assert_eq!(
         client.handle_mouse(
@@ -5665,7 +5666,7 @@ fn losing_the_outer_terminals_focus_drops_a_handle_drag_and_keeps_a_sent_move() 
         floating_pane_id,
         Point { column: 15, row: 5 },
     );
-    assert!(!client.cancel_floating_pane_move_drag());
+    client.handle_outer_terminal_focus_lost();
     assert_eq!(
         find_floating_pane_move_draft(&client, &mouse_frame),
         Some(FloatingPaneMoveDraft {
@@ -5747,6 +5748,7 @@ fn ending_a_handle_drag_leaves_a_border_drag_held() {
         Some(LeftButtonGesture::BorderResize(ResizeDrag {
             pane_id: resized_pane_id,
             border_side: Direction::Up,
+            corner_horizontal_side: None,
             last_accepted_position: divider_point,
         }))
     );
@@ -6150,6 +6152,314 @@ fn a_floating_panes_border_press_focuses_it_and_drags_any_side_when_unpinned() {
             resize_step: 1,
             requested_cell_count: 5,
         }]
+    );
+}
+
+#[test]
+fn a_floating_panes_corner_drag_resizes_both_of_its_borders() {
+    let tiled_pane_id = PaneId::new();
+    let floating_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(tiled_pane_id),
+        build_plain_mouse_pane(floating_pane_id),
+        false,
+        tiled_pane_id,
+    );
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    // The float's outer box spans screen columns 10–49 and rows 5–16.
+    let bottom_right_corner = Point {
+        column: 49,
+        row: 16,
+    };
+
+    let press_actions = client.handle_mouse(
+        build_left_mouse_press(bottom_right_corner),
+        &mouse_frame,
+        current_time,
+    );
+    assert_eq!(
+        press_actions,
+        vec![build_focus_pane_mouse_action(&client, floating_pane_id)]
+    );
+    assert_eq!(
+        client.left_button_gesture,
+        Some(LeftButtonGesture::BorderResize(ResizeDrag {
+            pane_id: floating_pane_id,
+            border_side: Direction::Right,
+            corner_horizontal_side: Some(Direction::Down),
+            last_accepted_position: bottom_right_corner,
+        }))
+    );
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_drag(Point {
+                column: 52,
+                row: 18
+            }),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 1),
+        ),
+        vec![
+            MouseAction::Resize {
+                pane_id: floating_pane_id,
+                border_side: Direction::Right,
+                resize_step: 1,
+                requested_cell_count: 3,
+            },
+            MouseAction::Resize {
+                pane_id: floating_pane_id,
+                border_side: Direction::Down,
+                resize_step: 1,
+                requested_cell_count: 2,
+            },
+        ]
+    );
+
+    // Each answer moves the anchor along its own border's axis only.
+    client.note_resize_applied(floating_pane_id, Direction::Down, 1, 2);
+    client.note_resize_applied(floating_pane_id, Direction::Right, 1, 1);
+    assert_eq!(
+        client.left_button_gesture,
+        Some(LeftButtonGesture::BorderResize(ResizeDrag {
+            pane_id: floating_pane_id,
+            border_side: Direction::Right,
+            corner_horizontal_side: Some(Direction::Down),
+            last_accepted_position: Point {
+                column: 50,
+                row: 18
+            },
+        }))
+    );
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_drag(Point {
+                column: 52,
+                row: 18
+            }),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 2),
+        ),
+        vec![MouseAction::Resize {
+            pane_id: floating_pane_id,
+            border_side: Direction::Right,
+            resize_step: 1,
+            requested_cell_count: 2,
+        }],
+        "the bottom border reached the pointer's row, so only the right border moves"
+    );
+}
+
+#[test]
+fn a_pinned_floating_panes_corner_drag_moves_only_its_right_and_bottom_borders() {
+    let floating_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(PaneId::new()),
+        build_plain_mouse_pane(floating_pane_id),
+        true,
+        floating_pane_id,
+    );
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    let mut drag_corner = |press_position: Point, drag_position: Point, step_index: u64| {
+        client.handle_mouse(
+            build_left_mouse_press(press_position),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 3 * step_index),
+        );
+        let drag_actions = client.handle_mouse(
+            build_left_mouse_drag(drag_position),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 3 * step_index + 1),
+        );
+        client.handle_mouse(
+            build_left_mouse_release(drag_position),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 3 * step_index + 2),
+        );
+        drag_actions
+    };
+    let build_grow_move = |border_side: Direction, requested_cell_count: u16| MouseAction::Resize {
+        pane_id: floating_pane_id,
+        border_side,
+        resize_step: 1,
+        requested_cell_count,
+    };
+
+    assert_eq!(
+        drag_corner(Point { column: 10, row: 5 }, Point { column: 8, row: 3 }, 0),
+        Vec::new()
+    );
+    assert_eq!(
+        drag_corner(
+            Point { column: 49, row: 5 },
+            Point { column: 51, row: 3 },
+            1
+        ),
+        vec![build_grow_move(Direction::Right, 2)]
+    );
+    assert_eq!(
+        drag_corner(
+            Point {
+                column: 10,
+                row: 16
+            },
+            Point { column: 8, row: 18 },
+            2
+        ),
+        vec![build_grow_move(Direction::Down, 2)]
+    );
+    assert_eq!(
+        drag_corner(
+            Point {
+                column: 49,
+                row: 16
+            },
+            Point {
+                column: 51,
+                row: 18
+            },
+            3
+        ),
+        vec![
+            build_grow_move(Direction::Right, 2),
+            build_grow_move(Direction::Down, 2),
+        ]
+    );
+}
+
+#[test]
+fn a_tiled_panes_corner_drag_moves_each_border_with_a_pane_beside_it() {
+    let resized_pane_id = PaneId::new();
+    let mouse_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(PaneId::new()),
+            build_plain_mouse_pane(resized_pane_id),
+        ],
+        None,
+    );
+    // The second band's top-left corner: no pane lies left of it, and the first
+    // band lies above it.
+    let top_left_corner = Point {
+        column: 0,
+        row: mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+            .outer_rect
+            .origin
+            .row
+            + 1,
+    };
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+
+    client.handle_mouse(
+        build_left_mouse_press(top_left_corner),
+        &mouse_frame,
+        current_time,
+    );
+    assert_eq!(
+        client.left_button_gesture,
+        Some(LeftButtonGesture::BorderResize(ResizeDrag {
+            pane_id: resized_pane_id,
+            border_side: Direction::Up,
+            corner_horizontal_side: None,
+            last_accepted_position: top_left_corner,
+        }))
+    );
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_drag(Point {
+                column: 3,
+                row: top_left_corner.row + 2,
+            }),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 1),
+        ),
+        vec![MouseAction::Resize {
+            pane_id: resized_pane_id,
+            border_side: Direction::Up,
+            resize_step: -1,
+            requested_cell_count: 2,
+        }]
+    );
+}
+
+#[test]
+fn a_tiled_panes_corner_drag_moves_both_borders_when_a_pane_lies_beside_each() {
+    let resized_pane_id = PaneId::new();
+    let mut mouse_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(resized_pane_id),
+            build_plain_mouse_pane(PaneId::new()),
+            build_plain_mouse_pane(PaneId::new()),
+        ],
+        None,
+    );
+    // `A | B` above a full-width `C`: A's bottom-right corner has B on its
+    // right and C below it.
+    for (pane_slot, outer_rect) in mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots
+        .iter_mut()
+        .zip([
+            build_cell_rect(0, 0, 40, 11),
+            build_cell_rect(40, 0, 40, 11),
+            build_cell_rect(0, 11, 80, 11),
+        ])
+    {
+        pane_slot.outer_rect = outer_rect;
+        pane_slot.content_rect = Some(build_cell_rect(
+            outer_rect.origin.column + 1,
+            outer_rect.origin.row + 1,
+            outer_rect.size.column_count - 2,
+            outer_rect.size.row_count - 2,
+        ));
+    }
+    // Pane-area cell (39, 10) is one screen row lower.
+    let bottom_right_corner = Point {
+        column: 39,
+        row: 11,
+    };
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+
+    client.handle_mouse(
+        build_left_mouse_press(bottom_right_corner),
+        &mouse_frame,
+        current_time,
+    );
+    assert_eq!(
+        client.left_button_gesture,
+        Some(LeftButtonGesture::BorderResize(ResizeDrag {
+            pane_id: resized_pane_id,
+            border_side: Direction::Right,
+            corner_horizontal_side: Some(Direction::Down),
+            last_accepted_position: bottom_right_corner,
+        }))
+    );
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_drag(Point {
+                column: 41,
+                row: 13
+            }),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, 1),
+        ),
+        vec![
+            MouseAction::Resize {
+                pane_id: resized_pane_id,
+                border_side: Direction::Right,
+                resize_step: 1,
+                requested_cell_count: 2,
+            },
+            MouseAction::Resize {
+                pane_id: resized_pane_id,
+                border_side: Direction::Down,
+                resize_step: 1,
+                requested_cell_count: 2,
+            },
+        ]
     );
 }
 
@@ -6964,4 +7274,503 @@ fn escape_during_a_handle_drag_in_floating_pane_move_mode_ends_only_the_drag() {
         client.resolve_key(escape_chord, current_time),
         KeyOutcome::Fire(build_core_bound_action("cancel-floating-pane-move"))
     );
+}
+
+// --- Dock/undock mode ----------------------------------------------------------
+
+/// A frame of tiled panes `upper_pane_id` and `lower_pane_id` as two bands,
+/// with floating pane `floating_pane_id` drawn over them in
+/// [`FLOATING_PANE_OUTER_RECT`] and taking the input. The active tab focuses
+/// `upper_pane_id`.
+fn build_dock_mouse_frame(
+    upper_pane_id: PaneId,
+    lower_pane_id: PaneId,
+    floating_pane_id: PaneId,
+) -> MouseFrame {
+    let mut mouse_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(upper_pane_id),
+            build_plain_mouse_pane(lower_pane_id),
+        ],
+        Some(floating_pane_id),
+    );
+    mouse_frame.client_snapshot.active_tab_focused_pane_id = Some(upper_pane_id);
+    add_floating_mouse_pane(
+        &mut mouse_frame,
+        build_plain_mouse_pane(floating_pane_id),
+        FLOATING_PANE_OUTER_RECT,
+        false,
+    );
+    mouse_frame
+}
+
+/// A viewer that painted `mouse_frame` and opened dock/undock mode on
+/// floating pane `floating_pane_id`, holding the dock preview of the frame's
+/// tab, which holds `layout_tree`.
+fn build_docking_mouse_client(
+    mouse_frame: &MouseFrame,
+    floating_pane_id: PaneId,
+    layout_tree: LayoutNode,
+) -> Client {
+    let mut client = build_test_client();
+    client.apply_render_snapshot(&build_render_snapshot_from_mouse_frame(mouse_frame));
+    client.drop_gestures_the_frame_ended(mouse_frame);
+    let PlacementInputAction::ReadPlacement { .. } =
+        client.apply_client_action(ClientActionKind::BeginDockUndock, Some(mouse_frame))
+    else {
+        panic!("dock/undock mode on a floating pane reads its preview");
+    };
+    let mut placement_snapshot =
+        build_mouse_placement_snapshot(mouse_frame, floating_pane_id, layout_tree);
+    float_placement_source_pane(&mut placement_snapshot);
+    client.placement_state.placement_snapshot = Some(Arc::new(placement_snapshot));
+    client
+}
+
+/// The tree `V[upper_pane_id, lower_pane_id]`.
+fn build_two_band_layout_tree(upper_pane_id: PaneId, lower_pane_id: PaneId) -> LayoutNode {
+    LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Vertical,
+        vec![
+            LayoutNode::Pane(upper_pane_id),
+            LayoutNode::Pane(lower_pane_id),
+        ],
+    ))
+}
+
+#[test]
+fn a_drag_of_the_selected_floating_pane_released_over_a_pane_docks_it_on_the_nearest_edge() {
+    let [upper_pane_id, lower_pane_id, floating_pane_id] =
+        [PaneId::new(), PaneId::new(), PaneId::new()];
+    let mouse_frame = build_dock_mouse_frame(upper_pane_id, lower_pane_id, floating_pane_id);
+    let tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let mut client = build_docking_mouse_client(
+        &mouse_frame,
+        floating_pane_id,
+        build_two_band_layout_tree(upper_pane_id, lower_pane_id),
+    );
+    let current_time = Instant::now();
+    let dock_right_of_lower_pane = TiledPlacementTarget::Split {
+        destination_tab_id: tab_id,
+        anchor: PanePlacementAnchor::Pane(lower_pane_id),
+        direction: Direction::Right,
+    };
+
+    // Screen `(20, 8)` is inside the floating pane's content.
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_press(Point { column: 20, row: 8 }),
+            &mouse_frame,
+            current_time,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert_eq!(client.get_placement_target(), None);
+    // Screen `(78, 17)` is one column inside the lower pane's right border.
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_drag(Point {
+                column: 78,
+                row: 17
+            }),
+            &mouse_frame,
+            current_time,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert_eq!(
+        client.get_placement_target(),
+        Some(dock_right_of_lower_pane.clone())
+    );
+
+    let release_action = client.handle_placement_mouse(
+        build_left_mouse_release(Point {
+            column: 78,
+            row: 17,
+        }),
+        &mouse_frame,
+        current_time,
+    );
+    let Some(PlacementInputAction::SubmitCommand { command, .. }) = release_action else {
+        panic!("the release over a pane sends the dock, got {release_action:?}");
+    };
+    assert_eq!(
+        command,
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id: Some(floating_pane_id),
+            placement_target: PanePlacementTarget::Tiled(dock_right_of_lower_pane),
+            expected_placement_revision: Some(PlacementRevision {
+                session_revision: 0,
+                client_revision: 0,
+            }),
+        })
+    );
+    assert!(client.is_dock_undock_command_pending());
+}
+
+#[test]
+fn a_pinned_selected_floating_pane_stays_at_its_cell_and_a_release_off_every_pane_sends_nothing() {
+    let [upper_pane_id, lower_pane_id, floating_pane_id] =
+        [PaneId::new(), PaneId::new(), PaneId::new()];
+    let mut mouse_frame = build_dock_mouse_frame(upper_pane_id, lower_pane_id, floating_pane_id);
+    mouse_frame.session_snapshot.floating_pane_slots[0].is_pinned = true;
+    let mut client = build_docking_mouse_client(
+        &mouse_frame,
+        floating_pane_id,
+        build_two_band_layout_tree(upper_pane_id, lower_pane_id),
+    );
+    let current_time = Instant::now();
+    client.handle_placement_mouse(
+        build_left_mouse_press(Point { column: 20, row: 8 }),
+        &mouse_frame,
+        current_time,
+    );
+    client.handle_placement_mouse(
+        build_left_mouse_drag(Point { column: 25, row: 0 }),
+        &mouse_frame,
+        current_time,
+    );
+
+    assert_eq!(
+        client
+            .build_frame_layout_with_current_chrome(&mouse_frame)
+            .find_drawn_floating_pane_slot(floating_pane_id),
+        Some(FloatingPaneSlot::from_outer_rect(
+            floating_pane_id,
+            FLOATING_PANE_OUTER_RECT,
+            true,
+        ))
+    );
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_release(Point { column: 25, row: 0 }),
+            &mouse_frame,
+            current_time,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert_eq!(client.sent_floating_pane_move, None);
+    assert_eq!(client.dock_undock_mode, Some(DockUndockMode::default()));
+    assert_eq!(
+        client.get_placement_source_pane_id(),
+        Some(floating_pane_id)
+    );
+}
+
+#[test]
+fn a_drag_of_the_selected_floating_pane_released_off_every_pane_moves_it_and_keeps_the_mode() {
+    let [upper_pane_id, lower_pane_id, floating_pane_id] =
+        [PaneId::new(), PaneId::new(), PaneId::new()];
+    let mouse_frame = build_dock_mouse_frame(upper_pane_id, lower_pane_id, floating_pane_id);
+    let mut client = build_docking_mouse_client(
+        &mouse_frame,
+        floating_pane_id,
+        build_two_band_layout_tree(upper_pane_id, lower_pane_id),
+    );
+    let current_time = Instant::now();
+    client.handle_placement_mouse(
+        build_left_mouse_press(Point { column: 20, row: 8 }),
+        &mouse_frame,
+        current_time,
+    );
+    client.handle_placement_mouse(
+        build_left_mouse_drag(Point { column: 25, row: 0 }),
+        &mouse_frame,
+        current_time,
+    );
+
+    // The pointer travelled `(+5, -8)` from the press: the pane's top-left
+    // cell `(10, 4)` moves to `(15, 0)`, its top row held at the pane area's.
+    let release_action = client.handle_placement_mouse(
+        build_left_mouse_release(Point { column: 25, row: 0 }),
+        &mouse_frame,
+        current_time,
+    );
+    let Some(PlacementInputAction::SubmitCommand { command, .. }) = release_action else {
+        panic!("the release off every pane sends a move, got {release_action:?}");
+    };
+    assert_eq!(
+        command,
+        Command::MoveFloatingPane(MoveFloatingPaneArgs {
+            pane_id: floating_pane_id,
+            top_left_cell: Point { column: 15, row: 0 },
+        })
+    );
+    assert_eq!(client.dock_undock_mode, Some(DockUndockMode::default()));
+    assert_eq!(
+        client.get_placement_source_pane_id(),
+        Some(floating_pane_id)
+    );
+    assert_eq!(client.get_placement_target(), None);
+}
+
+#[test]
+fn escape_during_a_dock_drag_puts_the_pane_back_and_a_second_escape_leaves_the_mode() {
+    let [upper_pane_id, lower_pane_id, floating_pane_id] =
+        [PaneId::new(), PaneId::new(), PaneId::new()];
+    let mouse_frame = build_dock_mouse_frame(upper_pane_id, lower_pane_id, floating_pane_id);
+    let mut client = build_docking_mouse_client(
+        &mouse_frame,
+        floating_pane_id,
+        build_two_band_layout_tree(upper_pane_id, lower_pane_id),
+    );
+    let current_time = Instant::now();
+    let escape_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Esc));
+    client.handle_placement_mouse(
+        build_left_mouse_press(Point { column: 20, row: 8 }),
+        &mouse_frame,
+        current_time,
+    );
+    client.handle_placement_mouse(
+        build_left_mouse_drag(Point {
+            column: 78,
+            row: 17,
+        }),
+        &mouse_frame,
+        current_time,
+    );
+
+    assert_eq!(
+        client.resolve_key(escape_chord, current_time),
+        KeyOutcome::Discard
+    );
+    assert_eq!(client.left_button_gesture, None);
+    assert_eq!(client.placement_state.placement_drag, None);
+    assert_eq!(client.get_placement_target(), None);
+    assert_eq!(
+        find_drawn_floating_pane_top_left_cell(&client, &mouse_frame, floating_pane_id),
+        Some(FLOATING_PANE_OUTER_RECT.origin)
+    );
+    assert_eq!(client.dock_undock_mode, Some(DockUndockMode::default()));
+    assert_eq!(
+        client.resolve_key(escape_chord, current_time),
+        KeyOutcome::Fire(build_core_bound_action("cancel-dock-undock"))
+    );
+}
+
+#[test]
+fn a_drag_that_starts_on_a_tiled_pane_in_dock_undock_mode_floats_that_pane_once() {
+    let [upper_pane_id, lower_pane_id] = [PaneId::new(), PaneId::new()];
+    let mouse_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(upper_pane_id),
+            build_plain_mouse_pane(lower_pane_id),
+        ],
+        Some(lower_pane_id),
+    );
+    let mut client = build_test_client();
+    client.apply_render_snapshot(&build_render_snapshot_from_mouse_frame(&mouse_frame));
+    client.apply_client_action(ClientActionKind::BeginDockUndock, Some(&mouse_frame));
+    let current_time = Instant::now();
+    let press_point = get_content_cell(&mouse_frame, 0);
+    let drag_point = Point {
+        column: press_point.column + 5,
+        row: press_point.row + 1,
+    };
+
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_press(press_point),
+            &mouse_frame,
+            current_time,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    let drag_action = client.handle_placement_mouse(
+        build_left_mouse_drag(drag_point),
+        &mouse_frame,
+        current_time,
+    );
+    let Some(PlacementInputAction::SubmitCommand {
+        command_id,
+        command,
+    }) = drag_action
+    else {
+        panic!("the first move of the drag sends the undock, got {drag_action:?}");
+    };
+    assert_eq!(
+        command,
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id: Some(upper_pane_id),
+            placement_target: PanePlacementTarget::Floating {
+                top_left_cell: None,
+            },
+            expected_placement_revision: None,
+        })
+    );
+    let selection_after_undock = Some(DockUndockMode {
+        tiled_pane_selection: Some(TiledPaneSelection {
+            pane_id: upper_pane_id,
+            pending_undock_command_id: Some(command_id),
+        }),
+    });
+    assert_eq!(client.dock_undock_mode, selection_after_undock);
+
+    // While the undock waits, a further move and the release send nothing.
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_drag(Point {
+                column: drag_point.column + 1,
+                row: drag_point.row,
+            }),
+            &mouse_frame,
+            current_time,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_release(drag_point),
+            &mouse_frame,
+            current_time,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert_eq!(client.left_button_gesture, None);
+    assert_eq!(client.dock_undock_mode, selection_after_undock);
+}
+
+#[test]
+fn a_frame_that_floats_a_dragged_tiled_pane_keeps_the_drag_from_where_the_frame_draws_it() {
+    let [upper_pane_id, lower_pane_id] = [PaneId::new(), PaneId::new()];
+    let tiled_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(upper_pane_id),
+            build_plain_mouse_pane(lower_pane_id),
+        ],
+        Some(lower_pane_id),
+    );
+    let mut client = build_test_client();
+    client.apply_render_snapshot(&build_render_snapshot_from_mouse_frame(&tiled_frame));
+    client.apply_client_action(ClientActionKind::BeginDockUndock, Some(&tiled_frame));
+    let current_time = Instant::now();
+    let press_point = get_content_cell(&tiled_frame, 0);
+    let drag_point = Point {
+        column: press_point.column + 5,
+        row: press_point.row + 1,
+    };
+    client.handle_placement_mouse(
+        build_left_mouse_press(press_point),
+        &tiled_frame,
+        current_time,
+    );
+    client.handle_placement_mouse(
+        build_left_mouse_drag(drag_point),
+        &tiled_frame,
+        current_time,
+    );
+
+    let mut floating_frame = tiled_frame.clone();
+    floating_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots
+        .retain(|pane_slot| pane_slot.pane_id == lower_pane_id);
+    floating_frame
+        .session_snapshot
+        .floating_pane_ids
+        .push(upper_pane_id);
+    floating_frame
+        .session_snapshot
+        .floating_pane_slots
+        .push(FloatingPaneSlot::from_outer_rect(
+            upper_pane_id,
+            FLOATING_PANE_OUTER_RECT,
+            false,
+        ));
+    client.apply_render_snapshot(&build_render_snapshot_from_mouse_frame(&floating_frame));
+
+    assert_eq!(client.dock_undock_mode, Some(DockUndockMode::default()));
+    assert_eq!(client.get_placement_source_pane_id(), Some(upper_pane_id));
+    assert_eq!(
+        client.placement_state.placement_drag,
+        Some(PlacementDrag {
+            start_position: press_point,
+            has_pointer_moved: true,
+            is_insertion_drag: true,
+        })
+    );
+    // The pointer travelled `(+5, +1)` from the press: the frame's floating
+    // cell `(10, 4)` is drawn at `(15, 5)`.
+    assert_eq!(
+        find_drawn_floating_pane_top_left_cell(&client, &floating_frame, upper_pane_id),
+        Some(Point { column: 15, row: 5 })
+    );
+
+    let release_point = Point {
+        column: drag_point.column + 2,
+        row: drag_point.row,
+    };
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_drag(release_point),
+            &floating_frame,
+            current_time,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert_eq!(
+        find_drawn_floating_pane_top_left_cell(&client, &floating_frame, upper_pane_id),
+        Some(Point { column: 17, row: 5 })
+    );
+    let release_action = client.handle_placement_mouse(
+        build_left_mouse_release(release_point),
+        &floating_frame,
+        current_time,
+    );
+    let Some(PlacementInputAction::SubmitCommand { command, .. }) = release_action else {
+        panic!("the release off every target sends a move, got {release_action:?}");
+    };
+    assert_eq!(
+        command,
+        Command::MoveFloatingPane(MoveFloatingPaneArgs {
+            pane_id: upper_pane_id,
+            top_left_cell: Point { column: 17, row: 5 },
+        })
+    );
+    assert_eq!(client.dock_undock_mode, Some(DockUndockMode::default()));
+}
+
+#[test]
+fn a_press_on_another_floating_pane_in_dock_undock_mode_selects_it_and_reads_its_preview() {
+    let floating_pane_id = PaneId::new();
+    let small_floating_pane_id = PaneId::new();
+    let mouse_frame = build_two_floating_pane_frame(
+        build_plain_mouse_pane(PaneId::new()),
+        floating_pane_id,
+        small_floating_pane_id,
+        false,
+    );
+    let tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let mut client = build_test_client();
+    client.apply_render_snapshot(&build_render_snapshot_from_mouse_frame(&mouse_frame));
+    client.apply_client_action(ClientActionKind::BeginDockUndock, Some(&mouse_frame));
+    assert_eq!(
+        client.get_placement_source_pane_id(),
+        Some(floating_pane_id)
+    );
+
+    // Screen `(65, 7)` is inside the small floating pane's content.
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_press(Point { column: 65, row: 7 }),
+            &mouse_frame,
+            Instant::now(),
+        ),
+        Some(PlacementInputAction::ReadPlacement {
+            pane_id_to_focus: None,
+            source_pane_id: small_floating_pane_id,
+            destination_tab_id: tab_id,
+        })
+    );
+    assert_eq!(client.dock_undock_mode, Some(DockUndockMode::default()));
+    assert_eq!(
+        client
+            .placement_state
+            .placement_mode
+            .as_ref()
+            .map(|placement_mode| (placement_mode.source_pane_id, placement_mode.source_tab_id)),
+        Some((small_floating_pane_id, None))
+    );
+    assert_eq!(client.get_placement_target(), None);
 }

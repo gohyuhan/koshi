@@ -6,7 +6,7 @@
 //! higher layers (the session runtime); this module only names *what* may be
 //! requested.
 //!
-//! Commands cross process boundaries (CLI IPC), so every variant and arg struct
+//! Commands cross process boundaries (CLI IPC). Every variant and arg struct
 //! holds only serde-friendly types that mean the same thing in another
 //! process: no `Instant`, no raw OS handles, no `&mut` references, and command
 //! identity is never a free-form `String`.
@@ -68,12 +68,16 @@ pub enum Command {
     ///   [`PanePlacementCommitted`](crate::event::PanePlacementCommitted)
     ///   first, and every viewer showing the tab slides to the new layout.
     MovePane(MovePaneArgs),
-    /// Commit one checked pane placement: a swap with another pane, or an
-    /// insertion beside a pane, a group, or a whole tab, in the source tab or
-    /// another tab.
+    /// Commit one checked pane placement ([`PanePlacementTarget`]): a swap
+    /// with another pane, an insertion beside a pane, a group, or a whole tab,
+    /// or a move into a pane's stack, in the source tab or another tab. A
+    /// floating source pane docks there. A `Floating` target undocks a tiled
+    /// or stacked source pane.
     ///
-    /// - Pane placement mode sends it when the user confirms with Enter or
-    ///   a mouse drop. `koshi place-pane` also sends it.
+    /// - Pane placement mode and dock/undock mode send it when the user
+    ///   confirms with Enter or a mouse drop. `koshi place-pane`,
+    ///   `koshi undock-pane`, `koshi dock-pane` and `core:undock-pane` also
+    ///   send it.
     /// - The preview before the confirm lives only in the client that is
     ///   placing. This command is the first change the session sees.
     /// - The session emits
@@ -149,6 +153,14 @@ pub enum CommandKind {
     PlacePane,
     /// Names [`Command::ScrollPane`].
     ScrollPane,
+    /// Names [`Command::MoveFloatingPane`].
+    MoveFloatingPane,
+    /// Names [`Command::SetPanePinned`].
+    SetPanePinned,
+    /// Names [`Command::SetPaneMinimized`].
+    SetPaneMinimized,
+    /// Names [`Command::SetAllFloatingPanesMinimized`].
+    SetAllFloatingPanesMinimized,
     /// Names [`Command::Quit`].
     Quit,
 }
@@ -264,13 +276,19 @@ pub enum FocusTarget {
     /// pane holds the client's focus, the target is the pane the client
     /// focused in its active tab, in every direction.
     Direction(Direction),
-    /// The floating pane after the focused one among the floating panes the
-    /// client shows, in creation order, wrapping past the last to the first.
-    /// With no floating pane focused, the first one.
+    /// The floating pane after the focused one among every floating pane of
+    /// the session, in the order the panes became floating, wrapping past the
+    /// last to the first.
+    /// With no floating pane focused, the first one. The pane it lands on is
+    /// shown and focused for the client; the floating panes the client
+    /// already shows stay shown.
     NextFloatingPane,
-    /// The floating pane before the focused one among the floating panes the
-    /// client shows, in creation order, wrapping past the first to the last.
-    /// With no floating pane focused, the last one.
+    /// The floating pane before the focused one among every floating pane of
+    /// the session, in the order the panes became floating, wrapping past the
+    /// first to the last.
+    /// With no floating pane focused, the last one. The pane it lands on is
+    /// shown and focused for the client; the floating panes the client
+    /// already shows stay shown.
     PreviousFloatingPane,
 }
 
@@ -306,10 +324,14 @@ pub enum PanePlacementTarget {
     /// Place the source pane in a tab's tiled layout.
     Tiled(TiledPlacementTarget),
     /// Make the tiled or stacked source pane a floating pane of its session:
-    /// undock it. The pane keeps its id, its PTY and its terminal state.
+    /// undock it. The pane keeps its id, its PTY and its terminal state, and
+    /// asks for the size of the rect the acting client draws it in. A pane
+    /// the acting client does not draw asks for 60% x 60% of the shared
+    /// floating viewport.
     Floating {
         /// The acting client's top-left cell of the floating pane, counted
-        /// from that client's pane-area origin. `None` draws the pane at that
+        /// from that client's pane-area origin. `None` keeps the top-left
+        /// cell where the acting client draws the pane, else takes that
         /// client's default placement.
         top_left_cell: Option<Point>,
     },
@@ -332,6 +354,14 @@ pub enum TiledPlacementTarget {
         anchor: PanePlacementAnchor,
         /// The side of the anchor where the source pane lands.
         direction: Direction,
+    },
+    /// Put the source pane into the stack holding the target pane, as its last
+    /// member and its open member. A target in no stack forms a new stack of
+    /// the target, then the source. `[S1, S2]` with target `S2` gives
+    /// `[S1, S2, F]` with `F` open; plain `P` gives `[P, F]`.
+    Stack {
+        /// The pane whose stack receives the source pane.
+        target_pane_id: PaneId,
     },
 }
 
@@ -441,8 +471,11 @@ pub struct MovePaneArgs {
 /// Arguments for [`Command::PlacePane`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlacePaneArgs {
-    /// The live pane being placed.
-    pub source_pane_id: PaneId,
+    /// The live pane being placed. `None` takes the issuing pane for an
+    /// in-session CLI, and the pane that takes the acting client's input for
+    /// every other source: its focused floating pane, else its active tab's
+    /// focused pane.
+    pub source_pane_id: Option<PaneId>,
     /// The checked destination in the same session.
     pub placement_target: PanePlacementTarget,
     /// Revisions captured by an interactive preview, or `None` for a direct
@@ -502,12 +535,11 @@ pub struct SetPaneMinimizedArgs {
     /// every other source.
     pub pane_id: Option<PaneId>,
     /// `true` minimizes a pane the acting client shows: that client stops
-    /// drawing it, and a focus on it moves to the floating pane that client
-    /// focused most recently among those it still shows, else to its active
-    /// tab's focused pane. `false` restores a pane the acting client does not
-    /// show: that client draws it above its other floating panes and focuses
-    /// it. A minimize of a pane the acting client does not show, or a restore
-    /// of a pane it shows, changes nothing.
+    /// drawing it, and a focus on it moves to the newest floating pane that
+    /// client still shows, else to its active tab's focused pane. `false`
+    /// restores a pane the acting client minimized: that client draws it above
+    /// its other floating panes and focuses it. A minimize of a pane the acting
+    /// client minimized, or a restore of a pane it shows, changes nothing.
     pub is_minimized: bool,
 }
 
@@ -518,8 +550,8 @@ pub struct SetPaneMinimizedArgs {
 pub struct SetAllFloatingPanesMinimizedArgs {
     /// `true` minimizes every floating pane the acting client shows, and that
     /// client's focus moves to its active tab's focused pane. `false` restores
-    /// every floating pane the acting client minimized, in that client's
-    /// floating focus order: the last one restored is drawn on top and focused.
+    /// every floating pane the acting client minimized, in the order the panes
+    /// became floating: the last one restored is drawn on top and focused.
     pub is_minimized: bool,
 }
 

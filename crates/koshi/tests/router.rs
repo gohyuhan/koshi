@@ -110,7 +110,8 @@ fn a_created_session_is_registered_and_found_by_its_id_and_by_its_name() {
 
     let created_session = create_session(&mut connection);
     let _session_processes = RunningSessions {
-        session_server_process_ids: vec![created_session.process_id],
+        runtime_directory: runtime_directory.path().to_path_buf(),
+        session_addresses: vec![created_session.clone()],
     };
 
     // The router picks the name and the id, and the session server binds the
@@ -167,7 +168,8 @@ fn a_session_server_that_is_killed_leaves_the_list_and_takes_its_files_with_it()
 
     let created_session = create_session(&mut connection);
     let _session_processes = RunningSessions {
-        session_server_process_ids: vec![created_session.process_id],
+        runtime_directory: runtime_directory.path().to_path_buf(),
+        session_addresses: vec![created_session.clone()],
     };
 
     terminate_process(created_session.process_id);
@@ -199,7 +201,8 @@ fn a_restarted_router_rediscovers_a_session_server_that_outlived_it() {
 
     let created_session = create_session(&mut connection);
     let _session_processes = RunningSessions {
-        session_server_process_ids: vec![created_session.process_id],
+        runtime_directory: runtime_directory.path().to_path_buf(),
+        session_addresses: vec![created_session.clone()],
     };
 
     // The router dies with no chance to tidy up; the session server it started
@@ -318,7 +321,8 @@ fn an_adopted_session_server_that_dies_is_dropped_by_the_next_lookup() {
 
     let created_session = create_session(&mut connection);
     let _session_processes = RunningSessions {
-        session_server_process_ids: vec![created_session.process_id],
+        runtime_directory: runtime_directory.path().to_path_buf(),
+        session_addresses: vec![created_session.clone()],
     };
 
     drop(connection);
@@ -404,7 +408,8 @@ fn the_router_ends_itself_once_no_session_is_left() {
 
     let created_session = create_session(&mut connection);
     let _session_processes = RunningSessions {
-        session_server_process_ids: vec![created_session.process_id],
+        runtime_directory: runtime_directory.path().to_path_buf(),
+        session_addresses: vec![created_session.clone()],
     };
 
     // The router spawned this session server: the child's exit reaches the
@@ -443,7 +448,8 @@ fn a_restart_keeps_the_sessions_and_the_router_serving() {
 
     let created_session = create_session(&mut connection);
     let _session_processes = RunningSessions {
-        session_server_process_ids: vec![created_session.process_id],
+        runtime_directory: runtime_directory.path().to_path_buf(),
+        session_addresses: vec![created_session.clone()],
     };
 
     let endpoint_before_restart =
@@ -564,7 +570,8 @@ fn a_session_server_the_restarted_router_does_not_list_is_reaped_once_it_exits()
     let mut connection = connect_to_router(runtime_directory.path());
     let created_session = create_session(&mut connection);
     let _session_processes = RunningSessions {
-        session_server_process_ids: vec![created_session.process_id],
+        runtime_directory: runtime_directory.path().to_path_buf(),
+        session_addresses: vec![created_session.clone()],
     };
     std::fs::remove_file(EndpointFile::resolve_endpoint_file_path(
         runtime_directory.path(),
@@ -627,7 +634,8 @@ fn a_restart_with_the_binary_gone_is_refused_and_the_old_router_keeps_serving() 
 
     let created_session = create_session(&mut connection);
     let _session_processes = RunningSessions {
-        session_server_process_ids: vec![created_session.process_id],
+        runtime_directory: runtime_directory.path().to_path_buf(),
+        session_addresses: vec![created_session.clone()],
     };
 
     // A running program can be renamed on every supported platform, and that
@@ -678,7 +686,8 @@ fn a_failed_restart_leaves_the_router_serving_hung_up_clients() {
 
     let created_session = create_session(&mut connection);
     let _session_processes = RunningSessions {
-        session_server_process_ids: vec![created_session.process_id],
+        runtime_directory: runtime_directory.path().to_path_buf(),
+        session_addresses: vec![created_session.clone()],
     };
 
     std::fs::remove_file(&binary_path).expect("the binary is taken away");
@@ -830,7 +839,8 @@ fn a_router_that_restarted_restarts_again() {
 
     let created_session = create_session(&mut connection);
     let _session_processes = RunningSessions {
-        session_server_process_ids: vec![created_session.process_id],
+        runtime_directory: runtime_directory.path().to_path_buf(),
+        session_addresses: vec![created_session.clone()],
     };
 
     let initial_endpoint =
@@ -900,7 +910,8 @@ fn a_running_router_and_session_lock_their_runtime_folder_and_set_access_times_a
     let mut connection = connect_to_router(runtime_directory.path());
     let created_session = create_session(&mut connection);
     let _session_processes = RunningSessions {
-        session_server_process_ids: vec![created_session.process_id],
+        runtime_directory: runtime_directory.path().to_path_buf(),
+        session_addresses: vec![created_session.clone()],
     };
 
     // Each server set its access times 30 days after its own start, and both

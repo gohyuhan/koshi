@@ -12,7 +12,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as RatatuiRect;
 
-use koshi_core::geometry::{Point, Rect, Size};
+use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
@@ -680,7 +680,8 @@ fn a_zero_height_chrome_region_paints_nothing() {
         resolve_hit_region(frame_layout, Point { column: 0, row: 0 }),
         HitRegion::PaneBorder {
             pane_id: only_pane_id,
-            side: koshi_core::geometry::Direction::Left,
+            side: Direction::Left,
+            corner_horizontal_side: Some(Direction::Up),
         }
     );
 }

@@ -6,6 +6,12 @@
 //! Then the crash report: what the file is named and what it holds, that the
 //! cleanup hooks run before it is written, and that every way the write can
 //! fail leaves no file and still restores the terminal.
+//!
+//! Every test that replaces the process-global panic hook is marked
+//! `#[ignore]`.
+//! [`the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary`]
+//! runs them one at a time in a child copy of this test binary, which runs no
+//! other test.
 
 use super::*;
 use std::panic::AssertUnwindSafe;
@@ -14,6 +20,33 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// Serializes the tests that replace the process-global panic hook. One such
 /// test runs at a time.
 static PANIC_HOOK_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// The number of tests in this file that replace the process-global panic
+/// hook: `18`.
+const PANIC_HOOK_TEST_COUNT: usize = 18;
+
+#[test]
+fn the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary() {
+    let child_output =
+        std::process::Command::new(std::env::current_exe().expect("the test binary has a path"))
+            .args(["cleanup::tests::", "--ignored", "--test-threads=1"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("the child copy of this test binary runs");
+
+    let child_standard_output = String::from_utf8_lossy(&child_output.stdout);
+    assert_eq!(
+        child_output.status.code(),
+        Some(0),
+        "{child_standard_output}"
+    );
+    assert!(
+        child_standard_output.contains(&format!(
+            "test result: ok. {PANIC_HOOK_TEST_COUNT} passed; 0 failed; 0 ignored;"
+        )),
+        "{child_standard_output}"
+    );
+}
 
 #[test]
 fn drop_runs_hooks_in_registration_order() {
@@ -31,18 +64,19 @@ fn drop_runs_hooks_in_registration_order() {
     assert_eq!(*cleanup_order.lock().unwrap(), vec![0, 1, 2]);
 }
 
-// A panic must trigger cleanup, and the subsequent drop must not run the hooks a
-// second time. This test installs a process-global panic hook; it restores the
-// prior hook before returning so it does not perturb other tests.
+// A panic runs the cleanup hooks once, and the drop that follows runs none. The
+// test replaces the process-global panic hook and puts the previous one back
+// before it returns.
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn panic_runs_cleanup_once_then_drop_is_noop() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let cleanup_count = Arc::new(AtomicUsize::new(0));
 
-    // Silence the default hook so the deliberate panic below stays quiet, and
-    // keep the original to restore at the end.
+    // A silent hook replaces the default one: the deliberate panic below prints
+    // nothing. The original is put back at the end.
     let previous_panic_hook = panic::take_hook();
     panic::set_hook(Box::new(|_| {}));
 
@@ -52,8 +86,8 @@ fn panic_runs_cleanup_once_then_drop_is_noop() {
         cleanup_guard.register_cleanup(Box::new(move || {
             cleanup_count_for_hook.fetch_add(1, Ordering::SeqCst);
         }));
-        // Hold the guard for the duration: dropping it would restore the silent
-        // hook and unchain the cleanup before the panic fires.
+        // The guard lives to the end of the block: the panic below runs with the
+        // cleanup chained into the hook.
         let _panic_hook_guard = install_panic_hook(&cleanup_guard, None);
 
         let panic_result = panic::catch_unwind(AssertUnwindSafe(|| panic!("boom")));
@@ -78,9 +112,10 @@ fn panic_runs_cleanup_once_then_drop_is_noop() {
     panic::set_hook(previous_panic_hook);
 }
 
-// A hook that panics must not stop the hooks that follow it: each runs in its
-// own `catch_unwind`. The deliberate panic is silenced under a no-op hook.
+// A hook that panics does not stop the hooks that follow it: each runs in its
+// own `catch_unwind`. A no-op hook keeps the deliberate panic silent.
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn a_panicking_hook_does_not_stop_later_hooks() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
@@ -107,11 +142,11 @@ fn a_panicking_hook_does_not_stop_later_hooks() {
     panic::set_hook(previous_panic_hook);
 }
 
-// The hardest case: a cleanup hook panics while cleanup runs *from the panic
-// hook*. The hooks run on a fresh thread, so reaching the assertions at all
-// proves the hooks ran off the panic path. The hook after the panicking one
-// must still run.
+// A cleanup hook panics while cleanup runs from the panic hook. The hooks run on
+// a fresh thread, the process does not abort, and the hook after the panicking
+// one still runs.
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn a_panicking_hook_during_panic_handling_does_not_abort() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
@@ -166,9 +201,10 @@ fn a_default_guard_runs_its_hooks_on_drop() {
 }
 
 // A thread that dies while it holds the registry poisons that lock. The
-// terminal must still be restored: registering and draining both recover the
-// poisoned lock instead of panicking.
+// terminal is still restored: registering and draining both recover the
+// poisoned lock and do not panic.
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn cleanup_still_runs_after_a_thread_died_holding_the_registry() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
@@ -182,7 +218,8 @@ fn cleanup_still_runs_after_a_thread_died_holding_the_registry() {
         before_cleanup_count_for_hook.fetch_add(1, Ordering::SeqCst);
     }));
 
-    // Silence the default hook so the deliberate panic below stays quiet.
+    // A silent hook replaces the default one: the deliberate panic below prints
+    // nothing.
     let previous_panic_hook = panic::take_hook();
     panic::set_hook(Box::new(|_| {}));
     let cleanup_hook_registry = Arc::clone(&cleanup_guard.cleanup_hooks);
@@ -221,10 +258,10 @@ fn cleanup_still_runs_after_a_thread_died_holding_the_registry() {
     );
 }
 
-// A hook registered after a panic already drained the registry must still run
-// on the guard's subsequent normal drop: the registry is reusable, not left
-// permanently drained by the earlier panic.
+// A hook registered after a panic drained the registry runs on the guard's
+// next normal drop: the registry takes new hooks after a drain.
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn hooks_registered_after_a_panic_drain_still_run_on_drop() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
@@ -274,9 +311,10 @@ fn hooks_registered_after_a_panic_drain_still_run_on_drop() {
     panic::set_hook(previous_panic_hook);
 }
 
-// Dropping the `PanicHookGuard` without a panic having occurred restores the
-// previously installed hook, so a subsequent panic no longer chains into cleanup.
+// Dropping the `PanicHookGuard` without a panic restores the previously
+// installed hook: a panic after the drop does not run cleanup.
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn dropping_panic_hook_guard_restores_previous_hook_so_cleanup_no_longer_chains() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
@@ -312,6 +350,7 @@ fn dropping_panic_hook_guard_restores_previous_hook_so_cleanup_no_longer_chains(
 // Two guards installed one inside the other. Dropping the inner one puts the
 // outer chained hook back; dropping the outer one puts the original hook back.
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn nested_panic_hook_guards_dropped_last_in_first_out_restore_each_previous_hook() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
@@ -386,6 +425,7 @@ fn nested_panic_hook_guards_dropped_last_in_first_out_restore_each_previous_hook
 // The previously installed hook runs after the cleanup hooks: when it fires,
 // the cleanup hook has already counted.
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn the_previous_panic_hook_runs_after_the_cleanup_hooks() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
@@ -413,9 +453,9 @@ fn the_previous_panic_hook_runs_after_the_cleanup_hooks() {
         );
     }
 
-    // Read the value out and put the original hook back before asserting: the
-    // installed hook takes this same lock, so a failing assertion that still
-    // held it would block instead of reporting.
+    // The count is read out and the original hook put back before the
+    // assertions: a failing assertion panics through the original hook, which
+    // takes no lock.
     let observed_cleanup_count = *observed_count_by_previous_hook.lock().unwrap();
     panic::set_hook(previous_panic_hook);
 
@@ -430,6 +470,7 @@ fn the_previous_panic_hook_runs_after_the_cleanup_hooks() {
 // the chained hook stays installed, and the next panic still drains the
 // registry.
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn a_panic_hook_guard_dropped_while_unwinding_leaves_the_chained_hook_installed() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
@@ -471,6 +512,7 @@ fn a_panic_hook_guard_dropped_while_unwinding_leaves_the_chained_hook_installed(
 // A guard dropped while its thread unwinds still runs its hooks, and runs them
 // on a fresh thread rather than on the unwinding one.
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn a_guard_dropped_while_unwinding_runs_its_hooks_on_another_thread() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
@@ -509,6 +551,7 @@ fn a_guard_dropped_while_unwinding_runs_its_hooks_on_another_thread() {
 // registry. The new hook is not part of the drain that is running; the next
 // drain runs it.
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn a_hook_registered_by_a_running_hook_runs_on_the_next_drain() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
@@ -701,9 +744,9 @@ fn a_crash_report_whose_file_path_is_a_directory_writes_nothing() {
     let _ = std::fs::remove_dir_all(&crash_directory_path);
 }
 
-// Only Unix can make a directory read-only through `std`. On Windows a failing
-// write is covered by
-// `a_crash_report_whose_file_path_is_a_directory_writes_nothing`.
+// The test runs on Unix only. On Windows,
+// `a_crash_report_whose_file_path_is_a_directory_writes_nothing` checks a
+// failing write.
 #[cfg(unix)]
 #[test]
 fn a_read_only_crash_directory_this_user_owns_is_made_private_and_takes_the_report() {
@@ -737,6 +780,7 @@ fn a_read_only_crash_directory_this_user_owns_is_made_private_and_takes_the_repo
 }
 
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn a_panic_writes_a_crash_report_naming_the_message_and_the_location() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
@@ -812,6 +856,7 @@ fn a_panic_writes_a_crash_report_naming_the_message_and_the_location() {
 }
 
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn a_panic_with_no_message_writes_the_stand_in_text() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
@@ -843,6 +888,7 @@ fn a_panic_with_no_message_writes_the_stand_in_text() {
 // A `panic!` with format arguments carries a `String` payload; the message is
 // written the same as a literal one.
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn a_formatted_panic_message_is_written_in_full() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
@@ -876,6 +922,7 @@ fn a_formatted_panic_message_is_written_in_full() {
 }
 
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn a_panic_with_a_multi_line_message_keeps_every_line() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
@@ -909,6 +956,7 @@ fn a_panic_with_a_multi_line_message_keeps_every_line() {
 }
 
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn a_panic_with_no_crash_directory_writes_no_file() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
@@ -942,6 +990,7 @@ fn a_panic_with_no_crash_directory_writes_no_file() {
 }
 
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn the_cleanup_hooks_run_before_the_crash_report_is_written() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
@@ -985,6 +1034,7 @@ fn the_cleanup_hooks_run_before_the_crash_report_is_written() {
 }
 
 #[test]
+#[ignore = "runs in the child process of the_panic_hook_tests_pass_alone_in_a_child_copy_of_this_test_binary"]
 fn a_crash_report_that_cannot_be_written_still_restores_the_terminal() {
     let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()

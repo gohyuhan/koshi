@@ -2,8 +2,10 @@
 //! construction, a tab's focus history, the start lock, the lifecycle moves
 //! that attaching, detaching and stopping make, the tab size, the shared
 //! floating viewport, where a client draws a floating pane, the tab and
-//! floating cell sizes, the floating set and its size solve, the serialized
-//! shape, and every invariant [`Session::validate_session_consistency`] checks.
+//! floating cell sizes, the floating set and its size solve, a tab's stored
+//! solve with the focus handoff and the floating pane minimize each solve
+//! runs, the serialized shape, and every invariant
+//! [`Session::validate_session_consistency`] checks.
 
 use super::*;
 use std::collections::HashMap;
@@ -97,6 +99,7 @@ fn commit_test_tab(session: &mut Session, tab_name: String) -> Vec<Event> {
         tab_name,
         None,
         NewPaneSpec::default(),
+        TEST_TAB_SIZE,
     )
     .1
 }
@@ -161,15 +164,19 @@ fn find_tab_by_pane_id_finds_the_tab_holding_each_leaf_and_none_for_other_panes(
     let mut session = build_empty_session();
     let (first_pane_id, second_pane_id, third_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
-    let first_tab = Tab::from_root_pane(TabId::new(), "a".to_owned(), 0, first_pane_id);
-    let mut second_tab = Tab::from_root_pane(TabId::new(), "b".to_owned(), 1, second_pane_id);
-    second_tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
-        SplitDirection::Horizontal,
-        vec![
-            LayoutNode::Pane(second_pane_id),
-            LayoutNode::Pane(third_pane_id),
-        ],
-    )));
+    let first_tab = build_tab(TabId::new(), "a", 0, LayoutNode::Pane(first_pane_id));
+    let second_tab = build_tab(
+        TabId::new(),
+        "b",
+        1,
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutNode::Pane(second_pane_id),
+                LayoutNode::Pane(third_pane_id),
+            ],
+        )),
+    );
     let (first_tab_id, second_tab_id) = (first_tab.get_tab_id(), second_tab.get_tab_id());
     session.tabs.insert(first_tab_id, first_tab);
     session.tabs.insert(second_tab_id, second_tab);
@@ -187,43 +194,6 @@ fn find_tab_by_pane_id_finds_the_tab_holding_each_leaf_and_none_for_other_panes(
             expected_tab_id
         );
     }
-}
-
-#[test]
-fn focus_repair_tab_rect_takes_the_viewers_then_every_client_then_80x24() {
-    let mut session = build_empty_session();
-    let (viewed_tab_id, unviewed_tab_id) = (TabId::new(), TabId::new());
-    let build_rect_at_origin = |column_count, row_count| {
-        Rect::from_size_at_origin(Size {
-            column_count,
-            row_count,
-        })
-    };
-    assert_eq!(
-        session.compute_focus_repair_tab_rect(viewed_tab_id),
-        build_rect_at_origin(80, 24),
-        "no client reports a pane area"
-    );
-
-    attach_viewer(&mut session, TabId::new(), 120, 42);
-    assert_eq!(
-        session.compute_focus_repair_tab_rect(viewed_tab_id),
-        build_rect_at_origin(120, 40),
-        "no client views the tab, one 120x40 pane area is attached elsewhere"
-    );
-
-    attach_viewer(&mut session, viewed_tab_id, 80, 24);
-    attach_viewer(&mut session, viewed_tab_id, 100, 32);
-    assert_eq!(
-        session.compute_focus_repair_tab_rect(viewed_tab_id),
-        build_rect_at_origin(80, 22),
-        "the tab's viewers have 80x22 and 100x30 pane areas"
-    );
-    assert_eq!(
-        session.compute_focus_repair_tab_rect(unviewed_tab_id),
-        build_rect_at_origin(80, 22),
-        "the per-axis minimum of every attached client's pane area"
-    );
 }
 
 #[test]
@@ -252,9 +222,9 @@ fn shared_floating_viewport_leaves_out_a_client_below_the_floating_minimum() {
         column_count: 120,
         row_count: 40,
     };
-    let minimum_floating_pane_area = Size {
-        column_count: 4,
-        row_count: 5,
+    let minimum_floating_viewport = Size {
+        column_count: 5,
+        row_count: 6,
     };
 
     attach_viewer_with_pane_area(
@@ -266,12 +236,12 @@ fn shared_floating_viewport_leaves_out_a_client_below_the_floating_minimum() {
     );
     for narrow_pane_area in [
         Size {
-            column_count: 3,
+            column_count: 4,
             row_count: 40,
         },
         Size {
             column_count: 120,
-            row_count: 4,
+            row_count: 5,
         },
     ] {
         attach_viewer_with_pane_area(
@@ -292,11 +262,11 @@ fn shared_floating_viewport_leaves_out_a_client_below_the_floating_minimum() {
         TabId::new(),
         120,
         42,
-        Some(PaneArea::Reported(minimum_floating_pane_area)),
+        Some(PaneArea::Reported(minimum_floating_viewport)),
     );
     assert_eq!(
         session.get_shared_floating_viewport(),
-        Some(minimum_floating_pane_area)
+        Some(minimum_floating_viewport)
     );
 }
 
@@ -1022,13 +992,12 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
             )),
         ],
     ));
-    let mut first_tab = Tab::from_root_pane(first_tab_id, "one".to_owned(), 0, first_pane_id);
-    first_tab.update_layout(first_tab_layout.clone());
+    let mut first_tab = build_tab(first_tab_id, "one", 0, first_tab_layout.clone());
     first_tab.record_focus_mru(second_pane_id);
     session.tabs.insert(first_tab_id, first_tab);
     session.tabs.insert(
         second_tab_id,
-        Tab::from_root_pane(second_tab_id, "two".to_owned(), 1, fourth_pane_id),
+        build_tab(second_tab_id, "two", 1, LayoutNode::Pane(fourth_pane_id)),
     );
 
     for pane_id in [first_pane_id, second_pane_id, third_pane_id, fourth_pane_id] {
@@ -1436,7 +1405,7 @@ fn a_new_session_starts_empty() {
 fn a_new_tab_owns_its_layout_and_starts_unfocused() {
     let tab_id = TabId::new();
     let root_pane_id = PaneId::new();
-    let tab = Tab::from_root_pane(tab_id, "code".to_owned(), 0, root_pane_id);
+    let tab = build_tab(tab_id, "code", 0, LayoutNode::Pane(root_pane_id));
 
     assert_eq!(tab.get_tab_id(), tab_id);
     assert_eq!(tab.get_tab_name(), "code");
@@ -1450,7 +1419,7 @@ fn a_new_tab_owns_its_layout_and_starts_unfocused() {
 
 #[test]
 fn a_tab_index_can_be_reassigned() {
-    let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let mut tab = build_tab(TabId::new(), "code", 0, LayoutNode::Pane(PaneId::new()));
 
     tab.update_tab_index(3);
 
@@ -1459,7 +1428,7 @@ fn a_tab_index_can_be_reassigned() {
 
 #[test]
 fn record_focus_orders_newest_first() {
-    let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let mut tab = build_tab(TabId::new(), "code", 0, LayoutNode::Pane(PaneId::new()));
     let (oldest_pane_id, middle_pane_id, newest_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
 
@@ -1475,7 +1444,7 @@ fn record_focus_orders_newest_first() {
 
 #[test]
 fn re_focusing_moves_to_front_without_duplicating() {
-    let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let mut tab = build_tab(TabId::new(), "code", 0, LayoutNode::Pane(PaneId::new()));
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
 
     tab.record_focus_mru(first_pane_id);
@@ -1491,7 +1460,7 @@ fn re_focusing_moves_to_front_without_duplicating() {
 
 #[test]
 fn focus_mru_is_capped_dropping_the_oldest() {
-    let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let mut tab = build_tab(TabId::new(), "code", 0, LayoutNode::Pane(PaneId::new()));
     let focus_history_entry_count = MAX_TAB_FOCUS_MRU_ENTRY_COUNT as usize;
 
     // Record one more distinct pane than the cap allows.
@@ -1516,7 +1485,7 @@ fn focus_mru_is_capped_dropping_the_oldest() {
 fn focus_mru_at_exactly_the_cap_evicts_nothing() {
     // The boundary just below the eviction case above: recording exactly
     // `MAX_TAB_FOCUS_MRU_ENTRY_COUNT` distinct panes keeps every one of them.
-    let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let mut tab = build_tab(TabId::new(), "code", 0, LayoutNode::Pane(PaneId::new()));
     let focus_history_entry_count = MAX_TAB_FOCUS_MRU_ENTRY_COUNT as usize;
 
     let pane_ids: Vec<PaneId> = (0..focus_history_entry_count)
@@ -1534,7 +1503,7 @@ fn focus_mru_at_exactly_the_cap_evicts_nothing() {
 fn re_recording_an_existing_pane_at_the_cap_moves_it_front_without_evicting() {
     // Re-recording an entry a full history already holds evicts nothing: the
     // duplicate is dropped before the length is checked.
-    let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let mut tab = build_tab(TabId::new(), "code", 0, LayoutNode::Pane(PaneId::new()));
     let focus_history_entry_count = MAX_TAB_FOCUS_MRU_ENTRY_COUNT as usize;
     let pane_ids: Vec<PaneId> = (0..focus_history_entry_count)
         .map(|_| PaneId::new())
@@ -1560,7 +1529,7 @@ fn re_recording_an_existing_pane_at_the_cap_moves_it_front_without_evicting() {
 
 #[test]
 fn recording_the_same_pane_twice_keeps_one_entry() {
-    let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let mut tab = build_tab(TabId::new(), "code", 0, LayoutNode::Pane(PaneId::new()));
     let pane_id = PaneId::new();
 
     tab.record_focus_mru(pane_id);
@@ -1571,7 +1540,7 @@ fn recording_the_same_pane_twice_keeps_one_entry() {
 
 #[test]
 fn remove_focus_mru_drops_only_the_named_pane() {
-    let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let mut tab = build_tab(TabId::new(), "code", 0, LayoutNode::Pane(PaneId::new()));
     let (oldest_pane_id, middle_pane_id, newest_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
     tab.record_focus_mru(oldest_pane_id);
@@ -1588,7 +1557,7 @@ fn remove_focus_mru_drops_only_the_named_pane() {
 
 #[test]
 fn remove_focus_mru_for_a_pane_never_recorded_is_a_noop() {
-    let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let mut tab = build_tab(TabId::new(), "code", 0, LayoutNode::Pane(PaneId::new()));
     let recorded_pane_id = PaneId::new();
     tab.record_focus_mru(recorded_pane_id);
 
@@ -1599,7 +1568,7 @@ fn remove_focus_mru_for_a_pane_never_recorded_is_a_noop() {
 
 #[test]
 fn remove_focus_mru_on_an_empty_history_is_a_noop() {
-    let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let mut tab = build_tab(TabId::new(), "code", 0, LayoutNode::Pane(PaneId::new()));
 
     tab.remove_focus_mru(PaneId::new());
 
@@ -1679,20 +1648,29 @@ fn the_starting_lock_is_stored_as_a_plain_json_bool() {
 #[test]
 fn a_tab_survives_a_serde_round_trip() {
     let root_pane_id = PaneId::new();
-    let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 2, root_pane_id);
+    let mut tab = build_tab(TabId::new(), "code", 2, LayoutNode::Pane(root_pane_id));
     tab.record_focus_mru(root_pane_id);
 
-    let serialized_tab_json = serde_json::to_string(&tab).expect("serialize");
-    let restored_tab: Tab = serde_json::from_str(&serialized_tab_json).expect("deserialize");
+    let serialized_tab_json = serde_json::to_value(&tab).expect("serialize");
+    let restored_tab: Tab =
+        serde_json::from_value(serialized_tab_json.clone()).expect("deserialize");
 
-    assert_eq!(tab, restored_tab);
+    assert_eq!(
+        serialized_tab_json["solved_tab_size"],
+        serde_json::json!({"column_count": 80, "row_count": 22})
+    );
+    assert_eq!(
+        serde_json::to_value(&restored_tab).expect("serialize"),
+        serialized_tab_json
+    );
+    assert_eq!(restored_tab.get_layout_solve(), &LayoutSolve::default());
 }
 
 #[test]
 fn a_tabs_name_is_stored_as_a_plain_json_string() {
     // Pins the stored shape: the member is named `tab_name` and holds a JSON
     // string, not a nested object.
-    let tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 2, PaneId::new());
+    let tab = build_tab(TabId::new(), "code", 2, LayoutNode::Pane(PaneId::new()));
 
     let serialized_tab = serde_json::to_value(&tab).expect("serialize");
 
@@ -1814,7 +1792,7 @@ fn a_freshly_built_session_is_consistent() {
 fn a_layout_leaf_with_no_record_is_reported() {
     let mut session = build_empty_session();
     let ghost_pane_id = PaneId::new();
-    let tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, ghost_pane_id);
+    let tab = build_tab(TabId::new(), "code", 0, LayoutNode::Pane(ghost_pane_id));
     let tab_id = tab.get_tab_id();
     session.tabs.insert(tab_id, tab);
 
@@ -1849,8 +1827,8 @@ fn a_record_in_no_layout_is_reported() {
 fn a_pane_placed_in_two_tabs_is_reported() {
     let mut session = build_empty_session();
     let shared_pane_id = register_terminal_pane(&mut session);
-    let first_tab = Tab::from_root_pane(TabId::new(), "a".to_owned(), 0, shared_pane_id);
-    let second_tab = Tab::from_root_pane(TabId::new(), "b".to_owned(), 1, shared_pane_id);
+    let first_tab = build_tab(TabId::new(), "a", 0, LayoutNode::Pane(shared_pane_id));
+    let second_tab = build_tab(TabId::new(), "b", 1, LayoutNode::Pane(shared_pane_id));
     let (first_tab_id, second_tab_id) = (first_tab.get_tab_id(), second_tab.get_tab_id());
     session.tabs.insert(first_tab_id, first_tab);
     session.tabs.insert(second_tab_id, second_tab);
@@ -1871,7 +1849,7 @@ fn a_pane_placed_in_two_tabs_is_reported() {
 fn a_tab_stored_under_the_wrong_key_is_reported() {
     let mut session = build_empty_session();
     let pane_id = register_terminal_pane(&mut session);
-    let tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, pane_id);
+    let tab = build_tab(TabId::new(), "code", 0, LayoutNode::Pane(pane_id));
     let tab_id = tab.get_tab_id();
     let wrong_tab_id = TabId::new();
     session.tabs.insert(wrong_tab_id, tab);
@@ -1890,8 +1868,8 @@ fn two_tabs_sharing_a_bar_index_are_reported() {
     let mut session = build_empty_session();
     let first_pane_id = register_terminal_pane(&mut session);
     let second_pane_id = register_terminal_pane(&mut session);
-    let first_tab = Tab::from_root_pane(TabId::new(), "a".to_owned(), 0, first_pane_id);
-    let second_tab = Tab::from_root_pane(TabId::new(), "b".to_owned(), 0, second_pane_id);
+    let first_tab = build_tab(TabId::new(), "a", 0, LayoutNode::Pane(first_pane_id));
+    let second_tab = build_tab(TabId::new(), "b", 0, LayoutNode::Pane(second_pane_id));
     session.tabs.insert(first_tab.get_tab_id(), first_tab);
     session.tabs.insert(second_tab.get_tab_id(), second_tab);
 
@@ -2244,14 +2222,18 @@ fn a_pane_appearing_twice_in_one_tabs_tree_is_reported() {
     let mut session = build_empty_session();
     let doubled_pane_id = register_terminal_pane(&mut session);
     let tab_id = TabId::new();
-    let mut tab = Tab::from_root_pane(tab_id, "code".to_owned(), 0, doubled_pane_id);
-    tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
-        SplitDirection::Horizontal,
-        vec![
-            LayoutNode::Pane(doubled_pane_id),
-            LayoutNode::Pane(doubled_pane_id),
-        ],
-    )));
+    let tab = build_tab(
+        tab_id,
+        "code",
+        0,
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutNode::Pane(doubled_pane_id),
+                LayoutNode::Pane(doubled_pane_id),
+            ],
+        )),
+    );
     session.tabs.insert(tab_id, tab);
 
     assert_eq!(
@@ -2268,7 +2250,7 @@ fn every_violation_is_collected_in_one_pass() {
     let mut session = build_empty_session();
     // A layout leaf with no record.
     let ghost_pane_id = PaneId::new();
-    let tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, ghost_pane_id);
+    let tab = build_tab(TabId::new(), "code", 0, LayoutNode::Pane(ghost_pane_id));
     let tab_id = tab.get_tab_id();
     session.tabs.insert(tab_id, tab);
     // A record that is a leaf nowhere.
@@ -2319,7 +2301,7 @@ fn validate_reports_two_orphan_records_in_id_order() {
 fn a_restored_focus_history_longer_than_the_cap_still_evicts() {
     // The length is compared in `usize`: a history of 65 536 entries is over
     // the cap and is cut back to it.
-    let tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
+    let tab = build_tab(TabId::new(), "code", 0, LayoutNode::Pane(PaneId::new()));
     let mut serialized_tab = serde_json::to_value(&tab).expect("a tab serializes");
     let oversized_focus_history: Vec<PaneId> = (0..65_536).map(|_| PaneId::new()).collect();
     serialized_tab["focus_mru"] =
@@ -2333,6 +2315,32 @@ fn a_restored_focus_history_longer_than_the_cap_still_evicts() {
         restored_tab.list_focus_mru().len(),
         usize::from(MAX_TAB_FOCUS_MRU_ENTRY_COUNT)
     );
+}
+
+/// The tab size the test tabs are solved at: `80x22`, the pane area of an
+/// `80x24` viewport that reports none.
+pub(crate) const TEST_TAB_SIZE: Size = Size {
+    column_count: 80,
+    row_count: 22,
+};
+
+/// A tab named `tab_name` at bar index `tab_index` holding `layout_tree`,
+/// with no focus recorded, solved at [`TEST_TAB_SIZE`] with the default pane
+/// sizing.
+pub(crate) fn build_tab(
+    tab_id: TabId,
+    tab_name: &str,
+    tab_index: usize,
+    layout_tree: LayoutNode,
+) -> Tab {
+    Tab::from_layout_tree(
+        tab_id,
+        tab_name.to_owned(),
+        tab_index,
+        layout_tree,
+        TEST_TAB_SIZE,
+        PaneSizing::default(),
+    )
 }
 
 /// A floating member for `pane_id` asking for the default size, solved to
@@ -2368,8 +2376,7 @@ fn build_floating_member(pane_id: PaneId) -> FloatingMember {
 fn register_floating_pane(session: &mut Session) -> PaneId {
     let pane_id = register_terminal_pane(session);
     session
-        .floating_set
-        .add_member(build_floating_member(pane_id))
+        .add_floating_member(build_floating_member(pane_id), None)
         .expect("the floating set has room for a fresh pane");
     pane_id
 }
@@ -2403,7 +2410,7 @@ fn replace_client_fields(
 }
 
 #[test]
-fn add_member_appends_floating_panes_in_creation_order() {
+fn add_member_appends_floating_panes_in_the_order_they_became_floating() {
     let mut floating_set = FloatingSet::default();
     let pane_ids = [PaneId::new(), PaneId::new(), PaneId::new()];
 
@@ -2437,7 +2444,7 @@ fn has_pane_finds_each_member_and_no_other_pane() {
 }
 
 #[test]
-fn find_member_returns_each_member_with_its_creation_index() {
+fn find_member_returns_each_member_with_its_cascade_index() {
     let mut floating_set = FloatingSet::default();
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
     for pane_id in [first_pane_id, second_pane_id] {
@@ -2514,14 +2521,7 @@ fn add_member_refuses_a_member_past_the_session_limit() {
             pane_id: pane_ids[0]
         })
     );
-    assert_eq!(
-        floating_set
-            .list_members()
-            .iter()
-            .map(|floating_member| floating_member.pane_id)
-            .collect::<Vec<PaneId>>(),
-        pane_ids
-    );
+    assert_eq!(floating_set.list_pane_ids(), pane_ids);
 }
 
 #[test]
@@ -2603,7 +2603,8 @@ fn build_floating_set_asking_for(
     floating_set
 }
 
-/// The solved size of every member of `floating_set`, in creation order.
+/// The solved size of every member of `floating_set`, in the order the panes
+/// became floating.
 fn list_solved_sizes(floating_set: &FloatingSet) -> Vec<Size> {
     floating_set
         .list_members()
@@ -2640,14 +2641,15 @@ fn update_member_sizes_resolves_a_percent_against_the_shared_viewport_rounding_d
 }
 
 #[test]
-fn update_member_sizes_raises_each_member_to_the_minimum_and_cuts_it_to_the_shared_viewport() {
+fn update_member_sizes_raises_each_member_to_the_minimum_and_cuts_it_to_the_cap() {
     let mut floating_set = build_floating_set_asking_for(&[
         (build_cells_dimension(200), build_cells_dimension(50)),
         (build_cells_dimension(10), build_cells_dimension(3)),
         (build_percent_dimension(1), build_percent_dimension(100)),
     ]);
 
-    // `pane { min-cols 20 min-rows 6 }`: the floating minimum is 22x10.
+    // `pane { min-cols 20 min-rows 6 }`: the floating minimum is 22x10. The
+    // 80x22 viewport caps a floating pane at 72x19.
     floating_set.update_member_sizes(
         Size {
             column_count: 80,
@@ -2663,8 +2665,8 @@ fn update_member_sizes_raises_each_member_to_the_minimum_and_cuts_it_to_the_shar
         list_solved_sizes(&floating_set),
         [
             Size {
-                column_count: 80,
-                row_count: 22,
+                column_count: 72,
+                row_count: 19,
             },
             Size {
                 column_count: 22,
@@ -2672,14 +2674,14 @@ fn update_member_sizes_raises_each_member_to_the_minimum_and_cuts_it_to_the_shar
             },
             Size {
                 column_count: 22,
-                row_count: 22,
+                row_count: 19,
             },
         ]
     );
 }
 
 #[test]
-fn update_member_sizes_shrinks_a_member_below_the_floating_minimum_to_the_shared_viewport() {
+fn update_member_sizes_shrinks_a_member_below_the_floating_minimum_to_the_cap() {
     let mut floating_set = build_floating_set_asking_for(&[
         (build_percent_dimension(60), build_percent_dimension(60)),
         (build_cells_dimension(30), build_cells_dimension(12)),
@@ -2689,10 +2691,11 @@ fn update_member_sizes_shrinks_a_member_below_the_floating_minimum_to_the_shared
         row_count: 6,
     };
 
+    // A 25x12 viewport caps a floating pane at 22x10, the floating minimum.
     floating_set.update_member_sizes(
         Size {
-            column_count: 22,
-            row_count: 10,
+            column_count: 25,
+            row_count: 12,
         },
         pane_minimum_size,
     );
@@ -2705,11 +2708,11 @@ fn update_member_sizes_shrinks_a_member_below_the_floating_minimum_to_the_shared
         [floating_pane_minimum, floating_pane_minimum]
     );
 
-    // 21 columns is one short of the 22-column floating minimum: each member
-    // takes all 21 columns.
+    // A 24-column viewport caps a floating pane at 21 columns, one short of
+    // the 22-column floating minimum: each member takes the 21 columns.
     floating_set.update_member_sizes(
         Size {
-            column_count: 21,
+            column_count: 24,
             row_count: 30,
         },
         pane_minimum_size,
@@ -2728,12 +2731,12 @@ fn update_member_sizes_shrinks_a_member_below_the_floating_minimum_to_the_shared
         ]
     );
 
-    // 9 rows is one short of the 10-row floating minimum: each member takes
-    // all 9 rows.
+    // A 10-row viewport caps a floating pane at 9 rows, one short of the
+    // 10-row floating minimum: each member takes the 9 rows.
     floating_set.update_member_sizes(
         Size {
-            column_count: 30,
-            row_count: 9,
+            column_count: 34,
+            row_count: 10,
         },
         pane_minimum_size,
     );
@@ -2777,7 +2780,7 @@ fn update_member_sizes_restores_the_desired_size_after_a_shrink_and_a_regrow() {
     assert_eq!(list_solved_sizes(&floating_set), [solved_on_roomy_viewport]);
     floating_set.update_member_sizes(
         Size {
-            column_count: 21,
+            column_count: 24,
             row_count: 30,
         },
         pane_minimum_size,
@@ -2796,13 +2799,14 @@ fn update_member_sizes_restores_the_desired_size_after_a_shrink_and_a_regrow() {
 }
 
 #[test]
-fn update_member_sizes_caps_a_floating_minimum_past_u16_max_at_the_shared_viewport() {
+fn update_member_sizes_cuts_a_floating_minimum_past_u16_max_to_the_cap() {
     let mut floating_set = build_floating_set_asking_for(&[
         (build_cells_dimension(40), build_cells_dimension(10)),
         (build_percent_dimension(100), build_percent_dimension(100)),
     ]);
 
-    // 65534 content columns plus 2 chrome columns cap at 65535 columns.
+    // 65534 content columns plus 2 chrome columns stop at 65535 columns. The
+    // 65535x22 viewport caps a floating pane at 58981x19.
     floating_set.update_member_sizes(
         Size {
             column_count: u16::MAX,
@@ -2818,46 +2822,12 @@ fn update_member_sizes_caps_a_floating_minimum_past_u16_max_at_the_shared_viewpo
         list_solved_sizes(&floating_set),
         [
             Size {
-                column_count: u16::MAX,
+                column_count: 58981,
                 row_count: 10,
             },
             Size {
-                column_count: u16::MAX,
-                row_count: 22,
-            },
-        ]
-    );
-}
-
-#[test]
-fn update_member_sizes_fits_a_floating_minimum_of_exactly_u16_max_columns() {
-    let mut floating_set = build_floating_set_asking_for(&[
-        (build_cells_dimension(40), build_cells_dimension(10)),
-        (build_percent_dimension(100), build_percent_dimension(100)),
-    ]);
-
-    // 65533 content columns plus 2 chrome columns need 65535 columns.
-    floating_set.update_member_sizes(
-        Size {
-            column_count: u16::MAX,
-            row_count: 22,
-        },
-        Size {
-            column_count: u16::MAX - 2,
-            row_count: 6,
-        },
-    );
-
-    assert_eq!(
-        list_solved_sizes(&floating_set),
-        [
-            Size {
-                column_count: u16::MAX,
-                row_count: 10,
-            },
-            Size {
-                column_count: u16::MAX,
-                row_count: 22,
+                column_count: 58981,
+                row_count: 19,
             },
         ]
     );
@@ -2876,8 +2846,6 @@ fn remove_floating_member_keeps_the_order_of_the_rest_and_clears_every_client_vi
     assert!(focusing_client.focus_floating_pane(middle_pane_id));
     assert!(focusing_client.focus_floating_pane(removed_pane_id));
     let pinning_client = get_attached_client_mut(&mut session, pinning_client_id);
-    assert!(pinning_client.focus_floating_pane(last_pane_id));
-    assert!(pinning_client.minimize_floating_pane(last_pane_id));
     assert!(pinning_client.focus_floating_pane(removed_pane_id));
     pinning_client.pin_floating_pane(removed_pane_id, Point { column: 3, row: 4 });
 
@@ -2895,7 +2863,7 @@ fn remove_floating_member_keeps_the_order_of_the_rest_and_clears_every_client_vi
     );
     let focusing_client = get_attached_client_mut(&mut session, focusing_client_id);
     assert_eq!(
-        focusing_client.list_floating_pane_focus_order(),
+        focusing_client.list_shown_floating_pane_ids(),
         [middle_pane_id]
     );
     assert_eq!(
@@ -2904,19 +2872,34 @@ fn remove_floating_member_keeps_the_order_of_the_rest_and_clears_every_client_vi
     );
     let pinning_client = get_attached_client_mut(&mut session, pinning_client_id);
     assert_eq!(
-        pinning_client.list_floating_pane_focus_order(),
-        [last_pane_id]
+        pinning_client.list_shown_floating_pane_ids(),
+        Vec::<PaneId>::new()
     );
     assert_eq!(pinning_client.get_focused_floating_pane_id(), None);
     assert_eq!(
         pinning_client.list_floating_pane_views(),
-        &HashMap::from([(
-            last_pane_id,
-            FloatingPaneView {
-                position: FloatingPanePosition::Default,
-                is_minimized: true,
-            },
-        )])
+        &HashMap::from([
+            (
+                middle_pane_id,
+                FloatingPaneView {
+                    position: FloatingPanePosition::Default,
+                    is_minimized: true,
+                },
+            ),
+            (
+                last_pane_id,
+                FloatingPaneView {
+                    position: FloatingPanePosition::Default,
+                    is_minimized: true,
+                },
+            ),
+        ])
+    );
+    assert_eq!(
+        session.validate_session_consistency(),
+        Err(vec![SessionConsistencyError::OrphanedPaneRecord {
+            pane_id: removed_pane_id
+        }])
     );
 }
 
@@ -2934,11 +2917,89 @@ fn remove_floating_member_of_a_pane_that_is_not_floating_changes_nothing() {
         [build_floating_member(floating_pane_id)]
     );
     let client = get_attached_client_mut(&mut session, client_id);
-    assert_eq!(client.list_floating_pane_focus_order(), [floating_pane_id]);
+    assert_eq!(client.list_shown_floating_pane_ids(), [floating_pane_id]);
     assert_eq!(
         client.get_focused_floating_pane_id(),
         Some(floating_pane_id)
     );
+}
+
+#[test]
+fn add_floating_member_gives_every_client_a_minimized_view_at_the_actors_position() {
+    let mut session = build_empty_session();
+    let tab_id = TabId::new();
+    let acting_client_id = attach_viewer(&mut session, tab_id, 80, 24);
+    let other_client_id = attach_viewer(&mut session, tab_id, 80, 24);
+    let pane_id = register_terminal_pane(&mut session);
+    let acting_position = FloatingPanePosition::Moved(Point { column: 7, row: 3 });
+
+    assert_eq!(
+        session.add_floating_member(
+            build_floating_member(pane_id),
+            Some((acting_client_id, acting_position))
+        ),
+        Ok(())
+    );
+
+    assert_eq!(
+        session.floating_set.list_members(),
+        [build_floating_member(pane_id)]
+    );
+    for (client_id, expected_position) in [
+        (acting_client_id, acting_position),
+        (other_client_id, FloatingPanePosition::Default),
+    ] {
+        let client = get_attached_client_mut(&mut session, client_id);
+        assert_eq!(
+            client.get_floating_pane_view(pane_id),
+            Some(FloatingPaneView {
+                position: expected_position,
+                is_minimized: true,
+            })
+        );
+        assert_eq!(client.list_shown_floating_pane_ids(), Vec::<PaneId>::new());
+    }
+    assert_eq!(
+        session.add_floating_member(build_floating_member(pane_id), None),
+        Err(FloatingSetError::DuplicatePane { pane_id })
+    );
+    assert_eq!(
+        session.floating_set.list_members(),
+        [build_floating_member(pane_id)]
+    );
+}
+
+#[test]
+fn attach_client_gives_the_attaching_client_a_minimized_view_of_every_floating_pane() {
+    let mut session = build_empty_session();
+    let (first_pane_id, second_pane_id) = (
+        register_floating_pane(&mut session),
+        register_floating_pane(&mut session),
+    );
+
+    let client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
+
+    let client = get_attached_client_mut(&mut session, client_id);
+    assert_eq!(
+        client.list_floating_pane_views(),
+        &HashMap::from([
+            (
+                first_pane_id,
+                FloatingPaneView {
+                    position: FloatingPanePosition::Default,
+                    is_minimized: true,
+                },
+            ),
+            (
+                second_pane_id,
+                FloatingPaneView {
+                    position: FloatingPanePosition::Default,
+                    is_minimized: true,
+                },
+            ),
+        ])
+    );
+    assert_eq!(client.list_shown_floating_pane_ids(), Vec::<PaneId>::new());
 }
 
 #[test]
@@ -3022,7 +3083,7 @@ fn a_floating_set_past_the_session_limit_is_reported_and_one_at_the_limit_is_not
 fn a_floating_member_that_is_also_a_layout_leaf_is_reported() {
     let mut session = build_empty_session();
     let pane_id = register_floating_pane(&mut session);
-    let tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, pane_id);
+    let tab = build_tab(TabId::new(), "code", 0, LayoutNode::Pane(pane_id));
     let tab_id = tab.get_tab_id();
     session.tabs.insert(tab_id, tab);
 
@@ -3035,15 +3096,38 @@ fn a_floating_member_that_is_also_a_layout_leaf_is_reported() {
     );
 }
 
+/// The JSON of a client's floating pane views: one view at the default
+/// placement per `(pane_id, is_minimized)` pair.
+fn build_default_floating_pane_views_json(pane_views: &[(PaneId, bool)]) -> serde_json::Value {
+    let floating_pane_view_by_pane_id: HashMap<PaneId, FloatingPaneView> = pane_views
+        .iter()
+        .map(|&(pane_id, is_minimized)| {
+            (
+                pane_id,
+                FloatingPaneView {
+                    position: FloatingPanePosition::Default,
+                    is_minimized,
+                },
+            )
+        })
+        .collect();
+    serde_json::to_value(floating_pane_view_by_pane_id).expect("the views encode")
+}
+
 #[test]
 fn client_views_of_panes_that_are_not_floating_are_reported_in_pane_id_order() {
     let mut session = build_empty_session();
     let client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
     let mut stray_pane_ids: [PaneId; 8] = std::array::from_fn(|_| PaneId::new());
-    let client = get_attached_client_mut(&mut session, client_id);
-    for stray_pane_id in stray_pane_ids {
-        client.pin_floating_pane(stray_pane_id, Point { column: 0, row: 0 });
-    }
+    let stray_pane_views = stray_pane_ids.map(|stray_pane_id| (stray_pane_id, true));
+    replace_client_fields(
+        &mut session,
+        client_id,
+        &[(
+            "floating_pane_view_by_pane_id",
+            build_default_floating_pane_views_json(&stray_pane_views),
+        )],
+    );
     stray_pane_ids.sort();
 
     assert_eq!(
@@ -3058,36 +3142,107 @@ fn client_views_of_panes_that_are_not_floating_are_reported_in_pane_id_order() {
 }
 
 #[test]
-fn a_floating_focus_order_entry_naming_a_pane_that_is_not_floating_is_reported() {
-    let mut session = build_empty_session();
-    let floating_pane_id = register_floating_pane(&mut session);
-    let client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
-    let stray_pane_id = PaneId::new();
-    let client = get_attached_client_mut(&mut session, client_id);
-    assert!(client.focus_floating_pane(stray_pane_id));
-    assert!(client.focus_floating_pane(floating_pane_id));
-
-    assert_eq!(
-        session.validate_session_consistency(),
-        Err(vec![
-            SessionConsistencyError::FloatingFocusOrderTargetMissing {
-                client_id,
-                pane_id: stray_pane_id,
-            }
-        ])
-    );
-}
-
-#[test]
-fn each_repeat_of_a_floating_focus_order_entry_is_reported() {
+fn a_client_with_no_view_of_a_floating_pane_is_reported() {
     let mut session = build_empty_session();
     let floating_pane_id = register_floating_pane(&mut session);
     let client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
     replace_client_fields(
         &mut session,
         client_id,
+        &[("floating_pane_view_by_pane_id", serde_json::json!({}))],
+    );
+
+    assert_eq!(
+        session.validate_session_consistency(),
+        Err(vec![SessionConsistencyError::FloatingViewMissing {
+            client_id,
+            pane_id: floating_pane_id,
+        }])
+    );
+}
+
+#[test]
+fn a_view_whose_minimized_flag_disagrees_with_the_shown_list_is_reported_both_ways() {
+    let mut session = build_empty_session();
+    let listed_pane_id = register_floating_pane(&mut session);
+    let unlisted_pane_id = register_floating_pane(&mut session);
+    let client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
+    replace_client_fields(
+        &mut session,
+        client_id,
+        &[
+            (
+                "floating_pane_view_by_pane_id",
+                build_default_floating_pane_views_json(&[
+                    (listed_pane_id, true),
+                    (unlisted_pane_id, false),
+                ]),
+            ),
+            (
+                "shown_floating_pane_ids",
+                serde_json::json!([listed_pane_id]),
+            ),
+            (
+                "focused_floating_pane_id",
+                serde_json::json!(listed_pane_id),
+            ),
+        ],
+    );
+
+    assert_eq!(
+        session.validate_session_consistency(),
+        Err(vec![
+            SessionConsistencyError::FloatingPaneShownStateMismatch {
+                client_id,
+                pane_id: listed_pane_id,
+                is_minimized: true,
+            },
+            SessionConsistencyError::FloatingPaneShownStateMismatch {
+                client_id,
+                pane_id: unlisted_pane_id,
+                is_minimized: false,
+            },
+        ])
+    );
+}
+
+#[test]
+fn a_shown_entry_naming_a_pane_that_is_not_floating_is_reported() {
+    let mut session = build_empty_session();
+    let client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
+    let stray_pane_id = PaneId::new();
+    replace_client_fields(
+        &mut session,
+        client_id,
+        &[
+            (
+                "shown_floating_pane_ids",
+                serde_json::json!([stray_pane_id]),
+            ),
+            ("focused_floating_pane_id", serde_json::json!(stray_pane_id)),
+        ],
+    );
+
+    assert_eq!(
+        session.validate_session_consistency(),
+        Err(vec![SessionConsistencyError::ShownFloatingPaneMissing {
+            client_id,
+            pane_id: stray_pane_id,
+        }])
+    );
+}
+
+#[test]
+fn each_repeat_of_a_shown_floating_pane_is_reported() {
+    let mut session = build_empty_session();
+    let floating_pane_id = register_floating_pane(&mut session);
+    let client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
+    assert!(get_attached_client_mut(&mut session, client_id).focus_floating_pane(floating_pane_id));
+    replace_client_fields(
+        &mut session,
+        client_id,
         &[(
-            "floating_pane_focus_order",
+            "shown_floating_pane_ids",
             serde_json::json!([floating_pane_id, floating_pane_id, floating_pane_id]),
         )],
     );
@@ -3095,11 +3250,11 @@ fn each_repeat_of_a_floating_focus_order_entry_is_reported() {
     assert_eq!(
         session.validate_session_consistency(),
         Err(vec![
-            SessionConsistencyError::DuplicateFloatingFocusOrderEntry {
+            SessionConsistencyError::DuplicateShownFloatingPane {
                 client_id,
                 pane_id: floating_pane_id,
             },
-            SessionConsistencyError::DuplicateFloatingFocusOrderEntry {
+            SessionConsistencyError::DuplicateShownFloatingPane {
                 client_id,
                 pane_id: floating_pane_id,
             },
@@ -3108,109 +3263,75 @@ fn each_repeat_of_a_floating_focus_order_entry_is_reported() {
 }
 
 #[test]
-fn a_floating_focus_on_a_pane_that_is_not_floating_is_reported() {
+fn a_floating_focus_that_is_not_the_newest_shown_pane_is_reported_in_each_shape() {
     let mut session = build_empty_session();
-    let client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
-    let stray_pane_id = PaneId::new();
-    assert!(get_attached_client_mut(&mut session, client_id).focus_floating_pane(stray_pane_id));
-
-    assert_eq!(
-        session.validate_session_consistency(),
-        Err(vec![
-            SessionConsistencyError::FloatingFocusOrderTargetMissing {
-                client_id,
-                pane_id: stray_pane_id,
-            },
-            SessionConsistencyError::FocusedFloatingPaneMissing {
-                client_id,
-                pane_id: stray_pane_id,
-            },
-        ])
-    );
-}
-
-#[test]
-fn a_floating_focus_that_is_not_last_in_the_focus_order_is_reported() {
-    let mut session = build_empty_session();
-    let focused_pane_id = register_floating_pane(&mut session);
+    let lower_pane_id = register_floating_pane(&mut session);
     let top_pane_id = register_floating_pane(&mut session);
     let client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
+    let client = get_attached_client_mut(&mut session, client_id);
+    assert!(client.focus_floating_pane(lower_pane_id));
+    assert!(client.focus_floating_pane(top_pane_id));
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+
+    for (focused_floating_pane_json, focused_pane_id) in [
+        (serde_json::json!(lower_pane_id), Some(lower_pane_id)),
+        (serde_json::Value::Null, None),
+    ] {
+        replace_client_fields(
+            &mut session,
+            client_id,
+            &[("focused_floating_pane_id", focused_floating_pane_json)],
+        );
+
+        assert_eq!(
+            session.validate_session_consistency(),
+            Err(vec![SessionConsistencyError::FloatingFocusNotNewestShown {
+                client_id,
+                focused_pane_id,
+                newest_shown_pane_id: Some(top_pane_id),
+            }])
+        );
+    }
+    let client = get_attached_client_mut(&mut session, client_id);
+    let _ = client.minimize_shown_floating_panes();
     replace_client_fields(
         &mut session,
         client_id,
-        &[
-            (
-                "floating_pane_focus_order",
-                serde_json::json!([focused_pane_id, top_pane_id]),
-            ),
-            (
-                "focused_floating_pane_id",
-                serde_json::json!(focused_pane_id),
-            ),
-        ],
+        &[("focused_floating_pane_id", serde_json::json!(top_pane_id))],
     );
 
     assert_eq!(
         session.validate_session_consistency(),
-        Err(vec![SessionConsistencyError::FocusedFloatingPaneNotOnTop {
+        Err(vec![SessionConsistencyError::FloatingFocusNotNewestShown {
             client_id,
-            pane_id: focused_pane_id,
+            focused_pane_id: Some(top_pane_id),
+            newest_shown_pane_id: None,
         }])
     );
 }
 
 #[test]
-fn a_floating_focus_on_a_pane_the_client_minimized_is_reported() {
+fn a_client_that_cannot_draw_floating_panes_and_shows_one_is_reported() {
     let mut session = build_empty_session();
-    let minimized_pane_id = register_floating_pane(&mut session);
-    let client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
-    let client = get_attached_client_mut(&mut session, client_id);
-    assert!(client.focus_floating_pane(minimized_pane_id));
-    assert!(client.minimize_floating_pane(minimized_pane_id));
-    replace_client_fields(
+    let floating_pane_id = register_floating_pane(&mut session);
+    let client_id = attach_viewer_with_pane_area(
         &mut session,
-        client_id,
-        &[(
-            "focused_floating_pane_id",
-            serde_json::json!(minimized_pane_id),
-        )],
+        TabId::new(),
+        80,
+        24,
+        Some(PaneArea::Reported(Size {
+            column_count: 4,
+            row_count: 6,
+        })),
     );
+    assert!(get_attached_client_mut(&mut session, client_id).focus_floating_pane(floating_pane_id));
 
     assert_eq!(
         session.validate_session_consistency(),
-        Err(vec![
-            SessionConsistencyError::FocusedFloatingPaneMinimized {
-                client_id,
-                pane_id: minimized_pane_id,
-            }
-        ])
-    );
-}
-
-#[test]
-fn a_minimized_floating_pane_missing_from_the_focus_order_is_reported() {
-    let mut session = build_empty_session();
-    let minimized_pane_id = register_floating_pane(&mut session);
-    let client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
-    let client = get_attached_client_mut(&mut session, client_id);
-    assert!(client.focus_floating_pane(minimized_pane_id));
-    assert!(client.minimize_floating_pane(minimized_pane_id));
-    assert_eq!(session.validate_session_consistency(), Ok(()));
-
-    replace_client_fields(
-        &mut session,
-        client_id,
-        &[("floating_pane_focus_order", serde_json::json!([]))],
-    );
-
-    assert_eq!(
-        session.validate_session_consistency(),
-        Err(vec![
-            SessionConsistencyError::MinimizedFloatingPaneNotInFocusOrder {
-                client_id,
-                pane_id: minimized_pane_id,
-            }
-        ])
+        Err(vec![SessionConsistencyError::UndrawableFloatingPaneShown {
+            client_id,
+            pane_id: floating_pane_id,
+        }])
     );
 }
 
@@ -3218,7 +3339,7 @@ fn a_minimized_floating_pane_missing_from_the_focus_order_is_reported() {
 fn client_focuses_and_zooms_in_missing_tabs_are_reported_in_tab_id_order() {
     let mut session = build_empty_session();
     let pane_id = register_terminal_pane(&mut session);
-    let tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, pane_id);
+    let tab = build_tab(TabId::new(), "code", 0, LayoutNode::Pane(pane_id));
     let tab_id = tab.get_tab_id();
     session.tabs.insert(tab_id, tab);
     let client_id = attach_viewer(&mut session, tab_id, 80, 24);
@@ -3279,7 +3400,7 @@ fn build_cells_size(column_count: u16, row_count: u16) -> FloatingPaneSize {
 }
 
 #[test]
-fn solve_floating_pane_size_raises_to_the_floating_minimum_and_cuts_to_the_viewport() {
+fn solve_floating_pane_size_raises_to_the_floating_minimum_and_cuts_to_the_cap() {
     let shared_floating_viewport = Size {
         column_count: 80,
         row_count: 22,
@@ -3311,7 +3432,10 @@ fn solve_floating_pane_size_raises_to_the_floating_minimum_and_cuts_to_the_viewp
             shared_floating_viewport,
             pane_minimum_size,
         ),
-        shared_floating_viewport
+        Size {
+            column_count: 72,
+            row_count: 19,
+        }
     );
     assert_eq!(
         solve_floating_pane_size(
@@ -3334,7 +3458,7 @@ fn solve_floating_pane_size_raises_to_the_floating_minimum_and_cuts_to_the_viewp
             pane_minimum_size,
         ),
         Size {
-            column_count: 3,
+            column_count: 2,
             row_count: 10,
         }
     );
@@ -3397,4 +3521,582 @@ fn update_member_desired_size_changes_only_that_member_and_refuses_any_other_pan
         .floating_set
         .update_member_desired_size(PaneId::new(), build_cells_size(9, 9)));
     assert_eq!(session.floating_set.list_members(), expected_members);
+}
+
+/// A session holding one tab `A | B | C` with focus history `C, A, B`,
+/// solved at [`TEST_TAB_SIZE`], and one client viewing it at `80x24` with
+/// its focus on `C`. Returns the session, the tab id, `[A, B, C]` and the
+/// client id.
+fn build_three_pane_row_session() -> (Session, TabId, [PaneId; 3], ClientId) {
+    let mut session = build_empty_session();
+    let row_pane_ids = [
+        register_terminal_pane(&mut session),
+        register_terminal_pane(&mut session),
+        register_terminal_pane(&mut session),
+    ];
+    let [left_pane_id, middle_pane_id, right_pane_id] = row_pane_ids;
+    let tab_id = TabId::new();
+    let mut tab = build_tab(
+        tab_id,
+        "code",
+        0,
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            row_pane_ids.map(LayoutNode::Pane).to_vec(),
+        )),
+    );
+    tab.record_focus_mru(middle_pane_id);
+    tab.record_focus_mru(left_pane_id);
+    tab.record_focus_mru(right_pane_id);
+    session.tabs.insert(tab_id, tab);
+    let client_id = attach_viewer(&mut session, tab_id, 80, 24);
+    let _ =
+        get_attached_client_mut(&mut session, client_id).update_focused_pane(tab_id, right_pane_id);
+    (session, tab_id, row_pane_ids, client_id)
+}
+
+/// Set the pane area `client_id` reports to `column_count` by `row_count`.
+fn report_pane_area(session: &mut Session, client_id: ClientId, column_count: u16, row_count: u16) {
+    get_attached_client_mut(session, client_id).update_pane_area(Some(PaneArea::Reported(Size {
+        column_count,
+        row_count,
+    })));
+}
+
+#[test]
+fn a_solve_that_suppresses_the_focused_pane_hands_the_focus_to_the_next_pane_in_the_history() {
+    let (mut session, tab_id, [left_pane_id, middle_pane_id, right_pane_id], client_id) =
+        build_three_pane_row_session();
+    // 9 columns hold two 4-column panes: the trailing `C` is suppressed.
+    report_pane_area(&mut session, client_id, 9, 3);
+
+    assert_eq!(
+        session.update_tab_solve(tab_id),
+        vec![Event::PaneFocused(koshi_core::event::PaneFocused {
+            client_id,
+            tab_id: Some(tab_id),
+            pane_id: left_pane_id,
+            previous_pane_id: Some(right_pane_id),
+        })]
+    );
+    assert_eq!(
+        session.tabs[&tab_id].get_layout_solve().suppressed_pane_ids,
+        [right_pane_id]
+    );
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .map(|client| client.get_focused_pane_id(tab_id)),
+        Some(Some(left_pane_id))
+    );
+    assert_eq!(
+        session.tabs[&tab_id].list_focus_mru(),
+        [left_pane_id, right_pane_id, middle_pane_id]
+    );
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+
+    // Room for `C` again moves no focus back.
+    report_pane_area(&mut session, client_id, 80, 22);
+    assert_eq!(session.update_tab_solve(tab_id), Vec::<Event>::new());
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .map(|client| client.get_focused_pane_id(tab_id)),
+        Some(Some(left_pane_id))
+    );
+}
+
+#[test]
+fn a_solve_that_suppresses_the_tab_focus_of_a_client_typing_in_a_floating_pane_moves_only_the_tab_focus(
+) {
+    let (mut session, tab_id, [left_pane_id, _, right_pane_id], client_id) =
+        build_three_pane_row_session();
+    let floating_pane_id = register_floating_pane(&mut session);
+    assert!(get_attached_client_mut(&mut session, client_id).focus_floating_pane(floating_pane_id));
+    // 9 columns hold two 4-column panes: the trailing `C` is suppressed. A
+    // `9x6` pane area still draws floating panes.
+    report_pane_area(&mut session, client_id, 9, 6);
+
+    assert_eq!(
+        session.update_tab_solve(tab_id),
+        vec![Event::PaneFocused(koshi_core::event::PaneFocused {
+            client_id,
+            tab_id: Some(tab_id),
+            pane_id: left_pane_id,
+            previous_pane_id: Some(right_pane_id),
+        })]
+    );
+    let client = session
+        .clients
+        .get_client_by_id(client_id)
+        .expect("the client is attached");
+    assert_eq!(client.get_focused_pane_id(tab_id), Some(left_pane_id));
+    assert_eq!(
+        client.get_focused_floating_pane_id(),
+        Some(floating_pane_id)
+    );
+    assert_eq!(client.list_shown_floating_pane_ids(), [floating_pane_id]);
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+}
+
+#[test]
+fn a_client_viewing_another_tab_keeps_its_focus_on_a_suppressed_pane_until_it_switches_onto_the_tab(
+) {
+    let (mut session, tab_id, [left_pane_id, _, right_pane_id], client_id) =
+        build_three_pane_row_session();
+    let other_tab_client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
+    let _ = get_attached_client_mut(&mut session, other_tab_client_id)
+        .update_focused_pane(tab_id, right_pane_id);
+    // 9 columns hold two 4-column panes: the trailing `C` is suppressed.
+    report_pane_area(&mut session, client_id, 9, 3);
+
+    assert_eq!(
+        session.update_tab_solve(tab_id),
+        vec![Event::PaneFocused(koshi_core::event::PaneFocused {
+            client_id,
+            tab_id: Some(tab_id),
+            pane_id: left_pane_id,
+            previous_pane_id: Some(right_pane_id),
+        })]
+    );
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(other_tab_client_id)
+            .map(|client| client.get_focused_pane_id(tab_id)),
+        Some(Some(right_pane_id))
+    );
+
+    // The switch leaves the tab at `9x3`, and the focus check still runs.
+    get_attached_client_mut(&mut session, other_tab_client_id).update_active_tab_id(tab_id);
+    assert_eq!(
+        session.update_tab_solve(tab_id),
+        vec![Event::PaneFocused(koshi_core::event::PaneFocused {
+            client_id: other_tab_client_id,
+            tab_id: Some(tab_id),
+            pane_id: left_pane_id,
+            previous_pane_id: Some(right_pane_id),
+        })]
+    );
+    assert_eq!(
+        session.tabs[&tab_id].get_solved_tab_size(),
+        Size {
+            column_count: 9,
+            row_count: 3,
+        }
+    );
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+}
+
+#[test]
+fn a_solve_keeps_the_focus_of_a_zoomed_client_and_of_a_tab_with_every_pane_suppressed() {
+    let (mut session, tab_id, [_, _, right_pane_id], client_id) = build_three_pane_row_session();
+    get_attached_client_mut(&mut session, client_id).zoom_pane(tab_id, right_pane_id);
+    report_pane_area(&mut session, client_id, 9, 3);
+
+    assert_eq!(session.update_tab_solve(tab_id), Vec::<Event>::new());
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .map(|client| client.get_focused_pane_id(tab_id)),
+        Some(Some(right_pane_id))
+    );
+
+    // 3 columns hold no pane at all.
+    get_attached_client_mut(&mut session, client_id).clear_zoom(tab_id);
+    report_pane_area(&mut session, client_id, 3, 3);
+    assert_eq!(session.update_tab_solve(tab_id), Vec::<Event>::new());
+    assert!(
+        session.tabs[&tab_id]
+            .get_layout_solve()
+            .is_every_pane_suppressed
+    );
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .map(|client| client.get_focused_pane_id(tab_id)),
+        Some(Some(right_pane_id))
+    );
+}
+
+#[test]
+fn a_solve_keeps_the_focus_on_a_stack_member_collapsed_to_its_header() {
+    let mut session = build_empty_session();
+    let collapsed_pane_id = register_terminal_pane(&mut session);
+    let expanded_pane_id = register_terminal_pane(&mut session);
+    let tab_id = TabId::new();
+    session.tabs.insert(
+        tab_id,
+        build_tab(
+            tab_id,
+            "code",
+            0,
+            LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+                vec![collapsed_pane_id, expanded_pane_id],
+                1,
+            )),
+        ),
+    );
+    let client_id = attach_viewer(&mut session, tab_id, 80, 24);
+    let _ = get_attached_client_mut(&mut session, client_id)
+        .update_focused_pane(tab_id, collapsed_pane_id);
+    report_pane_area(&mut session, client_id, 40, 10);
+
+    assert_eq!(session.update_tab_solve(tab_id), Vec::<Event>::new());
+    assert_eq!(
+        session.tabs[&tab_id].get_layout_solve().suppressed_pane_ids,
+        Vec::<PaneId>::new()
+    );
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .map(|client| client.get_focused_pane_id(tab_id)),
+        Some(Some(collapsed_pane_id))
+    );
+}
+
+#[test]
+fn a_client_whose_pane_area_shrinks_below_five_by_six_minimizes_the_floating_panes_it_shows() {
+    let mut session = build_empty_session();
+    let tiled_pane_id = register_terminal_pane(&mut session);
+    let tab_id = TabId::new();
+    session.tabs.insert(
+        tab_id,
+        build_tab(tab_id, "code", 0, LayoutNode::Pane(tiled_pane_id)),
+    );
+    let client_id = attach_viewer(&mut session, tab_id, 80, 24);
+    let other_client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
+    let floating_pane_id = register_floating_pane(&mut session);
+    for viewing_client_id in [client_id, other_client_id] {
+        let client = get_attached_client_mut(&mut session, viewing_client_id);
+        let _ = client.update_focused_pane(tab_id, tiled_pane_id);
+        assert!(client.focus_floating_pane(floating_pane_id));
+    }
+
+    // A 5x6 pane area still draws floating panes.
+    report_pane_area(&mut session, client_id, 5, 6);
+    assert_eq!(session.update_tab_solve(tab_id), Vec::<Event>::new());
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .map(Client::get_focused_floating_pane_id),
+        Some(Some(floating_pane_id))
+    );
+
+    let placement_revision_before = session
+        .clients
+        .get_client_by_id(client_id)
+        .map(Client::get_placement_revision);
+    report_pane_area(&mut session, client_id, 4, 6);
+    assert_eq!(
+        session.update_tab_solve(tab_id),
+        vec![
+            Event::PaneMinimizedChanged(koshi_core::event::PaneMinimizedChanged {
+                client_id,
+                pane_id: floating_pane_id,
+                is_minimized: true,
+            }),
+            Event::PaneFocused(koshi_core::event::PaneFocused {
+                client_id,
+                tab_id: Some(tab_id),
+                pane_id: tiled_pane_id,
+                previous_pane_id: Some(floating_pane_id),
+            }),
+        ]
+    );
+    let client = session
+        .clients
+        .get_client_by_id(client_id)
+        .expect("the client is attached");
+    assert_eq!(client.get_focused_floating_pane_id(), None);
+    assert_eq!(client.list_shown_floating_pane_ids(), Vec::<PaneId>::new());
+    assert_eq!(
+        Some(client.get_placement_revision()),
+        placement_revision_before.map(|placement_revision| placement_revision + 1)
+    );
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(other_client_id)
+            .map(Client::list_shown_floating_pane_ids),
+        Some(vec![floating_pane_id].as_slice())
+    );
+
+    // Room again restores nothing.
+    report_pane_area(&mut session, client_id, 80, 22);
+    assert_eq!(session.update_tab_solve(tab_id), Vec::<Event>::new());
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .map(Client::list_shown_floating_pane_ids),
+        Some(Vec::<PaneId>::new().as_slice())
+    );
+}
+
+#[test]
+fn a_client_draws_floating_panes_only_with_a_floating_viewport_and_a_tab_that_shows_a_pane() {
+    let mut session = build_empty_session();
+    let tiled_pane_id = register_terminal_pane(&mut session);
+    let tab_id = TabId::new();
+    session.tabs.insert(
+        tab_id,
+        build_tab(tab_id, "code", 0, LayoutNode::Pane(tiled_pane_id)),
+    );
+    let client_id = attach_viewer(&mut session, tab_id, 80, 24);
+    let can_client_draw = |session: &Session, client_id: ClientId| {
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .map(|client| session.can_client_draw_floating_panes(client))
+    };
+
+    report_pane_area(&mut session, client_id, 80, 22);
+    assert_eq!(session.update_tab_solve(tab_id), Vec::<Event>::new());
+    assert_eq!(can_client_draw(&session, client_id), Some(true));
+
+    // A `4x6` pane area has no floating viewport. The tab still shows its pane.
+    report_pane_area(&mut session, client_id, 4, 6);
+    assert_eq!(session.update_tab_solve(tab_id), Vec::<Event>::new());
+    assert!(
+        !session.tabs[&tab_id]
+            .get_layout_solve()
+            .is_every_pane_suppressed
+    );
+    assert_eq!(can_client_draw(&session, client_id), Some(false));
+
+    // A `4x2` viewer of the same tab solves it below the `4x3` pane floor.
+    report_pane_area(&mut session, client_id, 80, 22);
+    let small_client_id = attach_viewer(&mut session, tab_id, 80, 24);
+    report_pane_area(&mut session, small_client_id, 4, 2);
+    assert_eq!(session.update_tab_solve(tab_id), Vec::<Event>::new());
+    assert_eq!(
+        session.tabs[&tab_id].get_solved_tab_size(),
+        Size {
+            column_count: 4,
+            row_count: 2,
+        }
+    );
+    assert!(
+        session.tabs[&tab_id]
+            .get_layout_solve()
+            .is_every_pane_suppressed
+    );
+    assert_eq!(can_client_draw(&session, client_id), Some(false));
+
+    // An active tab the session does not hold leaves only the viewport check.
+    let unknown_tab_client_id = attach_viewer(&mut session, TabId::new(), 80, 24);
+    report_pane_area(&mut session, unknown_tab_client_id, 80, 22);
+    assert_eq!(can_client_draw(&session, unknown_tab_client_id), Some(true));
+}
+
+#[test]
+fn a_tab_whose_stored_solve_is_not_its_fresh_solve_is_reported() {
+    let mut session = build_empty_session();
+    let left_pane_id = register_terminal_pane(&mut session);
+    let right_pane_id = register_terminal_pane(&mut session);
+    let tab_id = TabId::new();
+    session.tabs.insert(
+        tab_id,
+        build_tab(tab_id, "code", 0, LayoutNode::Pane(left_pane_id)),
+    );
+    session
+        .tabs
+        .get_mut(&tab_id)
+        .expect("the tab exists")
+        .layout = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![
+            LayoutNode::Pane(left_pane_id),
+            LayoutNode::Pane(right_pane_id),
+        ],
+    ));
+
+    assert_eq!(
+        session.validate_session_consistency(),
+        Err(vec![SessionConsistencyError::TabSolveStale { tab_id }])
+    );
+}
+
+#[test]
+fn a_viewed_tab_solved_at_another_size_than_its_viewers_give_is_reported() {
+    let mut session = build_empty_session();
+    let tiled_pane_id = register_terminal_pane(&mut session);
+    let tab_id = TabId::new();
+    session.tabs.insert(
+        tab_id,
+        build_tab(tab_id, "code", 0, LayoutNode::Pane(tiled_pane_id)),
+    );
+    let client_id = attach_viewer(&mut session, tab_id, 40, 12);
+    let _ =
+        get_attached_client_mut(&mut session, client_id).update_focused_pane(tab_id, tiled_pane_id);
+
+    assert_eq!(
+        session.validate_session_consistency(),
+        Err(vec![SessionConsistencyError::TabSolveSizeStale {
+            tab_id,
+            solved_tab_size: TEST_TAB_SIZE,
+            tab_size: Size {
+                column_count: 40,
+                row_count: 10,
+            },
+        }])
+    );
+    assert_eq!(session.update_tab_solve(tab_id), Vec::<Event>::new());
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+}
+
+#[test]
+fn a_tab_no_client_views_keeps_its_solve_size_and_a_starving_viewer_solves_it_at_zero() {
+    let mut session = build_empty_session();
+    let tiled_pane_id = register_terminal_pane(&mut session);
+    let tab_id = TabId::new();
+    session.tabs.insert(
+        tab_id,
+        build_tab(tab_id, "code", 0, LayoutNode::Pane(tiled_pane_id)),
+    );
+    assert_eq!(session.resolve_tab_solve_size(tab_id), Some(TEST_TAB_SIZE));
+
+    let client_id =
+        attach_viewer_with_pane_area(&mut session, tab_id, 80, 24, Some(PaneArea::Starving));
+    let _ =
+        get_attached_client_mut(&mut session, client_id).update_focused_pane(tab_id, tiled_pane_id);
+    assert_eq!(
+        session.resolve_tab_solve_size(tab_id),
+        Some(Size {
+            column_count: 0,
+            row_count: 0,
+        })
+    );
+    assert_eq!(session.update_tab_solve(tab_id), Vec::<Event>::new());
+    assert_eq!(
+        session.tabs[&tab_id].get_solved_tab_size(),
+        Size {
+            column_count: 0,
+            row_count: 0,
+        }
+    );
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+    assert_eq!(session.resolve_tab_solve_size(TabId::new()), None);
+}
+
+#[test]
+fn a_new_pane_sizing_solves_every_tab_again() {
+    let mut session = build_empty_session();
+    let left_pane_id = register_terminal_pane(&mut session);
+    let right_pane_id = register_terminal_pane(&mut session);
+    let tab_id = TabId::new();
+    session.tabs.insert(
+        tab_id,
+        build_tab(
+            tab_id,
+            "code",
+            0,
+            LayoutNode::Split(SplitNode::with_equal_weights(
+                SplitDirection::Horizontal,
+                vec![
+                    LayoutNode::Pane(left_pane_id),
+                    LayoutNode::Pane(right_pane_id),
+                ],
+            )),
+        ),
+    );
+    let gapped_pane_sizing = PaneSizing {
+        gap_cell_count: 2,
+        ..PaneSizing::default()
+    };
+
+    assert_eq!(
+        session.update_pane_sizing(gapped_pane_sizing),
+        Vec::<Event>::new()
+    );
+    assert_eq!(
+        session.tabs[&tab_id].get_layout_solve(),
+        &solve_layout_with_sizing(
+            session.tabs[&tab_id].get_layout_tree(),
+            Rect::from_size_at_origin(TEST_TAB_SIZE),
+            gapped_pane_sizing,
+        )
+    );
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+}
+
+#[test]
+fn a_pane_sizing_that_leaves_no_room_minimizes_each_clients_floating_panes_once() {
+    let mut session = build_empty_session();
+    let (first_tiled_pane_id, second_tiled_pane_id) = (
+        register_terminal_pane(&mut session),
+        register_terminal_pane(&mut session),
+    );
+    let (first_tab_id, second_tab_id) = (TabId::new(), TabId::new());
+    session.tabs.insert(
+        first_tab_id,
+        build_tab(first_tab_id, "a", 0, LayoutNode::Pane(first_tiled_pane_id)),
+    );
+    session.tabs.insert(
+        second_tab_id,
+        build_tab(
+            second_tab_id,
+            "b",
+            1,
+            LayoutNode::Pane(second_tiled_pane_id),
+        ),
+    );
+    let first_client_id = attach_viewer(&mut session, first_tab_id, 80, 24);
+    let second_client_id = attach_viewer(&mut session, second_tab_id, 80, 24);
+    let floating_pane_id = register_floating_pane(&mut session);
+    for (client_id, tab_id, tiled_pane_id) in [
+        (first_client_id, first_tab_id, first_tiled_pane_id),
+        (second_client_id, second_tab_id, second_tiled_pane_id),
+    ] {
+        let client = get_attached_client_mut(&mut session, client_id);
+        let _ = client.update_focused_pane(tab_id, tiled_pane_id);
+        assert!(client.focus_floating_pane(floating_pane_id));
+    }
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+    // A `100x30` pane minimum suppresses the only pane of each `80x22` tab.
+    let oversized_pane_sizing = PaneSizing {
+        minimum_size: Size {
+            column_count: 100,
+            row_count: 30,
+        },
+        ..PaneSizing::default()
+    };
+
+    assert_eq!(
+        session.update_pane_sizing(oversized_pane_sizing),
+        [
+            (first_client_id, first_tab_id, first_tiled_pane_id),
+            (second_client_id, second_tab_id, second_tiled_pane_id),
+        ]
+        .into_iter()
+        .flat_map(|(client_id, tab_id, tiled_pane_id)| [
+            Event::PaneMinimizedChanged(koshi_core::event::PaneMinimizedChanged {
+                client_id,
+                pane_id: floating_pane_id,
+                is_minimized: true,
+            }),
+            Event::PaneFocused(koshi_core::event::PaneFocused {
+                client_id,
+                tab_id: Some(tab_id),
+                pane_id: tiled_pane_id,
+                previous_pane_id: Some(floating_pane_id),
+            }),
+        ])
+        .collect::<Vec<Event>>()
+    );
+    for tab_id in [first_tab_id, second_tab_id] {
+        assert!(
+            session.tabs[&tab_id]
+                .get_layout_solve()
+                .is_every_pane_suppressed
+        );
+    }
+    assert_eq!(session.validate_session_consistency(), Ok(()));
 }

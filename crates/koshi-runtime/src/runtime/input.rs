@@ -24,12 +24,11 @@
 //! press may reach is the one `Server::find_typed_pane` names; when it names
 //! none, the press is dropped.
 
-use crate::runtime::snapshot::solve_tab_layout;
 use crate::server::Server;
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_core::key::KeyInput;
 use koshi_input::keyboard::encode_key_input;
-use koshi_layout::content::list_content_rects;
+use koshi_layout::content::find_content_rect;
 
 impl Server {
     /// React to input reaching `pane_id`'s child from `client_id`: drop the
@@ -135,27 +134,21 @@ impl Server {
     /// Yields `None` for an unknown client, a client with no such pane, and a
     /// pane the session no longer holds.
     ///
-    /// A focused floating pane takes the keystroke while this client has room
-    /// to draw a floating pane ([`Client::get_floating_viewport`]), and yields
-    /// `None` while this client's pane area is smaller than `4x5` on either
-    /// axis, also while another attached client has room.
+    /// A focused floating pane takes the keystroke: a client focuses only a
+    /// floating pane it shows, and it shows none while it cannot draw them
+    /// ([`Session::can_client_draw_floating_panes`]).
     ///
-    /// A focused tiled pane yields `None` for a missing tab and a tab with no
-    /// tab size. A tiled pane this client draws no content for also yields
-    /// `None` —
-    /// suppressed for want of space, hidden behind a pane this client has
-    /// zoomed, or collapsed to a stack header. Shrink the terminal until the
-    /// focused pane is suppressed, type `l`, and the shell inside it stays
-    /// untouched. The question is asked with [`list_content_rects`], the same
-    /// function the renderer asks, in THIS client's layout mode: another
-    /// client's zoom never silences this client's keys.
+    /// A focused tiled pane takes the keystroke when it has a content rect
+    /// ([`find_content_rect`], the rect the renderer fills) in the solve the
+    /// session holds for this client's layout mode
+    /// ([`Session::compute_client_solve`]). A pane suppressed for want of
+    /// space, hidden behind a pane this client has zoomed, or collapsed to a
+    /// stack header yields `None`: shrink the terminal until the focused pane
+    /// is suppressed, type `l`, and the shell inside it stays untouched.
+    /// Another client's zoom never silences this client's keys.
     ///
-    /// The tab is solved against [`Session::get_tab_size`], the size every
-    /// client viewing it shares: every viewer of the tab agrees on which panes
-    /// are drawn, exactly as they agree on the frame.
-    ///
-    /// [`Session::get_tab_size`]: koshi_session::session::state::Session::get_tab_size
-    /// [`Client::get_floating_viewport`]: koshi_session::client::Client::get_floating_viewport
+    /// [`Session::can_client_draw_floating_panes`]: koshi_session::session::state::Session::can_client_draw_floating_panes
+    /// [`Session::compute_client_solve`]: koshi_session::session::state::Session::compute_client_solve
     /// [`Client::get_active_focused_pane_id`]: koshi_session::client::Client::get_active_focused_pane_id
     pub(crate) fn find_typed_pane(&self, client_id: ClientId) -> Option<PaneId> {
         let session = self.get_session_for_client(client_id)?;
@@ -163,26 +156,13 @@ impl Server {
         let pane_id = attached_client.get_active_focused_pane_id()?;
         session.panes.get_pane_record_by_id(pane_id)?;
         if attached_client.get_focused_floating_pane_id().is_some() {
-            return attached_client
-                .get_floating_viewport()
-                .is_some()
-                .then_some(pane_id);
+            return Some(pane_id);
         }
 
         let tab_id = attached_client.get_active_tab_id();
-        let tab_record = session.tabs.get(&tab_id)?;
-        let tab_size = session.get_tab_size(tab_id)?;
-        list_content_rects(&solve_tab_layout(
-            tab_record,
-            attached_client.get_layout_mode(tab_id),
-            tab_size,
-            self.get_pane_sizing(),
-        ))
-        .into_iter()
-        .any(|(candidate_pane_id, content_rect)| {
-            candidate_pane_id == pane_id && content_rect.is_some()
-        })
-        .then_some(pane_id)
+        let client_solve =
+            session.compute_client_solve(tab_id, attached_client.get_layout_mode(tab_id))?;
+        find_content_rect(&client_solve, pane_id).map(|_| pane_id)
     }
 
     /// Write one key the viewer did not bind to the pane it is typing into,

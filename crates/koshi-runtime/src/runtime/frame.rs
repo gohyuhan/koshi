@@ -28,11 +28,12 @@ use koshi_ipc::placement::{
     EncodedRow, PanePlacementClientSnapshot as WirePlacementClientSnapshot,
     PanePlacementPaneSnapshot as WirePlacementPaneSnapshot,
     PanePlacementSizing as WirePlacementSizing, PanePlacementSnapshot as WirePlacementSnapshot,
+    PanePlacementSource as WirePlacementSource,
     PanePlacementTabSnapshot as WirePlacementTabSnapshot, PlacementWindow,
 };
 use koshi_renderer::snapshot::{
     GridView, ImagePlacementSnapshot, PaneSlot, PaneSnapshot, PlacementPaneSnapshot,
-    PlacementSnapshot, PlacementTabSnapshot, RenderSnapshot, TabMetadata,
+    PlacementSnapshot, PlacementSource, PlacementTabSnapshot, RenderSnapshot, TabMetadata,
 };
 use koshi_terminal::graphics::{
     GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord, SixelBackground,
@@ -150,14 +151,17 @@ pub(crate) fn build_wire_placement_snapshot_with_content_ids(
     WirePlacementSnapshot {
         session_id: placement_snapshot.session_id,
         source_pane_id: placement_snapshot.source_pane_id,
-        source_tab_id: placement_snapshot.source_tab_id,
+        source: match &placement_snapshot.source {
+            PlacementSource::Tiled(source_tab_snapshot) => WirePlacementSource::Tiled(
+                build_wire_placement_tab(source_tab_snapshot, &mut assign_image_content_id),
+            ),
+            PlacementSource::Floating(source_pane_snapshot) => WirePlacementSource::Floating(
+                build_wire_placement_pane(source_pane_snapshot, &mut assign_image_content_id),
+            ),
+        },
         destination_tab_id: placement_snapshot.destination_tab_id,
         session_placement_revision: placement_snapshot.session_placement_revision,
         client_placement_revision: placement_snapshot.client_placement_revision,
-        source_tab_snapshot: build_wire_placement_tab(
-            &placement_snapshot.source_tab_snapshot,
-            &mut assign_image_content_id,
-        ),
         destination_tab_snapshot: placement_snapshot.destination_tab_snapshot.as_ref().map(
             |tab_snapshot| build_wire_placement_tab(tab_snapshot, &mut assign_image_content_id),
         ),
@@ -177,10 +181,7 @@ pub(crate) fn build_wire_placement_snapshot_with_content_ids(
                 .client_snapshot
                 .focused_pane_id,
         },
-        pane_sizing: WirePlacementSizing {
-            minimum_size: placement_snapshot.pane_sizing.minimum_size,
-            gap_cell_count: placement_snapshot.pane_sizing.gap_cell_count,
-        },
+        pane_sizing: WirePlacementSizing::from(placement_snapshot.pane_sizing),
     }
 }
 

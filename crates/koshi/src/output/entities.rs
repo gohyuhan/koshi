@@ -5,6 +5,7 @@
 
 use super::*;
 use koshi_core::geometry::PaneArea;
+use koshi_core::ids::TabId;
 
 /// Render a `list-sessions` answer.
 #[must_use]
@@ -244,16 +245,26 @@ fn format_tab_row_cells(tab: &TabRow) -> Vec<String> {
 }
 
 /// One [`PaneRow`] as table cells, in [`PANE_ROW_HEADERS`] order. A pane the
-/// child never titled prints `-`.
+/// child never titled prints `-`. A floating pane prints `float` as its tab and
+/// `-` as its tab name.
 fn format_pane_row_cells(pane: &PaneRow) -> Vec<String> {
     vec![
         pane.pane_id.to_string(),
         format_optional_cell(pane.pane_name.as_ref()),
-        pane.tab_id.to_string(),
-        pane.tab_name.clone(),
+        format_pane_tab_cell(pane.tab_id),
+        format_optional_cell(pane.tab_name.as_ref()),
         pane.session_id.to_string(),
         pane.session_name.clone(),
     ]
+}
+
+/// The tab cell of a pane: the id of the tab whose layout holds it, or `float`
+/// for a floating pane.
+fn format_pane_tab_cell(tab_id: Option<TabId>) -> String {
+    match tab_id {
+        Some(tab_id) => tab_id.to_string(),
+        None => String::from("float"),
+    }
 }
 
 /// One [`ClientRow`] as table cells, in [`CLIENT_ROW_HEADERS`] order.
@@ -292,7 +303,7 @@ fn render_tab_fields(tab_discovery: &TabDiscovery) -> Vec<String> {
 fn render_pane_fields(pane_discovery: &PaneDiscovery) -> Vec<String> {
     vec![
         pane_discovery.pane_id.to_string(),
-        pane_discovery.tab_id.to_string(),
+        format_pane_tab_cell(pane_discovery.tab_id),
         pane_discovery.session_id.to_string(),
         format_optional_cell(pane_discovery.pane_title.as_ref()),
         match &pane_discovery.working_directory {

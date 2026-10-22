@@ -883,11 +883,14 @@ pub(crate) fn build_test_placement_snapshot() -> crate::placement::PanePlacement
     crate::placement::PanePlacementSnapshot {
         session_id: SessionId::new(),
         source_pane_id,
-        source_tab_id,
+        source: crate::placement::PanePlacementSource::Tiled(build_tab_snapshot(
+            source_tab_id,
+            source_pane_id,
+            "source",
+        )),
         destination_tab_id,
         session_placement_revision: 1,
         client_placement_revision: 2,
-        source_tab_snapshot: build_tab_snapshot(source_tab_id, source_pane_id, "source"),
         destination_tab_snapshot: Some(build_tab_snapshot(
             destination_tab_id,
             destination_pane_id,

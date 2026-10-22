@@ -28,7 +28,7 @@ fn build_session_discovery(created_at: SystemTime) -> SessionDiscovery {
 fn build_pane_discovery(working_directory: Option<PathBuf>) -> PaneDiscovery {
     PaneDiscovery {
         pane_id: PaneId::from_uuid(build_fixed_uuid()),
-        tab_id: TabId::from_uuid(build_fixed_uuid()),
+        tab_id: Some(TabId::from_uuid(build_fixed_uuid())),
         session_id: SessionId::from_uuid(build_fixed_uuid()),
         pane_title: None,
         working_directory,
@@ -233,6 +233,21 @@ fn pane_discovery_round_trips_with_every_optional_field_set() {
         serde_json::from_str(&pane_discovery_json).expect("deserializes");
 
     assert_eq!(decoded_pane_discovery, pane_discovery);
+}
+
+#[test]
+fn a_floating_pane_row_carries_a_null_tab_and_round_trips() {
+    let floating_pane_discovery = PaneDiscovery {
+        tab_id: None,
+        ..build_pane_discovery(None)
+    };
+
+    let pane_discovery_json = serde_json::to_value(&floating_pane_discovery).expect("serializes");
+    let decoded_pane_discovery: PaneDiscovery =
+        serde_json::from_value(pane_discovery_json.clone()).expect("deserializes");
+
+    assert_eq!(pane_discovery_json["tab_id"], serde_json::Value::Null);
+    assert_eq!(decoded_pane_discovery, floating_pane_discovery);
 }
 
 #[test]

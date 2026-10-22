@@ -88,7 +88,7 @@ fn build_populated_test_command_envelope() -> CommandEnvelope {
 /// bytes on every call.
 fn build_populated_place_pane_command_envelope() -> CommandEnvelope {
     build_command_envelope_with_fixed_in_session_source(Command::PlacePane(PlacePaneArgs {
-        source_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+        source_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
         placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
             destination_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
             anchor: PanePlacementAnchor::Tab,
@@ -209,7 +209,7 @@ fn build_populated_test_session_overview() -> SessionOverview {
         }],
         panes: vec![PaneDiscovery {
             pane_id,
-            tab_id,
+            tab_id: Some(tab_id),
             session_id,
             pane_title: Some("vim".to_string()),
             working_directory: Some(PathBuf::from("/home/user")),
@@ -760,7 +760,7 @@ fn the_undock_command_wire_shape_belongs_to_this_protocol_version() {
         request_kind: IpcRequestKind::SubmitCommand(Box::new(
             build_command_envelope_with_fixed_in_session_source(Command::PlacePane(
                 PlacePaneArgs {
-                    source_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+                    source_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
                     placement_target: PanePlacementTarget::Floating {
                         top_left_cell: Some(Point { column: 7, row: 3 }),
                     },
@@ -782,6 +782,44 @@ fn the_undock_command_wire_shape_belongs_to_this_protocol_version() {
                 "expected_placement_revision": null
             }
         })
+    );
+}
+
+#[test]
+fn the_stack_dock_command_wire_shape_belongs_to_this_protocol_version() {
+    let stack_dock_command = Command::PlacePane(PlacePaneArgs {
+        source_pane_id: None,
+        placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Stack {
+            target_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+        }),
+        expected_placement_revision: None,
+    });
+    let ipc_request = IpcRequest {
+        request_id: 7,
+        request_kind: IpcRequestKind::SubmitCommand(Box::new(
+            build_command_envelope_with_fixed_in_session_source(stack_dock_command.clone()),
+        )),
+    };
+    let encoded_request = serde_json::to_value(&ipc_request).expect("request encodes");
+    let expected_command_json = json!({
+        "PlacePane": {
+            "source_pane_id": null,
+            "placement_target": {
+                "Tiled": {
+                    "Stack": { "target_pane_id": "00000000-0000-0000-0000-000000000001" }
+                }
+            },
+            "expected_placement_revision": null
+        }
+    });
+
+    assert_eq!(
+        encoded_request["request_kind"]["SubmitCommand"]["command"],
+        expected_command_json
+    );
+    assert_eq!(
+        serde_json::from_value::<Command>(expected_command_json).expect("command decodes"),
+        stack_dock_command
     );
 }
 
@@ -1759,7 +1797,7 @@ fn pane_commands_round_trip_inside_a_submit_command_request() {
             direction: Direction::Left,
         }),
         Command::PlacePane(PlacePaneArgs {
-            source_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+            source_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
             placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                 destination_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
                 anchor: PanePlacementAnchor::Tab,

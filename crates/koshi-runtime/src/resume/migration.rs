@@ -677,9 +677,10 @@ fn write_migrated_json(
 /// Runs the steps from `source_resume_format` up to [`RESUME_FORMAT`] on
 /// `resume_body`, in order. Step 1 converts format 1 to format 2. Step 2 adds
 /// the format-3 fields. Step 3 converts format 3 to format 4. Step 4 adds the
-/// format-5 floating fields and removes each pane record's `lifecycle` and
-/// `close_policy`. A body saved at format 3 also gets the step-2 fields before
-/// step 3. Steps 2 and 4 add only the fields that are missing.
+/// format-5 floating fields and each tab's `solved_tab_size`, and removes each
+/// pane record's `lifecycle` and `close_policy`. A body saved at format 3 also
+/// gets the step-2 fields before step 3. Steps 2 and 4 add only the fields
+/// that are missing.
 ///
 /// # Errors
 /// Returns an invalid-resume error when a step cannot convert `resume_body`.
@@ -1172,18 +1173,19 @@ fn migrate_client(client: &mut Value, json_path: &str) -> Result<(), StorageErro
     )
 }
 
-/// Adds the format-5 floating fields that `resume_body` lacks: `floating_set`
-/// `{"members":[]}` on each session, and `floating_pane_view_by_pane_id` `{}`,
-/// `floating_pane_focus_order` `[]` and `focused_floating_pane_id` `null` on
-/// each of its clients. A field that is present keeps its value. Removes
-/// `lifecycle` and `close_policy` from each record in a session's
-/// `panes.pane_record_by_id`.
+/// Adds the format-5 fields that `resume_body` lacks: `floating_set`
+/// `{"members":[]}` on each session, `solved_tab_size`
+/// `{"column_count":0,"row_count":0}` on each of its tabs, and
+/// `floating_pane_view_by_pane_id` `{}`, `shown_floating_pane_ids` `[]` and
+/// `focused_floating_pane_id` `null` on each of its clients. A field that is
+/// present keeps its value. Removes `lifecycle` and `close_policy` from each
+/// record in a session's `panes.pane_record_by_id`.
 ///
 /// # Errors
 /// Returns an invalid-resume error when `body.session_by_id`, a session's
-/// `clients`, `clients.client_by_id`, `panes` or `panes.pane_record_by_id` is
-/// missing, or when the body, a value on that path, a client or a pane record
-/// is not an object.
+/// `tabs`, `clients`, `clients.client_by_id`, `panes` or
+/// `panes.pane_record_by_id` is missing, or when the body, a value on that
+/// path, a tab, a client or a pane record is not an object.
 fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageError> {
     let sessions = get_required_json_field(
         get_json_object(resume_body, "body")?,
@@ -1195,6 +1197,13 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
         session_fields
             .entry("floating_set")
             .or_insert(serde_json::json!({"members": []}));
+        let tabs = get_required_json_field(session_fields, "tabs", session_path)?;
+        migrate_json_object_members(tabs, "session.tabs", |tab, tab_path| {
+            get_json_object(tab, tab_path)?
+                .entry("solved_tab_size")
+                .or_insert(serde_json::json!({"column_count": 0, "row_count": 0}));
+            Ok(())
+        })?;
         let clients = get_required_json_field(session_fields, "clients", session_path)?;
         let client_by_id = get_required_json_field(
             get_json_object(clients, "session.clients")?,
@@ -1210,7 +1219,7 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
                     .entry("floating_pane_view_by_pane_id")
                     .or_insert(Value::Object(Map::new()));
                 client_fields
-                    .entry("floating_pane_focus_order")
+                    .entry("shown_floating_pane_ids")
                     .or_insert(Value::Array(Vec::new()));
                 client_fields
                     .entry("focused_floating_pane_id")

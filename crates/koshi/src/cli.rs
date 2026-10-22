@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -24,11 +25,14 @@ use clap::{Parser, Subcommand, ValueEnum};
 use koshi_core::action::ActionReference;
 use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    MovePaneArgs, MoveTabArgs, NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor,
-    PanePlacementTarget, PlacePaneArgs, ResizePaneArgs, ScrollPaneArgs, TabTarget,
+    MoveFloatingPaneArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs, NewPanePlacement, NewTabArgs,
+    PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, ResizePaneArgs, ScrollPaneArgs,
+    SetAllFloatingPanesMinimizedArgs, SetPaneMinimizedArgs, SetPanePinnedArgs, TabTarget,
     TiledPlacementTarget, ToggleLockModeArgs, WriteToPaneArgs,
 };
-use koshi_core::geometry::Direction;
+use koshi_core::geometry::{
+    AxisPercent, Direction, FloatingPaneDimension, FloatingPaneSize, Point,
+};
 use koshi_core::ids::{parse_owned_session_id, parse_prefixed_uuid, OwnedSessionId};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::{ShellKind, SpawnSpec};
@@ -60,7 +64,12 @@ pub struct Cli {
 
     /// Run this invocation against the machine SERVER names — the name it was
     /// saved under, or the `host:port` it listens on — instead of this one.
-    #[arg(long = "remote", global = true, value_name = "SERVER")]
+    #[arg(
+        long = "remote",
+        global = true,
+        value_name = "SERVER",
+        display_order = 997
+    )]
     pub remote_server_reference: Option<String>,
 
     /// The fingerprint of the certificate the server `--remote` names must
@@ -71,7 +80,8 @@ pub struct Cli {
         long = "certificate-fingerprint",
         global = true,
         requires = "remote_server_reference",
-        value_name = "FINGERPRINT"
+        value_name = "FINGERPRINT",
+        display_order = 998
     )]
     pub certificate_fingerprint: Option<String>,
 
@@ -264,7 +274,8 @@ fn parse_tab_reference(tab_reference_argument: &str) -> Result<TabReference, Str
 pub struct ResolvedTargets {
     /// The resolved `--session` value.
     pub session_id: Option<SessionId>,
-    /// The resolved `--tab` value.
+    /// The resolved `--tab` value, or the destination tab the routing layer
+    /// reads for a bare `dock-pane`.
     pub tab_id: Option<TabId>,
 }
 
@@ -293,6 +304,45 @@ pub struct NewPaneFlags {
     /// Stack the new pane onto the source pane instead of splitting.
     #[arg(long = "stacked")]
     should_stack: bool,
+    /// Open the pane floating above the tiled panes, in no tab. The client
+    /// that `--client` names, else the issuing client, else the session's only
+    /// attached client, shows and focuses it when that client can draw
+    /// floating panes; every other client holds it minimized. Refused with
+    /// `--direction`, `--stacked`, `--pane` and `--tab`.
+    #[arg(
+        long = "floating",
+        conflicts_with_all = ["direction", "should_stack", "pane_id", "tab_reference"]
+    )]
+    should_float: bool,
+    /// Pin the floating pane at its top-left cell on the client that shows it.
+    #[arg(long = "pinned", requires = "should_float")]
+    should_pin: bool,
+    /// Column of the floating pane's top-left cell, counted from the left edge
+    /// of the pane area; needs `--y`. Omitted takes the default placement.
+    #[arg(long = "x", value_name = "COLUMN", requires_all = ["should_float", "top_left_row"])]
+    top_left_column: Option<u16>,
+    /// Row of the floating pane's top-left cell, counted from the top edge of
+    /// the pane area; needs `--x`.
+    #[arg(long = "y", value_name = "ROW", requires_all = ["should_float", "top_left_column"])]
+    top_left_row: Option<u16>,
+    /// Width of the floating pane: columns (`80`) or a percent of the pane area
+    /// (`60%`); needs `--rows`. Omitted takes 60% of each axis.
+    #[arg(
+        long = "cols",
+        value_parser = parse_floating_pane_dimension,
+        value_name = "COLUMNS",
+        requires_all = ["should_float", "floating_pane_height"]
+    )]
+    floating_pane_width: Option<FloatingPaneDimension>,
+    /// Height of the floating pane: rows (`20`) or a percent of the pane area
+    /// (`60%`); needs `--cols`.
+    #[arg(
+        long = "rows",
+        value_parser = parse_floating_pane_dimension,
+        value_name = "ROWS",
+        requires_all = ["should_float", "floating_pane_width"]
+    )]
+    floating_pane_height: Option<FloatingPaneDimension>,
     /// Pane to split from; defaults to the focused pane.
     #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
     pane_id: Option<PaneId>,
@@ -423,33 +473,190 @@ pub enum CliCommand {
         #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
         client_id: Option<ClientId>,
     },
-    /// Swap a pane with its visible neighbor in one step, with no preview and
-    /// no confirm.
+    /// Swap a tiled pane with its visible neighbor in one step, with no
+    /// preview and no confirm. With `--x` and `--y` instead, move a floating
+    /// pane on one client's screen.
     MovePane {
         /// Direction in which to choose the visible neighbor.
-        #[arg(long, value_enum, value_name = "DIRECTION")]
-        direction: DirectionArgument,
-        /// Pane to move; defaults to the focused pane.
+        #[arg(
+            long,
+            value_enum,
+            value_name = "DIRECTION",
+            required_unless_present = "top_left_column",
+            conflicts_with_all = ["top_left_column", "client_id"]
+        )]
+        direction: Option<DirectionArgument>,
+        /// Pane to move; defaults to the focused pane. Required with `--x`.
         #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
         pane_id: Option<PaneId>,
+        /// Column of the floating pane's new top-left cell, counted from the
+        /// left edge of the pane area; needs `--y` and `--pane`.
+        #[arg(long = "x", value_name = "COLUMN", requires_all = ["top_left_row", "pane_id"])]
+        top_left_column: Option<u16>,
+        /// Row of the floating pane's new top-left cell, counted from the top
+        /// edge of the pane area; needs `--x`.
+        #[arg(long = "y", value_name = "ROW", requires = "top_left_column")]
+        top_left_row: Option<u16>,
+        /// Client whose view of the floating pane moves; defaults to the
+        /// issuing client, else the session's only attached one. Only with
+        /// `--x`.
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
     },
-    /// Insert a pane into another tab's tiled layout.
+    /// Insert a pane into a tab's tiled layout: on one side of the whole tab,
+    /// or into the stack of another pane. A floating pane docks.
     PlacePane {
-        /// Pane to place.
+        /// Pane to place; defaults to the pane this command runs in, else the
+        /// focused pane.
         #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
-        pane_id: PaneId,
+        pane_id: Option<PaneId>,
         /// Destination tab, by id or name.
         #[arg(
             long = "tab",
             value_parser = parse_tab_reference,
             value_name = "TAB",
-            required = true
+            required_unless_present = "stack_onto_pane_id",
+            conflicts_with = "stack_onto_pane_id"
         )]
-        tab_reference: TabReference,
+        tab_reference: Option<TabReference>,
         /// Side of the destination tab where the pane lands.
-        #[arg(long, value_enum, value_name = "DIRECTION")]
-        direction: DirectionArgument,
+        #[arg(
+            long,
+            value_enum,
+            value_name = "DIRECTION",
+            required_unless_present = "stack_onto_pane_id",
+            conflicts_with = "stack_onto_pane_id"
+        )]
+        direction: Option<DirectionArgument>,
+        /// Tiled pane whose stack the pane joins as the open member; a pane in
+        /// no stack forms a new stack with it.
+        #[arg(long = "stack-onto", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        stack_onto_pane_id: Option<PaneId>,
         /// Client whose committed view supplies the destination sizing.
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
+    },
+    /// Float a tiled or stacked pane above the tiled panes, at the top-left
+    /// cell and the size where the client draws it, each axis cut to 90% of
+    /// the smallest pane area that an attached client draws floating panes in.
+    UndockPane {
+        /// Pane to float; defaults to the pane this command runs in, else the
+        /// focused pane.
+        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane_id: Option<PaneId>,
+        /// Column of the floating pane's top-left cell, counted from the left
+        /// edge of the pane area; needs `--y`.
+        #[arg(long = "x", value_name = "COLUMN", requires = "top_left_row")]
+        top_left_column: Option<u16>,
+        /// Row of the floating pane's top-left cell, counted from the top edge
+        /// of the pane area; needs `--x`.
+        #[arg(long = "y", value_name = "ROW", requires = "top_left_column")]
+        top_left_row: Option<u16>,
+        /// Client that shows and focuses the floating pane when it can draw
+        /// floating panes; defaults to the issuing client, else the session's
+        /// only attached one.
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
+    },
+    /// Dock a floating pane into a tab's tiled layout: on one side of the
+    /// whole tab, or into the stack of a tiled pane. A tiled pane moves there.
+    DockPane {
+        /// Floating pane to dock; defaults to the pane this command runs in, else
+        /// the focused pane.
+        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane_id: Option<PaneId>,
+        /// Destination tab, by id or name; defaults to the tab the `--client`
+        /// client views, else the tab of the tiled pane this command runs in,
+        /// else the tab the issuing client or the session's only attached
+        /// client views, else the session's only tab.
+        #[arg(
+            long = "tab",
+            value_parser = parse_tab_reference,
+            value_name = "TAB",
+            conflicts_with = "stack_onto_pane_id"
+        )]
+        tab_reference: Option<TabReference>,
+        /// Side of the destination tab where the pane lands; defaults to
+        /// `right`.
+        #[arg(
+            long,
+            value_enum,
+            value_name = "DIRECTION",
+            conflicts_with = "stack_onto_pane_id"
+        )]
+        direction: Option<DirectionArgument>,
+        /// Tiled pane whose stack the pane joins as the open member; a pane in
+        /// no stack forms a new stack with it.
+        #[arg(long = "stack-onto", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        stack_onto_pane_id: Option<PaneId>,
+        /// Client that moves to the destination tab; defaults to the issuing
+        /// client, else the session's only attached one.
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
+    },
+    /// Pin a floating pane on one client's screen: it stays at its top-left
+    /// cell, and the moves and the left or top edge resizes of that client
+    /// are refused.
+    PinPane {
+        /// Floating pane to pin; defaults to the pane this command runs in, else
+        /// the focused floating pane.
+        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane_id: Option<PaneId>,
+        /// Client whose view of the pane is pinned; defaults to the issuing
+        /// client, else the session's only attached one.
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
+    },
+    /// Unpin a floating pane on one client's screen; it stays at its pinned
+    /// cell.
+    UnpinPane {
+        /// Floating pane to unpin; defaults to the pane this command runs in,
+        /// else the focused floating pane.
+        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane_id: Option<PaneId>,
+        /// Client whose view of the pane is unpinned; defaults to the issuing
+        /// client, else the session's only attached one.
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
+    },
+    /// Minimize a floating pane on one client's screen, or with `--all` every
+    /// floating pane that client shows.
+    MinimizePane {
+        /// Floating pane to minimize; defaults to the pane this command runs in,
+        /// else the focused floating pane.
+        #[arg(
+            long = "pane",
+            value_parser = parse_pane_id,
+            value_name = "PANE_ID",
+            conflicts_with = "should_minimize_all_floating_panes"
+        )]
+        pane_id: Option<PaneId>,
+        /// Minimize every floating pane the client shows.
+        #[arg(long = "all")]
+        should_minimize_all_floating_panes: bool,
+        /// Client whose view changes; defaults to the issuing client, else the
+        /// session's only attached one.
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
+    },
+    /// Restore a minimized floating pane on one client's screen, or with
+    /// `--all` every floating pane that client minimized. The last pane
+    /// restored is drawn on top and focused.
+    RestorePane {
+        /// Floating pane to restore; defaults to the pane this command runs in,
+        /// else the focused floating pane.
+        #[arg(
+            long = "pane",
+            value_parser = parse_pane_id,
+            value_name = "PANE_ID",
+            conflicts_with = "should_restore_all_floating_panes"
+        )]
+        pane_id: Option<PaneId>,
+        /// Restore every floating pane the client minimized.
+        #[arg(long = "all")]
+        should_restore_all_floating_panes: bool,
+        /// Client whose view changes; defaults to the issuing client, else the
+        /// session's only attached one.
         #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
         client_id: Option<ClientId>,
     },
@@ -552,11 +759,35 @@ pub enum CliCommand {
         #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
         client_id: Option<ClientId>,
     },
-    /// Focus a pane by id.
+    /// Focus a pane by id, or the next or previous floating pane.
     FocusPane {
         /// Pane to focus.
-        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
-        pane_id: PaneId,
+        #[arg(
+            long = "pane",
+            value_parser = parse_pane_id,
+            value_name = "PANE_ID",
+            required_unless_present_any = [
+                "should_focus_next_floating_pane",
+                "should_focus_previous_floating_pane"
+            ],
+            conflicts_with_all = [
+                "should_focus_next_floating_pane",
+                "should_focus_previous_floating_pane"
+            ]
+        )]
+        pane_id: Option<PaneId>,
+        /// Show and focus the floating pane after the focused one, in the order
+        /// the panes became floating, wrapping past the last to the first.
+        #[arg(
+            long = "next-floating",
+            conflicts_with = "should_focus_previous_floating_pane"
+        )]
+        should_focus_next_floating_pane: bool,
+        /// Show and focus the floating pane before the focused one, in the
+        /// order the panes became floating, wrapping past the first to the
+        /// last.
+        #[arg(long = "previous-floating")]
+        should_focus_previous_floating_pane: bool,
         /// Client whose focus moves; defaults to the issuing client.
         #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
         client_id: Option<ClientId>,
@@ -1123,6 +1354,12 @@ impl CliCommand {
             | CliCommand::ResizePane { .. }
             | CliCommand::MovePane { .. }
             | CliCommand::PlacePane { .. }
+            | CliCommand::UndockPane { .. }
+            | CliCommand::DockPane { .. }
+            | CliCommand::PinPane { .. }
+            | CliCommand::UnpinPane { .. }
+            | CliCommand::MinimizePane { .. }
+            | CliCommand::RestorePane { .. }
             | CliCommand::ScrollPane { .. }
             | CliCommand::TogglePaneFullscreen { .. }
             | CliCommand::Input { .. }
@@ -1223,32 +1460,131 @@ impl CliCommand {
                     resize_amount_cells: *resize_amount_cells,
                 }),
             ),
-            CliCommand::MovePane { direction, pane_id } => (
-                "move-pane",
-                Command::MovePane(MovePaneArgs {
-                    pane_id: *pane_id,
-                    direction: Direction::from(*direction),
-                }),
-            ),
+            CliCommand::MovePane {
+                direction,
+                pane_id,
+                top_left_column,
+                top_left_row,
+                client_id: _,
+            } => {
+                // The parser takes either `--direction`, or `--x`, `--y` and
+                // `--pane` together.
+                match (direction, top_left_column, top_left_row, pane_id) {
+                    (Some(direction), _, _, _) => (
+                        "move-pane",
+                        Command::MovePane(MovePaneArgs {
+                            pane_id: *pane_id,
+                            direction: Direction::from(*direction),
+                        }),
+                    ),
+                    (None, Some(column), Some(row), Some(pane_id)) => (
+                        "move-floating-pane",
+                        Command::MoveFloatingPane(MoveFloatingPaneArgs {
+                            pane_id: *pane_id,
+                            top_left_cell: Point {
+                                column: *column,
+                                row: *row,
+                            },
+                        }),
+                    ),
+                    _ => unreachable!("clap requires --direction, or --x, --y and --pane"),
+                }
+            }
             CliCommand::PlacePane {
                 pane_id,
                 tab_reference,
                 direction,
+                stack_onto_pane_id,
                 client_id: _,
             } => (
                 "place-pane",
                 Command::PlacePane(PlacePaneArgs {
                     source_pane_id: *pane_id,
-                    placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
-                        destination_tab_id: resolved_targets
+                    placement_target: PanePlacementTarget::Tiled(build_tiled_placement_target(
+                        *stack_onto_pane_id,
+                        resolved_targets
                             .tab_id
-                            .or(resolve_tab_reference_id(&Some(tab_reference.clone())))
-                            .expect("clap and target routing require --tab"),
-                        anchor: PanePlacementAnchor::Tab,
-                        direction: Direction::from(*direction),
-                    }),
+                            .or(resolve_tab_reference_id(tab_reference)),
+                        direction.map(Direction::from),
+                    )),
                     expected_placement_revision: None,
                 }),
+            ),
+            CliCommand::UndockPane {
+                pane_id,
+                top_left_column,
+                top_left_row,
+                client_id: _,
+            } => {
+                let top_left_cell = top_left_column
+                    .zip(*top_left_row)
+                    .map(|(column, row)| Point { column, row });
+                (
+                    "undock-pane",
+                    Command::PlacePane(PlacePaneArgs {
+                        source_pane_id: *pane_id,
+                        placement_target: PanePlacementTarget::Floating { top_left_cell },
+                        expected_placement_revision: None,
+                    }),
+                )
+            }
+            CliCommand::DockPane {
+                pane_id,
+                tab_reference,
+                direction,
+                stack_onto_pane_id,
+                client_id: _,
+            } => (
+                "dock-pane",
+                Command::PlacePane(PlacePaneArgs {
+                    source_pane_id: *pane_id,
+                    placement_target: PanePlacementTarget::Tiled(build_tiled_placement_target(
+                        *stack_onto_pane_id,
+                        resolved_targets
+                            .tab_id
+                            .or(resolve_tab_reference_id(tab_reference)),
+                        Some(direction.map(Direction::from).unwrap_or(Direction::Right)),
+                    )),
+                    expected_placement_revision: None,
+                }),
+            ),
+            CliCommand::PinPane {
+                pane_id,
+                client_id: _,
+            } => (
+                "pin-pane",
+                Command::SetPanePinned(SetPanePinnedArgs {
+                    pane_id: *pane_id,
+                    is_pinned: true,
+                }),
+            ),
+            CliCommand::UnpinPane {
+                pane_id,
+                client_id: _,
+            } => (
+                "unpin-pane",
+                Command::SetPanePinned(SetPanePinnedArgs {
+                    pane_id: *pane_id,
+                    is_pinned: false,
+                }),
+            ),
+            CliCommand::MinimizePane {
+                pane_id,
+                should_minimize_all_floating_panes,
+                client_id: _,
+            } => build_floating_pane_minimize_action(
+                *pane_id,
+                *should_minimize_all_floating_panes,
+                true,
+            ),
+            CliCommand::RestorePane {
+                pane_id,
+                should_restore_all_floating_panes,
+                client_id: _,
+            } => build_floating_pane_minimize_action(
+                *pane_id,
+                *should_restore_all_floating_panes,
+                false,
             ),
             CliCommand::ScrollPane {
                 scroll_line_count,
@@ -1360,13 +1696,39 @@ impl CliCommand {
                     }),
                 )
             }
-            CliCommand::FocusPane { pane_id, client_id } => (
-                "focus-pane",
-                Command::FocusPane(FocusPaneArgs {
-                    focus_target: FocusTarget::Pane(*pane_id),
-                    client_id: *client_id,
-                }),
-            ),
+            CliCommand::FocusPane {
+                pane_id,
+                should_focus_next_floating_pane,
+                should_focus_previous_floating_pane,
+                client_id,
+            } => {
+                // The parser takes exactly one of `--pane`, `--next-floating`
+                // and `--previous-floating`.
+                let (action_name, focus_target) = match (
+                    pane_id,
+                    should_focus_next_floating_pane,
+                    should_focus_previous_floating_pane,
+                ) {
+                    (Some(pane_id), false, false) => ("focus-pane", FocusTarget::Pane(*pane_id)),
+                    (None, true, false) => {
+                        ("focus-next-floating-pane", FocusTarget::NextFloatingPane)
+                    }
+                    (None, false, true) => (
+                        "focus-previous-floating-pane",
+                        FocusTarget::PreviousFloatingPane,
+                    ),
+                    _ => unreachable!(
+                        "clap takes exactly one of --pane, --next-floating and --previous-floating"
+                    ),
+                };
+                (
+                    action_name,
+                    Command::FocusPane(FocusPaneArgs {
+                        focus_target,
+                        client_id: *client_id,
+                    }),
+                )
+            }
             CliCommand::Lock { client_id } => (
                 "lock",
                 Command::SetLockMode(LockModeArgs {
@@ -1457,8 +1819,9 @@ impl CliCommand {
             }
             CliCommand::CloseTab { tab_reference, .. }
             | CliCommand::MoveTab { tab_reference, .. }
-            | CliCommand::FocusTab { tab_reference, .. } => tab_reference.as_ref(),
-            CliCommand::PlacePane { tab_reference, .. } => Some(tab_reference),
+            | CliCommand::FocusTab { tab_reference, .. }
+            | CliCommand::PlacePane { tab_reference, .. }
+            | CliCommand::DockPane { tab_reference, .. } => tab_reference.as_ref(),
             _ => None,
         }
     }
@@ -1474,10 +1837,24 @@ impl CliCommand {
             CliCommand::ClosePane { pane_id, .. }
             | CliCommand::ResizePane { pane_id, .. }
             | CliCommand::ScrollPane { pane_id, .. }
-            | CliCommand::Input { pane_id, .. } => *pane_id,
-            CliCommand::MovePane { pane_id, .. } => *pane_id,
-            CliCommand::PlacePane { pane_id, .. } => Some(*pane_id),
-            CliCommand::FocusPane { pane_id, .. } => Some(*pane_id),
+            | CliCommand::Input { pane_id, .. }
+            | CliCommand::MovePane { pane_id, .. }
+            | CliCommand::UndockPane { pane_id, .. }
+            | CliCommand::PinPane { pane_id, .. }
+            | CliCommand::UnpinPane { pane_id, .. }
+            | CliCommand::MinimizePane { pane_id, .. }
+            | CliCommand::RestorePane { pane_id, .. }
+            | CliCommand::FocusPane { pane_id, .. } => *pane_id,
+            CliCommand::PlacePane {
+                pane_id,
+                stack_onto_pane_id,
+                ..
+            }
+            | CliCommand::DockPane {
+                pane_id,
+                stack_onto_pane_id,
+                ..
+            } => pane_id.or(*stack_onto_pane_id),
             _ => None,
         }
     }
@@ -1502,7 +1879,14 @@ impl CliCommand {
             | CliCommand::TogglePaneFullscreen { client_id }
             | CliCommand::ScrollPane { client_id, .. }
             | CliCommand::ResizePane { client_id, .. }
-            | CliCommand::PlacePane { client_id, .. } => *client_id,
+            | CliCommand::MovePane { client_id, .. }
+            | CliCommand::PlacePane { client_id, .. }
+            | CliCommand::UndockPane { client_id, .. }
+            | CliCommand::DockPane { client_id, .. }
+            | CliCommand::PinPane { client_id, .. }
+            | CliCommand::UnpinPane { client_id, .. }
+            | CliCommand::MinimizePane { client_id, .. }
+            | CliCommand::RestorePane { client_id, .. } => *client_id,
             _ => None,
         }
     }
@@ -1510,10 +1894,11 @@ impl CliCommand {
     /// The client this invocation names that no [`Command`] carries; it rides
     /// on the command's source instead
     /// ([`CommandSource::ExternalCli`](koshi_core::command::CommandSource::ExternalCli)).
-    /// `toggle-pane-fullscreen`, `scroll-pane`, `resize-pane` and `place-pane`
-    /// answer their `--client` value; every other verb answers `None`, and a
-    /// client-taking one puts its client in the command's own arguments, which
-    /// travel on both routes.
+    /// `toggle-pane-fullscreen`, `scroll-pane`, `resize-pane`, `move-pane`,
+    /// `place-pane`, `undock-pane`, `dock-pane`, `pin-pane`, `unpin-pane`,
+    /// `minimize-pane` and `restore-pane` answer their `--client` value; every
+    /// other verb answers `None`, and a client-taking one puts its client in
+    /// the command's own arguments, which travel on both routes.
     /// [`CommandSource::InSessionCli`](koshi_core::command::CommandSource::InSessionCli)
     /// carries no client, and a command with one here never takes the
     /// in-session route ([`crate::targeting::resolve_command_route`]).
@@ -1523,9 +1908,31 @@ impl CliCommand {
             CliCommand::TogglePaneFullscreen { client_id }
             | CliCommand::ScrollPane { client_id, .. }
             | CliCommand::ResizePane { client_id, .. }
-            | CliCommand::PlacePane { client_id, .. } => *client_id,
+            | CliCommand::MovePane { client_id, .. }
+            | CliCommand::PlacePane { client_id, .. }
+            | CliCommand::UndockPane { client_id, .. }
+            | CliCommand::DockPane { client_id, .. }
+            | CliCommand::PinPane { client_id, .. }
+            | CliCommand::UnpinPane { client_id, .. }
+            | CliCommand::MinimizePane { client_id, .. }
+            | CliCommand::RestorePane { client_id, .. } => *client_id,
             _ => None,
         }
+    }
+
+    /// Whether this invocation docks a pane into a tab it names neither by
+    /// `--tab` nor by `--stack-onto`: a bare `dock-pane`. The routing layer then
+    /// reads the destination tab from the target session's overview.
+    #[must_use]
+    pub fn is_bare_dock_pane(&self) -> bool {
+        matches!(
+            self,
+            CliCommand::DockPane {
+                tab_reference: None,
+                stack_onto_pane_id: None,
+                ..
+            }
+        )
     }
 
     /// Whether this is a discovery query: a `list-*` verb or an `inspect`
@@ -1568,6 +1975,65 @@ impl CliCommand {
     }
 }
 
+/// The tiled destination of `place-pane` and `dock-pane`: the stack holding
+/// `stack_onto_pane_id` when it is set, else the `direction` side of the whole
+/// tab `destination_tab_id`.
+///
+/// Panics when `stack_onto_pane_id` is `None` and `destination_tab_id` or
+/// `direction` is `None`; the parser and the routing layer give both.
+fn build_tiled_placement_target(
+    stack_onto_pane_id: Option<PaneId>,
+    destination_tab_id: Option<TabId>,
+    direction: Option<Direction>,
+) -> TiledPlacementTarget {
+    match stack_onto_pane_id {
+        Some(target_pane_id) => TiledPlacementTarget::Stack { target_pane_id },
+        None => TiledPlacementTarget::Split {
+            destination_tab_id: destination_tab_id
+                .expect("clap or target routing gives --tab without --stack-onto"),
+            anchor: PanePlacementAnchor::Tab,
+            direction: direction.expect("clap or dock-pane's default gives --direction"),
+        },
+    }
+}
+
+/// The action name and command of `minimize-pane` (`is_minimized: true`) and
+/// `restore-pane` (`false`). With `should_apply_to_all_floating_panes`:
+/// `minimize-all-floating-panes` or `restore-all-floating-panes` with
+/// [`Command::SetAllFloatingPanesMinimized`]. Else `minimize-pane` or
+/// `restore-pane` with [`Command::SetPaneMinimized`] for `pane_id`.
+fn build_floating_pane_minimize_action(
+    pane_id: Option<PaneId>,
+    should_apply_to_all_floating_panes: bool,
+    is_minimized: bool,
+) -> (&'static str, Command) {
+    if should_apply_to_all_floating_panes {
+        let action_name = if is_minimized {
+            "minimize-all-floating-panes"
+        } else {
+            "restore-all-floating-panes"
+        };
+        return (
+            action_name,
+            Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs {
+                is_minimized,
+            }),
+        );
+    }
+    let action_name = if is_minimized {
+        "minimize-pane"
+    } else {
+        "restore-pane"
+    };
+    (
+        action_name,
+        Command::SetPaneMinimized(SetPaneMinimizedArgs {
+            pane_id,
+            is_minimized,
+        }),
+    )
+}
+
 /// The id inside a `--tab` flag given directly as one; a name (or no flag)
 /// yields `None` and needs the routing layer's lookup.
 fn resolve_tab_reference_id(tab_reference: &Option<TabReference>) -> Option<TabId> {
@@ -1581,10 +2047,12 @@ impl NewPaneFlags {
     /// The `NewPane` arguments these flags ask for, running `spawn_spec`, or
     /// the shell when it is `None`.
     ///
-    /// The new pane joins the stack of `--pane` with `--stacked`, else `--pane`
-    /// splits toward `--direction`, or toward `new_pane_direction` when
-    /// `--direction` is absent. The tab is `resolved_tab_id`, else the id a
-    /// `--tab` flag gives directly. The working directory stays empty.
+    /// With `--floating`, the new pane floats: at `--x`/`--y` when given, at
+    /// `--cols` by `--rows` when given, pinned with `--pinned`. Else it joins
+    /// the stack of `--pane` with `--stacked`, else `--pane` splits toward
+    /// `--direction`, or toward `new_pane_direction` when `--direction` is
+    /// absent. The tab is `resolved_tab_id`, else the id a `--tab` flag gives
+    /// directly. The working directory stays empty.
     fn build_new_pane_args(
         &self,
         resolved_tab_id: Option<TabId>,
@@ -1593,7 +2061,21 @@ impl NewPaneFlags {
     ) -> NewPaneArgs {
         let source_pane_id = self.pane_id;
         let tab_id = resolved_tab_id.or(resolve_tab_reference_id(&self.tab_reference));
-        let placement = if self.should_stack {
+        let placement = if self.should_float {
+            let size = self
+                .floating_pane_width
+                .zip(self.floating_pane_height)
+                .map(|(width, height)| FloatingPaneSize { width, height });
+            let top_left_cell = self
+                .top_left_column
+                .zip(self.top_left_row)
+                .map(|(column, row)| Point { column, row });
+            NewPanePlacement::Floating {
+                size,
+                top_left_cell,
+                is_pinned: self.should_pin,
+            }
+        } else if self.should_stack {
             NewPanePlacement::Stacked {
                 source_pane_id,
                 tab_id,
@@ -1653,6 +2135,30 @@ fn parse_pane_id(pane_argument: &str) -> Result<PaneId, String> {
 /// Parse a `--client` flag value into a [`ClientId`].
 fn parse_client_id(client_argument: &str) -> Result<ClientId, String> {
     parse_prefixed_uuid(client_argument, "client").map(ClientId::from_uuid)
+}
+
+/// Parse a `--cols` or `--rows` value: a cell count from `1` to `65535`
+/// (`80` → `Cells(80)`), or a percent from `1` to `100` followed by `%`
+/// (`60%` → `Percent(60)`).
+fn parse_floating_pane_dimension(
+    dimension_argument: &str,
+) -> Result<FloatingPaneDimension, String> {
+    if let Some(percent_digits) = dimension_argument.strip_suffix('%') {
+        return match percent_digits.parse::<u8>().map(AxisPercent::try_from) {
+            Ok(Ok(axis_percent)) => Ok(FloatingPaneDimension::Percent(axis_percent)),
+            _ => Err(format!(
+                "`{dimension_argument}` is not a percent from 1% to 100%"
+            )),
+        };
+    }
+    dimension_argument
+        .parse::<NonZeroU16>()
+        .map(FloatingPaneDimension::Cells)
+        .map_err(|_| {
+            format!(
+                "`{dimension_argument}` is not a size; give cells from 1 to 65535, like `80`, or a percent, like `60%`"
+            )
+        })
 }
 
 #[cfg(test)]

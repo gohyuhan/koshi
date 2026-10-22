@@ -29,7 +29,7 @@ use koshi_layout::edit::{remove_pane, RemoveError};
 use koshi_layout::focus::compute_focus_candidates;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::normalize::normalize_layout_tree;
-use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
+use koshi_layout::solver::LayoutSolve;
 
 use crate::client::{compute_default_pane_area_size, Client};
 use crate::session::focus::{build_pane_focused_event, repair_focus, FocusRepairResult};
@@ -42,7 +42,8 @@ use crate::session::tab_ops::{close_and_refocus_tab, find_landing_pane};
 /// shell:
 /// 1. drop the pane from the registry, emit [`Event::PaneClosing`] and
 ///    [`Event::PaneRemoved`], and drop the pane from the tab's focus history;
-/// 2. collapse its leaf out of the layout, before focus repair computes its
+/// 2. collapse its leaf out of the layout and solve the tab again
+///    ([`Session::update_tab_layout`]), before focus repair ranks its
 ///    candidates, and emit [`Event::LayoutChanged`];
 /// 3. drop the zoom of every client zoomed on the removed pane, returning
 ///    those clients to their tiled view; a client zoomed on a surviving pane
@@ -53,19 +54,15 @@ use crate::session::tab_ops::{close_and_refocus_tab, find_landing_pane};
 ///    [`QuitCause::LastTabClosed`](koshi_core::event::QuitCause::LastTabClosed) carrying
 ///    `pane_exit`.
 ///
-/// `tab_rect` is the rect the tab is solved against, needed to rank focus
-/// candidates geometrically. `pane_sizing` carries the per-pane content minimum and
-/// the gap between split children. `pane_exit` is the child exit that removes
-/// the pane, and `None` when a command removes it. Returns the events for the
-/// caller to emit. An unknown pane, and a tab id the session does not hold,
-/// each change nothing and emit no events.
+/// `pane_exit` is the child exit that removes the pane, and `None` when a
+/// command removes it. Returns the events for the caller to emit. An unknown
+/// pane, and a tab id the session does not hold, each change nothing and emit
+/// no events.
 #[must_use]
 pub fn remove_pane_cascade(
     session: &mut Session,
     tab_id: TabId,
     pane_id: PaneId,
-    tab_rect: Rect,
-    pane_sizing: PaneSizing,
     pane_exit: Option<PaneProcessExited>,
 ) -> Vec<Event> {
     // Both checks run before anything is removed: an unknown pane and an
@@ -80,14 +77,7 @@ pub fn remove_pane_cascade(
             tab_id: Some(tab_id),
         }),
     ];
-    emitted_events.extend(remove_pane_from_tab(
-        session,
-        tab_id,
-        pane_id,
-        tab_rect,
-        pane_sizing,
-        pane_exit,
-    ));
+    emitted_events.extend(remove_pane_from_tab(session, tab_id, pane_id, pane_exit));
     emitted_events
 }
 
@@ -95,54 +85,48 @@ pub fn remove_pane_cascade(
 /// tree: steps 1 to 5 of [`remove_pane_cascade`] without the registry drop and
 /// its two events. The pane registry keeps every record: a closed pane's
 /// record is gone already, and an undocked pane's record stays. Step 4 runs
-/// [`repair_focus_after_pane_left`].
+/// [`repair_focus_after_pane_left`], ranked against the rect the pane held in
+/// the tab's solve before the removal.
 ///
-/// `tab_rect`, `pane_sizing` and `pane_exit` mean what they mean for
-/// [`remove_pane_cascade`]. A tab id the session does not hold changes nothing
-/// and emits no events.
+/// `pane_exit` means what it means for [`remove_pane_cascade`]. A tab id the
+/// session does not hold changes nothing and emits no events.
 #[must_use]
 pub(crate) fn remove_pane_from_tab(
     session: &mut Session,
     tab_id: TabId,
     pane_id: PaneId,
-    tab_rect: Rect,
-    pane_sizing: PaneSizing,
     pane_exit: Option<PaneProcessExited>,
 ) -> Vec<Event> {
     let Some(tab) = session.tabs.get_mut(&tab_id) else {
         return Vec::new();
     };
+    tab.remove_focus_mru(pane_id);
+    let departed_pane_rect = tab
+        .get_layout_solve()
+        .find_pane_rect(pane_id)
+        .unwrap_or_else(Rect::build_empty_at_origin);
     let mut emitted_events = Vec::new();
 
-    tab.remove_focus_mru(pane_id);
-
-    // Collapses the layout *before* focus repair: the tree names no removed
-    // pane while candidates are computed. Removing the only pane yields
-    // `LastPane` — the signal that the tab is now empty. The removal edit
-    // leaves canonicalization to `normalize_layout_tree`, which collapses the unary split
-    // the removed leaf leaves behind; every surviving leaf is live, so the pass
-    // canonicalizes shape only and drops nothing.
-    // `Some` carries the rect the pane vacated, which ranks the spatial focus
-    // candidates; `None` means the tab is now empty.
-    let removed_pane_rect = match remove_pane(tab.get_layout_tree(), tab_rect, pane_id, pane_sizing)
-    {
-        Ok((new_tree, pane_removal)) => {
-            let live_pane_ids: HashSet<PaneId> =
-                new_tree.list_leaf_pane_ids().into_iter().collect();
-            let canonical_tree =
-                normalize_layout_tree(&new_tree, &live_pane_ids).unwrap_or(new_tree);
-            tab.update_layout(canonical_tree);
-            // The layout collapsed a leaf: the tab's geometry changed. This
-            // event lands ahead of every focus event.
+    // Removing the only pane yields `LastPane`: the tab is now empty. The
+    // removal edit leaves canonicalization to `normalize_layout_tree`, which
+    // collapses the unary split the removed leaf leaves behind; every
+    // surviving leaf is live, so the pass canonicalizes shape only and drops
+    // nothing. A pane that is no leaf of the tab leaves the layout as it is,
+    // emits no `LayoutChanged`, and still moves zoom and focus off the pane.
+    let is_tab_empty = match remove_pane(tab.get_layout_tree(), pane_id) {
+        Ok(edited_layout_tree) => {
+            let live_pane_ids: HashSet<PaneId> = edited_layout_tree
+                .list_leaf_pane_ids()
+                .into_iter()
+                .collect();
+            let canonical_layout_tree = normalize_layout_tree(&edited_layout_tree, &live_pane_ids)
+                .unwrap_or(edited_layout_tree);
             emitted_events.push(Event::LayoutChanged(LayoutChanged { tab_id }));
-            Some(pane_removal.removed_pane_rect)
+            emitted_events.extend(session.update_tab_layout(tab_id, canonical_layout_tree));
+            false
         }
-        Err(RemoveError::LastPane { .. }) => None,
-        // The pane is not a leaf of the tab. The layout stands unchanged, so
-        // no rect was vacated and no `LayoutChanged` is emitted; zoom and
-        // focus still move off the pane below, ranked by focus history and
-        // layout order alone.
-        Err(RemoveError::PaneNotFound { .. }) => Some(Rect::build_empty_at_origin()),
+        Err(RemoveError::LastPane { .. }) => true,
+        Err(RemoveError::PaneNotFound { .. }) => false,
     };
 
     // Every client zoomed on the removed pane returns to its tiled view. A
@@ -151,51 +135,23 @@ pub(crate) fn remove_pane_from_tab(
         client.clear_zoom_of_pane(pane_id);
     }
 
-    match removed_pane_rect {
-        // The tab still has panes: repair focus for every client that was
-        // looking at the removed pane.
-        Some(removed_pane_rect) => emitted_events.extend(repair_focus_after_pane_left(
+    if is_tab_empty {
+        emitted_events.extend(close_and_refocus_tab(session, tab_id, pane_exit));
+    } else {
+        emitted_events.extend(repair_focus_after_pane_left(
             session,
             tab_id,
             pane_id,
-            removed_pane_rect,
-            tab_rect,
-            pane_sizing,
-        )),
-        // The tab is empty: close it.
-        None => emitted_events.extend(close_and_refocus_tab(session, tab_id, pane_exit)),
+            departed_pane_rect,
+        ));
     }
-
     emitted_events
 }
 
 /// Move the focus of every client focused on `departed_pane_id` in `tab_id`,
-/// a pane that is no longer a leaf of that tab, to the pane that inherits it.
-///
-/// `departed_pane_rect` is the rect the pane held in the tab's tree before
-/// it left, as the caller solved it. Its tab size can differ from
-/// `tab_rect`: when an `80x3` client moves a pane out of a tab that an
-/// `80x22` client also views, the departed rect is solved at `80x3` and
-/// `tab_rect` is `80x22`. The tab's current tree is solved against
-/// `tab_rect` with `pane_sizing`, the candidates are ranked against
-/// `departed_pane_rect`, and [`repair_focus`] picks one verdict that every
-/// such client takes. The inheriting pane is the verdict's pane for
-/// [`FocusRepairResult::Focused`], and the tab's landing pane
-/// ([`find_landing_pane`]) for [`FocusRepairResult::TerminalTooSmall`]. No
-/// inheriting pane is a stack member collapsed to its header. Each client
-/// then:
-/// 1. focuses the inheriting pane, records it as the tab's most-recent focus,
-///    and emits [`Event::PaneFocused`] naming the departed pane as
-///    `previous_pane_id`. With no inheriting pane, the client's focus and zoom
-///    in the tab are removed and no [`Event::PaneFocused`] is emitted;
-/// 2. for [`FocusRepairResult::TerminalTooSmall`], emits
-///    [`Event::TerminalTooSmallEntered`].
-///
-/// A tab `A | B` solved at `3x1` has no room for `A`: a client focused on `B`
-/// when `B` leaves focuses `A`, and its keys reach `A` once the tab has room
-/// for it. A stack `[A, B, C]` with `C` expanded and focus history `C, A, B`,
-/// solved at `3x1`: a client focused on `C` when `C` leaves focuses `B`, the
-/// member the removal expands, and not the collapsed `A`.
+/// a pane that is not a leaf of that tab, to the pane that inherits it
+/// ([`repair_focus_of_clients`]). `departed_pane_rect` is the rect the pane
+/// held in the tab's solve before it left.
 ///
 /// A client whose floating pane takes its input keeps that input. A tab id the
 /// session does not hold changes nothing and emits no events.
@@ -205,34 +161,123 @@ pub(crate) fn repair_focus_after_pane_left(
     tab_id: TabId,
     departed_pane_id: PaneId,
     departed_pane_rect: Rect,
-    tab_rect: Rect,
-    pane_sizing: PaneSizing,
 ) -> Vec<Event> {
-    let Some(tab) = session.tabs.get(&tab_id) else {
-        return Vec::new();
-    };
     let repaired_client_ids: Vec<ClientId> = session
         .clients
         .list_attached_clients()
         .filter(|client| client.get_focused_pane_id(tab_id) == Some(departed_pane_id))
-        .map(|client| client.get_client_id())
+        .map(Client::get_client_id)
         .collect();
+    repair_focus_of_clients(session, tab_id, departed_pane_rect, &repaired_client_ids)
+}
+
+/// Move the focus of every attached client that views `tab_id` tiled and
+/// whose focused pane in it the tab's solve suppresses, to the pane that
+/// inherits it ([`repair_focus_of_clients`]). The clients focused on one
+/// suppressed pane take one verdict, ranked against that pane's rect in
+/// `previous_layout_solve`, else in the tab's current solve. Suppressed
+/// panes are handled in the solve's suppressed order.
+///
+/// A client zoomed in the tab, a client that does not view the tab, and a
+/// tab whose solve suppresses every pane, keep their focus. A tab id the
+/// session does not hold changes nothing and emits no events.
+///
+/// `A | B | C` with focus history `C, A, B`, with a solve that suppresses
+/// `C`: a client focused on `C` focuses `A`.
+#[must_use]
+pub(crate) fn hand_off_suppressed_focus(
+    session: &mut Session,
+    tab_id: TabId,
+    previous_layout_solve: Option<&LayoutSolve>,
+) -> Vec<Event> {
+    let Some(tab) = session.tabs.get(&tab_id) else {
+        return Vec::new();
+    };
+    let layout_solve = tab.get_layout_solve();
+    if layout_solve.is_every_pane_suppressed {
+        return Vec::new();
+    }
+    let suppressed_focus_groups: Vec<(Rect, Vec<ClientId>)> = layout_solve
+        .suppressed_pane_ids
+        .iter()
+        .filter_map(|&suppressed_pane_id| {
+            let repaired_client_ids: Vec<ClientId> = session
+                .clients
+                .list_attached_clients()
+                .filter(|client| {
+                    client.get_active_tab_id() == tab_id
+                        && client.get_layout_mode(tab_id) == LayoutMode::Tiled
+                        && client.get_focused_pane_id(tab_id) == Some(suppressed_pane_id)
+                })
+                .map(Client::get_client_id)
+                .collect();
+            if repaired_client_ids.is_empty() {
+                return None;
+            }
+            let ranking_pane_rect = previous_layout_solve
+                .and_then(|previous_layout_solve| {
+                    previous_layout_solve.find_pane_rect(suppressed_pane_id)
+                })
+                .or_else(|| layout_solve.find_pane_rect(suppressed_pane_id))
+                .unwrap_or_else(Rect::build_empty_at_origin);
+            Some((ranking_pane_rect, repaired_client_ids))
+        })
+        .collect();
+    let mut emitted_events = Vec::new();
+    for (ranking_pane_rect, repaired_client_ids) in suppressed_focus_groups {
+        emitted_events.extend(repair_focus_of_clients(
+            session,
+            tab_id,
+            ranking_pane_rect,
+            &repaired_client_ids,
+        ));
+    }
+    emitted_events
+}
+
+/// Move the focus of each of `repaired_client_ids` in `tab_id` to the pane
+/// that inherits it from a pane that held `ranking_pane_rect`.
+///
+/// The candidates come from the tab's solve ([`compute_focus_candidates`]),
+/// ranked against `ranking_pane_rect`, and [`repair_focus`] picks one verdict
+/// that every client takes. The inheriting pane is the verdict's pane for
+/// [`FocusRepairResult::Focused`], and the tab's landing pane
+/// ([`find_landing_pane`]) for [`FocusRepairResult::TerminalTooSmall`]. No
+/// inheriting pane is a stack member collapsed to its header. The tab records
+/// the inheriting pane as its most-recent focus once. Each client then:
+/// 1. focuses the inheriting pane and emits [`Event::PaneFocused`] naming the
+///    pane it focused before as `previous_pane_id`. With no inheriting pane,
+///    the client's focus and zoom in the tab are removed and no
+///    [`Event::PaneFocused`] is emitted;
+/// 2. for [`FocusRepairResult::TerminalTooSmall`], emits
+///    [`Event::TerminalTooSmallEntered`] when `tab_id` is its active tab. A
+///    client that views another tab emits none.
+///
+/// A tab `A | B` solved at `3x1` has no room for `A`: a client focused on `B`
+/// when `B` leaves focuses `A`, and its keys reach `A` once the tab has room
+/// for it. A stack `[A, B, C]` with `C` expanded and focus history `C, A, B`,
+/// solved at `3x1`: a client focused on `C` when `C` leaves focuses `B`, the
+/// member the removal expands, and not the collapsed `A`.
+///
+/// No client id, and a tab id the session does not hold, change nothing and
+/// emit no events.
+fn repair_focus_of_clients(
+    session: &mut Session,
+    tab_id: TabId,
+    ranking_pane_rect: Rect,
+    repaired_client_ids: &[ClientId],
+) -> Vec<Event> {
     if repaired_client_ids.is_empty() {
         return Vec::new();
     }
-    // Candidates are ranked against the tiled solve. Every client repaired
-    // here was focused on the departed pane; zoom follows focus, and the
-    // caller dropped every zoom on that pane.
-    let solved = solve_layout_with_mode(
-        tab.get_layout_tree(),
-        LayoutMode::Tiled,
-        tab_rect,
-        pane_sizing,
-    );
+    let Some(tab) = session.tabs.get(&tab_id) else {
+        return Vec::new();
+    };
+    let layout_solve = tab.get_layout_solve();
     let candidates = compute_focus_candidates(
-        departed_pane_rect,
-        &solved.pane_rects,
-        &solved.stack_headers,
+        ranking_pane_rect,
+        &layout_solve.pane_rects,
+        &layout_solve.stack_headers,
     );
     // The verdict reads the tab, the registry and the candidates, nothing
     // client-specific: every repaired client inherits the same pane.
@@ -241,18 +286,20 @@ pub(crate) fn repair_focus_after_pane_left(
         FocusRepairResult::Focused(focused_pane_id) => Some(focused_pane_id),
         FocusRepairResult::TerminalTooSmall => find_landing_pane(session, tab_id),
     };
+    if let Some(inheriting_pane_id) = inheriting_pane_id {
+        if let Some(tab) = session.tabs.get_mut(&tab_id) {
+            tab.record_focus_mru(inheriting_pane_id);
+        }
+    }
 
     let mut emitted_events = Vec::new();
-    for client_id in repaired_client_ids {
+    for &client_id in repaired_client_ids {
         match inheriting_pane_id {
             Some(inheriting_pane_id) => {
                 let previous_pane_id = session
                     .clients
                     .get_client_mut_by_id(client_id)
                     .and_then(|client| client.update_focused_pane(tab_id, inheriting_pane_id));
-                if let Some(tab) = session.tabs.get_mut(&tab_id) {
-                    tab.record_focus_mru(inheriting_pane_id);
-                }
                 emitted_events.push(Event::PaneFocused(PaneFocused {
                     client_id,
                     tab_id: Some(tab_id),
@@ -267,13 +314,16 @@ pub(crate) fn repair_focus_after_pane_left(
             }
         }
         if verdict == FocusRepairResult::TerminalTooSmall {
-            let cause = resolve_terminal_too_small_cause(session, tab_id, client_id, tab_rect);
-            if let Some(client) = session.clients.get_client_by_id(client_id) {
+            if let Some(client) = session
+                .clients
+                .get_client_by_id(client_id)
+                .filter(|client| client.get_active_tab_id() == tab_id)
+            {
                 emitted_events.push(Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
                     client_id,
                     viewport_size: client.get_viewport_size(),
                     pane_area: client.get_reported_pane_area(),
-                    cause,
+                    cause: resolve_terminal_too_small_cause(session, tab_id, client_id),
                 }));
             }
         }
@@ -289,13 +339,11 @@ pub(crate) fn repair_focus_after_pane_left(
 /// [`TerminalTooSmallCause::OtherClient`] naming another viewer of `tab_id`
 /// whose own pane area sets the constraining axis of the tab's pane region.
 /// Returns [`TerminalTooSmallCause::Terminal`] in every other case, including
-/// an unattached `client_id`, a tab no client contributes a size to, and a
-/// `tab_rect` that differs from the tab's pane region.
+/// an unattached `client_id` and a tab no client contributes a size to.
 fn resolve_terminal_too_small_cause(
     session: &Session,
     tab_id: TabId,
     client_id: ClientId,
-    tab_rect: Rect,
 ) -> TerminalTooSmallCause {
     let Some(client) = session.clients.get_client_by_id(client_id) else {
         return TerminalTooSmallCause::Terminal;
@@ -320,10 +368,6 @@ fn resolve_terminal_too_small_cause(
     let Some(tab_size) = session.get_tab_size(tab_id) else {
         return TerminalTooSmallCause::Terminal;
     };
-
-    if tab_rect.size != tab_size {
-        return TerminalTooSmallCause::Terminal;
-    }
 
     if let Some(other_client) = session
         .clients
@@ -351,9 +395,9 @@ fn resolve_terminal_too_small_cause(
 /// Remove the floating pane `pane_id`: drop its registry record, its member
 /// entry in the floating set, and every attached client's view of it
 /// ([`Session::remove_floating_member`]). No layout changes and no tab closes.
-/// A client whose floating focus was on `pane_id` focuses the floating pane it
-/// focused or restored most recently among those it still shows, else its
-/// input returns to the pane it focused in its active tab.
+/// A client whose floating focus was on `pane_id` focuses the newest floating
+/// pane it still shows, else its input returns to the pane it focused in its
+/// active tab.
 ///
 /// Returns [`Event::PaneClosing`] then [`Event::PaneRemoved`] with
 /// `tab_id: None`, then, in client id order, one [`Event::PaneFocused`] with
@@ -394,17 +438,15 @@ pub fn remove_floating_pane(session: &mut Session, pane_id: PaneId) -> Vec<Event
 /// [`remove_pane_cascade`], so a self-exiting shell tears down exactly like an
 /// explicit close.
 ///
-/// `pane_sizing` carries the per-pane content minimum and the gap between split children. `pane_exit` is
-/// the exit fact for `pane_id`; a quit the removal reaches carries it as
-/// [`QuitCause::LastTabClosed`](koshi_core::event::QuitCause::LastTabClosed)'s `pane_exit`. An
-/// unknown `pane_id` emits only the exit event.
+/// `pane_exit` is the exit fact for its pane; a quit the removal reaches
+/// carries it as
+/// [`QuitCause::LastTabClosed`](koshi_core::event::QuitCause::LastTabClosed)'s
+/// `pane_exit`. An unknown pane emits only the exit event.
 #[must_use]
 pub fn apply_child_exit(
     session: &mut Session,
     tab_id: TabId,
     pane_exit: PaneProcessExited,
-    tab_rect: Rect,
-    pane_sizing: PaneSizing,
 ) -> Vec<Event> {
     let pane_id = pane_exit.pane_id;
     let mut emitted_events = vec![Event::PaneProcessExited(pane_exit)];
@@ -415,8 +457,6 @@ pub fn apply_child_exit(
         session,
         tab_id,
         pane_id,
-        tab_rect,
-        pane_sizing,
         Some(pane_exit),
     ));
     emitted_events

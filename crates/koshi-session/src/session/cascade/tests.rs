@@ -8,17 +8,18 @@
 
 use super::*;
 
+use std::collections::HashMap;
 use std::time::SystemTime;
 
 use koshi_core::event::{QuitCause, TabClosed};
 use koshi_core::geometry::{Point, Size, SplitDirection};
 use koshi_core::ids::SessionId;
-use koshi_layout::solver::MIN_PANE_SIZE;
+use koshi_layout::solver::PaneSizing;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 
-use crate::client::{Client, ClientOrigin, ClientRegistry, FloatingPaneView};
-use crate::session::state::tests::build_default_floating_member;
+use crate::client::{Client, ClientOrigin, ClientRegistry, FloatingPanePosition};
+use crate::session::state::tests::{build_default_floating_member, build_tab};
 use crate::session::state::Tab;
 
 /// Standard terminal size (80×24) used across all test fixtures.
@@ -27,14 +28,17 @@ const TEST_VIEWPORT_SIZE: Size = Size {
     row_count: 24,
 };
 
-/// A viewport-sized rect for solving a tab's layout: [`TEST_VIEWPORT_SIZE`] at `(0, 0)`.
-fn build_viewport_rect() -> Rect {
-    Rect::from_size_at_origin(TEST_VIEWPORT_SIZE)
-}
+/// A viewport whose pane area, `1x1`, is narrower than
+/// [`MIN_PANE_SIZE`](koshi_layout::solver::MIN_PANE_SIZE):
+/// a tab solved at it has room for no pane.
+const TINY_VIEWPORT_SIZE: Size = Size {
+    column_count: 1,
+    row_count: 3,
+};
 
 /// Creates a tab containing a single pane.
 fn build_single_pane_tab(tab_id: TabId, pane_id: PaneId) -> Tab {
-    Tab::from_root_pane(tab_id, "code".to_owned(), 0, pane_id)
+    build_tab(tab_id, "code", 0, LayoutNode::Pane(pane_id))
 }
 
 /// Creates a single-pane tab at the given display position (`tab_index`).
@@ -46,15 +50,18 @@ fn build_tab_at_index(tab_id: TabId, pane_id: PaneId, tab_index: usize) -> Tab {
 
 /// Creates a tab split horizontally (left/right) between two panes with equal widths.
 fn build_two_pane_tab(tab_id: TabId, left_pane_id: PaneId, right_pane_id: PaneId) -> Tab {
-    let mut tab = Tab::from_root_pane(tab_id, "code".to_owned(), 0, left_pane_id);
-    tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
-        SplitDirection::Horizontal,
-        vec![
-            LayoutNode::Pane(left_pane_id),
-            LayoutNode::Pane(right_pane_id),
-        ],
-    )));
-    tab
+    build_tab(
+        tab_id,
+        "code",
+        0,
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutNode::Pane(left_pane_id),
+                LayoutNode::Pane(right_pane_id),
+            ],
+        )),
+    )
 }
 
 /// Creates a client viewing the given tab with the given pane focused.
@@ -137,17 +144,7 @@ fn removing_a_focused_pane_focuses_a_survivor() {
     let client_id = client.get_client_id();
     session.attach_client(client);
 
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        removed_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let emitted_events = remove_pane_cascade(&mut session, tab_id, removed_pane_id, None);
 
     // The survivor inherits focus, on the client and in the event stream.
     assert_eq!(
@@ -210,17 +207,7 @@ fn removing_a_pane_missing_from_the_layout_still_repairs_focus_and_zoom() {
     let client_id = client.get_client_id();
     session.attach_client(client);
 
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        removed_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let emitted_events = remove_pane_cascade(&mut session, tab_id, removed_pane_id, None);
 
     let client = session.clients.get_client_by_id(client_id).unwrap();
     assert_eq!(client.get_focused_pane_id(tab_id), Some(surviving_pane_id));
@@ -269,17 +256,7 @@ fn removing_a_nonfocused_pane_leaves_focus_untouched() {
     let client_id = client.get_client_id();
     session.attach_client(client);
 
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        removed_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let emitted_events = remove_pane_cascade(&mut session, tab_id, removed_pane_id, None);
 
     assert_eq!(
         session
@@ -321,17 +298,7 @@ fn collapsing_a_multi_pane_tab_emits_layout_changed() {
         ],
     );
 
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        removed_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let emitted_events = remove_pane_cascade(&mut session, tab_id, removed_pane_id, None);
 
     // The survivor's geometry changed when the leaf collapsed, so the cascade
     // announces it — a subscriber re-solves on LayoutChanged.
@@ -372,17 +339,7 @@ fn focus_repair_runs_for_every_client_on_the_removed_pane() {
     session.attach_client(first_client);
     session.attach_client(second_client);
 
-    let _ = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        removed_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let _ = remove_pane_cascade(&mut session, tab_id, removed_pane_id, None);
 
     assert_eq!(
         session
@@ -426,17 +383,7 @@ fn focus_repair_reaches_a_client_viewing_another_tab() {
     client.update_focused_pane(removed_tab_id, removed_pane_id);
     session.attach_client(client);
 
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        removed_tab_id,
-        removed_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let emitted_events = remove_pane_cascade(&mut session, removed_tab_id, removed_pane_id, None);
 
     assert_eq!(
         emitted_events,
@@ -488,26 +435,12 @@ fn removing_a_focused_pane_with_no_room_to_refocus_lands_on_the_surviving_pane()
             PaneRecord::from_terminal_pane(surviving_pane_id),
         ],
     );
-    let client = build_focused_client(session.session_id, tab_id, removed_pane_id);
+    let mut client = build_focused_client(session.session_id, tab_id, removed_pane_id);
+    client.update_viewport_size(TINY_VIEWPORT_SIZE);
     let client_id = client.get_client_id();
     session.attach_client(client);
-
-    // A rect narrower than `MIN_PANE_SIZE` leaves the survivor no room.
-    let tiny = Rect::from_size_at_origin(Size {
-        column_count: 1,
-        row_count: 1,
-    });
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        removed_pane_id,
-        tiny,
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    assert_eq!(session.update_tab_solve(tab_id), vec![]);
+    let emitted_events = remove_pane_cascade(&mut session, tab_id, removed_pane_id, None);
 
     assert_eq!(
         emitted_events,
@@ -528,7 +461,7 @@ fn removing_a_focused_pane_with_no_room_to_refocus_lands_on_the_surviving_pane()
             }),
             Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
                 client_id,
-                viewport_size: TEST_VIEWPORT_SIZE,
+                viewport_size: TINY_VIEWPORT_SIZE,
                 pane_area: None,
                 cause: TerminalTooSmallCause::Terminal,
             }),
@@ -560,11 +493,15 @@ fn removing_a_focused_stack_member_with_no_room_lands_on_the_expanded_member() {
     let tab_id = TabId::new();
     let (first_pane_id, second_pane_id, removed_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
-    let mut tab = build_single_pane_tab(tab_id, first_pane_id);
-    tab.update_layout(LayoutNode::Split(SplitNode::from_stacked_pane_ids(
-        vec![first_pane_id, second_pane_id, removed_pane_id],
-        2,
-    )));
+    let mut tab = build_tab(
+        tab_id,
+        "code",
+        0,
+        LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+            vec![first_pane_id, second_pane_id, removed_pane_id],
+            2,
+        )),
+    );
     tab.record_focus_mru(second_pane_id);
     tab.record_focus_mru(first_pane_id);
     tab.record_focus_mru(removed_pane_id);
@@ -576,26 +513,12 @@ fn removing_a_focused_stack_member_with_no_room_lands_on_the_expanded_member() {
             PaneRecord::from_terminal_pane(removed_pane_id),
         ],
     );
-    let client = build_focused_client(session.session_id, tab_id, removed_pane_id);
+    let mut client = build_focused_client(session.session_id, tab_id, removed_pane_id);
+    client.update_viewport_size(TINY_VIEWPORT_SIZE);
     let client_id = client.get_client_id();
     session.attach_client(client);
-
-    // A rect narrower than `MIN_PANE_SIZE` leaves no member room.
-    let tiny = Rect::from_size_at_origin(Size {
-        column_count: 1,
-        row_count: 1,
-    });
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        removed_pane_id,
-        tiny,
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    assert_eq!(session.update_tab_solve(tab_id), vec![]);
+    let emitted_events = remove_pane_cascade(&mut session, tab_id, removed_pane_id, None);
 
     assert_eq!(
         emitted_events,
@@ -616,7 +539,7 @@ fn removing_a_focused_stack_member_with_no_room_lands_on_the_expanded_member() {
             }),
             Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
                 client_id,
-                viewport_size: TEST_VIEWPORT_SIZE,
+                viewport_size: TINY_VIEWPORT_SIZE,
                 pane_area: None,
                 cause: TerminalTooSmallCause::Terminal,
             }),
@@ -661,17 +584,7 @@ fn removing_a_focused_pane_whose_survivors_have_no_pane_record_clears_focus() {
     let client_id = client.get_client_id();
     session.attach_client(client);
 
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        removed_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let emitted_events = remove_pane_cascade(&mut session, tab_id, removed_pane_id, None);
 
     assert_eq!(
         emitted_events,
@@ -721,21 +634,9 @@ fn a_too_small_event_carries_a_starving_area_and_region_cause() {
     client.update_pane_area(Some(PaneArea::Starving));
     let client_id = client.get_client_id();
     session.attach_client(client);
+    assert_eq!(session.update_tab_solve(tab_id), vec![]);
 
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        removed_pane_id,
-        Rect::from_size_at_origin(Size {
-            column_count: 1,
-            row_count: 1,
-        }),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let emitted_events = remove_pane_cascade(&mut session, tab_id, removed_pane_id, None);
     let entered = emitted_events
         .iter()
         .find_map(|event| match event {
@@ -764,7 +665,7 @@ fn a_starving_report_names_the_clients_own_regions() {
     session.attach_client(client);
 
     assert_eq!(
-        resolve_terminal_too_small_cause(&session, tab_id, client_id, build_viewport_rect()),
+        resolve_terminal_too_small_cause(&session, tab_id, client_id),
         TerminalTooSmallCause::Regions
     );
 }
@@ -786,7 +687,7 @@ fn a_reported_area_smaller_than_the_default_names_the_clients_regions() {
     session.attach_client(client);
 
     assert_eq!(
-        resolve_terminal_too_small_cause(&session, tab_id, client_id, build_viewport_rect()),
+        resolve_terminal_too_small_cause(&session, tab_id, client_id),
         TerminalTooSmallCause::Regions
     );
 }
@@ -811,48 +712,8 @@ fn a_smaller_viewer_names_the_other_client() {
     session.attach_client(smaller_client);
 
     assert_eq!(
-        resolve_terminal_too_small_cause(
-            &session,
-            tab_id,
-            target_client_id,
-            Rect::from_size_at_origin(Size {
-                column_count: 40,
-                row_count: 22
-            }),
-        ),
+        resolve_terminal_too_small_cause(&session, tab_id, target_client_id),
         TerminalTooSmallCause::OtherClient(smaller_client_id)
-    );
-}
-
-#[test]
-fn a_shorter_solve_rect_is_a_terminal_shortage() {
-    let tab_id = TabId::new();
-    let pane_id = PaneId::new();
-    let mut session = build_session_with(
-        vec![build_single_pane_tab(tab_id, pane_id)],
-        vec![PaneRecord::from_terminal_pane(pane_id)],
-    );
-    let target_client = build_focused_client(session.session_id, tab_id, pane_id);
-    let target_client_id = target_client.get_client_id();
-    let mut smaller_client = build_focused_client(session.session_id, tab_id, pane_id);
-    smaller_client.update_pane_area(Some(PaneArea::Reported(Size {
-        column_count: 40,
-        row_count: 24,
-    })));
-    session.attach_client(target_client);
-    session.attach_client(smaller_client);
-
-    assert_eq!(
-        resolve_terminal_too_small_cause(
-            &session,
-            tab_id,
-            target_client_id,
-            Rect::from_size_at_origin(Size {
-                column_count: 1,
-                row_count: 1
-            }),
-        ),
-        TerminalTooSmallCause::Terminal
     );
 }
 
@@ -868,7 +729,7 @@ fn a_client_id_that_is_not_attached_is_a_terminal_shortage() {
     );
 
     assert_eq!(
-        resolve_terminal_too_small_cause(&session, tab_id, ClientId::new(), build_viewport_rect()),
+        resolve_terminal_too_small_cause(&session, tab_id, ClientId::new()),
         TerminalTooSmallCause::Terminal
     );
 }
@@ -895,7 +756,7 @@ fn a_tab_no_client_is_viewing_is_a_terminal_shortage() {
 
     assert_eq!(session.get_tab_size(other_tab_id), None);
     assert_eq!(
-        resolve_terminal_too_small_cause(&session, other_tab_id, client_id, build_viewport_rect()),
+        resolve_terminal_too_small_cause(&session, other_tab_id, client_id),
         TerminalTooSmallCause::Terminal
     );
 }
@@ -915,17 +776,7 @@ fn the_removed_pane_leaves_the_tab_focus_history() {
         ],
     );
 
-    let _ = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        removed_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let _ = remove_pane_cascade(&mut session, tab_id, removed_pane_id, None);
 
     // Only the survivor is left, and it kept its place in the history.
     assert_eq!(session.tabs[&tab_id].list_focus_mru(), [surviving_pane_id]);
@@ -940,17 +791,7 @@ fn removing_the_last_pane_closes_the_tab_and_quits() {
         vec![PaneRecord::from_terminal_pane(only_pane_id)],
     );
 
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        only_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let emitted_events = remove_pane_cascade(&mut session, tab_id, only_pane_id, None);
 
     assert_eq!(
         session.tabs.keys().copied().collect::<Vec<TabId>>(),
@@ -992,17 +833,7 @@ fn removing_the_last_pane_a_client_focuses_leaves_a_consistent_session() {
     let client_id = client.get_client_id();
     session.attach_client(client);
 
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        only_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let emitted_events = remove_pane_cascade(&mut session, tab_id, only_pane_id, None);
 
     assert_eq!(
         emitted_events,
@@ -1058,17 +889,7 @@ fn closing_the_last_pane_of_one_tab_among_several_does_not_quit() {
         ],
     );
 
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        first_tab_id,
-        first_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let emitted_events = remove_pane_cascade(&mut session, first_tab_id, first_pane_id, None);
 
     assert_eq!(
         session.tabs.keys().copied().collect::<Vec<TabId>>(),
@@ -1112,11 +933,6 @@ fn on_child_exit_for_an_unknown_pane_only_emits_the_exit_fact() {
             exit_code: Some(1),
             signal: None,
         },
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
     );
 
     assert_eq!(
@@ -1150,17 +966,7 @@ fn removing_an_unknown_pane_emits_nothing() {
         vec![PaneRecord::from_terminal_pane(only_pane_id)],
     );
 
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        PaneId::new(),
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let emitted_events = remove_pane_cascade(&mut session, tab_id, PaneId::new(), None);
 
     assert_eq!(emitted_events, Vec::new());
     assert_eq!(
@@ -1190,17 +996,7 @@ fn removing_a_pane_under_an_unknown_tab_changes_nothing_and_emits_nothing() {
         ],
     );
 
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        TabId::new(),
-        requested_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let emitted_events = remove_pane_cascade(&mut session, TabId::new(), requested_pane_id, None);
 
     assert_eq!(emitted_events, Vec::new());
     assert_eq!(
@@ -1233,11 +1029,6 @@ fn a_pane_exit_emits_the_exit_fact_then_runs_the_removal_cascade() {
             pane_id,
             exit_code: Some(0),
             signal: None,
-        },
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
         },
     );
 
@@ -1301,17 +1092,7 @@ fn closing_a_clients_active_tab_moves_it_to_the_previous_tab() {
     client.update_focused_pane(left_tab_id, left_pane_id);
     session.attach_client(client);
 
-    let _ = remove_pane_cascade(
-        &mut session,
-        middle_tab_id,
-        middle_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let _ = remove_pane_cascade(&mut session, middle_tab_id, middle_pane_id, None);
 
     let client = session.clients.get_client_by_id(client_id).unwrap();
     // The previous tab (largest index below the closed one) inherits the client.
@@ -1340,17 +1121,7 @@ fn closing_the_first_tab_moves_the_client_to_the_next_tab() {
     let client_id = client.get_client_id();
     session.attach_client(client);
 
-    let _ = remove_pane_cascade(
-        &mut session,
-        first_tab_id,
-        first_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let _ = remove_pane_cascade(&mut session, first_tab_id, first_pane_id, None);
 
     // No previous tab, so the next one inherits the client.
     assert_eq!(
@@ -1382,17 +1153,7 @@ fn closing_a_tab_a_client_is_not_viewing_leaves_its_active_tab() {
     client.update_focused_pane(other_tab_id, other_pane_id);
     session.attach_client(client);
 
-    let _ = remove_pane_cascade(
-        &mut session,
-        other_tab_id,
-        other_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let _ = remove_pane_cascade(&mut session, other_tab_id, other_pane_id, None);
 
     let client = session.clients.get_client_by_id(client_id).unwrap();
     // The client was not viewing the closed tab, so its active tab is unchanged.
@@ -1413,17 +1174,7 @@ fn closing_the_last_tab_prunes_client_focus_and_quits() {
     let client_id = client.get_client_id();
     session.attach_client(client);
 
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let emitted_events = remove_pane_cascade(&mut session, tab_id, pane_id, None);
 
     // No surviving tab to move the client to, so no `TabFocused` is emitted.
     assert_eq!(
@@ -1472,17 +1223,7 @@ fn removing_a_hidden_pane_leaves_a_zoomed_client_zoomed() {
     session.attach_client(client);
 
     // The focus was on the survivor, so no repair events follow.
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        removed_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let emitted_events = remove_pane_cascade(&mut session, tab_id, removed_pane_id, None);
 
     assert_eq!(
         emitted_events,
@@ -1535,17 +1276,7 @@ fn removing_the_zoomed_pane_drops_that_clients_zoom() {
     client.zoom_pane(tab_id, zoomed_pane_id);
     session.attach_client(client);
 
-    let _ = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        zoomed_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let _ = remove_pane_cascade(&mut session, tab_id, zoomed_pane_id, None);
 
     let client = session.clients.get_client_by_id(client_id).expect("client");
     assert_eq!(
@@ -1579,17 +1310,7 @@ fn a_registry_pane_missing_from_the_layout_is_dropped_without_touching_the_tab()
     let client_id = client.get_client_id();
     session.attach_client(client);
 
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        orphan_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let emitted_events = remove_pane_cascade(&mut session, tab_id, orphan_pane_id, None);
 
     // Exactly the two removal facts: no `LayoutChanged`, no `TabClosed`, no
     // `Quit`.
@@ -1654,10 +1375,12 @@ fn remove_floating_pane_drops_the_record_the_member_and_every_client_view() {
         .add_member(build_default_floating_member(floating_pane_id))
         .expect("the floating set is empty");
     let mut focusing_client = build_focused_client(session.session_id, tab_id, tiled_pane_id);
+    focusing_client.add_floating_pane_view(floating_pane_id, FloatingPanePosition::Default);
     assert!(focusing_client.focus_floating_pane(floating_pane_id));
     let focusing_client_id = focusing_client.get_client_id();
     session.attach_client(focusing_client);
     let mut pinning_client = build_focused_client(session.session_id, tab_id, tiled_pane_id);
+    pinning_client.add_floating_pane_view(floating_pane_id, FloatingPanePosition::Default);
     pinning_client.pin_floating_pane(floating_pane_id, Point { column: 3, row: 4 });
     let pinning_client_id = pinning_client.get_client_id();
     session.attach_client(pinning_client);
@@ -1692,14 +1415,8 @@ fn remove_floating_pane_drops_the_record_the_member_and_every_client_view() {
             .clients
             .get_client_by_id(client_id)
             .expect("the client is attached");
-        assert_eq!(
-            client.get_floating_pane_view(floating_pane_id),
-            FloatingPaneView::default()
-        );
-        assert_eq!(
-            client.list_floating_pane_focus_order(),
-            Vec::<PaneId>::new()
-        );
+        assert_eq!(client.list_floating_pane_views(), &HashMap::new());
+        assert_eq!(client.list_shown_floating_pane_ids(), &[] as &[PaneId]);
         assert_eq!(client.get_focused_floating_pane_id(), None);
         assert_eq!(client.get_focused_pane_id(tab_id), Some(tiled_pane_id));
     }
@@ -1733,10 +1450,14 @@ fn remove_floating_pane_moves_a_focusing_client_to_its_most_recent_shown_float()
     }
     let mut focusing_client = build_focused_client(session.session_id, tab_id, tiled_pane_id);
     for pane_id in [shown_pane_id, minimized_pane_id, removed_pane_id] {
+        focusing_client.add_floating_pane_view(pane_id, FloatingPanePosition::Default);
         assert!(focusing_client.focus_floating_pane(pane_id));
     }
     assert!(focusing_client.minimize_floating_pane(minimized_pane_id));
-    assert!(focusing_client.focus_floating_pane(removed_pane_id));
+    assert_eq!(
+        focusing_client.get_focused_floating_pane_id(),
+        Some(removed_pane_id)
+    );
     let focusing_client_id = focusing_client.get_client_id();
     session.attach_client(focusing_client);
 
@@ -1765,8 +1486,8 @@ fn remove_floating_pane_moves_a_focusing_client_to_its_most_recent_shown_float()
         .get_client_by_id(focusing_client_id)
         .expect("the client is attached");
     assert_eq!(
-        focusing_client.list_floating_pane_focus_order(),
-        [minimized_pane_id, shown_pane_id]
+        focusing_client.list_shown_floating_pane_ids(),
+        [shown_pane_id]
     );
     assert_eq!(
         focusing_client.get_active_focused_pane_id(),
@@ -1793,6 +1514,7 @@ fn remove_floating_pane_reports_no_focus_for_a_client_left_with_no_pane_to_type_
         .expect("the floating set is empty");
     let mut unfocused_client = build_focused_client(session.session_id, tab_id, tiled_pane_id);
     unfocused_client.remove_focused_pane(tab_id);
+    unfocused_client.add_floating_pane_view(floating_pane_id, FloatingPanePosition::Default);
     assert!(unfocused_client.focus_floating_pane(floating_pane_id));
     let unfocused_client_id = unfocused_client.get_client_id();
     session.attach_client(unfocused_client);
@@ -1842,5 +1564,70 @@ fn remove_floating_pane_of_a_tiled_pane_changes_nothing() {
     assert_eq!(
         session.tabs[&tab_id].get_layout_tree(),
         &LayoutNode::Pane(tiled_pane_id)
+    );
+}
+
+#[test]
+fn a_pane_leaving_a_tab_its_client_does_not_view_reports_no_terminal_too_small() {
+    let (viewed_tab_id, unviewed_tab_id) = (TabId::new(), TabId::new());
+    let viewed_pane_id = PaneId::new();
+    let (removed_pane_id, surviving_pane_id) = (PaneId::new(), PaneId::new());
+    // A tab no client views since the session came back keeps a `0x0` solve:
+    // every pane in it is suppressed.
+    let unviewed_tab = Tab::from_layout_tree(
+        unviewed_tab_id,
+        "logs".to_owned(),
+        1,
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutNode::Pane(removed_pane_id),
+                LayoutNode::Pane(surviving_pane_id),
+            ],
+        )),
+        Size {
+            column_count: 0,
+            row_count: 0,
+        },
+        PaneSizing::default(),
+    );
+    let mut session = build_session_with(
+        vec![
+            build_single_pane_tab(viewed_tab_id, viewed_pane_id),
+            unviewed_tab,
+        ],
+        vec![
+            PaneRecord::from_terminal_pane(viewed_pane_id),
+            PaneRecord::from_terminal_pane(removed_pane_id),
+            PaneRecord::from_terminal_pane(surviving_pane_id),
+        ],
+    );
+    let mut client = build_focused_client(session.session_id, viewed_tab_id, viewed_pane_id);
+    let _ = client.update_focused_pane(unviewed_tab_id, removed_pane_id);
+    let client_id = client.get_client_id();
+    session.attach_client(client);
+
+    let emitted_events = remove_pane_cascade(&mut session, unviewed_tab_id, removed_pane_id, None);
+
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::PaneClosing(PaneClosing {
+                pane_id: removed_pane_id
+            }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: removed_pane_id,
+                tab_id: Some(unviewed_tab_id),
+            }),
+            Event::LayoutChanged(LayoutChanged {
+                tab_id: unviewed_tab_id
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: Some(unviewed_tab_id),
+                pane_id: surviving_pane_id,
+                previous_pane_id: Some(removed_pane_id),
+            }),
+        ]
     );
 }

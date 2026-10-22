@@ -27,14 +27,14 @@ use std::sync::{Arc, OnceLock};
 use koshi_core::command::{Selection, SelectionKind};
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, TabId};
-use koshi_layout::content::list_content_rects;
 use koshi_layout::mode::LayoutMode;
-use koshi_layout::solver::{solve_layout_with_mode, LayoutSolve, PaneSizing};
+use koshi_layout::solver::{solve_layout_with_sizing, LayoutSolve};
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, FloatingPaneSlot, GridView, ImagePlacementSnapshot, PaneSlot,
-    PaneSnapshot, PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot,
-    PlacementSnapshotError, PlacementSnapshotErrorCode, PlacementTabSnapshot, RenderSnapshot,
-    ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
+    list_pane_slots, ClientSnapshot, CursorSnapshot, FloatingPaneSlot, GridView,
+    ImagePlacementSnapshot, PaneSlot, PaneSnapshot, PlacementClientSnapshot, PlacementPaneSnapshot,
+    PlacementSnapshot, PlacementSnapshotError, PlacementSnapshotErrorCode, PlacementSource,
+    PlacementTabSnapshot, RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot,
+    TabMetadata, TabSnapshot,
 };
 use koshi_session::client::{Client, FloatingPanePosition};
 use koshi_session::session::state::{Session, Tab};
@@ -131,47 +131,35 @@ impl Server {
     ///
     /// Returns `None` when no attached client has that id, or its viewed tab has
     /// gone — the caller skips the frame. On success,
-    /// `session_snapshot.active_tab_snapshot` is the
-    /// client's own viewed tab, solved over the tab size (the
-    /// per-axis-minimum pane area across every client viewing it), so the
-    /// renderer letterboxes it (centers it with padding) into this client's
-    /// larger viewport. A tab whose every viewer reports
-    /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving) solves
-    /// at `0x0`: every pane is suppressed and the frame carries `is_every_pane_suppressed`.
-    /// `session_snapshot.floating_pane_slots` holds the floating panes the
-    /// client shows, placed for it, and `pane_snapshots` holds one entry per
-    /// tiled slot, then one per floating pane slot.
+    /// `session_snapshot.active_tab_snapshot` is the client's own viewed tab in
+    /// the solve the session holds for the client's layout mode
+    /// ([`Session::compute_client_solve`]), at the tab's solved size
+    /// ([`Tab::get_solved_tab_size`]), so the renderer letterboxes it (centers
+    /// it with padding) into this client's larger viewport. A tab whose every
+    /// viewer reports
+    /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving) is
+    /// solved at `0x0`: every pane is suppressed and the frame carries
+    /// `is_every_pane_suppressed`. `session_snapshot.floating_pane_slots`
+    /// holds the floating panes the client shows, placed for it, and
+    /// `pane_snapshots` holds one entry per tiled slot, then one per floating
+    /// pane slot.
     pub fn build_snapshot(&self, client_id: ClientId) -> Option<RenderSnapshot> {
         let session = self.get_session_for_client(client_id)?;
         let client = session.clients.get_client_by_id(client_id)?;
         let active_tab_id = client.get_active_tab_id();
         let tab = session.tabs.get(&active_tab_id)?;
-
-        // Solve the active tab's layout over a rect at origin (0, 0) sized to the
-        // shared tab size; the renderer offsets it into the client viewport.
-        // A tab whose every viewer is starving solves at 0x0, which suppresses
-        // every pane.
-        //
-        // The solve uses THIS client's layout mode: zoom is per-client, so a pane
-        // filling the tab for this client can be one tile among several for
-        // another client viewing the same tab at the same moment.
-        let tab_size = session.get_tab_size(active_tab_id).unwrap_or(Size {
-            column_count: 0,
-            row_count: 0,
-        });
         let layout_mode = client.get_layout_mode(active_tab_id);
-        let pane_sizing = self.get_pane_sizing();
-        let layout_solve = solve_tab_layout(tab, layout_mode, tab_size, pane_sizing);
+        let client_solve = session.compute_client_solve(active_tab_id, layout_mode)?;
 
         let active_tab_snapshot = TabSnapshot {
             tab_id: tab.get_tab_id(),
             tab_name: tab.get_tab_name().to_owned(),
-            pane_slots: list_pane_slots(&layout_solve),
-            tab_size,
-            stack_headers: layout_solve.stack_headers,
+            pane_slots: list_pane_slots(&client_solve),
+            tab_size: tab.get_solved_tab_size(),
+            stack_headers: client_solve.stack_headers.clone(),
             layout_mode,
-            is_every_pane_suppressed: layout_solve.is_every_pane_suppressed,
-            gap_cell_count: pane_sizing.gap_cell_count,
+            is_every_pane_suppressed: client_solve.is_every_pane_suppressed,
+            gap_cell_count: session.get_pane_sizing().gap_cell_count,
         };
 
         // Metadata for every tab in the session, in display (index) order.
@@ -194,12 +182,7 @@ impl Server {
             active_tab_snapshot,
             tabs_metadata,
             floating_pane_slots: list_floating_pane_slots(session, client),
-            floating_pane_ids: session
-                .floating_set
-                .list_members()
-                .iter()
-                .map(|floating_member| floating_member.pane_id)
-                .collect(),
+            floating_pane_ids: session.floating_set.list_pane_ids(),
         };
 
         // One content snapshot per solved slot, in slot order, then one per
@@ -236,9 +219,21 @@ impl Server {
     /// placement preview. This method reads live state only; it never changes
     /// a tab, a client, a pane, focus, membership, or terminal size.
     ///
-    /// A floating source pane is refused with
-    /// [`PlacementSnapshotErrorCode::NotFound`] `<pane> is floating and holds
-    /// no tiled slot`.
+    /// A tiled source pane carries its tab ([`PlacementSource::Tiled`]); a
+    /// floating source pane carries its own content
+    /// ([`PlacementSource::Floating`]), and the destination tab is always
+    /// carried for it. When the source tab is the destination tab, that tab
+    /// is solved at its tab size ([`Session::get_tab_size`]), else at the
+    /// requesting client's pane area, else at `0x0`. Otherwise each tab is
+    /// solved at [`compute_placement_preview_tab_size`]: the source tab with
+    /// the requesting client left out, the destination tab with it counted.
+    ///
+    /// Refusals:
+    /// - [`PlacementSnapshotErrorCode::NotFound`] `the requesting client is
+    ///   not attached`, `the source pane does not exist`, or `the destination
+    ///   tab does not exist`;
+    /// - [`PlacementSnapshotErrorCode::ResourceLimit`] when the preview holds
+    ///   more panes, cells, images or image bytes than a preview may carry.
     pub(crate) fn build_placement_snapshot(
         &self,
         client_id: ClientId,
@@ -251,47 +246,62 @@ impl Server {
         let client = session.clients.get_client_by_id(client_id).ok_or_else(|| {
             build_placement_not_found_error("the requesting client is not attached")
         })?;
-        let source_tab = session.find_tab_by_pane_id(source_pane_id).ok_or_else(|| {
-            if session.floating_set.has_pane(source_pane_id) {
-                build_placement_not_found_error(&format!(
-                    "{source_pane_id} is floating and holds no tiled slot"
-                ))
-            } else {
-                build_placement_not_found_error("the source pane does not exist")
-            }
-        })?;
+        let source_tab = session.find_tab_by_pane_id(source_pane_id);
+        if source_tab.is_none() && !session.floating_set.has_pane(source_pane_id) {
+            return Err(build_placement_not_found_error(
+                "the source pane does not exist",
+            ));
+        }
         let destination_tab = session
             .tabs
             .get(&destination_tab_id)
             .ok_or_else(|| build_placement_not_found_error("the destination tab does not exist"))?;
-        let source_tab_id = source_tab.get_tab_id();
-        let source_tab_size = if source_tab_id == destination_tab_id {
-            session.get_tab_size(source_tab_id).unwrap_or_else(|| {
+        let is_destination_source_tab =
+            source_tab.is_some_and(|source_tab| source_tab.get_tab_id() == destination_tab_id);
+        let destination_tab_size = if is_destination_source_tab {
+            session.get_tab_size(destination_tab_id).unwrap_or_else(|| {
                 client.get_pane_area().unwrap_or(Size {
                     column_count: 0,
                     row_count: 0,
                 })
             })
         } else {
-            compute_placement_preview_tab_size(session, client_id, source_tab_id, false)
-        };
-        let destination_tab_size = if source_tab_id == destination_tab_id {
-            source_tab_size
-        } else {
             compute_placement_preview_tab_size(session, client_id, destination_tab_id, true)
         };
-        let source_tab_layout = self.solve_placement_tab_layout(source_tab, source_tab_size);
-        let destination_tab_layout = (source_tab_id != destination_tab_id)
+        let source_tab_layout = source_tab.map(|source_tab| {
+            let source_tab_size = if is_destination_source_tab {
+                destination_tab_size
+            } else {
+                compute_placement_preview_tab_size(
+                    session,
+                    client_id,
+                    source_tab.get_tab_id(),
+                    false,
+                )
+            };
+            (
+                source_tab,
+                source_tab_size,
+                self.solve_placement_tab_layout(source_tab, source_tab_size),
+            )
+        });
+        let destination_tab_layout = (!is_destination_source_tab)
             .then(|| self.solve_placement_tab_layout(destination_tab, destination_tab_size));
-        let source_pane_count = source_tab_layout.pane_slots.len();
+        let source_pane_count = source_tab_layout
+            .as_ref()
+            .map_or(1, |(_, _, source_tab_layout)| {
+                source_tab_layout.pane_slots.len()
+            });
         let destination_pane_count = destination_tab_layout
             .as_ref()
             .map_or(0, |tab_layout| tab_layout.pane_slots.len());
         let pane_count = source_pane_count.saturating_add(destination_pane_count);
         let mut placement_resource_count = PlacementSnapshotResourceCount::default();
-        placement_resource_count
-            .add_live_placement_tab_resources(self, &source_tab_layout.pane_slots);
-        if source_tab_id != destination_tab_id {
+        if let Some((_, _, source_tab_layout)) = source_tab_layout.as_ref() {
+            placement_resource_count
+                .add_live_placement_tab_resources(self, &source_tab_layout.pane_slots);
+        }
+        if !is_destination_source_tab {
             placement_resource_count.add_live_placement_pane_resources(self, source_pane_id);
         }
         if let Some(destination_tab_layout) = destination_tab_layout.as_ref() {
@@ -300,12 +310,17 @@ impl Server {
         }
         placement_resource_count.validate_placement_snapshot_resource_limits(pane_count)?;
 
-        let source_tab_snapshot = self.build_placement_tab_snapshot(
-            source_tab,
-            source_tab_size,
-            source_tab_layout,
-            (source_tab_id != destination_tab_id).then_some(source_pane_id),
-        );
+        let source = match source_tab_layout {
+            Some((source_tab, source_tab_size, source_tab_layout)) => {
+                PlacementSource::Tiled(self.build_placement_tab_snapshot(
+                    source_tab,
+                    source_tab_size,
+                    source_tab_layout,
+                    (!is_destination_source_tab).then_some(source_pane_id),
+                ))
+            }
+            None => PlacementSource::Floating(self.build_placement_pane_snapshot(source_pane_id)),
+        };
         let destination_tab_snapshot = destination_tab_layout.map(|tab_layout| {
             self.build_placement_tab_snapshot(
                 destination_tab,
@@ -317,11 +332,10 @@ impl Server {
         Ok(PlacementSnapshot {
             session_id: session.session_id,
             source_pane_id,
-            source_tab_id,
+            source,
             destination_tab_id,
             session_placement_revision: session.get_placement_revision(),
             client_placement_revision: client.get_placement_revision(),
-            source_tab_snapshot,
             destination_tab_snapshot,
             client_snapshot: PlacementClientSnapshot {
                 client_snapshot: build_client_snapshot(client),
@@ -335,9 +349,11 @@ impl Server {
     fn solve_placement_tab_layout(&self, tab: &Tab, tab_size: Size) -> SolvedPlacementTab {
         // Placement previews use the complete tiled tree, even when the
         // requesting client currently shows a fullscreen or zoomed pane.
-        let layout_mode = LayoutMode::Tiled;
-        let pane_sizing = self.get_pane_sizing();
-        let layout_solve = solve_tab_layout(tab, layout_mode, tab_size, pane_sizing);
+        let layout_solve = solve_layout_with_sizing(
+            tab.get_layout_tree(),
+            Rect::from_size_at_origin(tab_size),
+            self.get_pane_sizing(),
+        );
         let pane_slots = list_pane_slots(&layout_solve);
         SolvedPlacementTab {
             layout_solve,
@@ -368,12 +384,7 @@ impl Server {
                         image_placement_snapshots: Vec::new(),
                     };
                 }
-                let pane_snapshot = self.build_pane_snapshot(pane_slot.pane_id, 0, None);
-                PlacementPaneSnapshot {
-                    pane_id: pane_snapshot.pane_id,
-                    terminal_grid_view: pane_snapshot.terminal_grid_view,
-                    image_placement_snapshots: pane_snapshot.image_placement_snapshots,
-                }
+                self.build_placement_pane_snapshot(pane_slot.pane_id)
             })
             .collect();
         PlacementTabSnapshot {
@@ -389,6 +400,17 @@ impl Server {
                 gap_cell_count: pane_sizing.gap_cell_count,
             },
             pane_snapshots,
+        }
+    }
+
+    /// The live screen of `pane_id`, with its image placements, for a
+    /// placement preview.
+    fn build_placement_pane_snapshot(&self, pane_id: PaneId) -> PlacementPaneSnapshot {
+        let pane_snapshot = self.build_pane_snapshot(pane_id, 0, None);
+        PlacementPaneSnapshot {
+            pane_id: pane_snapshot.pane_id,
+            terminal_grid_view: pane_snapshot.terminal_grid_view,
+            image_placement_snapshots: pane_snapshot.image_placement_snapshots,
         }
     }
 
@@ -487,26 +509,22 @@ impl Server {
     }
 }
 
-/// The floating panes `client` shows, back to front: its floating focus order
-/// with its minimized panes left out, each placed for it. A slot's outer rect
-/// is the rectangle the session places the pane in for the client
+/// The floating panes `client` shows, back to front
+/// ([`Client::list_shown_floating_pane_ids`]), each placed for it. A slot's
+/// outer rect is the rectangle the session places the pane in for the client
 /// ([`Session::find_client_floating_pane_rect`]); its content rect comes from
-/// that outer rect ([`FloatingPaneSlot::from_outer_rect`]). A focus-order entry
-/// that is no floating member of `session` is left out. Empty when the client
-/// has no floating viewport ([`Client::get_floating_viewport`]).
+/// that outer rect ([`FloatingPaneSlot::from_outer_rect`]). Empty when the
+/// client has no floating viewport ([`Client::get_floating_viewport`]).
 ///
 /// A `72x22` pane at the default position, alone in the session, on a client
 /// whose floating viewport is `120x38` → outer rect `(24, 8)` `72x22`, content
 /// rect `(25, 11)` `70x18`.
 fn list_floating_pane_slots(session: &Session, client: &Client) -> Vec<FloatingPaneSlot> {
     client
-        .list_floating_pane_focus_order()
+        .list_shown_floating_pane_ids()
         .iter()
         .filter_map(|&pane_id| {
-            let floating_pane_view = client.get_floating_pane_view(pane_id);
-            if floating_pane_view.is_minimized {
-                return None;
-            }
+            let floating_pane_view = client.get_floating_pane_view(pane_id)?;
             let outer_rect = session.find_client_floating_pane_rect(client, pane_id)?;
             Some(FloatingPaneSlot::from_outer_rect(
                 pane_id,
@@ -577,13 +595,18 @@ fn shorten_home_path(display_path: &std::path::Path, home_path_text: Option<&str
     display_path_text
 }
 
+/// The size a placement preview solves `tab_id` at: the per-axis minimum of
+/// the pane areas of the clients other than `requesting_client_id` whose
+/// active tab is `tab_id`, with the requesting client's pane area counted too
+/// when `should_include_requesting_client`. `0x0` when none of those clients
+/// reports a pane area.
 fn compute_placement_preview_tab_size(
     session: &Session,
     requesting_client_id: ClientId,
     tab_id: TabId,
     should_include_requesting_client: bool,
 ) -> Size {
-    let shared_tab_size = session
+    session
         .clients
         .list_attached_clients()
         .filter(|client| {
@@ -592,24 +615,11 @@ fn compute_placement_preview_tab_size(
                     && client.get_active_tab_id() == tab_id)
         })
         .filter_map(Client::get_pane_area)
-        .reduce(Size::compute_minimum_axes);
-    shared_tab_size.unwrap_or_else(|| {
-        if should_include_requesting_client {
-            session
-                .clients
-                .get_client_by_id(requesting_client_id)
-                .and_then(Client::get_pane_area)
-                .unwrap_or(Size {
-                    column_count: 0,
-                    row_count: 0,
-                })
-        } else {
-            Size {
-                column_count: 0,
-                row_count: 0,
-            }
-        }
-    })
+        .reduce(Size::compute_minimum_axes)
+        .unwrap_or(Size {
+            column_count: 0,
+            row_count: 0,
+        })
 }
 
 fn build_placement_not_found_error(message: &str) -> PlacementSnapshotError {
@@ -624,50 +634,6 @@ fn build_placement_resource_limit_error(message: &str) -> PlacementSnapshotError
         code: PlacementSnapshotErrorCode::ResourceLimit,
         message: message.to_owned(),
     }
-}
-
-/// Solve `tab`'s current layout in `layout_mode` over a `tab_size`-sized rect at origin
-/// `(0, 0)` — the space `PaneSlot`/content rects live in.
-///
-/// `layout_mode` is a viewing client's, never the tab's: the tab holds only the
-/// tree. Two clients on this tab can pass different modes for the same tree in
-/// the same frame.
-pub(crate) fn solve_tab_layout(
-    tab: &Tab,
-    layout_mode: LayoutMode,
-    tab_size: Size,
-    pane_sizing: PaneSizing,
-) -> LayoutSolve {
-    solve_layout_with_mode(
-        tab.get_layout_tree(),
-        layout_mode,
-        Rect::from_size_at_origin(tab_size),
-        pane_sizing,
-    )
-}
-
-/// One [`PaneSlot`] per leaf of `layout_solve`, in solve order: the outer rect
-/// from the solve and the content rect from [`list_content_rects`].
-fn list_pane_slots(layout_solve: &LayoutSolve) -> Vec<PaneSlot> {
-    let suppressed_pane_ids: HashSet<PaneId> =
-        layout_solve.suppressed_pane_ids.iter().copied().collect();
-    layout_solve
-        .pane_rects
-        .iter()
-        .zip(list_content_rects(layout_solve))
-        .map(
-            |(&(pane_id, outer_rect), (content_pane_id, content_rect))| {
-                debug_assert_eq!(pane_id, content_pane_id);
-                PaneSlot {
-                    pane_id,
-                    outer_rect,
-                    content_rect,
-                    is_visible: content_rect.is_some(),
-                    is_suppressed: suppressed_pane_ids.contains(&pane_id),
-                }
-            },
-        )
-        .collect()
 }
 
 /// Cut `selection` down to the rows this frame shows, as a column range per

@@ -369,45 +369,83 @@ fn client_floating_view_errors_display_the_client_and_the_pane() {
         format!("client {client_id:?} stores a floating view of pane {pane_id:?}, which is not floating")
     );
     assert_eq!(
-        SessionConsistencyError::FloatingFocusOrderTargetMissing {
+        SessionConsistencyError::FloatingViewMissing { client_id, pane_id }.to_string(),
+        format!("client {client_id:?} holds no floating view of floating pane {pane_id:?}")
+    );
+    assert_eq!(
+        SessionConsistencyError::ShownFloatingPaneMissing { client_id, pane_id }.to_string(),
+        format!("client {client_id:?} shows pane {pane_id:?} as floating, and it is not floating")
+    );
+    assert_eq!(
+        SessionConsistencyError::DuplicateShownFloatingPane { client_id, pane_id }.to_string(),
+        format!("client {client_id:?} shows floating pane {pane_id:?} more than once")
+    );
+    assert_eq!(
+        SessionConsistencyError::FloatingPaneShownStateMismatch {
             client_id,
+            pane_id,
+            is_minimized: true,
+        }
+        .to_string(),
+        format!(
+            "client {client_id:?} view of floating pane {pane_id:?} says is_minimized true, which its shown floating panes contradict"
+        )
+    );
+    assert_eq!(
+        SessionConsistencyError::FloatingFocusNotNewestShown {
+            client_id,
+            focused_pane_id: None,
+            newest_shown_pane_id: Some(pane_id),
+        }
+        .to_string(),
+        format!(
+            "client {client_id:?} focuses floating pane None, and the newest floating pane it shows is Some({pane_id:?})"
+        )
+    );
+    assert_eq!(
+        SessionConsistencyError::UndrawableFloatingPaneShown { client_id, pane_id }.to_string(),
+        format!(
+            "client {client_id:?} cannot draw floating panes and shows floating pane {pane_id:?}"
+        )
+    );
+}
+
+#[test]
+fn tab_solve_errors_display_the_tab_and_the_sizes() {
+    let (client_id, tab_id, pane_id) = (ClientId::new(), TabId::new(), PaneId::new());
+    let solved_tab_size = Size {
+        column_count: 0,
+        row_count: 0,
+    };
+    let tab_size = Size {
+        column_count: 80,
+        row_count: 22,
+    };
+
+    assert_eq!(
+        SessionConsistencyError::TabSolveStale { tab_id }.to_string(),
+        format!("tab {tab_id:?} stores a solve that its tree does not give")
+    );
+    assert_eq!(
+        SessionConsistencyError::TabSolveSizeStale {
+            tab_id,
+            solved_tab_size,
+            tab_size,
+        }
+        .to_string(),
+        format!(
+            "tab {tab_id:?} is solved at {solved_tab_size:?}, and its tab size is {tab_size:?}"
+        )
+    );
+    assert_eq!(
+        SessionConsistencyError::SuppressedPaneFocused {
+            client_id,
+            tab_id,
             pane_id,
         }
         .to_string(),
         format!(
-            "client {client_id:?} floating focus order lists pane {pane_id:?}, which is not floating"
-        )
-    );
-    assert_eq!(
-        SessionConsistencyError::DuplicateFloatingFocusOrderEntry { client_id, pane_id }
-            .to_string(),
-        format!("client {client_id:?} floating focus order lists pane {pane_id:?} more than once")
-    );
-    assert_eq!(
-        SessionConsistencyError::FocusedFloatingPaneMissing { client_id, pane_id }.to_string(),
-        format!(
-            "client {client_id:?} focuses pane {pane_id:?} as floating, and it is not floating"
-        )
-    );
-    assert_eq!(
-        SessionConsistencyError::FocusedFloatingPaneNotOnTop {
-            client_id,
-            pane_id,
-        }
-        .to_string(),
-        format!(
-            "client {client_id:?} focuses floating pane {pane_id:?}, which is not last in its floating focus order"
-        )
-    );
-    assert_eq!(
-        SessionConsistencyError::FocusedFloatingPaneMinimized { client_id, pane_id }.to_string(),
-        format!("client {client_id:?} focuses floating pane {pane_id:?}, which it minimized")
-    );
-    assert_eq!(
-        SessionConsistencyError::MinimizedFloatingPaneNotInFocusOrder { client_id, pane_id }
-            .to_string(),
-        format!(
-            "client {client_id:?} minimized floating pane {pane_id:?}, which its floating focus order does not list"
+            "client {client_id:?} focuses pane {pane_id:?} of tab {tab_id:?}, which the tab's solve suppresses"
         )
     );
 }

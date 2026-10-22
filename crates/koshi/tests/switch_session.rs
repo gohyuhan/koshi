@@ -61,7 +61,8 @@ fn a_switch_ends_the_stream_with_the_session_to_join_next() {
     let source_session = create_session(&mut router_connection);
     let target_session = create_session(&mut router_connection);
     let _session_processes = RunningSessions {
-        session_server_process_ids: vec![source_session.process_id, target_session.process_id],
+        runtime_directory: runtime_directory.path().to_path_buf(),
+        session_addresses: vec![source_session.clone(), target_session.clone()],
     };
 
     let (mut source_connection, _) =

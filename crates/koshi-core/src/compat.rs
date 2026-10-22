@@ -66,9 +66,15 @@ pub struct Surface {
 ///   `source_tab_id` and a `destination_tab_id` that are `null` for one.
 /// - The `placement_target` of a `PlacePane` command and of a
 ///   `PanePlacementCommitted` event is `{"Tiled": {"Swap": …}}`,
-///   `{"Tiled": {"Split": …}}`, or `{"Floating": {"top_left_cell": …}}`,
-///   which makes a tiled or stacked pane a floating pane. 4 carried the swap
-///   or split target with no `Tiled` wrapper, and had no `Floating` target.
+///   `{"Tiled": {"Split": …}}`, `{"Tiled": {"Stack": …}}`, which puts the
+///   source pane into a tiled pane's stack, or `{"Floating": {"top_left_cell":
+///   …}}`, which makes a tiled or stacked pane a floating pane. 4 carried the
+///   swap or split target with no `Tiled` wrapper, and had no `Stack` and no
+///   `Floating` target. A `PlacePane` command's `source_pane_id` is `null` for
+///   the pane the command source acts on; 4 required a pane id.
+/// - A placement preview carries `source`: `{"Tiled": …}` with the source
+///   tab's snapshot, or `{"Floating": …}` with the floating source pane's own
+///   snapshot. 4 carried `source_tab_id` and `source_tab_snapshot`.
 /// - A frame's two revisions, an image placement's `is_available`, a close
 ///   command's `should_kill_process_tree`, and a terminal-too-small event's
 ///   cause are required. 4 read a message without them.
@@ -140,7 +146,8 @@ pub struct Surface {
 ///   or `null`. The field is required, and 4 has no such field.
 /// - A pane row of an `Overview` answer carries the lifecycle `Running` only.
 ///   4 also carried `Spawning`, `Exited` with the child's `exit_code`, and
-///   `Closing`.
+///   `Closing`. The answer lists the floating panes after the tiled panes,
+///   each with a `tab_id` of `null`; 4 has no floating pane.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A
@@ -257,11 +264,11 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 ///
 /// `v0.3.0` writes 2, `v0.4.0` writes 3, and `v0.5.0` writes 4. This build
 /// writes 5: format 5 adds each session's floating panes, each client's view of
-/// them, the views detached clients left with the resume-token hashes, and the
-/// process IDs of the children closed panes left running. It drops each pane
-/// record's lifecycle and close policy. Formats 4 and 5 use the declared field
-/// names in the saved records. Formats 1 through 4 pass through the ordered
-/// migration steps before they are restored.
+/// them, each tab's solved tab size, the views detached clients left with the
+/// resume-token hashes, and the process IDs of the children closed panes left
+/// running. It drops each pane record's lifecycle and close policy. Formats 4
+/// and 5 use the declared field names in the saved records. Formats 1 through
+/// 4 pass through the ordered migration steps before they are restored.
 ///
 /// The build being installed states which format it writes. The running server
 /// reads that answer before it commits to the swap.

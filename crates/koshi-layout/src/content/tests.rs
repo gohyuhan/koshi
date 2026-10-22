@@ -1,4 +1,4 @@
-//! Tests for [`list_content_rects`].
+//! Tests for [`list_content_rects`] and [`find_content_rect`].
 
 use koshi_test_support::fixtures::build_cell_rect;
 
@@ -199,4 +199,28 @@ fn a_mixed_layout_returns_content_for_only_visible_noncollapsed_panes() {
             (collapsed_pane_id, None),
         ]
     );
+}
+
+#[test]
+fn find_content_rect_gives_each_pane_its_listed_rect_and_none_for_a_pane_outside_the_solve() {
+    let visible_pane_id = PaneId::new();
+    let suppressed_pane_id = PaneId::new();
+    let collapsed_pane_id = PaneId::new();
+    let layout_solve = build_layout_solve(
+        vec![
+            (visible_pane_id, build_cell_rect(0, 0, 10, 10)),
+            (suppressed_pane_id, build_cell_rect(10, 0, 10, 10)),
+            (collapsed_pane_id, build_cell_rect(0, 10, 10, 1)),
+        ],
+        vec![suppressed_pane_id],
+        vec![build_stack_header(collapsed_pane_id)],
+    );
+
+    assert_eq!(
+        find_content_rect(&layout_solve, visible_pane_id),
+        Some(build_cell_rect(1, 1, 8, 8)),
+    );
+    assert_eq!(find_content_rect(&layout_solve, suppressed_pane_id), None);
+    assert_eq!(find_content_rect(&layout_solve, collapsed_pane_id), None);
+    assert_eq!(find_content_rect(&layout_solve, PaneId::new()), None);
 }

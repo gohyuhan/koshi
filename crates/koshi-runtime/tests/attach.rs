@@ -1364,7 +1364,7 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
                             placement_command_id,
                             CommandSource::from_key_binding(client_id),
                             Command::PlacePane(PlacePaneArgs {
-                                source_pane_id,
+                                source_pane_id: Some(source_pane_id),
                                 placement_target: PanePlacementTarget::Tiled(
                                     TiledPlacementTarget::Swap { target_pane_id },
                                 ),
@@ -1541,7 +1541,7 @@ fn a_pane_swap_confirmed_before_another_viewers_new_pane_is_rejected_to_its_view
                             placement_command_id,
                             CommandSource::from_key_binding(client_id),
                             Command::PlacePane(PlacePaneArgs {
-                                source_pane_id,
+                                source_pane_id: Some(source_pane_id),
                                 placement_target: PanePlacementTarget::Tiled(
                                     TiledPlacementTarget::Swap { target_pane_id },
                                 ),
@@ -1668,7 +1668,7 @@ fn an_accepted_pane_insertion_delivers_its_frame_without_a_resize() {
                             CommandId::new(),
                             CommandSource::from_key_binding(client_id),
                             Command::PlacePane(PlacePaneArgs {
-                                source_pane_id,
+                                source_pane_id: Some(source_pane_id),
                                 placement_target: PanePlacementTarget::Tiled(
                                     TiledPlacementTarget::Split {
                                         destination_tab_id: active_tab_id,

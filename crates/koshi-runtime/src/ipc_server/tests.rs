@@ -396,11 +396,7 @@ fn build_placement_snapshot_showing_records(
     PlacementSnapshot {
         session_id: render_snapshot.session_snapshot.session_id,
         source_pane_id,
-        source_tab_id: render_snapshot.client_snapshot.active_tab_id,
-        destination_tab_id: render_snapshot.client_snapshot.active_tab_id,
-        session_placement_revision: 0,
-        client_placement_revision: 0,
-        source_tab_snapshot: PlacementTabSnapshot {
+        source: PlacementSource::Tiled(PlacementTabSnapshot {
             layout_tree: LayoutNode::Pane(source_pane_id),
             tab_snapshot: render_snapshot.session_snapshot.active_tab_snapshot.clone(),
             pane_snapshots: vec![PlacementPaneSnapshot {
@@ -408,7 +404,10 @@ fn build_placement_snapshot_showing_records(
                 terminal_grid_view: None,
                 image_placement_snapshots: build_image_placements(image_records),
             }],
-        },
+        }),
+        destination_tab_id: render_snapshot.client_snapshot.active_tab_id,
+        session_placement_revision: 0,
+        client_placement_revision: 0,
         destination_tab_snapshot: None,
         client_snapshot: PlacementClientSnapshot {
             client_snapshot: render_snapshot.client_snapshot.clone(),
@@ -1640,19 +1639,11 @@ fn read_frames_checking_image_releases(
                 request_id,
                 snapshot,
             }) => {
-                preview_image_content_ids = [
-                    Some(&snapshot.source_tab_snapshot),
-                    snapshot.destination_tab_snapshot.as_ref(),
-                ]
-                .into_iter()
-                .flatten()
-                .flat_map(|placement_tab_snapshot| &placement_tab_snapshot.pane_snapshots)
-                .flat_map(|placement_pane_snapshot| {
-                    &placement_pane_snapshot.image_placement_snapshots
-                })
-                .filter(|image_placement| image_placement.is_available)
-                .map(|image_placement| image_placement.image_content_id)
-                .collect();
+                preview_image_content_ids = snapshot
+                    .list_image_placements()
+                    .filter(|image_placement| image_placement.is_available)
+                    .map(|image_placement| image_placement.image_content_id)
+                    .collect();
                 held_placement_request_id = Some(request_id);
             }
             SessionFrame::Event(SessionEvent::ImageContentReleased { image_content_ids }) => {
@@ -2628,7 +2619,8 @@ fn a_preview_image_that_does_not_fit_beside_the_frame_travels_without_its_record
     assert_eq!(
         prepared_placement_snapshot
             .placement_snapshot
-            .source_tab_snapshot
+            .find_source_tab_snapshot()
+            .expect("the source pane is tiled")
             .pane_snapshots[0]
             .image_placement_snapshots
             .iter()

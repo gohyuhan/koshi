@@ -16,11 +16,14 @@ use koshi_core::event::{Event, PaneCommandFinished, PaneCommandStarted};
 use koshi_core::geometry::{FloatingPaneDimension, FloatingPaneSize, PixelCellSize, Size};
 use koshi_core::ids::{ClientId, SessionId, TabId};
 use koshi_core::process::{PtySize, ShellKind, SpawnSpec};
+use koshi_layout::tree::LayoutNode;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::error::PtyError;
 use koshi_renderer::snapshot::Delivery;
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
-use koshi_session::session::state::{FloatingMember, Session, Tab};
+use koshi_session::session::state::{FloatingMember, Session};
+
+use crate::runtime::command::tests::{attach_client_record, build_tab};
 use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::style::{Color, Style};
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -114,13 +117,12 @@ fn build_viewed_pane_server(
         SystemTime::UNIX_EPOCH,
         ClientRegistry::new(),
     );
-    session.tabs.insert(
-        tab_id,
-        Tab::from_root_pane(tab_id, "t".to_owned(), 0, pane_id),
-    );
+    session
+        .tabs
+        .insert(tab_id, build_tab(tab_id, "t", 0, LayoutNode::Pane(pane_id)));
     let client = build_measured_client(session.session_id, tab_id, SystemTime::UNIX_EPOCH, 8, 16);
     let client_id = client.get_client_id();
-    session.attach_client(client);
+    attach_client_record(&mut session, client);
     runtime.session_by_id.insert(session.session_id, session);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60);
     runtime.push_frames(first_frame_time);
@@ -189,26 +191,28 @@ fn a_cell_pixel_size_query_answers_with_the_tab_cell_size_or_the_floating_cell_s
     );
     session.tabs.insert(
         db_tab_id,
-        Tab::from_root_pane(db_tab_id, "db".to_owned(), 0, PaneId::new()),
+        build_tab(db_tab_id, "db", 0, LayoutNode::Pane(PaneId::new())),
     );
     session.tabs.insert(
         web_tab_id,
-        Tab::from_root_pane(web_tab_id, "web".to_owned(), 1, tiled_pane_id),
+        build_tab(web_tab_id, "web", 1, LayoutNode::Pane(tiled_pane_id)),
     );
     let forty_cells = FloatingPaneDimension::Cells(NonZeroU16::new(40).expect("40 is nonzero"));
     session
-        .floating_set
-        .add_member(FloatingMember {
-            pane_id: floating_pane_id,
-            desired_size: FloatingPaneSize {
-                width: forty_cells,
-                height: forty_cells,
+        .add_floating_member(
+            FloatingMember {
+                pane_id: floating_pane_id,
+                desired_size: FloatingPaneSize {
+                    width: forty_cells,
+                    height: forty_cells,
+                },
+                solved_size: Size {
+                    column_count: 40,
+                    row_count: 40,
+                },
             },
-            solved_size: Size {
-                column_count: 40,
-                row_count: 40,
-            },
-        })
+            None,
+        )
         .expect("the floating set is empty");
     // alice attaches first and views `db` with 10x20 px cells; bob views
     // `web` with 8x16 px cells.
@@ -226,8 +230,8 @@ fn a_cell_pixel_size_query_answers_with_the_tab_cell_size_or_the_floating_cell_s
         8,
         16,
     );
-    session.attach_client(alice_client);
-    session.attach_client(bob_client);
+    attach_client_record(&mut session, alice_client);
+    attach_client_record(&mut session, bob_client);
     runtime.session_by_id.insert(session.session_id, session);
 
     // XTWINOPS 16: report the cell size in pixels.
@@ -319,27 +323,12 @@ fn output_marks_the_view_of_each_client_that_shows_its_pane_and_of_no_other() {
     );
     session.tabs.insert(
         db_tab_id,
-        Tab::from_root_pane(db_tab_id, "db".to_owned(), 0, db_pane_id),
+        build_tab(db_tab_id, "db", 0, LayoutNode::Pane(db_pane_id)),
     );
     session.tabs.insert(
         web_tab_id,
-        Tab::from_root_pane(web_tab_id, "web".to_owned(), 1, web_pane_id),
+        build_tab(web_tab_id, "web", 1, LayoutNode::Pane(web_pane_id)),
     );
-    let twenty_cells = FloatingPaneDimension::Cells(NonZeroU16::new(20).expect("20 is nonzero"));
-    session
-        .floating_set
-        .add_member(FloatingMember {
-            pane_id: floating_pane_id,
-            desired_size: FloatingPaneSize {
-                width: twenty_cells,
-                height: twenty_cells,
-            },
-            solved_size: Size {
-                column_count: 20,
-                row_count: 20,
-            },
-        })
-        .expect("the floating set is empty");
     let db_client =
         build_measured_client(session.session_id, db_tab_id, SystemTime::UNIX_EPOCH, 8, 16);
     let web_client = build_measured_client(
@@ -350,8 +339,31 @@ fn output_marks_the_view_of_each_client_that_shows_its_pane_and_of_no_other() {
         16,
     );
     let (db_client_id, web_client_id) = (db_client.get_client_id(), web_client.get_client_id());
-    session.attach_client(db_client);
-    session.attach_client(web_client);
+    attach_client_record(&mut session, db_client);
+    attach_client_record(&mut session, web_client);
+    let twenty_cells = FloatingPaneDimension::Cells(NonZeroU16::new(20).expect("20 is nonzero"));
+    session
+        .add_floating_member(
+            FloatingMember {
+                pane_id: floating_pane_id,
+                desired_size: FloatingPaneSize {
+                    width: twenty_cells,
+                    height: twenty_cells,
+                },
+                solved_size: Size {
+                    column_count: 20,
+                    row_count: 20,
+                },
+            },
+            None,
+        )
+        .expect("the floating set is empty");
+    // web shows the floating pane; db holds it minimized.
+    assert!(session
+        .clients
+        .get_client_mut_by_id(web_client_id)
+        .expect("web is attached")
+        .focus_floating_pane(floating_pane_id));
     runtime.session_by_id.insert(session.session_id, session);
     let _db_deliveries = runtime.subscribe(db_client_id, 60);
     let _web_deliveries = runtime.subscribe(web_client_id, 60);
@@ -373,7 +385,7 @@ fn output_marks_the_view_of_each_client_that_shows_its_pane_and_of_no_other() {
     runtime.handle_pty_output(floating_pane_id, b"hi");
     assert_eq!(
         get_frame_wait(&runtime, db_client_id, second_frame_time),
-        Some(DEFAULT_FRAME_INTERVAL_DURATION)
+        None
     );
     assert_eq!(
         get_frame_wait(&runtime, web_client_id, second_frame_time),

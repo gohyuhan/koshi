@@ -218,12 +218,7 @@ fn apply_layout_operation(
         }
         LayoutOperation::Remove { target_leaf_index } => {
             let removed_pane_id = select_leaf_pane_id(target_leaf_index);
-            if let Ok((next_layout_tree, _)) = remove_pane(
-                layout_tree,
-                tab_rect,
-                removed_pane_id,
-                build_pane_sizing(gap_cell_count),
-            ) {
+            if let Ok(next_layout_tree) = remove_pane(layout_tree, removed_pane_id) {
                 *layout_tree = next_layout_tree;
                 live_pane_ids.remove(&removed_pane_id);
             }

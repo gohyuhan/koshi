@@ -4,19 +4,24 @@
 //! spatial neighbor, absorbed pane, and finally the first visible pane in layout order.
 //! Also validates the eligibility rule — a pane must sit in the visible layout order and
 //! hold a registry pane record — and the two no-pane verdicts.
-//! Then checks the `PaneFocused` event `build_pane_focused_event` drafts for a move of a
-//! client's input into, out of, and between floating panes.
+//! Then checks the `PaneFocused` event `build_pane_focused_event` builds for a move of a
+//! client's input into, out of, and between floating panes, and the events
+//! `apply_tiled_pane_focus` and `build_pane_minimized_changed_events` return.
 
 use super::*;
 
 use std::time::SystemTime;
 
 use koshi_core::ids::TabId;
+use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::state::PaneRecord;
+
+use crate::client::FloatingPanePosition;
+use crate::session::state::tests::build_tab;
 
 /// A tab whose only leaf is `root_pane_id`, with no focus history recorded yet.
 fn build_tab_with_root(root_pane_id: PaneId) -> Tab {
-    Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, root_pane_id)
+    build_tab(TabId::new(), "code", 0, LayoutNode::Pane(root_pane_id))
 }
 
 /// A registry holding exactly `pane_records`.
@@ -357,9 +362,11 @@ fn ineligible_spatial_and_absorbed_candidates_fall_through_to_layout_order() {
     );
 }
 
-/// A client viewing `active_tab_id` on an `80x24` viewport, focusing nothing.
-fn build_client_on(active_tab_id: TabId) -> Client {
-    Client::from_attachment(
+/// A client viewing `active_tab_id` on an `80x24` viewport, focusing nothing,
+/// with a minimized view at the default placement of each of
+/// `floating_pane_ids`.
+fn build_client_on(active_tab_id: TabId, floating_pane_ids: &[PaneId]) -> Client {
+    let mut client = Client::from_attachment(
         koshi_core::ids::ClientId::new(),
         koshi_core::ids::SessionId::new(),
         SystemTime::UNIX_EPOCH,
@@ -372,14 +379,18 @@ fn build_client_on(active_tab_id: TabId) -> Client {
         crate::client::ClientOrigin::Local,
         "C-test-client".to_string(),
         0,
-    )
+    );
+    for &floating_pane_id in floating_pane_ids {
+        client.add_floating_pane_view(floating_pane_id, FloatingPanePosition::Default);
+    }
+    client
 }
 
 #[test]
 fn a_move_into_a_floating_pane_reports_no_tab_and_the_pane_it_left() {
     let tab_id = TabId::new();
     let (vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new());
-    let mut client = build_client_on(tab_id);
+    let mut client = build_client_on(tab_id, &[htop_pane_id]);
     client.update_focused_pane(tab_id, vim_pane_id);
     let previous_focused_pane_id = client.get_active_focused_pane_id();
     assert!(client.focus_floating_pane(htop_pane_id));
@@ -399,7 +410,7 @@ fn a_move_into_a_floating_pane_reports_no_tab_and_the_pane_it_left() {
 fn a_move_out_of_the_floating_panes_reports_the_active_tab_and_its_focused_pane() {
     let tab_id = TabId::new();
     let (vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new());
-    let mut client = build_client_on(tab_id);
+    let mut client = build_client_on(tab_id, &[htop_pane_id]);
     client.update_focused_pane(tab_id, vim_pane_id);
     assert!(client.focus_floating_pane(htop_pane_id));
     let previous_focused_pane_id = client.get_active_focused_pane_id();
@@ -420,7 +431,7 @@ fn a_move_out_of_the_floating_panes_reports_the_active_tab_and_its_focused_pane(
 fn a_move_between_floating_panes_reports_no_tab_and_the_floating_pane_it_left() {
     let tab_id = TabId::new();
     let (vim_pane_id, htop_pane_id, btop_pane_id) = (PaneId::new(), PaneId::new(), PaneId::new());
-    let mut client = build_client_on(tab_id);
+    let mut client = build_client_on(tab_id, &[htop_pane_id, btop_pane_id]);
     client.update_focused_pane(tab_id, vim_pane_id);
     assert!(client.focus_floating_pane(htop_pane_id));
     let previous_focused_pane_id = client.get_active_focused_pane_id();
@@ -441,7 +452,7 @@ fn a_move_between_floating_panes_reports_no_tab_and_the_floating_pane_it_left() 
 fn an_unchanged_input_and_no_pane_to_type_into_report_nothing() {
     let tab_id = TabId::new();
     let (vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new());
-    let mut client = build_client_on(tab_id);
+    let mut client = build_client_on(tab_id, &[htop_pane_id]);
 
     assert_eq!(build_pane_focused_event(&client, None), None);
     assert!(client.focus_floating_pane(htop_pane_id));
@@ -454,4 +465,101 @@ fn an_unchanged_input_and_no_pane_to_type_into_report_nothing() {
 
     client.update_focused_pane(tab_id, vim_pane_id);
     assert_eq!(build_pane_focused_event(&client, Some(vim_pane_id)), None);
+}
+
+#[test]
+fn a_tiled_focus_in_the_active_tab_reports_each_minimized_floating_pane_then_the_focus() {
+    let tab_id = TabId::new();
+    let (vim_pane_id, shell_pane_id, htop_pane_id, logs_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
+    let mut client = build_client_on(tab_id, &[htop_pane_id, logs_pane_id]);
+    client.update_focused_pane(tab_id, vim_pane_id);
+    assert!(client.focus_floating_pane(htop_pane_id));
+    assert!(client.focus_floating_pane(logs_pane_id));
+    let client_id = client.get_client_id();
+
+    assert_eq!(
+        apply_tiled_pane_focus(&mut client, tab_id, shell_pane_id),
+        vec![
+            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+                client_id,
+                pane_id: htop_pane_id,
+                is_minimized: true,
+            }),
+            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+                client_id,
+                pane_id: logs_pane_id,
+                is_minimized: true,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id,
+                tab_id: Some(tab_id),
+                pane_id: shell_pane_id,
+                previous_pane_id: Some(logs_pane_id),
+            }),
+        ]
+    );
+    assert_eq!(client.get_active_focused_pane_id(), Some(shell_pane_id));
+    assert_eq!(client.list_shown_floating_pane_ids(), Vec::<PaneId>::new());
+}
+
+#[test]
+fn a_tiled_focus_on_the_pane_already_focused_reports_nothing() {
+    let tab_id = TabId::new();
+    let vim_pane_id = PaneId::new();
+    let mut client = build_client_on(tab_id, &[]);
+    client.update_focused_pane(tab_id, vim_pane_id);
+
+    assert_eq!(
+        apply_tiled_pane_focus(&mut client, tab_id, vim_pane_id),
+        Vec::new()
+    );
+}
+
+#[test]
+fn a_tiled_focus_in_another_tab_reports_that_tab_and_minimizes_nothing() {
+    let (active_tab_id, other_tab_id) = (TabId::new(), TabId::new());
+    let (old_pane_id, new_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut client = build_client_on(active_tab_id, &[htop_pane_id]);
+    client.update_focused_pane(other_tab_id, old_pane_id);
+    assert!(client.focus_floating_pane(htop_pane_id));
+    let client_id = client.get_client_id();
+
+    assert_eq!(
+        apply_tiled_pane_focus(&mut client, other_tab_id, new_pane_id),
+        vec![Event::PaneFocused(PaneFocused {
+            client_id,
+            tab_id: Some(other_tab_id),
+            pane_id: new_pane_id,
+            previous_pane_id: Some(old_pane_id),
+        })]
+    );
+    assert_eq!(client.get_active_focused_pane_id(), Some(htop_pane_id));
+}
+
+#[test]
+fn minimized_changed_events_name_each_pane_in_order_with_the_given_flag() {
+    let client_id = ClientId::new();
+    let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
+
+    assert_eq!(
+        build_pane_minimized_changed_events(client_id, &[second_pane_id, first_pane_id], false)
+            .collect::<Vec<Event>>(),
+        vec![
+            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+                client_id,
+                pane_id: second_pane_id,
+                is_minimized: false,
+            }),
+            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+                client_id,
+                pane_id: first_pane_id,
+                is_minimized: false,
+            }),
+        ]
+    );
+    assert_eq!(
+        build_pane_minimized_changed_events(client_id, &[], true).count(),
+        0
+    );
 }

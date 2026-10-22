@@ -9,16 +9,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use koshi_config::hints::{HintBinding, KeyMatch};
+use koshi_config::hints::{KeyMatch, KeymapHints};
 use koshi_config::key::Leader;
 use koshi_config::layer::{PartialColorPalette, PartialLayoutDefaults};
 use koshi_config::types::{
     BoundAction, KeybindingsConfig, ModeBindings, ModeName, RgbColor, WheelScroll,
 };
-use koshi_core::action::{
-    ActionReference, MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT, MOVE_FLOATING_PANE_HINT,
-    MOVE_FOCUSED_PANE_HINT, MOVE_TILED_PANE_HINT,
-};
+use koshi_core::action::ActionReference;
 use koshi_core::command::{PanePlacementAnchor, TiledPlacementTarget};
 use koshi_core::geometry::{Direction, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
@@ -27,7 +24,7 @@ use koshi_core::lock::LockMode;
 use koshi_ipc::frame::FrameSlot;
 use koshi_ipc::placement::{
     PanePlacementClientSnapshot, PanePlacementPaneSnapshot, PanePlacementSizing,
-    PanePlacementSnapshot, PanePlacementTabSnapshot,
+    PanePlacementSnapshot, PanePlacementSource, PanePlacementTabSnapshot,
 };
 use koshi_ipc::protocol::IpcErrorCode;
 use koshi_layout::mode::LayoutMode;
@@ -96,11 +93,7 @@ pub(crate) fn build_test_placement_snapshot(
     PanePlacementSnapshot {
         session_id,
         source_pane_id,
-        source_tab_id,
-        destination_tab_id,
-        session_placement_revision,
-        client_placement_revision,
-        source_tab_snapshot: PanePlacementTabSnapshot {
+        source: PanePlacementSource::Tiled(PanePlacementTabSnapshot {
             tab_id: source_tab_id,
             tab_name: "source".to_string(),
             layout_tree: LayoutNode::Pane(source_pane_id),
@@ -111,7 +104,10 @@ pub(crate) fn build_test_placement_snapshot(
             is_every_pane_suppressed: false,
             gap_cell_count: 0,
             pane_snapshots: vec![build_placement_pane_snapshot(source_pane_id)],
-        },
+        }),
+        destination_tab_id,
+        session_placement_revision,
+        client_placement_revision,
         destination_tab_snapshot: Some(PanePlacementTabSnapshot {
             tab_id: destination_tab_id,
             tab_name: "destination".to_string(),
@@ -141,6 +137,47 @@ pub(crate) fn build_test_placement_snapshot(
     }
 }
 
+/// The source tab snapshot of `placement_snapshot`, for in-place edits.
+/// Panics when the source pane floats.
+pub(crate) fn get_source_tab_snapshot_mut(
+    placement_snapshot: &mut PanePlacementSnapshot,
+) -> &mut PanePlacementTabSnapshot {
+    let PanePlacementSource::Tiled(source_tab_snapshot) = &mut placement_snapshot.source else {
+        panic!("the test placement preview's source pane is tiled");
+    };
+    source_tab_snapshot
+}
+
+/// Float the source pane of `placement_snapshot`, with no content: its source
+/// tab becomes the destination tab. Panics when the source pane already
+/// floats.
+pub(crate) fn float_placement_source_pane(placement_snapshot: &mut PanePlacementSnapshot) {
+    let floating_source = PanePlacementSource::Floating(PanePlacementPaneSnapshot {
+        pane_id: placement_snapshot.source_pane_id,
+        terminal_window: None,
+        image_placement_snapshots: Vec::new(),
+    });
+    let PanePlacementSource::Tiled(source_tab_snapshot) =
+        std::mem::replace(&mut placement_snapshot.source, floating_source)
+    else {
+        panic!("the test placement preview's source pane is tiled");
+    };
+    placement_snapshot.destination_tab_snapshot = Some(source_tab_snapshot);
+}
+
+/// The source tab of the renderer-owned `placement_snapshot`, for in-place
+/// edits. Panics when the source pane floats.
+pub(crate) fn get_rendered_source_tab_snapshot_mut(
+    placement_snapshot: &mut koshi_renderer::snapshot::PlacementSnapshot,
+) -> &mut koshi_renderer::snapshot::PlacementTabSnapshot {
+    let koshi_renderer::snapshot::PlacementSource::Tiled(source_tab_snapshot) =
+        &mut placement_snapshot.source
+    else {
+        panic!("the test placement preview's source pane is tiled");
+    };
+    source_tab_snapshot
+}
+
 #[test]
 fn a_same_tab_insertion_that_preserves_the_layout_sends_no_command() {
     let mut client = build_test_client();
@@ -157,7 +194,7 @@ fn a_same_tab_insertion_that_preserves_the_layout_sends_no_command() {
         0,
     );
     placement_snapshot.destination_tab_snapshot = None;
-    placement_snapshot.source_tab_snapshot.layout_tree =
+    get_source_tab_snapshot_mut(&mut placement_snapshot).layout_tree =
         LayoutNode::Split(SplitNode::with_equal_weights(
             SplitDirection::Horizontal,
             vec![
@@ -173,7 +210,7 @@ fn a_same_tab_insertion_that_preserves_the_layout_sends_no_command() {
     client.placement_state.placement_snapshot = Some(Arc::new(placement_snapshot));
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id,
+        source_tab_id: Some(source_tab_id),
         destination_tab_id: source_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(placement_target),
@@ -232,7 +269,7 @@ fn an_accepted_preview_sets_the_source_tab_to_the_tab_the_preview_names() {
     client.set_session_id(session_id);
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id: TabId::new(),
+        source_tab_id: Some(TabId::new()),
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
@@ -256,7 +293,7 @@ fn an_accepted_preview_sets_the_source_tab_to_the_tab_the_preview_names() {
             .placement_state
             .placement_mode
             .as_ref()
-            .map(|placement_mode| placement_mode.source_tab_id),
+            .and_then(|placement_mode| placement_mode.source_tab_id),
         Some(current_source_tab_id)
     );
 }
@@ -454,7 +491,7 @@ fn a_missing_placement_target_cancels_the_active_interaction() {
     );
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id,
+        source_tab_id: Some(source_tab_id),
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
@@ -492,7 +529,7 @@ fn a_stale_missing_target_refusal_keeps_the_newer_placement_selection() {
     );
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id,
+        source_tab_id: Some(source_tab_id),
         destination_tab_id: current_destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
@@ -531,7 +568,7 @@ fn clearing_unconfirmed_placement_read_discards_the_selected_target() {
     let destination_tab_id = TabId::new();
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id,
+        source_tab_id: Some(source_tab_id),
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(TiledPlacementTarget::Split {
@@ -570,7 +607,7 @@ fn clearing_placement_read_keeps_a_submitted_target_pending() {
     };
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id,
+        source_tab_id: Some(source_tab_id),
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(placement_target.clone()),
@@ -598,7 +635,7 @@ fn an_unchanged_revision_frame_keeps_a_submitted_placement_target_pending() {
     };
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: PaneId::new(),
-        source_tab_id: TabId::new(),
+        source_tab_id: Some(TabId::new()),
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(placement_target.clone()),
@@ -620,7 +657,7 @@ fn a_committed_placement_frame_clears_the_submitted_placement_target() {
     let destination_tab_id = TabId::new();
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: PaneId::new(),
-        source_tab_id: TabId::new(),
+        source_tab_id: Some(TabId::new()),
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(TiledPlacementTarget::Split {
@@ -742,7 +779,7 @@ fn a_committed_placement_frame_keeps_keyboard_placement_mode_and_requests_one_pr
     let destination_tab_id = TabId::new();
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id,
+        source_tab_id: Some(source_tab_id),
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(TiledPlacementTarget::Swap {
@@ -774,7 +811,7 @@ fn a_changed_revision_frame_refreshes_an_unconfirmed_keyboard_placement() {
     let destination_tab_id = TabId::new();
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id,
+        source_tab_id: Some(source_tab_id),
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(TiledPlacementTarget::Swap {
@@ -802,7 +839,7 @@ fn a_changed_revision_frame_refreshes_an_unconfirmed_mouse_placement() {
     let destination_tab_id = TabId::new();
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id,
+        source_tab_id: Some(source_tab_id),
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(TiledPlacementTarget::Swap {
@@ -836,7 +873,7 @@ fn a_reconciled_keyboard_placement_keeps_pane_placement_mode_when_the_active_tab
     );
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id,
+        source_tab_id: Some(source_tab_id),
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(TiledPlacementTarget::Split {
@@ -880,7 +917,7 @@ fn a_frame_that_focuses_the_source_pane_and_drops_its_former_tab_keeps_pane_plac
     );
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id: former_tab_id,
+        source_tab_id: Some(former_tab_id),
         destination_tab_id: current_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
@@ -901,7 +938,7 @@ fn a_frame_that_focuses_the_source_pane_and_drops_its_former_tab_keeps_pane_plac
             .placement_state
             .placement_mode
             .as_ref()
-            .map(|placement_mode| placement_mode.source_tab_id),
+            .and_then(|placement_mode| placement_mode.source_tab_id),
         Some(current_tab_id)
     );
 }
@@ -920,7 +957,7 @@ fn closing_the_former_tab_after_a_cross_tab_placement_keeps_pane_placement_mode(
     );
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id: former_tab_id,
+        source_tab_id: Some(former_tab_id),
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(TiledPlacementTarget::Split {
@@ -953,7 +990,7 @@ fn closing_the_former_tab_after_a_cross_tab_placement_keeps_pane_placement_mode(
             .placement_state
             .placement_mode
             .as_ref()
-            .map(|placement_mode| placement_mode.source_tab_id),
+            .and_then(|placement_mode| placement_mode.source_tab_id),
         Some(destination_tab_id)
     );
 }
@@ -964,7 +1001,7 @@ fn reconnect_clears_unconfirmed_target_and_reconciles_confirmation() {
     let destination_tab_id = TabId::new();
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: PaneId::new(),
-        source_tab_id: TabId::new(),
+        source_tab_id: Some(TabId::new()),
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(TiledPlacementTarget::Split {
@@ -985,7 +1022,7 @@ fn reconnect_clears_unconfirmed_target_and_reconciles_confirmation() {
     };
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: PaneId::new(),
-        source_tab_id: TabId::new(),
+        source_tab_id: Some(TabId::new()),
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(submitted_placement_target.clone()),
@@ -1031,7 +1068,7 @@ fn build_client_with_submitted_placement(
     let mut client = build_test_client();
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id: TabId::new(),
+        source_tab_id: Some(TabId::new()),
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(TiledPlacementTarget::Swap {
@@ -1099,7 +1136,7 @@ fn a_revision_change_during_a_placement_drag_keeps_the_drag_and_refreshes_the_pr
     let source_tab_id = TabId::new();
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id,
+        source_tab_id: Some(source_tab_id),
         destination_tab_id: source_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(TiledPlacementTarget::Swap {
@@ -1139,7 +1176,7 @@ fn a_tab_hover_asks_for_no_wakeup_while_an_input_event_is_on_its_way() {
     let hover_started_at = Instant::now();
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id,
+        source_tab_id: Some(source_tab_id),
         destination_tab_id: source_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
@@ -1174,7 +1211,7 @@ fn hovering_another_tab_during_a_placement_drag_preserves_the_drag_and_insertion
     let hover_started_at = Instant::now();
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id,
+        source_tab_id: Some(source_tab_id),
         destination_tab_id: source_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
@@ -1209,7 +1246,7 @@ fn placement_drag_stays_moved_when_pointer_returns_to_the_press_position() {
     let drag_start_position = Point { column: 2, row: 3 };
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id,
+        source_tab_id: Some(source_tab_id),
         destination_tab_id: source_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
@@ -1340,7 +1377,7 @@ fn rejected_keyboard_placement_clears_target_and_requests_a_fresh_preview() {
     let command_id = CommandId::new();
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
-        source_tab_id,
+        source_tab_id: Some(source_tab_id),
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(TiledPlacementTarget::Swap {
@@ -1368,7 +1405,7 @@ fn rejected_mouse_placement_returns_to_the_base_mode() {
     client.set_lock_mode(LockMode::Locked);
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: PaneId::new(),
-        source_tab_id: TabId::new(),
+        source_tab_id: Some(TabId::new()),
         destination_tab_id: TabId::new(),
         placement_direction: Direction::Right,
         placement_target: Some(TiledPlacementTarget::Swap {
@@ -1393,7 +1430,7 @@ fn a_stale_placement_rejection_does_not_clear_a_new_confirmation() {
     };
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: PaneId::new(),
-        source_tab_id: TabId::new(),
+        source_tab_id: Some(TabId::new()),
         destination_tab_id: TabId::new(),
         placement_direction: Direction::Right,
         placement_target: Some(submitted_placement_target.clone()),
@@ -2225,6 +2262,7 @@ fn a_keybinding_file_removes_a_default_binding_only_in_the_mode_that_declares_it
     );
     assert_eq!(
         *client
+            .keymap_catalog
             .build_frame_hints(client.get_lock_mode(), false, false)
             .removed_key_sequences,
         BTreeSet::from([ctrl_q_sequence.clone()])
@@ -2238,50 +2276,6 @@ fn a_keybinding_file_removes_a_default_binding_only_in_the_mode_that_declares_it
             .exact_bound_action,
         Some(quit_action)
     );
-}
-
-/// How many hint bindings in `keymap_hints` carry `action_display_name`.
-fn count_hint_bindings_with_action_display_name(
-    keymap_hints: &KeymapHints,
-    action_display_name: &str,
-) -> usize {
-    keymap_hints
-        .hint_bindings
-        .iter()
-        .filter(|hint_binding| hint_binding.action_display_name == action_display_name)
-        .count()
-}
-
-#[test]
-fn frame_hints_label_the_move_choosers_enter_by_the_focused_panes_kind() {
-    let client = build_test_client();
-    // Each case: whether the focused pane is floating, then how many entries
-    // read `Move Tiled Pane` and `Move Floating Pane`.
-    for (is_focused_pane_floating, tiled_hint_count, floating_hint_count) in
-        [(false, 2, 1), (true, 1, 2)]
-    {
-        let move_choice_hints =
-            client.build_frame_hints(LockMode::PaneMoveChoice, false, is_focused_pane_floating);
-
-        assert_eq!(
-            count_hint_bindings_with_action_display_name(
-                &move_choice_hints,
-                MOVE_FOCUSED_PANE_HINT
-            ),
-            0
-        );
-        assert_eq!(
-            count_hint_bindings_with_action_display_name(&move_choice_hints, MOVE_TILED_PANE_HINT),
-            tiled_hint_count
-        );
-        assert_eq!(
-            count_hint_bindings_with_action_display_name(
-                &move_choice_hints,
-                MOVE_FLOATING_PANE_HINT
-            ),
-            floating_hint_count
-        );
-    }
 }
 
 #[test]
@@ -2308,57 +2302,17 @@ fn the_focused_pane_is_floating_only_when_the_session_lists_it_as_floating() {
 }
 
 #[test]
-fn frame_hints_flip_the_mouse_select_label_only_while_it_is_on() {
-    let client = build_test_client();
-    let mouse_selection_disabled_hints =
-        client.build_frame_hints(client.get_lock_mode(), false, false);
-    let mouse_selection_enabled_hints =
-        client.build_frame_hints(client.get_lock_mode(), true, false);
-
-    assert_eq!(
-        mouse_selection_disabled_hints.hint_bindings.len(),
-        mouse_selection_enabled_hints.hint_bindings.len()
-    );
-    let changed_hint_bindings = mouse_selection_disabled_hints
-        .hint_bindings
-        .iter()
-        .zip(mouse_selection_enabled_hints.hint_bindings.iter())
-        .filter(|(disabled_hint_binding, enabled_hint_binding)| {
-            disabled_hint_binding != enabled_hint_binding
-        })
-        .collect::<Vec<_>>();
-    let [(mouse_select_hint_binding, mouse_unselect_hint_binding)] =
-        changed_hint_bindings.as_slice()
-    else {
-        panic!("exactly one hint changes, got {changed_hint_bindings:?}");
-    };
-    assert_eq!(
-        mouse_select_hint_binding.action_display_name,
-        MOUSE_SELECT_HINT
-    );
-    assert_eq!(
-        **mouse_unselect_hint_binding,
-        HintBinding {
-            action_display_name: MOUSE_UNSELECT_HINT.to_string(),
-            ..(*mouse_select_hint_binding).clone()
-        }
-    );
-    assert_eq!(
-        mouse_selection_disabled_hints.removed_key_sequences,
-        mouse_selection_enabled_hints.removed_key_sequences
-    );
-    assert_eq!(
-        mouse_selection_disabled_hints.is_reverted_to_defaults,
-        mouse_selection_enabled_hints.is_reverted_to_defaults
-    );
-}
-
-#[test]
 fn frame_hints_follow_the_viewers_own_mode() {
     let mut client = build_test_client();
-    let normal_mode_hints = client.build_frame_hints(client.get_lock_mode(), false, false);
+    let normal_mode_hints =
+        client
+            .keymap_catalog
+            .build_frame_hints(client.get_lock_mode(), false, false);
     client.set_lock_mode(LockMode::Locked);
-    let locked_mode_hints = client.build_frame_hints(client.get_lock_mode(), false, false);
+    let locked_mode_hints =
+        client
+            .keymap_catalog
+            .build_frame_hints(client.get_lock_mode(), false, false);
 
     let list_sorted_hint_labels = |keymap_hints: &KeymapHints| {
         let mut hint_labels = keymap_hints
@@ -2381,10 +2335,13 @@ fn frame_hints_follow_the_viewers_own_mode() {
             "Begin Pane Placement",
             "Close Pane Tree",
             "Close Tab",
+            "Dock Or Undock Pane",
+            "Focus Next Floating Pane",
             "Focus Pane Down",
             "Focus Pane Left",
             "Focus Pane Right",
             "Focus Pane Up",
+            "Focus Previous Floating Pane",
             "Lock",
             "Mouse Select",
             "New Pane",
@@ -2402,7 +2359,6 @@ fn frame_hints_follow_the_viewers_own_mode() {
             "Resize Pane Right",
             "Resize Pane Up",
             "Toggle Pane Fullscreen",
-            "Undock Or Dock Pane",
         ]
         .map(|hint_label| (hint_label.to_string(), false))
     );

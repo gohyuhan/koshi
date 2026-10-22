@@ -49,8 +49,10 @@ fn a_minted_token_takes_back_every_part_of_the_saved_view() {
     client.update_focused_pane(other_tab_id, zoomed_pane_id);
     client.zoom_pane(other_tab_id, zoomed_pane_id);
     client.set_scroll_offset(scrolled_pane_id, 7);
-    assert!(client.focus_floating_pane(minimized_floating_pane_id));
-    assert!(client.focus_floating_pane(focused_floating_pane_id));
+    for floating_pane_id in [minimized_floating_pane_id, focused_floating_pane_id] {
+        client.add_floating_pane_view(floating_pane_id, FloatingPanePosition::Default);
+        assert!(client.focus_floating_pane(floating_pane_id));
+    }
     assert!(client.minimize_floating_pane(minimized_floating_pane_id));
     client.pin_floating_pane(focused_floating_pane_id, Point { column: 4, row: 2 });
 
@@ -94,12 +96,8 @@ fn a_minted_token_takes_back_every_part_of_the_saved_view() {
         ])
     );
     assert_eq!(
-        saved_view.floating_pane_focus_order,
-        [minimized_floating_pane_id, focused_floating_pane_id]
-    );
-    assert_eq!(
-        saved_view.focused_floating_pane_id,
-        Some(focused_floating_pane_id)
+        saved_view.shown_floating_pane_ids,
+        [focused_floating_pane_id]
     );
 }
 
@@ -253,11 +251,10 @@ fn forgetting_a_client_leaves_its_minted_token_taking_back_nothing() {
     );
 }
 
-/// The last time this platform's clock holds, to within one second. Every
-/// platform holds a different one, so it is found rather than written down:
-/// the step starts wider than any clock's range and halves on every pass,
-/// taken when the clock accepts it and skipped when it does not, which lands
-/// inside a second after 63 passes.
+/// The last time this platform's clock holds, to within one second. The walk
+/// starts at the epoch with a step of 2^62 seconds and halves the step on
+/// every pass: a pass takes the step when the clock accepts it and skips it
+/// when it does not. After 63 passes the walk is inside one second of the end.
 fn find_clock_end() -> SystemTime {
     let mut current_time = SystemTime::UNIX_EPOCH;
     let mut time_step = Duration::from_secs(1 << 62);
@@ -310,8 +307,7 @@ fn a_client_that_touched_nothing_takes_back_its_tab_and_an_empty_view() {
             zoomed_pane_id_by_tab_id: HashMap::new(),
             scroll_offset_by_pane_id: HashMap::new(),
             floating_pane_view_by_pane_id: HashMap::new(),
-            floating_pane_focus_order: Vec::new(),
-            focused_floating_pane_id: None,
+            shown_floating_pane_ids: Vec::new(),
         })
     );
 }

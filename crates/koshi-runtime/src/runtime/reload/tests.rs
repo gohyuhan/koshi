@@ -15,6 +15,7 @@ use koshi_config::layer::{
 use koshi_config::types::RgbColor;
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, SessionId};
+use koshi_layout::solver::PaneSizing;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 fn build_test_server() -> (Server, ClientId) {
@@ -215,6 +216,38 @@ fn app_config_reload_lands_the_session_owned_sections_on_the_server() {
     // The same file's viewer-owned section went to the viewer config the
     // session folds.
     assert!(!runtime.client_config.scrollback.should_scroll_to_input);
+}
+
+#[test]
+fn a_reload_solves_every_tab_of_a_live_session_with_the_new_pane_sizing() {
+    let (mut runtime, _client_id) = build_test_server();
+    let session_id = get_only_session_id(&runtime);
+
+    let reloaded_events = runtime.reload_app_config(PartialKoshiConfig {
+        pane: Some(PartialPaneConfig {
+            minimum_column_count: Some(7),
+            minimum_row_count: Some(4),
+            gap_cell_count: Some(1),
+        }),
+        ..PartialKoshiConfig::default()
+    });
+
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(
+        session.get_pane_sizing(),
+        PaneSizing {
+            minimum_size: Size {
+                column_count: 7,
+                row_count: 4,
+            },
+            gap_cell_count: 1,
+        }
+    );
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+    assert_eq!(
+        reloaded_events,
+        vec![Event::ConfigReloaded(ConfigReloaded { session_id })]
+    );
 }
 
 #[test]

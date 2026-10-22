@@ -77,6 +77,9 @@ Each terminal reads these for itself.
 | `scroll-lines` | integer — lines per wheel notch | `3` | ≥ 0.1.0 |
 | `wheel` | `"scroll-scrollback"` (scroll koshi's history) \| `"ignore"` | `"scroll-scrollback"` | ≥ 0.1.0 |
 
+A drag on the corner of a tiled pane moves each of the two borders that meet
+there and have a pane beside them.
+
 A program in a pane that asked for the mouse gets one release for each press
 that koshi sent it, and no drag or release without a press. If one of these
 comes before your release, koshi sends the release itself, at the cell your
@@ -114,16 +117,22 @@ On a floating pane's titlebar row:
   pane, and `✕` closes it.
 
 Drag a floating pane's border to resize it, up to the edge of your pane area
-on that side. A pane you pinned resizes from its right and bottom borders
-only. A pinned pane that does not fit at its pinned cell is drawn left of or
-above that cell, against the pane area edge. A drag on its right or bottom
-border changes its size by the cells you drag. Until the pane fits at its
-pinned cell, that border stays at the edge and the opposite edge moves. A
-press on the titlebar, the grab handle or the border also focuses the pane and
-shows it above your other floating panes; the three buttons do not.
+on that side. A drag on a corner moves the two borders that meet there. A pane
+you pinned resizes from its right and bottom borders only. A pinned pane that
+does not fit at its pinned cell is drawn left of or above that cell, against
+the pane area edge. A drag on its right or bottom border changes its size by
+the cells you drag. Until the pane fits at its pinned cell, that border stays
+at the edge and the opposite edge moves. A press on the titlebar, the grab
+handle or the border also focuses the pane and shows it above your other
+floating panes; the three buttons do not.
 
 Example: a `40x12` floating pane at column `30` of an `80`-column pane area,
 its right border dragged 15 columns right, becomes `50` columns wide.
+
+Example: the bottom-right corner of a `40x12` floating pane, dragged 3 columns
+right and 2 rows down, makes it `43x14`. On a pinned pane, a drag on the
+top-left corner resizes nothing, and a drag on the bottom-left corner moves
+the bottom border only.
 
 Example: a `40`-column pane pinned at column `20` of a `50`-column pane area is
 drawn at column `10`. Its right border dragged 3 columns left makes it `37`
@@ -548,7 +557,8 @@ The session sends the terminal a frame at most once per second divided by this
 value, rounded up to the next nanosecond. A screen that changes faster than
 that reaches the terminal as its newest state at each frame. The frame after
 your own key, paste or mouse event goes at once, without that wait. The
-pane-move animation steps once per the same interval.
+pane placement preview and the pane slides that
+[`reduced-motion`](#reduced-motion) describes step once per the same interval.
 
 Example: with `max-frames-per-second 60`, `cat` of a large log in a pane sends
 the terminal at most 60 frames a second, one at most every 16666667

@@ -102,7 +102,7 @@ use koshi_ipc::wire::MaybeKnown;
 use koshi_observability::logging::recent_events;
 use koshi_observability::repeated_warning::WarningRateLimiter;
 use koshi_renderer::snapshot::{
-    Delivery, ImagePlacementSnapshot, PlacementSnapshot, RenderSnapshot,
+    Delivery, ImagePlacementSnapshot, PlacementSnapshot, PlacementSource, RenderSnapshot,
 };
 use koshi_terminal::graphics::{DecodedAnimation, DecodedImage, ImageRecord};
 
@@ -666,9 +666,8 @@ impl IpcServer {
         drop(self);
     }
 
-    /// The teardown itself, safe to run at most once per field: the join is
-    /// guarded by taking `accept_thread`, and removing an already-removed
-    /// file is a no-op.
+    /// The teardown. A second call joins no thread, since the first took
+    /// `accept_thread`, and removing a file that is already gone does nothing.
     fn stop_ipc_server(&mut self) {
         self.is_shutting_down.store(true, Ordering::SeqCst);
         if let Some(accept_thread_handle) = self.accept_thread.take() {
@@ -2141,15 +2140,24 @@ impl ConnectionImageCache {
         sent_after_update_sequence: u64,
         placement_snapshot: &PlacementSnapshot,
     ) -> PreparedPlacementSnapshot {
-        let image_placements: Vec<&ImagePlacementSnapshot> = [
-            Some(&placement_snapshot.source_tab_snapshot),
-            placement_snapshot.destination_tab_snapshot.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        .flat_map(|tab_snapshot| &tab_snapshot.pane_snapshots)
-        .flat_map(|pane_snapshot| &pane_snapshot.image_placement_snapshots)
-        .collect();
+        let source_pane_snapshots = match &placement_snapshot.source {
+            PlacementSource::Tiled(source_tab_snapshot) => {
+                source_tab_snapshot.pane_snapshots.as_slice()
+            }
+            PlacementSource::Floating(source_pane_snapshot) => {
+                std::slice::from_ref(source_pane_snapshot)
+            }
+        };
+        let image_placements: Vec<&ImagePlacementSnapshot> = source_pane_snapshots
+            .iter()
+            .chain(
+                placement_snapshot
+                    .destination_tab_snapshot
+                    .iter()
+                    .flat_map(|tab_snapshot| &tab_snapshot.pane_snapshots),
+            )
+            .flat_map(|pane_snapshot| &pane_snapshot.image_placement_snapshots)
+            .collect();
         let should_reset_image_cache = self.reset_image_cache_when_due(&image_placements);
         let mut image_budget = ImageBudget::default();
         keep_shown_images(&mut image_budget, &self.frame_shown_images);
@@ -2789,21 +2797,27 @@ fn send_image_uploads(
     Ok(())
 }
 
-/// Run [`hide_image_records`] on every pane of the source tab and of the
-/// destination tab, when there is one, in `placement_snapshot`.
+/// Run [`hide_image_records`] on every pane of the source tab, or on the
+/// floating source pane, and on every pane of the destination tab, when there
+/// is one, in `placement_snapshot`.
 fn hide_placement_image_records(
     placement_snapshot: &mut koshi_ipc::placement::PanePlacementSnapshot,
 ) {
-    for placement_tab_snapshot in [
-        Some(&mut placement_snapshot.source_tab_snapshot),
-        placement_snapshot.destination_tab_snapshot.as_mut(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        for pane_snapshot in &mut placement_tab_snapshot.pane_snapshots {
-            hide_image_records(&mut pane_snapshot.image_placement_snapshots);
+    let source_pane_snapshots = match &mut placement_snapshot.source {
+        koshi_ipc::placement::PanePlacementSource::Tiled(source_tab_snapshot) => {
+            source_tab_snapshot.pane_snapshots.as_mut_slice()
         }
+        koshi_ipc::placement::PanePlacementSource::Floating(source_pane_snapshot) => {
+            std::slice::from_mut(source_pane_snapshot)
+        }
+    };
+    for pane_snapshot in source_pane_snapshots.iter_mut().chain(
+        placement_snapshot
+            .destination_tab_snapshot
+            .iter_mut()
+            .flat_map(|tab_snapshot| tab_snapshot.pane_snapshots.iter_mut()),
+    ) {
+        hide_image_records(&mut pane_snapshot.image_placement_snapshots);
     }
 }
 

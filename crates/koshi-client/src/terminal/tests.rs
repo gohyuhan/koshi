@@ -3560,7 +3560,8 @@ fn proposed_same_tab_swap_replaces_slots_without_mutating_the_snapshot() {
     .expect("the swap target is in the tab");
 
     let proposed_pane_ids = proposed_snapshot
-        .source_tab_snapshot
+        .find_source_tab_snapshot()
+        .expect("the source pane is tiled")
         .tab_snapshot
         .pane_slots
         .iter()
@@ -3569,7 +3570,11 @@ fn proposed_same_tab_swap_replaces_slots_without_mutating_the_snapshot() {
     assert_eq!(proposed_pane_ids, vec![target_pane_id, source_pane_id]);
     assert_eq!(placement_snapshot, original_snapshot);
     assert_eq!(
-        proposed_snapshot.source_tab_snapshot.pane_snapshots[0].pane_id,
+        proposed_snapshot
+            .find_source_tab_snapshot()
+            .expect("the source pane is tiled")
+            .pane_snapshots[0]
+            .pane_id,
         target_pane_id
     );
 }
@@ -3598,7 +3603,8 @@ fn placement_interpolation_returns_both_ends_and_the_exact_midpoint() {
         proposed_snapshot
     );
     let halfway_outer_rects = halfway_snapshot
-        .source_tab_snapshot
+        .find_source_tab_snapshot()
+        .expect("the source pane is tiled")
         .tab_snapshot
         .pane_slots
         .iter()
@@ -3635,8 +3641,11 @@ fn pane_insertion_preview_shows_both_messages_and_terminal_contents() {
     };
     let placement_display_snapshot =
         build_placement_preview_snapshot(&placement_snapshot, Some(&placement_target));
-    render_snapshot.session_snapshot.active_tab_snapshot =
-        placement_snapshot.source_tab_snapshot.tab_snapshot.clone();
+    render_snapshot.session_snapshot.active_tab_snapshot = placement_snapshot
+        .find_source_tab_snapshot()
+        .expect("the source pane is tiled")
+        .tab_snapshot
+        .clone();
     let displayed_render_snapshot =
         build_placement_render_snapshot(&render_snapshot, &placement_display_snapshot)
             .expect("the proposed source tab is the displayed tab");
@@ -3778,8 +3787,11 @@ fn placement_render_snapshot_replaces_the_active_pane_layout() {
         &TiledPlacementTarget::Swap { target_pane_id },
     )
     .expect("the test target is in the source tab");
-    render_snapshot.session_snapshot.active_tab_snapshot =
-        placement_snapshot.source_tab_snapshot.tab_snapshot.clone();
+    render_snapshot.session_snapshot.active_tab_snapshot = placement_snapshot
+        .find_source_tab_snapshot()
+        .expect("the source pane is tiled")
+        .tab_snapshot
+        .clone();
 
     let displayed_render_snapshot =
         build_placement_render_snapshot(&render_snapshot, &proposed_snapshot)
@@ -3791,7 +3803,8 @@ fn placement_render_snapshot_replaces_the_active_pane_layout() {
             .active_tab_snapshot
             .pane_slots,
         proposed_snapshot
-            .source_tab_snapshot
+            .find_source_tab_snapshot()
+            .expect("the source pane is tiled")
             .tab_snapshot
             .pane_slots
     );
@@ -3804,7 +3817,8 @@ fn placement_render_snapshot_replaces_the_active_pane_layout() {
             .terminal_grid_view
             .as_ref(),
         proposed_snapshot
-            .source_tab_snapshot
+            .find_source_tab_snapshot()
+            .expect("the source pane is tiled")
             .pane_snapshots
             .iter()
             .find(|pane_snapshot| pane_snapshot.pane_id == source_pane_id)
@@ -4087,15 +4101,14 @@ fn build_same_tab_placement_snapshot(
     PlacementSnapshot {
         session_id: SessionId::new(),
         source_pane_id,
-        source_tab_id: tab_id,
-        destination_tab_id: tab_id,
-        session_placement_revision: 4,
-        client_placement_revision: 7,
-        source_tab_snapshot: build_test_placement_tab_snapshot(
+        source: PlacementSource::Tiled(build_test_placement_tab_snapshot(
             tab_id,
             "work",
             [source_pane_id, target_pane_id],
-        ),
+        )),
+        destination_tab_id: tab_id,
+        session_placement_revision: 4,
+        client_placement_revision: 7,
         destination_tab_snapshot: None,
         client_snapshot: PlacementClientSnapshot {
             client_snapshot: ClientSnapshot {
@@ -4135,15 +4148,14 @@ fn build_cross_tab_placement_snapshot(
     PlacementSnapshot {
         session_id: render_snapshot.session_snapshot.session_id,
         source_pane_id,
-        source_tab_id,
-        destination_tab_id,
-        session_placement_revision: render_snapshot.session_snapshot.session_revision,
-        client_placement_revision: render_snapshot.client_snapshot.client_revision,
-        source_tab_snapshot: build_test_placement_tab_snapshot(
+        source: PlacementSource::Tiled(build_test_placement_tab_snapshot(
             source_tab_id,
             "source",
             [source_pane_id, PaneId::new()],
-        ),
+        )),
+        destination_tab_id,
+        session_placement_revision: render_snapshot.session_snapshot.session_revision,
+        client_placement_revision: render_snapshot.client_snapshot.client_revision,
         destination_tab_snapshot: Some(build_test_placement_tab_snapshot(
             destination_tab_id,
             "destination",
@@ -4184,20 +4196,7 @@ fn build_test_placement_tab_snapshot(
         CoreRect::from_size_at_origin(tab_size),
         pane_sizing,
     );
-    let content_rect_by_pane_id = koshi_layout::content::list_content_rects(&layout_solve)
-        .into_iter()
-        .collect::<HashMap<_, _>>();
-    let pane_slots = layout_solve
-        .pane_rects
-        .iter()
-        .map(|(pane_id, outer_rect)| PaneSlot {
-            pane_id: *pane_id,
-            outer_rect: *outer_rect,
-            content_rect: content_rect_by_pane_id.get(pane_id).copied().flatten(),
-            is_visible: true,
-            is_suppressed: false,
-        })
-        .collect::<Vec<_>>();
+    let pane_slots = list_pane_slots(&layout_solve);
     let pane_snapshots = pane_ids
         .iter()
         .enumerate()
@@ -4928,4 +4927,79 @@ fn frame_inputs_list_no_rows_when_an_input_other_than_the_render_snapshot_differ
             "{change_name} in the shown frame"
         );
     }
+}
+
+#[test]
+fn a_floating_source_preview_places_the_pane_in_the_destination_tab_with_its_own_content() {
+    let (session_server, client_id, floating_pane_id) = build_test_server_with_pane();
+    let render_snapshot = build_render_snapshot(&session_server, client_id);
+    let destination_tab_id = TabId::new();
+    let [left_pane_id, right_pane_id] = [PaneId::new(), PaneId::new()];
+    let mut placement_snapshot = build_cross_tab_placement_snapshot(
+        &render_snapshot,
+        floating_pane_id,
+        destination_tab_id,
+        [left_pane_id, right_pane_id],
+    );
+    let floating_pane_snapshot = PlacementPaneSnapshot {
+        pane_id: floating_pane_id,
+        terminal_grid_view: None,
+        image_placement_snapshots: Vec::new(),
+    };
+    placement_snapshot.source = PlacementSource::Floating(floating_pane_snapshot.clone());
+    let base_destination_tab_snapshot = placement_snapshot
+        .destination_tab_snapshot
+        .clone()
+        .expect("the preview carries the destination tab");
+    let placement_target = TiledPlacementTarget::Split {
+        destination_tab_id,
+        anchor: PanePlacementAnchor::Pane(right_pane_id),
+        direction: Direction::Right,
+    };
+
+    let preview_snapshot =
+        build_placement_preview_snapshot(&placement_snapshot, Some(&placement_target));
+
+    assert_eq!(preview_snapshot.source, placement_snapshot.source);
+    let proposed_destination_tab_snapshot = preview_snapshot
+        .destination_tab_snapshot
+        .as_ref()
+        .expect("the proposal keeps a destination tab");
+    assert_eq!(
+        proposed_destination_tab_snapshot.layout_tree,
+        place_floating_pane_in_tab(
+            &base_destination_tab_snapshot.layout_tree,
+            floating_pane_id,
+            &PlacementTarget::from_tiled_placement_target(&placement_target),
+            CoreRect::from_size_at_origin(base_destination_tab_snapshot.tab_snapshot.tab_size),
+            PaneSizing::default(),
+        )
+        .expect("the floating pane fits the 48x8 tab")
+    );
+    assert_eq!(
+        proposed_destination_tab_snapshot
+            .tab_snapshot
+            .pane_slots
+            .iter()
+            .map(|pane_slot| pane_slot.pane_id)
+            .collect::<Vec<PaneId>>(),
+        vec![left_pane_id, right_pane_id, floating_pane_id]
+    );
+    let mut expected_pane_snapshots = base_destination_tab_snapshot.pane_snapshots.clone();
+    expected_pane_snapshots.push(floating_pane_snapshot);
+    assert_eq!(
+        proposed_destination_tab_snapshot.pane_snapshots,
+        expected_pane_snapshots
+    );
+
+    // A target naming no pane of the destination tab proposes nothing.
+    let unknown_pane_target = TiledPlacementTarget::Split {
+        destination_tab_id,
+        anchor: PanePlacementAnchor::Pane(PaneId::new()),
+        direction: Direction::Right,
+    };
+    assert_eq!(
+        build_placement_preview_snapshot(&placement_snapshot, Some(&unknown_pane_target)),
+        placement_snapshot
+    );
 }

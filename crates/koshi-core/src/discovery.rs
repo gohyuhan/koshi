@@ -35,7 +35,8 @@ pub struct SessionDiscovery {
     pub created_at: SystemTime,
     /// Ids of the clients currently attached.
     pub attached_client_ids: Vec<ClientId>,
-    /// Number of panes across all of the session's tabs.
+    /// Number of panes the session holds: the panes of its tabs and its
+    /// floating panes.
     pub pane_count: usize,
 }
 
@@ -71,8 +72,8 @@ pub enum PaneLifecycle {
 pub struct PaneDiscovery {
     /// Stable pane id.
     pub pane_id: PaneId,
-    /// The tab holding the pane.
-    pub tab_id: TabId,
+    /// The tab whose layout holds the pane; `None` for a floating pane.
+    pub tab_id: Option<TabId>,
     /// The session holding the pane.
     pub session_id: SessionId,
     /// The pane's display title, once the child has set one.
@@ -118,8 +119,8 @@ pub struct ClientDiscovery {
     pub pane_area: Option<PaneArea>,
 }
 
-/// One session described in full: itself, its tabs, every pane across those
-/// tabs, and the clients attached to it.
+/// One session described in full: itself, its tabs, every pane of its tabs,
+/// its floating panes, and the clients attached to it.
 ///
 /// This is what a session answers a discovery request with. The caller keeps
 /// the rows its query asked for and drops the rest, and merges the overviews
@@ -130,7 +131,8 @@ pub struct SessionOverview {
     pub session: SessionDiscovery,
     /// The session's tabs, in tab-bar order.
     pub tabs: Vec<TabDiscovery>,
-    /// Every pane in the session, across all of its tabs.
+    /// Every pane of the session: the panes of its tabs in tab-bar order, then
+    /// its floating panes in the order they became floating.
     pub panes: Vec<PaneDiscovery>,
     /// The clients currently attached to the session.
     pub clients: Vec<ClientDiscovery>,

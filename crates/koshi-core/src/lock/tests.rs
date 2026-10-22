@@ -23,23 +23,15 @@ fn all_lock_modes_list_each_mode_once_with_its_keymap_name() {
             "tab",
             "scroll",
             "pane-move-choice",
-            "floating-pane-move"
+            "floating-pane-move",
+            "dock-undock"
         ]
     );
 }
 
 #[test]
 fn a_lock_mode_survives_a_serde_round_trip() {
-    for mode in [
-        LockMode::Normal,
-        LockMode::Locked,
-        LockMode::Resize,
-        LockMode::PanePlacement,
-        LockMode::TabMode,
-        LockMode::ScrollMode,
-        LockMode::PaneMoveChoice,
-        LockMode::FloatingPaneMove,
-    ] {
+    for mode in LockMode::ALL {
         let serialized_lock_mode = serde_json::to_string(&mode).expect("serialize");
         let deserialized_lock_mode: LockMode =
             serde_json::from_str(&serialized_lock_mode).expect("deserialize");
@@ -72,6 +64,7 @@ fn only_normal_and_locked_pass_unbound_input_to_the_pane() {
         (LockMode::ScrollMode, false),
         (LockMode::PaneMoveChoice, false),
         (LockMode::FloatingPaneMove, false),
+        (LockMode::DockUndock, false),
     ];
     for (mode, expected_should_pass_unbound_input) in mode_expectations {
         assert_eq!(
@@ -89,6 +82,7 @@ fn decoding_the_keymap_name_is_refused() {
     assert_eq!(
         lock_mode_parse_error.to_string(),
         "unknown variant `locked`, expected one of `Normal`, `Locked`, `Resize`, `PanePlacement`, \
-         `TabMode`, `ScrollMode`, `PaneMoveChoice`, `FloatingPaneMove` at line 1 column 8"
+         `TabMode`, `ScrollMode`, `PaneMoveChoice`, `FloatingPaneMove`, `DockUndock` at line 1 \
+         column 8"
     );
 }

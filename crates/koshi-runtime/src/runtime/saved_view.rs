@@ -54,15 +54,12 @@ pub struct SavedView {
     /// value the lines scrolled up from the live bottom. A pane with no entry
     /// sat at the live bottom.
     pub scroll_offset_by_pane_id: HashMap<PaneId, usize>,
-    /// The client's view of each floating pane, keyed by pane id: where it drew
-    /// the pane, and whether it pinned or minimized the pane. A pane with no
-    /// entry drew at the default placement, unpinned and not minimized.
+    /// The client's view of each floating pane of its session, keyed by pane
+    /// id: where it drew the pane, and whether it minimized the pane.
     pub floating_pane_view_by_pane_id: HashMap<PaneId, FloatingPaneView>,
-    /// The floating panes the client focused or restored, least recently first.
-    pub floating_pane_focus_order: Vec<PaneId>,
-    /// The floating pane that took the client's input, or `None` when no
-    /// floating pane did.
-    pub focused_floating_pane_id: Option<PaneId>,
+    /// The floating panes the client showed, oldest first. The last one held
+    /// the client's input.
+    pub shown_floating_pane_ids: Vec<PaneId>,
 }
 
 /// One filed view: the sha256 of the token that takes it back, when it stops
@@ -134,8 +131,7 @@ impl SavedViewStore {
                 zoomed_pane_id_by_tab_id: client.list_zoomed_pane_ids().clone(),
                 scroll_offset_by_pane_id: client.list_scroll_offsets().clone(),
                 floating_pane_view_by_pane_id: client.list_floating_pane_views().clone(),
-                floating_pane_focus_order: client.list_floating_pane_focus_order().to_vec(),
-                focused_floating_pane_id: client.get_focused_floating_pane_id(),
+                shown_floating_pane_ids: client.list_shown_floating_pane_ids().to_vec(),
             },
         });
         while self.saved_view_records.len() > MAX_SAVED_VIEW_RECORD_COUNT {

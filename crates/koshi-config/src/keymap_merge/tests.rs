@@ -109,8 +109,8 @@ fn no_layers_yield_an_empty_merged_keymap() {
 #[test]
 fn a_built_in_mode_no_layer_binds_is_absent_from_the_merged_keymap() {
     // A built-in mode never seeds an entry of its own. The shipped defaults
-    // bind `normal`, `locked`, `pane-placement`, `pane-move-choice` and
-    // `floating-pane-move`; `resize` gets no entry.
+    // bind `normal`, `locked`, `pane-placement`, `pane-move-choice`,
+    // `floating-pane-move` and `dock-undock`; `resize` gets no entry.
     let merged_keymap = merge_test_keymaps(&[build_default_keymap_layer()]);
     assert_eq!(
         merged_keymap
@@ -119,6 +119,7 @@ fn a_built_in_mode_no_layer_binds_is_absent_from_the_merged_keymap() {
             .cloned()
             .collect::<Vec<_>>(),
         vec![
+            ModeName::from_text("dock-undock"),
             ModeName::from_text("floating-pane-move"),
             ModeName::from_text("locked"),
             ModeName::from_text("normal"),
@@ -173,15 +174,16 @@ fn a_zero_chord_depth_cap_leaves_every_map_empty() {
 fn defaults_alone_fill_the_defaults_map_and_nothing_else() {
     let merged_keymap = merge_test_keymaps(&[build_default_keymap_layer()]);
 
-    // Every shipped default fires in this build.
-    for mode_name in ["normal", "locked"] {
+    // Every shipped default of every mode fires in this build.
+    for mode_name in KeybindingsConfig::default().mode_bindings_by_name.keys() {
         assert_eq!(
-            merged_keymap.mode_keymap_by_name[&ModeName::from_text(mode_name)],
+            merged_keymap.mode_keymap_by_name[mode_name],
             MergedModeKeymap {
-                default_bindings_by_key_sequence: list_default_bound_actions(mode_name),
+                default_bindings_by_key_sequence: list_default_bound_actions(mode_name.get_name()),
                 ..MergedModeKeymap::default()
             },
-            "{mode_name}"
+            "{}",
+            mode_name.get_name()
         );
     }
 }
@@ -969,6 +971,7 @@ fn unregistered_mode_is_skipped() {
             .cloned()
             .collect::<Vec<_>>(),
         vec![
+            ModeName::from_text("dock-undock"),
             ModeName::from_text("floating-pane-move"),
             ModeName::from_text("locked"),
             ModeName::from_text("normal"),

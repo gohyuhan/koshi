@@ -246,24 +246,28 @@ impl Server {
     /// focuses; the zoom pass runs after it, and leaves each tab zoomed on the
     /// pane `saved_view` names.
     ///
-    /// A focus or zoom entry naming a tab the session no longer holds, or a
-    /// pane that tab's layout no longer holds, is dropped instead of applied:
+    /// A focus or zoom entry naming a tab the session does not hold, or a
+    /// pane that tab's layout does not hold, is dropped instead of applied:
     /// that tab keeps the focus the attach gave it and stays tiled. A scroll
-    /// entry naming a pane the session no longer holds is dropped, and that
+    /// entry naming a pane the session does not hold is dropped, and that
     /// pane sits at the live bottom. A floating view entry naming a pane that
-    /// is no longer floating is dropped, and a floating focus on that pane
-    /// moves as [`Client::minimize_floating_pane`] moves it. A scroll offset
-    /// past the lines its pane still retains is cut down to that count — an
-    /// offset of 500 onto a pane retaining 120 lines restores 120, and onto a
-    /// pane whose scrollback was erased restores 0, which sits at the live
-    /// bottom and holds the view no longer. A restored zoom changes the size
-    /// the tab's panes solve to, so the tab reflows and one
-    /// [`Event::PtyResized`] is returned for each pane whose PTY size changed.
+    /// is not a floating pane of the session is dropped, and the newest
+    /// floating pane still shown takes the floating focus. A floating pane the
+    /// saved view holds no entry for is minimized at the default placement. A
+    /// scroll offset past the lines its pane still retains is cut down to that
+    /// count — an offset of 500 onto a pane retaining 120 lines restores 120,
+    /// and onto a pane whose scrollback was erased restores 0, the live
+    /// bottom. A restored zoom changes the size the tab's panes solve to, so
+    /// the tab reflows and one [`Event::PtyResized`] is returned for each pane
+    /// whose PTY size changed.
     ///
     /// A restore that moves the client's input off the pane the attach put it
     /// on returns one [`Event::PaneFocused`] naming the pane that takes the
     /// input after the restore ([`build_pane_focused_event`]), with
-    /// `tab_id: None` for a floating pane.
+    /// `tab_id: None` for a floating pane. The events of the tab's solve
+    /// ([`Self::reflow_tab_if_viewed`]) and its [`Event::PtyResized`] events
+    /// follow it. A client that cannot draw floating panes minimizes, in that
+    /// solve, every floating pane the restored view shows.
     ///
     /// Returns no event when the session or the client is gone.
     fn restore_saved_view(
@@ -273,16 +277,14 @@ impl Server {
         active_tab_id: TabId,
         saved_view: &SavedView,
     ) -> Vec<Event> {
-        // Clone the shared backend before borrowing the session: the reflow then
-        // needs no `&self` across the mutation.
         let pty_backend = Arc::clone(self.get_pty_backend());
         let mut emitted_events = Vec::new();
         let Some(session) = self.session_by_id.get_mut(&session_id) else {
             return emitted_events;
         };
+        let floating_pane_ids = session.floating_set.list_pane_ids();
         let tab_by_id = &session.tabs;
         let pane_registry = &session.panes;
-        let floating_set = &session.floating_set;
         let Some(client) = session.clients.get_client_mut_by_id(client_id) else {
             return emitted_events;
         };
@@ -320,9 +322,8 @@ impl Server {
         }
         let has_floating_view_changed = client.replace_floating_view(
             &saved_view.floating_pane_view_by_pane_id,
-            &saved_view.floating_pane_focus_order,
-            saved_view.focused_floating_pane_id,
-            |pane_id| floating_set.has_pane(pane_id),
+            &saved_view.shown_floating_pane_ids,
+            &floating_pane_ids,
         );
         let pane_focused_event = build_pane_focused_event(client, previous_focused_pane_id);
         let has_client_view_changed = focused_pane_id_by_tab_id_before
@@ -332,6 +333,7 @@ impl Server {
         if has_client_view_changed {
             advance_client_placement_revisions(session, &[client_id]);
         }
+        emitted_events.extend(pane_focused_event);
 
         self.reflow_tab_if_viewed(
             pty_backend.as_ref(),
@@ -339,7 +341,6 @@ impl Server {
             active_tab_id,
             &mut emitted_events,
         );
-        emitted_events.extend(pane_focused_event);
 
         emitted_events
     }
@@ -402,8 +403,6 @@ impl Server {
         } else {
             ClientOrigin::Local
         };
-        // Clone the shared backend before borrowing the session: the reflow then
-        // needs no `&self` across the mutation.
         let pty_backend = Arc::clone(self.get_pty_backend());
         let mut emitted_events = Vec::new();
 
@@ -875,7 +874,7 @@ impl Server {
 
     /// Set the target client's [`LockMode`], emitting [`Event::InputModeChanged`]
     /// only when it changes. `resolve_lock_mode` maps the client's current mode to the
-    /// next one, so the toggle and the explicit set share one path.
+    /// next one. The toggle and the explicit set both run through here.
     ///
     /// Lock mode targets a client alone — the explicit `client` argument when
     /// set, else the acting client — no pane is resolved, so a client with no
@@ -989,9 +988,8 @@ impl Server {
             .session_by_id
             .get_mut(&session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
-        let is_position_changed = Self::require_client(session, client_id)?
-            .get_floating_pane_view(pane_id)
-            .position
+        let client = Self::require_client(session, client_id)?;
+        let is_position_changed = Self::require_floating_pane_view(client, pane_id)?.position
             != FloatingPanePosition::Moved(command_args.top_left_cell);
         if is_position_changed {
             ensure_client_placement_revision_capacity(session, &[client_id])?;
@@ -1071,18 +1069,15 @@ impl Server {
     /// pane in the acting client's view ([`Self::resolve_pane_minimize_target`]).
     ///
     /// A minimize stops the client drawing the pane
-    /// ([`Client::minimize_floating_pane`]); a focus on it moves to the
-    /// floating pane the client focused or restored most recently among those
-    /// it still shows, else to its active tab's focused pane. A restore draws
-    /// the pane above the client's other floating panes and focuses it
-    /// ([`Client::restore_floating_pane`]). Either change advances the acting
-    /// client's placement revision, then emits one
-    /// [`Event::PaneMinimizedChanged`] when the pane's minimized state changed,
-    /// then one [`Event::PaneFocused`] when the client's input moved. A restore
-    /// of a pane the client never focused emits only the `PaneFocused`. A view
-    /// that already has the asked state changes nothing and emits nothing. The
-    /// session's placement revision and every other client's view stay as
-    /// they are.
+    /// ([`Client::minimize_floating_pane`]); a focus on it moves to the newest
+    /// floating pane the client still shows, else to its active tab's focused
+    /// pane. A restore shows the pane above the client's other floating panes
+    /// and focuses it ([`Client::focus_floating_pane`]). Either change
+    /// advances the acting client's placement revision, then emits one
+    /// [`Event::PaneMinimizedChanged`], then one [`Event::PaneFocused`] when
+    /// the client's input moved. A view that already has the asked state
+    /// changes nothing and emits nothing. The session's placement revision and
+    /// every other client's view stay as they are.
     pub(super) fn handle_set_pane_minimized(
         &mut self,
         command_id: CommandId,
@@ -1104,22 +1099,16 @@ impl Server {
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
         ensure_client_placement_revision_capacity(session, &[client_id])?;
         let client = Self::require_client_mut(session, client_id)?;
-        let is_minimized_before = client.get_floating_pane_view(pane_id).is_minimized;
         let previous_focused_pane_id = client.get_active_focused_pane_id();
         if command_args.is_minimized {
             let _ = client.minimize_floating_pane(pane_id);
         } else {
-            let _ = client.restore_floating_pane(pane_id);
+            let _ = client.focus_floating_pane(pane_id);
         }
         let _ = client.advance_placement_revision();
-        let mut emitted_events = Vec::new();
-        if is_minimized_before != command_args.is_minimized {
-            emitted_events.push(Event::PaneMinimizedChanged(PaneMinimizedChanged {
-                client_id,
-                pane_id,
-                is_minimized: command_args.is_minimized,
-            }));
-        }
+        let mut emitted_events: Vec<Event> =
+            build_pane_minimized_changed_events(client_id, &[pane_id], command_args.is_minimized)
+                .collect();
         emitted_events.extend(build_pane_focused_event(client, previous_focused_pane_id));
         Ok(Self::commit_events(
             &mut self.event_bus,
@@ -1129,17 +1118,25 @@ impl Server {
     }
 
     /// Handle [`Command::SetAllFloatingPanesMinimized`]: minimize every
-    /// floating pane the acting client shows, or restore every floating pane
-    /// it minimized, in that client's floating focus order.
+    /// floating pane the acting client shows, oldest shown first, or restore
+    /// every floating pane it minimized, in the order the panes became
+    /// floating.
     ///
     /// The acting client is the target client the command source names
     /// ([`CommandSource::get_target_client_id`]), else the issuer while it is
     /// attached, else, for a CLI source, the session's sole attached client
     /// ([`Self::resolve_view_client`]). After a minimize, the client's input
-    /// returns to its active tab's focused pane. After a restore, the last
-    /// pane restored is drawn on top and focused: order `[a, b, c]` with `a`
-    /// and `c` minimized and `b` focused restores `a`, then `c`, giving
-    /// `[b, a, c]` with `c` focused.
+    /// returns to its active tab's focused pane
+    /// ([`Client::minimize_shown_floating_panes`]). After a restore, each pane
+    /// is shown and focused in turn ([`Client::focus_floating_pane`]), so the
+    /// last pane restored is drawn on top and focused: floats `a`, `b`, `c`
+    /// that became floating in that order, with `a` and `c` minimized and `b`
+    /// shown, restore `a`, then `c`, giving `[b, a, c]` with `c` focused.
+    ///
+    /// A restore by a client that cannot draw floating panes
+    /// ([`Session::can_client_draw_floating_panes`]) is
+    /// [`RejectReason::InvalidState`] `no floating pane can be drawn on this
+    /// client`, changing nothing.
     ///
     /// A change advances the acting client's placement revision and emits one
     /// [`Event::PaneMinimizedChanged`] per changed pane, in that order, then
@@ -1164,34 +1161,44 @@ impl Server {
             .get_mut(&session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
         let client = Self::require_client(session, client_id)?;
-        let changing_pane_ids: Vec<PaneId> = client
-            .list_floating_pane_focus_order()
-            .iter()
-            .copied()
-            .filter(|&pane_id| {
-                client.get_floating_pane_view(pane_id).is_minimized != command_args.is_minimized
-            })
-            .collect();
+        let changing_pane_ids: Vec<PaneId> = if command_args.is_minimized {
+            client.list_shown_floating_pane_ids().to_vec()
+        } else {
+            session
+                .floating_set
+                .list_members()
+                .iter()
+                .map(|floating_member| floating_member.pane_id)
+                .filter(|&pane_id| !client.is_floating_pane_shown(pane_id))
+                .collect()
+        };
         if changing_pane_ids.is_empty() {
             return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
+        }
+        if !command_args.is_minimized {
+            Self::require_client_drawing_floating_panes(
+                session,
+                client,
+                "no floating pane can be drawn on this client",
+            )?;
         }
         ensure_client_placement_revision_capacity(session, &[client_id])?;
         let client = Self::require_client_mut(session, client_id)?;
         let previous_focused_pane_id = client.get_active_focused_pane_id();
-        let mut emitted_events = Vec::new();
-        for pane_id in changing_pane_ids {
-            if command_args.is_minimized {
-                let _ = client.minimize_floating_pane(pane_id);
-            } else {
-                let _ = client.restore_floating_pane(pane_id);
+        if command_args.is_minimized {
+            let _ = client.minimize_shown_floating_panes();
+        } else {
+            for &pane_id in &changing_pane_ids {
+                let _ = client.focus_floating_pane(pane_id);
             }
-            emitted_events.push(Event::PaneMinimizedChanged(PaneMinimizedChanged {
-                client_id,
-                pane_id,
-                is_minimized: command_args.is_minimized,
-            }));
         }
         let _ = client.advance_placement_revision();
+        let mut emitted_events: Vec<Event> = build_pane_minimized_changed_events(
+            client_id,
+            &changing_pane_ids,
+            command_args.is_minimized,
+        )
+        .collect();
         emitted_events.extend(build_pane_focused_event(client, previous_focused_pane_id));
         Ok(Self::commit_events(
             &mut self.event_bus,

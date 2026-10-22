@@ -143,7 +143,7 @@ fn migrate_format_four_restores_the_session_with_no_floating_panes_and_empty_cli
             serde_json::json!({})
         );
         assert_eq!(
-            client_record["floating_pane_focus_order"],
+            client_record["shown_floating_pane_ids"],
             serde_json::json!([])
         );
         assert_eq!(
@@ -2728,8 +2728,7 @@ fn a_saved_view_store_crosses_the_file_with_its_waiting_hash_and_its_filed_view(
             zoomed_pane_id_by_tab_id: HashMap::new(),
             scroll_offset_by_pane_id: HashMap::new(),
             floating_pane_view_by_pane_id: HashMap::new(),
-            floating_pane_focus_order: Vec::new(),
-            focused_floating_pane_id: None,
+            shown_floating_pane_ids: Vec::new(),
         })
     );
 }

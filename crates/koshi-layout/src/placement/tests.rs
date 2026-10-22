@@ -1,5 +1,6 @@
-//! Tests for pane placement: swaps, insertions, anchor validation,
-//! destination listing and the conversion of a tiled placement target.
+//! Tests for pane placement: swaps, insertions, stacks, anchor validation,
+//! destination listing, the placement of a pane no tree holds, and the
+//! conversion of a tiled placement target.
 //!
 //! The main fixture is the four-pane screen `A | B B` above `A | C D` over
 //! 120 by 40 cells, encoded as `H[A, V[B, H[C, D]]]` with the outer weights
@@ -825,7 +826,7 @@ fn a_pane_swapped_onto_a_collapsed_member_becomes_the_active_member() {
 
 #[test]
 fn a_pane_swapped_into_a_nested_stack_expands_every_stack_above_it() {
-    let [pane_a, pane_b, pane_c, pane_d] = build_sorted_pane_ids();
+    let [pane_a, pane_b, pane_c, _] = build_sorted_pane_ids();
     let inner_stack = build_stack(vec![pane_b, pane_c], 0);
     let outer_stack = LayoutNode::Split(SplitNode {
         direction: SplitDirection::Stacked,
@@ -855,7 +856,6 @@ fn a_pane_swapped_into_a_nested_stack_expands_every_stack_above_it() {
             active_child_index: 1,
         })
     );
-    let _ = pane_d;
 }
 
 // ── cross-tab ───────────────────────────────────────────────────────────
@@ -1165,16 +1165,16 @@ fn destinations_of_d_list_every_visible_slot_group_and_the_tab() {
     assert_eq!(
         destinations,
         PlacementDestinations {
-            swap_slots: vec![
-                SwapSlot {
+            target_pane_slots: vec![
+                TargetPaneSlot {
                     pane_id: pane_a,
                     slot_rect: build_cell_rect(0, 0, 40, 40)
                 },
-                SwapSlot {
+                TargetPaneSlot {
                     pane_id: pane_b,
                     slot_rect: build_cell_rect(40, 0, 80, 20)
                 },
-                SwapSlot {
+                TargetPaneSlot {
                     pane_id: pane_c,
                     slot_rect: build_cell_rect(40, 20, 40, 20)
                 },
@@ -1241,11 +1241,11 @@ fn every_listed_insertion_span_places_without_error() {
             check_tiles_exactly(&placed_tree, FIXTURE_TAB_RECT);
         }
     }
-    for swap_slot in destinations.swap_slots {
+    for target_pane_slot in destinations.target_pane_slots {
         place_pane_within_tab(
             &fixture_tree,
             pane_d,
-            &build_swap_target(swap_slot.pane_id),
+            &build_swap_target(target_pane_slot.pane_id),
             FIXTURE_TAB_RECT,
             PaneSizing::default(),
         )
@@ -1288,7 +1288,7 @@ fn an_insertion_that_restores_the_source_layout_is_a_noop() {
 }
 
 #[test]
-fn a_stack_is_one_group_and_its_members_are_swap_slots_but_not_spans() {
+fn a_stack_is_one_group_and_its_members_are_target_pane_slots_but_not_spans() {
     let [pane_a, pane_b, pane_c, _] = build_sorted_pane_ids();
     let stack_tree = build_horizontal_split(
         vec![
@@ -1314,12 +1314,12 @@ fn a_stack_is_one_group_and_its_members_are_swap_slots_but_not_spans() {
     assert_eq!(
         destinations,
         PlacementDestinations {
-            swap_slots: vec![
-                SwapSlot {
+            target_pane_slots: vec![
+                TargetPaneSlot {
                     pane_id: pane_b,
                     slot_rect: build_cell_rect(40, 0, 40, 19)
                 },
-                SwapSlot {
+                TargetPaneSlot {
                     pane_id: pane_c,
                     slot_rect: build_cell_rect(40, 19, 40, 1)
                 },
@@ -1361,12 +1361,12 @@ fn a_suppressed_pane_is_neither_a_slot_nor_part_of_a_group() {
     assert_eq!(
         destinations,
         PlacementDestinations {
-            swap_slots: vec![
-                SwapSlot {
+            target_pane_slots: vec![
+                TargetPaneSlot {
                     pane_id: pane_b,
                     slot_rect: build_cell_rect(40, 0, 80, 20)
                 },
-                SwapSlot {
+                TargetPaneSlot {
                     pane_id: pane_c,
                     slot_rect: build_cell_rect(40, 20, 80, 20)
                 },
@@ -1443,7 +1443,7 @@ fn a_tree_holding_only_the_source_lists_nothing() {
     assert_eq!(
         list_placement_destinations(&lone_tree, &layout_solve, tab_rect, pane_a),
         PlacementDestinations {
-            swap_slots: Vec::new(),
+            target_pane_slots: Vec::new(),
             insertion_spans: Vec::new(),
         }
     );
@@ -1624,12 +1624,12 @@ fn destinations_of_a_collapsed_member_list_its_own_stack_as_a_group() {
     assert_eq!(
         destinations,
         PlacementDestinations {
-            swap_slots: vec![
-                SwapSlot {
+            target_pane_slots: vec![
+                TargetPaneSlot {
                     pane_id: pane_a,
                     slot_rect: build_cell_rect(0, 0, 40, 20)
                 },
-                SwapSlot {
+                TargetPaneSlot {
                     pane_id: pane_b,
                     slot_rect: build_cell_rect(40, 0, 40, 19)
                 },
@@ -1723,5 +1723,402 @@ fn a_tiled_placement_target_becomes_the_layout_edit_it_names() {
             anchor: PanePlacementAnchor::Pane(anchor_pane_id),
             direction: Direction::Left,
         }
+    );
+    assert_eq!(
+        PlacementTarget::from_tiled_placement_target(&TiledPlacementTarget::Stack {
+            target_pane_id
+        }),
+        PlacementTarget::Stack { target_pane_id }
+    );
+}
+
+// ── stack ───────────────────────────────────────────────────────────────
+
+fn build_stack_target(target_pane_id: PaneId) -> PlacementTarget {
+    PlacementTarget::Stack { target_pane_id }
+}
+
+#[test]
+fn stacking_a_onto_b_in_a_row_gives_a_stack_of_b_then_a_with_a_expanded() {
+    let [pane_a, pane_b, _, _] = build_sorted_pane_ids();
+    let layout_tree = build_horizontal_split(
+        vec![build_pane_leaf(pane_a), build_pane_leaf(pane_b)],
+        &[1, 1],
+    );
+
+    let placed_layout_tree = place_pane_within_tab(
+        &layout_tree,
+        pane_a,
+        &build_stack_target(pane_b),
+        FIXTURE_TAB_RECT,
+        PaneSizing::default(),
+    )
+    .expect("the stack fits");
+
+    assert_eq!(placed_layout_tree, build_stack(vec![pane_b, pane_a], 1));
+}
+
+#[test]
+fn stacking_d_onto_b_turns_b_into_a_stack_and_collapses_the_emptied_split() {
+    let pane_ids = build_sorted_pane_ids();
+    let [pane_a, pane_b, pane_c, pane_d] = pane_ids;
+
+    let placed_layout_tree = place_pane_within_tab(
+        &build_fixture_tree(pane_ids),
+        pane_d,
+        &build_stack_target(pane_b),
+        FIXTURE_TAB_RECT,
+        PaneSizing::default(),
+    )
+    .expect("the stack fits");
+
+    assert_eq!(
+        placed_layout_tree,
+        build_horizontal_split(
+            vec![
+                build_pane_leaf(pane_a),
+                build_vertical_split(
+                    vec![
+                        build_stack(vec![pane_b, pane_d], 1),
+                        build_pane_leaf(pane_c)
+                    ],
+                    &[1, 1],
+                ),
+            ],
+            &[1, 2],
+        )
+    );
+}
+
+#[test]
+fn stacking_onto_a_stack_member_appends_the_source_as_the_expanded_last_member() {
+    let [pane_a, first_stack_pane_id, second_stack_pane_id, _] = build_sorted_pane_ids();
+    let layout_tree = build_horizontal_split(
+        vec![
+            build_pane_leaf(pane_a),
+            build_stack(vec![first_stack_pane_id, second_stack_pane_id], 0),
+        ],
+        &[1, 1],
+    );
+
+    let placed_layout_tree = place_pane_within_tab(
+        &layout_tree,
+        pane_a,
+        &build_stack_target(second_stack_pane_id),
+        FIXTURE_TAB_RECT,
+        PaneSizing::default(),
+    )
+    .expect("the stack fits");
+
+    assert_eq!(
+        placed_layout_tree,
+        build_stack(vec![first_stack_pane_id, second_stack_pane_id, pane_a], 2)
+    );
+}
+
+#[test]
+fn stacking_a_pane_onto_itself_returns_the_tree_unchanged() {
+    let pane_ids = build_sorted_pane_ids();
+    let fixture_tree = build_fixture_tree(pane_ids);
+
+    assert_eq!(
+        place_pane_within_tab(
+            &fixture_tree,
+            pane_ids[3],
+            &build_stack_target(pane_ids[3]),
+            FIXTURE_TAB_RECT,
+            PaneSizing::default(),
+        ),
+        Ok(fixture_tree)
+    );
+}
+
+#[test]
+fn stacking_onto_an_unknown_pane_is_target_not_found_in_both_tab_cases() {
+    let pane_ids = build_sorted_pane_ids();
+    let missing_pane_id = PaneId::new();
+    let fixture_tree = build_fixture_tree(pane_ids);
+
+    assert_eq!(
+        place_pane_within_tab(
+            &fixture_tree,
+            pane_ids[3],
+            &build_stack_target(missing_pane_id),
+            FIXTURE_TAB_RECT,
+            PaneSizing::default(),
+        ),
+        Err(PlacementError::TargetPaneNotFound {
+            pane_id: missing_pane_id
+        })
+    );
+    let pane_x = PaneId::new();
+    assert_eq!(
+        place_pane_across_tabs(
+            &build_pane_leaf(pane_x),
+            pane_x,
+            &fixture_tree,
+            &build_stack_target(missing_pane_id),
+            FIXTURE_TAB_RECT,
+            PaneSizing::default(),
+        ),
+        Err(PlacementError::TargetPaneNotFound {
+            pane_id: missing_pane_id
+        })
+    );
+}
+
+#[test]
+fn a_cross_tab_stack_removes_the_leaf_and_stacks_it_onto_the_target() {
+    let pane_ids = build_sorted_pane_ids();
+    let [pane_a, pane_b, pane_c, pane_d] = pane_ids;
+    let (pane_x, pane_y) = (PaneId::new(), PaneId::new());
+    let other_tree = build_horizontal_split(
+        vec![build_pane_leaf(pane_x), build_pane_leaf(pane_y)],
+        &[1, 1],
+    );
+
+    let placement = place_pane_across_tabs(
+        &other_tree,
+        pane_x,
+        &build_fixture_tree(pane_ids),
+        &build_stack_target(pane_c),
+        FIXTURE_TAB_RECT,
+        PaneSizing::default(),
+    )
+    .expect("the stack fits");
+
+    assert_eq!(
+        placement,
+        CrossTabPlacement {
+            source_tree: Some(build_pane_leaf(pane_y)),
+            destination_tree: build_horizontal_split(
+                vec![
+                    build_pane_leaf(pane_a),
+                    build_vertical_split(
+                        vec![
+                            build_pane_leaf(pane_b),
+                            build_horizontal_split(
+                                vec![
+                                    build_stack(vec![pane_c, pane_x], 1),
+                                    build_pane_leaf(pane_d)
+                                ],
+                                &[1, 1],
+                            ),
+                        ],
+                        &[1, 1],
+                    ),
+                ],
+                &[1, 2],
+            ),
+        }
+    );
+}
+
+// ── a pane no tree holds ────────────────────────────────────────────────
+
+#[test]
+fn a_floating_pane_inserted_right_of_b_joins_the_row_with_exact_shares() {
+    let [pane_a, pane_b, floating_pane_id, _] = build_sorted_pane_ids();
+    let layout_tree = build_horizontal_split(
+        vec![build_pane_leaf(pane_a), build_pane_leaf(pane_b)],
+        &[1, 1],
+    );
+
+    let placed_layout_tree = place_floating_pane_in_tab(
+        &layout_tree,
+        floating_pane_id,
+        &build_insert_target(PanePlacementAnchor::Pane(pane_b), Direction::Right),
+        FIXTURE_TAB_RECT,
+        PaneSizing::default(),
+    )
+    .expect("the insertion fits");
+
+    assert_eq!(
+        placed_layout_tree,
+        build_horizontal_split(
+            vec![
+                build_pane_leaf(pane_a),
+                build_pane_leaf(pane_b),
+                build_pane_leaf(floating_pane_id),
+            ],
+            &[2, 1, 1],
+        )
+    );
+    check_tiles_exactly(&placed_layout_tree, FIXTURE_TAB_RECT);
+}
+
+#[test]
+fn a_floating_pane_stacked_onto_a_member_is_the_expanded_last_member() {
+    let [first_stack_pane_id, second_stack_pane_id, floating_pane_id, _] = build_sorted_pane_ids();
+    let layout_tree = build_stack(vec![first_stack_pane_id, second_stack_pane_id], 0);
+
+    let placed_layout_tree = place_floating_pane_in_tab(
+        &layout_tree,
+        floating_pane_id,
+        &build_stack_target(second_stack_pane_id),
+        FIXTURE_TAB_RECT,
+        PaneSizing::default(),
+    )
+    .expect("the stack fits");
+
+    assert_eq!(
+        placed_layout_tree,
+        build_stack(
+            vec![first_stack_pane_id, second_stack_pane_id, floating_pane_id],
+            2
+        )
+    );
+}
+
+#[test]
+fn a_stack_one_header_row_taller_than_the_tab_is_refused_from_every_source() {
+    let [pane_a, pane_b, pane_x, _] = build_sorted_pane_ids();
+    // Two 4x3 panes fit side by side in 8x3; a stack of two needs a header row
+    // above its 4x3 member: 4x4.
+    let tab_rect = build_cell_rect(0, 0, 8, 3);
+    let expected_refusal = Some(PlacementError::DestinationTooSmall {
+        required_size: RequiredSize {
+            column_count: 4,
+            row_count: 4,
+        },
+        available_size: Size {
+            column_count: 8,
+            row_count: 3,
+        },
+    });
+    let row_tree = build_horizontal_split(
+        vec![build_pane_leaf(pane_a), build_pane_leaf(pane_b)],
+        &[1, 1],
+    );
+
+    assert_eq!(
+        place_pane_within_tab(
+            &row_tree,
+            pane_a,
+            &build_stack_target(pane_b),
+            tab_rect,
+            PaneSizing::default(),
+        )
+        .err(),
+        expected_refusal
+    );
+    assert_eq!(
+        place_pane_across_tabs(
+            &build_pane_leaf(pane_x),
+            pane_x,
+            &build_pane_leaf(pane_b),
+            &build_stack_target(pane_b),
+            tab_rect,
+            PaneSizing::default(),
+        )
+        .err(),
+        expected_refusal
+    );
+    assert_eq!(
+        place_floating_pane_in_tab(
+            &build_pane_leaf(pane_b),
+            pane_x,
+            &build_stack_target(pane_b),
+            tab_rect,
+            PaneSizing::default(),
+        )
+        .err(),
+        expected_refusal
+    );
+}
+
+#[test]
+fn a_floating_pane_refuses_a_swap_a_tree_holding_it_and_an_unknown_stack_target() {
+    let [pane_a, pane_b, floating_pane_id, _] = build_sorted_pane_ids();
+    let missing_pane_id = PaneId::new();
+    let layout_tree = build_horizontal_split(
+        vec![build_pane_leaf(pane_a), build_pane_leaf(pane_b)],
+        &[1, 1],
+    );
+
+    assert_eq!(
+        place_floating_pane_in_tab(
+            &layout_tree,
+            floating_pane_id,
+            &build_swap_target(pane_a),
+            FIXTURE_TAB_RECT,
+            PaneSizing::default(),
+        ),
+        Err(PlacementError::SourcePaneNotFound {
+            pane_id: floating_pane_id
+        })
+    );
+    assert_eq!(
+        place_floating_pane_in_tab(
+            &layout_tree,
+            pane_a,
+            &build_stack_target(pane_b),
+            FIXTURE_TAB_RECT,
+            PaneSizing::default(),
+        ),
+        Err(PlacementError::PaneInBothTrees { pane_id: pane_a })
+    );
+    assert_eq!(
+        place_floating_pane_in_tab(
+            &layout_tree,
+            floating_pane_id,
+            &build_stack_target(missing_pane_id),
+            FIXTURE_TAB_RECT,
+            PaneSizing::default(),
+        ),
+        Err(PlacementError::TargetPaneNotFound {
+            pane_id: missing_pane_id
+        })
+    );
+}
+
+#[test]
+fn a_floating_pane_that_does_not_fit_the_tab_is_refused_with_both_sizes() {
+    let [pane_a, pane_b, floating_pane_id, _] = build_sorted_pane_ids();
+    let layout_tree = build_horizontal_split(
+        vec![build_pane_leaf(pane_a), build_pane_leaf(pane_b)],
+        &[1, 1],
+    );
+
+    assert_eq!(
+        place_floating_pane_in_tab(
+            &layout_tree,
+            floating_pane_id,
+            &build_insert_target(PanePlacementAnchor::Pane(pane_b), Direction::Right),
+            build_cell_rect(0, 0, 7, 3),
+            PaneSizing::default(),
+        ),
+        Err(PlacementError::DestinationTooSmall {
+            required_size: RequiredSize {
+                column_count: 12,
+                row_count: 3
+            },
+            available_size: Size {
+                column_count: 7,
+                row_count: 3
+            },
+        })
+    );
+}
+
+#[test]
+fn a_floating_pane_anchored_on_itself_is_refused_as_anchor_is_source() {
+    let [pane_a, pane_b, floating_pane_id, _] = build_sorted_pane_ids();
+    let layout_tree = build_horizontal_split(
+        vec![build_pane_leaf(pane_a), build_pane_leaf(pane_b)],
+        &[1, 1],
+    );
+
+    assert_eq!(
+        place_floating_pane_in_tab(
+            &layout_tree,
+            floating_pane_id,
+            &build_insert_target(PanePlacementAnchor::Pane(floating_pane_id), Direction::Up),
+            FIXTURE_TAB_RECT,
+            PaneSizing::default(),
+        ),
+        Err(PlacementError::AnchorIsSource {
+            pane_id: floating_pane_id
+        })
     );
 }

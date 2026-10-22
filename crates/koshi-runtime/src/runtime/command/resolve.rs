@@ -237,13 +237,9 @@ impl Server {
         session: Option<&Session>,
     ) -> Result<(), Rejection> {
         match command {
-            Command::FocusPane(command_args) => Self::resolve_focus_target(
-                command_args,
-                command_source,
-                session,
-                self.get_pane_sizing(),
-            )
-            .map(drop),
+            Command::FocusPane(command_args) => {
+                Self::resolve_focus_target(command_args, command_source, session).map(drop)
+            }
             Command::ClosePane(command_args) => self
                 .resolve_pane_target(command_args.pane_id, command_source, session)
                 .map(drop),
@@ -403,7 +399,7 @@ impl Server {
 
     /// Resolve a move target and the client view used to choose its neighbor.
     /// A floating pane is [`RejectReason::InvalidState`] `<pane> is floating
-    /// and has no tiled position`.
+    /// and has no tiled position; use move-pane --x --y`.
     pub(super) fn resolve_move_pane_target(
         &self,
         command_args: &MovePaneArgs,
@@ -418,7 +414,7 @@ impl Server {
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
                 &format!(
-                    "{} is floating and has no tiled position",
+                    "{} is floating and has no tiled position; use move-pane --x --y",
                     pane_target.pane_id
                 ),
             ));
@@ -434,56 +430,69 @@ impl Server {
 
     /// Resolve the source pane, destination tab, and acting client of a checked
     /// placement into a tab's tiled layout, `tiled_placement_target`. A swap's
-    /// destination tab is the tab of its target pane, which may be the source
-    /// tab. The destination target must stay inside the source pane's session,
-    /// and the selected client must be attached there
+    /// and a stack's destination tab is the tab of its target pane, which may
+    /// be the source tab. The destination target must stay inside the source
+    /// pane's session, and the selected client must be attached there
     /// ([`Self::resolve_placement_client`]).
+    ///
+    /// A floating source pane resolves to a dock
+    /// ([`ResolvedTiledPlacement::FloatingSource`]). Each refusal is
+    /// [`RejectReason::InvalidState`] and changes nothing:
+    /// - a swap from or onto a floating pane: `<pane-id> is floating; a swap
+    ///   exchanges tiled slots`;
+    /// - a stack onto a floating pane: `<pane-id> is floating; a stack holds
+    ///   tiled panes`;
+    /// - a target pane in another session, with no help.
     pub(super) fn resolve_tiled_placement_target(
         &self,
         command_args: &PlacePaneArgs,
         tiled_placement_target: &TiledPlacementTarget,
         command_source: &CommandSource,
         session: Option<&Session>,
-    ) -> Result<PlacePaneTarget, Rejection> {
+    ) -> Result<ResolvedTiledPlacement, Rejection> {
         let source_pane_target =
-            self.resolve_pane_target(Some(command_args.source_pane_id), command_source, session)?;
-        let Some(source_tab_id) = source_pane_target.tab_id else {
-            let floating_source_help = match tiled_placement_target {
-                TiledPlacementTarget::Swap { .. } => format!(
-                    "{} is floating; a swap exchanges tiled slots",
-                    command_args.source_pane_id
-                ),
-                TiledPlacementTarget::Split { .. } => format!(
-                    "{} is floating and holds no tiled slot",
-                    command_args.source_pane_id
-                ),
-            };
+            self.resolve_pane_target(command_args.source_pane_id, command_source, session)?;
+        if source_pane_target.tab_id.is_none()
+            && matches!(tiled_placement_target, TiledPlacementTarget::Swap { .. })
+        {
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
-                &floating_source_help,
+                &format!(
+                    "{} is floating; a swap exchanges tiled slots",
+                    source_pane_target.pane_id
+                ),
             ));
-        };
+        }
         let owner_session = self
             .session_by_id
             .get(&source_pane_target.session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
-        let destination_tab_id = match tiled_placement_target {
-            TiledPlacementTarget::Swap { target_pane_id } => {
+        // The tab holding `target_pane_id`, a pane of the source pane's
+        // session. A floating target is refused with `<pane-id> is floating;
+        // <floating_target_help>`.
+        let resolve_target_pane_tab_id =
+            |target_pane_id: PaneId, floating_target_help: &str| -> Result<TabId, Rejection> {
                 let destination_pane_target = self.resolve_pane_target(
-                    Some(*target_pane_id),
+                    Some(target_pane_id),
                     command_source,
                     Some(owner_session),
                 )?;
                 if destination_pane_target.session_id != source_pane_target.session_id {
                     return Err(Rejection::from_reason(RejectReason::InvalidState));
                 }
-                let Some(destination_tab_id) = destination_pane_target.tab_id else {
-                    return Err(Rejection::from_reason_and_help(
+                destination_pane_target.tab_id.ok_or_else(|| {
+                    Rejection::from_reason_and_help(
                         RejectReason::InvalidState,
-                        &format!("{target_pane_id} is floating; a swap exchanges tiled slots"),
-                    ));
-                };
-                destination_tab_id
+                        &format!("{target_pane_id} is floating; {floating_target_help}"),
+                    )
+                })
+            };
+        let destination_tab_id = match tiled_placement_target {
+            TiledPlacementTarget::Swap { target_pane_id } => {
+                resolve_target_pane_tab_id(*target_pane_id, "a swap exchanges tiled slots")?
+            }
+            TiledPlacementTarget::Stack { target_pane_id } => {
+                resolve_target_pane_tab_id(*target_pane_id, "a stack holds tiled panes")?
             }
             TiledPlacementTarget::Split {
                 destination_tab_id,
@@ -500,12 +509,22 @@ impl Server {
             command_args.expected_placement_revision,
             command_source,
         )?;
-        Ok(PlacePaneTarget {
-            session_id: source_pane_target.session_id,
-            source_tab_id,
-            destination_tab_id,
-            client_id,
-        })
+        let resolved_tiled_placement = match source_pane_target.tab_id {
+            Some(source_tab_id) => ResolvedTiledPlacement::TiledSource(PlacePaneTarget {
+                session_id: source_pane_target.session_id,
+                source_pane_id: source_pane_target.pane_id,
+                source_tab_id,
+                destination_tab_id,
+                client_id,
+            }),
+            None => ResolvedTiledPlacement::FloatingSource(DockPaneTarget {
+                session_id: source_pane_target.session_id,
+                source_pane_id: source_pane_target.pane_id,
+                destination_tab_id,
+                client_id,
+            }),
+        };
+        Ok(resolved_tiled_placement)
     }
 
     /// Resolve the source pane, its tab, and the acting client of an undock:
@@ -531,11 +550,11 @@ impl Server {
         session: Option<&Session>,
     ) -> Result<UndockPaneTarget, Rejection> {
         let source_pane_target =
-            self.resolve_pane_target(Some(command_args.source_pane_id), command_source, session)?;
+            self.resolve_pane_target(command_args.source_pane_id, command_source, session)?;
         let Some(source_tab_id) = source_pane_target.tab_id else {
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
-                &format!("{} is already floating", command_args.source_pane_id),
+                &format!("{} is already floating", source_pane_target.pane_id),
             ));
         };
         let owner_session = self
@@ -548,7 +567,7 @@ impl Server {
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
         let is_last_tiled_pane = owner_session.tabs.len() == 1
             && source_tab.get_layout_tree().list_leaf_pane_ids()
-                == vec![command_args.source_pane_id];
+                == vec![source_pane_target.pane_id];
         if is_last_tiled_pane {
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
@@ -568,6 +587,7 @@ impl Server {
         )?;
         Ok(UndockPaneTarget {
             session_id: source_pane_target.session_id,
+            source_pane_id: source_pane_target.pane_id,
             source_tab_id,
             client_id,
         })
@@ -634,13 +654,12 @@ impl Server {
         })
     }
 
-    /// Confirm that `client_id` shows the floating pane `pane_id`: the client
-    /// did not minimize it, and the pane is in the client's floating focus
-    /// order.
+    /// Confirm that `client_id` shows the floating pane `pane_id`: its view of
+    /// the pane is not minimized ([`Client::is_floating_pane_shown`]).
     ///
     /// A client that does not show `pane_id` is [`RejectReason::InvalidState`]:
-    /// `<pane> is minimized` when the client minimized it, else `<pane> is not
-    /// shown on this client`.
+    /// `<pane> is minimized; restore it first` when the client holds a
+    /// minimized view of it, else `<pane> is not shown on this client`.
     pub(super) fn require_floating_pane_shown(
         session: &Session,
         client_id: ClientId,
@@ -650,8 +669,11 @@ impl Server {
         if client.is_floating_pane_shown(pane_id) {
             return Ok(());
         }
-        let refusal_help = if client.get_floating_pane_view(pane_id).is_minimized {
-            format!("{pane_id} is minimized")
+        let is_minimized = client
+            .get_floating_pane_view(pane_id)
+            .is_some_and(|floating_pane_view| floating_pane_view.is_minimized);
+        let refusal_help = if is_minimized {
+            format!("{pane_id} is minimized; restore it first")
         } else {
             format!("{pane_id} is not shown on this client")
         };
@@ -744,7 +766,7 @@ impl Server {
     ///
     /// A pane the acting client minimized, and a pane that client does not
     /// show, both resolve. A pane the acting client pinned is
-    /// [`RejectReason::InvalidState`] `<pane> is pinned`.
+    /// [`RejectReason::InvalidState`] `<pane> is pinned; unpin it to move it`.
     pub(super) fn resolve_move_floating_pane_target(
         &self,
         command_args: &MoveFloatingPaneArgs,
@@ -761,14 +783,16 @@ impl Server {
             .session_by_id
             .get(&floating_pane_view_target.session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+        let client = Self::require_client(pane_session, floating_pane_view_target.client_id)?;
         let client_position =
-            Self::require_client(pane_session, floating_pane_view_target.client_id)?
-                .get_floating_pane_view(floating_pane_view_target.pane_id)
-                .position;
+            Self::require_floating_pane_view(client, floating_pane_view_target.pane_id)?.position;
         if let FloatingPanePosition::Pinned(_) = client_position {
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
-                &format!("{} is pinned", floating_pane_view_target.pane_id),
+                &format!(
+                    "{} is pinned; unpin it to move it",
+                    floating_pane_view_target.pane_id
+                ),
             ));
         }
         Ok(floating_pane_view_target)
@@ -809,7 +833,7 @@ impl Server {
             .get(&floating_pane_view_target.session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
         let client = Self::require_client(pane_session, floating_pane_view_target.client_id)?;
-        let client_position = client.get_floating_pane_view(pane_id).position;
+        let client_position = Self::require_floating_pane_view(client, pane_id)?.position;
         let pane_pin_change = match (command_args.is_pinned, client_position) {
             (true, FloatingPanePosition::Pinned(_))
             | (false, FloatingPanePosition::Default | FloatingPanePosition::Moved(_)) => {
@@ -842,7 +866,9 @@ impl Server {
     /// the acting client does not show ([`Client::is_floating_pane_shown`]),
     /// or a restore of a pane it shows. A tiled pane is
     /// [`RejectReason::InvalidState`] `<pane> is tiled; only a floating pane
-    /// minimizes`.
+    /// minimizes`. A restore by a client that cannot draw floating panes
+    /// ([`Session::can_client_draw_floating_panes`]) is
+    /// [`RejectReason::InvalidState`] `<pane> cannot be drawn on this client`.
     pub(super) fn resolve_pane_minimize_target(
         &self,
         command_args: &SetPaneMinimizedArgs,
@@ -859,9 +885,9 @@ impl Server {
             .session_by_id
             .get(&floating_pane_view_target.session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+        let client = Self::require_client(pane_session, floating_pane_view_target.client_id)?;
         let is_floating_pane_shown =
-            Self::require_client(pane_session, floating_pane_view_target.client_id)?
-                .is_floating_pane_shown(floating_pane_view_target.pane_id);
+            client.is_floating_pane_shown(floating_pane_view_target.pane_id);
         let is_view_in_asked_state = if command_args.is_minimized {
             !is_floating_pane_shown
         } else {
@@ -869,6 +895,16 @@ impl Server {
         };
         if is_view_in_asked_state {
             return Ok(None);
+        }
+        if !command_args.is_minimized {
+            Self::require_client_drawing_floating_panes(
+                pane_session,
+                client,
+                &format!(
+                    "{} cannot be drawn on this client",
+                    floating_pane_view_target.pane_id
+                ),
+            )?;
         }
         Ok(Some(floating_pane_view_target))
     }
@@ -922,7 +958,8 @@ impl Server {
     /// captured pane, or the acting client's focused pane.
     ///
     /// A source pane that floats is [`RejectReason::InvalidState`]:
-    /// `<pane> is floating and has no split to divide`.
+    /// `<pane> is floating and has no split to divide; use new-pane --floating,
+    /// or dock-pane first`.
     pub(super) fn resolve_new_pane_source(
         &self,
         source_pane_id: Option<PaneId>,
@@ -953,8 +990,8 @@ impl Server {
             // [`Self::resolve_pane_target`], so the pane's own tab is the
             // receiving tab. The issuer becomes the focus client only while
             // still attached to the owning session — an in-session CLI whose
-            // client is gone still splits its pane, it just focuses the new pane
-            // for nobody.
+            // client is gone still splits its pane, and focuses the new pane for
+            // no client.
             (source_pane_id, _) => {
                 let pane_target =
                     self.resolve_pane_target(source_pane_id, command_source, session)?;
@@ -962,7 +999,7 @@ impl Server {
                     return Err(Rejection::from_reason_and_help(
                         RejectReason::InvalidState,
                         &format!(
-                            "{} is floating and has no split to divide",
+                            "{} is floating and has no split to divide; use new-pane --floating, or dock-pane first",
                             pane_target.pane_id
                         ),
                     ));
@@ -1130,15 +1167,16 @@ impl Server {
     ///   viewport): [`RejectReason::InvalidState`] `no attached terminal has a
     ///   pane area to size floating panes in`;
     /// - `Left` or `Up` on a pane the acting client pinned:
-    ///   [`RejectReason::InvalidState`] `<pane> is pinned; its left and top
-    ///   edges do not move`;
+    ///   [`RejectReason::InvalidState`] `<pane> is pinned; unpin it to move
+    ///   its left or top edge`;
     /// - a shrink of an axis at the floating minimum:
     ///   [`RejectReason::MinimumSize`] with no spare cells;
-    /// - a growth of an axis at the shared floating viewport:
-    ///   [`RejectReason::InvalidState`] `<pane> already spans the smallest
-    ///   attached terminal on that axis`;
-    /// - a growth of an axis narrower than the shared floating viewport whose
-    ///   moved edge already reaches the acting client's pane area edge:
+    /// - a growth of an axis at the floating cap, 90% of the shared floating
+    ///   viewport rounding down ([`compute_floating_pane_size_cap`]):
+    ///   [`RejectReason::InvalidState`] `<pane> already spans 90% of the
+    ///   smallest attached pane area on that axis`;
+    /// - a growth of an axis below the floating cap whose moved edge already
+    ///   reaches the acting client's pane area edge:
     ///   [`RejectReason::InvalidState`] `<pane> already reaches the <side>
     ///   edge of the pane area`, `<side>` being `right`, `bottom`, `left` or
     ///   `top`.
@@ -1170,27 +1208,28 @@ impl Server {
         let floating_pane_minimum_size =
             compute_floating_pane_minimum_size(self.get_pane_sizing().minimum_size);
         let client = Self::require_client(session, client_id)?;
-        let client_position = client.get_floating_pane_view(pane_id).position;
+        let client_position = Self::require_floating_pane_view(client, pane_id)?.position;
         let direction = command_args.direction;
         let is_left_or_top_edge = matches!(direction, Direction::Left | Direction::Up);
         if is_left_or_top_edge && matches!(client_position, FloatingPanePosition::Pinned(_)) {
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
-                &format!("{pane_id} is pinned; its left and top edges do not move"),
+                &format!("{pane_id} is pinned; unpin it to move its left or top edge"),
             ));
         }
         let is_width = matches!(direction, Direction::Left | Direction::Right);
-        let (current_cell_count, minimum_cell_count, viewport_cell_count) = if is_width {
+        let floating_pane_size_cap = compute_floating_pane_size_cap(shared_floating_viewport);
+        let (current_cell_count, minimum_cell_count, cap_cell_count) = if is_width {
             (
                 outer_size.column_count,
                 floating_pane_minimum_size.column_count,
-                shared_floating_viewport.column_count,
+                floating_pane_size_cap.column_count,
             )
         } else {
             (
                 outer_size.row_count,
                 floating_pane_minimum_size.row_count,
-                shared_floating_viewport.row_count,
+                floating_pane_size_cap.row_count,
             )
         };
         let client_viewport = client.get_floating_viewport();
@@ -1207,8 +1246,8 @@ impl Server {
                     Direction::Up => drawn_rect.origin.row + drawn_rect.size.row_count,
                 });
         let maximum_cell_count = room_cell_count
-            .map_or(viewport_cell_count, |room_cell_count| {
-                viewport_cell_count.min(room_cell_count)
+            .map_or(cap_cell_count, |room_cell_count| {
+                cap_cell_count.min(room_cell_count)
             })
             .max(current_cell_count);
         let clamped_cell_count =
@@ -1224,7 +1263,7 @@ impl Server {
                     spare_cell_count: Some(0),
                 });
             }
-            if current_cell_count < viewport_cell_count {
+            if current_cell_count < cap_cell_count {
                 let side_name = match direction {
                     Direction::Right => "right",
                     Direction::Down => "bottom",
@@ -1238,7 +1277,9 @@ impl Server {
             }
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
-                &format!("{pane_id} already spans the smallest attached terminal on that axis"),
+                &format!(
+                    "{pane_id} already spans 90% of the smallest attached pane area on that axis"
+                ),
             ));
         }
         let resized_cell_count = u16::try_from(clamped_cell_count)
@@ -1433,40 +1474,44 @@ impl Server {
     /// ([`Self::resolve_acting_client`]).
     ///
     /// - [`FocusTarget::Pane`] naming a floating pane of the acting session
-    ///   is [`FocusPaneTarget::Floating`]; a pane the client minimized is
-    ///   [`RejectReason::InvalidState`] `<pane> is minimized`. Any other pane
-    ///   resolves through [`Self::require_pane_in_active_tab`].
+    ///   is [`FocusPaneTarget::Floating`], minimized for the client or not. A
+    ///   client that cannot draw floating panes
+    ///   ([`Session::can_client_draw_floating_panes`]) is
+    ///   [`RejectReason::InvalidState`] `<pane> cannot be drawn on this
+    ///   client`. Any other pane resolves through
+    ///   [`Self::require_pane_in_active_tab`].
     /// - [`FocusTarget::Direction`] with a floating pane focused is the pane
     ///   the client focused in its active tab, in every direction. With none
-    ///   focused, it resolves geometrically from that pane over the solved
-    ///   layout ([`Self::find_directional_neighbor`]); no pane in that
+    ///   focused, it resolves geometrically from that pane over the client's
+    ///   view of the tab ([`Self::find_directional_neighbor`]); no pane in that
     ///   direction is [`RejectReason::TargetNotFound`]. No focused pane in the
     ///   active tab is [`RejectReason::TargetNotFound`] `no focused pane`.
     /// - [`FocusTarget::NextFloatingPane`] and
-    ///   [`FocusTarget::PreviousFloatingPane`] step through the floating panes
-    ///   the client shows ([`Client::is_floating_pane_shown`]) in creation
-    ///   order from the focused floating pane, wrapping at the ends. With no
-    ///   floating pane focused, next is the first and previous the last. None
-    ///   shown is [`RejectReason::TargetNotFound`] `no floating pane is
-    ///   visible`. With floats `a`, `b`, `c` created in that order and `c`
-    ///   focused, previous gives `b`, then `a`, then `c`.
+    ///   [`FocusTarget::PreviousFloatingPane`] step through every floating pane
+    ///   of the session, in the order the panes became floating, from the
+    ///   focused floating pane, wrapping at the ends. With no floating pane
+    ///   focused, next is the first and previous the last. With floats `a`,
+    ///   `b`, `c` that became floating in that order and `c` focused, previous
+    ///   gives `b`, then `a`, then `c`. No floating
+    ///   pane is [`RejectReason::TargetNotFound`] `the session holds no
+    ///   floating pane`; a client that cannot draw floating panes is
+    ///   [`RejectReason::InvalidState`] `no floating pane can be drawn on this
+    ///   client`.
     pub(super) fn resolve_focus_target(
         command_args: &FocusPaneArgs,
         command_source: &CommandSource,
         session: Option<&Session>,
-        pane_sizing: PaneSizing,
     ) -> Result<FocusPaneTarget, Rejection> {
         let session = Self::require_session(session)?;
         let client_id = Self::resolve_view_client(command_args.client_id, command_source, session)?;
         let client = Self::require_client(session, client_id)?;
         let tiled_pane_id = match command_args.focus_target {
             FocusTarget::Pane(pane_id) if session.floating_set.has_pane(pane_id) => {
-                if client.get_floating_pane_view(pane_id).is_minimized {
-                    return Err(Rejection::from_reason_and_help(
-                        RejectReason::InvalidState,
-                        &format!("{pane_id} is minimized"),
-                    ));
-                }
+                Self::require_client_drawing_floating_panes(
+                    session,
+                    client,
+                    &format!("{pane_id} cannot be drawn on this client"),
+                )?;
                 return Ok(FocusPaneTarget::Floating(FloatingPaneViewTarget {
                     session_id: session.session_id,
                     client_id,
@@ -1485,51 +1530,49 @@ impl Server {
                         client_id,
                         tab_focused_pane_id,
                         direction,
-                        pane_sizing,
                     )?
                 }
             }
             FocusTarget::NextFloatingPane | FocusTarget::PreviousFloatingPane => {
-                let shown_floating_pane_ids: Vec<PaneId> = session
-                    .floating_set
-                    .list_members()
-                    .iter()
-                    .map(|floating_member| floating_member.pane_id)
-                    .filter(|&pane_id| client.is_floating_pane_shown(pane_id))
-                    .collect();
-                let shown_floating_pane_count = shown_floating_pane_ids.len();
-                if shown_floating_pane_count == 0 {
+                let floating_members = session.floating_set.list_members();
+                let floating_pane_count = floating_members.len();
+                if floating_pane_count == 0 {
                     return Err(Rejection::from_reason_and_help(
                         RejectReason::TargetNotFound,
-                        "no floating pane is visible",
+                        "the session holds no floating pane",
                     ));
                 }
+                Self::require_client_drawing_floating_panes(
+                    session,
+                    client,
+                    "no floating pane can be drawn on this client",
+                )?;
                 let focused_floating_pane_index =
                     client
                         .get_focused_floating_pane_id()
                         .and_then(|focused_floating_pane_id| {
-                            shown_floating_pane_ids
-                                .iter()
-                                .position(|&pane_id| pane_id == focused_floating_pane_id)
+                            floating_members.iter().position(|floating_member| {
+                                floating_member.pane_id == focused_floating_pane_id
+                            })
                         });
                 let should_focus_next_floating_pane =
                     command_args.focus_target == FocusTarget::NextFloatingPane;
                 let target_floating_pane_index =
                     match (focused_floating_pane_index, should_focus_next_floating_pane) {
                         (Some(focused_floating_pane_index), true) => {
-                            (focused_floating_pane_index + 1) % shown_floating_pane_count
+                            (focused_floating_pane_index + 1) % floating_pane_count
                         }
                         (Some(focused_floating_pane_index), false) => {
-                            (focused_floating_pane_index + shown_floating_pane_count - 1)
-                                % shown_floating_pane_count
+                            (focused_floating_pane_index + floating_pane_count - 1)
+                                % floating_pane_count
                         }
                         (None, true) => 0,
-                        (None, false) => shown_floating_pane_count - 1,
+                        (None, false) => floating_pane_count - 1,
                     };
                 return Ok(FocusPaneTarget::Floating(FloatingPaneViewTarget {
                     session_id: session.session_id,
                     client_id,
-                    pane_id: shown_floating_pane_ids[target_floating_pane_index],
+                    pane_id: floating_members[target_floating_pane_index].pane_id,
                 }));
             }
         };
@@ -1542,50 +1585,68 @@ impl Server {
         }))
     }
 
+    /// Confirm that `client` can draw floating panes
+    /// ([`Session::can_client_draw_floating_panes`]). A client that cannot is
+    /// [`RejectReason::InvalidState`] with `refusal_help`.
+    pub(super) fn require_client_drawing_floating_panes(
+        session: &Session,
+        client: &Client,
+        refusal_help: &str,
+    ) -> Result<(), Rejection> {
+        if session.can_client_draw_floating_panes(client) {
+            return Ok(());
+        }
+        Err(Rejection::from_reason_and_help(
+            RejectReason::InvalidState,
+            refusal_help,
+        ))
+    }
+
+    /// `client`'s view of the floating pane `pane_id`. A client that holds no
+    /// view of `pane_id`, a pane that is no floating pane of its session, is
+    /// [`RejectReason::TargetGone`].
+    pub(super) fn require_floating_pane_view(
+        client: &Client,
+        pane_id: PaneId,
+    ) -> Result<FloatingPaneView, Rejection> {
+        client
+            .get_floating_pane_view(pane_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))
+    }
+
     /// The nearest pane in `direction` from `source_pane_id`, over the
-    /// client's active tab solved at its current pane region.
+    /// client's own view of its active tab ([`Session::compute_client_solve`]).
     ///
-    /// The tab is solved in the client's own layout mode; a zoomed client's
-    /// solve holds one pane and yields no neighbor. Suppressed and zero-area
-    /// panes are left out of the candidates; a collapsed stack member is a
-    /// candidate at its header strip. Ranking is
+    /// A zoomed client's view holds one pane and yields no neighbor.
+    /// Suppressed and zero-area panes are left out of the candidates; a
+    /// collapsed stack member is a candidate at its header strip. Ranking is
     /// [`select_directional_neighbor`]: nearest facing edge, then largest
-    /// perpendicular overlap, then screen position, then pane id. No
-    /// qualifying pane is [`RejectReason::TargetNotFound`].
+    /// perpendicular overlap, then screen position, then pane id. A tab no
+    /// viewer contributes a pane area to is [`RejectReason::InvalidState`].
+    /// No qualifying pane is [`RejectReason::TargetNotFound`].
     pub(super) fn find_directional_neighbor(
         session: &Session,
         client_id: ClientId,
         source_pane_id: PaneId,
         direction: Direction,
-        pane_sizing: PaneSizing,
     ) -> Result<PaneId, Rejection> {
         let client = Self::require_client(session, client_id)?;
         let tab_id = client.get_active_tab_id();
-        let tab = session
-            .tabs
-            .get(&tab_id)
+        if session.get_tab_size(tab_id).is_none() {
+            return Err(Rejection::from_reason(RejectReason::InvalidState));
+        }
+        let client_solve = session
+            .compute_client_solve(tab_id, client.get_layout_mode(tab_id))
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
-        let tab_size = session
-            .get_tab_size(tab_id)
-            .ok_or_else(|| Rejection::from_reason(RejectReason::InvalidState))?;
-        let solved_layout = crate::runtime::snapshot::solve_tab_layout(
-            tab,
-            client.get_layout_mode(tab_id),
-            tab_size,
-            pane_sizing,
-        );
-        let source_pane_rect = solved_layout
-            .pane_rects
-            .iter()
-            .find(|(pane_id, _)| *pane_id == source_pane_id)
-            .map(|(_, pane_rect)| *pane_rect)
+        let source_pane_rect = client_solve
+            .find_pane_rect(source_pane_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
-        let candidate_pane_rects: Vec<(PaneId, Rect)> = solved_layout
+        let candidate_pane_rects: Vec<(PaneId, Rect)> = client_solve
             .pane_rects
             .iter()
             .copied()
             .filter(|&(pane_id, _)| {
-                pane_id != source_pane_id && !solved_layout.suppressed_pane_ids.contains(&pane_id)
+                pane_id != source_pane_id && !client_solve.suppressed_pane_ids.contains(&pane_id)
             })
             .collect();
         select_directional_neighbor(source_pane_rect, &candidate_pane_rects, direction).ok_or_else(
@@ -1807,9 +1868,10 @@ impl Server {
             .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))
     }
 
-    /// The floating member `pane_id` of `session`, with its index in creation
-    /// order, which is its cascade index. [`RejectReason::TargetNotFound`]
-    /// when `pane_id` is not a floating member of `session`.
+    /// The floating member `pane_id` of `session`, with its index in the order
+    /// the panes became floating, which is its cascade index.
+    /// [`RejectReason::TargetNotFound`] when `pane_id` is not a floating member
+    /// of `session`.
     pub(super) fn require_floating_member(
         session: &Session,
         pane_id: PaneId,

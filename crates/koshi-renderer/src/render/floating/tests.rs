@@ -6,9 +6,11 @@
 //! and scroll position. A glyph two columns wide that starts in the column
 //! left of a floating pane turns blank, and the frame diff writes the pane's
 //! left border beside it. `U+17D8` there takes 1 column and stays, and in a
-//! title it takes 1 column. No floating pane is placed or drawn while pane
-//! placement shows or every pane is suppressed. The pane a move draft names is
-//! placed at the draft's top-left cell, moved inside the pane area.
+//! title it takes 1 column. While pane placement shows, only the placement
+//! source pane is placed and drawn, and only while the active tab holds no
+//! slot of it. No floating pane is placed or drawn while every pane is
+//! suppressed. The pane a move draft names is placed at the draft's top-left
+//! cell, moved inside the pane area.
 
 use super::*;
 
@@ -309,6 +311,37 @@ fn a_move_draft_places_its_floating_pane_at_the_draft_cell() {
 }
 
 #[test]
+fn a_move_draft_leaves_a_pinned_floating_pane_at_its_frame_cell() {
+    let mut render_snapshot = build_forty_by_twelve_render_snapshot();
+    let pinned_pane_id =
+        push_floating_pane(&mut render_snapshot, build_cell_rect(2, 1, 20, 6), "htop");
+    render_snapshot.session_snapshot.floating_pane_slots[0].is_pinned = true;
+    let viewer_chrome = ViewerChrome {
+        floating_pane_move_draft: Some(FloatingPaneMoveDraft {
+            pane_id: pinned_pane_id,
+            top_left_cell: Point { column: 15, row: 4 },
+        }),
+        ..ViewerChrome::default()
+    };
+
+    let placed_floating_panes = list_core_placed_floating_panes(&render_snapshot, viewer_chrome);
+
+    assert_eq!(
+        placed_floating_panes,
+        [PlacedFloatingPane {
+            floating_pane_slot: FloatingPaneSlot::from_outer_rect(
+                pinned_pane_id,
+                build_cell_rect(2, 1, 20, 6),
+                true,
+            ),
+            outer_area: RatatuiRect::new(2, 2, 20, 6),
+            content_area: RatatuiRect::new(3, 5, 18, 2),
+            visible_content_area: RatatuiRect::new(3, 5, 18, 2),
+        }]
+    );
+}
+
+#[test]
 fn a_move_draft_past_the_pane_area_places_its_floating_pane_moved_inside_the_pane_area() {
     let mut render_snapshot = build_forty_by_twelve_render_snapshot();
     let moved_pane_id =
@@ -354,6 +387,41 @@ fn no_floating_pane_is_placed_while_pane_placement_shows() {
     );
 
     assert_eq!(placed_floating_panes, []);
+}
+
+#[test]
+fn only_the_placement_source_floating_pane_is_placed_while_pane_placement_shows() {
+    let mut render_snapshot = build_forty_by_twelve_render_snapshot();
+    push_floating_pane(&mut render_snapshot, build_cell_rect(6, 2, 26, 6), "htop");
+    let source_pane_id =
+        push_floating_pane(&mut render_snapshot, build_cell_rect(2, 1, 20, 6), "logs");
+    let placement_viewer_chrome = ViewerChrome {
+        is_pane_placement_visible: true,
+        placement_source_pane_id: Some(source_pane_id),
+        ..ViewerChrome::default()
+    };
+
+    let list_placed_pane_ids = |render_snapshot: &RenderSnapshot| -> Vec<PaneId> {
+        list_core_placed_floating_panes(render_snapshot, placement_viewer_chrome)
+            .iter()
+            .map(|placed_floating_pane| placed_floating_pane.floating_pane_slot.pane_id)
+            .collect()
+    };
+    assert_eq!(list_placed_pane_ids(&render_snapshot), vec![source_pane_id]);
+
+    // The preview draws the source pane in the active tab's layout.
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots
+        .push(PaneSlot {
+            pane_id: source_pane_id,
+            outer_rect: build_cell_rect(20, 0, 20, 10),
+            content_rect: Some(build_cell_rect(21, 1, 18, 8)),
+            is_visible: true,
+            is_suppressed: false,
+        });
+    assert_eq!(list_placed_pane_ids(&render_snapshot), Vec::<PaneId>::new());
 }
 
 #[test]

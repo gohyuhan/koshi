@@ -5,9 +5,8 @@
 //! real runtime would: a child-exit fired on the backend is taken back from the
 //! sink the backend delivers to and handed to [`apply_child_exit`]; an output
 //! chunk pushed to a pane is taken back and routed by looking the pane up in
-//! the session. The
-//! backend and the session share one pane id per child, so a signal the backend
-//! drives lands on the pane the session tracks.
+//! the session. The backend and the session share one pane id per child, so a
+//! signal the backend drives lands on the pane the session tracks.
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -16,10 +15,10 @@ use koshi_core::event::{
     Event, LayoutChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved, QuitCause,
     TabClosed, TerminalTooSmallCause, TerminalTooSmallEntered,
 };
-use koshi_core::geometry::{Rect, Size, SplitDirection};
+use koshi_core::geometry::{Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::process::PtySize;
-use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
+use koshi_layout::solver::PaneSizing;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
@@ -31,25 +30,24 @@ use koshi_test_support::event_assert::assert_events;
 use koshi_test_support::fake_pty::{ExitStatus, FakePtyBackend, PaneDeliveryRecorder, PtyBackend};
 use koshi_test_support::fixtures::build_spawn_spec;
 
-/// The viewport every client and layout solve uses.
+/// The viewport every client uses.
 const TEST_VIEWPORT_SIZE: Size = Size {
     column_count: 80,
     row_count: 24,
 };
 
-/// A viewport-sized rect for solving a tab's layout.
-fn build_viewport_rect() -> Rect {
-    Rect::from_size_at_origin(TEST_VIEWPORT_SIZE)
-}
+/// The size every tab is solved at: the pane area of [`TEST_VIEWPORT_SIZE`].
+const TEST_TAB_SIZE: Size = Size {
+    column_count: 80,
+    row_count: 22,
+};
 
-/// A viewport too small to fit any pane, so focus recovery finds no focusable
-/// survivor even when one still exists in the layout.
-fn build_minimum_viewport_rect() -> Rect {
-    Rect::from_size_at_origin(Size {
-        column_count: 1,
-        row_count: 1,
-    })
-}
+/// A viewport whose pane area, `1x1`, fits no pane, so focus recovery finds no
+/// focusable survivor even when one still exists in the layout.
+const TINY_VIEWPORT_SIZE: Size = Size {
+    column_count: 1,
+    row_count: 3,
+};
 
 /// The initial PTY size for a spawned child.
 fn build_spawn_pty_size() -> PtySize {
@@ -78,35 +76,50 @@ fn spawn_test_child(fake_pty_backend: &FakePtyBackend) -> PaneId {
     pane_id
 }
 
+/// A tab at display position 0 holding `layout_tree`, solved at
+/// [`TEST_TAB_SIZE`].
+fn build_tab(tab_id: TabId, layout_tree: LayoutNode) -> Tab {
+    Tab::from_layout_tree(
+        tab_id,
+        "code".to_owned(),
+        0,
+        layout_tree,
+        TEST_TAB_SIZE,
+        PaneSizing::default(),
+    )
+}
+
 /// A single-pane tab at display position 0.
 fn build_single_pane_tab(tab_id: TabId, pane_id: PaneId) -> Tab {
-    Tab::from_root_pane(tab_id, "code".to_owned(), 0, pane_id)
+    build_tab(tab_id, LayoutNode::Pane(pane_id))
 }
 
 /// A single-pane tab at display position `tab_index`.
 fn build_tab_at_index(tab_id: TabId, pane_id: PaneId, tab_index: usize) -> Tab {
-    let mut tab_state = build_single_pane_tab(tab_id, pane_id);
-    tab_state.update_tab_index(tab_index);
-    tab_state
+    let mut tab = build_single_pane_tab(tab_id, pane_id);
+    tab.update_tab_index(tab_index);
+    tab
 }
 
 /// A tab split between `left_pane_id` and `right_pane_id`, at display position 0.
 fn build_two_pane_tab(tab_id: TabId, left_pane_id: PaneId, right_pane_id: PaneId) -> Tab {
-    let mut tab_state = Tab::from_root_pane(tab_id, "code".to_owned(), 0, left_pane_id);
-    tab_state.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
-        SplitDirection::Horizontal,
-        vec![
-            LayoutNode::Pane(left_pane_id),
-            LayoutNode::Pane(right_pane_id),
-        ],
-    )));
-    tab_state
+    build_tab(
+        tab_id,
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutNode::Pane(left_pane_id),
+                LayoutNode::Pane(right_pane_id),
+            ],
+        )),
+    )
 }
 
 /// A client of `session_id` viewing `tab_id` with `pane_id` focused there.
 ///
 /// The client stores `session_id` as its own, which is what
-/// `Session::validate_session_consistency` requires of every client in that session's registry.
+/// `Session::validate_session_consistency` requires of every client in that
+/// session's registry.
 fn build_focused_client(session_id: SessionId, tab_id: TabId, pane_id: PaneId) -> Client {
     let mut client = Client::from_attachment(
         ClientId::new(),
@@ -155,7 +168,6 @@ fn process_child_exit(
     pane_delivery_recorder: &PaneDeliveryRecorder,
     pane_id: PaneId,
     tab_id: TabId,
-    tab_rect: Rect,
 ) -> Vec<Event> {
     match pane_delivery_recorder.take_exit_status(pane_id) {
         Some(exit_status) => {
@@ -171,23 +183,15 @@ fn process_child_exit(
                     signal: Some(signal),
                 },
             };
-            apply_child_exit(
-                session,
-                tab_id,
-                pane_exit,
-                tab_rect,
-                PaneSizing {
-                    minimum_size: MIN_PANE_SIZE,
-                    gap_cell_count: 0,
-                },
-            )
+            apply_child_exit(session, tab_id, pane_exit)
         }
         None => Vec::new(),
     }
 }
 
 /// Take one pending output chunk of pane `pane_id` from
-/// `pane_delivery_recorder` and route it by looking the pane up in the session — the runtime's output path. Returns:
+/// `pane_delivery_recorder` and route it by looking the pane up in the
+/// session, as the runtime's output path does. Returns:
 /// - `None` when no chunk was pending,
 /// - `Some((chunk, true))` when the chunk reached a live pane,
 /// - `Some((chunk, false))` when the chunk arrived but its pane is gone, so it is
@@ -231,7 +235,6 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
         &pane_delivery_recorder,
         exited_pane_id,
         tab_id,
-        build_viewport_rect(),
     )
     .is_empty());
 
@@ -243,7 +246,6 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
         &pane_delivery_recorder,
         exited_pane_id,
         tab_id,
-        build_viewport_rect(),
     );
 
     // The exiting pane is gone; the survivor inherits focus on the client.
@@ -315,7 +317,6 @@ fn a_signal_killed_child_reports_the_signal_and_no_exit_code() {
         &pane_delivery_recorder,
         exited_pane_id,
         tab_id,
-        build_viewport_rect(),
     );
 
     assert!(session
@@ -368,14 +369,12 @@ fn a_second_exit_for_an_already_removed_pane_only_reports_the_exit() {
         &pane_delivery_recorder,
         exited_pane_id,
         tab_id,
-        build_viewport_rect(),
     );
     let second_exit_events = process_child_exit(
         &mut session,
         &pane_delivery_recorder,
         exited_pane_id,
         tab_id,
-        build_viewport_rect(),
     );
 
     // The pane left the registry on the first exit, so the second reports the
@@ -419,7 +418,6 @@ fn child_exit_in_nonfocused_pane_leaves_focus_untouched() {
         &pane_delivery_recorder,
         exited_pane_id,
         tab_id,
-        build_viewport_rect(),
     );
 
     // The exit is still reported, but the focused survivor is untouched and no
@@ -484,7 +482,6 @@ fn child_exit_refocuses_every_client_that_watched_the_pane() {
         &pane_delivery_recorder,
         exited_pane_id,
         tab_id,
-        build_viewport_rect(),
     );
 
     // Every client that was looking at the gone pane is moved to the survivor,
@@ -520,11 +517,14 @@ fn child_exit_with_no_room_to_refocus_lands_on_the_survivor() {
             PaneRecord::from_terminal_pane(survivor_pane_id),
         ],
     );
-    let client = build_focused_client(session.session_id, tab_id, exited_pane_id);
+    // The client's viewport is too small to fit the survivor, and the tab is
+    // solved at its pane area.
+    let mut client = build_focused_client(session.session_id, tab_id, exited_pane_id);
+    client.update_viewport_size(TINY_VIEWPORT_SIZE);
     let client_id = client.get_client_id();
     session.attach_client(client);
+    assert_eq!(session.update_tab_solve(tab_id), vec![]);
 
-    // Drive the exit against a viewport too small to fit the survivor.
     fake_pty_backend
         .trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
         .expect("the exited pane is known to the backend");
@@ -533,7 +533,6 @@ fn child_exit_with_no_room_to_refocus_lands_on_the_survivor() {
         &pane_delivery_recorder,
         exited_pane_id,
         tab_id,
-        build_minimum_viewport_rect(),
     );
 
     // The client focuses the survivor, which has no room at this size.
@@ -551,7 +550,7 @@ fn child_exit_with_no_room_to_refocus_lands_on_the_survivor() {
         Some(&PaneRecord::from_terminal_pane(survivor_pane_id))
     );
     // The overlay names the client's own viewport, its unreported pane area, and
-    // the terminal as the cause: the shortage comes from the tab rect, not from
+    // the terminal as the cause: the shortage comes from the viewport, not from
     // this client's regions or another viewer.
     assert_events(
         &emitted_events,
@@ -577,7 +576,7 @@ fn child_exit_with_no_room_to_refocus_lands_on_the_survivor() {
             }),
             Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
                 client_id,
-                viewport_size: TEST_VIEWPORT_SIZE,
+                viewport_size: TINY_VIEWPORT_SIZE,
                 pane_area: None,
                 cause: TerminalTooSmallCause::Terminal,
             }),
@@ -598,13 +597,8 @@ fn last_pane_exit_closes_the_tab_and_quits() {
     fake_pty_backend
         .trigger_child_exit(only_pane_id, ExitStatus::ExitCode(0))
         .expect("the pane is known to the backend");
-    let emitted_events = process_child_exit(
-        &mut session,
-        &pane_delivery_recorder,
-        only_pane_id,
-        tab_id,
-        build_viewport_rect(),
-    );
+    let emitted_events =
+        process_child_exit(&mut session, &pane_delivery_recorder, only_pane_id, tab_id);
 
     // The empty tab closes and, as the last tab, the session winds down.
     assert!(session.tabs.is_empty());
@@ -667,7 +661,6 @@ fn last_pane_exit_in_one_of_several_tabs_does_not_quit() {
         &pane_delivery_recorder,
         closing_pane_id,
         closing_tab_id,
-        build_viewport_rect(),
     );
 
     // The emptied tab closes; the sibling tab keeps the session alive and the
@@ -725,7 +718,6 @@ fn a_failing_last_pane_is_removed_and_the_session_quits() {
         &pane_delivery_recorder,
         failed_pane_id,
         tab_id,
-        build_viewport_rect(),
     );
 
     // A non-zero exit tears down exactly like a clean one: the pane goes, its
@@ -779,17 +771,7 @@ fn closing_the_focused_pane_removes_it_and_refocuses_a_survivor() {
 
     // An explicit close, not a child exit: the user asks for the focused pane
     // to go while its child is still running.
-    let emitted_events = remove_pane_cascade(
-        &mut session,
-        tab_id,
-        closed_pane_id,
-        build_viewport_rect(),
-        PaneSizing {
-            minimum_size: MIN_PANE_SIZE,
-            gap_cell_count: 0,
-        },
-        None,
-    );
+    let emitted_events = remove_pane_cascade(&mut session, tab_id, closed_pane_id, None);
 
     // The closed pane is gone, the layout collapsed onto the survivor, and the
     // client that was watching it follows.
@@ -854,12 +836,9 @@ fn closing_a_tab_removes_every_pane_without_killing_via_pty() {
     let second_tab_pane_id = spawn_test_child(&fake_pty_backend);
     let other_tab_pane_id = spawn_test_child(&fake_pty_backend);
     let (multi_tab_id, other_tab_id) = (TabId::new(), TabId::new());
-    let mut multi_tab_state =
-        build_two_pane_tab(multi_tab_id, first_tab_pane_id, second_tab_pane_id);
-    multi_tab_state.update_tab_index(0);
     let mut session = build_session_with(
         vec![
-            multi_tab_state,
+            build_two_pane_tab(multi_tab_id, first_tab_pane_id, second_tab_pane_id),
             build_tab_at_index(other_tab_id, other_tab_pane_id, 1),
         ],
         vec![
@@ -938,11 +917,11 @@ fn child_exit_drops_the_pane_from_focus_history() {
     let exited_pane_id = spawn_test_child(&fake_pty_backend);
     let survivor_pane_id = spawn_test_child(&fake_pty_backend);
     let tab_id = TabId::new();
-    let mut tab_state = build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id);
-    tab_state.record_focus_mru(survivor_pane_id);
-    tab_state.record_focus_mru(exited_pane_id); // newest first: exited, survivor
+    let mut tab = build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id);
+    tab.record_focus_mru(survivor_pane_id);
+    tab.record_focus_mru(exited_pane_id); // newest first: exited, survivor
     let mut session = build_session_with(
-        vec![tab_state],
+        vec![tab],
         vec![
             PaneRecord::from_terminal_pane(exited_pane_id),
             PaneRecord::from_terminal_pane(survivor_pane_id),
@@ -957,7 +936,6 @@ fn child_exit_drops_the_pane_from_focus_history() {
         &pane_delivery_recorder,
         exited_pane_id,
         tab_id,
-        build_viewport_rect(),
     );
 
     // The removed pane leaves the tab's focus history; the survivor stays, at the
@@ -1025,7 +1003,6 @@ fn output_for_a_removed_pane_is_dropped() {
         &pane_delivery_recorder,
         removed_pane_id,
         tab_id,
-        build_viewport_rect(),
     );
     assert!(session
         .panes
@@ -1115,7 +1092,6 @@ fn the_session_still_validates_after_a_child_exit_refocuses_a_client() {
         &pane_delivery_recorder,
         exited_pane_id,
         tab_id,
-        build_viewport_rect(),
     );
 
     // The cascade leaves no dangling reference behind: the removed pane is out

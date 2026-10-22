@@ -3,7 +3,8 @@
 //! filter (a refused action, a locked-mode sequence holding the unlock chord,
 //! and a mode the build does not register each yield no hint), the
 //! chord-depth cap at 0 and 1, the pinned locked-mode unlock, prefix labels
-//! under either leader shape, sequence matching, empty modes, and the
+//! under either leader shape, sequence matching, empty modes, the label each
+//! frame shows for the move chooser's Enter and for mouse-select, and the
 //! per-frame `Arc` sharing.
 
 use koshi_core::key::{BindingModifierFlags, Key, NamedKey};
@@ -55,10 +56,10 @@ fn build_hint_catalog_with_config(keybindings_config: &KeybindingsConfig) -> Key
 
 #[test]
 fn normal_mode_joins_defaults_to_display_names() {
-    let hints = build_default_hint_catalog().build_hints_for_mode(LockMode::Normal);
+    let hints = build_default_hint_catalog().build_frame_hints(LockMode::Normal, false, false);
 
-    // All 25 shipped normal-mode bindings fire in this build.
-    assert_eq!(hints.hint_bindings.len(), 25);
+    // All 27 shipped normal-mode bindings fire in this build.
+    assert_eq!(hints.hint_bindings.len(), 27);
 
     let new_pane_key_sequence = build_two_chord_sequence(
         build_character_chord(BindingModifierFlags::CTRL, 'p'),
@@ -79,7 +80,7 @@ fn quit_binding_surfaces_in_both_modes() {
     let hint_catalog = build_default_hint_catalog();
     let quit_key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'q');
     for lock_mode in [LockMode::Normal, LockMode::Locked] {
-        let hints = hint_catalog.build_hints_for_mode(lock_mode);
+        let hints = hint_catalog.build_frame_hints(lock_mode, false, false);
         let hint_binding = hints
             .hint_bindings
             .iter()
@@ -91,7 +92,7 @@ fn quit_binding_surfaces_in_both_modes() {
 
 #[test]
 fn locked_mode_pins_the_reserved_unlock() {
-    let hints = build_default_hint_catalog().build_hints_for_mode(LockMode::Locked);
+    let hints = build_default_hint_catalog().build_frame_hints(LockMode::Locked, false, false);
     // The reserved unlock (the same `<C-l>` that locks in normal mode), the
     // pane placement opener, and the quit and mouse-select chords.
     assert_eq!(hints.hint_bindings.len(), 4);
@@ -110,7 +111,7 @@ fn locked_mode_pins_the_reserved_unlock() {
 fn modes_without_defaults_are_empty() {
     let hint_catalog = build_default_hint_catalog();
     for lock_mode in [LockMode::Resize, LockMode::TabMode, LockMode::ScrollMode] {
-        let hints = hint_catalog.build_hints_for_mode(lock_mode);
+        let hints = hint_catalog.build_frame_hints(lock_mode, false, false);
         assert!(
             hints.hint_bindings.is_empty(),
             "{lock_mode:?} ships no bindings"
@@ -121,7 +122,8 @@ fn modes_without_defaults_are_empty() {
 
 #[test]
 fn pane_placement_mode_hints_expose_every_rebindable_placement_action() {
-    let hints = build_default_hint_catalog().build_hints_for_mode(LockMode::PanePlacement);
+    let hints =
+        build_default_hint_catalog().build_frame_hints(LockMode::PanePlacement, false, false);
     let expected_hint_bindings = [
         (
             KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Left)),
@@ -160,6 +162,10 @@ fn pane_placement_mode_hints_expose_every_rebindable_placement_action() {
             "Cycle Pane Placement Span",
         ),
         (
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('s')),
+            "Toggle Pane Placement Stack",
+        ),
+        (
             KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Tab)),
             "Select Next Placement Tab",
         ),
@@ -177,7 +183,7 @@ fn pane_placement_mode_hints_expose_every_rebindable_placement_action() {
         ),
     ];
 
-    assert_eq!(hints.hint_bindings.len(), 13);
+    assert_eq!(hints.hint_bindings.len(), 14);
     for (key_chord, action_display_name) in expected_hint_bindings {
         let key_sequence = KeySequence::from(key_chord);
         let hint_binding = hints
@@ -193,7 +199,7 @@ fn pane_placement_mode_hints_expose_every_rebindable_placement_action() {
 
 #[test]
 fn prefix_labels_carry_the_shipped_names() {
-    let hints = build_default_hint_catalog().build_hints_for_mode(LockMode::Normal);
+    let hints = build_default_hint_catalog().build_frame_hints(LockMode::Normal, false, false);
     assert_eq!(
         *hints.prefix_labels,
         build_expected_prefix_labels(BindingModifierFlags::CTRL)
@@ -295,7 +301,7 @@ fn a_rebound_leader_moves_the_prefix_labels() {
         &keybindings_config,
         &ActionRegistry::new(),
     )
-    .build_hints_for_mode(LockMode::Normal);
+    .build_frame_hints(LockMode::Normal, false, false);
 
     assert_eq!(
         *hints.prefix_labels,
@@ -307,7 +313,7 @@ fn a_rebound_leader_moves_the_prefix_labels() {
 fn default_hint_catalog_is_not_marked_reverted_to_defaults() {
     assert!(
         !build_default_hint_catalog()
-            .build_hints_for_mode(LockMode::Normal)
+            .build_frame_hints(LockMode::Normal, false, false)
             .is_reverted_to_defaults
     );
 }
@@ -317,12 +323,12 @@ fn mark_reverted_to_defaults_marks_every_mode_hint() {
     let hint_catalog = build_default_hint_catalog().mark_reverted_to_defaults();
     assert!(
         hint_catalog
-            .build_hints_for_mode(LockMode::Normal)
+            .build_frame_hints(LockMode::Normal, false, false)
             .is_reverted_to_defaults
     );
     assert!(
         hint_catalog
-            .build_hints_for_mode(LockMode::Locked)
+            .build_frame_hints(LockMode::Locked, false, false)
             .is_reverted_to_defaults
     );
 }
@@ -330,8 +336,8 @@ fn mark_reverted_to_defaults_marks_every_mode_hint() {
 #[test]
 fn frames_share_the_per_mode_data_by_reference() {
     let hint_catalog = build_default_hint_catalog();
-    let first_hints = hint_catalog.build_hints_for_mode(LockMode::Normal);
-    let second_hints = hint_catalog.build_hints_for_mode(LockMode::Normal);
+    let first_hints = hint_catalog.build_frame_hints(LockMode::Normal, false, false);
+    let second_hints = hint_catalog.build_frame_hints(LockMode::Normal, false, false);
     assert!(Arc::ptr_eq(
         &first_hints.hint_bindings,
         &second_hints.hint_bindings
@@ -347,6 +353,137 @@ fn frames_share_the_per_mode_data_by_reference() {
 }
 
 #[test]
+fn frames_share_each_label_form_by_reference() {
+    let hint_catalog = build_default_hint_catalog();
+    let label_forms = [(false, false), (false, true), (true, false), (true, true)];
+    for (is_mouse_selection_enabled, is_focused_pane_floating) in label_forms {
+        let first_hints = hint_catalog.build_frame_hints(
+            LockMode::Normal,
+            is_mouse_selection_enabled,
+            is_focused_pane_floating,
+        );
+        let second_hints = hint_catalog.build_frame_hints(
+            LockMode::Normal,
+            is_mouse_selection_enabled,
+            is_focused_pane_floating,
+        );
+        assert!(Arc::ptr_eq(
+            &first_hints.hint_bindings,
+            &second_hints.hint_bindings
+        ));
+    }
+    // Pane placement mode binds neither `Mouse Select` nor `Move Focused
+    // Pane`. All four label forms are one list.
+    let pane_placement_hints =
+        hint_catalog.build_frame_hints(LockMode::PanePlacement, false, false);
+    for (is_mouse_selection_enabled, is_focused_pane_floating) in label_forms {
+        assert!(Arc::ptr_eq(
+            &pane_placement_hints.hint_bindings,
+            &hint_catalog
+                .build_frame_hints(
+                    LockMode::PanePlacement,
+                    is_mouse_selection_enabled,
+                    is_focused_pane_floating,
+                )
+                .hint_bindings
+        ));
+    }
+}
+
+/// How many hint bindings in `keymap_hints` carry `action_display_name`.
+fn count_hint_bindings_with_action_display_name(
+    keymap_hints: &KeymapHints,
+    action_display_name: &str,
+) -> usize {
+    keymap_hints
+        .hint_bindings
+        .iter()
+        .filter(|hint_binding| hint_binding.action_display_name == action_display_name)
+        .count()
+}
+
+#[test]
+fn frame_hints_label_the_move_choosers_enter_by_the_focused_panes_kind() {
+    let hint_catalog = build_default_hint_catalog();
+    // Each case: whether the focused pane is floating, then how many entries
+    // read `Move Tiled Pane` and `Move Floating Pane`.
+    for (is_focused_pane_floating, tiled_hint_count, floating_hint_count) in
+        [(false, 2, 1), (true, 1, 2)]
+    {
+        let move_choice_hints = hint_catalog.build_frame_hints(
+            LockMode::PaneMoveChoice,
+            false,
+            is_focused_pane_floating,
+        );
+
+        assert_eq!(
+            count_hint_bindings_with_action_display_name(
+                &move_choice_hints,
+                MOVE_FOCUSED_PANE_HINT
+            ),
+            0
+        );
+        assert_eq!(
+            count_hint_bindings_with_action_display_name(&move_choice_hints, MOVE_TILED_PANE_HINT),
+            tiled_hint_count
+        );
+        assert_eq!(
+            count_hint_bindings_with_action_display_name(
+                &move_choice_hints,
+                MOVE_FLOATING_PANE_HINT
+            ),
+            floating_hint_count
+        );
+    }
+}
+
+#[test]
+fn frame_hints_flip_the_mouse_select_label_only_while_it_is_on() {
+    let hint_catalog = build_default_hint_catalog();
+    let mouse_selection_disabled_hints =
+        hint_catalog.build_frame_hints(LockMode::Normal, false, false);
+    let mouse_selection_enabled_hints =
+        hint_catalog.build_frame_hints(LockMode::Normal, true, false);
+
+    assert_eq!(
+        mouse_selection_disabled_hints.hint_bindings.len(),
+        mouse_selection_enabled_hints.hint_bindings.len()
+    );
+    let changed_hint_bindings = mouse_selection_disabled_hints
+        .hint_bindings
+        .iter()
+        .zip(mouse_selection_enabled_hints.hint_bindings.iter())
+        .filter(|(disabled_hint_binding, enabled_hint_binding)| {
+            disabled_hint_binding != enabled_hint_binding
+        })
+        .collect::<Vec<_>>();
+    let [(mouse_select_hint_binding, mouse_unselect_hint_binding)] =
+        changed_hint_bindings.as_slice()
+    else {
+        panic!("exactly one hint changes, got {changed_hint_bindings:?}");
+    };
+    assert_eq!(
+        mouse_select_hint_binding.action_display_name,
+        MOUSE_SELECT_HINT
+    );
+    assert_eq!(
+        **mouse_unselect_hint_binding,
+        HintBinding {
+            action_display_name: MOUSE_UNSELECT_HINT.to_string(),
+            ..(*mouse_select_hint_binding).clone()
+        }
+    );
+    assert_eq!(
+        mouse_selection_disabled_hints.removed_key_sequences,
+        mouse_selection_enabled_hints.removed_key_sequences
+    );
+    assert_eq!(
+        mouse_selection_disabled_hints.is_reverted_to_defaults,
+        mouse_selection_enabled_hints.is_reverted_to_defaults
+    );
+}
+
+#[test]
 fn a_user_binding_takes_the_default_key_and_shows_as_user_set() {
     let fullscreen_key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'f');
     let hint_catalog = build_hint_catalog_with_user(
@@ -354,10 +491,10 @@ fn a_user_binding_takes_the_default_key_and_shows_as_user_set() {
         BTreeMap::from([(fullscreen_key_sequence.clone(), build_bound_action("quit"))]),
         BTreeSet::new(),
     );
-    let hints = hint_catalog.build_hints_for_mode(LockMode::Normal);
+    let hints = hint_catalog.build_frame_hints(LockMode::Normal, false, false);
 
     // The user entry replaces the default on that key rather than adding one.
-    assert_eq!(hints.hint_bindings.len(), 25);
+    assert_eq!(hints.hint_bindings.len(), 27);
     let hint_binding = hints
         .hint_bindings
         .iter()
@@ -382,9 +519,9 @@ fn a_user_removal_drops_the_hint_and_matches_nothing() {
         BTreeMap::new(),
         BTreeSet::from([fullscreen_key_sequence.clone()]),
     );
-    let hints = hint_catalog.build_hints_for_mode(LockMode::Normal);
+    let hints = hint_catalog.build_frame_hints(LockMode::Normal, false, false);
 
-    assert_eq!(hints.hint_bindings.len(), 24);
+    assert_eq!(hints.hint_bindings.len(), 26);
     assert_eq!(
         hints
             .hint_bindings
@@ -403,7 +540,7 @@ fn a_user_removal_drops_the_hint_and_matches_nothing() {
     // The removal belongs to the mode that authored it.
     assert_eq!(
         *hint_catalog
-            .build_hints_for_mode(LockMode::Locked)
+            .build_frame_hints(LockMode::Locked, false, false)
             .removed_key_sequences,
         BTreeSet::new()
     );
@@ -419,9 +556,9 @@ fn a_binding_the_resolver_refuses_yields_no_hint() {
         BTreeMap::from([(key_sequence.clone(), build_bound_action("copy-selection"))]),
         BTreeSet::new(),
     );
-    let hints = hint_catalog.build_hints_for_mode(LockMode::Normal);
+    let hints = hint_catalog.build_frame_hints(LockMode::Normal, false, false);
 
-    assert_eq!(hints.hint_bindings.len(), 25);
+    assert_eq!(hints.hint_bindings.len(), 27);
     assert_eq!(
         hints
             .hint_bindings
@@ -477,7 +614,7 @@ fn every_locked_entry_firing_unlock_is_pinned() {
         )]),
         BTreeSet::new(),
     );
-    let hints = hint_catalog.build_hints_for_mode(LockMode::Locked);
+    let hints = hint_catalog.build_frame_hints(LockMode::Locked, false, false);
 
     assert_eq!(hints.hint_bindings.len(), 5);
     let pinned_key_sequences: Vec<String> = hints
@@ -495,7 +632,7 @@ fn a_chord_depth_cap_of_one_drops_every_multi_chord_default() {
         maximum_chord_depth: 1,
         ..KeybindingsConfig::default()
     });
-    let hints = hint_catalog.build_hints_for_mode(LockMode::Normal);
+    let hints = hint_catalog.build_frame_hints(LockMode::Normal, false, false);
 
     let key_sequence_strings: Vec<String> = hints
         .hint_bindings
@@ -527,7 +664,7 @@ fn a_chord_leader_collapses_the_groups_and_drops_every_prefix_label() {
         leader: Leader::Chord(space_leader_chord),
         ..KeybindingsConfig::default()
     })
-    .build_hints_for_mode(LockMode::Normal);
+    .build_frame_hints(LockMode::Normal, false, false);
 
     assert_eq!(*hints.prefix_labels, BTreeMap::new());
 }
@@ -557,8 +694,8 @@ fn the_chord_timeout_carries_the_configured_milliseconds_at_both_bounds() {
 fn mark_reverted_to_defaults_changes_only_the_flag() {
     let base_hint_catalog = build_default_hint_catalog();
     let reverted_hint_catalog = base_hint_catalog.clone().mark_reverted_to_defaults();
-    let base_hints = base_hint_catalog.build_hints_for_mode(LockMode::Normal);
-    let reverted_hints = reverted_hint_catalog.build_hints_for_mode(LockMode::Normal);
+    let base_hints = base_hint_catalog.build_frame_hints(LockMode::Normal, false, false);
+    let reverted_hints = reverted_hint_catalog.build_frame_hints(LockMode::Normal, false, false);
 
     assert!(!base_hints.is_reverted_to_defaults);
     assert!(reverted_hints.is_reverted_to_defaults);
@@ -599,7 +736,7 @@ fn a_binding_in_a_mode_the_build_does_not_register_yields_no_hint() {
     );
 
     for lock_mode in LockMode::ALL {
-        let hints = hint_catalog.build_hints_for_mode(lock_mode);
+        let hints = hint_catalog.build_frame_hints(lock_mode, false, false);
         assert_eq!(
             hints
                 .hint_bindings
@@ -616,10 +753,10 @@ fn a_binding_in_a_mode_the_build_does_not_register_yields_no_hint() {
     // The shipped defaults are untouched by the skipped mode.
     assert_eq!(
         hint_catalog
-            .build_hints_for_mode(LockMode::Normal)
+            .build_frame_hints(LockMode::Normal, false, false)
             .hint_bindings
             .len(),
-        25
+        27
     );
 }
 
@@ -632,7 +769,9 @@ fn a_chord_depth_cap_of_zero_drops_every_binding_and_keeps_the_escape_chord() {
 
     for lock_mode in LockMode::ALL {
         assert_eq!(
-            *hint_catalog.build_hints_for_mode(lock_mode).hint_bindings,
+            *hint_catalog
+                .build_frame_hints(lock_mode, false, false)
+                .hint_bindings,
             Vec::<HintBinding>::new(),
             "{lock_mode:?}"
         );
@@ -660,9 +799,9 @@ fn a_removal_of_a_key_nothing_binds_is_still_listed_as_removed() {
         BTreeMap::new(),
         BTreeSet::from([unbound_key_sequence.clone()]),
     );
-    let hints = hint_catalog.build_hints_for_mode(LockMode::Normal);
+    let hints = hint_catalog.build_frame_hints(LockMode::Normal, false, false);
 
-    assert_eq!(hints.hint_bindings.len(), 25);
+    assert_eq!(hints.hint_bindings.len(), 27);
     assert_eq!(
         *hints.removed_key_sequences,
         BTreeSet::from([unbound_key_sequence.clone()])
@@ -684,7 +823,7 @@ fn a_locked_sequence_holding_the_unlock_chord_yields_no_hint() {
         BTreeMap::from([(key_sequence.clone(), build_bound_action("quit"))]),
         BTreeSet::new(),
     );
-    let hints = hint_catalog.build_hints_for_mode(LockMode::Locked);
+    let hints = hint_catalog.build_frame_hints(LockMode::Locked, false, false);
 
     assert_eq!(hints.hint_bindings.len(), 4);
     assert_eq!(
@@ -713,7 +852,7 @@ fn a_locked_sequence_holding_the_unlock_chord_yields_no_hint() {
 
 #[test]
 fn entries_are_sorted_by_key_sequence_with_no_key_twice() {
-    let hints = build_default_hint_catalog().build_hints_for_mode(LockMode::Normal);
+    let hints = build_default_hint_catalog().build_frame_hints(LockMode::Normal, false, false);
     let key_sequences: Vec<KeySequence> = hints
         .hint_bindings
         .iter()

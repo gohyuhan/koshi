@@ -1,19 +1,25 @@
 //! Pane placement: move one existing pane to a slot the user sees.
 //!
-//! Two operations, both pure edits over borrowed trees:
+//! Three operations, all pure edits over borrowed trees:
 //!
 //! - a **swap** exchanges two leaves and leaves every split, weight and
 //!   active index where it was;
 //! - an **insertion** takes the source leaf out of its tree and splits a
 //!   chosen span — one pane, one visible group, or the whole tab — beside it,
-//!   then normalizes the result once.
+//!   then normalizes the result once;
+//! - a **stack** takes the source leaf out of its tree and adds it to the
+//!   stack holding a target pane, or forms a stack of the target and the
+//!   source.
+//!
+//! [`place_floating_pane_in_tab`] puts a pane that no tree holds into a tab
+//! by an insertion or a stack.
 //!
 //! A pane that lands inside a stack becomes that stack's expanded member.
 //! Every failure returns a typed [`PlacementError`] and the caller's trees are
 //! unchanged.
 //!
 //! [`list_placement_destinations`] lists, from a solved layout, every slot a
-//! swap may target and every span an insertion may split.
+//! swap or a stack may target and every span an insertion may split.
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,7 +28,7 @@ use koshi_core::geometry::{Direction, Point, Rect, RequiredSize, Size, SplitDire
 use koshi_core::ids::PaneId;
 use thiserror::Error;
 
-use crate::edit::{remove_leaf, PaneRemovalStatus};
+use crate::edit::{add_pane_to_stack, remove_leaf, PaneRemovalStatus};
 use crate::focus::activate_stack_member;
 use crate::neighbor::{compute_bottom_edge, compute_right_edge};
 use crate::normalize::normalize_layout_tree;
@@ -49,12 +55,20 @@ pub enum PlacementTarget {
         /// The side of `anchor` the source lands on.
         direction: Direction,
     },
+    /// Remove the source leaf and add it to the innermost stack holding
+    /// `target_pane_id` as its last and expanded member. A target under no
+    /// stack becomes a stack of the target, then the source.
+    Stack {
+        /// The pane whose stack receives the source.
+        target_pane_id: PaneId,
+    },
 }
 
 impl PlacementTarget {
     /// The layout edit a tiled placement command names: `Swap` stays `Swap`,
-    /// and `Split` becomes `Insert` with the same anchor and direction. The
-    /// destination tab of a `Split` is the caller's to resolve.
+    /// `Split` becomes `Insert` with the same anchor and direction, and
+    /// `Stack` stays `Stack`. The destination tab of a `Split` is the caller's
+    /// to resolve.
     #[must_use]
     pub fn from_tiled_placement_target(tiled_placement_target: &TiledPlacementTarget) -> Self {
         match tiled_placement_target {
@@ -67,6 +81,9 @@ impl PlacementTarget {
                 anchor: anchor.clone(),
                 direction: *direction,
             },
+            TiledPlacementTarget::Stack { target_pane_id } => PlacementTarget::Stack {
+                target_pane_id: *target_pane_id,
+            },
         }
     }
 }
@@ -77,8 +94,8 @@ pub enum PlacementError {
     /// The source pane is not a leaf of the source tree.
     #[error("pane {pane_id} is not in the source layout")]
     SourcePaneNotFound { pane_id: PaneId },
-    /// The swap target, or a pane the anchor names, is not a leaf of the
-    /// destination tree.
+    /// The swap or stack target, or a pane the anchor names, is not a leaf of
+    /// the destination tree.
     #[error("pane {pane_id} is not in the destination layout")]
     TargetPaneNotFound { pane_id: PaneId },
     /// The anchor names only the source pane: `Pane(source)`, or a `Group`
@@ -133,11 +150,13 @@ pub struct CrossTabPlacement {
 /// `layout_tree` is the tab's tree, `tab_rect` the rectangle it solves into
 /// and `pane_sizing` the caller's own [`PaneSizing`].
 ///
-/// A swap with itself returns `layout_tree` unchanged. An insertion when the
-/// source is the only leaf, anchored on the tab, returns the bare leaf.
+/// A swap or a stack with itself returns `layout_tree` unchanged. An
+/// insertion when the source is the only leaf, anchored on the tab, returns
+/// the bare leaf.
 ///
 /// `H[A, V[B, H[C, D]]]` with D swapped with B gives `H[A, V[D, H[C, B]]]`,
-/// every weight in place.
+/// every weight in place. `H[A, B]` with A stacked onto B gives `B` and `A` in
+/// one stack, `A` expanded.
 ///
 /// # Errors
 ///
@@ -191,6 +210,24 @@ pub fn place_pane_within_tab(
                 *direction,
             );
             expand_stacks_and_check_fit(inserted_layout_tree, source_pane_id, tab_rect, pane_sizing)
+        }
+        PlacementTarget::Stack { target_pane_id } => {
+            if *target_pane_id == source_pane_id {
+                return Ok(layout_tree.clone());
+            }
+            if !layout_tree.has_pane(*target_pane_id) {
+                return Err(PlacementError::TargetPaneNotFound {
+                    pane_id: *target_pane_id,
+                });
+            }
+            let mut removed_layout_tree = layout_tree.clone();
+            let PaneRemovalStatus::Removed = remove_leaf(&mut removed_layout_tree, source_pane_id)
+            else {
+                unreachable!("the tree holds the source and a different target");
+            };
+            let stacked_layout_tree =
+                stack_pane_onto_target(&removed_layout_tree, source_pane_id, *target_pane_id)?;
+            expand_stacks_and_check_fit(stacked_layout_tree, source_pane_id, tab_rect, pane_sizing)
         }
     }
 }
@@ -285,13 +322,7 @@ pub fn place_pane_across_tabs(
             direction,
         } => {
             validate_placement_anchor(destination_tree, source_pane_id, placement_anchor)?;
-            let mut removed_source_tree = source_tree.clone();
-            let remaining_source_tree = match remove_leaf(&mut removed_source_tree, source_pane_id)
-            {
-                PaneRemovalStatus::Removed => Some(normalize_all_leaves(&removed_source_tree)),
-                PaneRemovalStatus::SubtreeEmpty => None,
-                PaneRemovalStatus::PaneNotFound => unreachable!("presence checked above"),
-            };
+            let remaining_source_tree = remove_source_leaf(source_tree, source_pane_id);
             let inserted_layout_tree = insert_pane_beside_anchor(
                 destination_tree.clone(),
                 source_pane_id,
@@ -309,7 +340,118 @@ pub fn place_pane_across_tabs(
                 destination_tree,
             })
         }
+        PlacementTarget::Stack { target_pane_id } => {
+            let stacked_layout_tree =
+                stack_pane_onto_target(destination_tree, source_pane_id, *target_pane_id)?;
+            let remaining_source_tree = remove_source_leaf(source_tree, source_pane_id);
+            let destination_tree = expand_stacks_and_check_fit(
+                stacked_layout_tree,
+                source_pane_id,
+                destination_tab_rect,
+                pane_sizing,
+            )?;
+            Ok(CrossTabPlacement {
+                source_tree: remaining_source_tree,
+                destination_tree,
+            })
+        }
     }
+}
+
+/// Place `floating_pane_id`, a pane that no leaf of `layout_tree` holds, at
+/// `placement_target` in `layout_tree`, the tree of the tab that receives it.
+///
+/// `tab_rect` is the rectangle `layout_tree` solves into and `pane_sizing` the
+/// caller's own [`PaneSizing`]. An insertion splits the anchor so the pane
+/// sits on its `direction` side, and a stack adds the pane to the target's
+/// stack. Either way the pane is the expanded member of every stack above it.
+///
+/// `H[A, B]` with `F` inserted `Right` of `Pane(B)` gives `H[A, B, F]`;
+/// `S[S1, S2]` with `F` stacked onto `S2` gives `S[S1, S2, F]` with `F`
+/// expanded.
+///
+/// # Errors
+///
+/// - [`PlacementError::PaneInBothTrees`]: `layout_tree` already holds
+///   `floating_pane_id`.
+/// - [`PlacementError::SourcePaneNotFound`]: `placement_target` is a swap,
+///   which needs a source leaf.
+/// - [`PlacementError::TargetPaneNotFound`]: the stack target, or a pane the
+///   anchor names, is not a leaf of `layout_tree`.
+/// - [`PlacementError::AnchorIsSource`]: the anchor is `Pane(floating_pane_id)`.
+/// - The anchor errors of an insertion: [`PlacementError::GroupPaneDuplicated`],
+///   [`PlacementError::GroupIsNotOneSubtree`] and
+///   [`PlacementError::AnchorInsideStack`].
+/// - [`PlacementError::DestinationTooSmall`]: the tree with the pane does not
+///   fit `tab_rect`.
+pub fn place_floating_pane_in_tab(
+    layout_tree: &LayoutNode,
+    floating_pane_id: PaneId,
+    placement_target: &PlacementTarget,
+    tab_rect: Rect,
+    pane_sizing: PaneSizing,
+) -> Result<LayoutNode, PlacementError> {
+    if layout_tree.has_pane(floating_pane_id) {
+        return Err(PlacementError::PaneInBothTrees {
+            pane_id: floating_pane_id,
+        });
+    }
+    let placed_layout_tree = match placement_target {
+        PlacementTarget::Swap { .. } => {
+            return Err(PlacementError::SourcePaneNotFound {
+                pane_id: floating_pane_id,
+            });
+        }
+        PlacementTarget::Insert {
+            anchor: placement_anchor,
+            direction,
+        } => {
+            validate_placement_anchor(layout_tree, floating_pane_id, placement_anchor)?;
+            insert_pane_beside_anchor(
+                layout_tree.clone(),
+                floating_pane_id,
+                placement_anchor,
+                *direction,
+            )
+        }
+        PlacementTarget::Stack { target_pane_id } => {
+            stack_pane_onto_target(layout_tree, floating_pane_id, *target_pane_id)?
+        }
+    };
+    expand_stacks_and_check_fit(placed_layout_tree, floating_pane_id, tab_rect, pane_sizing)
+}
+
+/// `source_tree` without the leaf `source_pane_id`, normalized, or `None` when
+/// that leaf was its only one. `source_tree` holds `source_pane_id`.
+fn remove_source_leaf(source_tree: &LayoutNode, source_pane_id: PaneId) -> Option<LayoutNode> {
+    let mut removed_source_tree = source_tree.clone();
+    match remove_leaf(&mut removed_source_tree, source_pane_id) {
+        PaneRemovalStatus::Removed => Some(normalize_all_leaves(&removed_source_tree)),
+        PaneRemovalStatus::SubtreeEmpty => None,
+        PaneRemovalStatus::PaneNotFound => unreachable!("presence checked by the caller"),
+    }
+}
+
+/// Add `source_pane_id` to the innermost stack holding `target_pane_id` in
+/// `layout_tree`, as its last and expanded member, or form a stack of
+/// `target_pane_id`, then `source_pane_id`, when no stack holds the target.
+/// Then normalize the whole tree once. `layout_tree` does not hold
+/// `source_pane_id`.
+///
+/// # Errors
+///
+/// [`PlacementError::TargetPaneNotFound`] when no leaf of `layout_tree` is
+/// `target_pane_id`.
+fn stack_pane_onto_target(
+    layout_tree: &LayoutNode,
+    source_pane_id: PaneId,
+    target_pane_id: PaneId,
+) -> Result<LayoutNode, PlacementError> {
+    let stacked_layout_tree = add_pane_to_stack(layout_tree, target_pane_id, source_pane_id)
+        .map_err(|_| PlacementError::TargetPaneNotFound {
+            pane_id: target_pane_id,
+        })?;
+    Ok(normalize_all_leaves(&stacked_layout_tree))
 }
 
 /// Check `anchor` against `destination_tree` as it stands before the source
@@ -549,9 +691,9 @@ fn find_outermost_stack_above(
     })
 }
 
-/// One slot a swap may target.
+/// One pane slot a swap or a stack may target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SwapSlot {
+pub struct TargetPaneSlot {
     /// The pane in the slot.
     pub pane_id: PaneId,
     /// The slot's drawn rectangle: the pane's content rectangle, or its
@@ -572,8 +714,8 @@ pub struct InsertionSpan {
 /// Every destination a placement of one pane may name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementDestinations {
-    /// Swap targets, in the solve's pane order.
-    pub swap_slots: Vec<SwapSlot>,
+    /// Swap and stack targets, in the solve's pane order.
+    pub target_pane_slots: Vec<TargetPaneSlot>,
     /// Insertion spans: panes in pane order, then groups in pre-order, then
     /// the tab.
     pub insertion_spans: Vec<InsertionSpan>,
@@ -582,8 +724,9 @@ pub struct PlacementDestinations {
 /// List the destinations `source_pane_id` may move to in `layout_tree`,
 /// solved as `layout_solve` over `tab_rect`.
 ///
-/// Swap slots: every pane other than the source whose rectangle covers
-/// cells. A collapsed stack member is listed with its header strip.
+/// Target pane slots, for a swap or a stack: every pane other than the source
+/// whose rectangle covers cells. A collapsed stack member is listed with its
+/// header strip.
 ///
 /// Insertion spans, in this order:
 ///
@@ -596,12 +739,14 @@ pub struct PlacementDestinations {
 ///    earlier group's is skipped.
 /// 3. `Tab` over `tab_rect`, when some pane other than the source exists.
 ///
-/// A tree holding only the source lists nothing. `layout_solve` is the tiled
-/// solve of `layout_tree` itself: a leaf absent from `layout_solve.pane_rects`
-/// is listed nowhere and counts for no group rectangle.
+/// A tree holding only the source lists nothing. A `source_pane_id` that no
+/// leaf of `layout_tree` holds, such as a floating pane, leaves every pane
+/// listed. `layout_solve` is the tiled solve of `layout_tree` itself: a leaf
+/// absent from `layout_solve.pane_rects` is listed nowhere and counts for no
+/// group rectangle.
 ///
-/// `H[A, V[B, H[C, D]]]` with source D lists swap slots `A, B, C`, and spans
-/// `Pane(A), Pane(B), Pane(C), Group([B, C, D]), Group([C, D]), Tab`.
+/// `H[A, V[B, H[C, D]]]` with source D lists target pane slots `A, B, C`, and
+/// spans `Pane(A), Pane(B), Pane(C), Group([B, C, D]), Group([C, D]), Tab`.
 #[must_use]
 pub fn list_placement_destinations(
     layout_tree: &LayoutNode,
@@ -609,11 +754,11 @@ pub fn list_placement_destinations(
     tab_rect: Rect,
     source_pane_id: PaneId,
 ) -> PlacementDestinations {
-    let swap_slots: Vec<SwapSlot> = layout_solve
+    let target_pane_slots: Vec<TargetPaneSlot> = layout_solve
         .pane_rects
         .iter()
         .filter(|&&(pane_id, pane_rect)| pane_id != source_pane_id && !pane_rect.is_empty())
-        .map(|&(pane_id, slot_rect)| SwapSlot { pane_id, slot_rect })
+        .map(|&(pane_id, slot_rect)| TargetPaneSlot { pane_id, slot_rect })
         .collect();
 
     let mut all_pane_ids = layout_tree.list_leaf_pane_ids();
@@ -644,7 +789,7 @@ pub fn list_placement_destinations(
     }
 
     PlacementDestinations {
-        swap_slots,
+        target_pane_slots,
         insertion_spans,
     }
 }

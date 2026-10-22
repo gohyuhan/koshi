@@ -37,15 +37,11 @@ use std::time::{Duration, Instant};
 use koshi_config::conflict::{
     build_keymap_layers, detect_conflicts, ConflictReport, KeymapVerdict,
 };
-use koshi_config::hints::{HintBinding, KeymapHintCatalog, KeymapHints};
+use koshi_config::hints::KeymapHintCatalog;
 use koshi_config::layer::{
     ConfigLayers, PartialKeybindingsConfig, PartialKoshiConfig, PartialThemeConfig,
 };
 use koshi_config::types::ClientConfig;
-use koshi_core::action::{
-    MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT, MOVE_FLOATING_PANE_HINT, MOVE_FOCUSED_PANE_HINT,
-    MOVE_TILED_PANE_HINT,
-};
 use koshi_core::command::{Command, TiledPlacementTarget};
 use koshi_core::geometry::Direction;
 use koshi_core::key::PendingKeySequence;
@@ -106,11 +102,12 @@ pub(crate) struct PlacementMode {
     /// The pane being placed. A left press on another pane in placement mode
     /// selects that pane instead.
     pub(crate) source_pane_id: PaneId,
-    /// The tab that owns the source pane. A painted frame that focuses the
-    /// source pane sets it to that frame's active tab, and each accepted
-    /// preview sets it to the tab that preview names: after `pane-123` moves
-    /// from tab `#1` to tab `#2`, both set `#2`.
-    pub(crate) source_tab_id: TabId,
+    /// The tab whose layout holds the source pane, or `None` while the source
+    /// pane floats. A painted frame that focuses a tiled source pane sets it to
+    /// that frame's active tab, and each accepted preview sets it to the tab
+    /// that preview names, or to `None` for a floating source: after
+    /// `pane-123` moves from tab `#1` to tab `#2`, both set `#2`.
+    pub(crate) source_tab_id: Option<TabId>,
     /// The tab currently being previewed.
     pub(crate) destination_tab_id: TabId,
     /// The edge used by the last insertion selection.
@@ -237,6 +234,28 @@ pub(crate) struct FloatingPaneMoveSelection {
     pub(crate) pending_move_command_id: Option<CommandId>,
 }
 
+/// Dock/undock mode, which the `dock-undock` keymap mode resolves keys in and
+/// the tabline tags `DOCK`. The floating pane the mode selected is the source
+/// pane of pane placement mode, which picks where that pane docks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DockUndockMode {
+    /// The tiled pane the mode selected, or `None` while the mode selected a
+    /// floating pane or nothing.
+    pub(crate) tiled_pane_selection: Option<TiledPaneSelection>,
+}
+
+/// The tiled pane that dock/undock mode selected, and the undock the mode
+/// sent for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TiledPaneSelection {
+    /// The tiled pane that Enter, or a drag that starts on it, floats where
+    /// this viewer draws it.
+    pub(crate) pane_id: PaneId,
+    /// The id of the `PlacePane` that floats `pane_id`, while the mode waits
+    /// for the session's answer. `None` while the mode waits for no undock.
+    pub(crate) pending_undock_command_id: Option<CommandId>,
+}
+
 /// The viewer fields [`Client::apply_render_snapshot`] changes, copied before
 /// one frame is applied. [`Client::restore_viewer`] puts them back.
 pub(crate) struct ViewerRestorePoint {
@@ -266,6 +285,8 @@ pub(crate) struct ViewerRestorePoint {
     /// The floating pane move a grab-handle release sent, which this viewer
     /// draws ahead of the session.
     sent_floating_pane_move: Option<SentFloatingPaneMove>,
+    /// Dock/undock mode and the tiled pane it selected.
+    dock_undock_mode: Option<DockUndockMode>,
 }
 
 /// Whether a viewer holds a link to its session, and how it is getting one back
@@ -296,10 +317,12 @@ pub(crate) enum PlacementInputAction {
         destination_tab_id: TabId,
     },
     /// Send `command` under `command_id`, issued by this viewer's key
-    /// binding: the `PlacePane` that placement mode recorded as pending, the
-    /// `PlacePane` that floats the focused pane, the `MoveFloatingPane` that
-    /// floating pane move mode recorded as sent, or the `FocusPane` that
-    /// focuses the floating pane it selected.
+    /// binding or by a mouse event in dock/undock mode: the `PlacePane` that
+    /// placement mode recorded as pending, the `PlacePane` that floats the
+    /// tiled pane dock/undock mode selected, the `MoveFloatingPane` that
+    /// floating pane move mode or dock/undock mode recorded as sent, or the
+    /// `FocusPane` that focuses the floating pane floating pane move mode
+    /// selected.
     SubmitCommand {
         /// The id the command carries.
         command_id: CommandId,
@@ -308,6 +331,22 @@ pub(crate) enum PlacementInputAction {
     },
     /// Consume the event without a request or command.
     Consumed,
+}
+
+impl PlacementInputAction {
+    /// The read of the preview `placement_read` names, as
+    /// `(source_pane_id, destination_tab_id)`, with no pane to focus, or
+    /// `Consumed` for `None`.
+    pub(crate) fn from_placement_read(placement_read: Option<(PaneId, TabId)>) -> Self {
+        placement_read.map_or(
+            PlacementInputAction::Consumed,
+            |(source_pane_id, destination_tab_id)| PlacementInputAction::ReadPlacement {
+                pane_id_to_focus: None,
+                source_pane_id,
+                destination_tab_id,
+            },
+        )
+    }
 }
 
 /// One attached terminal's view side: its id, its own terminal size, its event
@@ -343,9 +382,9 @@ pub struct Client {
     /// Dispatch itself happens on the session, against its own table.
     registry: ActionRegistry,
     /// This viewer's base input mode. It decides what a key means when no local
-    /// submode owns the keyboard. Pane placement mode, the move chooser, and
-    /// floating pane move mode overlay this value without changing it: each
-    /// returns to Normal or Locked.
+    /// submode owns the keyboard. Pane placement mode, the move chooser,
+    /// floating pane move mode, and dock/undock mode overlay this value
+    /// without changing it: each returns to Normal or Locked.
     /// The session keeps its own copy, which `koshi lock --client` reaches and
     /// `koshi list-clients` reports.
     lock_mode: LockMode,
@@ -437,6 +476,9 @@ pub struct Client {
     /// The move chooser or floating pane move mode, or `None` when neither is
     /// on. It is `None` while pane placement mode is on.
     pane_move_mode: Option<PaneMoveMode>,
+    /// Dock/undock mode, or `None` when it is off. It is `None` while the move
+    /// chooser or floating pane move mode is on.
+    dock_undock_mode: Option<DockUndockMode>,
     /// Restores the outer terminal when the client ends or the process
     /// panics. Held to be dropped with the client; nothing reads it.
     _terminal_cleanup_guard: TerminalCleanupGuard,
@@ -490,6 +532,7 @@ impl Client {
             active_tab_focused_pane_id: None,
             visible_tab_ids: Vec::new(),
             pane_move_mode: None,
+            dock_undock_mode: None,
             _terminal_cleanup_guard: terminal_cleanup_guard,
         }
     }
@@ -592,10 +635,11 @@ impl Client {
     /// draws `RECONNECTING (attempt 4, retry in 8s)` for
     /// `LinkStatus::Redialing(Reconnecting { attempt: 4, retry_in_seconds: Some(8) })`.
     ///
-    /// Pane placement mode, the move chooser, and floating pane move mode own
-    /// the keyboard only while the viewer is [`LinkStatus::Linked`]. A change
-    /// that moves the keyboard between one of their keymaps and the base
-    /// keymap drops an open key sequence, and no pane receives its chords.
+    /// Dock/undock mode, pane placement mode, the move chooser, and floating
+    /// pane move mode own the keyboard only while the viewer is
+    /// [`LinkStatus::Linked`]. A change that moves the keyboard between one of
+    /// their keymaps and the base keymap drops an open key sequence, and no
+    /// pane receives its chords.
     pub(crate) fn set_link_status(&mut self, link_status: LinkStatus) {
         let previous_active_input_mode = self.get_active_input_mode();
         self.link_status = link_status;
@@ -627,13 +671,15 @@ impl Client {
     /// Apply the viewer state `render_snapshot` carries, in this order: the
     /// placement revisions, whether the snapshot settles a sent floating pane
     /// move by naming it (`settle_floating_pane_move`), the active tab with its
-    /// focused pane and tab list, the lock mode, the tab-strip peek, and
-    /// whether mouse-select is on. A tab-strip peek made on another tab is
-    /// dropped. The placement revisions, the active tab, the lock mode, and
-    /// mouse-select can end pane placement mode or clear its target. The
-    /// settled move can end floating pane move mode, and a lock mode or
-    /// mouse-select change ends the move chooser and floating pane move mode
-    /// that waits for no move, as `settle_floating_pane_move`,
+    /// focused pane and tab list, the lock mode, the tab-strip peek, whether
+    /// mouse-select is on, and where the tiled pane that dock/undock mode
+    /// selected is drawn (`update_dock_undock_selection`). A tab-strip peek
+    /// made on another tab is dropped. The placement revisions, the active
+    /// tab, the lock mode, and mouse-select can end pane placement mode or
+    /// clear its target. The settled move can end floating pane move mode, and
+    /// a lock mode or mouse-select change ends the move chooser, floating pane
+    /// move mode that waits for no move, and dock/undock mode that waits for
+    /// no undock or dock, as `settle_floating_pane_move`,
     /// `set_placement_revisions`, `set_frame_view`,
     /// [`set_lock_mode`](Self::set_lock_mode), and
     /// [`set_mouse_selection_enabled`](Self::set_mouse_selection_enabled)
@@ -677,6 +723,66 @@ impl Client {
         self.set_mouse_selection_enabled(
             render_snapshot.client_snapshot.is_mouse_selection_enabled,
         );
+        self.update_dock_undock_selection(&render_snapshot.session_snapshot);
+    }
+
+    /// Follow the tiled pane that dock/undock mode selected into
+    /// `session_snapshot`, the frame being applied:
+    ///
+    /// - A frame that draws the pane floating keeps it selected as the source
+    ///   pane of pane placement mode. That mode previews the frame's active
+    ///   tab with no target, until Esc, and the end of this attachment loop
+    ///   pass reads its preview. A drag of the pane under way becomes that
+    ///   mode's drag, and the pane is drawn where the frame floats it, moved
+    ///   by the pointer's travel since the press
+    ///   ([`rebase_floating_pane_handle_drag`](Self::rebase_floating_pane_handle_drag)).
+    /// - A frame whose active tab holds no slot of the pane leaves nothing
+    ///   selected.
+    ///
+    /// Does nothing when the mode selected no tiled pane. Example: after Enter
+    /// on tiled pane `pane-7`, the frame that floats `pane-7` makes it the
+    /// source pane of pane placement mode.
+    fn update_dock_undock_selection(&mut self, session_snapshot: &SessionSnapshot) {
+        let Some(tiled_pane_selection) = self
+            .dock_undock_mode
+            .and_then(|dock_undock_mode| dock_undock_mode.tiled_pane_selection)
+        else {
+            return;
+        };
+        let pane_id = tiled_pane_selection.pane_id;
+        let floating_pane_slot = session_snapshot
+            .floating_pane_slots
+            .iter()
+            .find(|floating_pane_slot| floating_pane_slot.pane_id == pane_id);
+        if let Some(floating_pane_slot) = floating_pane_slot {
+            self.dock_undock_mode = Some(DockUndockMode::default());
+            self.placement_state.placement_mode = Some(PlacementMode {
+                source_pane_id: pane_id,
+                source_tab_id: None,
+                destination_tab_id: session_snapshot.active_tab_snapshot.tab_id,
+                placement_direction: Direction::Right,
+                placement_target: None,
+                pending_placement_command: None,
+            });
+            self.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
+            self.placement_state.placement_drag = self
+                .rebase_floating_pane_handle_drag(pane_id, floating_pane_slot.outer_rect.origin)
+                .map(|press_position| PlacementDrag {
+                    start_position: press_position,
+                    has_pointer_moved: true,
+                    is_insertion_drag: true,
+                });
+            self.placement_state.needs_placement_preview_refresh = true;
+            return;
+        }
+        let is_pane_in_active_tab = session_snapshot
+            .active_tab_snapshot
+            .pane_slots
+            .iter()
+            .any(|pane_slot| pane_slot.pane_id == pane_id);
+        if !is_pane_in_active_tab {
+            self.dock_undock_mode = Some(DockUndockMode::default());
+        }
     }
 
     /// Copy every field [`apply_render_snapshot`](Self::apply_render_snapshot)
@@ -695,6 +801,7 @@ impl Client {
             placement_state: self.placement_state.clone(),
             pane_move_mode: self.pane_move_mode,
             sent_floating_pane_move: self.sent_floating_pane_move,
+            dock_undock_mode: self.dock_undock_mode,
         }
     }
 
@@ -713,6 +820,7 @@ impl Client {
             placement_state,
             pane_move_mode,
             sent_floating_pane_move,
+            dock_undock_mode,
         } = viewer_restore_point;
         self.lock_mode = lock_mode;
         self.pending_lock_command_id = pending_lock_command_id;
@@ -726,6 +834,7 @@ impl Client {
         self.placement_state = placement_state;
         self.pane_move_mode = pane_move_mode;
         self.sent_floating_pane_move = sent_floating_pane_move;
+        self.dock_undock_mode = dock_undock_mode;
     }
 
     /// Record the view carried by the newest painted frame: its active tab,
@@ -755,8 +864,10 @@ impl Client {
             self.placement_state.needs_placement_preview_refresh = needs_placement_preview_refresh;
         }
         if let Some(placement_mode) = self.placement_state.placement_mode.as_mut() {
-            if focused_pane_id == Some(placement_mode.source_pane_id) {
-                placement_mode.source_tab_id = active_tab_id;
+            if let Some(source_tab_id) = placement_mode.source_tab_id.as_mut() {
+                if focused_pane_id == Some(placement_mode.source_pane_id) {
+                    *source_tab_id = active_tab_id;
+                }
             }
         }
         let should_cancel_placement = self.is_placement_mode_active()
@@ -765,9 +876,12 @@ impl Client {
                 || (has_focused_pane_changed && !self.is_placement_source_pane(focused_pane_id))
                 || (has_visible_tab_list_changed
                     && !visible_tab_ids.is_empty()
-                    && self.placement_state.placement_mode.as_ref().is_some_and(
-                        |placement_mode| !visible_tab_ids.contains(&placement_mode.source_tab_id),
-                    )));
+                    && self
+                        .placement_state
+                        .placement_mode
+                        .as_ref()
+                        .and_then(|placement_mode| placement_mode.source_tab_id)
+                        .is_some_and(|source_tab_id| !visible_tab_ids.contains(&source_tab_id))));
         if should_cancel_placement {
             self.cancel_placement_mode();
         }
@@ -785,8 +899,8 @@ impl Client {
     ///   placement. With `stay-in-pane-placement-mode-after-placement #true`,
     ///   pane placement mode stays on until Esc and reads a fresh preview; a
     ///   mode opened by a pane-handle drag switches to
-    ///   [`PlacementModeLifetime::UntilCancelled`]. With `#false`, the mode
-    ///   ends.
+    ///   [`PlacementModeLifetime::UntilCancelled`]. With `#false`, and in
+    ///   dock/undock mode whatever the setting says, the mode ends.
     /// - With a confirmation pending and no answer yet, the frame shows another
     ///   change, such as a pane another viewer opened. The confirmation stays
     ///   pending until the session commits or rejects it.
@@ -813,9 +927,10 @@ impl Client {
         self.placement_state.client_placement_revision = client_placement_revision;
         if has_placement_revision_changed && !is_waiting_for_placement_answer {
             let placement_drag = self.placement_state.placement_drag;
-            let should_stay_in_pane_placement_mode = self
-                .client_config
-                .should_stay_in_pane_placement_mode_after_placement;
+            let should_stay_in_pane_placement_mode = self.dock_undock_mode.is_none()
+                && self
+                    .client_config
+                    .should_stay_in_pane_placement_mode_after_placement;
             if is_placement_confirmation_pending && should_stay_in_pane_placement_mode {
                 self.placement_state.placement_mode_lifetime =
                     PlacementModeLifetime::UntilCancelled;
@@ -838,14 +953,19 @@ impl Client {
     /// Enter local placement mode for the focused pane in the active tab,
     /// until Esc, also while a floating pane takes this viewer's input. The
     /// preview starts on the active tab: `<C-p> m` on tab `#1` of `[#1, #2]`
-    /// previews `#1`. Returns `None` when placement mode is already on, a
-    /// placement waits for the session, floating pane move mode waits for the
-    /// move it sent, or the active tab focuses no pane.
+    /// previews `#1`. Returns `None` when dock/undock mode is on, placement
+    /// mode is already on, a placement waits for the session, floating pane
+    /// move mode waits for the move it sent, or the active tab focuses no
+    /// pane.
     pub(crate) fn begin_placement_mode(&mut self) -> Option<(PaneId, TabId)> {
+        if self.dock_undock_mode.is_some() {
+            return None;
+        }
         let source_pane_id = self.active_tab_focused_pane_id?;
         let source_tab_id = self.active_tab_id?;
         self.open_placement_mode(
             source_pane_id,
+            Some(source_tab_id),
             source_tab_id,
             PlacementModeLifetime::UntilCancelled,
         )
@@ -862,23 +982,26 @@ impl Client {
     ) -> Option<(PaneId, TabId)> {
         self.open_placement_mode(
             source_pane_id,
+            Some(source_tab_id),
             source_tab_id,
             PlacementModeLifetime::UntilDragEnds,
         )
     }
 
-    /// Start a placement of `source_pane_id` that previews `source_tab_id`
-    /// with no target, ends the move chooser or floating pane move mode,
-    /// drops any open key sequence, tab hover, preview read, and every
-    /// gesture a held button drives
+    /// Start a placement of `source_pane_id`, held in the layout of
+    /// `source_tab_id` or floating with `None`, that previews
+    /// `destination_tab_id` with no target, ends the move chooser or floating
+    /// pane move mode, drops any open key sequence, tab hover, preview read,
+    /// and every gesture a held button drives
     /// ([`end_held_mouse_gestures`](Self::end_held_mouse_gestures)), and
-    /// returns `(source_pane_id, source_tab_id)`. Returns `None`, changing
-    /// nothing, when placement mode is already on, a placement waits for the
-    /// session, or floating pane move mode waits for the move it sent.
+    /// returns `(source_pane_id, destination_tab_id)`. Returns `None`,
+    /// changing nothing, when placement mode is already on, a placement waits
+    /// for the session, or floating pane move mode waits for the move it sent.
     fn open_placement_mode(
         &mut self,
         source_pane_id: PaneId,
-        source_tab_id: TabId,
+        source_tab_id: Option<TabId>,
+        destination_tab_id: TabId,
         placement_mode_lifetime: PlacementModeLifetime,
     ) -> Option<(PaneId, TabId)> {
         if self.is_placement_mode_active()
@@ -890,7 +1013,7 @@ impl Client {
         self.placement_state.placement_mode = Some(PlacementMode {
             source_pane_id,
             source_tab_id,
-            destination_tab_id: source_tab_id,
+            destination_tab_id,
             placement_direction: Direction::Right,
             placement_target: None,
             pending_placement_command: None,
@@ -901,7 +1024,7 @@ impl Client {
         self.placement_state.placement_tab_hover = None;
         self.pending_key_sequence = None;
         self.clear_placement_read();
-        Some((source_pane_id, source_tab_id))
+        Some((source_pane_id, destination_tab_id))
     }
 
     /// Whether this viewer's keyboard or active mouse drag belongs to placement.
@@ -920,10 +1043,29 @@ impl Client {
     /// Return whether pane placement draws its subdued panes and in-pane messages,
     /// with no hover tint and no placement handle.
     /// It stays `true` while a submitted placement command waits for the
-    /// session's answer.
+    /// session's answer. It is `false` while dock/undock mode selected a
+    /// floating pane that has no dock target and no drag moving it.
     #[must_use]
     pub(crate) fn is_pane_placement_visible(&self) -> bool {
-        self.is_placement_mode_active() || self.is_placement_confirmation_pending()
+        (self.is_placement_mode_active() || self.is_placement_confirmation_pending())
+            && !self.is_floating_dock_selection_idle()
+    }
+
+    /// Whether dock/undock mode selected a floating pane that has no dock
+    /// target, no drag moving it, and no dock waiting for the session. The
+    /// frame then shows no placement preview.
+    #[must_use]
+    pub(crate) fn is_floating_dock_selection_idle(&self) -> bool {
+        self.dock_undock_mode.is_some()
+            && self.placement_state.placement_drag.is_none()
+            && self
+                .placement_state
+                .placement_mode
+                .as_ref()
+                .is_some_and(|placement_mode| {
+                    placement_mode.placement_target.is_none()
+                        && placement_mode.pending_placement_command.is_none()
+                })
     }
 
     /// Return whether `focused_pane_id` names the source pane of the active
@@ -1077,7 +1219,7 @@ impl Client {
                 return None;
             }
             placement_mode.source_pane_id = source_pane_id;
-            placement_mode.source_tab_id = source_tab_id;
+            placement_mode.source_tab_id = Some(source_tab_id);
             if !self
                 .visible_tab_ids
                 .contains(&placement_mode.destination_tab_id)
@@ -1242,7 +1384,7 @@ impl Client {
             return false;
         }
         if let Some(placement_mode) = self.placement_state.placement_mode.as_mut() {
-            placement_mode.source_tab_id = placement_snapshot.source_tab_id;
+            placement_mode.source_tab_id = placement_snapshot.find_source_tab_id();
         }
         self.placement_state.placement_snapshot = Some(Arc::new(placement_snapshot));
         self.select_whole_tab_insertion_target();
@@ -1385,13 +1527,15 @@ impl Client {
 
     /// Drop the command `command_id` names, which the session rejected, and
     /// return `true`: a sent floating pane move
-    /// ([`reject_floating_pane_move`](Self::reject_floating_pane_move)), or
-    /// the pending placement confirmation. After a rejected confirmation, pane
+    /// ([`reject_floating_pane_move`](Self::reject_floating_pane_move)), the
+    /// undock that dock/undock mode sent
+    /// ([`reject_undock_command`](Self::reject_undock_command)), or the
+    /// pending placement confirmation. After a rejected confirmation, pane
     /// placement mode that lasts until Esc stays on and reads a fresh preview,
     /// and a mode that lasts until its drag ends closes. Returns `false`,
-    /// changing nothing, when `command_id` names neither.
+    /// changing nothing, when `command_id` names none of them.
     pub(crate) fn reject_placement_command(&mut self, command_id: CommandId) -> bool {
-        if self.reject_floating_pane_move(command_id) {
+        if self.reject_floating_pane_move(command_id) || self.reject_undock_command(command_id) {
             return true;
         }
         if !self.is_pending_placement_command(command_id) {
@@ -1414,8 +1558,19 @@ impl Client {
         self.get_pending_placement_command().is_some()
     }
 
-    /// Mark a submitted placement for reconciliation with the next frame.
+    /// Mark a submitted placement for reconciliation with the next frame, and
+    /// drop the undock that dock/undock mode waits for: the next frame shows
+    /// whether it ran ([`update_dock_undock_selection`]).
+    ///
+    /// [`update_dock_undock_selection`]: Self::update_dock_undock_selection
     pub(crate) fn prepare_placement_reconciliation(&mut self) {
+        if let Some(tiled_pane_selection) = self
+            .dock_undock_mode
+            .as_mut()
+            .and_then(|dock_undock_mode| dock_undock_mode.tiled_pane_selection.as_mut())
+        {
+            tiled_pane_selection.pending_undock_command_id = None;
+        }
         let is_placement_confirmation_pending = self.is_placement_confirmation_pending();
         let is_placement_mode_until_cancelled =
             self.placement_state.placement_mode_lifetime == PlacementModeLifetime::UntilCancelled;
@@ -1491,77 +1646,18 @@ impl Client {
     /// Called when the session reports the mode for this viewer, either as an
     /// event or in the frame an attached viewer reads. The session owns the
     /// mode; this only moves the viewer's copy of it, which mouse routing
-    /// reads. A change ends pane placement mode, the move chooser, and
-    /// floating pane move mode that waits for no move.
+    /// reads. A change ends pane placement mode, the move chooser, floating
+    /// pane move mode that waits for no move, and dock/undock mode that waits
+    /// for no undock or dock.
     pub fn set_mouse_selection_enabled(&mut self, is_mouse_selection_enabled: bool) {
         if self.is_mouse_selection_enabled != is_mouse_selection_enabled {
             if self.is_placement_mode_active() {
                 self.cancel_placement_mode();
             }
             self.close_pane_move_mode();
+            self.close_dock_undock_mode();
         }
         self.is_mouse_selection_enabled = is_mouse_selection_enabled;
-    }
-
-    /// The hint-bar data one frame is painted from, using `lock_mode`, the
-    /// acting client's mouse-selection state, and whether its focused pane is
-    /// floating.
-    ///
-    /// Every entry labelled [`MOUSE_SELECT_HINT`] reads [`MOUSE_UNSELECT_HINT`]
-    /// while mouse-selection mode is enabled. Every entry labelled
-    /// [`MOVE_FOCUSED_PANE_HINT`] reads [`MOVE_FLOATING_PANE_HINT`] while the
-    /// focused pane is floating, and [`MOVE_TILED_PANE_HINT`] otherwise.
-    #[must_use]
-    pub(crate) fn build_frame_hints(
-        &self,
-        lock_mode: LockMode,
-        is_mouse_selection_enabled: bool,
-        is_focused_pane_floating: bool,
-    ) -> KeymapHints {
-        let mut keymap_hints = self.keymap_catalog.build_hints_for_mode(lock_mode);
-        if is_mouse_selection_enabled {
-            keymap_hints = relabel_hints(keymap_hints, MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT);
-        }
-        let move_focused_pane_hint = if is_focused_pane_floating {
-            MOVE_FLOATING_PANE_HINT
-        } else {
-            MOVE_TILED_PANE_HINT
-        };
-        relabel_hints(keymap_hints, MOVE_FOCUSED_PANE_HINT, move_focused_pane_hint)
-    }
-}
-
-/// `keymap_hints` with every entry labelled `current_label` relabelled
-/// `replacement_label`, and nothing else changed. Matching is on the label, so
-/// a rebound or duplicated binding is relabelled too: `Mouse Select` becomes
-/// `Mouse Unselect` on every key bound to `core:mouse-select`. With no entry
-/// labelled `current_label`, it returns `keymap_hints` as it is.
-fn relabel_hints(
-    keymap_hints: KeymapHints,
-    current_label: &str,
-    replacement_label: &str,
-) -> KeymapHints {
-    let has_current_label = keymap_hints
-        .hint_bindings
-        .iter()
-        .any(|hint_binding| hint_binding.action_display_name == current_label);
-    if !has_current_label {
-        return keymap_hints;
-    }
-    let hint_bindings: Vec<HintBinding> = keymap_hints
-        .hint_bindings
-        .iter()
-        .map(|hint_binding| {
-            let mut hint_binding = hint_binding.clone();
-            if hint_binding.action_display_name == current_label {
-                replacement_label.clone_into(&mut hint_binding.action_display_name);
-            }
-            hint_binding
-        })
-        .collect();
-    KeymapHints {
-        hint_bindings: Arc::new(hint_bindings),
-        ..keymap_hints
     }
 }
 

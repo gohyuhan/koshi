@@ -5,12 +5,11 @@
 //! leaving the input untouched. A failed edit returns an error and changes
 //! nothing; there is no half-edited tree.
 
-use koshi_core::geometry::{Direction, Rect, SplitDirection};
+use koshi_core::geometry::{Direction, SplitDirection};
 use koshi_core::ids::PaneId;
 use thiserror::Error;
 
 use crate::size::SizeWeight;
-use crate::solver::{is_content_visible, solve_layout_with_sizing, PaneSizing};
 use crate::tree::{compute_split_direction, LayoutNode, SplitNode};
 
 /// A rejected split or stack edit.
@@ -128,22 +127,6 @@ pub enum RemoveError {
     LastPane { pane_id: PaneId },
 }
 
-/// What a removal freed and who took it over. Callers use this to repair
-/// focus and to resize the PTYs that grew.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PaneRemovalOutcome {
-    /// The rect the removed pane occupied before removal.
-    pub removed_pane_rect: Rect,
-    /// Panes whose new rects cover part of `removed_pane_rect`, largest absorbed
-    /// area first (ties keep layout order), followed in layout order by
-    /// panes that cover none of it but changed size. Removing a stack member
-    /// regrows the active member in place without its rect touching the
-    /// freed strip; that member is listed in the second group. Zero-area
-    /// panes and collapsed stack members (whose rect is their one-row header
-    /// strip) are never listed.
-    pub absorbing_pane_ids: Vec<PaneId>,
-}
-
 /// Remove the leaf holding `pane_id`; its space flows to the siblings on the
 /// next solve.
 ///
@@ -155,12 +138,6 @@ pub struct PaneRemovalOutcome {
 /// one-member stack; a stack left with none is pruned like any emptied
 /// split.
 ///
-/// `tab_rect` is the rect the layout tree solves into; the returned
-/// [`PaneRemovalOutcome`] geometry is measured in it. `pane_sizing` is the caller's own
-/// [`PaneSizing`]; the before and after solves use it, so they agree with
-/// the caller's solve on which panes are suppressed and where each rect
-/// sits.
-///
 /// # Errors
 ///
 /// - [`RemoveError::PaneNotFound`] when `pane_id` has no leaf in `layout_tree`.
@@ -168,22 +145,7 @@ pub struct PaneRemovalOutcome {
 ///   when the tree's other children are splits holding no leaf.
 ///
 /// The caller's layout tree is unchanged in both cases.
-pub fn remove_pane(
-    layout_tree: &LayoutNode,
-    tab_rect: Rect,
-    pane_id: PaneId,
-    pane_sizing: PaneSizing,
-) -> Result<(LayoutNode, PaneRemovalOutcome), RemoveError> {
-    // The solve before the edit gives the rect the pane frees.
-    let layout_before_removal = solve_layout_with_sizing(layout_tree, tab_rect, pane_sizing);
-    let Some(&(_, removed_pane_rect)) = layout_before_removal
-        .pane_rects
-        .iter()
-        .find(|&&(before_pane_id, _)| before_pane_id == pane_id)
-    else {
-        return Err(RemoveError::PaneNotFound { pane_id });
-    };
-
+pub fn remove_pane(layout_tree: &LayoutNode, pane_id: PaneId) -> Result<LayoutNode, RemoveError> {
     let mut edited_layout_tree = layout_tree.clone();
     match remove_leaf(&mut edited_layout_tree, pane_id) {
         PaneRemovalStatus::PaneNotFound => return Err(RemoveError::PaneNotFound { pane_id }),
@@ -195,43 +157,7 @@ pub fn remove_pane(
     if edited_layout_tree.list_leaf_pane_ids().is_empty() {
         return Err(RemoveError::LastPane { pane_id });
     }
-
-    // Solve again after the edit and collect every surviving, visible pane
-    // that either grew into the freed space or simply changed size.
-    let layout_after_removal = solve_layout_with_sizing(&edited_layout_tree, tab_rect, pane_sizing);
-    let mut affected_pane_absorbed_areas: Vec<(PaneId, u32)> = layout_after_removal
-        .pane_rects
-        .iter()
-        .filter(|&&(pane_id, pane_rect)| {
-            is_content_visible(pane_id, pane_rect, &layout_after_removal.stack_headers)
-        })
-        .filter_map(|&(pane_id, pane_rect)| {
-            let absorbed_cell_area = pane_rect
-                .compute_intersection(removed_pane_rect)
-                .map_or(0, |overlap_rect| overlap_rect.size.compute_cell_count());
-            let is_resized = layout_before_removal.pane_rects.iter().any(
-                |&(before_pane_id, before_pane_rect)| {
-                    before_pane_id == pane_id && before_pane_rect.size != pane_rect.size
-                },
-            );
-            (absorbed_cell_area > 0 || is_resized).then_some((pane_id, absorbed_cell_area))
-        })
-        .collect();
-    // Largest absorbed area first; the stable sort keeps layout order among
-    // equal areas, including the zero-overlap resizes.
-    affected_pane_absorbed_areas
-        .sort_by_key(|&(_, absorbed_cell_area)| std::cmp::Reverse(absorbed_cell_area));
-
-    Ok((
-        edited_layout_tree,
-        PaneRemovalOutcome {
-            removed_pane_rect,
-            absorbing_pane_ids: affected_pane_absorbed_areas
-                .into_iter()
-                .map(|(pane_id, _)| pane_id)
-                .collect(),
-        },
-    ))
+    Ok(edited_layout_tree)
 }
 
 /// What happened below while looking for the leaf to remove.

@@ -14,14 +14,15 @@ use koshi_core::command::{GridPosition, Selection, SelectionKind};
 use koshi_core::geometry::Size;
 use koshi_core::ids::{SessionId, TabId};
 use koshi_core::process::PtySize;
+use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
-use koshi_session::session::state::{Session, Tab};
+use koshi_session::session::state::Session;
 use koshi_terminal::engine::TerminalEngine;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::runtime::command::tests::attach_second_client;
+use crate::runtime::command::tests::{attach_client_record, attach_second_client, build_tab};
 use crate::runtime::event::RuntimeEvent;
 use crate::runtime::render_schedule::tests::{
     get_frame_wait, subscribe_and_push_first_frame, DEFAULT_FRAME_INTERVAL_DURATION,
@@ -59,10 +60,9 @@ fn attach_test_session_with_pane(runtime: &mut Server) -> (PaneId, ClientId) {
         .panes
         .register_pane_record(PaneRecord::from_terminal_pane(pane_id))
         .expect("unique pane id");
-    session.tabs.insert(
-        tab_id,
-        Tab::from_root_pane(tab_id, "t".to_string(), 0, pane_id),
-    );
+    session
+        .tabs
+        .insert(tab_id, build_tab(tab_id, "t", 0, LayoutNode::Pane(pane_id)));
     let mut client = Client::from_attachment(
         client_id,
         session_id,
@@ -78,7 +78,7 @@ fn attach_test_session_with_pane(runtime: &mut Server) -> (PaneId, ClientId) {
         0,
     );
     client.update_focused_pane(tab_id, pane_id);
-    session.attach_client(client);
+    attach_client_record(&mut session, client);
     runtime.session_by_id.insert(session_id, session);
 
     runtime.terminal_engine_by_pane_id.insert(
@@ -698,11 +698,7 @@ fn output_re_anchors_each_client_on_a_shared_pane_on_its_own() {
             "C-test-client".to_string(),
             0,
         );
-        runtime
-            .session_by_id
-            .get_mut(&session_id)
-            .unwrap()
-            .attach_client(client);
+        attach_client_record(runtime.session_by_id.get_mut(&session_id).unwrap(), client);
     }
 
     runtime.scroll_up(first_client_id, pane_id, 2);

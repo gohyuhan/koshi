@@ -277,7 +277,8 @@ fn a_silent_link_ends_the_remote_viewer_and_its_session_removes_it() {
         start_router_with_remote_access(home_directory.path(), &runtime_directory);
     let created_session = create_session(&mut router_connection);
     let _session_processes = RunningSessions {
-        session_server_process_ids: vec![created_session.process_id],
+        runtime_directory: runtime_directory.clone(),
+        session_addresses: vec![created_session.clone()],
     };
     let session_id = created_session.session_id;
     let connection_token = match send_router_request(

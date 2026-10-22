@@ -43,11 +43,12 @@ use koshi_ipc::frame::{
     MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT, MAX_FRAME_IMAGE_TRANSFER_COUNT,
 };
 use koshi_ipc::image_chunk::ImageChunkFrame;
-use koshi_ipc::placement::{PanePlacementSnapshot, PlacementWindow};
+use koshi_ipc::placement::{PanePlacementSnapshot, PanePlacementSource, PlacementWindow};
 use koshi_renderer::snapshot::{
     ClientSnapshot, FloatingPaneSlot, GridView, ImagePlacementSnapshot, PaneSlot, PaneSnapshot,
-    PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot, PlacementTabSnapshot,
-    RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
+    PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot, PlacementSource,
+    PlacementTabSnapshot, RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot,
+    TabMetadata, TabSnapshot,
 };
 use koshi_runtime::runtime::painted_update::{ReceivedPaintedFrame, ReceivedPaneView};
 use koshi_terminal::graphics::{
@@ -151,27 +152,28 @@ fn build_placement_render_snapshot(
     image_record_by_content_id: &HashMap<u64, Arc<ImageRecord>>,
 ) -> Option<PlacementSnapshot> {
     let placement_snapshot = &held_placement_snapshot.placement_snapshot;
+    let build_pane_snapshot = |pane_snapshot: &koshi_ipc::placement::PanePlacementPaneSnapshot| {
+        let image_placement_snapshots = pane_snapshot
+            .image_placement_snapshots
+            .iter()
+            .map(|image_placement| {
+                build_image_placement_snapshot(image_placement, image_record_by_content_id)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(PlacementPaneSnapshot {
+            pane_id: pane_snapshot.pane_id,
+            terminal_grid_view: held_placement_snapshot
+                .grid_view_by_pane_id
+                .get(&pane_snapshot.pane_id)
+                .cloned(),
+            image_placement_snapshots,
+        })
+    };
     let build_tab_snapshot = |tab_snapshot: &koshi_ipc::placement::PanePlacementTabSnapshot| {
         let pane_snapshots = tab_snapshot
             .pane_snapshots
             .iter()
-            .map(|pane_snapshot| {
-                let image_placement_snapshots = pane_snapshot
-                    .image_placement_snapshots
-                    .iter()
-                    .map(|image_placement| {
-                        build_image_placement_snapshot(image_placement, image_record_by_content_id)
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                Some(PlacementPaneSnapshot {
-                    pane_id: pane_snapshot.pane_id,
-                    terminal_grid_view: held_placement_snapshot
-                        .grid_view_by_pane_id
-                        .get(&pane_snapshot.pane_id)
-                        .cloned(),
-                    image_placement_snapshots,
-                })
-            })
+            .map(build_pane_snapshot)
             .collect::<Option<Vec<_>>>()?;
         Some(PlacementTabSnapshot {
             layout_tree: tab_snapshot.layout_tree.clone(),
@@ -192,7 +194,14 @@ fn build_placement_render_snapshot(
             pane_snapshots,
         })
     };
-    let source_tab_snapshot = build_tab_snapshot(&placement_snapshot.source_tab_snapshot)?;
+    let source = match &placement_snapshot.source {
+        PanePlacementSource::Tiled(source_tab_snapshot) => {
+            PlacementSource::Tiled(build_tab_snapshot(source_tab_snapshot)?)
+        }
+        PanePlacementSource::Floating(source_pane_snapshot) => {
+            PlacementSource::Floating(build_pane_snapshot(source_pane_snapshot)?)
+        }
+    };
     let destination_tab_snapshot = match placement_snapshot.destination_tab_snapshot.as_ref() {
         Some(destination_tab_snapshot) => Some(build_tab_snapshot(destination_tab_snapshot)?),
         None => None,
@@ -200,11 +209,10 @@ fn build_placement_render_snapshot(
     Some(PlacementSnapshot {
         session_id: placement_snapshot.session_id,
         source_pane_id: placement_snapshot.source_pane_id,
-        source_tab_id: placement_snapshot.source_tab_id,
+        source,
         destination_tab_id: placement_snapshot.destination_tab_id,
         session_placement_revision: placement_snapshot.session_placement_revision,
         client_placement_revision: placement_snapshot.client_placement_revision,
-        source_tab_snapshot,
         destination_tab_snapshot,
         client_snapshot: PlacementClientSnapshot {
             client_snapshot: ClientSnapshot {
@@ -221,10 +229,7 @@ fn build_placement_render_snapshot(
             },
             reported_pane_area: placement_snapshot.client_snapshot.pane_area,
         },
-        pane_sizing: koshi_layout::solver::PaneSizing {
-            minimum_size: placement_snapshot.pane_sizing.minimum_size,
-            gap_cell_count: placement_snapshot.pane_sizing.gap_cell_count,
-        },
+        pane_sizing: koshi_layout::solver::PaneSizing::from(placement_snapshot.pane_sizing),
     })
 }
 
@@ -443,25 +448,11 @@ impl ImageCache {
         &mut self,
         image_content_ids: &[u64],
     ) -> Result<(), ImageAssemblyError> {
-        let mut shown_image_content_ids = HashSet::new();
-        if let Some(received_painted_frame) = &self.painted_frame {
-            for pane_snapshot in &received_painted_frame.painted_frame.pane_snapshots {
-                for image_placement in &pane_snapshot.image_placement_snapshots {
-                    if image_placement.is_available {
-                        shown_image_content_ids.insert(image_placement.image_content_id);
-                    }
-                }
-            }
-        }
-        if let Some(held_placement_snapshot) = &self.placement_snapshot {
-            for image_placement in
-                list_placement_image_snapshots(&held_placement_snapshot.placement_snapshot)
-            {
-                if image_placement.is_available {
-                    shown_image_content_ids.insert(image_placement.image_content_id);
-                }
-            }
-        }
+        let shown_image_content_ids: HashSet<u64> = self
+            .list_held_image_placements()
+            .filter(|image_placement| image_placement.is_available)
+            .map(|image_placement| image_placement.image_content_id)
+            .collect();
         for image_content_id in image_content_ids {
             if shown_image_content_ids.contains(image_content_id) {
                 return Err(ImageAssemblyError::ReleasedImageInUse {
@@ -495,9 +486,9 @@ impl ImageCache {
                 placement_count.checked_add(pane_snapshot.image_placement_snapshots.len())
             })
             .ok_or(ImageAssemblyError::TransferCountExceedsFrame)?;
-        let mut required_image_content_ids = HashSet::new();
+        let mut missing_image_content_ids = HashSet::new();
         let mut seen_placement_keys = HashSet::new();
-        required_image_content_ids
+        missing_image_content_ids
             .try_reserve(placement_count)
             .map_err(|_| ImageAssemblyError::ByteLengthDoesNotFit)?;
         seen_placement_keys
@@ -519,20 +510,13 @@ impl ImageCache {
                 if !is_placement_valid {
                     return Err(ImageAssemblyError::InvalidPlacement);
                 }
-                if image_placement.is_available {
-                    required_image_content_ids.insert(image_placement.image_content_id);
+                if self.is_image_record_missing(image_placement) {
+                    missing_image_content_ids.insert(image_placement.image_content_id);
                 }
             }
         }
 
-        self.missing_painted_image_content_ids = required_image_content_ids
-            .into_iter()
-            .filter(|image_content_id| {
-                !self
-                    .image_record_by_content_id
-                    .contains_key(image_content_id)
-            })
-            .collect();
+        self.missing_painted_image_content_ids = missing_image_content_ids;
         self.pending_image_transfer = None;
         self.image_transfer_count = 0;
         self.painted_frame = Some(received_painted_frame);
@@ -592,24 +576,16 @@ impl ImageCache {
             .validate()
             .map_err(|_| ImageAssemblyError::InvalidPlacement)?;
         let mut grid_view_by_pane_id = HashMap::new();
-        for placement_tab_snapshot in [
-            Some(&placement_snapshot.source_tab_snapshot),
-            placement_snapshot.destination_tab_snapshot.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            for pane_snapshot in &placement_tab_snapshot.pane_snapshots {
-                if let Some(terminal_window) = &pane_snapshot.terminal_window {
-                    grid_view_by_pane_id.insert(
-                        pane_snapshot.pane_id,
-                        decode_placement_grid_view(terminal_window)?,
-                    );
-                }
+        for pane_snapshot in placement_snapshot.list_pane_snapshots() {
+            if let Some(terminal_window) = &pane_snapshot.terminal_window {
+                grid_view_by_pane_id.insert(
+                    pane_snapshot.pane_id,
+                    decode_placement_grid_view(terminal_window)?,
+                );
             }
         }
-        let mut required_image_content_ids = HashSet::new();
-        for image_placement in list_placement_image_snapshots(&placement_snapshot) {
+        let mut missing_image_content_ids = HashSet::new();
+        for image_placement in placement_snapshot.list_image_placements() {
             let is_placement_valid = build_image_placement_snapshot_from_record(
                 image_placement,
                 self.image_record_by_content_id
@@ -619,8 +595,8 @@ impl ImageCache {
             if !is_placement_valid {
                 return Err(ImageAssemblyError::InvalidPlacement);
             }
-            if image_placement.is_available {
-                required_image_content_ids.insert(image_placement.image_content_id);
+            if self.is_image_record_missing(image_placement) {
+                missing_image_content_ids.insert(image_placement.image_content_id);
             }
         }
         self.placement_snapshot = Some(Box::new(HeldPlacementSnapshot {
@@ -628,14 +604,7 @@ impl ImageCache {
             placement_snapshot: *placement_snapshot,
             grid_view_by_pane_id,
         }));
-        self.missing_placement_image_content_ids = required_image_content_ids
-            .into_iter()
-            .filter(|image_content_id| {
-                !self
-                    .image_record_by_content_id
-                    .contains_key(image_content_id)
-            })
-            .collect();
+        self.missing_placement_image_content_ids = missing_image_content_ids;
         self.pending_image_transfer = None;
         self.image_transfer_count = 0;
         Ok(())
@@ -797,60 +766,55 @@ impl ImageCache {
         Ok(self.build_render_snapshot())
     }
 
-    /// Check a complete record against every placement that names it.
+    /// Check a complete record against every available placement of the
+    /// newest painted frame and of the held placement preview that names it.
     fn validate_image_record(
         &self,
         image_content_id: u64,
         image_record: &Arc<ImageRecord>,
     ) -> Result<(), ImageAssemblyError> {
-        let has_valid_painted_placement =
-            self.painted_frame
-                .as_ref()
-                .is_none_or(|received_painted_frame| {
-                    received_painted_frame
-                        .painted_frame
-                        .pane_snapshots
-                        .iter()
-                        .all(|pane_snapshot| {
-                            pane_snapshot
-                                .image_placement_snapshots
-                                .iter()
-                                .filter(|image_placement| {
-                                    image_placement.is_available
-                                        && image_placement.image_content_id == image_content_id
-                                })
-                                .all(|image_placement| {
-                                    build_image_placement_snapshot_from_record(
-                                        image_placement,
-                                        Some(image_record),
-                                    )
-                                    .is_some()
-                                })
-                        })
-                });
-        let has_valid_placement_snapshot =
-            self.placement_snapshot
-                .as_ref()
-                .is_none_or(|held_placement_snapshot| {
-                    list_placement_image_snapshots(&held_placement_snapshot.placement_snapshot)
-                        .into_iter()
-                        .filter(|image_placement| {
-                            image_placement.is_available
-                                && image_placement.image_content_id == image_content_id
-                        })
-                        .all(|image_placement| {
-                            build_image_placement_snapshot_from_record(
-                                image_placement,
-                                Some(image_record),
-                            )
-                            .is_some()
-                        })
-                });
-        if has_valid_painted_placement && has_valid_placement_snapshot {
+        let is_every_placement_valid = self
+            .list_held_image_placements()
+            .filter(|image_placement| {
+                image_placement.is_available && image_placement.image_content_id == image_content_id
+            })
+            .all(|image_placement| {
+                build_image_placement_snapshot_from_record(image_placement, Some(image_record))
+                    .is_some()
+            });
+        if is_every_placement_valid {
             Ok(())
         } else {
             Err(ImageAssemblyError::InvalidPlacement)
         }
+    }
+
+    /// Every image placement of the newest painted frame, then every image
+    /// placement of the held placement preview.
+    fn list_held_image_placements(&self) -> impl Iterator<Item = &FrameImagePlacement> {
+        let painted_image_placements = self
+            .painted_frame
+            .iter()
+            .flat_map(|received_painted_frame| &received_painted_frame.painted_frame.pane_snapshots)
+            .flat_map(|pane_snapshot| &pane_snapshot.image_placement_snapshots);
+        let preview_image_placements =
+            self.placement_snapshot
+                .iter()
+                .flat_map(|held_placement_snapshot| {
+                    held_placement_snapshot
+                        .placement_snapshot
+                        .list_image_placements()
+                });
+        painted_image_placements.chain(preview_image_placements)
+    }
+
+    /// Whether `image_placement` is available and the cache holds no record of
+    /// its image content.
+    fn is_image_record_missing(&self, image_placement: &FrameImagePlacement) -> bool {
+        image_placement.is_available
+            && !self
+                .image_record_by_content_id
+                .contains_key(&image_placement.image_content_id)
     }
 
     /// Rebuild the newest painted update with each available cached record,
@@ -863,24 +827,6 @@ impl ImageCache {
             )
         })
     }
-}
-
-fn list_placement_image_snapshots(
-    placement_snapshot: &PanePlacementSnapshot,
-) -> Vec<&FrameImagePlacement> {
-    let mut image_placement_snapshots = Vec::new();
-    for placement_tab_snapshot in [
-        Some(&placement_snapshot.source_tab_snapshot),
-        placement_snapshot.destination_tab_snapshot.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        for pane_snapshot in &placement_tab_snapshot.pane_snapshots {
-            image_placement_snapshots.extend(&pane_snapshot.image_placement_snapshots);
-        }
-    }
-    image_placement_snapshots
 }
 
 /// The RGBA byte count of `image_record`'s pixels.
@@ -960,6 +906,16 @@ fn build_image_placement_snapshot(
     )
 }
 
+/// `frame_image_placement` as the renderer reads it. An available placement
+/// with `cached_image_record` shows that record, with the protocol, action,
+/// display and anchor of the placement's own record header when it carries
+/// one. Any other placement is unavailable.
+///
+/// Returns `None` when the header's pixel size differs from the record's, when
+/// [`ImagePlacementSnapshot::with_content_id`] or
+/// [`ImagePlacementSnapshot::build_unavailable`] refuses the placement, or when
+/// its cell geometry does not hold its full cell size
+/// ([`ImagePlacementSnapshot::with_cell_geometry`]).
 fn build_image_placement_snapshot_from_record(
     frame_image_placement: &FrameImagePlacement,
     cached_image_record: Option<&Arc<ImageRecord>>,

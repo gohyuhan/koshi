@@ -1088,6 +1088,7 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "config",
         "debug",
         "detach",
+        "dock-pane",
         "doctor",
         "focus-pane",
         "focus-tab",
@@ -1100,16 +1101,19 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "list-sessions",
         "list-tabs",
         "lock",
+        "minimize-pane",
         "move-pane",
         "move-tab",
         "new-pane",
         "new-tab",
         "next-tab",
+        "pin-pane",
         "place-pane",
         "previous-tab",
         "remote",
         "resize-pane",
         "restart-servers",
+        "restore-pane",
         "resume-support",
         "run",
         "scroll-pane",
@@ -1120,7 +1124,9 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "share",
         "toggle-lock",
         "toggle-pane-fullscreen",
+        "undock-pane",
         "unlock",
+        "unpin-pane",
         "update",
         "version",
     ]
@@ -1477,6 +1483,58 @@ fn resize_pane_help_renders_its_about_usage_and_flags() {
     );
 }
 
+/// The long option names `koshi <verb_name> --help` lists, in the order it
+/// lists them, without the leading `--`.
+fn list_help_option_names(verb_name: &str) -> Vec<String> {
+    parse_cli_error(&["koshi", verb_name, "--help"])
+        .to_string()
+        .lines()
+        .filter_map(|help_line| {
+            let help_line = help_line.trim_start();
+            let help_line = help_line.strip_prefix("-h, ").unwrap_or(help_line);
+            let option_text = help_line.strip_prefix("--")?;
+            option_text.split_whitespace().next().map(str::to_owned)
+        })
+        .collect()
+}
+
+#[test]
+fn verb_help_lists_the_remote_flags_after_the_verbs_own_flags() {
+    assert_eq!(
+        list_help_option_names("new-pane"),
+        [
+            "direction",
+            "stacked",
+            "floating",
+            "pinned",
+            "x",
+            "y",
+            "cols",
+            "rows",
+            "pane",
+            "session",
+            "tab",
+            "client",
+            "remote",
+            "certificate-fingerprint",
+            "help",
+        ]
+    );
+    assert_eq!(
+        list_help_option_names("dock-pane"),
+        [
+            "pane",
+            "tab",
+            "direction",
+            "stack-onto",
+            "client",
+            "remote",
+            "certificate-fingerprint",
+            "help",
+        ]
+    );
+}
+
 // --- Typed action arguments ---
 
 #[test]
@@ -1487,6 +1545,12 @@ fn new_pane_parses_bare_and_with_every_flag() {
             new_pane_flags: NewPaneFlags {
                 direction: None,
                 should_stack: false,
+                should_float: false,
+                should_pin: false,
+                top_left_column: None,
+                top_left_row: None,
+                floating_pane_width: None,
+                floating_pane_height: None,
                 pane_id: None,
                 session_reference: None,
                 tab_reference: None,
@@ -1508,6 +1572,12 @@ fn new_pane_parses_bare_and_with_every_flag() {
             new_pane_flags: NewPaneFlags {
                 direction: Some(DirectionArgument::Right),
                 should_stack: false,
+                should_float: false,
+                should_pin: false,
+                top_left_column: None,
+                top_left_row: None,
+                floating_pane_width: None,
+                floating_pane_height: None,
                 pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
                 session_reference: None,
                 tab_reference: None,
@@ -1521,6 +1591,12 @@ fn new_pane_parses_bare_and_with_every_flag() {
             new_pane_flags: NewPaneFlags {
                 direction: None,
                 should_stack: true,
+                should_float: false,
+                should_pin: false,
+                top_left_column: None,
+                top_left_row: None,
+                floating_pane_width: None,
+                floating_pane_height: None,
                 pane_id: None,
                 session_reference: None,
                 tab_reference: None,
@@ -1648,6 +1724,12 @@ fn new_pane_parses_session_tab_and_client_targets() {
             new_pane_flags: NewPaneFlags {
                 direction: None,
                 should_stack: false,
+                should_float: false,
+                should_pin: false,
+                top_left_column: None,
+                top_left_row: None,
+                floating_pane_width: None,
+                floating_pane_height: None,
                 pane_id: None,
                 session_reference: Some(SessionReference::SessionName("amber-fox".to_string())),
                 tab_reference: Some(TabReference::TabName("logs".to_string())),
@@ -1949,17 +2031,10 @@ fn resize_pane_requires_a_direction() {
 }
 
 #[test]
-fn place_pane_requires_a_pane_tab_and_direction() {
+fn place_pane_requires_a_tab_and_direction_or_a_stack_target() {
     let pane_flag = format!("pane-{}", build_fixed_test_uuid());
     for argument_values in [
-        vec![
-            "koshi",
-            "place-pane",
-            "--tab",
-            "logs",
-            "--direction",
-            "left",
-        ],
+        vec!["koshi", "place-pane"],
         vec![
             "koshi",
             "place-pane",
@@ -1982,6 +2057,624 @@ fn place_pane_requires_a_pane_tab_and_direction() {
             ErrorKind::MissingRequiredArgument
         );
     }
+}
+
+/// The `(action, command)` pair `argument_values` maps to, with the routing
+/// layer's `--tab` answer `resolved_tab_id`.
+fn build_cli_action_with_resolved_tab(
+    argument_values: &[&str],
+    resolved_tab_id: TabId,
+) -> (ActionReference, Command) {
+    parse_cli_command(argument_values)
+        .build_action_command(
+            &ResolvedTargets {
+                session_id: None,
+                tab_id: Some(resolved_tab_id),
+            },
+            Direction::Right,
+        )
+        .expect("argument values must map to an action")
+}
+
+/// The `core:` action reference named `action_name`.
+fn build_core_action_reference(action_name: &str) -> ActionReference {
+    ActionReference::from_core_action_name(action_name).expect("action name is valid")
+}
+
+#[test]
+fn place_pane_stack_onto_builds_a_stack_target_with_no_tab() {
+    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
+    let stack_pane_id = PaneId::new();
+    let pane_flag = pane_id.to_string();
+    let stack_flag = stack_pane_id.to_string();
+    let parsed_command = parse_cli_command(&[
+        "koshi",
+        "place-pane",
+        "--pane",
+        &pane_flag,
+        "--stack-onto",
+        &stack_flag,
+    ]);
+    assert_eq!(parsed_command.get_target_tab_reference(), None);
+    assert_eq!(parsed_command.get_target_pane_id(), Some(pane_id));
+    assert!(!parsed_command.is_bare_dock_pane());
+    assert_eq!(
+        build_cli_action(&[
+            "koshi",
+            "place-pane",
+            "--pane",
+            &pane_flag,
+            "--stack-onto",
+            &stack_flag,
+        ]),
+        (
+            build_core_action_reference("place-pane"),
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: Some(pane_id),
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Stack {
+                    target_pane_id: stack_pane_id,
+                }),
+                expected_placement_revision: None,
+            }),
+        )
+    );
+}
+
+#[test]
+fn place_pane_without_a_pane_places_the_focused_pane() {
+    let tab_id = TabId::from_uuid(build_fixed_test_uuid());
+    let tab_flag = tab_id.to_string();
+    assert_eq!(
+        build_cli_action(&[
+            "koshi",
+            "place-pane",
+            "--tab",
+            &tab_flag,
+            "--direction",
+            "down",
+        ]),
+        (
+            build_core_action_reference("place-pane"),
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: None,
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
+                    destination_tab_id: tab_id,
+                    anchor: PanePlacementAnchor::Tab,
+                    direction: Direction::Down,
+                }),
+                expected_placement_revision: None,
+            }),
+        )
+    );
+}
+
+#[test]
+fn place_pane_and_dock_pane_refuse_a_stack_target_with_a_tab_or_a_direction() {
+    let stack_flag = PaneId::new().to_string();
+    for verb in ["place-pane", "dock-pane"] {
+        for argument_values in [
+            vec!["koshi", verb, "--stack-onto", &stack_flag, "--tab", "logs"],
+            vec![
+                "koshi",
+                verb,
+                "--stack-onto",
+                &stack_flag,
+                "--direction",
+                "left",
+            ],
+        ] {
+            assert_eq!(
+                parse_cli_error(&argument_values).kind(),
+                ErrorKind::ArgumentConflict,
+                "for {argument_values:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn undock_pane_floats_the_named_or_focused_pane_at_an_optional_cell() {
+    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
+    let pane_flag = pane_id.to_string();
+    assert_eq!(
+        build_cli_action(&["koshi", "undock-pane"]),
+        (
+            build_core_action_reference("undock-pane"),
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: None,
+                placement_target: PanePlacementTarget::Floating {
+                    top_left_cell: None,
+                },
+                expected_placement_revision: None,
+            }),
+        )
+    );
+    assert_eq!(
+        build_cli_action(&[
+            "koshi",
+            "undock-pane",
+            "--pane",
+            &pane_flag,
+            "--x",
+            "5",
+            "--y",
+            "3",
+        ]),
+        (
+            build_core_action_reference("undock-pane"),
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: Some(pane_id),
+                placement_target: PanePlacementTarget::Floating {
+                    top_left_cell: Some(Point { column: 5, row: 3 }),
+                },
+                expected_placement_revision: None,
+            }),
+        )
+    );
+    for argument_values in [
+        vec!["koshi", "undock-pane", "--x", "5"],
+        vec!["koshi", "undock-pane", "--y", "3"],
+    ] {
+        assert_eq!(
+            parse_cli_error(&argument_values).kind(),
+            ErrorKind::MissingRequiredArgument,
+            "for {argument_values:?}"
+        );
+    }
+}
+
+#[test]
+fn dock_pane_with_no_tab_is_bare_and_lands_on_its_right_side() {
+    let tab_id = TabId::from_uuid(build_fixed_test_uuid());
+    let parsed_command = parse_cli_command(&["koshi", "dock-pane"]);
+    assert!(parsed_command.is_bare_dock_pane());
+    assert_eq!(parsed_command.get_target_tab_reference(), None);
+    assert_eq!(
+        build_cli_action_with_resolved_tab(&["koshi", "dock-pane"], tab_id),
+        (
+            build_core_action_reference("dock-pane"),
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: None,
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
+                    destination_tab_id: tab_id,
+                    anchor: PanePlacementAnchor::Tab,
+                    direction: Direction::Right,
+                }),
+                expected_placement_revision: None,
+            }),
+        )
+    );
+}
+
+#[test]
+fn dock_pane_with_a_tab_or_a_stack_target_is_not_bare() {
+    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
+    let pane_flag = pane_id.to_string();
+    let tab_id = TabId::new();
+    let tab_flag = tab_id.to_string();
+    let stack_pane_id = PaneId::new();
+    let stack_flag = stack_pane_id.to_string();
+
+    let tab_command = parse_cli_command(&[
+        "koshi",
+        "dock-pane",
+        "--pane",
+        &pane_flag,
+        "--tab",
+        &tab_flag,
+        "--direction",
+        "up",
+    ]);
+    assert!(!tab_command.is_bare_dock_pane());
+    assert_eq!(
+        tab_command.get_target_tab_reference(),
+        Some(&TabReference::TabId(tab_id))
+    );
+    assert_eq!(
+        tab_command.build_action_command(&ResolvedTargets::default(), Direction::Right),
+        Some((
+            build_core_action_reference("dock-pane"),
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: Some(pane_id),
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
+                    destination_tab_id: tab_id,
+                    anchor: PanePlacementAnchor::Tab,
+                    direction: Direction::Up,
+                }),
+                expected_placement_revision: None,
+            }),
+        ))
+    );
+
+    let stack_command = parse_cli_command(&["koshi", "dock-pane", "--stack-onto", &stack_flag]);
+    assert!(!stack_command.is_bare_dock_pane());
+    assert_eq!(stack_command.get_target_pane_id(), Some(stack_pane_id));
+    assert_eq!(
+        stack_command.build_action_command(&ResolvedTargets::default(), Direction::Right),
+        Some((
+            build_core_action_reference("dock-pane"),
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: None,
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Stack {
+                    target_pane_id: stack_pane_id,
+                }),
+                expected_placement_revision: None,
+            }),
+        ))
+    );
+}
+
+#[test]
+fn move_pane_with_x_and_y_moves_a_floating_pane_for_the_named_client() {
+    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
+    let pane_flag = pane_id.to_string();
+    let client_id = ClientId::from_uuid(build_fixed_test_uuid());
+    let client_flag = client_id.to_string();
+    let argument_values = [
+        "koshi",
+        "move-pane",
+        "--pane",
+        &pane_flag,
+        "--x",
+        "12",
+        "--y",
+        "4",
+        "--client",
+        &client_flag,
+    ];
+    let parsed_command = parse_cli_command(&argument_values);
+    assert_eq!(parsed_command.get_source_client_id(), Some(client_id));
+    assert_eq!(parsed_command.get_target_client_id(), Some(client_id));
+    assert_eq!(
+        build_cli_action(&argument_values),
+        (
+            build_core_action_reference("move-floating-pane"),
+            Command::MoveFloatingPane(MoveFloatingPaneArgs {
+                pane_id,
+                top_left_cell: Point { column: 12, row: 4 },
+            }),
+        )
+    );
+}
+
+#[test]
+fn move_pane_refuses_mixed_or_incomplete_forms() {
+    let pane_flag = PaneId::new().to_string();
+    let client_flag = ClientId::new().to_string();
+    for (argument_values, expected_error_kind) in [
+        (
+            vec!["koshi", "move-pane"],
+            ErrorKind::MissingRequiredArgument,
+        ),
+        (
+            vec!["koshi", "move-pane", "--x", "5", "--y", "3"],
+            ErrorKind::MissingRequiredArgument,
+        ),
+        (
+            vec!["koshi", "move-pane", "--pane", &pane_flag, "--x", "5"],
+            ErrorKind::MissingRequiredArgument,
+        ),
+        (
+            vec!["koshi", "move-pane", "--pane", &pane_flag, "--y", "3"],
+            ErrorKind::MissingRequiredArgument,
+        ),
+        (
+            vec![
+                "koshi",
+                "move-pane",
+                "--direction",
+                "up",
+                "--pane",
+                &pane_flag,
+                "--x",
+                "5",
+                "--y",
+                "3",
+            ],
+            ErrorKind::ArgumentConflict,
+        ),
+        (
+            vec![
+                "koshi",
+                "move-pane",
+                "--direction",
+                "up",
+                "--client",
+                &client_flag,
+            ],
+            ErrorKind::ArgumentConflict,
+        ),
+    ] {
+        assert_eq!(
+            parse_cli_error(&argument_values).kind(),
+            expected_error_kind,
+            "for {argument_values:?}"
+        );
+    }
+}
+
+#[test]
+fn pin_and_unpin_pane_set_the_pin_of_the_named_or_focused_floating_pane() {
+    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
+    let pane_flag = pane_id.to_string();
+    let client_id = ClientId::from_uuid(build_fixed_test_uuid());
+    let client_flag = client_id.to_string();
+    let pin_arguments = [
+        "koshi",
+        "pin-pane",
+        "--pane",
+        &pane_flag,
+        "--client",
+        &client_flag,
+    ];
+    assert_eq!(
+        build_cli_action(&pin_arguments),
+        (
+            build_core_action_reference("pin-pane"),
+            Command::SetPanePinned(SetPanePinnedArgs {
+                pane_id: Some(pane_id),
+                is_pinned: true,
+            }),
+        )
+    );
+    assert_eq!(
+        parse_cli_command(&pin_arguments).get_source_client_id(),
+        Some(client_id)
+    );
+    assert_eq!(
+        build_cli_action(&["koshi", "unpin-pane"]),
+        (
+            build_core_action_reference("unpin-pane"),
+            Command::SetPanePinned(SetPanePinnedArgs {
+                pane_id: None,
+                is_pinned: false,
+            }),
+        )
+    );
+}
+
+#[test]
+fn minimize_and_restore_pane_act_on_one_pane_or_with_all_on_every_pane() {
+    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
+    let pane_flag = pane_id.to_string();
+    let client_id = ClientId::from_uuid(build_fixed_test_uuid());
+    let client_flag = client_id.to_string();
+    assert_eq!(
+        build_cli_action(&["koshi", "minimize-pane", "--pane", &pane_flag]),
+        (
+            build_core_action_reference("minimize-pane"),
+            Command::SetPaneMinimized(SetPaneMinimizedArgs {
+                pane_id: Some(pane_id),
+                is_minimized: true,
+            }),
+        )
+    );
+    assert_eq!(
+        build_cli_action(&["koshi", "restore-pane"]),
+        (
+            build_core_action_reference("restore-pane"),
+            Command::SetPaneMinimized(SetPaneMinimizedArgs {
+                pane_id: None,
+                is_minimized: false,
+            }),
+        )
+    );
+    let minimize_all_arguments = ["koshi", "minimize-pane", "--all", "--client", &client_flag];
+    assert_eq!(
+        build_cli_action(&minimize_all_arguments),
+        (
+            build_core_action_reference("minimize-all-floating-panes"),
+            Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs {
+                is_minimized: true,
+            }),
+        )
+    );
+    assert_eq!(
+        parse_cli_command(&minimize_all_arguments).get_source_client_id(),
+        Some(client_id)
+    );
+    assert_eq!(
+        build_cli_action(&["koshi", "restore-pane", "--all"]),
+        (
+            build_core_action_reference("restore-all-floating-panes"),
+            Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs {
+                is_minimized: false,
+            }),
+        )
+    );
+    for verb in ["minimize-pane", "restore-pane"] {
+        assert_eq!(
+            parse_cli_error(&["koshi", verb, "--pane", &pane_flag, "--all"]).kind(),
+            ErrorKind::ArgumentConflict,
+            "for {verb}"
+        );
+    }
+}
+
+#[test]
+fn new_pane_floating_builds_a_floating_placement_from_every_flag() {
+    let client_id = ClientId::from_uuid(build_fixed_test_uuid());
+    let client_flag = client_id.to_string();
+    assert_eq!(
+        build_cli_action(&["koshi", "new-pane", "--floating"]),
+        (
+            build_core_action_reference("new-pane"),
+            Command::NewPane(NewPaneArgs {
+                placement: NewPanePlacement::Floating {
+                    size: None,
+                    top_left_cell: None,
+                    is_pinned: false,
+                },
+                working_directory: None,
+                spawn_spec: None,
+                client_id: None,
+            }),
+        )
+    );
+    assert_eq!(
+        build_cli_action(&[
+            "koshi",
+            "new-pane",
+            "--floating",
+            "--pinned",
+            "--x",
+            "5",
+            "--y",
+            "3",
+            "--cols",
+            "80",
+            "--rows",
+            "60%",
+            "--client",
+            &client_flag,
+        ]),
+        (
+            build_core_action_reference("new-pane"),
+            Command::NewPane(NewPaneArgs {
+                placement: NewPanePlacement::Floating {
+                    size: Some(FloatingPaneSize {
+                        width: FloatingPaneDimension::Cells(NonZeroU16::new(80).unwrap()),
+                        height: FloatingPaneDimension::Percent(AxisPercent::try_from(60).unwrap()),
+                    }),
+                    top_left_cell: Some(Point { column: 5, row: 3 }),
+                    is_pinned: true,
+                },
+                working_directory: None,
+                spawn_spec: None,
+                client_id: Some(client_id),
+            }),
+        )
+    );
+}
+
+#[test]
+fn run_floating_builds_a_floating_placement_with_the_spawn_spec() {
+    let (action_reference, command) =
+        build_cli_action(&["koshi", "run", "--floating", "--", "htop", "-d", "5"]);
+    assert_eq!(action_reference, build_core_action_reference("run"));
+    let Command::NewPane(new_pane_args) = command else {
+        panic!("run builds a new-pane command, not {command:?}");
+    };
+    assert_eq!(
+        new_pane_args.placement,
+        NewPanePlacement::Floating {
+            size: None,
+            top_left_cell: None,
+            is_pinned: false,
+        }
+    );
+    assert_eq!(
+        new_pane_args.spawn_spec,
+        Some(build_spawn_spec_from_arguments(&[
+            "htop".to_string(),
+            "-d".to_string(),
+            "5".to_string(),
+        ]))
+    );
+}
+
+#[test]
+fn new_pane_floating_refuses_tiled_flags_and_incomplete_pairs() {
+    let pane_flag = PaneId::new().to_string();
+    for (argument_values, expected_error_kind) in [
+        (
+            vec!["koshi", "new-pane", "--floating", "--direction", "left"],
+            ErrorKind::ArgumentConflict,
+        ),
+        (
+            vec!["koshi", "new-pane", "--floating", "--stacked"],
+            ErrorKind::ArgumentConflict,
+        ),
+        (
+            vec!["koshi", "new-pane", "--floating", "--pane", &pane_flag],
+            ErrorKind::ArgumentConflict,
+        ),
+        (
+            vec!["koshi", "new-pane", "--floating", "--tab", "logs"],
+            ErrorKind::ArgumentConflict,
+        ),
+        (
+            vec!["koshi", "new-pane", "--floating", "--x", "5"],
+            ErrorKind::MissingRequiredArgument,
+        ),
+        (
+            vec!["koshi", "new-pane", "--floating", "--cols", "80"],
+            ErrorKind::MissingRequiredArgument,
+        ),
+        (
+            vec!["koshi", "new-pane", "--pinned"],
+            ErrorKind::MissingRequiredArgument,
+        ),
+        (
+            vec!["koshi", "new-pane", "--x", "5", "--y", "3"],
+            ErrorKind::MissingRequiredArgument,
+        ),
+        (
+            vec!["koshi", "run", "--floating", "--stacked", "--", "htop"],
+            ErrorKind::ArgumentConflict,
+        ),
+    ] {
+        assert_eq!(
+            parse_cli_error(&argument_values).kind(),
+            expected_error_kind,
+            "for {argument_values:?}"
+        );
+    }
+}
+
+#[test]
+fn floating_pane_dimension_parses_cells_and_percents_and_refuses_the_rest() {
+    assert_eq!(
+        parse_floating_pane_dimension("80"),
+        Ok(FloatingPaneDimension::Cells(NonZeroU16::new(80).unwrap()))
+    );
+    assert_eq!(
+        parse_floating_pane_dimension("65535"),
+        Ok(FloatingPaneDimension::Cells(
+            NonZeroU16::new(65535).unwrap()
+        ))
+    );
+    assert_eq!(
+        parse_floating_pane_dimension("1%"),
+        Ok(FloatingPaneDimension::Percent(
+            AxisPercent::try_from(1).unwrap()
+        ))
+    );
+    assert_eq!(
+        parse_floating_pane_dimension("100%"),
+        Ok(FloatingPaneDimension::Percent(
+            AxisPercent::try_from(100).unwrap()
+        ))
+    );
+    for refused_percent in ["0%", "101%", "300%", "%", "-5%", "abc%"] {
+        assert_eq!(
+            parse_floating_pane_dimension(refused_percent),
+            Err(format!(
+                "`{refused_percent}` is not a percent from 1% to 100%"
+            ))
+        );
+    }
+    for refused_size in ["0", "65536", "-1", "abc", ""] {
+        assert_eq!(
+            parse_floating_pane_dimension(refused_size),
+            Err(format!(
+                "`{refused_size}` is not a size; give cells from 1 to 65535, like `80`, or a percent, like `60%`"
+            ))
+        );
+    }
+    assert_eq!(
+        parse_cli_error(&[
+            "koshi",
+            "new-pane",
+            "--floating",
+            "--cols",
+            "0",
+            "--rows",
+            "5"
+        ])
+        .kind(),
+        ErrorKind::ValueValidation
+    );
 }
 
 #[test]
@@ -2213,10 +2906,76 @@ fn focus_pane_requires_a_pane_and_takes_an_optional_client() {
             &client_flag
         ]),
         CliCommand::FocusPane {
-            pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+            pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
+            should_focus_next_floating_pane: false,
+            should_focus_previous_floating_pane: false,
             client_id: Some(ClientId::from_uuid(build_fixed_test_uuid())),
         }
     );
+}
+
+#[test]
+fn focus_pane_next_and_previous_floating_build_the_floating_focus_targets() {
+    let client_flag = format!("client-{}", build_fixed_test_uuid());
+    assert_eq!(
+        build_cli_action(&["koshi", "focus-pane", "--next-floating"]),
+        (
+            ActionReference::from_core_action_name("focus-next-floating-pane").unwrap(),
+            Command::FocusPane(FocusPaneArgs {
+                focus_target: FocusTarget::NextFloatingPane,
+                client_id: None,
+            }),
+        )
+    );
+    assert_eq!(
+        build_cli_action(&[
+            "koshi",
+            "focus-pane",
+            "--previous-floating",
+            "--client",
+            &client_flag
+        ]),
+        (
+            ActionReference::from_core_action_name("focus-previous-floating-pane").unwrap(),
+            Command::FocusPane(FocusPaneArgs {
+                focus_target: FocusTarget::PreviousFloatingPane,
+                client_id: Some(ClientId::from_uuid(build_fixed_test_uuid())),
+            }),
+        )
+    );
+}
+
+#[test]
+fn focus_pane_takes_exactly_one_of_pane_next_floating_and_previous_floating() {
+    let pane_flag = format!("pane-{}", build_fixed_test_uuid());
+    for argument_values in [
+        vec![
+            "koshi",
+            "focus-pane",
+            "--pane",
+            &pane_flag,
+            "--next-floating",
+        ],
+        vec![
+            "koshi",
+            "focus-pane",
+            "--pane",
+            &pane_flag,
+            "--previous-floating",
+        ],
+        vec![
+            "koshi",
+            "focus-pane",
+            "--next-floating",
+            "--previous-floating",
+        ],
+    ] {
+        assert_eq!(
+            parse_cli_error(&argument_values).kind(),
+            ErrorKind::ArgumentConflict,
+            "for {argument_values:?}"
+        );
+    }
 }
 
 #[test]
@@ -2227,6 +2986,12 @@ fn run_takes_its_command_after_the_separator() {
             new_pane_flags: NewPaneFlags {
                 direction: None,
                 should_stack: false,
+                should_float: false,
+                should_pin: false,
+                top_left_column: None,
+                top_left_row: None,
+                floating_pane_width: None,
+                floating_pane_height: None,
                 pane_id: None,
                 session_reference: None,
                 tab_reference: None,
@@ -2241,6 +3006,12 @@ fn run_takes_its_command_after_the_separator() {
             new_pane_flags: NewPaneFlags {
                 direction: Some(DirectionArgument::Down),
                 should_stack: false,
+                should_float: false,
+                should_pin: false,
+                top_left_column: None,
+                top_left_row: None,
+                floating_pane_width: None,
+                floating_pane_height: None,
                 pane_id: None,
                 session_reference: None,
                 tab_reference: None,
@@ -2260,6 +3031,12 @@ fn run_takes_an_optional_source_pane() {
             new_pane_flags: NewPaneFlags {
                 direction: None,
                 should_stack: false,
+                should_float: false,
+                should_pin: false,
+                top_left_column: None,
+                top_left_row: None,
+                floating_pane_width: None,
+                floating_pane_height: None,
                 pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
                 session_reference: None,
                 tab_reference: None,
@@ -2680,7 +3457,7 @@ fn action_subcommands_map_to_their_exact_commands() {
             ],
             "place-pane",
             Command::PlacePane(PlacePaneArgs {
-                source_pane_id: pane_id,
+                source_pane_id: Some(pane_id),
                 placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                     destination_tab_id: tab_id,
                     anchor: PanePlacementAnchor::Tab,
@@ -2853,10 +3630,36 @@ fn every_mapped_action_matches_its_seeded_command_kind() {
             "--pane",
             "0192f0c1-2345-7000-8000-000000000001",
         ],
+        &["koshi", "focus-pane", "--next-floating"],
+        &["koshi", "focus-pane", "--previous-floating"],
         &["koshi", "lock"],
         &["koshi", "unlock"],
         &["koshi", "toggle-lock"],
         &["koshi", "run", "--", "htop"],
+        &["koshi", "new-pane", "--floating"],
+        &["koshi", "undock-pane"],
+        &[
+            "koshi",
+            "dock-pane",
+            "--tab",
+            "tab-0192f0c1-2345-7000-8000-000000000001",
+        ],
+        &[
+            "koshi",
+            "move-pane",
+            "--pane",
+            "0192f0c1-2345-7000-8000-000000000001",
+            "--x",
+            "1",
+            "--y",
+            "1",
+        ],
+        &["koshi", "pin-pane"],
+        &["koshi", "unpin-pane"],
+        &["koshi", "minimize-pane"],
+        &["koshi", "minimize-pane", "--all"],
+        &["koshi", "restore-pane"],
+        &["koshi", "restore-pane", "--all"],
     ];
 
     for argument_values in argument_value_lists {
@@ -3166,6 +3969,13 @@ fn target_client_names_the_client_of_every_verb_that_takes_one() {
                 "--client",
                 &client_flag,
             ],
+            true,
+        ),
+        (vec!["koshi", "undock-pane", "--client", &client_flag], true),
+        (vec!["koshi", "dock-pane", "--client", &client_flag], true),
+        (vec!["koshi", "unpin-pane", "--client", &client_flag], true),
+        (
+            vec!["koshi", "restore-pane", "--client", &client_flag],
             true,
         ),
     ];
@@ -3551,6 +4361,12 @@ fn run_accepts_an_empty_program_token() {
             new_pane_flags: NewPaneFlags {
                 direction: None,
                 should_stack: false,
+                should_float: false,
+                should_pin: false,
+                top_left_column: None,
+                top_left_row: None,
+                floating_pane_width: None,
+                floating_pane_height: None,
                 pane_id: None,
                 session_reference: None,
                 tab_reference: None,
@@ -3776,7 +4592,7 @@ fn place_pane_with_a_named_tab_is_classified_before_routing_resolves_the_tab() {
     assert_eq!(
         mapped_command,
         Command::PlacePane(PlacePaneArgs {
-            source_pane_id: pane_id,
+            source_pane_id: Some(pane_id),
             placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
                 destination_tab_id,
                 anchor: PanePlacementAnchor::Tab,
@@ -3920,7 +4736,7 @@ fn a_discovery_query_names_its_session_scope() {
 }
 
 /// Every action name `build_action_command` builds is a registered core action, and the
-/// 19 action verbs name 19 different actions.
+/// 30 argument lists name 30 different actions.
 #[test]
 fn every_cli_action_name_is_a_registered_core_action() {
     use std::collections::BTreeSet;
@@ -3957,10 +4773,35 @@ fn every_cli_action_name_is_a_registered_core_action() {
         vec!["koshi", "next-tab"],
         vec!["koshi", "previous-tab"],
         vec!["koshi", "focus-pane", "--pane", &pane_id_text],
+        vec!["koshi", "focus-pane", "--next-floating"],
+        vec!["koshi", "focus-pane", "--previous-floating"],
         vec!["koshi", "lock"],
         vec!["koshi", "unlock"],
         vec!["koshi", "toggle-lock"],
         vec!["koshi", "run", "--", "htop"],
+        vec!["koshi", "undock-pane"],
+        vec![
+            "koshi",
+            "dock-pane",
+            "--tab",
+            "tab-0192f0c1-2345-7000-8000-000000000001",
+        ],
+        vec![
+            "koshi",
+            "move-pane",
+            "--pane",
+            &pane_id_text,
+            "--x",
+            "1",
+            "--y",
+            "1",
+        ],
+        vec!["koshi", "pin-pane"],
+        vec!["koshi", "unpin-pane"],
+        vec!["koshi", "minimize-pane"],
+        vec!["koshi", "minimize-pane", "--all"],
+        vec!["koshi", "restore-pane"],
+        vec!["koshi", "restore-pane", "--all"],
     ];
 
     let mut cli_action_names = BTreeSet::new();
@@ -3982,22 +4823,33 @@ fn every_cli_action_name_is_a_registered_core_action() {
     let expected_registered_action_names: BTreeSet<String> = [
         "core:close-pane",
         "core:close-tab",
+        "core:dock-pane",
+        "core:focus-next-floating-pane",
         "core:focus-pane",
+        "core:focus-previous-floating-pane",
         "core:focus-tab",
         "core:lock",
+        "core:minimize-all-floating-panes",
+        "core:minimize-pane",
+        "core:move-floating-pane",
         "core:move-pane",
         "core:move-tab",
         "core:new-pane",
         "core:new-tab",
         "core:next-tab",
+        "core:pin-pane",
         "core:place-pane",
         "core:previous-tab",
         "core:resize-pane",
+        "core:restore-all-floating-panes",
+        "core:restore-pane",
         "core:run",
         "core:scroll-pane",
         "core:toggle-lock",
         "core:toggle-pane-fullscreen",
+        "core:undock-pane",
         "core:unlock",
+        "core:unpin-pane",
         "core:write-to-pane",
     ]
     .map(String::from)

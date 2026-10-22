@@ -5,8 +5,9 @@
 //! catalog at startup from the keybinding layers and the action table: it
 //! folds the layers with [`merge_keymaps`], joins every surviving binding to
 //! its action's display name from the [`ActionRegistry`], and files the
-//! result per mode behind [`Arc`]s. [`KeymapHintCatalog::build_hints_for_mode`]
-//! then hands one mode's data out as `Arc` clones, and
+//! result per mode behind [`Arc`]s, in each label form a frame shows.
+//! [`KeymapHintCatalog::build_frame_hints`] then hands one frame's data out as
+//! `Arc` clones, and
 //! [`KeymapHintCatalog::match_sequence`] answers one pending key sequence from
 //! the same folded map.
 //!
@@ -22,7 +23,10 @@ use crate::conflict::{build_keymap_layers, KeymapLayer};
 use crate::key::Leader;
 use crate::keymap_merge::{merge_keymaps, MergedKeymap, MergedModeKeymap};
 use crate::types::{build_default_prefix_labels, BoundAction, KeybindingsConfig, ModeName};
-use koshi_core::action::ActionReference;
+use koshi_core::action::{
+    ActionReference, MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT, MOVE_FLOATING_PANE_HINT,
+    MOVE_FOCUSED_PANE_HINT, MOVE_TILED_PANE_HINT,
+};
 use koshi_core::key::{KeyChord, KeySequence};
 use koshi_core::lock::LockMode;
 use koshi_core::registry::ActionRegistry;
@@ -80,9 +84,9 @@ pub struct KeymapHintCatalog {
     chord_timeout_duration: Duration,
     /// The chord that unlocks a locked client, ahead of every other lookup.
     unlock_chord: KeyChord,
-    /// One sorted binding list per built-in mode; a mode nothing binds in
-    /// holds an empty list.
-    hint_bindings_by_mode_name: BTreeMap<ModeName, Arc<Vec<HintBinding>>>,
+    /// One sorted binding list per built-in mode in each label form; a mode
+    /// nothing binds in holds empty lists.
+    hint_bindings_by_mode_name: BTreeMap<ModeName, ModeHintBindings>,
     /// Per-mode keys a user surface removed; empty until user layers load.
     removed_key_sequences_by_mode_name: BTreeMap<ModeName, Arc<BTreeSet<KeySequence>>>,
     /// Display labels for the default table's prefix chords.
@@ -146,14 +150,35 @@ impl KeymapHintCatalog {
                 .mode_keymap_by_name
                 .get(&mode_name)
                 .unwrap_or(&empty_merged_mode_keymap);
+            let hint_bindings = Arc::new(build_mode_hint_bindings(
+                merged_mode_keymap,
+                registry,
+                lock_mode,
+                &unlock_action_reference,
+            ));
+            let tiled_pane_hint_bindings =
+                relabel_hint_bindings(&hint_bindings, MOVE_FOCUSED_PANE_HINT, MOVE_TILED_PANE_HINT);
+            let floating_pane_hint_bindings = relabel_hint_bindings(
+                &hint_bindings,
+                MOVE_FOCUSED_PANE_HINT,
+                MOVE_FLOATING_PANE_HINT,
+            );
             hint_bindings_by_mode_name.insert(
                 mode_name.clone(),
-                Arc::new(build_mode_hint_bindings(
-                    merged_mode_keymap,
-                    registry,
-                    lock_mode,
-                    &unlock_action_reference,
-                )),
+                ModeHintBindings {
+                    mouse_selection_tiled_pane_hint_bindings: relabel_hint_bindings(
+                        &tiled_pane_hint_bindings,
+                        MOUSE_SELECT_HINT,
+                        MOUSE_UNSELECT_HINT,
+                    ),
+                    mouse_selection_floating_pane_hint_bindings: relabel_hint_bindings(
+                        &floating_pane_hint_bindings,
+                        MOUSE_SELECT_HINT,
+                        MOUSE_UNSELECT_HINT,
+                    ),
+                    tiled_pane_hint_bindings,
+                    floating_pane_hint_bindings,
+                },
             );
             removed_key_sequences_by_mode_name.insert(
                 mode_name,
@@ -234,15 +259,42 @@ impl KeymapHintCatalog {
         self.unlock_chord
     }
 
-    /// The hint-bar data for one client's current mode: the mode's bindings
-    /// and removals shared by reference, plus the labels and the revert flag.
-    pub fn build_hints_for_mode(&self, lock_mode: LockMode) -> KeymapHints {
+    /// The hint-bar data one frame is painted from: the bindings and removals
+    /// of `lock_mode` shared by reference, plus the prefix labels and the
+    /// revert flag.
+    ///
+    /// Every entry labelled [`MOUSE_SELECT_HINT`] reads [`MOUSE_UNSELECT_HINT`]
+    /// while `is_mouse_selection_enabled` is `true`. Every entry labelled
+    /// [`MOVE_FOCUSED_PANE_HINT`] reads [`MOVE_FLOATING_PANE_HINT`] while
+    /// `is_focused_pane_floating` is `true`, and [`MOVE_TILED_PANE_HINT`]
+    /// otherwise. Matching is on the label, so a rebound or duplicated binding
+    /// is relabelled too: `Mouse Select` becomes `Mouse Unselect` on every key
+    /// bound to `core:mouse-select`.
+    pub fn build_frame_hints(
+        &self,
+        lock_mode: LockMode,
+        is_mouse_selection_enabled: bool,
+        is_focused_pane_floating: bool,
+    ) -> KeymapHints {
         let mode_name = lock_mode.get_keymap_name();
         KeymapHints {
             hint_bindings: self
                 .hint_bindings_by_mode_name
                 .get(mode_name)
-                .map(Arc::clone)
+                .map(|mode_hint_bindings| {
+                    let hint_bindings = match (is_mouse_selection_enabled, is_focused_pane_floating)
+                    {
+                        (false, false) => &mode_hint_bindings.tiled_pane_hint_bindings,
+                        (false, true) => &mode_hint_bindings.floating_pane_hint_bindings,
+                        (true, false) => {
+                            &mode_hint_bindings.mouse_selection_tiled_pane_hint_bindings
+                        }
+                        (true, true) => {
+                            &mode_hint_bindings.mouse_selection_floating_pane_hint_bindings
+                        }
+                    };
+                    Arc::clone(hint_bindings)
+                })
                 .unwrap_or_default(),
             prefix_labels: Arc::clone(&self.prefix_labels),
             removed_key_sequences: self
@@ -253,6 +305,48 @@ impl KeymapHintCatalog {
             is_reverted_to_defaults: self.is_reverted_to_defaults,
         }
     }
+}
+
+/// One built-in mode's sorted binding list in each label form that
+/// [`KeymapHintCatalog::build_frame_hints`] hands out. Two forms with the same
+/// labels share one list.
+#[derive(Clone)]
+struct ModeHintBindings {
+    /// `Mouse Select` and `Move Tiled Pane` labels.
+    tiled_pane_hint_bindings: Arc<Vec<HintBinding>>,
+    /// `Mouse Select` and `Move Floating Pane` labels.
+    floating_pane_hint_bindings: Arc<Vec<HintBinding>>,
+    /// `Mouse Unselect` and `Move Tiled Pane` labels.
+    mouse_selection_tiled_pane_hint_bindings: Arc<Vec<HintBinding>>,
+    /// `Mouse Unselect` and `Move Floating Pane` labels.
+    mouse_selection_floating_pane_hint_bindings: Arc<Vec<HintBinding>>,
+}
+
+/// `hint_bindings` with every entry labelled `current_label` relabelled
+/// `replacement_label`, and nothing else changed. With no entry labelled
+/// `current_label`, it returns `hint_bindings` itself, the same [`Arc`].
+fn relabel_hint_bindings(
+    hint_bindings: &Arc<Vec<HintBinding>>,
+    current_label: &str,
+    replacement_label: &str,
+) -> Arc<Vec<HintBinding>> {
+    let has_current_label = hint_bindings
+        .iter()
+        .any(|hint_binding| hint_binding.action_display_name == current_label);
+    if !has_current_label {
+        return Arc::clone(hint_bindings);
+    }
+    let relabelled_hint_bindings: Vec<HintBinding> = hint_bindings
+        .iter()
+        .map(|hint_binding| {
+            let mut hint_binding = hint_binding.clone();
+            if hint_binding.action_display_name == current_label {
+                replacement_label.clone_into(&mut hint_binding.action_display_name);
+            }
+            hint_binding
+        })
+        .collect();
+    Arc::new(relabelled_hint_bindings)
 }
 
 /// Exact and longer-prefix results for one sequence lookup.

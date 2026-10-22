@@ -1,15 +1,17 @@
 //! Tests for mouse hit-testing: chrome rows win over the pane area, a click maps
 //! to the pane content, its border side, a stack header, or a tab, a border
-//! corner reads as its vertical side, the layout is centered and the letterbox
-//! margin hits nothing, a pane's content rect and the cell inside it — counted
-//! from one, or clamped from zero — follow that centering, a committed left
-//! region moves all of that right, a commit holding no region leaves every row
-//! to the panes, the gap between two panes and a pane that is not drawn hit
-//! nothing, a pane with no content cells clamps to its own origin, a stack
-//! header wins the cells it covers, the tab strip reports its first visible tab,
-//! two clients of different sizes hit-test independently, degenerate frames
-//! are safe, and floating panes hit front to back over the tiled layer and the
-//! letterbox margin, with their content, border, titlebar and controls apart.
+//! corner reads as its vertical side and names its horizontal side, the layout
+//! is centered and the letterbox margin hits nothing, a pane's content rect and
+//! the cell inside it — counted from one, or clamped from zero — follow that
+//! centering, a committed left region moves all of that right, a commit holding
+//! no region leaves every row to the panes, the gap between two panes and a
+//! pane that is not drawn hit nothing, a border cell goes to the pane whose box
+//! holds it, a pane with no content cells clamps to its own origin, a stack
+//! header wins the cells it covers, the tab strip reports its first visible
+//! tab, two clients of different sizes hit-test independently, degenerate
+//! frames are safe, and floating panes hit front to back over the tiled layer
+//! and the letterbox margin, with their content, border, titlebar and controls
+//! apart.
 
 use super::*;
 
@@ -150,7 +152,8 @@ fn full_pane_content_border_and_chrome() {
         ),
         HitRegion::PaneBorder {
             pane_id,
-            side: Direction::Left
+            side: Direction::Left,
+            corner_horizontal_side: None,
         }
     );
     assert_eq!(
@@ -160,7 +163,8 @@ fn full_pane_content_border_and_chrome() {
         ),
         HitRegion::PaneBorder {
             pane_id,
-            side: Direction::Right
+            side: Direction::Right,
+            corner_horizontal_side: None,
         }
     );
     // Top row is the tabline (drawn over the pane), off any tab ribbon here.
@@ -216,7 +220,8 @@ fn centered_layout_exposes_top_bottom_borders_and_letterbox() {
         ),
         HitRegion::PaneBorder {
             pane_id,
-            side: Direction::Up
+            side: Direction::Up,
+            corner_horizontal_side: None,
         }
     );
     // Bottom border row of the pane, above the statusline.
@@ -227,7 +232,8 @@ fn centered_layout_exposes_top_bottom_borders_and_letterbox() {
         ),
         HitRegion::PaneBorder {
             pane_id,
-            side: Direction::Down
+            side: Direction::Down,
+            corner_horizontal_side: None,
         }
     );
     // Left of the content rect → letterbox margin.
@@ -401,7 +407,8 @@ fn a_left_region_shifts_the_pane_area_right() {
         resolve_screen_hit_region(20, 1),
         HitRegion::PaneBorder {
             pane_id,
-            side: Direction::Left
+            side: Direction::Left,
+            corner_horizontal_side: Some(Direction::Up),
         }
     );
     assert_eq!(
@@ -518,14 +525,16 @@ fn a_committed_solve_with_no_regions_leaves_every_row_to_the_panes() {
         resolve_screen_hit_region(20, 0),
         HitRegion::PaneBorder {
             pane_id,
-            side: Direction::Up
+            side: Direction::Up,
+            corner_horizontal_side: None,
         }
     );
     assert_eq!(
         resolve_screen_hit_region(20, 9),
         HitRegion::PaneBorder {
             pane_id,
-            side: Direction::Down
+            side: Direction::Down,
+            corner_horizontal_side: None,
         }
     );
     assert_eq!(
@@ -577,14 +586,16 @@ fn a_pane_with_a_zero_cell_content_area_clamps_every_cell_to_its_origin() {
         resolve_hit_region(build_frame_layout(), build_screen_point(0, 5)),
         HitRegion::PaneBorder {
             pane_id,
-            side: Direction::Left
+            side: Direction::Left,
+            corner_horizontal_side: Some(Direction::Up),
         }
     );
     assert_eq!(
         resolve_hit_region(build_frame_layout(), build_screen_point(1, 5)),
         HitRegion::PaneBorder {
             pane_id,
-            side: Direction::Right
+            side: Direction::Right,
+            corner_horizontal_side: Some(Direction::Up),
         }
     );
 }
@@ -741,10 +752,9 @@ fn tabs_hit_by_column() {
     let first_tab_id = TabId::new();
     let second_tab_id = TabId::new();
     // The session block and its version badge hold the left, then each 7-cell
-    // tab ribbon with a one-cell gap between them. The columns come from the
-    // same solve the paint uses, so the badge's width is never spelled out.
-    // The row is sized from the badge, so a longer version string widens the
-    // row instead of squeezing the tabs out of it.
+    // tab ribbon with a one-cell gap between them. The row is the badge's
+    // width plus 31 columns, and the tab columns come from the same solve the
+    // paint uses.
     let tabline_column_count = compute_version_badge_column_count() + 31;
     let render_snapshot = build_render_snapshot(
         Size {
@@ -818,8 +828,7 @@ fn scroll_arrows_hit_test_to_their_arrows() {
     let tab_ids: Vec<TabId> = (0..8).map(|_| TabId::new()).collect();
     let tab_ids_and_names: Vec<(TabId, &str)> =
         tab_ids.iter().map(|tab_id| (*tab_id, "tab")).collect();
-    // Sized from the version badge, so a longer version string widens the row
-    // instead of starving the tab strip the arrows are measured against.
+    // The row is the version badge's width plus 21 columns for the tab strip.
     let tabline_column_count = compute_version_badge_column_count() + 21;
     let render_snapshot = build_render_snapshot(
         Size {
@@ -926,10 +935,10 @@ fn degenerate_frames_hit_nothing() {
     );
 }
 
-/// A border corner cell reads as the left or right edge, never the top or
-/// bottom one.
+/// A border corner cell reads as the left or right edge and names the top or
+/// bottom edge it also lies on.
 #[test]
-fn a_border_corner_reads_as_its_vertical_side() {
+fn a_border_corner_reads_as_its_vertical_side_and_names_its_horizontal_side() {
     let pane_id = PaneId::new();
     // Centered, so the pane's own top and bottom rows sit clear of the chrome
     // rows and all four corners are reachable: the box spans (2, 2)–(41, 11).
@@ -957,28 +966,79 @@ fn a_border_corner_reads_as_its_vertical_side() {
         resolve_border_corner_hit_region(2, 2),
         HitRegion::PaneBorder {
             pane_id,
-            side: Direction::Left
+            side: Direction::Left,
+            corner_horizontal_side: Some(Direction::Up),
         }
     );
     assert_eq!(
         resolve_border_corner_hit_region(2, 11),
         HitRegion::PaneBorder {
             pane_id,
-            side: Direction::Left
+            side: Direction::Left,
+            corner_horizontal_side: Some(Direction::Down),
         }
     );
     assert_eq!(
         resolve_border_corner_hit_region(41, 2),
         HitRegion::PaneBorder {
             pane_id,
-            side: Direction::Right
+            side: Direction::Right,
+            corner_horizontal_side: Some(Direction::Up),
         }
     );
     assert_eq!(
         resolve_border_corner_hit_region(41, 11),
         HitRegion::PaneBorder {
             pane_id,
-            side: Direction::Right
+            side: Direction::Right,
+            corner_horizontal_side: Some(Direction::Down),
+        }
+    );
+}
+
+/// In a top and bottom split, a border cell on the column both boxes share goes
+/// to the pane whose box holds the cell.
+#[test]
+fn a_border_cell_goes_to_the_pane_whose_box_holds_it() {
+    let top_pane_id = PaneId::new();
+    let bottom_pane_id = PaneId::new();
+    let render_snapshot = build_render_snapshot(
+        Size {
+            column_count: 40,
+            row_count: 10,
+        },
+        Size {
+            column_count: 40,
+            row_count: 10,
+        },
+        &[
+            (top_pane_id, build_cell_rect(0, 0, 40, 5), true),
+            (bottom_pane_id, build_cell_rect(0, 5, 40, 5), true),
+        ],
+        &[],
+        &[],
+    );
+    let resolve_screen_hit_region = |screen_column, screen_row| {
+        resolve_hit_region(
+            render_snapshot.build_frame_layout(ViewerChrome::default()),
+            build_screen_point(screen_column, screen_row),
+        )
+    };
+
+    assert_eq!(
+        resolve_screen_hit_region(0, 7),
+        HitRegion::PaneBorder {
+            pane_id: bottom_pane_id,
+            side: Direction::Left,
+            corner_horizontal_side: None,
+        }
+    );
+    assert_eq!(
+        resolve_screen_hit_region(0, 4),
+        HitRegion::PaneBorder {
+            pane_id: top_pane_id,
+            side: Direction::Left,
+            corner_horizontal_side: Some(Direction::Down),
         }
     );
 }
@@ -1378,7 +1438,8 @@ fn a_cell_goes_to_the_topmost_floating_pane_drawn_over_it() {
         resolve_screen_hit_region(30, 16),
         HitRegion::PaneBorder {
             pane_id: upper_floating_pane_id,
-            side: Direction::Left
+            side: Direction::Left,
+            corner_horizontal_side: None,
         }
     );
 }
@@ -1427,7 +1488,8 @@ fn a_floating_pane_in_the_letterbox_margin_is_hit() {
         ),
         HitRegion::PaneBorder {
             pane_id: floating_pane_id,
-            side: Direction::Up
+            side: Direction::Up,
+            corner_horizontal_side: None,
         }
     );
 }
@@ -1528,6 +1590,7 @@ fn a_floating_panes_titlebar_parts_hit_where_they_are_drawn() {
             HitRegion::PaneBorder {
                 pane_id,
                 side: Direction::Left,
+                corner_horizontal_side: None,
             },
         ),
         (
@@ -1536,6 +1599,7 @@ fn a_floating_panes_titlebar_parts_hit_where_they_are_drawn() {
             HitRegion::PaneBorder {
                 pane_id,
                 side: Direction::Left,
+                corner_horizontal_side: None,
             },
         ),
         (
@@ -1544,6 +1608,7 @@ fn a_floating_panes_titlebar_parts_hit_where_they_are_drawn() {
             HitRegion::PaneBorder {
                 pane_id,
                 side: Direction::Right,
+                corner_horizontal_side: None,
             },
         ),
         (
@@ -1552,6 +1617,7 @@ fn a_floating_panes_titlebar_parts_hit_where_they_are_drawn() {
             HitRegion::PaneBorder {
                 pane_id,
                 side: Direction::Up,
+                corner_horizontal_side: None,
             },
         ),
         (
@@ -1560,6 +1626,25 @@ fn a_floating_panes_titlebar_parts_hit_where_they_are_drawn() {
             HitRegion::PaneBorder {
                 pane_id,
                 side: Direction::Down,
+                corner_horizontal_side: None,
+            },
+        ),
+        (
+            0,
+            0,
+            HitRegion::PaneBorder {
+                pane_id,
+                side: Direction::Left,
+                corner_horizontal_side: Some(Direction::Up),
+            },
+        ),
+        (
+            47,
+            11,
+            HitRegion::PaneBorder {
+                pane_id,
+                side: Direction::Right,
+                corner_horizontal_side: Some(Direction::Down),
             },
         ),
     ] {

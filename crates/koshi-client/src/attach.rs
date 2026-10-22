@@ -44,8 +44,9 @@
 //! the same way. Keys and pastes typed while the client comes back are held in
 //! the order typed and sent after the size report on the new link. The hold
 //! keeps at most 1024 inputs and one frame of paste text: past either, every
-//! input typed during that restart is dropped. While pane placement is on,
-//! nothing is held.
+//! input typed during that restart is dropped. While dock/undock mode, pane
+//! placement mode, the move chooser, or floating pane move mode is on, nothing
+//! is held.
 //!
 //! A viewer of a session on a server sends a `Ping` every third of
 //! `remote-link-timeout-ms` while it waits for the session's answer to its
@@ -315,7 +316,8 @@ pub(crate) struct ViewerPaint {
     /// The pane under the pointer and where the tab strip sits, for the tab the
     /// frame on the screen shows.
     pub(crate) chrome: ViewerChrome,
-    /// The active base or placement mode whose bindings the hint bar lists.
+    /// The input mode that owns the viewer's keyboard
+    /// ([`Client::get_active_input_mode`]), whose bindings the hint bar lists.
     pub(crate) lock_mode: LockMode,
     /// Whether the frame's viewer takes the mouse for text selection.
     pub(crate) is_mouse_selection_enabled: bool,
@@ -329,6 +331,8 @@ pub(crate) struct ViewerPaint {
     pub(crate) placement_presentation: Option<PanePlacementPresentation>,
 }
 
+/// How long one placement preview change, committed placement slide, or
+/// undock slide runs: 160 ms.
 const PLACEMENT_ANIMATION_DURATION: Duration = Duration::from_millis(160);
 
 /// The viewer-owned interpolation between two placement snapshots.
@@ -467,7 +471,8 @@ fn build_pane_placement_presentation(
             target_message: None,
         });
     };
-    let is_cross_tab = placement_snapshot.source_tab_id != placement_snapshot.destination_tab_id;
+    let is_cross_tab =
+        placement_snapshot.find_source_tab_id() != Some(placement_snapshot.destination_tab_id);
     let confirmation_hint = if client.is_placement_confirmation_pending() {
         "Waiting for session"
     } else if client.is_placement_drag_active() {
@@ -498,11 +503,8 @@ fn build_pane_placement_presentation(
                         (target_pane_ids.clone(), "Other panes")
                     }
                     PanePlacementAnchor::Tab => {
-                        let destination_tab_snapshot = if is_cross_tab {
-                            placement_snapshot.destination_tab_snapshot.as_ref()
-                        } else {
-                            Some(&placement_snapshot.source_tab_snapshot)
-                        };
+                        let destination_tab_snapshot = placement_snapshot
+                            .find_tab_snapshot(placement_snapshot.destination_tab_id);
                         (
                             destination_tab_snapshot
                                 .map(|destination_tab_snapshot| {
@@ -531,17 +533,34 @@ fn build_pane_placement_presentation(
                     },
                 )
             }
+            TiledPlacementTarget::Stack { target_pane_id } => (
+                vec![*target_pane_id],
+                "Moving pane will open in this stack".to_string(),
+                "Moving pane",
+                PanePlacementMessage {
+                    full_text: "Other pane will stack behind it".to_string(),
+                    compact_text: "Other pane",
+                    detail_text: None,
+                },
+            ),
         };
     target_pane_ids.retain(|target_pane_id| *target_pane_id != source_pane_id);
     let moving_pane_detail_text = if client.is_placement_confirmation_pending() {
         confirmation_hint.to_string()
     } else if is_cross_tab {
         match placement_target {
-            TiledPlacementTarget::Swap { .. } => format!(
-                "Other pane takes the old place in {}",
-                placement_snapshot.source_tab_snapshot.tab_name
-            ),
-            TiledPlacementTarget::Split { .. } => format!("In {destination_tab_name}"),
+            TiledPlacementTarget::Swap { .. } => {
+                match placement_snapshot.find_source_tab_snapshot() {
+                    Some(source_tab_snapshot) => format!(
+                        "Other pane takes the old place in {}",
+                        source_tab_snapshot.tab_name
+                    ),
+                    None => format!("In {destination_tab_name}"),
+                }
+            }
+            TiledPlacementTarget::Split { .. } | TiledPlacementTarget::Stack { .. } => {
+                format!("In {destination_tab_name}")
+            }
         }
     } else {
         confirmation_hint.to_string()
@@ -729,7 +748,8 @@ impl<B: Backend> Screen<B> {
     /// Apply the pending frame to `client` and paint it from the result. A
     /// rejected paint puts `client` back as it was before the frame and keeps
     /// the frame pending. Before a native image retry is due, it paints nothing
-    /// and changes nothing.
+    /// and changes nothing. The paint shows no placement preview while
+    /// [`Client::is_floating_dock_selection_idle`] is `true`.
     fn commit_pending_snapshot(
         &mut self,
         client: &mut Client,
@@ -755,11 +775,8 @@ impl<B: Backend> Screen<B> {
             .client_snapshot
             .viewport_size;
         let committed_regions = self.compute_committed_regions(viewport_size);
-        let placement_display_snapshot = self.update_placement_animation(
-            client,
-            client.get_placement_target().as_ref(),
-            current_time,
-        );
+        let placement_display_snapshot =
+            self.update_previewed_placement_animation(client, current_time);
         let committed_placement_tab_ids = std::mem::take(&mut self.committed_placement_tab_ids);
         let committed_placement_tab_snapshot = self.update_committed_placement_animation(
             client,
@@ -774,12 +791,9 @@ impl<B: Backend> Screen<B> {
             current_time,
         );
         let snapshot = self.pending_snapshot.as_ref()?;
-        let placement_render_snapshot = placement_display_snapshot
-            .as_ref()
-            .or(self.placement_snapshot.as_ref());
         let displayed_render_snapshot = build_displayed_render_snapshot(
             snapshot,
-            placement_render_snapshot,
+            placement_display_snapshot.as_ref(),
             committed_placement_tab_snapshot,
             &undock_floating_pane_slots,
         );
@@ -833,7 +847,7 @@ impl<B: Backend> Screen<B> {
         let painted_viewer_chrome = frame_paint.chrome;
         self.shown_viewer_paint = Some(frame_paint);
         self.shown_placement_snapshot = self.placement_snapshot.clone();
-        self.shown_placement_render_snapshot = placement_render_snapshot.cloned();
+        self.shown_placement_render_snapshot = placement_display_snapshot;
         self.shown_undock_floating_pane_slots = undock_floating_pane_slots;
         self.shown_tab_snapshot = Some(
             displayed_snapshot
@@ -841,7 +855,7 @@ impl<B: Backend> Screen<B> {
                 .active_tab_snapshot
                 .clone(),
         );
-        let mouse_frame_snapshot = if placement_render_snapshot.is_some() {
+        let mouse_frame_snapshot = if self.shown_placement_render_snapshot.is_some() {
             displayed_snapshot
         } else {
             &snapshot
@@ -864,7 +878,9 @@ impl<B: Backend> Screen<B> {
     /// `active_tab_id` is `Some` after the first frame has been drawn. A viewer
     /// with no changed local state, and no finished image request since its
     /// last paint, draws nothing. A viewer whose viewport no longer matches the
-    /// committed region solve draws nothing until the next session frame.
+    /// committed region solve draws nothing until the next session frame. No
+    /// placement preview is drawn while
+    /// [`Client::is_floating_dock_selection_idle`] is `true`.
     fn refresh(&mut self, client: &mut Client, active_tab_id: Option<TabId>) -> Option<MouseFrame> {
         self.refresh_at(client, active_tab_id, Instant::now())
     }
@@ -887,11 +903,8 @@ impl<B: Backend> Screen<B> {
             client,
             get_frame_placement_revision(self.last_snapshot.as_ref()?),
         );
-        let placement_display_snapshot = self.update_placement_animation(
-            client,
-            client.get_placement_target().as_ref(),
-            current_time,
-        );
+        let placement_display_snapshot =
+            self.update_previewed_placement_animation(client, current_time);
         let committed_placement_tab_snapshot = self.update_committed_placement_animation(
             client,
             &[],
@@ -904,17 +917,15 @@ impl<B: Backend> Screen<B> {
             current_time,
         );
         let snapshot = self.last_snapshot.as_ref()?;
-        let placement_render_snapshot = placement_display_snapshot
+        let displayed_active_tab_id = placement_display_snapshot
             .as_ref()
-            .or(self.placement_snapshot.as_ref());
-        let displayed_active_tab_id = placement_render_snapshot
-            .and_then(terminal::find_displayed_placement_tab_snapshot)
+            .and_then(PlacementSnapshot::find_displayed_tab_snapshot)
             .map_or(
                 snapshot.client_snapshot.active_tab_id,
                 |displayed_tab_snapshot| displayed_tab_snapshot.tab_snapshot.tab_id,
             );
         let viewer_paint = ViewerPaint::from_client(client, displayed_active_tab_id, snapshot);
-        let is_committed_tab_shown = placement_render_snapshot.is_some()
+        let is_committed_tab_shown = placement_display_snapshot.is_some()
             || self.shown_tab_snapshot.as_ref()
                 == Some(
                     committed_placement_tab_snapshot
@@ -923,7 +934,7 @@ impl<B: Backend> Screen<B> {
                 );
         if self.shown_viewer_paint.as_ref() == Some(&viewer_paint)
             && self.shown_placement_snapshot == self.placement_snapshot
-            && self.shown_placement_render_snapshot.as_ref() == placement_render_snapshot
+            && self.shown_placement_render_snapshot == placement_display_snapshot
             && is_committed_tab_shown
             && self.shown_undock_floating_pane_slots == undock_floating_pane_slots
             && !self.image_output_state.has_unselected_results()
@@ -932,7 +943,7 @@ impl<B: Backend> Screen<B> {
         }
         let displayed_render_snapshot = build_displayed_render_snapshot(
             snapshot,
-            placement_render_snapshot,
+            placement_display_snapshot.as_ref(),
             committed_placement_tab_snapshot,
             &undock_floating_pane_slots,
         );
@@ -958,7 +969,7 @@ impl<B: Backend> Screen<B> {
         let painted_viewer_chrome = viewer_paint.chrome;
         self.shown_viewer_paint = Some(viewer_paint);
         self.shown_placement_snapshot = self.placement_snapshot.clone();
-        self.shown_placement_render_snapshot = placement_render_snapshot.cloned();
+        self.shown_placement_render_snapshot = placement_display_snapshot;
         self.shown_undock_floating_pane_slots = undock_floating_pane_slots;
         self.shown_tab_snapshot = Some(
             displayed_snapshot
@@ -966,7 +977,7 @@ impl<B: Backend> Screen<B> {
                 .active_tab_snapshot
                 .clone(),
         );
-        let mouse_frame_snapshot = if placement_render_snapshot.is_some() {
+        let mouse_frame_snapshot = if self.shown_placement_render_snapshot.is_some() {
             displayed_snapshot
         } else {
             snapshot
@@ -976,6 +987,29 @@ impl<B: Backend> Screen<B> {
             self.committed_regions.clone(),
             painted_viewer_chrome,
         ))
+    }
+
+    /// [`Self::update_placement_animation`] toward the selected placement
+    /// target, or toward no target while the held left button drives a
+    /// floating pane's grab-handle drag
+    /// ([`Client::is_floating_pane_move_drag_active`]). While
+    /// [`Client::is_floating_dock_selection_idle`] is `true`, the placement
+    /// animation ends and the result is `None`.
+    fn update_previewed_placement_animation(
+        &mut self,
+        client: &Client,
+        current_time: Instant,
+    ) -> Option<PlacementSnapshot> {
+        if client.is_floating_dock_selection_idle() {
+            self.placement_animation = None;
+            return None;
+        }
+        let previewed_placement_target = if client.is_floating_pane_move_drag_active() {
+            None
+        } else {
+            client.get_placement_target()
+        };
+        self.update_placement_animation(client, previewed_placement_target.as_ref(), current_time)
     }
 
     /// Update the local placement interpolation and return its current frame.
@@ -2647,7 +2681,8 @@ fn run_attachment<B: Backend, W: Write>(
     // timeout on whichever link the loop holds; a local home sends none.
     let remote_link_timeout_ms = client.get_client_config().remote_link_timeout_ms;
     let ping_interval = compute_heartbeat_interval(remote_link_timeout_ms);
-    // The pane-move animation steps once per frame interval.
+    // A placement preview animation and every slide step once per frame
+    // interval.
     let frame_interval = compute_frame_interval(client.get_client_config().max_frames_per_second);
     let mut next_ping_at = match home {
         Home::Remote { .. } => Some(Instant::now()),
@@ -3243,7 +3278,7 @@ fn dial_session(
     home: &Home,
     session_selector: &SessionSelector,
     attach_settings: AttachSettings,
-    cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    cell_size: Option<PixelCellSize>,
     config_directory: Option<&Path>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, CliError> {
@@ -3328,7 +3363,7 @@ fn dial_remote(
     resume_client_id: Option<ClientId>,
     resume_token: Option<&ConnectionToken>,
     attach_settings: AttachSettings,
-    cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    cell_size: Option<PixelCellSize>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, DialError> {
     let (remote_link, saved_server) = remote_client::connect_saved_server(
@@ -3398,7 +3433,7 @@ fn join_remote_session(
     resume_client_id: Option<ClientId>,
     resume_token: Option<&ConnectionToken>,
     attach_settings: AttachSettings,
-    cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    cell_size: Option<PixelCellSize>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, DialError> {
     let link_timeout = Duration::from_millis(u64::from(remote_link_timeout_ms));
@@ -3589,7 +3624,7 @@ fn reconnect_after_restart(
     connection_token: &ConnectionToken,
     resume_token: Option<&ConnectionToken>,
     attach_settings: AttachSettings,
-    cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    cell_size: Option<PixelCellSize>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, AttachmentEnding> {
     let restart_deadline = Instant::now() + RESTART_WINDOW_DURATION;
@@ -3833,8 +3868,8 @@ enum LinkRecovery {
 
 impl LinkRecovery {
     /// Hold `held_input` for a restarted session, oldest first. A redial drops
-    /// it, and so does a rejoin while pane placement mode, the move chooser, or
-    /// floating pane move mode is on for `client`. An
+    /// it, and so does a rejoin while dock/undock mode, pane placement mode,
+    /// the move chooser, or floating pane move mode is on for `client`. An
     /// input past [`MAX_HELD_INPUT_COUNT`] inputs or past
     /// [`MAX_FRAME_BYTE_COUNT`] bytes of paste text drops everything held, and
     /// everything typed after it during this rejoin.
@@ -3978,10 +4013,12 @@ enum HeldInput {
 /// after `<C-y>` with a 500 ms chord timeout: the held `NewTab` comes before
 /// the held paste. A frame from the connection that ended is dropped. A resize
 /// and a mouse event are dropped and not recorded. A cell-size reply is taken
-/// by `cell_size_query` and not sent. Focus lost ends pane placement mode, as
-/// [`Client::cancel_placement_mode`] says. `client`'s link status follows the
-/// stretch and is [`LinkStatus::Linked`] again when this returns; a join draws
-/// the screen once more without the tag.
+/// by `cell_size_query` and not sent. Focus lost ends what
+/// [`Client::handle_outer_terminal_focus_lost`] names, the same as while the
+/// link is up.
+/// `client`'s link status follows the stretch and is [`LinkStatus::Linked`]
+/// again when this returns; a join draws the screen once more without the
+/// tag.
 ///
 /// # Errors
 /// [`AttachmentEnding::TerminalGone`] when this terminal hangs up.
@@ -4142,8 +4179,7 @@ fn run_without_link<B: Backend>(
                         let _ = cell_size_query.accept_cell_size_reply(cell_size);
                     }
                     RuntimeEvent::OuterTerminalFocusLost { .. } => {
-                        client.cancel_placement_mode();
-                        client.close_pane_move_mode();
+                        client.handle_outer_terminal_focus_lost();
                     }
                     // A resize and a mouse event are dropped and not recorded; the
                     // new link reads the terminal's size itself.
@@ -4304,7 +4340,7 @@ fn report_terminal_size_with_cell_size(
     client: &mut Client,
     uplink: &mut Uplink,
     cell_size_query: &mut terminal::CellSizeQuery,
-    locally_measured_cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    locally_measured_cell_size: Option<PixelCellSize>,
 ) {
     let viewport_size = get_terminal_viewport_size();
     let needs_cell_size_query =
@@ -4571,7 +4607,7 @@ fn join_session(
     resume_client_id: Option<ClientId>,
     resume_token: Option<&ConnectionToken>,
     attach_settings: AttachSettings,
-    cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    cell_size: Option<PixelCellSize>,
     commit_timeout: Option<Duration>,
 ) -> Result<(ClientId, SessionId, Option<ConnectionToken>), DialError> {
     let hello = IpcRequest {
@@ -4624,7 +4660,7 @@ fn build_attach_prepare_request(
     resume_client_id: Option<ClientId>,
     resume_token: Option<&ConnectionToken>,
     attach_settings: AttachSettings,
-    cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    cell_size: Option<PixelCellSize>,
     link_timeout_ms: Option<u32>,
 ) -> IpcRequest {
     let viewport_size = get_terminal_viewport_size();
@@ -4718,7 +4754,7 @@ fn rejoin_session(
     resume_token: Option<&ConnectionToken>,
     restart_deadline: Instant,
     attach_settings: AttachSettings,
-    cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    cell_size: Option<PixelCellSize>,
 ) -> Result<JoinedSession, AttachmentEnding> {
     if connection_token.expose_secret().is_empty() {
         tracing::warn!(
@@ -4882,9 +4918,9 @@ fn spawn_frame_reader(
 /// Write the loop's requests on their own thread and give back the queue they
 /// are handed to, together with the signal of the thread's end.
 ///
-/// A write blocks until the session has taken the bytes, so it is done here:
-/// the loop only puts the request on the queue, and a session reading slowly
-/// backs the queue up instead of holding this terminal's input.
+/// A write on this thread blocks until the session has taken the bytes. The
+/// loop only puts the request on the queue: a session that reads slowly backs
+/// the queue up, and the loop goes on reading this terminal's input.
 ///
 /// Requests leave in the order they were queued and nothing here is folded or
 /// reordered: a [`WireMouseAction::Forward`] is one report the pane's program
@@ -5317,9 +5353,9 @@ fn process_runtime_input_with_cell_size(
             }
         }
         RuntimeEvent::KeyInput { key_input, .. } => {
-            // A release has no binding chord. Pane placement mode, the move
-            // chooser, and floating pane move mode own releases while on;
-            // every other release goes to the focused pane.
+            // A release has no binding chord. Dock/undock mode, pane placement
+            // mode, the move chooser, and floating pane move mode own releases
+            // while on; every other release goes to the focused pane.
             let Some(chord) = key_input.to_binding_chord() else {
                 if client.find_viewer_local_input_mode().is_none() {
                     uplink.send_request(IpcRequestKind::Keyboard { key_input });
@@ -5455,9 +5491,8 @@ fn expire_input_timers(
 ///   `pending_mouse_actions` ([`handle_mouse_event`]), which the pass writes at
 ///   its end. Before the first paint, `mouse_frame` is `None`, and a mouse
 ///   event changes nothing.
-/// - A loss of the outer terminal's focus ends pane placement mode that waits
-///   for no placement, the move chooser, floating pane move mode that waits
-///   for no move, and a grab-handle drag, and sends nothing.
+/// - A loss of the outer terminal's focus ends what
+///   [`Client::handle_outer_terminal_focus_lost`] names, and sends nothing.
 /// - Every other event writes the held mouse actions as one round, then sends
 ///   its own requests
 ///   ([`process_runtime_input_with_cell_size`]).
@@ -5516,9 +5551,7 @@ fn handle_terminal_input_event(
             ControlFlow::Continue(())
         }
         RuntimeEvent::OuterTerminalFocusLost { .. } => {
-            client.cancel_placement_mode();
-            client.close_pane_move_mode();
-            client.cancel_floating_pane_move_drag();
+            client.handle_outer_terminal_focus_lost();
             ControlFlow::Continue(())
         }
         other_runtime_event => {
@@ -5929,21 +5962,57 @@ fn convert_mouse_action_to_wire(mouse_action: MouseAction) -> WireMouseAction {
 ///   carries the full distance from the drag anchor to the pointer it was
 ///   decided at — an answer that advances the anchor re-bases the older ones in
 ///   [`rebase_border_moves`] — so they all measure from one place and the newest
-///   is the whole move.
+///   is the whole move. A border move also folds past the move just before it
+///   when that move is for the same pane's border on the other axis, as a
+///   corner drag writes them: `Right`, `Down`, `Right`, `Down` becomes the newer
+///   `Right` and the newer `Down`.
 /// - A forward always pushes: each report is a separate event the pane's program
 ///   must see.
 fn coalesce_mouse_actions(mouse_actions: Vec<MouseAction>) -> Vec<MouseAction> {
     let mut folded_mouse_actions: Vec<MouseAction> = Vec::with_capacity(mouse_actions.len());
     for mouse_action in mouse_actions {
-        let unfolded_mouse_action = match folded_mouse_actions.last_mut() {
-            Some(tail_mouse_action) => fold_mouse_action(tail_mouse_action, mouse_action),
-            None => Some(mouse_action),
+        let unfolded_mouse_action = match folded_mouse_actions.as_mut_slice() {
+            [.., earlier_mouse_action, tail_mouse_action]
+                if is_other_axis_border_move(tail_mouse_action, &mouse_action) =>
+            {
+                fold_mouse_action(earlier_mouse_action, mouse_action)
+            }
+            [.., tail_mouse_action] => fold_mouse_action(tail_mouse_action, mouse_action),
+            [] => Some(mouse_action),
         };
         if let Some(mouse_action) = unfolded_mouse_action {
             folded_mouse_actions.push(mouse_action);
         }
     }
     folded_mouse_actions
+}
+
+/// Whether `held_mouse_action` and `next_mouse_action` are border moves of one
+/// pane on different axes: a `Right` move and a `Down` move of one pane are,
+/// and a `Right` move and a `Left` move of one pane are not.
+fn is_other_axis_border_move(
+    held_mouse_action: &MouseAction,
+    next_mouse_action: &MouseAction,
+) -> bool {
+    match (held_mouse_action, next_mouse_action) {
+        (
+            MouseAction::Resize {
+                pane_id,
+                border_side,
+                ..
+            },
+            MouseAction::Resize {
+                pane_id: next_pane_id,
+                border_side: next_border_side,
+                ..
+            },
+        ) => {
+            pane_id == next_pane_id
+                && matches!(border_side, Direction::Left | Direction::Right)
+                    != matches!(next_border_side, Direction::Left | Direction::Right)
+        }
+        _ => false,
+    }
 }
 
 /// Fold `next_mouse_action` into `tail_mouse_action` when the two state one

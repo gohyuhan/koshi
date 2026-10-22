@@ -93,10 +93,10 @@ pub struct FrameSession {
     /// One entry per tab in the session, in display order.
     pub tab_snapshots: Vec<FrameTabMetadata>,
     /// The floating panes the viewing client shows, back to front: the pane
-    /// that client focused least recently first, its minimized panes left
-    /// out. Empty when the client has no floating viewport: it reports
+    /// shown longest first, the focused one last. Empty when the client has no
+    /// floating viewport: it reports
     /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving), or a
-    /// pane area narrower than 4 columns or shorter than 5 rows.
+    /// pane area narrower than 5 columns or shorter than 6 rows.
     pub floating_pane_slots: Vec<FrameFloatingPaneSlot>,
     /// Every floating pane of the session, in the order the panes became
     /// floating, whether or not the viewing client shows it.

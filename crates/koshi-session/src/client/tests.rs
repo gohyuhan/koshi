@@ -1451,6 +1451,10 @@ fn list_attached_clients_walks_clients_in_id_order() {
         ordered_mutable_client_ids,
         vec![lower_client_id, higher_client_id]
     );
+    assert_eq!(
+        client_registry.list_client_ids(),
+        vec![lower_client_id, higher_client_id]
+    );
 }
 
 #[test]
@@ -1506,78 +1510,109 @@ fn detaching_one_of_two_clients_leaves_the_other_attached() {
     );
 }
 
+// --- floating pane views ----------------------------------------------
+
+/// Give `client` a minimized view at the default placement of each pane of
+/// `pane_ids`, in that order.
+fn add_default_floating_pane_views(client: &mut Client, pane_ids: &[PaneId]) {
+    for &pane_id in pane_ids {
+        client.add_floating_pane_view(pane_id, FloatingPanePosition::Default);
+    }
+}
+
+/// The view at `position`, minimized when `is_minimized`.
+fn build_floating_pane_view(
+    position: FloatingPanePosition,
+    is_minimized: bool,
+) -> FloatingPaneView {
+    FloatingPaneView {
+        position,
+        is_minimized,
+    }
+}
+
 #[test]
-fn focusing_a_floating_pane_moves_exactly_that_pane_to_the_top() {
+fn adding_a_floating_pane_view_minimizes_it_and_keeps_a_view_already_held() {
+    let mut client = build_test_client(TabId::new());
+    let pane_id = PaneId::new();
+
+    client.add_floating_pane_view(pane_id, FloatingPanePosition::Default);
+
+    assert_eq!(
+        client.get_floating_pane_view(pane_id),
+        Some(build_floating_pane_view(
+            FloatingPanePosition::Default,
+            true
+        ))
+    );
+    assert_eq!(client.list_shown_floating_pane_ids(), Vec::<PaneId>::new());
+    assert_eq!(client.get_focused_floating_pane_id(), None);
+
+    assert!(client.set_floating_pane_position(pane_id, Point { column: 1, row: 2 }));
+    client.add_floating_pane_view(
+        pane_id,
+        FloatingPanePosition::Moved(Point { column: 9, row: 9 }),
+    );
+
+    assert_eq!(
+        client.get_floating_pane_view(pane_id),
+        Some(build_floating_pane_view(
+            FloatingPanePosition::Moved(Point { column: 1, row: 2 }),
+            true
+        ))
+    );
+}
+
+#[test]
+fn focusing_a_floating_pane_shows_it_on_top_and_reports_whether_it_was_minimized() {
     let mut client = build_test_client(TabId::new());
     let (first_pane_id, second_pane_id, third_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
+    add_default_floating_pane_views(&mut client, &[first_pane_id, second_pane_id, third_pane_id]);
 
     for pane_id in [first_pane_id, second_pane_id, third_pane_id] {
         assert!(client.focus_floating_pane(pane_id));
     }
 
     assert_eq!(
-        client.list_floating_pane_focus_order(),
+        client.list_shown_floating_pane_ids(),
         [first_pane_id, second_pane_id, third_pane_id]
     );
     assert_eq!(client.get_focused_floating_pane_id(), Some(third_pane_id));
 
-    assert!(client.focus_floating_pane(second_pane_id));
+    assert!(!client.focus_floating_pane(second_pane_id));
 
     assert_eq!(
-        client.list_floating_pane_focus_order(),
+        client.list_shown_floating_pane_ids(),
         [first_pane_id, third_pane_id, second_pane_id]
     );
     assert_eq!(client.get_focused_floating_pane_id(), Some(second_pane_id));
+    assert_eq!(
+        client.get_floating_pane_view(second_pane_id),
+        Some(build_floating_pane_view(
+            FloatingPanePosition::Default,
+            false
+        ))
+    );
 }
 
 #[test]
-fn pinning_a_floating_pane_keeps_the_focus_order_and_unpinning_keeps_its_cell() {
+fn focusing_a_floating_pane_the_client_holds_no_view_of_changes_nothing() {
     let mut client = build_test_client(TabId::new());
-    let (pinned_pane_id, focused_pane_id) = (PaneId::new(), PaneId::new());
-    let pinned_cell = Point { column: 3, row: 4 };
-    assert!(client.focus_floating_pane(pinned_pane_id));
-    assert!(client.focus_floating_pane(focused_pane_id));
 
-    client.pin_floating_pane(pinned_pane_id, pinned_cell);
+    assert!(!client.focus_floating_pane(PaneId::new()));
 
-    assert_eq!(
-        client.list_floating_pane_focus_order(),
-        [pinned_pane_id, focused_pane_id]
-    );
-    assert_eq!(client.get_focused_floating_pane_id(), Some(focused_pane_id));
-    assert_eq!(
-        client.get_floating_pane_view(pinned_pane_id),
-        FloatingPaneView {
-            position: FloatingPanePosition::Pinned(pinned_cell),
-            is_minimized: false,
-        }
-    );
-
-    client.unpin_floating_pane(pinned_pane_id);
-    client.unpin_floating_pane(focused_pane_id);
-
-    assert_eq!(
-        client.list_floating_pane_views(),
-        &HashMap::from([(
-            pinned_pane_id,
-            FloatingPaneView {
-                position: FloatingPanePosition::Moved(pinned_cell),
-                is_minimized: false,
-            },
-        )])
-    );
-    assert_eq!(
-        client.list_floating_pane_focus_order(),
-        [pinned_pane_id, focused_pane_id]
-    );
+    assert_eq!(client.list_floating_pane_views(), &HashMap::new());
+    assert_eq!(client.list_shown_floating_pane_ids(), Vec::<PaneId>::new());
+    assert_eq!(client.get_focused_floating_pane_id(), None);
 }
 
 #[test]
-fn minimizing_the_focused_floating_pane_focuses_and_raises_the_most_recent_shown_one() {
+fn minimizing_the_focused_floating_pane_focuses_the_newest_pane_still_shown() {
     let mut client = build_test_client(TabId::new());
     let (first_pane_id, second_pane_id, third_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
+    add_default_floating_pane_views(&mut client, &[first_pane_id, second_pane_id, third_pane_id]);
     for pane_id in [first_pane_id, second_pane_id, third_pane_id] {
         assert!(client.focus_floating_pane(pane_id));
     }
@@ -1585,16 +1620,57 @@ fn minimizing_the_focused_floating_pane_focuses_and_raises_the_most_recent_shown
     assert!(client.minimize_floating_pane(third_pane_id));
 
     assert_eq!(
-        client.list_floating_pane_focus_order(),
-        [first_pane_id, third_pane_id, second_pane_id]
+        client.list_shown_floating_pane_ids(),
+        [first_pane_id, second_pane_id]
     );
     assert_eq!(client.get_focused_floating_pane_id(), Some(second_pane_id));
     assert_eq!(
         client.get_floating_pane_view(third_pane_id),
-        FloatingPaneView {
-            position: FloatingPanePosition::Default,
-            is_minimized: true,
-        }
+        Some(build_floating_pane_view(
+            FloatingPanePosition::Default,
+            true
+        ))
+    );
+}
+
+#[test]
+fn minimizing_an_unfocused_floating_pane_keeps_the_focus() {
+    let mut client = build_test_client(TabId::new());
+    let (lower_pane_id, top_pane_id) = (PaneId::new(), PaneId::new());
+    add_default_floating_pane_views(&mut client, &[lower_pane_id, top_pane_id]);
+    assert!(client.focus_floating_pane(lower_pane_id));
+    assert!(client.focus_floating_pane(top_pane_id));
+
+    assert!(client.minimize_floating_pane(lower_pane_id));
+
+    assert_eq!(client.list_shown_floating_pane_ids(), [top_pane_id]);
+    assert_eq!(client.get_focused_floating_pane_id(), Some(top_pane_id));
+}
+
+#[test]
+fn minimizing_a_floating_pane_the_client_does_not_show_changes_nothing() {
+    let mut client = build_test_client(TabId::new());
+    let (minimized_pane_id, shown_pane_id) = (PaneId::new(), PaneId::new());
+    add_default_floating_pane_views(&mut client, &[minimized_pane_id, shown_pane_id]);
+    assert!(client.focus_floating_pane(shown_pane_id));
+
+    assert!(!client.minimize_floating_pane(minimized_pane_id));
+    assert!(!client.minimize_floating_pane(PaneId::new()));
+
+    assert_eq!(client.list_shown_floating_pane_ids(), [shown_pane_id]);
+    assert_eq!(client.get_focused_floating_pane_id(), Some(shown_pane_id));
+    assert_eq!(
+        client.list_floating_pane_views(),
+        &HashMap::from([
+            (
+                minimized_pane_id,
+                build_floating_pane_view(FloatingPanePosition::Default, true)
+            ),
+            (
+                shown_pane_id,
+                build_floating_pane_view(FloatingPanePosition::Default, false)
+            ),
+        ])
     );
 }
 
@@ -1602,243 +1678,183 @@ fn minimizing_the_focused_floating_pane_focuses_and_raises_the_most_recent_shown
 fn minimizing_the_last_shown_floating_pane_returns_the_input_to_the_tab() {
     let active_tab_id = TabId::new();
     let mut client = build_test_client(active_tab_id);
-    let (tiled_pane_id, minimized_pane_id, floating_pane_id) =
-        (PaneId::new(), PaneId::new(), PaneId::new());
+    let (tiled_pane_id, floating_pane_id) = (PaneId::new(), PaneId::new());
     client.update_focused_pane(active_tab_id, tiled_pane_id);
-    assert!(client.focus_floating_pane(minimized_pane_id));
-    assert!(client.minimize_floating_pane(minimized_pane_id));
+    add_default_floating_pane_views(&mut client, &[floating_pane_id]);
     assert!(client.focus_floating_pane(floating_pane_id));
     assert_eq!(client.get_active_focused_pane_id(), Some(floating_pane_id));
 
     assert!(client.minimize_floating_pane(floating_pane_id));
 
-    assert_eq!(
-        client.list_floating_pane_focus_order(),
-        [minimized_pane_id, floating_pane_id]
-    );
     assert_eq!(client.get_focused_floating_pane_id(), None);
     assert_eq!(client.get_active_focused_pane_id(), Some(tiled_pane_id));
 }
 
 #[test]
-fn minimizing_a_floating_pane_the_client_does_not_show_changes_nothing() {
+fn minimizing_every_shown_floating_pane_returns_them_oldest_first() {
     let mut client = build_test_client(TabId::new());
-    let (minimized_pane_id, focused_pane_id, never_focused_pane_id) =
+    let (first_pane_id, minimized_pane_id, last_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
-    assert!(client.focus_floating_pane(minimized_pane_id));
-    assert!(client.focus_floating_pane(focused_pane_id));
-    assert!(client.minimize_floating_pane(minimized_pane_id));
-
-    assert!(!client.minimize_floating_pane(minimized_pane_id));
-    assert!(!client.minimize_floating_pane(never_focused_pane_id));
+    add_default_floating_pane_views(
+        &mut client,
+        &[first_pane_id, minimized_pane_id, last_pane_id],
+    );
+    assert!(client.focus_floating_pane(first_pane_id));
+    assert!(client.focus_floating_pane(last_pane_id));
 
     assert_eq!(
-        client.list_floating_pane_focus_order(),
-        [minimized_pane_id, focused_pane_id]
+        client.minimize_shown_floating_panes(),
+        [first_pane_id, last_pane_id]
     );
-    assert_eq!(client.get_focused_floating_pane_id(), Some(focused_pane_id));
-    assert_eq!(
-        client.list_floating_pane_views(),
-        &HashMap::from([(
-            minimized_pane_id,
-            FloatingPaneView {
-                position: FloatingPanePosition::Default,
-                is_minimized: true,
-            },
-        )])
-    );
+
+    assert_eq!(client.list_shown_floating_pane_ids(), Vec::<PaneId>::new());
+    assert_eq!(client.get_focused_floating_pane_id(), None);
+    for pane_id in [first_pane_id, minimized_pane_id, last_pane_id] {
+        assert_eq!(
+            client.get_floating_pane_view(pane_id),
+            Some(build_floating_pane_view(
+                FloatingPanePosition::Default,
+                true
+            ))
+        );
+    }
+    assert_eq!(client.minimize_shown_floating_panes(), Vec::<PaneId>::new());
 }
 
 #[test]
-fn minimizing_an_unfocused_floating_pane_keeps_the_focus_and_the_order() {
+fn pinning_a_floating_pane_keeps_the_shown_list_and_unpinning_keeps_its_cell() {
     let mut client = build_test_client(TabId::new());
-    let (lower_pane_id, top_pane_id) = (PaneId::new(), PaneId::new());
-    assert!(client.focus_floating_pane(lower_pane_id));
-    assert!(client.focus_floating_pane(top_pane_id));
-
-    assert!(client.minimize_floating_pane(lower_pane_id));
-
-    assert_eq!(
-        client.list_floating_pane_focus_order(),
-        [lower_pane_id, top_pane_id]
-    );
-    assert_eq!(client.get_focused_floating_pane_id(), Some(top_pane_id));
-}
-
-#[test]
-fn focusing_a_minimized_floating_pane_is_refused_and_changes_nothing() {
-    let mut client = build_test_client(TabId::new());
-    let (focused_pane_id, minimized_pane_id) = (PaneId::new(), PaneId::new());
-    assert!(client.focus_floating_pane(minimized_pane_id));
-    assert!(client.focus_floating_pane(focused_pane_id));
-    assert!(client.minimize_floating_pane(minimized_pane_id));
-
-    assert!(!client.focus_floating_pane(minimized_pane_id));
-
-    assert_eq!(
-        client.list_floating_pane_focus_order(),
-        [minimized_pane_id, focused_pane_id]
-    );
-    assert_eq!(client.get_focused_floating_pane_id(), Some(focused_pane_id));
-    assert_eq!(
-        client.list_floating_pane_views(),
-        &HashMap::from([(
-            minimized_pane_id,
-            FloatingPaneView {
-                position: FloatingPanePosition::Default,
-                is_minimized: true,
-            },
-        )])
-    );
-}
-
-#[test]
-fn restoring_a_minimized_floating_pane_focuses_it_and_puts_it_on_top() {
-    let mut client = build_test_client(TabId::new());
-    let (restored_pane_id, focused_pane_id) = (PaneId::new(), PaneId::new());
-    assert!(client.focus_floating_pane(restored_pane_id));
-    assert!(client.focus_floating_pane(focused_pane_id));
-    assert!(client.minimize_floating_pane(restored_pane_id));
-
-    assert!(client.restore_floating_pane(restored_pane_id));
-
-    assert_eq!(
-        client.list_floating_pane_focus_order(),
-        [focused_pane_id, restored_pane_id]
-    );
-    assert_eq!(
-        client.get_focused_floating_pane_id(),
-        Some(restored_pane_id)
-    );
-    assert_eq!(client.list_floating_pane_views(), &HashMap::new());
-}
-
-#[test]
-fn restoring_a_floating_pane_this_client_never_focused_appends_and_focuses_it() {
-    let mut client = build_test_client(TabId::new());
-    let (focused_pane_id, never_focused_pane_id) = (PaneId::new(), PaneId::new());
-    assert!(client.focus_floating_pane(focused_pane_id));
-    assert!(!client.is_floating_pane_shown(never_focused_pane_id));
-
-    assert!(client.restore_floating_pane(never_focused_pane_id));
-
-    assert_eq!(
-        client.list_floating_pane_focus_order(),
-        [focused_pane_id, never_focused_pane_id]
-    );
-    assert_eq!(
-        client.get_focused_floating_pane_id(),
-        Some(never_focused_pane_id)
-    );
-    assert_eq!(client.list_floating_pane_views(), &HashMap::new());
-}
-
-#[test]
-fn restoring_a_shown_floating_pane_changes_nothing() {
-    let mut client = build_test_client(TabId::new());
-    let (shown_pane_id, focused_pane_id) = (PaneId::new(), PaneId::new());
-    assert!(client.focus_floating_pane(shown_pane_id));
-    assert!(client.focus_floating_pane(focused_pane_id));
-
-    assert!(!client.restore_floating_pane(shown_pane_id));
-
-    assert_eq!(
-        client.list_floating_pane_focus_order(),
-        [shown_pane_id, focused_pane_id]
-    );
-    assert_eq!(client.get_focused_floating_pane_id(), Some(focused_pane_id));
-    assert_eq!(client.list_floating_pane_views(), &HashMap::new());
-}
-
-#[test]
-fn restoring_a_floating_pane_keeps_its_pinned_cell() {
-    let mut client = build_test_client(TabId::new());
-    let pane_id = PaneId::new();
+    let (pinned_pane_id, focused_pane_id) = (PaneId::new(), PaneId::new());
     let pinned_cell = Point { column: 3, row: 4 };
-    assert!(client.focus_floating_pane(pane_id));
-    client.pin_floating_pane(pane_id, pinned_cell);
-    assert!(client.minimize_floating_pane(pane_id));
+    add_default_floating_pane_views(&mut client, &[pinned_pane_id, focused_pane_id]);
+    assert!(client.focus_floating_pane(pinned_pane_id));
+    assert!(client.focus_floating_pane(focused_pane_id));
 
-    assert!(client.restore_floating_pane(pane_id));
+    client.pin_floating_pane(pinned_pane_id, pinned_cell);
 
     assert_eq!(
-        client.get_floating_pane_view(pane_id),
-        FloatingPaneView {
-            position: FloatingPanePosition::Pinned(pinned_cell),
-            is_minimized: false,
-        }
+        client.list_shown_floating_pane_ids(),
+        [pinned_pane_id, focused_pane_id]
+    );
+    assert_eq!(client.get_focused_floating_pane_id(), Some(focused_pane_id));
+    assert_eq!(
+        client.get_floating_pane_view(pinned_pane_id),
+        Some(build_floating_pane_view(
+            FloatingPanePosition::Pinned(pinned_cell),
+            false
+        ))
+    );
+
+    client.unpin_floating_pane(pinned_pane_id);
+    client.unpin_floating_pane(focused_pane_id);
+
+    assert_eq!(
+        client.list_floating_pane_views(),
+        &HashMap::from([
+            (
+                pinned_pane_id,
+                build_floating_pane_view(FloatingPanePosition::Moved(pinned_cell), false)
+            ),
+            (
+                focused_pane_id,
+                build_floating_pane_view(FloatingPanePosition::Default, false)
+            ),
+        ])
     );
 }
 
 #[test]
 fn a_pinned_floating_pane_refuses_a_new_position_and_an_unpinned_one_accepts_it() {
     let mut client = build_test_client(TabId::new());
-    let pane_id = PaneId::new();
+    let (pane_id, viewless_pane_id) = (PaneId::new(), PaneId::new());
     let pinned_cell = Point { column: 3, row: 4 };
     let moved_cell = Point { column: 7, row: 1 };
+    add_default_floating_pane_views(&mut client, &[pane_id]);
     client.pin_floating_pane(pane_id, pinned_cell);
+    client.pin_floating_pane(viewless_pane_id, pinned_cell);
 
     assert!(!client.set_floating_pane_position(pane_id, moved_cell));
+    assert!(!client.set_floating_pane_position(viewless_pane_id, moved_cell));
     assert_eq!(
         client.get_floating_pane_view(pane_id),
-        FloatingPaneView {
-            position: FloatingPanePosition::Pinned(pinned_cell),
-            is_minimized: false,
-        }
+        Some(build_floating_pane_view(
+            FloatingPanePosition::Pinned(pinned_cell),
+            true
+        ))
     );
+    assert_eq!(client.get_floating_pane_view(viewless_pane_id), None);
 
     client.unpin_floating_pane(pane_id);
 
     assert!(client.set_floating_pane_position(pane_id, moved_cell));
     assert_eq!(
         client.get_floating_pane_view(pane_id),
-        FloatingPaneView {
-            position: FloatingPanePosition::Moved(moved_cell),
-            is_minimized: false,
-        }
+        Some(build_floating_pane_view(
+            FloatingPanePosition::Moved(moved_cell),
+            true
+        ))
     );
 }
 
 #[test]
-fn remove_floating_pane_view_drops_the_view_the_order_entry_and_a_matching_focus() {
+fn showing_a_minimized_floating_pane_again_keeps_its_pinned_cell() {
+    let mut client = build_test_client(TabId::new());
+    let pane_id = PaneId::new();
+    let pinned_cell = Point { column: 3, row: 4 };
+    add_default_floating_pane_views(&mut client, &[pane_id]);
+    assert!(client.focus_floating_pane(pane_id));
+    client.pin_floating_pane(pane_id, pinned_cell);
+    assert!(client.minimize_floating_pane(pane_id));
+
+    assert!(client.focus_floating_pane(pane_id));
+
+    assert_eq!(
+        client.get_floating_pane_view(pane_id),
+        Some(build_floating_pane_view(
+            FloatingPanePosition::Pinned(pinned_cell),
+            false
+        ))
+    );
+}
+
+#[test]
+fn remove_floating_pane_view_drops_the_view_the_shown_entry_and_a_matching_focus() {
     let mut client = build_test_client(TabId::new());
     let (lower_pane_id, top_pane_id) = (PaneId::new(), PaneId::new());
+    let top_pinned_cell = Point { column: 5, row: 6 };
+    add_default_floating_pane_views(&mut client, &[lower_pane_id, top_pane_id]);
     assert!(client.focus_floating_pane(lower_pane_id));
     assert!(client.focus_floating_pane(top_pane_id));
-    let top_pinned_cell = Point { column: 5, row: 6 };
-    client.pin_floating_pane(lower_pane_id, Point { column: 1, row: 2 });
     client.pin_floating_pane(top_pane_id, top_pinned_cell);
 
     client.remove_floating_pane_view(lower_pane_id);
 
-    assert_eq!(client.list_floating_pane_focus_order(), [top_pane_id]);
+    assert_eq!(client.list_shown_floating_pane_ids(), [top_pane_id]);
     assert_eq!(client.get_focused_floating_pane_id(), Some(top_pane_id));
     assert_eq!(
         client.list_floating_pane_views(),
         &HashMap::from([(
             top_pane_id,
-            FloatingPaneView {
-                position: FloatingPanePosition::Pinned(top_pinned_cell),
-                is_minimized: false,
-            },
+            build_floating_pane_view(FloatingPanePosition::Pinned(top_pinned_cell), false)
         )])
     );
 
     client.remove_floating_pane_view(top_pane_id);
 
-    assert_eq!(
-        client.list_floating_pane_focus_order(),
-        Vec::<PaneId>::new()
-    );
+    assert_eq!(client.list_shown_floating_pane_ids(), Vec::<PaneId>::new());
     assert_eq!(client.get_focused_floating_pane_id(), None);
     assert_eq!(client.list_floating_pane_views(), &HashMap::new());
 }
 
 #[test]
-fn removing_the_focused_floating_pane_view_focuses_and_raises_the_most_recent_shown_one() {
+fn removing_the_focused_floating_pane_view_focuses_the_newest_pane_still_shown() {
     let mut client = build_test_client(TabId::new());
     let (shown_pane_id, minimized_pane_id, removed_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
+    add_default_floating_pane_views(
+        &mut client,
+        &[shown_pane_id, minimized_pane_id, removed_pane_id],
+    );
     for pane_id in [shown_pane_id, minimized_pane_id, removed_pane_id] {
         assert!(client.focus_floating_pane(pane_id));
     }
@@ -1846,30 +1862,27 @@ fn removing_the_focused_floating_pane_view_focuses_and_raises_the_most_recent_sh
 
     client.remove_floating_pane_view(removed_pane_id);
 
-    assert_eq!(
-        client.list_floating_pane_focus_order(),
-        [minimized_pane_id, shown_pane_id]
-    );
+    assert_eq!(client.list_shown_floating_pane_ids(), [shown_pane_id]);
     assert_eq!(client.get_focused_floating_pane_id(), Some(shown_pane_id));
 }
 
 #[test]
-fn replace_floating_view_copies_another_clients_floating_view() {
+fn replace_floating_view_copies_a_saved_view_for_the_listed_floating_panes() {
     let mut leaving_client = build_test_client(TabId::new());
     let (pinned_pane_id, minimized_pane_id, focused_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
-    for pane_id in [pinned_pane_id, minimized_pane_id, focused_pane_id] {
+    let floating_pane_ids = [pinned_pane_id, minimized_pane_id, focused_pane_id];
+    add_default_floating_pane_views(&mut leaving_client, &floating_pane_ids);
+    for pane_id in [pinned_pane_id, focused_pane_id] {
         assert!(leaving_client.focus_floating_pane(pane_id));
     }
     leaving_client.pin_floating_pane(pinned_pane_id, Point { column: 4, row: 2 });
-    assert!(leaving_client.minimize_floating_pane(minimized_pane_id));
     let mut returning_client = build_test_client(TabId::new());
 
     assert!(returning_client.replace_floating_view(
         leaving_client.list_floating_pane_views(),
-        leaving_client.list_floating_pane_focus_order(),
-        leaving_client.get_focused_floating_pane_id(),
-        |_| true,
+        leaving_client.list_shown_floating_pane_ids(),
+        &floating_pane_ids,
     ));
 
     assert_eq!(
@@ -1877,23 +1890,24 @@ fn replace_floating_view_copies_another_clients_floating_view() {
         &HashMap::from([
             (
                 pinned_pane_id,
-                FloatingPaneView {
-                    position: FloatingPanePosition::Pinned(Point { column: 4, row: 2 }),
-                    is_minimized: false,
-                },
+                build_floating_pane_view(
+                    FloatingPanePosition::Pinned(Point { column: 4, row: 2 }),
+                    false
+                )
             ),
             (
                 minimized_pane_id,
-                FloatingPaneView {
-                    position: FloatingPanePosition::Default,
-                    is_minimized: true,
-                },
+                build_floating_pane_view(FloatingPanePosition::Default, true)
+            ),
+            (
+                focused_pane_id,
+                build_floating_pane_view(FloatingPanePosition::Default, false)
             ),
         ])
     );
     assert_eq!(
-        returning_client.list_floating_pane_focus_order(),
-        [pinned_pane_id, minimized_pane_id, focused_pane_id]
+        returning_client.list_shown_floating_pane_ids(),
+        [pinned_pane_id, focused_pane_id]
     );
     assert_eq!(
         returning_client.get_focused_floating_pane_id(),
@@ -1905,44 +1919,44 @@ fn replace_floating_view_copies_another_clients_floating_view() {
 fn replace_floating_view_reports_a_change_in_each_part_alone_and_none_for_the_same_view() {
     let mut client = build_test_client(TabId::new());
     let (lower_pane_id, upper_pane_id) = (PaneId::new(), PaneId::new());
-    let pinned_view_by_pane_id = HashMap::from([(
+    let floating_pane_ids = [lower_pane_id, upper_pane_id];
+    let shown_view_by_pane_id = HashMap::from([
+        (
+            lower_pane_id,
+            build_floating_pane_view(FloatingPanePosition::Default, false),
+        ),
+        (
+            upper_pane_id,
+            build_floating_pane_view(FloatingPanePosition::Default, false),
+        ),
+    ]);
+    let mut pinned_view_by_pane_id = shown_view_by_pane_id.clone();
+    pinned_view_by_pane_id.insert(
         lower_pane_id,
-        FloatingPaneView {
-            position: FloatingPanePosition::Pinned(Point { column: 4, row: 2 }),
-            is_minimized: false,
-        },
-    )]);
+        build_floating_pane_view(
+            FloatingPanePosition::Pinned(Point { column: 4, row: 2 }),
+            false,
+        ),
+    );
     assert!(client.replace_floating_view(
-        &HashMap::new(),
+        &shown_view_by_pane_id,
         &[lower_pane_id, upper_pane_id],
-        Some(upper_pane_id),
-        |_| true,
+        &floating_pane_ids,
     ));
 
     assert!(
         client.replace_floating_view(
             &pinned_view_by_pane_id,
             &[lower_pane_id, upper_pane_id],
-            Some(upper_pane_id),
-            |_| true,
+            &floating_pane_ids,
         ),
         "a pin alone changes the view"
     );
     assert!(
         client.replace_floating_view(
             &pinned_view_by_pane_id,
-            &[lower_pane_id, upper_pane_id],
-            None,
-            |_| true,
-        ),
-        "a focus alone changes the view"
-    );
-    assert!(
-        client.replace_floating_view(
-            &pinned_view_by_pane_id,
             &[upper_pane_id, lower_pane_id],
-            None,
-            |_| true,
+            &floating_pane_ids,
         ),
         "an order alone changes the view"
     );
@@ -1950,50 +1964,54 @@ fn replace_floating_view_reports_a_change_in_each_part_alone_and_none_for_the_sa
         !client.replace_floating_view(
             &pinned_view_by_pane_id,
             &[upper_pane_id, lower_pane_id],
-            None,
-            |_| true,
+            &floating_pane_ids,
         ),
         "the same view changes nothing"
     );
+    assert_eq!(client.get_focused_floating_pane_id(), Some(lower_pane_id));
 }
 
 #[test]
-fn replace_floating_view_drops_every_pane_no_longer_floating_and_moves_its_focus() {
-    let mut leaving_client = build_test_client(TabId::new());
-    let (shown_pane_id, minimized_pane_id, closed_pane_id, closed_pinned_pane_id) =
-        (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
-    for pane_id in [shown_pane_id, minimized_pane_id, closed_pane_id] {
-        assert!(leaving_client.focus_floating_pane(pane_id));
-    }
-    assert!(leaving_client.minimize_floating_pane(minimized_pane_id));
-    leaving_client.pin_floating_pane(closed_pinned_pane_id, Point { column: 1, row: 2 });
-    assert_eq!(
-        leaving_client.list_floating_pane_focus_order(),
-        [shown_pane_id, minimized_pane_id, closed_pane_id],
-        "the pinned pane has a view and no floating focus order entry"
-    );
+fn replace_floating_view_drops_panes_no_longer_floating_and_minimizes_panes_it_has_no_view_of() {
+    let (shown_pane_id, closed_pane_id, new_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let saved_view_by_pane_id = HashMap::from([
+        (
+            shown_pane_id,
+            build_floating_pane_view(FloatingPanePosition::Default, false),
+        ),
+        (
+            closed_pane_id,
+            build_floating_pane_view(
+                FloatingPanePosition::Moved(Point { column: 1, row: 2 }),
+                false,
+            ),
+        ),
+    ]);
     let mut returning_client = build_test_client(TabId::new());
 
     assert!(returning_client.replace_floating_view(
-        leaving_client.list_floating_pane_views(),
-        leaving_client.list_floating_pane_focus_order(),
-        leaving_client.get_focused_floating_pane_id(),
-        |pane_id| pane_id != closed_pane_id && pane_id != closed_pinned_pane_id,
+        &saved_view_by_pane_id,
+        &[shown_pane_id, closed_pane_id],
+        &[shown_pane_id, new_pane_id],
     ));
 
     assert_eq!(
         returning_client.list_floating_pane_views(),
-        &HashMap::from([(
-            minimized_pane_id,
-            FloatingPaneView {
-                position: FloatingPanePosition::Default,
-                is_minimized: true,
-            },
-        )])
+        &HashMap::from([
+            (
+                shown_pane_id,
+                build_floating_pane_view(FloatingPanePosition::Default, false)
+            ),
+            (
+                new_pane_id,
+                build_floating_pane_view(FloatingPanePosition::Default, true)
+            ),
+        ])
     );
     assert_eq!(
-        returning_client.list_floating_pane_focus_order(),
-        [minimized_pane_id, shown_pane_id]
+        returning_client.list_shown_floating_pane_ids(),
+        [shown_pane_id]
     );
     assert_eq!(
         returning_client.get_focused_floating_pane_id(),
@@ -2002,27 +2020,38 @@ fn replace_floating_view_drops_every_pane_no_longer_floating_and_moves_its_focus
 }
 
 #[test]
-fn replace_floating_view_leaves_no_floating_pane_focused_when_the_input_was_on_a_tiled_pane() {
-    let tab_id = TabId::new();
-    let mut leaving_client = build_test_client(tab_id);
-    let (floating_pane_id, tiled_pane_id) = (PaneId::new(), PaneId::new());
-    assert!(leaving_client.focus_floating_pane(floating_pane_id));
-    let _ = leaving_client.focus_tiled_pane(tab_id, tiled_pane_id);
-    let mut returning_client = build_test_client(tab_id);
+fn replace_floating_view_shows_no_pane_whose_saved_view_is_minimized_or_absent() {
+    let (minimized_pane_id, viewless_pane_id) = (PaneId::new(), PaneId::new());
+    let saved_view_by_pane_id = HashMap::from([(
+        minimized_pane_id,
+        build_floating_pane_view(FloatingPanePosition::Default, true),
+    )]);
+    let mut returning_client = build_test_client(TabId::new());
 
     assert!(returning_client.replace_floating_view(
-        leaving_client.list_floating_pane_views(),
-        leaving_client.list_floating_pane_focus_order(),
-        leaving_client.get_focused_floating_pane_id(),
-        |_| true,
+        &saved_view_by_pane_id,
+        &[minimized_pane_id, viewless_pane_id],
+        &[minimized_pane_id, viewless_pane_id],
     ));
 
     assert_eq!(
-        returning_client.list_floating_pane_focus_order(),
-        [floating_pane_id]
+        returning_client.list_shown_floating_pane_ids(),
+        Vec::<PaneId>::new()
     );
-    assert!(returning_client.is_floating_pane_shown(floating_pane_id));
     assert_eq!(returning_client.get_focused_floating_pane_id(), None);
+    assert_eq!(
+        returning_client.list_floating_pane_views(),
+        &HashMap::from([
+            (
+                minimized_pane_id,
+                build_floating_pane_view(FloatingPanePosition::Default, true)
+            ),
+            (
+                viewless_pane_id,
+                build_floating_pane_view(FloatingPanePosition::Default, true)
+            ),
+        ])
+    );
 }
 
 #[test]
@@ -2035,12 +2064,14 @@ fn the_focused_floating_pane_takes_the_input_over_the_tab_and_keeps_it_across_a_
     client.update_focused_pane(first_tab_id, first_tab_pane_id);
     client.update_focused_pane(second_tab_id, second_tab_pane_id);
     assert_eq!(client.get_active_focused_pane_id(), Some(first_tab_pane_id));
+    add_default_floating_pane_views(&mut client, &[floating_pane_id]);
 
     assert!(client.focus_floating_pane(floating_pane_id));
     assert_eq!(client.get_active_focused_pane_id(), Some(floating_pane_id));
 
     client.update_active_tab_id(second_tab_id);
     assert_eq!(client.get_active_focused_pane_id(), Some(floating_pane_id));
+    assert_eq!(client.list_shown_floating_pane_ids(), [floating_pane_id]);
     assert_eq!(
         client.get_focused_pane_id(second_tab_id),
         Some(second_tab_pane_id)
@@ -2048,42 +2079,56 @@ fn the_focused_floating_pane_takes_the_input_over_the_tab_and_keeps_it_across_a_
 }
 
 #[test]
-fn focusing_a_tiled_pane_in_the_active_tab_takes_over_the_input_from_the_floating_pane() {
+fn focusing_a_tiled_pane_in_the_active_tab_minimizes_every_shown_floating_pane() {
     let active_tab_id = TabId::new();
     let mut client = build_test_client(active_tab_id);
-    let (vim_pane_id, shell_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let (vim_pane_id, shell_pane_id, htop_pane_id, logs_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
     client.update_focused_pane(active_tab_id, vim_pane_id);
+    add_default_floating_pane_views(&mut client, &[htop_pane_id, logs_pane_id]);
     assert!(client.focus_floating_pane(htop_pane_id));
+    assert!(client.focus_floating_pane(logs_pane_id));
 
     assert_eq!(
         client.focus_tiled_pane(active_tab_id, shell_pane_id),
-        Some(htop_pane_id)
+        TiledPaneFocusChange {
+            previous_pane_id: Some(logs_pane_id),
+            minimized_floating_pane_ids: vec![htop_pane_id, logs_pane_id],
+        }
     );
 
     assert_eq!(client.get_focused_floating_pane_id(), None);
     assert_eq!(client.get_active_focused_pane_id(), Some(shell_pane_id));
-    assert_eq!(client.list_floating_pane_focus_order(), [htop_pane_id]);
+    assert_eq!(client.list_shown_floating_pane_ids(), Vec::<PaneId>::new());
     assert_eq!(
         client.focus_tiled_pane(active_tab_id, vim_pane_id),
-        Some(shell_pane_id)
+        TiledPaneFocusChange {
+            previous_pane_id: Some(shell_pane_id),
+            minimized_floating_pane_ids: Vec::new(),
+        }
     );
 }
 
 #[test]
-fn focusing_a_tiled_pane_in_another_tab_leaves_the_floating_focus() {
+fn focusing_a_tiled_pane_in_another_tab_keeps_the_floating_panes_shown() {
     let (active_tab_id, other_tab_id) = (TabId::new(), TabId::new());
     let mut client = build_test_client(active_tab_id);
     let (other_tab_old_pane_id, other_tab_new_pane_id, htop_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
     client.update_focused_pane(other_tab_id, other_tab_old_pane_id);
+    add_default_floating_pane_views(&mut client, &[htop_pane_id]);
     assert!(client.focus_floating_pane(htop_pane_id));
 
     assert_eq!(
         client.focus_tiled_pane(other_tab_id, other_tab_new_pane_id),
-        Some(other_tab_old_pane_id)
+        TiledPaneFocusChange {
+            previous_pane_id: Some(other_tab_old_pane_id),
+            minimized_floating_pane_ids: Vec::new(),
+        }
     );
 
     assert_eq!(client.get_focused_floating_pane_id(), Some(htop_pane_id));
+    assert_eq!(client.list_shown_floating_pane_ids(), [htop_pane_id]);
     assert_eq!(
         client.get_focused_pane_id(other_tab_id),
         Some(other_tab_new_pane_id)
@@ -2091,7 +2136,49 @@ fn focusing_a_tiled_pane_in_another_tab_leaves_the_floating_focus() {
 }
 
 #[test]
-fn a_floating_viewport_needs_a_pane_area_of_at_least_four_by_five() {
+fn the_floating_pane_size_cap_is_ninety_percent_of_each_axis_rounded_down() {
+    for (floating_viewport, expected_size_cap) in [
+        (
+            Size {
+                column_count: 80,
+                row_count: 22,
+            },
+            Size {
+                column_count: 72,
+                row_count: 19,
+            },
+        ),
+        (
+            Size {
+                column_count: 5,
+                row_count: 6,
+            },
+            Size {
+                column_count: 4,
+                row_count: 5,
+            },
+        ),
+        (
+            Size {
+                column_count: 0,
+                row_count: 0,
+            },
+            Size {
+                column_count: 0,
+                row_count: 0,
+            },
+        ),
+    ] {
+        assert_eq!(
+            compute_floating_pane_size_cap(floating_viewport),
+            expected_size_cap,
+            "{floating_viewport:?}"
+        );
+    }
+}
+
+#[test]
+fn a_floating_viewport_needs_a_pane_area_whose_ninety_percent_holds_four_by_five() {
     assert_eq!(
         MIN_FLOATING_PANE_SIZE,
         Size {
@@ -2099,6 +2186,10 @@ fn a_floating_viewport_needs_a_pane_area_of_at_least_four_by_five() {
             row_count: 5,
         }
     );
+    let five_by_six = Size {
+        column_count: 5,
+        row_count: 6,
+    };
     for (pane_area, expected_floating_viewport) in [
         (
             Some(PaneArea::Reported(Size {
@@ -2110,21 +2201,18 @@ fn a_floating_viewport_needs_a_pane_area_of_at_least_four_by_five() {
                 row_count: 22,
             }),
         ),
-        (
-            Some(PaneArea::Reported(MIN_FLOATING_PANE_SIZE)),
-            Some(MIN_FLOATING_PANE_SIZE),
-        ),
+        (Some(PaneArea::Reported(five_by_six)), Some(five_by_six)),
         (
             Some(PaneArea::Reported(Size {
-                column_count: 3,
-                row_count: 40,
+                column_count: 4,
+                row_count: 6,
             })),
             None,
         ),
         (
             Some(PaneArea::Reported(Size {
-                column_count: 80,
-                row_count: 4,
+                column_count: 5,
+                row_count: 5,
             })),
             None,
         ),
@@ -2150,10 +2238,9 @@ fn a_floating_viewport_needs_a_pane_area_of_at_least_four_by_five() {
 fn a_client_floating_view_survives_a_serde_round_trip() {
     let mut client = build_test_client(TabId::new());
     let (minimized_pane_id, placed_pane_id) = (PaneId::new(), PaneId::new());
-    assert!(client.focus_floating_pane(minimized_pane_id));
+    add_default_floating_pane_views(&mut client, &[minimized_pane_id, placed_pane_id]);
     assert!(client.focus_floating_pane(placed_pane_id));
     client.pin_floating_pane(placed_pane_id, Point { column: 3, row: 4 });
-    assert!(client.minimize_floating_pane(minimized_pane_id));
 
     let client_json = serde_json::to_value(&client).expect("the client encodes");
     let placed_pane_key = serde_json::to_value(placed_pane_id).expect("the pane id encodes");
@@ -2177,8 +2264,8 @@ fn a_client_floating_view_survives_a_serde_round_trip() {
         })
     );
     assert_eq!(
-        client_json["floating_pane_focus_order"],
-        serde_json::json!([minimized_pane_id, placed_pane_id])
+        client_json["shown_floating_pane_ids"],
+        serde_json::json!([placed_pane_id])
     );
     assert_eq!(
         client_json["focused_floating_pane_id"],
@@ -2193,8 +2280,8 @@ fn a_client_floating_view_survives_a_serde_round_trip() {
         client.list_floating_pane_views()
     );
     assert_eq!(
-        decoded_client.list_floating_pane_focus_order(),
-        [minimized_pane_id, placed_pane_id]
+        decoded_client.list_shown_floating_pane_ids(),
+        [placed_pane_id]
     );
     assert_eq!(
         decoded_client.get_focused_floating_pane_id(),
@@ -2212,11 +2299,10 @@ fn one_clients_floating_view_changes_leave_another_clients_bytes_unchanged() {
     let (moving_client_id, watching_client_id) = (ClientId::new(), ClientId::new());
     let pane_id = PaneId::new();
     for client_id in [moving_client_id, watching_client_id] {
-        client_registry.attach_client(build_test_client_from_parts(client_id, TabId::new(), None));
-        assert!(client_registry
-            .get_client_mut_by_id(client_id)
-            .expect("the client was just attached")
-            .focus_floating_pane(pane_id));
+        let mut client = build_test_client_from_parts(client_id, TabId::new(), None);
+        client.add_floating_pane_view(pane_id, FloatingPanePosition::Default);
+        assert!(client.focus_floating_pane(pane_id));
+        client_registry.attach_client(client);
     }
     let watching_client_bytes = serde_json::to_vec(
         client_registry
@@ -2246,10 +2332,10 @@ fn one_clients_floating_view_changes_leave_another_clients_bytes_unchanged() {
         .expect("the client is attached");
     assert_eq!(
         moving_client.get_floating_pane_view(pane_id),
-        FloatingPaneView {
-            position: FloatingPanePosition::Pinned(Point { column: 1, row: 2 }),
-            is_minimized: true,
-        }
+        Some(build_floating_pane_view(
+            FloatingPanePosition::Pinned(Point { column: 1, row: 2 }),
+            true
+        ))
     );
     assert_eq!(moving_client.get_focused_floating_pane_id(), None);
 }
@@ -2258,7 +2344,7 @@ fn one_clients_floating_view_changes_leave_another_clients_bytes_unchanged() {
 fn floating_view_fields_are_required_and_a_missing_floating_focus_decodes_as_none() {
     let client_json =
         serde_json::to_value(build_test_client(TabId::new())).expect("the client encodes");
-    for required_field_name in ["floating_pane_view_by_pane_id", "floating_pane_focus_order"] {
+    for required_field_name in ["floating_pane_view_by_pane_id", "shown_floating_pane_ids"] {
         let mut incomplete_client_json = client_json.clone();
         incomplete_client_json
             .as_object_mut()

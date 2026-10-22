@@ -89,6 +89,22 @@ fn horizontal_split_divides_columns() {
 }
 
 #[test]
+fn find_pane_rect_returns_the_solved_rect_and_none_for_a_pane_outside_the_tree() {
+    let (left_pane_id, right_pane_id) = (PaneId::new(), PaneId::new());
+    let layout_solve = solve_layout(
+        &build_equal_split_node(SplitDirection::Horizontal, &[left_pane_id, right_pane_id]),
+        build_cell_rect(0, 0, 80, 24),
+    );
+
+    assert_eq!(
+        layout_solve.find_pane_rect(right_pane_id),
+        Some(build_cell_rect(40, 0, 40, 24))
+    );
+    assert_eq!(layout_solve.find_pane_rect(PaneId::new()), None);
+    assert_eq!(LayoutSolve::default().find_pane_rect(left_pane_id), None);
+}
+
+#[test]
 fn vertical_split_divides_rows() {
     let (top_pane_id, bottom_pane_id) = (PaneId::new(), PaneId::new());
     let layout_area = build_cell_rect(0, 0, 80, 24);
@@ -881,8 +897,7 @@ fn a_tab_grown_shrunk_to_nothing_then_regrown_returns_the_exact_first_solve() {
     // pane, yet regrowing to the original rect reproduces the first solve
     // exactly, deltas and remainders included.
     let (left_pane_id, top_pane_id, bottom_pane_id) = (PaneId::new(), PaneId::new(), PaneId::new());
-    // A resize delta on the outer border makes the shape asymmetric, so the
-    // exact-return check is meaningful and not just an even split.
+    // A resize delta on the outer border makes the shape asymmetric.
     let inner_layout_split = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Vertical,
         vec![
@@ -1638,15 +1653,9 @@ fn far_more_panes_than_fit_suppress_every_trailing_one() {
     assert!(!layout_result.is_every_pane_suppressed);
     // The kept twenty each take exactly their four-column floor, back to back.
     for (pane_index, &pane_id) in pane_ids.iter().take(20).enumerate() {
-        let placed_pane_rect = layout_result
-            .pane_rects
-            .iter()
-            .find(|&&(placed_pane_id, _)| placed_pane_id == pane_id)
-            .unwrap()
-            .1;
         assert_eq!(
-            placed_pane_rect,
-            build_cell_rect(pane_index as u16 * 4, 0, 4, 24)
+            layout_result.find_pane_rect(pane_id),
+            Some(build_cell_rect(pane_index as u16 * 4, 0, 4, 24))
         );
     }
     assert_tiles_exactly(&layout_result, layout_area);

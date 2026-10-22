@@ -60,7 +60,7 @@ use common::{
     build_koshi_command_at, build_no_such_session_result, build_shell_spawn_spec,
     build_short_test_directory, connect_to_router, copy_koshi_binary, create_session,
     send_attach_lookup, start_router_process, terminate_process, wait_for_session_lookup_refusal,
-    RunningProcess, SessionProcess, SESSION_SERVER_NAME, WAIT_DURATION,
+    RunningProcess, RunningSessions, SessionProcess, SESSION_SERVER_NAME, WAIT_DURATION,
 };
 use koshi_test_support::fixtures::{
     build_paint_report_request, send_committed_request, start_program_process,
@@ -154,19 +154,25 @@ fn start_session_server(
     runtime_directory: &Path,
     session_id: SessionId,
 ) -> ReadySessionProcess {
-    start_session_server_with_command(&mut build_session_server_command(
-        binary_path,
-        test_home_directory,
+    start_session_server_with_command(
+        &mut build_session_server_command(
+            binary_path,
+            test_home_directory,
+            runtime_directory,
+            session_id,
+        ),
         runtime_directory,
         session_id,
-    ))
+    )
 }
 
-/// Start `process_command`, a session server's whole command line, with its
-/// standard output piped, and wait for the ready line it prints once its
-/// control socket is bound.
+/// Start `process_command`, the whole command line of a session server that
+/// serves `session_id` in `runtime_directory`, with its standard output piped,
+/// and wait for the ready line it prints once its control socket is bound.
 fn start_session_server_with_command(
     process_command: &mut std::process::Command,
+    runtime_directory: &Path,
+    session_id: SessionId,
 ) -> ReadySessionProcess {
     let mut child_process = start_program_process(process_command.stdout(Stdio::piped()));
     let mut ready_output_reader = BufReader::new(
@@ -184,7 +190,11 @@ fn start_session_server_with_command(
         "the ready line named no socket: {ready_line}"
     );
     ReadySessionProcess {
-        session_process: SessionProcess { child_process },
+        session_process: SessionProcess {
+            child_process,
+            runtime_directory: runtime_directory.to_path_buf(),
+            session_id,
+        },
         _ready_output_reader: ready_output_reader,
     }
 }
@@ -1141,15 +1151,14 @@ fn a_client_that_never_leaves_does_not_hold_the_swap_up() {
 
 #[test]
 fn a_pane_a_running_session_opened_prints_what_its_child_wrote() {
-    // No restart here. This asks the one question every test above it takes for
-    // granted: does a pane a real session server opened print at all?
+    // No restart here: a pane a real session server opened prints what its
+    // child wrote.
     //
-    // On Windows that pane's terminal is a pseudoconsole living in the helper
-    // process, and a pseudoconsole hands over nothing its child printed until
-    // the cursor-position query it asks is answered. The session server reads
-    // that query out of the pane's output, its terminal engine builds the
-    // report, and the report goes back over the link. A failure here puts the
-    // fault on that path and clears the swap of it; a pass puts it on the swap.
+    // On Windows that pane's terminal is a pseudoconsole in the helper process.
+    // A pseudoconsole hands over nothing its child printed until the
+    // cursor-position query it asks is answered. The session server reads that
+    // query out of the pane's output, its terminal engine builds the report,
+    // and the report goes back over the link.
     let test_home_directory = build_short_test_directory();
     let runtime_directory = build_short_test_directory();
     let binary_path = copy_koshi_binary(test_home_directory.path());
@@ -2115,8 +2124,9 @@ fn the_router_leaves_a_session_that_is_replacing_its_image_alone() {
 
     let created_session = create_session(&mut router_connection);
     let created_session_selector = SessionSelector::SessionId(created_session.session_id);
-    let _session_server_process = RunningProcess {
-        process_id: created_session.process_id,
+    let _session_server_process = RunningSessions {
+        runtime_directory: runtime_directory.path().to_path_buf(),
+        session_addresses: vec![created_session.clone()],
     };
 
     // What the router sees while a session is replacing its own image: the
@@ -2151,7 +2161,7 @@ fn the_router_leaves_a_session_that_is_replacing_its_image_alone() {
     .exists());
 
     // With the resume file gone the same lookup takes that advertisement off
-    // the disk, which is exactly what the guard held back.
+    // the disk.
     std::fs::remove_file(resolve_resume_file_path(
         runtime_directory.path(),
         created_session.session_id,
@@ -2346,6 +2356,8 @@ fn a_resume_file_whose_header_does_not_read_comes_back_as_one_fresh_shell_showin
         )
         .arg("--resume")
         .arg(&resume_file_path),
+        runtime_directory.path(),
+        session_id,
     );
 
     let fresh_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
@@ -2489,7 +2501,11 @@ fn a_resume_file_whose_header_does_not_read_lets_the_inherited_terminal_and_ende
         });
     }
 
-    let _session_server_process = start_session_server_with_command(&mut process_command);
+    let _session_server_process = start_session_server_with_command(
+        &mut process_command,
+        runtime_directory.path(),
+        session_id,
+    );
     // SAFETY: `close` takes descriptors this test opened and uses no more.
     unsafe {
         libc::close(terminal_master_file_descriptor);
@@ -2578,7 +2594,11 @@ fn a_resume_file_whose_header_does_not_read_ends_and_reaps_a_child_that_ignores_
         });
     }
 
-    let _session_server_process = start_session_server_with_command(&mut process_command);
+    let _session_server_process = start_session_server_with_command(
+        &mut process_command,
+        runtime_directory.path(),
+        session_id,
+    );
     // SAFETY: `close` takes a descriptor this test opened and uses no more.
     unsafe {
         libc::close(process_id_write_file_descriptor);

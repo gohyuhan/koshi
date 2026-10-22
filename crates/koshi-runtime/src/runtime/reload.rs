@@ -10,13 +10,13 @@
 //! partial config layer; discovering, reading, and deserializing the files is
 //! the config loader's job.
 //!
-//! App settings are typed values and always apply. The transaction yields one
-//! [`Event::ConfigReloaded`] per live session.
+//! App settings are typed values and always apply. The transaction solves
+//! every tab of every live session again with the new pane sizing, and yields
+//! one [`Event::ConfigReloaded`] per live session.
 
 use koshi_config::layer::{merge_client, merge_server, PartialKoshiConfig};
 use koshi_config::types::{ClientConfig, ServerConfig};
 use koshi_core::event::{ConfigReloaded, Event};
-use koshi_core::ids::SessionId;
 
 use crate::server::Server;
 
@@ -25,7 +25,8 @@ impl Server {
     /// `reloaded_app_config` and recompute both effective configs from it, the session's
     /// own and the viewer copy. `koshi.kdl` carries sections both sides own.
     /// The next pane spawns with the new shell, size floor, and scrollback
-    /// limits.
+    /// limits. Every tab of every live session is solved again with the new
+    /// pane size floor and gap, in session-id order; no PTY is resized.
     ///
     /// `reloaded_app_config.theme` and `reloaded_app_config.keybindings` are set to `None` before
     /// the swap: the colors come from the theme file and the bindings from
@@ -33,15 +34,17 @@ impl Server {
     /// hand-built candidate carries one. The config loader resolves the theme
     /// `koshi.kdl` names and hands that file to the viewer.
     ///
-    /// Returns one [`Event::ConfigReloaded`] per live session, in session-id
-    /// order.
+    /// Returns the events of those solves, then one [`Event::ConfigReloaded`]
+    /// per live session, both in session-id order.
     pub fn reload_app_config(&mut self, mut reloaded_app_config: PartialKoshiConfig) -> Vec<Event> {
         reloaded_app_config.theme = None;
         reloaded_app_config.keybindings = None;
         self.app_layer = reloaded_app_config;
         self.config = merge_app_layer_into_server_config(&self.app_layer);
         self.client_config = merge_app_layer_into_client_config(&self.app_layer);
-        self.build_config_reloaded_events()
+        let mut emitted_events = self.update_every_session_pane_sizing();
+        emitted_events.extend(self.build_config_reloaded_events());
+        emitted_events
     }
 
     /// Apply the `koshi.kdl` settings read at startup, before any session
@@ -58,9 +61,7 @@ impl Server {
 
     /// One [`Event::ConfigReloaded`] per live session, in session-id order.
     fn build_config_reloaded_events(&self) -> Vec<Event> {
-        let mut session_ids: Vec<SessionId> = self.session_by_id.keys().copied().collect();
-        session_ids.sort_unstable();
-        session_ids
+        self.list_session_ids()
             .into_iter()
             .map(|session_id| Event::ConfigReloaded(ConfigReloaded { session_id }))
             .collect()

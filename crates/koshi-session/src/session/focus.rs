@@ -6,16 +6,19 @@
 //! layout's ranked survivors, it walks a fixed recovery order and returns the
 //! pane to focus, or a defined fallback when nothing is focusable.
 //!
-//! It chooses, it does not mutate; the caller applies the verdict. The removed
-//! pane must have been the client's focus: the removal pipeline runs it only
-//! for the clients whose focused pane vanished.
+//! It chooses, it does not mutate; the caller applies the verdict. The pane
+//! that left must have been the client's focus: the callers run it only for
+//! the clients whose focused pane left the tab or is suppressed.
 //!
 //! [`build_pane_focused_event`] reports a change of the pane that takes a
-//! client's input, floating or tiled.
+//! client's input, floating or tiled, and
+//! [`build_pane_minimized_changed_events`] a change of the floating panes one
+//! client shows. [`apply_tiled_pane_focus`] focuses a tiled pane for one
+//! client and reports both.
 
 use koshi_core::{
-    event::{Event, PaneFocused},
-    ids::PaneId,
+    event::{Event, PaneFocused, PaneMinimizedChanged},
+    ids::{ClientId, PaneId, TabId},
 };
 use koshi_layout::focus::FocusCandidates;
 use koshi_pane::registry::PaneRegistry;
@@ -37,12 +40,13 @@ pub enum FocusRepairResult {
     TerminalTooSmall,
 }
 
-/// Pick the pane that inherits focus after the focused pane in `tab` is gone.
+/// Pick the pane that inherits focus after the focused pane in `tab` left the
+/// tab or was suppressed.
 ///
 /// The recovery order is fixed, and the first eligible pane wins:
 /// 1. the tab's focus history, newest first ([`Tab::list_focus_mru`]);
-/// 2. the spatial neighbor of the removed pane's old rect;
-/// 3. the pane that absorbed the most of the removed pane's space;
+/// 2. the spatial neighbor of the rect the pane that left held;
+/// 3. the pane that absorbed the most of that rect;
 /// 4. the first eligible pane in layout order, as a last resort.
 ///
 /// `ranked_focus_candidates` is the layout's ranked survivors after the removal
@@ -117,6 +121,55 @@ pub fn build_pane_focused_event(
         pane_id: focused_pane_id,
         previous_pane_id: previous_focused_pane_id,
     }))
+}
+
+/// Focus `pane_id` in `tab_id` for `client` ([`Client::focus_tiled_pane`]):
+/// in `client`'s active tab, `pane_id` takes its input and every floating
+/// pane it shows is minimized.
+///
+/// Returns one [`Event::PaneMinimizedChanged`] with `is_minimized: true` per
+/// floating pane minimized, oldest shown first, then an
+/// [`Event::PaneFocused`] with `tab_id: Some(tab_id)` naming the pane that
+/// held the focus before as `previous_pane_id`. With `htop` shown and
+/// focused, focusing tiled `a` in the active tab → `PaneMinimizedChanged
+/// { pane_id: htop, is_minimized: true }`, then `PaneFocused { pane_id: a,
+/// previous_pane_id: Some(htop) }`. No `PaneFocused` when `pane_id` held the
+/// focus already.
+#[must_use]
+pub fn apply_tiled_pane_focus(client: &mut Client, tab_id: TabId, pane_id: PaneId) -> Vec<Event> {
+    let client_id = client.get_client_id();
+    let tiled_pane_focus_change = client.focus_tiled_pane(tab_id, pane_id);
+    let mut emitted_events: Vec<Event> = build_pane_minimized_changed_events(
+        client_id,
+        &tiled_pane_focus_change.minimized_floating_pane_ids,
+        true,
+    )
+    .collect();
+    if tiled_pane_focus_change.previous_pane_id != Some(pane_id) {
+        emitted_events.push(Event::PaneFocused(PaneFocused {
+            client_id,
+            tab_id: Some(tab_id),
+            pane_id,
+            previous_pane_id: tiled_pane_focus_change.previous_pane_id,
+        }));
+    }
+    emitted_events
+}
+
+/// One [`Event::PaneMinimizedChanged`] per pane of `pane_ids`, in that order,
+/// each naming `client_id` and `is_minimized`.
+pub fn build_pane_minimized_changed_events(
+    client_id: ClientId,
+    pane_ids: &[PaneId],
+    is_minimized: bool,
+) -> impl Iterator<Item = Event> + '_ {
+    pane_ids.iter().map(move |&pane_id| {
+        Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            client_id,
+            pane_id,
+            is_minimized,
+        })
+    })
 }
 
 #[cfg(test)]

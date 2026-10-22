@@ -154,6 +154,7 @@ impl Server {
             tab_name,
             Some(tab_target.client_id),
             new_pane_spec,
+            designated_pane_area,
         );
         advance_session_placement_revision(session);
         advance_client_placement_revisions(session, &affected_client_ids);
@@ -240,7 +241,7 @@ impl Server {
         );
         ensure_session_placement_revision_capacity(session)?;
         ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
-        let floating_pane_ids = list_floating_pane_ids(session);
+        let floating_pane_ids = session.floating_set.list_pane_ids();
 
         // Commit the state removal: pane records drop, the tab goes, viewers
         // move to the nearest surviving tab, last-tab close quits the session.

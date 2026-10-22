@@ -1438,7 +1438,8 @@ fn a_merged_resize_run_leaves_the_layout_that_every_size_in_turn_leaves() {
     assert_eq!(list_pty_sizes(&server), pty_sizes_after_each_size);
 }
 
-/// Each floating pane of `session_id` and its solved size, in creation order.
+/// Each floating pane of `session_id` and its solved size, in the order the
+/// panes became floating.
 fn list_floating_solved_sizes(server: &Server, session_id: SessionId) -> Vec<(PaneId, Size)> {
     server.session_by_id[&session_id]
         .floating_set

@@ -38,9 +38,9 @@ use koshi_core::{
     },
     constant::GRACEFUL_TIMEOUT_DURATION,
     event::{
-        Event, FloatingPaneMoved, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused,
-        PaneMinimizedChanged, PanePinChanged, PanePlacementCommitted, PaneProcessExited,
-        PtyResized, RejectReason, SelectionChanged,
+        Event, FloatingPaneMoved, InputModeChanged, LayoutChanged, MouseSelectChanged,
+        PanePinChanged, PanePlacementCommitted, PaneProcessExited, PtyResized, RejectReason,
+        SelectionChanged,
     },
     geometry::{
         Direction, FloatingPaneDimension, FloatingPaneSize, PaneArea, Point, Rect, Size,
@@ -52,12 +52,14 @@ use koshi_core::{
     process::{ExitStatus, KillPolicy, PtySize, SpawnSpec},
 };
 use koshi_layout::{
-    content::list_content_rects,
+    content::{find_content_rect, list_content_rects},
     edit::{add_pane_to_stack, split_leaf},
     focus::activate_stack_member,
     mode::LayoutMode,
     neighbor::select_directional_neighbor,
-    placement::{place_pane_within_tab, PlacementError, PlacementTarget},
+    placement::{
+        place_floating_pane_in_tab, place_pane_within_tab, PlacementError, PlacementTarget,
+    },
     resize::{resize_layout_with_sizing, ResizeError},
     solver::{is_layout_within_rect, solve_layout_with_mode, solve_layout_with_sizing, PaneSizing},
     tree::LayoutNode,
@@ -65,14 +67,22 @@ use koshi_layout::{
 use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::resize::{compute_pty_size, resize_for_layout_change};
 use koshi_renderer::floating_pane_chrome::compute_floating_pane_content_size;
-use koshi_session::client::{place_floating_pane, Client, ClientOrigin, FloatingPanePosition};
+use koshi_session::client::{
+    compute_floating_pane_size_cap, place_floating_pane, Client, ClientOrigin,
+    FloatingPanePosition, FloatingPaneView,
+};
 use koshi_session::error::FloatingSetError;
 use koshi_session::session::{
     cascade::{apply_child_exit, remove_floating_pane, remove_pane_cascade},
-    focus::build_pane_focused_event,
+    focus::{
+        apply_tiled_pane_focus, build_pane_focused_event, build_pane_minimized_changed_events,
+    },
     lifecycle::SessionLifecycle,
     pane_ops::{self, NewPaneSpec},
-    placement::{commit_cross_tab_placement, commit_undock_placement, PlacementCommitError},
+    placement::{
+        commit_cross_tab_placement, commit_dock_placement, commit_undock_placement,
+        PlacementCommitError,
+    },
     state::{compute_floating_pane_minimum_size, FloatingMember, Session},
     tab_ops,
 };
@@ -99,20 +109,6 @@ fn list_clients_affected_by_tabs(
         .collect()
 }
 
-/// List every attached client whose floating view names `pane_id`: a stored
-/// view, or an entry in its floating focus order.
-fn list_clients_holding_floating_view(session: &Session, pane_id: PaneId) -> Vec<ClientId> {
-    session
-        .clients
-        .list_attached_clients()
-        .filter(|client| {
-            client.get_floating_pane_view(pane_id) != Default::default()
-                || client.list_floating_pane_focus_order().contains(&pane_id)
-        })
-        .map(|client| client.get_client_id())
-        .collect()
-}
-
 /// How a closed pane's child dies: an immediate force-kill when
 /// `should_force_close` is set, else a graceful close that escalates after
 /// [`GRACEFUL_TIMEOUT_DURATION`]. `should_kill_process_tree` widens the picked
@@ -133,16 +129,6 @@ fn compute_pane_kill_policy(
     } else {
         kill_policy
     }
-}
-
-/// Every floating pane of `session`, in creation order.
-fn list_floating_pane_ids(session: &Session) -> Vec<PaneId> {
-    session
-        .floating_set
-        .list_members()
-        .iter()
-        .map(|floating_member| floating_member.pane_id)
-        .collect()
 }
 
 /// Refuse a transaction when its shared placement generation cannot advance.
@@ -218,18 +204,11 @@ pub(crate) fn compute_root_pane_pty_size(
     tab_size: Size,
     pane_sizing: PaneSizing,
 ) -> PtySize {
-    let root_layout_tree = LayoutNode::Pane(pane_id);
     let tab_layout_rect = Rect::from_size_at_origin(tab_size);
-    let pane_content_rects = list_content_rects(&solve_layout_with_sizing(
-        &root_layout_tree,
-        tab_layout_rect,
-        pane_sizing,
-    ));
-    let pane_content_rect = pane_content_rects
-        .iter()
-        .find(|(matched_pane_id, _)| *matched_pane_id == pane_id)
-        .and_then(|(_, content_rect)| *content_rect)
-        .unwrap_or(tab_layout_rect);
+    let root_layout_solve =
+        solve_layout_with_sizing(&LayoutNode::Pane(pane_id), tab_layout_rect, pane_sizing);
+    let pane_content_rect =
+        find_content_rect(&root_layout_solve, pane_id).unwrap_or(tab_layout_rect);
     compute_pty_size(pane_content_rect)
 }
 
@@ -445,15 +424,36 @@ struct FocusTabTarget {
 /// placement.
 struct PlacePaneTarget {
     session_id: SessionId,
+    source_pane_id: PaneId,
     source_tab_id: TabId,
     destination_tab_id: TabId,
     client_id: ClientId,
 }
 
-/// The resolved source tab and acting client of an undock: a
+/// The resolved source pane, destination tab and acting client of a dock: a
+/// [`Command::PlacePane`] whose source pane is floating and whose target is
+/// [`PanePlacementTarget::Tiled`].
+struct DockPaneTarget {
+    session_id: SessionId,
+    source_pane_id: PaneId,
+    destination_tab_id: TabId,
+    client_id: ClientId,
+}
+
+/// A resolved [`Command::PlacePane`] with a [`PanePlacementTarget::Tiled`]
+/// target, by the kind of its source pane.
+enum ResolvedTiledPlacement {
+    /// The source pane is a leaf of a tab.
+    TiledSource(PlacePaneTarget),
+    /// The source pane is floating: the placement docks it.
+    FloatingSource(DockPaneTarget),
+}
+
+/// The resolved source pane, its tab and the acting client of an undock: a
 /// [`Command::PlacePane`] whose target is [`PanePlacementTarget::Floating`].
 struct UndockPaneTarget {
     session_id: SessionId,
+    source_pane_id: PaneId,
     source_tab_id: TabId,
     client_id: ClientId,
 }
@@ -914,20 +914,23 @@ impl Server {
     }
 
     /// The size each of `tab_id`'s panes must be given, once every client
-    /// viewing the tab has had its say. Empty when the tab is gone; `None` for a
-    /// pane no viewer draws, which keeps that pane's PTY at its current size.
+    /// viewing the tab has had its say. Empty when the tab is gone or no client
+    /// views it; `None` for a pane no viewer draws, which keeps that pane's PTY
+    /// at its current size.
     ///
     /// **A pane's PTY has exactly one size, but its viewers may disagree about
     /// its rect** — zoom is per-client, so client A can have pane X filling the
     /// tab while client B has it tiled in a corner. The size handed to X's child
-    /// is the **smallest** rect among the clients who actually draw X.
+    /// is the **smallest** rect among the clients who actually draw X. Each
+    /// viewer draws the tab with its own solve ([`Session::compute_client_solve`]):
+    /// a tiled viewer reads the tab's solve, a zoomed viewer solves its zoom at
+    /// the tab's solved size.
     ///
     /// A client zoomed on some *other* pane draws X not at all, so it is not
     /// one of the viewers this minimum is taken over. It still bounds X
-    /// indirectly: `tab_size` is the tab's shared [`Session::get_tab_size`]
+    /// indirectly: the tab is solved at its shared [`Session::get_tab_size`]
     /// (the per-axis minimum pane area across every client viewing the tab,
-    /// zoomed or not), every pane is solved inside it, and the renderer draws
-    /// the whole tab at that size — so no pane, zoomed or tiled, may exceed it.
+    /// zoomed or not), and no pane, zoomed or tiled, exceeds it.
     ///
     /// When exactly one client views the tab (the common case), the minimum is
     /// that client's own rect and a zoom gives its pane the whole tab.
@@ -935,29 +938,15 @@ impl Server {
     /// Only the returned rect's SIZE is meaningful: its origin is whatever the
     /// first drawing viewer placed it at, and every consumer here reads the size
     /// alone ([`compute_pty_size`]).
-    fn compute_tab_content_rects(
-        session: &Session,
-        tab_id: TabId,
-        tab_size: Size,
-        pane_sizing: PaneSizing,
-    ) -> Vec<(PaneId, Option<Rect>)> {
-        let Some(tab) = session.tabs.get(&tab_id) else {
-            return Vec::new();
-        };
-        let tab_rect = Rect::from_size_at_origin(tab_size);
-
-        // One solve per viewer, each in that client's own layout mode.
+    fn compute_tab_content_rects(session: &Session, tab_id: TabId) -> Vec<(PaneId, Option<Rect>)> {
         let per_viewer_content_rects: Vec<Vec<(PaneId, Option<Rect>)>> = session
             .clients
             .list_attached_clients()
             .filter(|client| client.get_active_tab_id() == tab_id)
-            .map(|client| {
-                list_content_rects(&solve_layout_with_mode(
-                    tab.get_layout_tree(),
-                    client.get_layout_mode(tab_id),
-                    tab_rect,
-                    pane_sizing,
-                ))
+            .filter_map(|client| {
+                session
+                    .compute_client_solve(tab_id, client.get_layout_mode(tab_id))
+                    .map(|client_solve| list_content_rects(&client_solve))
             })
             .collect();
 
@@ -1008,9 +997,10 @@ impl Server {
     }
 
     /// The target session borrowed mutably, plus the size `tab_id` is
-    /// currently solved against. Rejects when the session is gone or when no
-    /// attached client views the tab — an unviewed tab has no terminal size to
-    /// solve against.
+    /// currently solved against ([`Session::get_tab_size`]). Rejects with
+    /// [`RejectReason::TargetNotFound`] when the session is gone, and with
+    /// [`RejectReason::InvalidState`] `pane's tab is not viewed by any client`
+    /// when no attached client contributes a pane area to the tab.
     fn resolve_session_and_tab_size(
         &mut self,
         session_id: SessionId,
@@ -1029,13 +1019,17 @@ impl Server {
         Ok((session, tab_size))
     }
 
-    /// Reflow `tab_id`'s live PTYs to its current tab size when a client
-    /// still views it, appending one [`Event::PtyResized`] per pane actually
-    /// resized. First sets [`Session::get_tab_cell_size`] on the terminal
-    /// engine of each pane in the tab; with no reported cell size, each engine
-    /// keeps its own. A tab no viewer contributes a pane area to has no
-    /// [`Session::get_tab_size`] and keeps its sizes. Every live pane of the
-    /// tab whose PTY size changed is resized; none is skipped.
+    /// Solve `tab_id` again at its tab size ([`Session::update_tab_solve`]),
+    /// appending the events of that solve, then reflow the tab's live PTYs to
+    /// the solve when a client still views it, appending one
+    /// [`Event::PtyResized`] per pane actually resized.
+    ///
+    /// First sets [`Session::get_tab_cell_size`] on the terminal engine of each
+    /// pane in the tab; with no reported cell size, each engine keeps its own.
+    /// A tab no viewer contributes a pane area to has no
+    /// [`Session::get_tab_size`] and keeps its PTY sizes. Every live pane of
+    /// the tab whose PTY size changed is resized; none is skipped. A session or
+    /// tab this server does not hold changes nothing.
     pub(crate) fn reflow_tab_if_viewed(
         &mut self,
         backend: &dyn PtyBackend,
@@ -1043,9 +1037,10 @@ impl Server {
         tab_id: TabId,
         emitted_events: &mut Vec<Event>,
     ) {
-        let Some(session) = self.session_by_id.get(&session_id) else {
+        let Some(session) = self.session_by_id.get_mut(&session_id) else {
             return;
         };
+        emitted_events.extend(session.update_tab_solve(tab_id));
         if let Some(cell_size) = session.get_tab_cell_size(tab_id) {
             if let Some(tab) = session.tabs.get(&tab_id) {
                 for pane_id in tab.get_layout_tree().list_leaf_pane_ids() {
@@ -1055,17 +1050,17 @@ impl Server {
                 }
             }
         }
-        let Some(tab_size) = session.get_tab_size(tab_id) else {
+        if session.get_tab_size(tab_id).is_none() {
             return;
-        };
-        let content_rects =
-            Self::compute_tab_content_rects(session, tab_id, tab_size, self.get_pane_sizing());
+        }
+        let content_rects = Self::compute_tab_content_rects(session, tab_id);
         self.reflow_changed(backend, content_rects, None, emitted_events);
     }
 
     /// Solve every floating pane of `session_id` against the session's shared
     /// floating viewport, then resize each live PTY whose size changed,
-    /// appending one [`Event::PtyResized`] per resized pane, in creation order.
+    /// appending one [`Event::PtyResized`] per resized pane, in the order the
+    /// panes became floating.
     ///
     /// First sets [`Session::get_floating_cell_size`] on each floating pane's
     /// terminal engine; with no reported cell size, each engine keeps its own.
@@ -1079,7 +1074,7 @@ impl Server {
     /// minimum. A session this server does not hold changes nothing.
     ///
     /// [`FloatingSet::update_member_sizes`]: koshi_session::session::state::FloatingSet::update_member_sizes
-    fn reflow_floating_panes(
+    pub(crate) fn reflow_floating_panes(
         &mut self,
         backend: &dyn PtyBackend,
         session_id: SessionId,

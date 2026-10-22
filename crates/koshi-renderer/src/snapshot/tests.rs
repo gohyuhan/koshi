@@ -1,8 +1,9 @@
 //! Tests for the render-snapshot DTOs: build a full snapshot from fixture
 //! pieces, check exact field values, confirm it is `Send + Sync`, confirm
 //! cloning shares every row by reference (no cell copy), confirm equality, and
-//! check the mouse-frame projection, the borrowed layout views, and the
-//! selection row lookup.
+//! check the mouse-frame projection, the borrowed layout views, the selection
+//! row lookup, the pane slots of a layout solve, and the tab a placement
+//! preview shows for a tiled and a floating source.
 
 use super::*;
 
@@ -17,6 +18,7 @@ fn build_mouse_frame(render_snapshot: RenderSnapshot) -> MouseFrame {
 use koshi_core::geometry::Point;
 use koshi_terminal::grid::state::Cell;
 use koshi_terminal::style::Style;
+use koshi_test_support::fixtures::build_cell_rect;
 
 /// A 24-row × 80-column blank grid.
 fn build_render_snapshot_fixture_grid() -> Grid {
@@ -234,8 +236,7 @@ fn render_snapshot_fixture_has_exact_field_values() {
 #[test]
 fn a_mouse_frame_keeps_every_field_a_mouse_event_is_answered_from() {
     let mut render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
-    // Each field takes a value of its own, so a copy that reads the wrong
-    // source field lands on the wrong value here.
+    // Each field gets a value that no other field holds.
     render_snapshot.pane_snapshots[0].view_top_row_index = 42;
     render_snapshot.pane_snapshots[0].mouse_tracking = MouseTracking::ButtonMotion;
     render_snapshot.pane_snapshots[0].is_alternate_scroll_enabled = true;
@@ -653,9 +654,8 @@ fn cloning_render_snapshot_preserves_equality() {
 
 #[test]
 fn render_snapshots_with_different_grid_cells_are_not_equal() {
-    // Derived `PartialEq` recurses into the grid; a single-cell difference
-    // deep inside it must still make the two snapshots unequal, not just a
-    // difference at the top-level fields.
+    // Two snapshots that differ in one grid cell and in no top-level field
+    // compare unequal: the derived `PartialEq` compares the grid too.
     let first_terminal_grid = Grid::build_blank(24, 80, Style::default());
     let first_render_snapshot = build_render_snapshot_fixture(first_terminal_grid);
 
@@ -689,4 +689,192 @@ fn empty_render_snapshot_is_valid_and_equals_its_clone() {
         .pane_slots
         .is_empty());
     assert_eq!(render_snapshot, render_snapshot.clone());
+}
+
+/// A shown pane gets its outer rect inset by one cell as its content, a
+/// suppressed pane and a collapsed stack member get no content, and only the
+/// suppressed pane is marked suppressed, each slot in solve order.
+#[test]
+fn list_pane_slots_gives_a_shown_a_suppressed_and_a_collapsed_stack_pane_their_slots() {
+    let shown_pane_id = PaneId::new();
+    let suppressed_pane_id = PaneId::new();
+    let collapsed_pane_id = PaneId::new();
+    let layout_solve = LayoutSolve {
+        pane_rects: vec![
+            (shown_pane_id, build_cell_rect(0, 1, 10, 5)),
+            (suppressed_pane_id, build_cell_rect(10, 0, 0, 0)),
+            (collapsed_pane_id, build_cell_rect(0, 0, 10, 1)),
+        ],
+        suppressed_pane_ids: vec![suppressed_pane_id],
+        is_every_pane_suppressed: false,
+        stack_headers: vec![StackHeader {
+            pane_id: collapsed_pane_id,
+            header_rect: build_cell_rect(0, 0, 10, 1),
+            member_index: 1,
+            member_count: 2,
+        }],
+    };
+
+    assert_eq!(
+        list_pane_slots(&layout_solve),
+        vec![
+            PaneSlot {
+                pane_id: shown_pane_id,
+                outer_rect: build_cell_rect(0, 1, 10, 5),
+                content_rect: Some(build_cell_rect(1, 2, 8, 3)),
+                is_visible: true,
+                is_suppressed: false,
+            },
+            PaneSlot {
+                pane_id: suppressed_pane_id,
+                outer_rect: build_cell_rect(10, 0, 0, 0),
+                content_rect: None,
+                is_visible: false,
+                is_suppressed: true,
+            },
+            PaneSlot {
+                pane_id: collapsed_pane_id,
+                outer_rect: build_cell_rect(0, 0, 10, 1),
+                content_rect: None,
+                is_visible: false,
+                is_suppressed: false,
+            },
+        ]
+    );
+}
+
+/// A visible slot is found by its pane id. A hidden slot and a pane id with no
+/// slot give `None`.
+#[test]
+fn find_visible_pane_slot_finds_only_a_visible_slot_of_the_pane() {
+    let shown_pane_id = PaneId::new();
+    let hidden_pane_id = PaneId::new();
+    let shown_pane_slot = PaneSlot {
+        pane_id: shown_pane_id,
+        outer_rect: build_cell_rect(0, 0, 10, 5),
+        content_rect: Some(build_cell_rect(1, 1, 8, 3)),
+        is_visible: true,
+        is_suppressed: false,
+    };
+    let tab_snapshot = TabSnapshot {
+        pane_slots: vec![
+            PaneSlot {
+                pane_id: hidden_pane_id,
+                outer_rect: build_cell_rect(10, 0, 10, 5),
+                content_rect: None,
+                is_visible: false,
+                is_suppressed: false,
+            },
+            shown_pane_slot.clone(),
+        ],
+        ..build_render_snapshot_fixture(build_render_snapshot_fixture_grid())
+            .session_snapshot
+            .active_tab_snapshot
+    };
+
+    assert_eq!(
+        tab_snapshot.find_visible_pane_slot(shown_pane_id),
+        Some(&shown_pane_slot)
+    );
+    assert_eq!(tab_snapshot.find_visible_pane_slot(hidden_pane_id), None);
+    assert_eq!(tab_snapshot.find_visible_pane_slot(PaneId::new()), None);
+}
+
+/// A placement tab snapshot of `tab_snapshot`, its layout one leaf of the
+/// tab's first pane, with no pane content.
+fn build_placement_tab_snapshot(tab_snapshot: TabSnapshot) -> PlacementTabSnapshot {
+    PlacementTabSnapshot {
+        layout_tree: LayoutNode::Pane(tab_snapshot.pane_slots[0].pane_id),
+        tab_snapshot,
+        pane_snapshots: Vec::new(),
+    }
+}
+
+/// A tiled source shows its own tab when that tab is the destination, and the
+/// destination tab otherwise. A floating source has no tab and shows the
+/// destination tab.
+#[test]
+fn a_placement_snapshot_shows_the_source_tab_only_when_it_is_the_destination() {
+    let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
+    let source_tab_snapshot = render_snapshot.session_snapshot.active_tab_snapshot.clone();
+    let source_tab_id = source_tab_snapshot.tab_id;
+    let destination_tab_snapshot = TabSnapshot {
+        tab_id: TabId::new(),
+        ..source_tab_snapshot.clone()
+    };
+    let destination_tab_id = destination_tab_snapshot.tab_id;
+    let build_placement_snapshot =
+        |source_pane_id: PaneId,
+         source: PlacementSource,
+         destination_tab_id: TabId,
+         destination_tab_snapshot: Option<PlacementTabSnapshot>| {
+            PlacementSnapshot {
+                session_id: render_snapshot.session_snapshot.session_id,
+                source_pane_id,
+                source,
+                destination_tab_id,
+                session_placement_revision: 0,
+                client_placement_revision: 0,
+                destination_tab_snapshot,
+                client_snapshot: PlacementClientSnapshot {
+                    client_snapshot: render_snapshot.client_snapshot.clone(),
+                    reported_pane_area: None,
+                },
+                pane_sizing: PaneSizing::default(),
+            }
+        };
+    let tiled_pane_id = source_tab_snapshot.pane_slots[0].pane_id;
+    let floating_pane_id = PaneId::new();
+
+    let same_tab_placement_snapshot = build_placement_snapshot(
+        tiled_pane_id,
+        PlacementSource::Tiled(build_placement_tab_snapshot(source_tab_snapshot.clone())),
+        source_tab_id,
+        None,
+    );
+    let other_tab_placement_snapshot = build_placement_snapshot(
+        tiled_pane_id,
+        PlacementSource::Tiled(build_placement_tab_snapshot(source_tab_snapshot.clone())),
+        destination_tab_id,
+        Some(build_placement_tab_snapshot(
+            destination_tab_snapshot.clone(),
+        )),
+    );
+    let floating_placement_snapshot = build_placement_snapshot(
+        floating_pane_id,
+        PlacementSource::Floating(PlacementPaneSnapshot {
+            pane_id: floating_pane_id,
+            terminal_grid_view: None,
+            image_placement_snapshots: Vec::new(),
+        }),
+        destination_tab_id,
+        Some(build_placement_tab_snapshot(
+            destination_tab_snapshot.clone(),
+        )),
+    );
+
+    assert_eq!(
+        same_tab_placement_snapshot.find_source_tab_id(),
+        Some(source_tab_id)
+    );
+    assert_eq!(
+        same_tab_placement_snapshot.find_displayed_tab_snapshot(),
+        Some(&build_placement_tab_snapshot(source_tab_snapshot.clone()))
+    );
+    assert_eq!(
+        other_tab_placement_snapshot.find_source_tab_snapshot(),
+        Some(&build_placement_tab_snapshot(source_tab_snapshot))
+    );
+    assert_eq!(
+        other_tab_placement_snapshot.find_displayed_tab_snapshot(),
+        Some(&build_placement_tab_snapshot(
+            destination_tab_snapshot.clone()
+        ))
+    );
+    assert_eq!(floating_placement_snapshot.find_source_tab_id(), None);
+    assert_eq!(floating_placement_snapshot.find_source_tab_snapshot(), None);
+    assert_eq!(
+        floating_placement_snapshot.find_displayed_tab_snapshot(),
+        Some(&build_placement_tab_snapshot(destination_tab_snapshot))
+    );
 }

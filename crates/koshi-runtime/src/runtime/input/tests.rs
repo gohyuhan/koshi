@@ -1656,13 +1656,15 @@ fn a_key_writes_nothing_when_the_client_has_no_focused_pane() {
 fn a_key_from_a_starving_sole_viewer_writes_nothing() {
     let (mut server, fake_pty_backend, client_id, mut viewer) = build_test_server();
     let pane_id = get_only_pane_id(&server);
-    server
-        .get_session_for_client_mut(client_id)
-        .expect("session")
-        .clients
-        .get_client_mut_by_id(client_id)
-        .expect("client")
-        .update_pane_area(Some(PaneArea::Starving));
+    let _ = server.handle_client_resize(
+        client_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        Some(PaneArea::Starving),
+        None,
+    );
 
     apply_key_press(
         &mut server,

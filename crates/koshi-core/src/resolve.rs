@@ -32,8 +32,9 @@ use std::fmt;
 use crate::action::{ActionHandlerReference, ActionReference, ClientActionKind};
 use crate::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    NewPaneArgs, NewPanePlacement, NewTabArgs, ResizePaneArgs, ScrollPaneArgs, TabTarget,
-    ToggleLockModeArgs,
+    NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementTarget, PlacePaneArgs, ResizePaneArgs,
+    ScrollPaneArgs, SetAllFloatingPanesMinimizedArgs, SetPaneMinimizedArgs, SetPanePinnedArgs,
+    TabTarget, ToggleLockModeArgs,
 };
 use crate::geometry::Direction;
 use crate::registry::ActionRegistry;
@@ -182,6 +183,35 @@ fn resolve_core_action(
             build_focus_pane_command(FocusTarget::PreviousFloatingPane)
         }
         "toggle-pane-fullscreen" => Command::TogglePaneFullscreen,
+        "undock-pane" => Command::PlacePane(PlacePaneArgs {
+            source_pane_id: None,
+            placement_target: PanePlacementTarget::Floating {
+                top_left_cell: None,
+            },
+            expected_placement_revision: None,
+        }),
+        "pin-pane" => Command::SetPanePinned(SetPanePinnedArgs {
+            pane_id: None,
+            is_pinned: true,
+        }),
+        "unpin-pane" => Command::SetPanePinned(SetPanePinnedArgs {
+            pane_id: None,
+            is_pinned: false,
+        }),
+        "minimize-pane" => Command::SetPaneMinimized(SetPaneMinimizedArgs {
+            pane_id: None,
+            is_minimized: true,
+        }),
+        "minimize-all-floating-panes" => {
+            Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs {
+                is_minimized: true,
+            })
+        }
+        "restore-all-floating-panes" => {
+            Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs {
+                is_minimized: false,
+            })
+        }
 
         // --- Tabs ---
         "new-tab" => Command::NewTab(NewTabArgs::default()),

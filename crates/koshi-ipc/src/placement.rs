@@ -1,9 +1,9 @@
 //! Bounded read-only placement previews.
 //!
-//! A placement preview carries the source and selected destination layout trees,
-//! solved slots, each visible pane's rows in the row encoding, and image
-//! references. It carries no scrollback metadata and does not change session
-//! state.
+//! A placement preview carries the source pane's tab, or the source pane's own
+//! content when that pane floats, the selected destination layout tree, solved
+//! slots, each visible pane's rows in the row encoding, and image references.
+//! It carries no scrollback metadata and does not change session state.
 
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 
@@ -11,6 +11,7 @@ use koshi_core::geometry::{PaneArea, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::size::SizeConstraint;
+use koshi_layout::solver::PaneSizing;
 use koshi_layout::tree::LayoutNode;
 use serde::{Deserialize, Serialize};
 
@@ -38,23 +39,33 @@ pub struct PanePlacementSnapshot {
     pub session_id: SessionId,
     /// The source pane named by the request.
     pub source_pane_id: PaneId,
-    /// The source tab that currently contains `source_pane_id`.
-    pub source_tab_id: TabId,
+    /// Where `source_pane_id` sits: the tab whose layout holds it, or its own
+    /// content when it floats.
+    pub source: PanePlacementSource,
     /// The destination tab named by the request.
     pub destination_tab_id: TabId,
     /// The session placement revision used to build the preview.
     pub session_placement_revision: u64,
     /// The requesting client's placement revision used to build the preview.
     pub client_placement_revision: u64,
-    /// The source tab's read-only layout and pane content.
-    pub source_tab_snapshot: PanePlacementTabSnapshot,
     /// The destination tab's read-only layout and visible pane content. `None`
-    /// means the destination is the source tab and the source snapshot is used.
+    /// exactly when the destination is the tab of a [`PanePlacementSource::Tiled`]
+    /// source, whose snapshot is used.
     pub destination_tab_snapshot: Option<PanePlacementTabSnapshot>,
     /// The requesting client's view inputs.
     pub client_snapshot: PanePlacementClientSnapshot,
     /// The shared sizing values used by the layout solver.
     pub pane_sizing: PanePlacementSizing,
+}
+
+/// Where the source pane of a placement preview sits before the placement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PanePlacementSource {
+    /// A leaf of this tab's layout: the source tab's read-only layout and pane
+    /// content.
+    Tiled(PanePlacementTabSnapshot),
+    /// A floating pane, with its own visible content.
+    Floating(PanePlacementPaneSnapshot),
 }
 
 const MAX_PLACEMENT_SNAPSHOT_LAYOUT_NODE_COUNT: usize = MAX_PLACEMENT_SNAPSHOT_PANE_COUNT * 2 - 1;
@@ -70,17 +81,82 @@ struct PanePlacementValidationState {
 }
 
 impl PanePlacementSnapshot {
-    /// Validate the bounds and relationships that protect a client from malformed previews.
-    pub fn validate(&self) -> Result<(), PanePlacementSnapshotValidationError> {
-        if self.source_tab_snapshot.tab_id != self.source_tab_id {
-            return Err(PanePlacementSnapshotValidationError::TabIdentityMismatch);
+    /// The tab whose layout holds the source pane, or `None` when the source
+    /// pane floats.
+    #[must_use]
+    pub fn find_source_tab_id(&self) -> Option<TabId> {
+        self.find_source_tab_snapshot()
+            .map(|source_tab_snapshot| source_tab_snapshot.tab_id)
+    }
+
+    /// The tab snapshot whose layout holds the source pane, or `None` when the
+    /// source pane floats.
+    #[must_use]
+    pub fn find_source_tab_snapshot(&self) -> Option<&PanePlacementTabSnapshot> {
+        match &self.source {
+            PanePlacementSource::Tiled(source_tab_snapshot) => Some(source_tab_snapshot),
+            PanePlacementSource::Floating(_) => None,
         }
+    }
+
+    /// The snapshot of tab `tab_id`: the source tab snapshot for the source
+    /// pane's tab, the destination tab snapshot for `destination_tab_id`, and
+    /// `None` for any other tab.
+    #[must_use]
+    pub fn find_tab_snapshot(&self, tab_id: TabId) -> Option<&PanePlacementTabSnapshot> {
+        if self.find_source_tab_id() == Some(tab_id) {
+            self.find_source_tab_snapshot()
+        } else if self.destination_tab_id == tab_id {
+            self.destination_tab_snapshot.as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Every pane snapshot the preview carries: the source tab's panes, or the
+    /// floating source pane, then the destination tab's panes.
+    pub fn list_pane_snapshots(&self) -> impl Iterator<Item = &PanePlacementPaneSnapshot> {
+        let source_pane_snapshots = match &self.source {
+            PanePlacementSource::Tiled(source_tab_snapshot) => {
+                source_tab_snapshot.pane_snapshots.as_slice()
+            }
+            PanePlacementSource::Floating(source_pane_snapshot) => {
+                std::slice::from_ref(source_pane_snapshot)
+            }
+        };
+        source_pane_snapshots.iter().chain(
+            self.destination_tab_snapshot
+                .iter()
+                .flat_map(|tab_snapshot| &tab_snapshot.pane_snapshots),
+        )
+    }
+
+    /// Every image placement the preview carries, pane by pane in
+    /// [`Self::list_pane_snapshots`] order.
+    pub fn list_image_placements(&self) -> impl Iterator<Item = &FrameImagePlacement> {
+        self.list_pane_snapshots()
+            .flat_map(|pane_snapshot| &pane_snapshot.image_placement_snapshots)
+    }
+
+    /// Validate the bounds and relationships that protect a client from malformed previews.
+    ///
+    /// Beyond each bound, the preview fails with
+    /// [`PanePlacementSnapshotValidationError::TabIdentityMismatch`] when a
+    /// destination snapshot names another tab than `destination_tab_id`, or
+    /// when the destination snapshot is present for the source tab or absent
+    /// for any other tab. A floating source counts as no tab: a preview for a
+    /// floating source with no destination snapshot fails. The source pane
+    /// missing from the source tab's slots, or a floating source content that
+    /// names another pane, fails with
+    /// [`PanePlacementSnapshotValidationError::SourcePaneMissing`].
+    pub fn validate(&self) -> Result<(), PanePlacementSnapshotValidationError> {
+        let source_tab_id = self.find_source_tab_id();
         if self
             .destination_tab_snapshot
             .as_ref()
             .is_some_and(|tab_snapshot| tab_snapshot.tab_id != self.destination_tab_id)
             || self.destination_tab_snapshot.is_none()
-                != (self.source_tab_id == self.destination_tab_id)
+                != (source_tab_id == Some(self.destination_tab_id))
         {
             return Err(PanePlacementSnapshotValidationError::TabIdentityMismatch);
         }
@@ -94,18 +170,31 @@ impl PanePlacementSnapshot {
             image_dimensions_by_content_id: HashMap::new(),
             expected_gap_cell_count: self.pane_sizing.gap_cell_count,
         };
-        validate_tab_snapshot(
-            &self.source_tab_snapshot,
-            &mut placement_validation,
-            (self.source_tab_id != self.destination_tab_id).then_some(self.source_pane_id),
-        )?;
-        if !self
-            .source_tab_snapshot
-            .pane_slots
-            .iter()
-            .any(|pane_slot| pane_slot.pane_id == self.source_pane_id)
-        {
-            return Err(PanePlacementSnapshotValidationError::SourcePaneMissing);
+        match &self.source {
+            PanePlacementSource::Tiled(source_tab_snapshot) => {
+                validate_tab_snapshot(
+                    source_tab_snapshot,
+                    &mut placement_validation,
+                    (source_tab_id != Some(self.destination_tab_id)).then_some(self.source_pane_id),
+                )?;
+                if !source_tab_snapshot
+                    .pane_slots
+                    .iter()
+                    .any(|pane_slot| pane_slot.pane_id == self.source_pane_id)
+                {
+                    return Err(PanePlacementSnapshotValidationError::SourcePaneMissing);
+                }
+            }
+            PanePlacementSource::Floating(source_pane_snapshot) => {
+                if source_pane_snapshot.pane_id != self.source_pane_id {
+                    return Err(PanePlacementSnapshotValidationError::SourcePaneMissing);
+                }
+                if !placement_validation.pane_ids.insert(self.source_pane_id) {
+                    return Err(PanePlacementSnapshotValidationError::DuplicatePaneId);
+                }
+                placement_validation.pane_count += 1;
+                validate_pane_content(source_pane_snapshot, &mut placement_validation)?;
+            }
         }
         if let Some(destination_tab_snapshot) = &self.destination_tab_snapshot {
             validate_tab_snapshot(destination_tab_snapshot, &mut placement_validation, None)?;
@@ -149,8 +238,8 @@ pub struct PanePlacementTabSnapshot {
     /// Blank cells between adjacent split panes.
     pub gap_cell_count: u16,
     /// Visible cells and image references, matched to `pane_slots` by pane id.
-    /// The source pane may retain cells while its source slot is suppressed so
-    /// a cross-tab preview can display that pane after transfer.
+    /// The source pane keeps its cells while its source slot is suppressed,
+    /// and a cross-tab preview draws them in the destination tab.
     pub pane_snapshots: Vec<PanePlacementPaneSnapshot>,
 }
 
@@ -211,12 +300,33 @@ pub struct PanePlacementSizing {
     pub gap_cell_count: u16,
 }
 
+/// The same minimum pane size and gap, field for field.
+impl From<PaneSizing> for PanePlacementSizing {
+    fn from(pane_sizing: PaneSizing) -> Self {
+        PanePlacementSizing {
+            minimum_size: pane_sizing.minimum_size,
+            gap_cell_count: pane_sizing.gap_cell_count,
+        }
+    }
+}
+
+/// The same minimum pane size and gap, field for field.
+impl From<PanePlacementSizing> for PaneSizing {
+    fn from(pane_placement_sizing: PanePlacementSizing) -> Self {
+        PaneSizing {
+            minimum_size: pane_placement_sizing.minimum_size,
+            gap_cell_count: pane_placement_sizing.gap_cell_count,
+        }
+    }
+}
+
 /// Why a decoded placement preview is not safe to retain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanePlacementSnapshotValidationError {
     /// The source or destination tab id disagrees with its record.
     TabIdentityMismatch,
-    /// The requested source pane is not in the source tab.
+    /// The requested source pane is not in the source tab, or the floating
+    /// source content names another pane.
     SourcePaneMissing,
     /// The preview has too many panes.
     PaneCountExceeded,
@@ -446,6 +556,15 @@ fn validate_pane_snapshot(
     {
         return Err(PanePlacementSnapshotValidationError::PaneSlotMismatch);
     }
+    validate_pane_content(pane_snapshot, placement_validation)
+}
+
+/// Check one pane's terminal window and image placements, and add their
+/// cells, placements and image bytes to `placement_validation`.
+fn validate_pane_content(
+    pane_snapshot: &PanePlacementPaneSnapshot,
+    placement_validation: &mut PanePlacementValidationState,
+) -> Result<(), PanePlacementSnapshotValidationError> {
     if !pane_snapshot.image_placement_snapshots.is_empty()
         && pane_snapshot.terminal_window.is_none()
     {
