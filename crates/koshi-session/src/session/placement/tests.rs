@@ -9,12 +9,12 @@ use koshi_core::constant::MAX_FLOATING_PANES_PER_SESSION;
 use koshi_core::event::{
     Event, LayoutChanged, PaneFocused, PaneMinimizedChanged, TabClosed, TabFocused,
 };
-use koshi_core::geometry::{PaneArea, Point, Size, SplitDirection};
+use koshi_core::geometry::{FloatingPanePosition, PaneArea, Point, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 
-use crate::client::{Client, ClientOrigin, FloatingPanePosition, FloatingPaneView};
+use crate::client::{Client, ClientOrigin, FloatingPaneView};
 use crate::error::FloatingSetError;
 use crate::session::state::tests::{build_default_floating_member, build_empty_session, build_tab};
 use crate::session::state::Session;

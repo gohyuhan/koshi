@@ -42,8 +42,8 @@ use koshi_core::{
         SelectionChanged,
     },
     geometry::{
-        Direction, FloatingPaneDimension, FloatingPaneSize, PaneArea, PixelCellSize, Point, Rect,
-        Size, DEFAULT_FLOATING_PANE_SIZE,
+        Direction, FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize, PaneArea,
+        PixelCellSize, Point, Rect, Size, DEFAULT_FLOATING_PANE_SIZE,
     },
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
     lock::LockMode,
@@ -67,8 +67,7 @@ use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::resize::{compute_pty_size, resize_for_layout_change};
 use koshi_renderer::floating_pane_chrome::compute_floating_pane_content_size;
 use koshi_session::client::{
-    compute_floating_pane_size_cap, place_floating_pane, Client, ClientOrigin,
-    FloatingPanePosition, FloatingPaneView,
+    compute_floating_pane_size_cap, place_floating_pane, Client, ClientOrigin, FloatingPaneView,
 };
 use koshi_session::error::FloatingSetError;
 use koshi_session::session::{

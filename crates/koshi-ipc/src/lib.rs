@@ -36,7 +36,8 @@ pub mod frame;
 pub mod handshake;
 /// The binary frames that carry the raw RGBA bytes of each image record.
 pub mod image_chunk;
-/// One session's layout: each tab's split tree and the rectangles it solves to.
+/// One session's layout: each tab's split tree and the rectangles it solves to,
+/// and each floating pane with what each attached client draws for it.
 pub mod layout;
 /// The binary frames that carry each attached client's screen changes.
 pub mod painted_update;

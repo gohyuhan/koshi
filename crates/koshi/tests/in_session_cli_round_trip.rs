@@ -33,11 +33,14 @@ use koshi_core::event::{
     Event, InputModeChanged, LayoutChanged, PaneClosing, PaneCreated, PaneFocused, PaneRemoved,
     PtyResized, RejectReason,
 };
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::{
+    Direction, FloatingPanePosition, Point, Size, DEFAULT_FLOATING_PANE_SIZE,
+};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::{KillPolicy, PtySize};
 use koshi_ipc::event::SessionEvent;
+use koshi_ipc::layout::{FloatingPaneClientView, FloatingPaneLayout, FloatingPaneVisibility};
 use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
 use koshi_link::error::CliError;
 use koshi_test_support::fixtures::{build_test_runtime_directory, send_committed_request};
@@ -280,6 +283,29 @@ fn build_neighboring_pane(
     }
 }
 
+/// Run `koshi new-pane --floating` in `pane_id` as `client`, and hand back the
+/// floating pane it created. `client` shows and focuses that pane at the
+/// default placement.
+fn build_floating_pane(
+    session: &RunningSession,
+    client: &AttachedClient,
+    pane_id: PaneId,
+) -> PaneId {
+    let (command_result, exit_code) = run_cli_invocation(
+        session,
+        client,
+        pane_id,
+        &["koshi", "new-pane", "--floating"],
+    );
+    assert_eq!(exit_code, CliExitCode::Success);
+    match list_emitted_events(&command_result) {
+        [Event::PaneCreated(created_pane), ..] => created_pane.pane_id,
+        unexpected_events => {
+            panic!("expected a floating pane to be created, got {unexpected_events:?}")
+        }
+    }
+}
+
 #[test]
 fn new_pane_over_the_socket_splits_and_reports_success() {
     let session = RunningSession::start_session();
@@ -435,6 +461,65 @@ fn close_pane_over_the_socket_kills_the_child_and_removes_the_pane() {
             .map(|pane| pane.pane_id)
             .collect::<Vec<_>>(),
         vec![root_pane_id]
+    );
+}
+
+#[test]
+fn close_pane_from_outside_koshi_closes_the_floating_pane_it_names() {
+    let session = RunningSession::start_session();
+    let client = attach_test_client(&session);
+    let root_pane_id = session.list_pane_ids()[0];
+    let tab_id = get_only_tab_id(&session);
+    let floating_pane_id = build_floating_pane(&session, &client, root_pane_id);
+    let floating_pane_text = floating_pane_id.to_string();
+    assert_eq!(
+        session
+            .fetch_session_overview()
+            .panes
+            .iter()
+            .map(|pane| (pane.pane_id, pane.tab_id))
+            .collect::<Vec<_>>(),
+        vec![(root_pane_id, Some(tab_id)), (floating_pane_id, None)]
+    );
+
+    let (command_result, exit_code) = run_external_cli_invocation(
+        &session,
+        &["koshi", "close-pane", "--pane", &floating_pane_text],
+    );
+
+    assert_eq!(
+        list_emitted_events(&command_result),
+        [
+            Event::PaneClosing(PaneClosing {
+                pane_id: floating_pane_id,
+            }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: floating_pane_id,
+                tab_id: None,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id: client.client_id,
+                tab_id: Some(tab_id),
+                pane_id: root_pane_id,
+                previous_pane_id: Some(floating_pane_id),
+            }),
+        ]
+    );
+    assert_eq!(exit_code, CliExitCode::Success);
+    assert_eq!(
+        wait_for_pane_kill_policies(&session, floating_pane_id),
+        vec![KillPolicy::Graceful {
+            timeout_duration: GRACEFUL_TIMEOUT_DURATION,
+        }]
+    );
+    assert_eq!(
+        session
+            .fetch_session_overview()
+            .panes
+            .iter()
+            .map(|pane| (pane.pane_id, pane.tab_id))
+            .collect::<Vec<_>>(),
+        vec![(root_pane_id, Some(tab_id))]
     );
 }
 
@@ -703,6 +788,7 @@ fn dump_layout_over_the_socket_describes_a_tab_no_client_is_viewing() {
         koshi_layout::tree::LayoutNode::Pane(root_pane_id)
     );
     assert_eq!(session_layout.tabs[0].solved_tabs, Vec::new());
+    assert_eq!(session_layout.floating_panes, Vec::new());
     assert_eq!(session_layout.clients, Vec::new());
 
     let expected_output = format!(
@@ -763,6 +849,7 @@ fn dump_layout_over_the_socket_shows_the_attached_clients_solved_rectangles() {
     assert_eq!(solved_tabs[0].suppressed_pane_ids, Vec::new());
     assert!(!solved_tabs[0].is_every_pane_suppressed);
     assert_eq!(solved_tabs[0].stack_headers, Vec::new());
+    assert_eq!(session_layout.floating_panes, Vec::new());
     assert_eq!(
         session_layout.clients,
         vec![koshi_ipc::layout::ClientFocus {
@@ -817,6 +904,60 @@ fn dump_layout_over_the_socket_narrowed_to_an_unknown_tab_reports_the_tab_missin
             help: Some(format!("no running session has tab {unknown_tab_id}")),
         }
         .to_string(),
+    );
+}
+
+#[test]
+fn dump_layout_over_the_socket_lists_a_floating_pane_and_where_the_client_draws_it() {
+    let session = RunningSession::start_session();
+    let client = attach_test_client(&session);
+    let root_pane_id = session.list_pane_ids()[0];
+    let floating_pane_id = build_floating_pane(&session, &client, root_pane_id);
+
+    let session_layout = koshi_link::ipc_client::fetch_layout(
+        session.runtime_directory.path(),
+        None,
+        session.session_id,
+        None,
+    )
+    .expect("the session describes its layout");
+
+    // `60%` by `60%` of the client's 80x22 pane area is 48x13, centered at
+    // (16, 4).
+    assert_eq!(
+        session_layout.floating_panes,
+        vec![FloatingPaneLayout {
+            pane_id: floating_pane_id,
+            desired_size: DEFAULT_FLOATING_PANE_SIZE,
+            solved_size: Size {
+                column_count: 48,
+                row_count: 13
+            },
+            client_views: vec![FloatingPaneClientView {
+                client_id: client.client_id,
+                position: FloatingPanePosition::Default,
+                visibility: FloatingPaneVisibility::Drawn {
+                    top_left_cell: Point { column: 16, row: 4 },
+                    layer_index: 0,
+                },
+            }],
+        }]
+    );
+    let tab_layout = &session_layout.tabs[0];
+    let expected_output = format!(
+        "session {session_id} quiet-lake\n  tab {tab_id} {tab_name} index 0\n    tree\n      \
+         pane {root_pane_id}\n    client {client_id} tiled viewport 80x22\n      pane \
+         {root_pane_id} rect 0,0 80x22\n  floating panes\n    pane {floating_pane_id} asks \
+         60%x60% size 48x13\n      client {client_id} rect 16,4 48x13 layer 0 position \
+         default\n  clients\n    {client_id} tab {tab_id} focus {floating_pane_id}\n",
+        session_id = session.session_id,
+        tab_id = tab_layout.tab_id,
+        tab_name = tab_layout.tab_name,
+        client_id = client.client_id,
+    );
+    assert_eq!(
+        koshi::output::render_layouts(&[session_layout], koshi::cli::OutputFormat::Table),
+        expected_output
     );
 }
 

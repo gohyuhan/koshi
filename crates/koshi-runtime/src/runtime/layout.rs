@@ -3,7 +3,8 @@
 //! [`Server::build_session_layout`] answers an IPC `Layout` request. It walks
 //! this process's session — tabs in bar order, and for each tab every client
 //! viewing it — and packs the split trees, the rectangles those trees solve
-//! to, and every attached client's focus into one [`SessionLayout`].
+//! to, every floating pane with what each attached client draws for it, and
+//! every attached client's focus into one [`SessionLayout`].
 //!
 //! Each viewing client gets the solve of its own view of the tab
 //! ([`Session::compute_client_solve`]): its zoom, and in each stack the member
@@ -20,8 +21,12 @@
 //! [`Session::compute_client_solve`]: koshi_session::session::state::Session::compute_client_solve
 
 use koshi_core::ids::TabId;
-use koshi_ipc::layout::{ClientFocus, SessionLayout, SolvedPane, SolvedTab, TabLayout};
-use koshi_session::session::state::Tab;
+use koshi_ipc::layout::{
+    ClientFocus, FloatingPaneClientView, FloatingPaneLayout, FloatingPaneVisibility, SessionLayout,
+    SolvedPane, SolvedTab, TabLayout,
+};
+use koshi_session::client::Client;
+use koshi_session::session::state::{FloatingMember, Session, Tab};
 
 use crate::server::Server;
 
@@ -36,7 +41,8 @@ impl Server {
     /// `requested_tab_id` narrows the described tabs to that one; absent, every
     /// tab is described. A `requested_tab_id` the session does not hold leaves
     /// `tabs` empty.
-    /// `clients` lists every attached client either way, narrowed or not.
+    /// `floating_panes` lists every floating pane and `clients` every attached
+    /// client either way, narrowed or not.
     #[must_use]
     pub fn build_session_layout(&self, requested_tab_id: Option<TabId>) -> Option<SessionLayout> {
         let session = self.get_sole_session()?;
@@ -100,6 +106,24 @@ impl Server {
             })
             .collect();
 
+        let floating_pane_layouts = session
+            .floating_set
+            .list_members()
+            .iter()
+            .map(|floating_member| FloatingPaneLayout {
+                pane_id: floating_member.pane_id,
+                desired_size: floating_member.desired_size,
+                solved_size: floating_member.solved_size,
+                client_views: session
+                    .clients
+                    .list_attached_clients()
+                    .filter_map(|client_record| {
+                        build_floating_pane_client_view(session, client_record, floating_member)
+                    })
+                    .collect(),
+            })
+            .collect();
+
         let client_focuses = session
             .clients
             .list_attached_clients()
@@ -114,7 +138,48 @@ impl Server {
             session_id: session.session_id,
             session_name: session.session_name.clone(),
             tabs: tab_layouts,
+            floating_panes: floating_pane_layouts,
             clients: client_focuses,
         })
     }
+}
+
+/// `client_record`'s view of the floating pane of `floating_member`, or `None`
+/// when the client holds no view of it.
+///
+/// The visibility follows the client's shown floating panes
+/// ([`Client::list_shown_floating_pane_ids`]):
+/// - a pane the client does not show is [`FloatingPaneVisibility::Minimized`];
+/// - a shown pane is [`FloatingPaneVisibility::Drawn`] at the top-left cell of
+///   the rectangle the session places it in for the client
+///   ([`Session::find_client_floating_pane_rect`]), with its index in the shown
+///   list as its layer;
+/// - a shown pane with no such rectangle, from a client with no floating
+///   viewport, is [`FloatingPaneVisibility::NoFloatingViewport`].
+fn build_floating_pane_client_view(
+    session: &Session,
+    client_record: &Client,
+    floating_member: &FloatingMember,
+) -> Option<FloatingPaneClientView> {
+    let pane_id = floating_member.pane_id;
+    let floating_pane_view = client_record.get_floating_pane_view(pane_id)?;
+    let shown_layer_index = client_record
+        .list_shown_floating_pane_ids()
+        .iter()
+        .position(|&shown_pane_id| shown_pane_id == pane_id);
+    let visibility = match shown_layer_index {
+        None => FloatingPaneVisibility::Minimized,
+        Some(layer_index) => match session.find_client_floating_pane_rect(client_record, pane_id) {
+            Some(drawn_rect) => FloatingPaneVisibility::Drawn {
+                top_left_cell: drawn_rect.origin,
+                layer_index,
+            },
+            None => FloatingPaneVisibility::NoFloatingViewport,
+        },
+    };
+    Some(FloatingPaneClientView {
+        client_id: client_record.get_client_id(),
+        position: floating_pane_view.position,
+        visibility,
+    })
 }

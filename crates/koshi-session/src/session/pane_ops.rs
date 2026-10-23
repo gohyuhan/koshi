@@ -10,12 +10,12 @@
 use std::path::PathBuf;
 
 use koshi_core::event::{Event, LayoutChanged, PaneCreated, TabFocused};
+use koshi_core::geometry::FloatingPanePosition;
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_core::process::SpawnSpec;
 use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::state::PaneRecord;
 
-use crate::client::FloatingPanePosition;
 use crate::error::FloatingSetError;
 use crate::session::focus::{apply_tiled_pane_focus, build_pane_focused_event};
 use crate::session::state::{FloatingMember, Session};

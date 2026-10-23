@@ -19,8 +19,10 @@ use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcRequestKind, IpcResult
 use koshi_ipc::transport::Listener;
 use uuid::uuid;
 
+use clap::Parser;
+
 use super::*;
-use crate::cli::CliCommand;
+use crate::cli::{Cli, CliCommand};
 use koshi_test_support::fixtures::{build_accepted_hello_result, send_ipc_reply};
 
 /// One session overview with the given name and one tab/pane/client per
@@ -1905,4 +1907,157 @@ fn an_explicit_floating_pane_picks_its_owning_session() {
         selected_session_overview.session.session_id,
         target_session_id
     );
+}
+
+#[test]
+fn every_pane_verb_naming_a_floating_pane_goes_to_the_session_holding_it() {
+    let owner_session_id = SessionId::new();
+    let owner_tab_id = TabId::new();
+    let floating_pane_id = PaneId::new();
+    let floating_pane_text = floating_pane_id.to_string();
+    let owner_tab_text = owner_tab_id.to_string();
+    let floating_pane_argument = floating_pane_text.as_str();
+    let owner_tab_argument = owner_tab_text.as_str();
+    // Each row: the verb's arguments after `koshi`, and the tab the route
+    // resolves for it.
+    let verb_rows: [(&[&str], Option<TabId>); 18] = [
+        (&["close-pane", "--pane", floating_pane_argument], None),
+        (
+            &[
+                "resize-pane",
+                "--direction",
+                "right",
+                "--pane",
+                floating_pane_argument,
+            ],
+            None,
+        ),
+        (
+            &[
+                "move-pane",
+                "--direction",
+                "left",
+                "--pane",
+                floating_pane_argument,
+            ],
+            None,
+        ),
+        (
+            &[
+                "move-pane",
+                "--pane",
+                floating_pane_argument,
+                "--x",
+                "2",
+                "--y",
+                "1",
+            ],
+            None,
+        ),
+        (
+            &[
+                "place-pane",
+                "--pane",
+                floating_pane_argument,
+                "--tab",
+                owner_tab_argument,
+                "--direction",
+                "right",
+            ],
+            Some(owner_tab_id),
+        ),
+        (
+            &["place-pane", "--stack-onto", floating_pane_argument],
+            None,
+        ),
+        (&["undock-pane", "--pane", floating_pane_argument], None),
+        (
+            &["dock-pane", "--pane", floating_pane_argument],
+            Some(owner_tab_id),
+        ),
+        (&["dock-pane", "--stack-onto", floating_pane_argument], None),
+        (&["pin-pane", "--pane", floating_pane_argument], None),
+        (&["unpin-pane", "--pane", floating_pane_argument], None),
+        (&["minimize-pane", "--pane", floating_pane_argument], None),
+        (&["restore-pane", "--pane", floating_pane_argument], None),
+        (
+            &[
+                "scroll-pane",
+                "--lines",
+                "1",
+                "--pane",
+                floating_pane_argument,
+            ],
+            None,
+        ),
+        (&["input", "--pane", floating_pane_argument, "ls"], None),
+        (&["focus-pane", "--pane", floating_pane_argument], None),
+        (&["new-pane", "--pane", floating_pane_argument], None),
+        (
+            &["run", "--pane", floating_pane_argument, "--", "htop"],
+            None,
+        ),
+    ];
+
+    for (verb_index, (verb_arguments, expected_tab_id)) in verb_rows.into_iter().enumerate() {
+        let runtime_directory =
+            build_test_runtime_directory(&format!("floating-pane-verb-{verb_index}"));
+        let mut owner_session_overview = build_session_overview(
+            "blue-owl",
+            owner_session_id,
+            &[(owner_tab_id, "one")],
+            &[(PaneId::new(), owner_tab_id)],
+            &[],
+        );
+        owner_session_overview
+            .panes
+            .push(build_floating_pane_discovery(
+                floating_pane_id,
+                owner_session_id,
+            ));
+        let other_tab_id = TabId::new();
+        let owner_discovery_server_thread =
+            serve_discovery(&runtime_directory, owner_session_overview);
+        let other_discovery_server_thread = serve_discovery(
+            &runtime_directory,
+            build_session_overview(
+                "amber-fox",
+                SessionId::new(),
+                &[(other_tab_id, "one")],
+                &[(PaneId::new(), other_tab_id)],
+                &[],
+            ),
+        );
+        let parsed_cli =
+            Cli::try_parse_from(std::iter::once("koshi").chain(verb_arguments.iter().copied()))
+                .expect("the argv parses");
+        let command = parsed_cli.command.expect("the argv carries a subcommand");
+
+        let command_route =
+            resolve_command_route_in_runtime_directory(&runtime_directory, None, &command, None)
+                .expect("both sessions answer");
+
+        for discovery_server_thread in
+            [owner_discovery_server_thread, other_discovery_server_thread]
+        {
+            discovery_server_thread
+                .join()
+                .expect("stand-in session exits");
+        }
+        assert_eq!(
+            command_route,
+            Route::External {
+                session_id: owner_session_id,
+                owner_user_id: None,
+                targets: ResolvedTargets {
+                    session_id: Some(owner_session_id),
+                    tab_id: expected_tab_id,
+                    pane_id: None,
+                },
+            },
+            "koshi {}",
+            verb_arguments.join(" ")
+        );
+        let _ = std::fs::remove_dir_all(&runtime_directory);
+    }
 }

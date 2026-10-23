@@ -173,6 +173,7 @@ fn build_test_session_layout() -> SessionLayout {
                 stack_headers: Vec::new(),
             }],
         }],
+        floating_panes: Vec::new(),
         clients: vec![ClientFocus {
             client_id,
             active_tab_id: tab_id,

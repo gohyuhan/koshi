@@ -11,8 +11,8 @@ use koshi_core::{
     },
     event::Event,
     geometry::{
-        compute_percent_cell_count, FloatingPaneDimension, FloatingPaneSize, PixelCellSize, Rect,
-        Size,
+        compute_percent_cell_count, FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize,
+        PixelCellSize, Rect, Size,
     },
     ids::{ClientId, PaneId, SessionId, TabId},
 };
@@ -25,10 +25,7 @@ use koshi_pane::registry::PaneRegistry;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    client::{
-        compute_floating_pane_size_cap, place_floating_pane, Client, ClientRegistry,
-        FloatingPanePosition,
-    },
+    client::{compute_floating_pane_size_cap, place_floating_pane, Client, ClientRegistry},
     error::{FloatingSetError, InvalidTransition, SessionConsistencyError},
     session::cascade::hand_off_suppressed_focus,
     session::focus::{build_pane_focused_event, build_pane_minimized_changed_events},

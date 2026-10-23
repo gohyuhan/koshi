@@ -1386,7 +1386,7 @@ holding different values use different directories and do not find each other.
 | Command | Result |
 |---|---|
 | `koshi debug dump-state [--format table\|json]` | Print every running session's sessions, tabs, panes, and clients |
-| `koshi debug dump-layout [--tab <NAME_OR_ID>] [--format table\|json]` | Print each tab's split tree, solved rectangles, panes with no room, stacks, and per-client focus |
+| `koshi debug dump-layout [--tab <NAME_OR_ID>] [--format table\|json]` | Print each tab's split tree, solved rectangles, panes with no room, stacks, each floating pane with what each client draws for it, and per-client focus |
 | `koshi debug events [--since <LENGTH>] [--filter <NAME>] [--format table\|json]` | Print the events each running session published most recently, oldest first |
 
 A pane's command arguments print as `***`; the program name stays visible.
@@ -1400,6 +1400,26 @@ bottom hint row. Two clients on one tab, one 80x24 and one 120x40, both print
 `viewport 80x22`. What is per client is the view: one client tiled and one with
 a pane fullscreen give that tab two sets of rectangles. A tab no client is
 viewing prints its tree and no rectangles.
+
+`dump-layout` prints the floating panes after the tabs, in the order the panes
+became floating. Each pane line names the size the pane asks for and the size
+it holds. Under it, one line per attached client says what that client draws:
+
+- `rect <x>,<y> <cols>x<rows> layer <n>`: the client draws the pane there.
+  Layer `0` draws first, and a higher layer draws over a lower one.
+- `minimized`: the client holds the pane minimized.
+- `no floating viewport`: the client shows the pane and draws nothing. Its
+  pane area is smaller than `5x6`, or it has no room to draw a pane.
+
+Each client line ends with the position that client stored: `default`,
+`moved <x>,<y>`, or `pinned <x>,<y>`. A session with no floating pane prints
+no floating section. `--tab` narrows the tabs only, and every floating pane
+still prints: a floating pane draws over every tab.
+
+Example: one 80x24 terminal shows a floating pane that `koshi new-pane
+--floating` opened. The pane prints as `pane pane-… asks 60%x60% size 48x13`,
+and the client line under it prints as `client client-… rect 16,4 48x13 layer 0
+position default`.
 
 A session that started before you installed this Koshi cannot report its
 layout. `dump-layout` says so and names what to do: restart that session, or

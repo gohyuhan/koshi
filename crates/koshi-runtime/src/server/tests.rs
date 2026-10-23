@@ -27,7 +27,7 @@ use koshi_core::event::{
     InputModeChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved, PtyResized,
     SubscriberLagged, TabCreated,
 };
-use koshi_core::geometry::{Direction, PaneArea, Point};
+use koshi_core::geometry::{Direction, FloatingPanePosition, PaneArea, Point};
 use koshi_core::ids::{CommandId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
@@ -36,7 +36,7 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_renderer::snapshot::Delivery;
-use koshi_session::client::{ClientOrigin, ClientRegistry, FloatingPanePosition, FloatingPaneView};
+use koshi_session::client::{ClientOrigin, ClientRegistry, FloatingPaneView};
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
 };

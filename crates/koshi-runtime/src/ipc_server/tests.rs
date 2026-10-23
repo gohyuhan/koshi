@@ -2899,6 +2899,7 @@ fn build_layout_named(session_name: &str) -> SessionLayout {
         session_id: SessionId::new(),
         session_name: session_name.to_string(),
         tabs: Vec::new(),
+        floating_panes: Vec::new(),
         clients: Vec::new(),
     }
 }
