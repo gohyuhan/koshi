@@ -1824,6 +1824,14 @@ impl FrameInputs {
 /// into one pane while a Sixel image in another pane encodes draws at once,
 /// and the image shows its older pixels, or none, until its encode ends.
 ///
+/// A frame that clears the whole screen before its cells
+/// ([`PaintDriver::needs_screen_erase`]), such as the first frame after a
+/// host resize, records that the outer terminal shows no image
+/// ([`ImageOutputState::clear_host_images`]) before it picks the pixels. It
+/// then writes every image it has pixels for after its cells. Example: a
+/// Sixel image at `(0, 0)` and a resize from 80×24 to 100×30 give one frame:
+/// `ESC[2J`, the cells, then the Sixel image again from its kept encode.
+///
 /// # Errors
 ///
 /// Returns a backend, output or native-image error when the frame cannot be
@@ -1882,7 +1890,9 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
     )
     .filter(|_| !is_focused_pane_softened);
     let is_native_image_output = image_output_state.get_output_kind().is_some();
-    image_output_state.set_host_terminal_size(terminal_size.column_count, terminal_size.row_count);
+    if paint_driver.needs_screen_erase(terminal_size) {
+        image_output_state.clear_host_images();
+    }
     let mut image_paint_commands = build_image_paints(
         displayed_snapshot,
         committed_regions,

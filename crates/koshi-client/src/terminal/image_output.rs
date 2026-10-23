@@ -814,15 +814,13 @@ pub(crate) struct ImageOutputState {
     /// The pixels the host shows, in draw order.
     shown_placements: Vec<SelectedPlacement>,
     /// Whether the host may show image pixels: `shown_placements` is not
-    /// empty, or a failed frame left the host screen unknown.
+    /// empty, or the host screen is unknown.
     has_host_pixels: bool,
     /// Whether a failed frame or a replaced connection left the host screen
     /// unknown. The next paint clears it and draws every cell and image.
     is_host_screen_unknown: bool,
     needs_screen_reset: bool,
     needs_image_abort: bool,
-    /// Host screen size in columns and rows at the last painted frame.
-    host_terminal_size: Option<(u16, u16)>,
     /// Alpha coverage per decoded-image address and source rectangle. Holds
     /// only the addresses retained by the latest frame.
     alpha_stats_by_image_and_source: HashMap<(usize, ImageSourceKey), Option<AlphaStats>>,
@@ -899,7 +897,6 @@ impl ImageOutputState {
             is_host_screen_unknown: false,
             needs_screen_reset: false,
             needs_image_abort: false,
-            host_terminal_size: None,
             alpha_stats_by_image_and_source: HashMap::new(),
             held_kitty_image_id_by_content_id: HashMap::new(),
             kitty_image_ids_to_delete: Vec::new(),
@@ -953,35 +950,34 @@ impl ImageOutputState {
         None
     }
 
-    /// Drop every Kitty image id the host holds and free the host's images
-    /// and placements at the next reset. Finished uploads keep their ids and
-    /// are written after the reset. `next_kitty_image_id` keeps counting from
-    /// where it is. On every other protocol this frees nothing.
-    fn forget_kitty_images(&mut self) {
-        if !matches!(self.output_kind, Some(ImageOutputKind::Kitty)) {
+    /// Record that the host screen is erased before the next frame's cells:
+    /// the host shows no image pixels, and the next paint writes every
+    /// selected placement again after the cells. `has_host_pixels` becomes
+    /// `is_host_screen_unknown`. Encode results, finished uploads and the
+    /// encode cache are kept.
+    ///
+    /// On Kitty output the host also holds no image: every Kitty image id is
+    /// dropped, and the next frame reset frees every image with `a=d,d=A`.
+    /// Finished uploads keep their ids and are written after the reset.
+    /// `next_kitty_image_id` keeps counting from where it is. With no output
+    /// protocol this changes nothing.
+    ///
+    /// Example: an iTerm2 image shown at `(0, 0)` before a host resize is
+    /// written again, from its kept units, in the frame whose cells follow
+    /// the `ESC[2J` of the resize.
+    pub(crate) fn clear_host_images(&mut self) {
+        let Some(output_kind) = self.output_kind else {
+            return;
+        };
+        self.shown_placements.clear();
+        self.has_host_pixels = self.is_host_screen_unknown;
+        self.has_unselected_results = true;
+        if !matches!(output_kind, ImageOutputKind::Kitty) {
             return;
         }
         self.held_kitty_image_id_by_content_id.clear();
         self.kitty_image_ids_to_delete.clear();
         self.should_free_all_kitty_images = true;
-        self.shown_placements.clear();
-        self.has_unselected_results = true;
-    }
-
-    /// Record the host screen size for the frame being painted.
-    ///
-    /// A changed size forgets every Kitty image id. The next frame
-    /// transmits its images again.
-    pub(crate) fn set_host_terminal_size(&mut self, column_count: u16, row_count: u16) {
-        let host_terminal_size = Some((column_count, row_count));
-        if self.host_terminal_size == host_terminal_size {
-            return;
-        }
-        let has_previous_terminal_size = self.host_terminal_size.is_some();
-        self.host_terminal_size = host_terminal_size;
-        if has_previous_terminal_size {
-            self.forget_kitty_images();
-        }
     }
 
     /// Read the newest frame's image paints, pick the pixels each placement
@@ -1981,20 +1977,19 @@ impl ImageOutputState {
     /// finished Kitty uploads are kept.
     pub(crate) fn fail_frame_commit(&mut self) {
         self.needs_image_abort = self.output_kind.is_some();
-        self.shown_placements.clear();
         self.selected_kitty_upload_ids.clear();
-        self.has_host_pixels = true;
         self.is_host_screen_unknown = true;
         self.needs_screen_reset = true;
-        self.has_unselected_results = true;
-        self.forget_kitty_images();
+        self.clear_host_images();
     }
 
     /// Reset this output state when a connection is replaced, when the
     /// session resets its image records, or when the cell size changes. The
     /// active request is cancelled and its results are dropped; the waiting
     /// request, every encode result, every finished upload and the whole
-    /// encode cache are dropped.
+    /// encode cache are dropped. A host that may show image pixels becomes
+    /// unknown: the next paint clears it and draws every cell and image again
+    /// ([`Self::clear_host_images`]).
     pub(crate) fn reset_connection(&mut self) {
         if let Some(active_job) = self.active_job.as_ref() {
             active_job
@@ -2013,12 +2008,10 @@ impl ImageOutputState {
         self.failed_kitty_image_content_ids.clear();
         self.selected_placements.clear();
         self.unavailable_placement_keys.clear();
-        self.shown_placements.clear();
         self.is_host_screen_unknown = self.has_host_pixels;
         self.needs_screen_reset = self.has_host_pixels;
-        self.has_unselected_results = true;
         self.alpha_stats_by_image_and_source.clear();
-        self.forget_kitty_images();
+        self.clear_host_images();
     }
 
     /// Record that the client's image records hold `held_image_byte_count`
