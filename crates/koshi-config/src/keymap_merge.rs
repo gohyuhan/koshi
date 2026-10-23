@@ -2,8 +2,8 @@
 //! per-mode lookup tables a keypress consults.
 //!
 //! Bindings arrive in the same layers conflict detection reads — the
-//! built-in defaults, then the user's own surfaces (user file, session,
-//! layout), lowest precedence first. [`merge_keymaps`] folds them per key:
+//! built-in defaults, then the user's `keybinding.kdl`, lowest precedence
+//! first. [`merge_keymaps`] folds them per key:
 //! a higher-precedence layer's entry on a key replaces a lower layer's on the
 //! same key, and every other key is untouched. The result splits each mode
 //! into two maps, and a keypress checks the user map before the default map:
@@ -21,10 +21,8 @@
 //!
 //! Merge runs only on a keymap detection has already approved: every
 //! layer on [`KeymapVerdict::Apply`](crate::conflict::KeymapVerdict::Apply),
-//! or the defaults alone after
-//! [`RevertToDefaults`](crate::conflict::KeymapVerdict::RevertToDefaults).
-//! Merge checks neither the unlock guarantee nor cross-layer collisions;
-//! detection does both. Merging is pure and re-runs on every config load or
+//! or the defaults alone. Merge does not check the unlock guarantee;
+//! detection does. Merging is pure and re-runs on every config load or
 //! reload.
 
 use std::collections::{BTreeMap, BTreeSet};
