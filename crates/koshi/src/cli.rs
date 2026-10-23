@@ -1141,9 +1141,11 @@ pub enum DebugCommand {
         output_format: OutputFormat,
     },
     /// Print each tab's split tree, the rectangles it solves to, the panes
-    /// with no room, the stacks, and each client's focus.
+    /// with no room, the stacks, each floating pane with what each client
+    /// draws for it, and each client's focus.
     DumpLayout {
-        /// Narrow the answer to one tab, by id or name.
+        /// Narrow the tabs to one tab, by id or name; every floating pane still
+        /// prints.
         #[arg(long = "tab", value_parser = parse_tab_reference, value_name = "TAB")]
         tab_reference: Option<TabReference>,
         /// Output format.

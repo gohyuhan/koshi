@@ -15,7 +15,10 @@ pub use koshi_core::client::ClientOrigin;
 use koshi_core::{
     command::Selection,
     constant::FLOATING_PANE_CHROME_SIZE,
-    geometry::{compute_percent_cell_count, PaneArea, PixelCellSize, Point, Rect, Size},
+    geometry::{
+        compute_percent_cell_count, FloatingPanePosition, PaneArea, PixelCellSize, Point, Rect,
+        Size,
+    },
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
     lock::LockMode,
 };
@@ -90,22 +93,6 @@ pub struct TiledPaneFocusChange {
     /// The floating panes this client showed before the call, oldest first.
     /// After the call, each is minimized for this client.
     pub minimized_floating_pane_ids: Vec<PaneId>,
-}
-
-/// Where one client draws one floating pane: the default placement, or a
-/// stored top-left cell counted from that client's pane-area origin.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FloatingPanePosition {
-    /// The client stored no cell: the pane draws at the default placement
-    /// ([`place_floating_pane`]).
-    #[default]
-    Default,
-    /// The pane's top-left cell, stored by a move, a resize, or the
-    /// `top_left_cell` of the command that created the pane.
-    Moved(Point),
-    /// The pane's top-left cell, locked: a move and a resize of the pane's
-    /// left or top edge are refused.
-    Pinned(Point),
 }
 
 /// The rectangle one client draws a floating pane in, counted in that client's

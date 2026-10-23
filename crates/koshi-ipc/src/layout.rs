@@ -1,8 +1,9 @@
 //! One session's layout, as the session server reports it on request.
 //!
 //! [`SessionLayout`](crate::layout::SessionLayout) describes how a session
-//! arranges its panes right now: each tab's split tree, and the rectangles
-//! that tree solves to.
+//! arranges its panes right now: each tab's split tree, the rectangles that
+//! tree solves to, and each floating pane with what each attached client draws
+//! for it.
 //!
 //! Trees travel unsolved, as on attach. Each tab carries one
 //! [`SolvedTab`](crate::layout::SolvedTab) per client viewing it, solved
@@ -12,15 +13,15 @@
 //! Nothing here describes pane content: no grid, no cursor, no scrollback, no
 //! colors.
 
-use koshi_core::geometry::{Rect, Size};
+use koshi_core::geometry::{FloatingPanePosition, FloatingPaneSize, Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
 use koshi_layout::tree::LayoutNode;
 use serde::{Deserialize, Serialize};
 
-/// One session's layout: every tab it holds, and where each attached client
-/// is looking.
+/// One session's layout: every tab it holds, every floating pane it holds, and
+/// where each attached client is looking.
 ///
 /// Decoding ignores a field this build does not know, in this record and in
 /// every record under it.
@@ -33,6 +34,9 @@ pub struct SessionLayout {
     /// The tabs described, in tab-bar order. Holds every tab, or the one tab
     /// the request named.
     pub tabs: Vec<TabLayout>,
+    /// Every floating pane of the session, in the order the panes became
+    /// floating, also when the request named one tab.
+    pub floating_panes: Vec<FloatingPaneLayout>,
     /// Every attached client, and what it has focused.
     pub clients: Vec<ClientFocus>,
 }
@@ -87,6 +91,66 @@ pub struct SolvedPane {
     pub pane_id: PaneId,
     /// The pane's rectangle, including its 1-cell border on each side.
     pub outer_rect: Rect,
+}
+
+/// One floating pane: the size it asks for, the size it holds, and what each
+/// attached client draws for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FloatingPaneLayout {
+    /// The floating pane.
+    pub pane_id: PaneId,
+    /// The size the pane asks for, per axis: a number of cells, or a percent
+    /// of the smallest floating viewport of the attached clients. `60%` by
+    /// `60%` for a pane that `koshi new-pane --floating` opened with no `--cols`
+    /// and no `--rows`.
+    pub desired_size: FloatingPaneSize,
+    /// The pane's outer size in cells, its chrome included: the size every
+    /// client draws it at. `60%` by `60%` with an `80x22` smallest floating
+    /// viewport → `48x13`.
+    pub solved_size: Size,
+    /// One view per attached client, in client id order.
+    pub client_views: Vec<FloatingPaneClientView>,
+}
+
+/// One attached client's view of one floating pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FloatingPaneClientView {
+    /// The client holding the view.
+    pub client_id: ClientId,
+    /// The cell the client stored for the pane: none for the default
+    /// placement, a moved cell, or a pinned cell. A `40`-column pane pinned at
+    /// column `20` keeps `Pinned` at column `20` while a `50`-column pane area
+    /// draws it at column `10`.
+    pub position: FloatingPanePosition,
+    /// What the client draws for the pane.
+    pub visibility: FloatingPaneVisibility,
+}
+
+/// What one attached client draws for one floating pane.
+///
+/// Encodes as `{"Drawn":{"top_left_cell":{"column":16,"row":4},"layer_index":0}}`,
+/// `"Minimized"` or `"NoFloatingViewport"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FloatingPaneVisibility {
+    /// The client shows the pane and draws it: a box of
+    /// [`FloatingPaneLayout::solved_size`] cells whose top-left cell is
+    /// `top_left_cell`, counted from the client's pane-area origin. A
+    /// `48x13` pane at the default placement, alone in the session, on an
+    /// `80x22` pane area → `top_left_cell` `(16, 4)`.
+    Drawn {
+        /// The top-left cell of the pane's box, its chrome included.
+        top_left_cell: Point,
+        /// The pane's place in the order the client draws the floating panes
+        /// it shows: `0` draws first, at the back, and each higher index
+        /// draws over the lower ones.
+        layer_index: usize,
+    },
+    /// The client holds the pane minimized and draws nothing for it.
+    Minimized,
+    /// The client shows the pane and draws nothing for it: the client has no
+    /// floating viewport. Its pane area is smaller than `5x6`, or it reported
+    /// no room to draw a pane.
+    NoFloatingViewport,
 }
 
 /// One attached client's focus.

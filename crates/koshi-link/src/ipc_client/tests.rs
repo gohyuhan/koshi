@@ -696,6 +696,7 @@ fn build_named_session_layout(session_name: &str, session_id: SessionId) -> Sess
         session_id,
         session_name: session_name.to_string(),
         tabs: Vec::new(),
+        floating_panes: Vec::new(),
         clients: Vec::new(),
     }
 }

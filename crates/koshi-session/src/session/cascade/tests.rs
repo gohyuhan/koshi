@@ -12,13 +12,13 @@ use std::collections::HashMap;
 use std::time::SystemTime;
 
 use koshi_core::event::{PaneFocused, QuitCause, TabClosed};
-use koshi_core::geometry::{Point, Size, SplitDirection};
+use koshi_core::geometry::{FloatingPanePosition, Point, Size, SplitDirection};
 use koshi_core::ids::SessionId;
 use koshi_layout::solver::PaneSizing;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 
-use crate::client::{Client, ClientOrigin, FloatingPanePosition};
+use crate::client::{Client, ClientOrigin};
 use crate::session::state::tests::{build_default_floating_member, build_empty_session, build_tab};
 use crate::session::state::Tab;
 

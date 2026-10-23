@@ -14,12 +14,18 @@ use koshi_core::discovery::{
     ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, TabDiscovery,
 };
 use koshi_core::event::{Event, InputModeChanged, PaneCreated, PaneFocused, QuitCause, TabCreated};
-use koshi_core::geometry::{PaneArea, Point, Rect, Size, SplitDirection};
+use koshi_core::geometry::{
+    AxisPercent, FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize, PaneArea, Point,
+    Rect, Size, SplitDirection,
+};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence};
 use koshi_core::lock::LockMode;
 use koshi_core::recent_event::{self, RecentEvent};
-use koshi_ipc::layout::{ClientFocus, SessionLayout, SolvedPane, SolvedTab, TabLayout};
+use koshi_ipc::layout::{
+    ClientFocus, FloatingPaneClientView, FloatingPaneLayout, FloatingPaneVisibility, SessionLayout,
+    SolvedPane, SolvedTab, TabLayout,
+};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::size::SizeWeight;
 use koshi_layout::solver::StackHeader;
@@ -1485,6 +1491,7 @@ fn build_test_session_layout(
             layout_tree,
             solved_tabs,
         }],
+        floating_panes: Vec::new(),
         clients: vec![ClientFocus {
             client_id: build_test_layout_client_id(),
             active_tab_id: build_test_layout_tab_id(),
@@ -2068,6 +2075,7 @@ session session-00000000-0000-0000-0000-000000000001 quiet-lake
         session_id: build_test_layout_session_id(),
         session_name: "quiet-lake".to_string(),
         tabs: Vec::new(),
+        floating_panes: Vec::new(),
         clients: Vec::new(),
     };
 
@@ -2168,10 +2176,235 @@ fn dump_layout_json_is_an_array_of_whole_layouts() {
                     "stack_headers": []
                 }]
             }],
+            "floating_panes": [],
             "clients": [{
                 "client_id": "00000000-0000-0000-0000-000000000003",
                 "active_tab_id": "00000000-0000-0000-0000-000000000002",
                 "focused_pane_id": "00000000-0000-0000-0000-000000000004"
+            }]
+        }])
+    );
+}
+
+/// The floating pane of the layout fixtures below that asks for `60%` by
+/// `60%`.
+fn build_test_percent_floating_pane_id() -> PaneId {
+    PaneId::from_uuid(build_test_uuid_with_suffix(6))
+}
+
+/// The second client of the floating pane fixtures below.
+fn build_test_second_layout_client_id() -> ClientId {
+    ClientId::from_uuid(build_test_uuid_with_suffix(7))
+}
+
+/// The floating pane of the layout fixtures below that asks for `30` columns
+/// by `50%`.
+fn build_test_cells_floating_pane_id() -> PaneId {
+    PaneId::from_uuid(build_test_uuid_with_suffix(8))
+}
+
+/// Two floating panes whose views carry every visibility and every position:
+/// the `60%` pane drawn at the back by the fixture client at the default
+/// placement and minimized by the second client, which pinned it; the
+/// `30`-column pane drawn on top by the fixture client, moved, and shown with
+/// no floating viewport by the second client.
+fn build_test_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
+    let sixty_percent =
+        FloatingPaneDimension::Percent(AxisPercent::try_from(60).expect("1 to 100"));
+    vec![
+        FloatingPaneLayout {
+            pane_id: build_test_percent_floating_pane_id(),
+            desired_size: FloatingPaneSize {
+                width: sixty_percent,
+                height: sixty_percent,
+            },
+            solved_size: Size {
+                column_count: 48,
+                row_count: 13,
+            },
+            client_views: vec![
+                FloatingPaneClientView {
+                    client_id: build_test_layout_client_id(),
+                    position: FloatingPanePosition::Default,
+                    visibility: FloatingPaneVisibility::Drawn {
+                        top_left_cell: Point { column: 16, row: 4 },
+                        layer_index: 0,
+                    },
+                },
+                FloatingPaneClientView {
+                    client_id: build_test_second_layout_client_id(),
+                    position: FloatingPanePosition::Pinned(Point { column: 20, row: 5 }),
+                    visibility: FloatingPaneVisibility::Minimized,
+                },
+            ],
+        },
+        FloatingPaneLayout {
+            pane_id: build_test_cells_floating_pane_id(),
+            desired_size: FloatingPaneSize {
+                width: FloatingPaneDimension::Cells(
+                    std::num::NonZeroU16::new(30).expect("not zero"),
+                ),
+                height: FloatingPaneDimension::Percent(
+                    AxisPercent::try_from(50).expect("1 to 100"),
+                ),
+            },
+            solved_size: Size {
+                column_count: 30,
+                row_count: 11,
+            },
+            client_views: vec![
+                FloatingPaneClientView {
+                    client_id: build_test_layout_client_id(),
+                    position: FloatingPanePosition::Moved(Point { column: 2, row: 1 }),
+                    visibility: FloatingPaneVisibility::Drawn {
+                        top_left_cell: Point { column: 2, row: 1 },
+                        layer_index: 1,
+                    },
+                },
+                FloatingPaneClientView {
+                    client_id: build_test_second_layout_client_id(),
+                    position: FloatingPanePosition::Default,
+                    visibility: FloatingPaneVisibility::NoFloatingViewport,
+                },
+            ],
+        },
+    ]
+}
+
+/// One session with one tab no client views, the floating panes of
+/// [`build_test_floating_pane_layouts`], and the fixture client focused on
+/// the `30`-column floating pane.
+fn build_test_floating_session_layout() -> SessionLayout {
+    SessionLayout {
+        floating_panes: build_test_floating_pane_layouts(),
+        ..build_test_session_layout(
+            LayoutNode::Pane(build_test_first_pane_id()),
+            Vec::new(),
+            Some(build_test_cells_floating_pane_id()),
+        )
+    }
+}
+
+#[test]
+fn dump_layout_table_lists_each_floating_pane_and_each_client_view_after_the_tabs() {
+    let expected_text = "\
+session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      pane pane-00000000-0000-0000-0000-000000000004
+    no client views this tab
+  floating panes
+    pane pane-00000000-0000-0000-0000-000000000006 asks 60%x60% size 48x13
+      client client-00000000-0000-0000-0000-000000000003 rect 16,4 48x13 layer 0 position default
+      client client-00000000-0000-0000-0000-000000000007 minimized position pinned 20,5
+    pane pane-00000000-0000-0000-0000-000000000008 asks 30x50% size 30x11
+      client client-00000000-0000-0000-0000-000000000003 rect 2,1 30x11 layer 1 position moved 2,1
+      client client-00000000-0000-0000-0000-000000000007 no floating viewport position default
+  clients
+    client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus pane-00000000-0000-0000-0000-000000000008
+";
+
+    assert_eq!(
+        render_layouts(&[build_test_floating_session_layout()], OutputFormat::Table),
+        expected_text
+    );
+}
+
+#[test]
+fn dump_layout_table_prints_a_floating_pane_no_client_views_as_its_pane_line_alone() {
+    let expected_text = "\
+session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      pane pane-00000000-0000-0000-0000-000000000004
+    no client views this tab
+  floating panes
+    pane pane-00000000-0000-0000-0000-000000000006 asks 60%x60% size 48x13
+  clients
+";
+    let mut floating_pane_layouts = build_test_floating_pane_layouts();
+    floating_pane_layouts.truncate(1);
+    floating_pane_layouts[0].client_views.clear();
+    let session_layout = SessionLayout {
+        floating_panes: floating_pane_layouts,
+        clients: Vec::new(),
+        ..build_test_floating_session_layout()
+    };
+
+    assert_eq!(
+        render_layouts(&[session_layout], OutputFormat::Table),
+        expected_text
+    );
+}
+
+#[test]
+fn dump_layout_json_carries_each_floating_pane_and_each_client_view() {
+    let rendered_text = render_layouts(&[build_test_floating_session_layout()], OutputFormat::Json);
+    let parsed_json: serde_json::Value =
+        serde_json::from_str(&rendered_text).expect("the dump is JSON");
+
+    assert_eq!(
+        parsed_json,
+        serde_json::json!([{
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "session_name": "quiet-lake",
+            "tabs": [{
+                "tab_id": "00000000-0000-0000-0000-000000000002",
+                "tab_name": "editor",
+                "tab_index": 0,
+                "layout_tree": { "Pane": "00000000-0000-0000-0000-000000000004" },
+                "solved_tabs": []
+            }],
+            "floating_panes": [
+                {
+                    "pane_id": "00000000-0000-0000-0000-000000000006",
+                    "desired_size": { "width": { "Percent": 60 }, "height": { "Percent": 60 } },
+                    "solved_size": { "column_count": 48, "row_count": 13 },
+                    "client_views": [
+                        {
+                            "client_id": "00000000-0000-0000-0000-000000000003",
+                            "position": "Default",
+                            "visibility": {
+                                "Drawn": {
+                                    "top_left_cell": { "column": 16, "row": 4 },
+                                    "layer_index": 0
+                                }
+                            }
+                        },
+                        {
+                            "client_id": "00000000-0000-0000-0000-000000000007",
+                            "position": { "Pinned": { "column": 20, "row": 5 } },
+                            "visibility": "Minimized"
+                        }
+                    ]
+                },
+                {
+                    "pane_id": "00000000-0000-0000-0000-000000000008",
+                    "desired_size": { "width": { "Cells": 30 }, "height": { "Percent": 50 } },
+                    "solved_size": { "column_count": 30, "row_count": 11 },
+                    "client_views": [
+                        {
+                            "client_id": "00000000-0000-0000-0000-000000000003",
+                            "position": { "Moved": { "column": 2, "row": 1 } },
+                            "visibility": {
+                                "Drawn": {
+                                    "top_left_cell": { "column": 2, "row": 1 },
+                                    "layer_index": 1
+                                }
+                            }
+                        },
+                        {
+                            "client_id": "00000000-0000-0000-0000-000000000007",
+                            "position": "Default",
+                            "visibility": "NoFloatingViewport"
+                        }
+                    ]
+                }
+            ],
+            "clients": [{
+                "client_id": "00000000-0000-0000-0000-000000000003",
+                "active_tab_id": "00000000-0000-0000-0000-000000000002",
+                "focused_pane_id": "00000000-0000-0000-0000-000000000008"
             }]
         }])
     );

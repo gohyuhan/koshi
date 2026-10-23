@@ -25,13 +25,14 @@ use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use koshi_core::command::{Selection, SelectionKind};
+use koshi_core::geometry::FloatingPanePosition;
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_renderer::snapshot::{
     list_pane_slots, ClientSnapshot, CursorSnapshot, FloatingPaneSlot, GridView,
     ImagePlacementSnapshot, PaneSnapshot, RenderSnapshot, ScrollbackMetadata, SelectionSpans,
     SessionSnapshot, TabMetadata, TabSnapshot,
 };
-use koshi_session::client::{Client, FloatingPanePosition};
+use koshi_session::client::Client;
 use koshi_session::session::state::Session;
 use koshi_terminal::scrollback::Scrollback;
 use koshi_terminal::selection::order_selection_positions;

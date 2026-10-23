@@ -15,12 +15,12 @@ use std::time::SystemTime;
 
 use koshi_core::command::{GridPosition, Selection, SelectionKind};
 use koshi_core::event::Event;
-use koshi_core::geometry::{AxisPercent, PaneArea, Point, SplitDirection};
+use koshi_core::geometry::{AxisPercent, FloatingPanePosition, PaneArea, Point, SplitDirection};
 use koshi_core::lock::LockMode;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 
-use crate::client::{ClientOrigin, FloatingPanePosition, FloatingPaneView};
+use crate::client::{ClientOrigin, FloatingPaneView};
 use crate::session::pane_ops::NewPaneSpec;
 use crate::session::tab_ops::{close_tab, commit_new_tab};
 

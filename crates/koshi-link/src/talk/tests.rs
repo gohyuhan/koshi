@@ -203,6 +203,7 @@ fn a_reply_carrying_a_payload_is_named_by_its_variant_not_its_contents() {
         session_id: SessionId::new(),
         session_name: "workspace".to_string(),
         tabs: Vec::new(),
+        floating_panes: Vec::new(),
         clients: Vec::new(),
     });
 

@@ -1,16 +1,18 @@
 //! Renderer for `koshi debug dump-layout`: each tab's split tree, the
 //! rectangles every viewing client solves that tree to, the panes with no
-//! room, the stack header strips, and each client's focus.
+//! room, the stack header strips, each floating pane with what each client
+//! draws for it, and each client's focus.
 
 use super::*;
 
-use koshi_core::geometry::{Rect, SplitDirection};
-use koshi_ipc::layout::{SessionLayout, SolvedTab};
+use koshi_core::geometry::{FloatingPaneDimension, FloatingPanePosition, Rect, SplitDirection};
+use koshi_ipc::layout::{FloatingPaneLayout, FloatingPaneVisibility, SessionLayout, SolvedTab};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::LayoutNode;
 
 /// Render a `debug dump-layout` answer. One session split left and right over
-/// an 80x22 tab, viewed by one client, results in:
+/// an 80x22 tab, viewed by one client, with one floating pane that client
+/// shows at the default placement, results in:
 ///
 /// ```text
 /// session session-… quiet-lake
@@ -22,9 +24,15 @@ use koshi_layout::tree::LayoutNode;
 ///     client client-… tiled viewport 80x22
 ///       pane pane-…4 rect 0,0 40x22
 ///       pane pane-…5 rect 40,0 40x22
+///   floating panes
+///     pane pane-…6 asks 60%x60% size 48x13
+///       client client-… rect 16,4 48x13 layer 0 position default
 ///   clients
-///     client-… tab tab-… focus pane-…4
+///     client-… tab tab-… focus pane-…6
 /// ```
+///
+/// The `floating panes` section is left out when the session holds no
+/// floating pane.
 #[must_use]
 pub fn render_layouts(session_layouts: &[SessionLayout], output_format: OutputFormat) -> String {
     match output_format {
@@ -49,6 +57,12 @@ pub fn render_layouts(session_layouts: &[SessionLayout], output_format: OutputFo
                     if tab_layout.solved_tabs.is_empty() {
                         rendered_output.push_str("    no client views this tab\n");
                     }
+                }
+                if !session_layout.floating_panes.is_empty() {
+                    rendered_output.push_str("  floating panes\n");
+                }
+                for floating_pane_layout in &session_layout.floating_panes {
+                    render_floating_pane(&mut rendered_output, floating_pane_layout);
                 }
                 rendered_output.push_str("  clients\n");
                 for client_discovery in &session_layout.clients {
@@ -102,6 +116,47 @@ fn render_solved_tab(rendered_output: &mut String, solved_tab: &SolvedTab) {
             format_rect_cell(stack_header.header_rect),
             stack_header.member_index + 1,
             stack_header.member_count
+        ));
+    }
+}
+
+/// Append one floating pane: the pane line with the size it asks for and the
+/// size it holds, then one line per client view with what the client draws
+/// and the position it stored.
+///
+/// A view the client draws prints the pane's rectangle and its layer:
+/// `client client-… rect 16,4 48x13 layer 0 position default`. A minimized view
+/// prints `minimized`, and a view from a client with no floating viewport
+/// prints `no floating viewport`: `client client-… minimized position pinned
+/// 20,5`.
+fn render_floating_pane(rendered_output: &mut String, floating_pane_layout: &FloatingPaneLayout) {
+    let desired_size = floating_pane_layout.desired_size;
+    rendered_output.push_str(&format!(
+        "    pane {} asks {}x{} size {}\n",
+        floating_pane_layout.pane_id,
+        format_floating_pane_dimension_cell(desired_size.width),
+        format_floating_pane_dimension_cell(desired_size.height),
+        format_size_cell(floating_pane_layout.solved_size)
+    ));
+    for client_view in &floating_pane_layout.client_views {
+        let visibility_cell = match client_view.visibility {
+            FloatingPaneVisibility::Drawn {
+                top_left_cell,
+                layer_index,
+            } => format!(
+                "rect {} layer {layer_index}",
+                format_rect_cell(Rect::from_origin_and_size(
+                    top_left_cell,
+                    floating_pane_layout.solved_size
+                ))
+            ),
+            FloatingPaneVisibility::Minimized => "minimized".to_string(),
+            FloatingPaneVisibility::NoFloatingViewport => "no floating viewport".to_string(),
+        };
+        rendered_output.push_str(&format!(
+            "      client {} {visibility_cell} position {}\n",
+            client_view.client_id,
+            format_floating_pane_position_cell(client_view.position)
         ));
     }
 }
@@ -160,5 +215,28 @@ fn format_layout_mode_cell(layout_mode: LayoutMode) -> String {
     match layout_mode {
         LayoutMode::Tiled => "tiled".to_string(),
         LayoutMode::Fullscreen { focused_pane_id } => format!("fullscreen {focused_pane_id}"),
+    }
+}
+
+/// One axis of a floating pane's desired size: `80` for 80 cells, `60%` for
+/// 60 percent of the axis.
+fn format_floating_pane_dimension_cell(floating_pane_dimension: FloatingPaneDimension) -> String {
+    match floating_pane_dimension {
+        FloatingPaneDimension::Cells(cell_count) => cell_count.to_string(),
+        FloatingPaneDimension::Percent(axis_percent) => format!("{}%", axis_percent.get_percent()),
+    }
+}
+
+/// The cell a client stored for a floating pane: `default`, `moved 20,5`, or
+/// `pinned 20,5`.
+fn format_floating_pane_position_cell(floating_pane_position: FloatingPanePosition) -> String {
+    match floating_pane_position {
+        FloatingPanePosition::Default => "default".to_string(),
+        FloatingPanePosition::Moved(top_left_cell) => {
+            format!("moved {},{}", top_left_cell.column, top_left_cell.row)
+        }
+        FloatingPanePosition::Pinned(top_left_cell) => {
+            format!("pinned {},{}", top_left_cell.column, top_left_cell.row)
+        }
     }
 }

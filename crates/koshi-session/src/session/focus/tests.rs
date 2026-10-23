@@ -13,12 +13,12 @@ use super::*;
 
 use std::time::SystemTime;
 
-use koshi_core::geometry::{Size, SplitDirection};
+use koshi_core::geometry::{FloatingPanePosition, Size, SplitDirection};
 use koshi_core::ids::{SessionId, TabId};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 
-use crate::client::{ClientOrigin, FloatingPanePosition};
+use crate::client::ClientOrigin;
 use crate::session::state::tests::{build_empty_session, build_tab};
 
 /// A registry holding exactly `pane_records`.

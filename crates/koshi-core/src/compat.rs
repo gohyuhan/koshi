@@ -163,6 +163,9 @@ pub struct Surface {
 ///   4 also carried `Spawning`, `Exited` with the child's `exit_code`, and
 ///   `Closing`. The answer lists the floating panes after the tiled panes,
 ///   each with a `tab_id` of `null`; 4 has no floating pane.
+/// - A `Layout` answer carries `floating_panes`: each floating pane's desired
+///   size, solved size, and every attached client's stored position and what
+///   that client draws for it. The field is required, and 4 has no such field.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A

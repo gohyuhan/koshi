@@ -3,7 +3,9 @@
 //! decode back into the same values, a field this build does not know is
 //! ignored, and a missing or malformed field is refused with its exact error.
 
-use koshi_core::geometry::{Point, SplitDirection};
+use std::num::NonZeroU16;
+
+use koshi_core::geometry::{AxisPercent, FloatingPaneDimension, Point, SplitDirection};
 use koshi_layout::size::SizeWeight;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use serde::de::DeserializeOwned;
@@ -47,6 +49,93 @@ fn build_test_collapsed_pane_id() -> PaneId {
     PaneId::from_uuid(build_test_uuid_with_suffix(5))
 }
 
+/// The floating pane that asks for `60%` by `60%`.
+fn build_test_percent_floating_pane_id() -> PaneId {
+    PaneId::from_uuid(build_test_uuid_with_suffix(6))
+}
+
+/// The client viewing the tab with no floating viewport.
+fn build_test_second_client_id() -> ClientId {
+    ClientId::from_uuid(build_test_uuid_with_suffix(7))
+}
+
+/// The floating pane that asks for `30` columns by `50%`.
+fn build_test_cells_floating_pane_id() -> PaneId {
+    PaneId::from_uuid(build_test_uuid_with_suffix(8))
+}
+
+/// A floating pane axis of `percent` percent.
+fn build_percent_dimension(percent: u8) -> FloatingPaneDimension {
+    FloatingPaneDimension::Percent(AxisPercent::try_from(percent).expect("1 to 100"))
+}
+
+/// A floating pane axis of `cell_count` cells.
+fn build_cells_dimension(cell_count: u16) -> FloatingPaneDimension {
+    FloatingPaneDimension::Cells(NonZeroU16::new(cell_count).expect("not zero"))
+}
+
+/// Two floating panes whose views carry every visibility and every position:
+/// the `60%` pane drawn on top for the first client at the default placement
+/// and minimized for the second client, pinned; the `30`-column pane drawn at
+/// the back for the first client, moved, and shown with no floating viewport
+/// for the second client.
+fn build_populated_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
+    vec![
+        FloatingPaneLayout {
+            pane_id: build_test_percent_floating_pane_id(),
+            desired_size: FloatingPaneSize {
+                width: build_percent_dimension(60),
+                height: build_percent_dimension(60),
+            },
+            solved_size: Size {
+                column_count: 48,
+                row_count: 13,
+            },
+            client_views: vec![
+                FloatingPaneClientView {
+                    client_id: build_test_client_id(),
+                    position: FloatingPanePosition::Default,
+                    visibility: FloatingPaneVisibility::Drawn {
+                        top_left_cell: Point { column: 16, row: 4 },
+                        layer_index: 1,
+                    },
+                },
+                FloatingPaneClientView {
+                    client_id: build_test_second_client_id(),
+                    position: FloatingPanePosition::Pinned(Point { column: 20, row: 5 }),
+                    visibility: FloatingPaneVisibility::Minimized,
+                },
+            ],
+        },
+        FloatingPaneLayout {
+            pane_id: build_test_cells_floating_pane_id(),
+            desired_size: FloatingPaneSize {
+                width: build_cells_dimension(30),
+                height: build_percent_dimension(50),
+            },
+            solved_size: Size {
+                column_count: 30,
+                row_count: 11,
+            },
+            client_views: vec![
+                FloatingPaneClientView {
+                    client_id: build_test_client_id(),
+                    position: FloatingPanePosition::Moved(Point { column: 2, row: 1 }),
+                    visibility: FloatingPaneVisibility::Drawn {
+                        top_left_cell: Point { column: 2, row: 1 },
+                        layer_index: 0,
+                    },
+                },
+                FloatingPaneClientView {
+                    client_id: build_test_second_client_id(),
+                    position: FloatingPanePosition::Default,
+                    visibility: FloatingPaneVisibility::NoFloatingViewport,
+                },
+            ],
+        },
+    ]
+}
+
 /// Encode `message` and decode it back.
 fn round_trip_wire_message<WireMessage: Serialize + DeserializeOwned>(
     wire_message: &WireMessage,
@@ -56,7 +145,8 @@ fn round_trip_wire_message<WireMessage: Serialize + DeserializeOwned>(
 }
 
 /// A layout with every field carrying a value: a stacked tab, one viewing
-/// client zoomed on a pane, a suppressed pane, and a header strip.
+/// client zoomed on a pane, a suppressed pane, a header strip, and the floating
+/// panes of [`build_populated_floating_pane_layouts`].
 fn build_populated_session_layout() -> SessionLayout {
     SessionLayout {
         session_id: build_test_session_id(),
@@ -118,6 +208,7 @@ fn build_populated_session_layout() -> SessionLayout {
                 }],
             }],
         }],
+        floating_panes: build_populated_floating_pane_layouts(),
         clients: vec![ClientFocus {
             client_id: build_test_client_id(),
             active_tab_id: build_test_tab_id(),
@@ -194,6 +285,52 @@ fn build_populated_layout_json() -> serde_json::Value {
                 }]
             }]
         }],
+        "floating_panes": [
+            {
+                "pane_id": "00000000-0000-0000-0000-000000000006",
+                "desired_size": { "width": { "Percent": 60 }, "height": { "Percent": 60 } },
+                "solved_size": { "column_count": 48, "row_count": 13 },
+                "client_views": [
+                    {
+                        "client_id": "00000000-0000-0000-0000-000000000003",
+                        "position": "Default",
+                        "visibility": {
+                            "Drawn": {
+                                "top_left_cell": { "column": 16, "row": 4 },
+                                "layer_index": 1
+                            }
+                        }
+                    },
+                    {
+                        "client_id": "00000000-0000-0000-0000-000000000007",
+                        "position": { "Pinned": { "column": 20, "row": 5 } },
+                        "visibility": "Minimized"
+                    }
+                ]
+            },
+            {
+                "pane_id": "00000000-0000-0000-0000-000000000008",
+                "desired_size": { "width": { "Cells": 30 }, "height": { "Percent": 50 } },
+                "solved_size": { "column_count": 30, "row_count": 11 },
+                "client_views": [
+                    {
+                        "client_id": "00000000-0000-0000-0000-000000000003",
+                        "position": { "Moved": { "column": 2, "row": 1 } },
+                        "visibility": {
+                            "Drawn": {
+                                "top_left_cell": { "column": 2, "row": 1 },
+                                "layer_index": 0
+                            }
+                        }
+                    },
+                    {
+                        "client_id": "00000000-0000-0000-0000-000000000007",
+                        "position": "Default",
+                        "visibility": "NoFloatingViewport"
+                    }
+                ]
+            }
+        ],
         "clients": [{
             "client_id": "00000000-0000-0000-0000-000000000003",
             "active_tab_id": "00000000-0000-0000-0000-000000000002",
@@ -215,6 +352,7 @@ fn a_layout_with_no_tabs_and_no_clients_survives_a_round_trip_wire_message() {
         session_id: build_test_session_id(),
         session_name: "quiet-lake".to_string(),
         tabs: Vec::new(),
+        floating_panes: Vec::new(),
         clients: Vec::new(),
     };
 
@@ -233,6 +371,7 @@ fn a_tab_no_client_views_survives_a_round_trip_with_an_empty_solve_list() {
             layout_tree: LayoutNode::Pane(build_test_active_pane_id()),
             solved_tabs: Vec::new(),
         }],
+        floating_panes: Vec::new(),
         clients: Vec::new(),
     };
 
@@ -248,6 +387,7 @@ fn a_client_that_has_focused_nothing_survives_a_round_trip_wire_message() {
         session_id: build_test_session_id(),
         session_name: "quiet-lake".to_string(),
         tabs: Vec::new(),
+        floating_panes: Vec::new(),
         clients: vec![ClientFocus {
             client_id: build_test_client_id(),
             active_tab_id: build_test_tab_id(),
@@ -278,6 +418,7 @@ fn a_split_with_no_children_survives_a_round_trip_wire_message() {
             }),
             solved_tabs: Vec::new(),
         }],
+        floating_panes: Vec::new(),
         clients: Vec::new(),
     };
 
@@ -290,8 +431,8 @@ fn the_layout_wire_shape_belongs_to_this_protocol_version() {
     // builds only understand each other's bytes when they agree on this
     // shape, and the version in the Hello is the only thing that catches a
     // pair that does not. So a change here is a change to the wire: add,
-    // remove, or rename anything below and `PROTOCOL_VERSION` goes up in the
-    // same commit.
+    // remove, or rename anything below and `SESSION_PROTOCOL` in
+    // `koshi-core/src/compat.rs` records it under its version rule.
     //
     // Round-trip tests cannot catch this: one build encoding and decoding its
     // own structs always agrees with itself.
@@ -312,7 +453,7 @@ fn the_pinned_wire_shape_decodes_back_into_the_same_layout() {
 #[test]
 fn a_layout_carrying_an_unknown_field_ignores_it() {
     let decoded_session_layout: SessionLayout = serde_json::from_str(
-        r#"{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[],"clients":[],"junk":5}"#,
+        r#"{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[],"floating_panes":[],"clients":[],"junk":5}"#,
     )
     .expect("a field this build does not know is ignored");
 
@@ -322,6 +463,7 @@ fn a_layout_carrying_an_unknown_field_ignores_it() {
             session_id: build_test_session_id(),
             session_name: "quiet-lake".to_string(),
             tabs: Vec::new(),
+            floating_panes: Vec::new(),
             clients: Vec::new(),
         }
     );
@@ -426,14 +568,14 @@ fn a_client_focus_with_no_focused_pane_key_reads_as_focusing_nothing() {
 #[test]
 fn a_layout_with_a_misspelled_field_name_is_refused() {
     let decoded_layout_result: Result<SessionLayout, _> = serde_json::from_str(
-        r#"{"session_id":"00000000-0000-0000-0000-000000000001","nmae":"quiet-lake","tabs":[],"clients":[]}"#,
+        r#"{"session_id":"00000000-0000-0000-0000-000000000001","nmae":"quiet-lake","tabs":[],"floating_panes":[],"clients":[]}"#,
     );
 
     assert_eq!(
         decoded_layout_result
             .expect_err("a misspelled field is refused")
             .to_string(),
-        "missing field `session_name` at line 1 column 96"
+        "missing field `session_name` at line 1 column 116"
     );
 }
 
@@ -468,13 +610,99 @@ fn a_solve_whose_mode_this_build_does_not_have_is_refused() {
 #[test]
 fn a_layout_missing_its_clients_is_refused() {
     let decoded_layout_result: Result<SessionLayout, _> = serde_json::from_str(
-        r#"{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[]}"#,
+        r#"{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[],"floating_panes":[]}"#,
     );
 
     assert_eq!(
         decoded_layout_result
             .expect_err("a missing field is refused")
             .to_string(),
-        "missing field `clients` at line 1 column 91"
+        "missing field `clients` at line 1 column 111"
+    );
+}
+
+#[test]
+fn a_layout_missing_its_floating_panes_is_refused() {
+    let decoded_layout_result: Result<SessionLayout, _> = serde_json::from_str(
+        r#"{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[],"clients":[]}"#,
+    );
+
+    assert_eq!(
+        decoded_layout_result
+            .expect_err("a missing field is refused")
+            .to_string(),
+        "missing field `floating_panes` at line 1 column 104"
+    );
+}
+
+#[test]
+fn a_floating_pane_carrying_an_unknown_field_ignores_it() {
+    let decoded_floating_pane_layout: FloatingPaneLayout = serde_json::from_str(
+        r#"{"pane_id":"00000000-0000-0000-0000-000000000006","desired_size":{"width":{"Percent":60},"height":{"Percent":60}},"solved_size":{"column_count":48,"row_count":13},"client_views":[],"junk":5}"#,
+    )
+    .expect("a field this build does not know is ignored");
+
+    assert_eq!(
+        decoded_floating_pane_layout,
+        FloatingPaneLayout {
+            pane_id: build_test_percent_floating_pane_id(),
+            desired_size: FloatingPaneSize {
+                width: build_percent_dimension(60),
+                height: build_percent_dimension(60),
+            },
+            solved_size: Size {
+                column_count: 48,
+                row_count: 13,
+            },
+            client_views: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn a_floating_pane_client_view_carrying_an_unknown_field_ignores_it() {
+    let decoded_client_view: FloatingPaneClientView = serde_json::from_str(
+        r#"{"client_id":"00000000-0000-0000-0000-000000000003","position":"Default","visibility":{"Drawn":{"top_left_cell":{"column":16,"row":4},"layer_index":0,"junk":5}},"junk":5}"#,
+    )
+    .expect("a field this build does not know is ignored");
+
+    assert_eq!(
+        decoded_client_view,
+        FloatingPaneClientView {
+            client_id: build_test_client_id(),
+            position: FloatingPanePosition::Default,
+            visibility: FloatingPaneVisibility::Drawn {
+                top_left_cell: Point { column: 16, row: 4 },
+                layer_index: 0,
+            },
+        }
+    );
+}
+
+#[test]
+fn a_floating_pane_visibility_this_build_does_not_have_is_refused() {
+    let decoded_client_view_result: Result<FloatingPaneClientView, _> = serde_json::from_str(
+        r#"{"client_id":"00000000-0000-0000-0000-000000000003","position":"Default","visibility":"Hidden"}"#,
+    );
+
+    assert_eq!(
+        decoded_client_view_result
+            .expect_err("a visibility this build does not have is refused")
+            .to_string(),
+        "unknown variant `Hidden`, expected one of `Drawn`, `Minimized`, `NoFloatingViewport` at line 1 column 94"
+    );
+}
+
+#[test]
+fn a_floating_pane_asking_for_zero_percent_is_refused() {
+    let decoded_floating_pane_result: Result<FloatingPaneLayout, _> = serde_json::from_str(
+        r#"{"pane_id":"00000000-0000-0000-0000-000000000006","desired_size":{"width":{"Percent":0},"height":{"Percent":60}},"solved_size":{"column_count":48,"row_count":13},"client_views":[]}"#,
+    );
+
+    assert_eq!(
+        decoded_floating_pane_result
+            .expect_err("a percent of 0 is refused")
+            .to_string(),
+        "percent 0 is outside 1 to 100 at line 1 column 87"
     );
 }
