@@ -4,8 +4,7 @@
 //! without a running session: the view folds the user's keybinding file (when
 //! one exists in the koshi config directory) onto the built-in defaults, runs
 //! conflict detection against the core action table, and merges the layers
-//! into the per-mode lookup the renderers read. The running session's layers
-//! (`session`, `layout`) are not visible here.
+//! into the per-mode lookup the renderers read.
 //!
 //! The view reads, parses, folds, and checks the file through the functions a
 //! client runs on its own `keybinding.kdl` when it attaches, and

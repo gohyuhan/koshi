@@ -106,6 +106,11 @@ struct KeysValidation {
 }
 
 /// Render a `koshi keys list` answer from the offline keymap view.
+///
+/// `scope_filter` keeps the rows one layer authored. [`KeymapScope::Default`]
+/// keeps the surviving defaults and the `defaults (unbound)` rows of the
+/// defaults a user binding or `remove` displaced. [`KeymapScope::User`]
+/// keeps the user's bindings.
 #[must_use]
 pub fn render_keys_list(
     keymap_view: &crate::keymap::KeymapView,
@@ -113,7 +118,11 @@ pub fn render_keys_list(
     scope_filter: Option<KeymapScope>,
     output_format: OutputFormat,
 ) -> String {
-    let scope_filter_label = scope_filter.map(format_scope_argument_label);
+    let listed_layer_origin = scope_filter.map(resolve_scope_layer_origin);
+    let is_layer_listed = |layer_origin: koshi_config::conflict::LayerOrigin| {
+        listed_layer_origin.is_none_or(|listed_layer_origin| listed_layer_origin == layer_origin)
+    };
+    let are_defaults_listed = is_layer_listed(koshi_config::conflict::LayerOrigin::Defaults);
     let mut key_bindings: Vec<KeyBindingSummary> = Vec::new();
     for (mode_name, merged_mode_keymap) in &keymap_view.merged_keymap.mode_keymap_by_name {
         if requested_input_mode_name.is_some_and(|requested_input_mode_name| {
@@ -122,12 +131,18 @@ pub fn render_keys_list(
             continue;
         }
         for (key_sequence, merged_binding) in &merged_mode_keymap.user_bindings_by_key_sequence {
+            if !is_layer_listed(merged_binding.layer_origin) {
+                continue;
+            }
             key_bindings.push(KeyBindingSummary {
                 input_mode: mode_name.get_name().to_string(),
                 key_sequence: key_sequence.to_string(),
                 action_reference: merged_binding.bound_action.action_reference.to_string(),
                 binding_source: merged_binding.layer_origin.to_string(),
             });
+        }
+        if !are_defaults_listed {
+            continue;
         }
         for (key_sequence, default_binding) in &merged_mode_keymap.default_bindings_by_key_sequence
         {
@@ -149,9 +164,6 @@ pub fn render_keys_list(
             });
         }
     }
-    if let Some(scope_filter_label) = scope_filter_label {
-        key_bindings.retain(|binding| binding.binding_source == scope_filter_label);
-    }
     key_bindings.sort_by(|left_binding, right_binding| {
         (&left_binding.input_mode, &left_binding.key_sequence)
             .cmp(&(&right_binding.input_mode, &right_binding.key_sequence))
@@ -169,11 +181,14 @@ pub fn render_keys_list(
 }
 
 /// Render a `koshi keys describe <key-sequence>` answer: one detail block
-/// per mode the sequence is bound in.
+/// per binding that is the sequence or starts with it, mode by mode in
+/// mode-name order, and in key order within a mode. A prefix that binds
+/// nothing itself describes the bindings it opens: `<C-t>` describes
+/// `<C-t> n` and `<C-t> x`.
 ///
 /// # Errors
 /// The parser's message when `key_sequence_text` is not a valid key sequence; `Ok(None)`
-/// when it parses but nothing is bound on it in any mode.
+/// when it parses but no binding in any mode is the sequence or starts with it.
 pub fn render_keys_describe(
     keymap_view: &crate::keymap::KeymapView,
     key_sequence_text: &str,
@@ -188,44 +203,51 @@ pub fn render_keys_describe(
 
     let mut key_binding_details: Vec<KeyBindingDetail> = Vec::new();
     for (mode_name, merged_mode_keymap) in &keymap_view.merged_keymap.mode_keymap_by_name {
-        let (matched_binding, binding_source) = if let Some(merged_binding) = merged_mode_keymap
-            .user_bindings_by_key_sequence
-            .get(&parsed_key_sequence)
-        {
+        let user_bindings = list_bindings_starting_with(
+            &merged_mode_keymap.user_bindings_by_key_sequence,
+            &parsed_key_sequence,
+        )
+        .map(|(key_sequence, merged_binding)| {
             (
+                key_sequence,
                 &merged_binding.bound_action,
                 merged_binding.layer_origin.to_string(),
             )
-        } else if let Some(default_binding) = merged_mode_keymap
-            .default_bindings_by_key_sequence
-            .get(&parsed_key_sequence)
-        {
-            (default_binding, "defaults".to_string())
-        } else {
-            continue;
-        };
-        let action_metadata = keymap_view
-            .action_registry
-            .find_action_metadata(&matched_binding.action_reference);
-        key_binding_details.push(KeyBindingDetail {
-            key_sequence: parsed_key_sequence.to_string(),
-            input_mode: mode_name.get_name().to_string(),
-            action_reference: matched_binding.action_reference.to_string(),
-            display_name: action_metadata.map_or(String::new(), |action_metadata_entry| {
-                action_metadata_entry.display_name.clone()
-            }),
-            description: action_metadata.map_or(String::new(), |action_metadata_entry| {
-                action_metadata_entry.description.clone()
-            }),
-            scope: action_metadata
-                .map_or("-", |action_metadata_entry| {
-                    format_scope_label(action_metadata_entry.scope)
-                })
-                .to_string(),
-            binding_source,
-            is_continuous: action_metadata
-                .is_some_and(|action_metadata_entry| action_metadata_entry.is_continuous),
         });
+        let default_bindings = list_bindings_starting_with(
+            &merged_mode_keymap.default_bindings_by_key_sequence,
+            &parsed_key_sequence,
+        )
+        .map(|(key_sequence, default_binding)| {
+            (key_sequence, default_binding, "defaults".to_string())
+        });
+        let mut mode_bindings: Vec<_> = user_bindings.chain(default_bindings).collect();
+        mode_bindings.sort_by_key(|(key_sequence, _, _)| *key_sequence);
+
+        for (key_sequence, matched_binding, binding_source) in mode_bindings {
+            let action_metadata = keymap_view
+                .action_registry
+                .find_action_metadata(&matched_binding.action_reference);
+            key_binding_details.push(KeyBindingDetail {
+                key_sequence: key_sequence.to_string(),
+                input_mode: mode_name.get_name().to_string(),
+                action_reference: matched_binding.action_reference.to_string(),
+                display_name: action_metadata.map_or(String::new(), |action_metadata_entry| {
+                    action_metadata_entry.display_name.clone()
+                }),
+                description: action_metadata.map_or(String::new(), |action_metadata_entry| {
+                    action_metadata_entry.description.clone()
+                }),
+                scope: action_metadata
+                    .map_or("-", |action_metadata_entry| {
+                        format_scope_label(action_metadata_entry.scope)
+                    })
+                    .to_string(),
+                binding_source,
+                is_continuous: action_metadata
+                    .is_some_and(|action_metadata_entry| action_metadata_entry.is_continuous),
+            });
+        }
     }
     if key_binding_details.is_empty() {
         return Ok(None);
@@ -420,12 +442,29 @@ fn format_keymap_verdict_label(
     }
 }
 
-/// The `source` label a [`KeymapScope`] filter matches.
-fn format_scope_argument_label(scope_argument: KeymapScope) -> &'static str {
+/// The keymap layer a [`KeymapScope`] filter keeps.
+fn resolve_scope_layer_origin(scope_argument: KeymapScope) -> koshi_config::conflict::LayerOrigin {
     match scope_argument {
-        KeymapScope::Default => "defaults",
-        KeymapScope::User => "user",
-        KeymapScope::Session => "session",
-        KeymapScope::Layout => "layout",
+        KeymapScope::Default => koshi_config::conflict::LayerOrigin::Defaults,
+        KeymapScope::User => koshi_config::conflict::LayerOrigin::User,
     }
+}
+
+/// Every entry of `bindings_by_key_sequence` whose key is `key_sequence` or
+/// starts with it, in key order. With `<C-t> n` and `<C-t> x` bound, `<C-t>`
+/// yields both, and `<C-t> n` yields only itself.
+///
+/// The walk starts at `key_sequence` and stops at the first key that does not
+/// start with it.
+fn list_bindings_starting_with<'a, Binding>(
+    bindings_by_key_sequence: &'a std::collections::BTreeMap<koshi_core::key::KeySequence, Binding>,
+    key_sequence: &'a koshi_core::key::KeySequence,
+) -> impl Iterator<Item = (&'a koshi_core::key::KeySequence, &'a Binding)> {
+    bindings_by_key_sequence
+        .range(key_sequence..)
+        .take_while(|(candidate_key_sequence, _)| {
+            candidate_key_sequence
+                .list_chords()
+                .starts_with(key_sequence.list_chords())
+        })
 }

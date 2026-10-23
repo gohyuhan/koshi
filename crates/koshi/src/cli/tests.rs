@@ -791,6 +791,47 @@ fn keys_list_parses_its_filters_and_format() {
 }
 
 #[test]
+fn keys_list_mode_accepts_every_built_in_mode_name() {
+    for lock_mode in LockMode::ALL {
+        let mode_name = lock_mode.get_keymap_name();
+        assert_eq!(
+            parse_cli_command(&["koshi", "keys", "list", "--mode", mode_name]),
+            CliCommand::Keys {
+                command: KeysCommand::List {
+                    input_mode_name: Some(mode_name.to_string()),
+                    scope: None,
+                    output_format: OutputFormat::Table,
+                }
+            }
+        );
+    }
+}
+
+#[test]
+fn keys_list_refuses_a_mode_that_is_not_built_in() {
+    for mode_name in ["bogus", "Normal", ""] {
+        let cli_error = parse_cli_error(&["koshi", "keys", "list", "--mode", mode_name]);
+        assert_eq!(
+            cli_error.kind(),
+            ErrorKind::InvalidValue,
+            "for {mode_name:?}"
+        );
+    }
+}
+
+#[test]
+fn keys_list_refuses_the_session_and_layout_scopes() {
+    for scope_name in ["session", "layout"] {
+        let cli_error = parse_cli_error(&["koshi", "keys", "list", "--scope", scope_name]);
+        assert_eq!(
+            cli_error.kind(),
+            ErrorKind::InvalidValue,
+            "for {scope_name}"
+        );
+    }
+}
+
+#[test]
 fn keys_describe_parses_the_sequence() {
     assert_eq!(
         parse_cli_command(&["koshi", "keys", "describe", "<C-p> n"]),

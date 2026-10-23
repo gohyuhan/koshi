@@ -1331,28 +1331,146 @@ fn keys_list_scope_filter_for_defaults_keeps_only_shipped_bindings() {
 }
 
 #[test]
-fn keys_list_scope_filter_for_session_or_layout_is_empty_offline() {
-    // No session or layout layer is visible offline. Filtering to either
-    // leaves the table's header row alone.
-    let keymap_view = build_keymap_view_from_partial(None, None, None);
-    let header_only_table_text = "mode  key  action  source\n";
-    assert_eq!(
-        render_keys_list(
+fn keys_list_scope_filters_split_the_listing_by_authoring_layer() {
+    // The user binding on `<A-f>` displaces the default there. The default
+    // scope keeps that displaced default with every other default, the user
+    // scope keeps the user binding, and together they are the whole listing.
+    let keymap_view = build_test_keymap_view_with_binding("<A-f>", "core:close-pane");
+    let list_binding_records = |scope_filter: Option<KeymapScope>| -> Vec<serde_json::Value> {
+        let json_document: serde_json::Value = serde_json::from_str(&render_keys_list(
             &keymap_view,
             None,
-            Some(KeymapScope::Session),
-            OutputFormat::Table,
-        ),
-        header_only_table_text
+            scope_filter,
+            OutputFormat::Json,
+        ))
+        .expect("valid JSON");
+        json_document["key_bindings"]
+            .as_array()
+            .expect("array")
+            .clone()
+    };
+    let unfiltered_binding_records = list_binding_records(None);
+    let (user_binding_records, default_binding_records): (Vec<_>, Vec<_>) =
+        unfiltered_binding_records
+            .into_iter()
+            .partition(|binding| binding["binding_source"] == serde_json::json!("user"));
+
+    assert_eq!(
+        user_binding_records,
+        [serde_json::json!({
+            "input_mode": "normal",
+            "key_sequence": "<A-f>",
+            "action_reference": "core:close-pane",
+            "binding_source": "user",
+        })]
+    );
+    assert!(default_binding_records.contains(&serde_json::json!({
+        "input_mode": "normal",
+        "key_sequence": "<A-f>",
+        "action_reference": "core:toggle-pane-fullscreen",
+        "binding_source": "defaults (unbound)",
+    })));
+    assert_eq!(
+        list_binding_records(Some(KeymapScope::User)),
+        user_binding_records
     );
     assert_eq!(
-        render_keys_list(
-            &keymap_view,
-            None,
-            Some(KeymapScope::Layout),
-            OutputFormat::Table,
-        ),
-        header_only_table_text
+        list_binding_records(Some(KeymapScope::Default)),
+        default_binding_records
+    );
+}
+
+#[test]
+fn keys_describe_lists_every_binding_a_prefix_opens() {
+    // `<C-t>` binds nothing itself. It opens `<C-t> n` and `<C-t> x`, and
+    // describing it describes both.
+    let keymap_view = build_keymap_view_from_partial(None, None, None);
+    let rendered_text = render_keys_describe(&keymap_view, "<C-t>", OutputFormat::Table)
+        .expect("sequence parses")
+        .expect("the prefix opens two bindings");
+    let expected_text = "\
+key: <C-t> n
+mode: normal
+action: core:new-tab
+display_name: New Tab
+description: Create a new tab
+scope: tab
+source: defaults
+continuous: false
+
+key: <C-t> x
+mode: normal
+action: core:close-tab
+display_name: Close Tab
+description: Close the focused tab
+scope: tab
+source: defaults
+continuous: false
+";
+    assert_eq!(rendered_text, expected_text);
+}
+
+#[test]
+fn keys_describe_lists_a_bound_prefix_first_and_each_mode_on_its_own() {
+    // In `normal`, the user binds `<C-t>` itself, ahead of the two defaults
+    // it opens. In `locked`, `<C-t>` binds `core:new-tab` and opens nothing.
+    // Each mode answers from its own bindings, `locked` first.
+    let mut keymap_view = build_test_keymap_view_with_binding("<C-t>", "core:quit");
+    keymap_view
+        .merged_keymap
+        .mode_keymap_by_name
+        .get_mut(&ModeName::from_text("locked"))
+        .expect("built-in mode is merged")
+        .default_bindings_by_key_sequence
+        .insert(
+            KeySequence::from(KeyChord::from_parts(
+                BindingModifierFlags::CTRL,
+                Key::Char('t'),
+            )),
+            BoundAction {
+                action_reference: ActionReference::from_core_action_name("new-tab")
+                    .expect("valid name"),
+            },
+        );
+    let rendered_text = render_keys_describe(&keymap_view, "<C-t>", OutputFormat::Json)
+        .expect("sequence parses")
+        .expect("bound in two modes");
+    let json_document: serde_json::Value =
+        serde_json::from_str(&rendered_text).expect("valid JSON");
+    let described_bindings: Vec<(&str, &str, &str, &str)> = json_document
+        .as_array()
+        .expect("a JSON array")
+        .iter()
+        .map(|key_binding_detail| {
+            (
+                key_binding_detail["input_mode"].as_str().expect("text"),
+                key_binding_detail["key_sequence"].as_str().expect("text"),
+                key_binding_detail["action_reference"]
+                    .as_str()
+                    .expect("text"),
+                key_binding_detail["binding_source"].as_str().expect("text"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        described_bindings,
+        [
+            ("locked", "<C-t>", "core:new-tab", "defaults"),
+            ("normal", "<C-t>", "core:quit", "user"),
+            ("normal", "<C-t> n", "core:new-tab", "defaults"),
+            ("normal", "<C-t> x", "core:close-tab", "defaults"),
+        ]
+    );
+}
+
+#[test]
+fn keys_describe_answers_nothing_for_a_sequence_past_a_bound_key() {
+    // `<A-f>` fires the moment it is pressed, so `<A-f> x` is not a binding
+    // and starts none.
+    let keymap_view = build_keymap_view_from_partial(None, None, None);
+    assert_eq!(
+        render_keys_describe(&keymap_view, "<A-f> x", OutputFormat::Table),
+        Ok(None)
     );
 }
 

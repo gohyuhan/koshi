@@ -806,10 +806,21 @@ Example: terminals `client-1a2b…` and `client-3c4d…` both watch session
 |---|---|
 | `koshi actions list [--format table\|json]` | List supported actions |
 | `koshi actions explain <ACTION> [--format table\|json]` | Explain one action |
-| `koshi keys list [--mode <MODE>] [--scope default\|user\|session\|layout] [--format table\|json]` | List effective shortcuts |
-| `koshi keys describe "<KEY_SEQUENCE>"` | Explain one shortcut |
+| `koshi keys list [--mode <MODE>] [--scope default\|user] [--format table\|json]` | List effective shortcuts |
+| `koshi keys describe "<KEY_SEQUENCE>"` | Explain one shortcut, or each shortcut it starts |
 | `koshi keys conflicts` | Report clashes, dead shortcuts, and warnings |
 | `koshi keys validate <PATH>` | Check a shortcut file without applying it |
+
+`keys list --mode` takes the name of one built-in mode, such as `normal` or
+`locked`. Another name exits 2 and lists the mode names. `--scope user` lists
+the shortcuts in your `keybinding.kdl`. `--scope default` lists the built-in
+shortcuts. It also lists each built-in shortcut that your file rebinds or
+removes, with the source `defaults (unbound)`.
+
+`keys describe` on a key that starts longer shortcuts explains each of them.
+For example, `koshi keys describe "<C-t>"` explains `<C-t> n` (`core:new-tab`)
+and `<C-t> x` (`core:close-tab`). A key that is no shortcut and starts none
+exits 2.
 
 `keys conflicts` checks the `keybinding.kdl` in the config directory, and
 `keys validate` checks the file at `PATH`. Each one checks the file the way a

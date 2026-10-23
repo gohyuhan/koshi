@@ -903,7 +903,7 @@ fn run_actions(command: &ActionsCommand) -> Result<(), CliError> {
 
 /// Serve a `koshi keys` query from the offline keymap view: the user's
 /// keybinding file folded onto the built-in defaults. No running session is
-/// asked, so its own layers (`session`, `layout`) are not shown.
+/// asked.
 fn run_keys_query(command: &KeysCommand) -> Result<(), CliError> {
     match command {
         KeysCommand::List {

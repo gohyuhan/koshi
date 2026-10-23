@@ -4,43 +4,14 @@
 //! code that verdict gives.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use koshi_config::types::SCHEMA_VERSION;
 use tempfile::TempDir;
 
 mod common;
 
-use common::{build_koshi_command_under_home, resolve_config_directory_under_home};
-
-/// What one `koshi` run printed, and the code it exited with.
-#[derive(Debug, PartialEq, Eq)]
-struct KoshiRunOutput {
-    standard_output: String,
-    standard_error: String,
-    exit_code: Option<i32>,
-}
-
-/// Run `koshi <arguments>` under `home_directory` and collect its output.
-fn run_koshi_under_home(home_directory: &Path, arguments: &[&str]) -> KoshiRunOutput {
-    let process_output = build_koshi_command_under_home(home_directory)
-        .args(arguments)
-        .output()
-        .expect("run koshi");
-    KoshiRunOutput {
-        standard_output: String::from_utf8(process_output.stdout).expect("UTF-8 stdout"),
-        standard_error: String::from_utf8(process_output.stderr).expect("UTF-8 stderr"),
-        exit_code: process_output.status.code(),
-    }
-}
-
-/// The `keybinding.kdl` path a `koshi` under `home_directory` reads, with its
-/// config directory created.
-fn create_keybinding_file_path(home_directory: &Path) -> PathBuf {
-    let config_directory = resolve_config_directory_under_home(home_directory);
-    fs::create_dir_all(&config_directory).expect("create config directory");
-    config_directory.join("keybinding.kdl")
-}
+use common::{create_keybinding_file_path, run_koshi_under_home, KoshiRunOutput};
 
 /// The answer `koshi keys conflicts` gives for a `keybinding.kdl` at
 /// `keybinding_file_path` that a client ignores for `file_error_message`.
