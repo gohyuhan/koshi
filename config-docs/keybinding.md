@@ -9,7 +9,8 @@ same key. Unchanged keys keep built-in actions.
 `%APPDATA%\koshi\config\keybinding.kdl` on Windows. See
 [README](README.md#where-the-files-go).
 
-**Any error drops the whole file.** `koshi keys conflicts` reports problems.
+**Any error drops the whole file.** `koshi keys conflicts` reports problems,
+and exits 2 when koshi drops the file.
 `koshi keys list` prints the active keymap.
 
 ## Top-level settings

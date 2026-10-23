@@ -559,13 +559,12 @@ fn loading_an_absent_keybinding_file_is_none_without_a_warning() {
 
 #[test]
 fn an_unparseable_keybinding_file_drops_the_whole_file_with_a_warning() {
-    // `keybinding.kdl` is all-or-nothing: any parse error drops the file.
+    // `keybinding.kdl` is all-or-nothing: any parse error drops the file. The
+    // warning names every schema problem, joined by `; `.
     let keybinding_source = "mode \"normal\" {\n    bind \"<C-\" \"core:new-tab\"\n}\n";
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("keybinding.kdl");
     fs::write(&config_file_path, keybinding_source).expect("write");
-    let parse_error = parse_keybindings(&config_file_path, keybinding_source)
-        .expect_err("the file does not parse");
     let mut config_warnings = Vec::new();
     assert_eq!(
         load_keybindings_config(&config_file_path, &mut config_warnings),
@@ -574,10 +573,113 @@ fn an_unparseable_keybinding_file_drops_the_whole_file_with_a_warning() {
     assert_eq!(
         config_warnings,
         vec![format!(
-            "keybinding.kdl not applied ({}): {parse_error}; using defaults",
+            "keybinding.kdl not applied ({}): keybinding file must declare `version`; \
+             invalid key `<C-`: missing closing `>`; using defaults",
             config_file_path.display()
         )]
     );
+}
+
+#[test]
+fn a_keybinding_file_that_is_not_kdl_warns_with_its_line_and_column() {
+    let test_directory = tempfile::tempdir().expect("temp dir");
+    let config_file_path = test_directory.path().join("keybinding.kdl");
+    fs::write(&config_file_path, "version 2\nmode \"normal\" {\n").expect("write");
+    let mut config_warnings = Vec::new();
+    assert_eq!(
+        load_keybindings_config(&config_file_path, &mut config_warnings),
+        None
+    );
+    assert_eq!(
+        config_warnings,
+        vec![format!(
+            "keybinding.kdl not applied ({path}): config parse error in {path}: line 2, \
+             column 15: No closing '}}' for child block; using defaults",
+            path = config_file_path.display()
+        )]
+    );
+}
+
+#[test]
+fn an_unreadable_keybinding_file_gives_no_layer_with_a_warning() {
+    // A directory named `keybinding.kdl` exists and does not read as text.
+    let test_directory = tempfile::tempdir().expect("temp dir");
+    let config_file_path = test_directory.path().join("keybinding.kdl");
+    fs::create_dir(&config_file_path).expect("create directory");
+    let read_error =
+        fs::read_to_string(&config_file_path).expect_err("a directory does not read as text");
+    let mut config_warnings = Vec::new();
+    assert_eq!(
+        load_keybindings_config(&config_file_path, &mut config_warnings),
+        None
+    );
+    assert_eq!(
+        config_warnings,
+        vec![format!(
+            "could not read config file {}: {read_error}",
+            config_file_path.display()
+        )]
+    );
+}
+
+#[test]
+fn load_keybinding_file_names_why_a_file_gives_no_layer() {
+    let test_directory = tempfile::tempdir().expect("temp dir");
+
+    let absent_file_path = test_directory.path().join("absent.kdl");
+    match load_keybinding_file(&absent_file_path) {
+        Ok(None) => {}
+        other_outcome => panic!("expected an absent file, got {other_outcome:?}"),
+    }
+
+    let directory_file_path = test_directory.path().join("directory.kdl");
+    fs::create_dir(&directory_file_path).expect("create directory");
+    let expected_read_error =
+        fs::read_to_string(&directory_file_path).expect_err("a directory does not read as text");
+    match load_keybinding_file(&directory_file_path) {
+        Err(KeybindingFileError::Unreadable(read_error)) => {
+            assert_eq!(read_error.kind(), expected_read_error.kind());
+            assert_eq!(read_error.to_string(), expected_read_error.to_string());
+        }
+        other_outcome => panic!("expected an unreadable file, got {other_outcome:?}"),
+    }
+
+    let unparseable_file_path = test_directory.path().join("unparseable.kdl");
+    fs::write(
+        &unparseable_file_path,
+        "version 2\nunlock_alternative \"<A-u>\"\n",
+    )
+    .expect("write");
+    match load_keybinding_file(&unparseable_file_path) {
+        Err(KeybindingFileError::Unparseable(KeybindingParseError::Invalid {
+            keybinding_path,
+            diagnostics,
+        })) => {
+            assert_eq!(keybinding_path, unparseable_file_path.display().to_string());
+            let diagnostic_messages: Vec<&str> = diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.get_diagnostic_message())
+                .collect();
+            assert_eq!(
+                diagnostic_messages,
+                vec!["unknown key `unlock_alternative`; did you mean `unlock-alternative`?"]
+            );
+        }
+        other_outcome => panic!("expected an unparseable file, got {other_outcome:?}"),
+    }
+
+    let parsed_file_path = test_directory.path().join("parsed.kdl");
+    fs::write(&parsed_file_path, "version 2\nchord-timeout-ms 750\n").expect("write");
+    match load_keybinding_file(&parsed_file_path) {
+        Ok(Some(keybindings_config_layer)) => assert_eq!(
+            keybindings_config_layer,
+            PartialKeybindingsConfig {
+                chord_timeout_ms: Some(750),
+                ..PartialKeybindingsConfig::default()
+            }
+        ),
+        other_outcome => panic!("expected a parsed file, got {other_outcome:?}"),
+    }
 }
 
 // --- append_config_field_warnings: file-prefixed skip lines ---

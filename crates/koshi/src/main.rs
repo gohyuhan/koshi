@@ -19,6 +19,7 @@ use koshi::targeting::{self, Route};
 use koshi::updater;
 use koshi::version;
 use koshi_client::attach;
+use koshi_config::conflict::KeymapVerdict;
 use koshi_core::command::{CliExitCode, Command, CommandResult, DetachArgs};
 use koshi_core::ids::parse_owned_session_id;
 use koshi_daemon::pty_supervisor;
@@ -943,14 +944,23 @@ fn run_keys_query(command: &KeysCommand) -> Result<(), CliError> {
             }
         }
         KeysCommand::Conflicts { output_format } => {
-            // The rendered answer names an ignored keybinding file itself;
-            // nothing is written to stderr.
+            // The whole answer prints, then a verdict other than `apply`
+            // exits 2. Such a verdict always carries the file's path.
             let keymap_view = keymap::load_keymap_view();
             print!(
                 "{}",
                 output::render_keys_conflicts(&keymap_view, *output_format)
             );
-            Ok(())
+            match keymap_view.user_keybinding_file_path {
+                Some(keybinding_file_path)
+                    if keymap_view.keymap_verdict != KeymapVerdict::Apply =>
+                {
+                    Err(CliError::InvalidKeybindingFile {
+                        keybinding_file_path: keybinding_file_path.display().to_string(),
+                    })
+                }
+                _ => Ok(()),
+            }
         }
         KeysCommand::Validate {
             keybinding_file_path,
@@ -985,7 +995,7 @@ fn run_keys_query(command: &KeysCommand) -> Result<(), CliError> {
 fn warn_keymap_reverted(keymap_view: &KeymapView) {
     if let Some(keybinding_file_error_message) = &keymap_view.keybinding_file_error_message {
         eprintln!("koshi: keybinding file ignored: {keybinding_file_error_message}");
-    } else if keymap_view.is_reverted_to_defaults {
+    } else if keymap_view.keymap_verdict != KeymapVerdict::Apply {
         eprintln!(
             "koshi: keybinding file not applied (conflicts); showing built-in defaults — \
              run `koshi keys conflicts` for details"

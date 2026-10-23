@@ -135,7 +135,7 @@ fn the_migration_step_reports_config_kdl_that_does_not_parse_on_every_platform()
         assert_eq!(
             migration_error.to_string(),
             format!(
-                "config failed: config parse error in {}: No closing '}}' for child block",
+                "config failed: config parse error in {}: line 2, column 6: No closing '}}' for child block",
                 app_config_path.display()
             )
         );
@@ -306,7 +306,7 @@ fn a_router_whose_config_migration_fails_warns_and_serves() {
     assert_eq!(
         String::from_utf8_lossy(&router_output.stderr),
         format!(
-            "koshi: config failed: config parse error in {}: No closing '}}' for child block; \
+            "koshi: config failed: config parse error in {}: line 2, column 6: No closing '}}' for child block; \
              starting with the config files as they are\n",
             app_config_path.display()
         )
@@ -366,7 +366,7 @@ fn a_session_server_whose_config_migration_fails_writes_the_failure_to_its_log()
         .spawn()
         .expect("start the session server");
     let expected_warning = format!(
-        "config failed: config parse error in {}: No closing '}}' for child block",
+        "config failed: config parse error in {}: line 2, column 8: No closing '}}' for child block",
         keybinding_config_path.display()
     );
     let startup_deadline = Instant::now() + WAIT_DURATION;

@@ -368,6 +368,25 @@ fn syntax_error_is_the_syntax_variant() {
 }
 
 #[test]
+fn problem_messages_name_a_syntax_error_by_line_and_column_and_list_schema_errors() {
+    assert_eq!(
+        parse_profile_text("tab {")
+            .unwrap_err()
+            .list_problem_messages(),
+        vec![
+            "config parse error in profile/dev.kdl: line 1, column 5: No closing '}' for child block"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        parse_profile_text("tab {pane}")
+            .unwrap_err()
+            .list_problem_messages(),
+        vec!["profile file must declare `version`".to_string()]
+    );
+}
+
+#[test]
 fn invalid_report_names_the_file() {
     let profile_error = parse_profile_text("version 1").unwrap_err();
     assert_eq!(

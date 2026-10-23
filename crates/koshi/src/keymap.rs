@@ -7,9 +7,13 @@
 //! into the per-mode lookup the renderers read. The running session's layers
 //! (`session`, `layout`) are not visible here.
 //!
-//! The keybinding section applies all-or-nothing: a user file that fails to
-//! parse, or whose conflict verdict refuses it, leaves the view on the
-//! built-in defaults and carries the reasons for the caller to surface.
+//! The view reads, parses, folds, and checks the file through the functions a
+//! client runs on its own `keybinding.kdl` when it attaches, and
+//! [`KeymapView::keymap_verdict`](crate::keymap::KeymapView::keymap_verdict)
+//! is the decision that client reaches. The keybinding section applies
+//! all-or-nothing: a user file that cannot be read or parsed, or whose
+//! conflict verdict refuses it, leaves the view on the built-in defaults and
+//! carries the reasons for the caller to surface.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,33 +21,37 @@ use std::path::{Path, PathBuf};
 use koshi_config::conflict::{
     build_keymap_layers, detect_conflicts, ConflictReport, KeymapVerdict,
 };
-use koshi_config::keybinding::{parse_keybindings, KeybindingParseError};
+use koshi_config::keybinding::parse_keybindings;
 use koshi_config::keymap_merge::{merge_keymaps, MergedKeymap};
-use koshi_config::layer::PartialKeybindingsConfig;
+use koshi_config::layer::{ConfigLayers, PartialKeybindingsConfig};
 use koshi_config::types::KeybindingsConfig;
 use koshi_core::registry::ActionRegistry;
+use koshi_link::config::{load_keybinding_file, KeybindingFileError};
 
 #[cfg(test)]
 pub(crate) mod tests;
 
 /// The effective keymap as seen from outside a session: the folded
-/// keybinding settings, the merged per-mode lookup, the conflict report that
-/// admitted (or refused) the user layer, and the core action table.
+/// keybinding settings, the merged per-mode lookup, the conflict report and
+/// the verdict on the user layer, and the core action table.
 pub struct KeymapView {
     /// The effective keybinding settings — the built-in defaults with the
-    /// user file's fields folded on when its verdict admitted it.
+    /// user file's fields folded on when the verdict is
+    /// [`KeymapVerdict::Apply`].
     pub keybindings_config: KeybindingsConfig,
     /// The merged per-mode lookup the renderers read.
     pub merged_keymap: MergedKeymap,
     /// The core action table the bindings resolve against.
     pub action_registry: ActionRegistry,
     /// Every conflict-detection finding for the user layer, warnings
-    /// included. Holds no findings when no user file exists.
+    /// included. Holds no findings when no user layer exists.
     pub conflict_report: ConflictReport,
-    /// True when the view holds the built-in defaults although a user file
-    /// exists: its conflict verdict refused it, or it could not be read or
-    /// parsed.
-    pub is_reverted_to_defaults: bool,
+    /// What a client does with the user keybinding file when it attaches.
+    /// [`KeymapVerdict::Reject`] when the file cannot be read or parsed;
+    /// otherwise the verdict of [`conflict_report`](Self::conflict_report),
+    /// which is [`KeymapVerdict::Apply`] when no file exists. Any verdict
+    /// other than `Apply` leaves the view on the built-in defaults.
+    pub keymap_verdict: KeymapVerdict,
     /// The user keybinding file the view read, when one exists.
     pub user_keybinding_file_path: Option<PathBuf>,
     /// Why the user file could not be used, when it could not be parsed or
@@ -52,11 +60,13 @@ pub struct KeymapView {
 }
 
 /// Load the offline keymap view: read `keybinding.kdl` from the koshi config
-/// directory when it exists, and fold it onto the built-in defaults. An absent
-/// file gives the defaults with no error; any other read failure gives the
-/// defaults with the read error in `keybinding_file_error_message`. A file
-/// that does not parse gives the defaults with its parse errors, joined by
-/// `; `, in `keybinding_file_error_message`.
+/// directory through [`load_keybinding_file`], and fold it onto the built-in
+/// defaults. An absent file gives the defaults with no error. A file that
+/// cannot be read gives the defaults with the read error in
+/// `keybinding_file_error_message`. A file that does not parse gives the
+/// defaults with its parse errors, joined by `; `, in
+/// `keybinding_file_error_message`. A file that exists always sets
+/// `user_keybinding_file_path`.
 #[must_use]
 pub fn load_keymap_view() -> KeymapView {
     let Some(keybinding_file_path) = koshi_paths::resolve_config_directory()
@@ -64,38 +74,38 @@ pub fn load_keymap_view() -> KeymapView {
     else {
         return build_keymap_view_from_partial(None, None, None);
     };
-    let keybinding_source_text = match fs::read_to_string(&keybinding_file_path) {
-        Ok(keybinding_source_text) => keybinding_source_text,
-        Err(keybinding_file_read_error)
-            if keybinding_file_read_error.kind() == std::io::ErrorKind::NotFound =>
-        {
-            return build_keymap_view_from_partial(None, None, None);
-        }
-        Err(keybinding_file_read_error) => {
-            return build_keymap_view_from_partial(
-                None,
-                Some(keybinding_file_path.clone()),
-                Some(keybinding_file_read_error.to_string()),
-            );
-        }
-    };
-    match parse_keybindings(&keybinding_file_path, &keybinding_source_text) {
-        Ok(partial_keybindings_config) => build_keymap_view_from_partial(
+    match load_keybinding_file(&keybinding_file_path) {
+        Ok(None) => build_keymap_view_from_partial(None, None, None),
+        Ok(Some(partial_keybindings_config)) => build_keymap_view_from_partial(
             Some(partial_keybindings_config),
             Some(keybinding_file_path),
             None,
         ),
-        Err(keybinding_parse_error) => build_keymap_view_from_partial(
-            None,
-            Some(keybinding_file_path),
-            Some(list_parse_error_lines(&keybinding_parse_error).join("; ")),
-        ),
+        Err(KeybindingFileError::Unreadable(keybinding_file_read_error)) => {
+            build_keymap_view_from_partial(
+                None,
+                Some(keybinding_file_path),
+                Some(keybinding_file_read_error.to_string()),
+            )
+        }
+        Err(KeybindingFileError::Unparseable(keybinding_parse_error)) => {
+            build_keymap_view_from_partial(
+                None,
+                Some(keybinding_file_path),
+                Some(keybinding_parse_error.list_problem_messages().join("; ")),
+            )
+        }
     }
 }
 
 /// Build the view for one already-parsed user layer (`None` = defaults
-/// only). The keybinding file path and error pass through to the view. Reads
-/// no file: this is [`load_keymap_view`] without the file I/O.
+/// only). The keybinding file path and error pass through to the view, and an
+/// error gives the verdict [`KeymapVerdict::Reject`]. Reads no file: this is
+/// [`load_keymap_view`] without the file I/O.
+///
+/// The user fields fold onto the defaults through
+/// [`ConfigLayers::resolve_effective_client_config`], and the folded leader,
+/// unlock alternative, and chord depth feed conflict detection.
 #[must_use]
 pub fn build_keymap_view_from_partial(
     partial_keybindings_config: Option<PartialKeybindingsConfig>,
@@ -103,51 +113,41 @@ pub fn build_keymap_view_from_partial(
     keybinding_file_error_message: Option<String>,
 ) -> KeymapView {
     let action_registry = ActionRegistry::new();
-    let default_keybindings_config = KeybindingsConfig::default();
-
-    // Fold the user fields onto the defaults to get the candidate settings.
-    let mut keybindings_config = default_keybindings_config.clone();
-    let user_keymap_modes = match partial_keybindings_config {
-        Some(partial_keybindings_config) => {
-            if let Some(chord_timeout_ms) = partial_keybindings_config.chord_timeout_ms {
-                keybindings_config.chord_timeout_ms = chord_timeout_ms;
-            }
-            if let Some(which_key_delay_ms) = partial_keybindings_config.which_key_delay_ms {
-                keybindings_config.which_key_delay_ms = which_key_delay_ms;
-            }
-            if let Some(maximum_chord_depth) = partial_keybindings_config.maximum_chord_depth {
-                keybindings_config.maximum_chord_depth = maximum_chord_depth;
-            }
-            if let Some(leader) = partial_keybindings_config.leader {
-                keybindings_config.leader = leader;
-            }
-            if let Some(unlock_alternative) = partial_keybindings_config.unlock_alternative {
-                keybindings_config.unlock_alternative = unlock_alternative;
-            }
-            partial_keybindings_config.mode_bindings_by_name
-        }
-        None => None,
-    };
-
-    let keymap_layers = build_keymap_layers(user_keymap_modes, keybindings_config.leader);
+    let user_mode_bindings_by_name =
+        partial_keybindings_config
+            .as_ref()
+            .and_then(|partial_keybindings_config| {
+                partial_keybindings_config.mode_bindings_by_name.clone()
+            });
+    let candidate_keybindings_config =
+        ConfigLayers::from_config_file_layers(None, None, partial_keybindings_config)
+            .resolve_effective_client_config()
+            .keybindings;
+    let candidate_keymap_layers = build_keymap_layers(
+        user_mode_bindings_by_name,
+        candidate_keybindings_config.leader,
+    );
     let conflict_report = detect_conflicts(
-        &keymap_layers,
-        keybindings_config.leader,
-        keybindings_config.unlock_alternative,
-        keybindings_config.maximum_chord_depth,
+        &candidate_keymap_layers,
+        candidate_keybindings_config.leader,
+        candidate_keybindings_config.unlock_alternative,
+        candidate_keybindings_config.maximum_chord_depth,
         &action_registry,
     );
-
-    // All-or-nothing: a refused user layer drops the whole section back to
-    // the defaults.
-    let is_keymap_admitted = conflict_report.get_verdict() == KeymapVerdict::Apply;
-    let (keybindings_config, keymap_layers) = if is_keymap_admitted {
-        (keybindings_config, keymap_layers)
+    let keymap_verdict = if keybinding_file_error_message.is_some() {
+        KeymapVerdict::Reject
     } else {
-        (
-            default_keybindings_config.clone(),
-            build_keymap_layers(None, default_keybindings_config.leader),
-        )
+        conflict_report.get_verdict()
+    };
+
+    // All-or-nothing: a verdict other than `Apply` drops the whole section
+    // back to the defaults.
+    let (keybindings_config, keymap_layers) = if keymap_verdict == KeymapVerdict::Apply {
+        (candidate_keybindings_config, candidate_keymap_layers)
+    } else {
+        let default_keybindings_config = KeybindingsConfig::default();
+        let default_keymap_layers = build_keymap_layers(None, default_keybindings_config.leader);
+        (default_keybindings_config, default_keymap_layers)
     };
 
     let merged_keymap = merge_keymaps(
@@ -161,7 +161,7 @@ pub fn build_keymap_view_from_partial(
         merged_keymap,
         action_registry,
         conflict_report,
-        is_reverted_to_defaults: !is_keymap_admitted || keybinding_file_error_message.is_some(),
+        keymap_verdict,
         user_keybinding_file_path,
         keybinding_file_error_message,
     }
@@ -171,21 +171,18 @@ pub fn build_keymap_view_from_partial(
 pub enum KeymapValidationOutcome {
     /// The file did not parse; each element is one rendered problem.
     ParseFailed(Vec<String>),
-    /// The file parsed; the conflict report carries every finding and the
-    /// verdict says whether a reload would apply it.
-    Checked {
-        /// The conflict-detection findings for the file's layer.
-        conflict_report: ConflictReport,
-        /// True when a reload would apply the file.
-        is_applicable: bool,
-    },
+    /// The file parsed. The conflict report carries every finding, and its
+    /// verdict is the one a client reaches on the file when it attaches.
+    Checked(ConflictReport),
 }
 
 /// Dry-run the keybinding file at `keybinding_file_path`: parse it and run
-/// conflict detection, applying nothing.
+/// conflict detection the way [`build_keymap_view_from_partial`] does,
+/// applying nothing.
 ///
 /// # Errors
-/// An [`std::io::Error`] when the file cannot be read.
+/// An [`std::io::Error`] when the file cannot be read, an absent file
+/// included.
 pub fn validate_keybinding_file(
     keybinding_file_path: &Path,
 ) -> Result<KeymapValidationOutcome, std::io::Error> {
@@ -195,7 +192,7 @@ pub fn validate_keybinding_file(
             Ok(partial_keybindings_config) => partial_keybindings_config,
             Err(keybinding_parse_error) => {
                 return Ok(KeymapValidationOutcome::ParseFailed(
-                    list_parse_error_lines(&keybinding_parse_error),
+                    keybinding_parse_error.list_problem_messages(),
                 ))
             }
         };
@@ -204,19 +201,7 @@ pub fn validate_keybinding_file(
         Some(keybinding_file_path.to_path_buf()),
         None,
     );
-    Ok(KeymapValidationOutcome::Checked {
-        is_applicable: !keymap_view.is_reverted_to_defaults,
-        conflict_report: keymap_view.conflict_report,
-    })
-}
-
-/// One rendered line per problem in a parse failure.
-fn list_parse_error_lines(keybinding_parse_error: &KeybindingParseError) -> Vec<String> {
-    match keybinding_parse_error {
-        KeybindingParseError::Syntax(syntax_error) => vec![syntax_error.to_string()],
-        KeybindingParseError::Invalid { diagnostics, .. } => diagnostics
-            .iter()
-            .map(|diagnostic| diagnostic.get_diagnostic_message().to_string())
-            .collect(),
-    }
+    Ok(KeymapValidationOutcome::Checked(
+        keymap_view.conflict_report,
+    ))
 }

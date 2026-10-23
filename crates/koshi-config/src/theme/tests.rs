@@ -189,7 +189,10 @@ fn a_syntax_error_is_a_parse_error() {
         panic!("expected a parse error, got {config_error:?}");
     };
     assert_eq!(config_path, "themes/midnight.kdl");
-    assert_eq!(parse_error_detail, "No closing '}' for child block");
+    assert_eq!(
+        parse_error_detail,
+        "line 1, column 8: No closing '}' for child block"
+    );
 }
 
 // -- adversarial: type confusion and exact warnings -----------------------

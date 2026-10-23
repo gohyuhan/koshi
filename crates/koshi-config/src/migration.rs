@@ -304,18 +304,16 @@ fn list_schema_problems(
             Err(KeybindingParseError::Syntax(parse_diagnostic)) => {
                 Err(build_parse_error(parse_diagnostic))
             }
-            Err(KeybindingParseError::Invalid { diagnostics, .. }) => Ok(diagnostics
-                .iter()
-                .map(|diagnostic| diagnostic.get_diagnostic_message().to_string())
-                .collect()),
+            Err(keybinding_parse_error @ KeybindingParseError::Invalid { .. }) => {
+                Ok(keybinding_parse_error.list_problem_messages())
+            }
         },
         ConfigFileKind::Profile => match parse_profile(config_path, config_source_text) {
             Ok(_) => Ok(Vec::new()),
             Err(ProfileError::Syntax(parse_diagnostic)) => Err(build_parse_error(parse_diagnostic)),
-            Err(ProfileError::Invalid { diagnostics, .. }) => Ok(diagnostics
-                .iter()
-                .map(|diagnostic| diagnostic.get_diagnostic_message().to_string())
-                .collect()),
+            Err(profile_error @ ProfileError::Invalid { .. }) => {
+                Ok(profile_error.list_problem_messages())
+            }
         },
     }
 }

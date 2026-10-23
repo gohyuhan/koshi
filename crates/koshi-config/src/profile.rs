@@ -56,6 +56,25 @@ pub enum ProfileError {
     },
 }
 
+impl ProfileError {
+    /// One message per problem, in file order. A syntax error gives the one
+    /// [`ConfigError::Parse`](crate::error::ConfigError::Parse) message, such as
+    /// `config parse error in profile/dev.kdl: line 1, column 5: No closing '}'
+    /// for child block`. A schema error gives each diagnostic's message.
+    #[must_use]
+    pub fn list_problem_messages(&self) -> Vec<String> {
+        match self {
+            Self::Syntax(parse_diagnostic) => {
+                vec![parse_diagnostic.build_config_error().to_string()]
+            }
+            Self::Invalid { diagnostics, .. } => diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.get_diagnostic_message().to_string())
+                .collect(),
+        }
+    }
+}
+
 /// One schema violation in a profile file, rendered with a caret at the
 /// offending node.
 #[derive(Debug, Error, Diagnostic)]

@@ -101,10 +101,9 @@ fn diagnostic_preserves_spans_from_kdl() {
 #[test]
 fn diagnostic_flattens_to_config_error() {
     let malformed_config_text = "pane { width";
-    // The flattened detail is the first sub-diagnostic's specific message, not
-    // kdl's generic top-level Display.
-    let raw_kdl_error = malformed_config_text.parse::<KdlDocument>().unwrap_err();
-    let expected_parse_error_detail = raw_kdl_error.diagnostics.first().unwrap().to_string();
+    // The flattened detail is the first sub-diagnostic's location and specific
+    // message, not kdl's generic top-level Display.
+    let expected_parse_error_detail = "line 1, column 6: No closing '}' for child block";
     let parse_diagnostic = parse_kdl(Path::new("bad.kdl"), malformed_config_text).unwrap_err();
 
     match ConfigError::from(parse_diagnostic) {
@@ -468,9 +467,15 @@ fn a_block_nested_past_the_limit_is_a_parse_error_not_a_stack_overflow() {
             parse_error_detail,
         } => {
             assert_eq!(config_path, "koshi.kdl");
+            // Each `a {` is three characters: the refused `{` of level 25
+            // is character 75 of line 1.
+            let refused_brace_column_number = 3 * (MAX_BLOCK_DEPTH + 1);
             assert_eq!(
                 parse_error_detail,
-                format!("blocks nest more than {MAX_BLOCK_DEPTH} levels deep")
+                format!(
+                    "line 1, column {refused_brace_column_number}: blocks nest more than \
+                     {MAX_BLOCK_DEPTH} levels deep"
+                )
             );
         }
         unexpected_config_error => {
