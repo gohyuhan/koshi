@@ -42,6 +42,9 @@ struct ConfigFieldHelp {
     config_field_description: &'static str,
 }
 
+/// One row for each key `koshi config explain` prints: every key the
+/// `koshi.kdl`, `keybinding.kdl`, theme, and profile parsers accept, except the
+/// `mode` blocks of `keybinding.kdl` and the `tab` blocks of a profile.
 const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
     build_config_field_help("koshi.version", "koshi.kdl", "2", "Config schema version."),
     build_config_field_help(
@@ -107,6 +110,12 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "30000",
         "Milliseconds a link to a session on another machine may carry no byte before it \
          drops, from 1000.",
+    ),
+    build_config_field_help(
+        "koshi.max-frames-per-second",
+        "koshi.kdl",
+        "60",
+        "Most frames a second the session sends this terminal, from 30 to 120.",
     ),
     build_config_field_help(
         "koshi.image-support",
@@ -209,8 +218,15 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
     build_config_field_help(
         "koshi.terminal.default-shell",
         "koshi.kdl",
-        "$SHELL",
+        "$SHELL (%COMSPEC% on Windows)",
         "Shell used for a new terminal pane.",
+    ),
+    build_config_field_help(
+        "koshi.terminal.extended-keys",
+        "koshi.kdl",
+        "\"on-request\"",
+        "What a pane program receives for a key whose legacy bytes another key also sends: \
+         \"on-request\" or \"always\".",
     ),
     build_config_field_help(
         "koshi.logging.enabled",
@@ -373,6 +389,12 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "profile/<name>.kdl",
         "2",
         "Config schema version.",
+    ),
+    build_config_field_help(
+        "profile.lock",
+        "profile/<name>.kdl",
+        "unset",
+        "Bare marker. Start the session's first terminal with input locked.",
     ),
 ];
 

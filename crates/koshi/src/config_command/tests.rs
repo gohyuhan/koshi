@@ -1,7 +1,25 @@
 //! Tests for local config commands.
 
 use std::fs;
+use std::net::SocketAddr;
 
+use koshi_config::app_config::{parse_app_config, AppConfigFile};
+use koshi_config::key::Leader;
+use koshi_config::keybinding::parse_keybindings;
+use koshi_config::layer::{
+    PartialColorPalette, PartialCopyConfig, PartialKeybindingsConfig, PartialKoshiConfig,
+    PartialLayoutDefaults, PartialLoggingConfig, PartialMouseConfig,
+    PartialPaneClipboardWriteConfig, PartialPaneConfig, PartialScrollbackConfig,
+    PartialTerminalConfig, PartialThemeConfig, PartialUpdateConfig,
+};
+use koshi_config::parser::parse_kdl;
+use koshi_config::profile::parse_profile;
+use koshi_config::theme::parse_theme;
+use koshi_config::types::{RgbColor, WheelScroll};
+use koshi_core::geometry::Direction;
+use koshi_core::key::{BindingModifierFlags, ExtendedKeysMode, Key, KeyChord};
+use koshi_core::log::{LogFormat, LogLevel};
+use koshi_layout::template::ProfileTemplate;
 use tempfile::TempDir;
 
 use super::*;
@@ -60,6 +78,23 @@ fn explain_reports_file_default_and_meaning_for_each_config_file_kind() {
              drops, from 1000.\n",
         ),
         (
+            "koshi.max-frames-per-second",
+            "koshi.max-frames-per-second\nfile: koshi.kdl\ndefault: 60\n\
+             Most frames a second the session sends this terminal, from 30 to 120.\n",
+        ),
+        (
+            "koshi.terminal.default-shell",
+            "koshi.terminal.default-shell\nfile: koshi.kdl\n\
+             default: $SHELL (%COMSPEC% on Windows)\n\
+             Shell used for a new terminal pane.\n",
+        ),
+        (
+            "koshi.terminal.extended-keys",
+            "koshi.terminal.extended-keys\nfile: koshi.kdl\ndefault: \"on-request\"\n\
+             What a pane program receives for a key whose legacy bytes another key also sends: \
+             \"on-request\" or \"always\".\n",
+        ),
+        (
             "theme.colors.border-hover",
             "theme.colors.border-hover\nfile: themes/<name>.kdl\ndefault: \"#af5fff\"\n\
              Pane border under the pointer.\n",
@@ -73,6 +108,11 @@ fn explain_reports_file_default_and_meaning_for_each_config_file_kind() {
             "profile.version",
             "profile.version\nfile: profile/<name>.kdl\ndefault: 2\n\
              Config schema version.\n",
+        ),
+        (
+            "profile.lock",
+            "profile.lock\nfile: profile/<name>.kdl\ndefault: unset\n\
+             Bare marker. Start the session's first terminal with input locked.\n",
         ),
     ];
 
@@ -92,6 +132,283 @@ fn explain_unknown_key_suggests_the_nearest_key() {
     assert_eq!(
         config_error.to_string(),
         "config failed: unknown key `koshi.pane.min-col`; did you mean `koshi.pane.min-cols`?"
+    );
+}
+
+/// The file-qualified keys that `config_source_text` sets, sorted. With
+/// `file_key_prefix` `koshi`, the top-level `theme "midnight"` gives
+/// `koshi.theme`, and `min-cols 3` inside `pane { … }` gives
+/// `koshi.pane.min-cols`. A top-level node named in `layout_node_names` gives
+/// no key, and its children give none.
+fn list_config_keys_in_text(
+    file_key_prefix: &str,
+    config_source_text: &str,
+    layout_node_names: &[&str],
+) -> Vec<String> {
+    let config_document = parse_kdl(Path::new("config.kdl"), config_source_text).unwrap();
+    let mut config_keys = Vec::new();
+    for config_node in config_document.nodes() {
+        let config_node_name = config_node.name().value();
+        if layout_node_names.contains(&config_node_name) {
+            continue;
+        }
+        match config_node.children() {
+            Some(section_block) => {
+                for field_node in section_block.nodes() {
+                    config_keys.push(format!(
+                        "{file_key_prefix}.{config_node_name}.{}",
+                        field_node.name().value()
+                    ));
+                }
+            }
+            None => config_keys.push(format!("{file_key_prefix}.{config_node_name}")),
+        }
+    }
+    config_keys.sort();
+    config_keys
+}
+
+/// The keys of every [`CONFIG_FIELD_HELP`] row whose file is
+/// `config_file_name`, sorted.
+fn list_explained_config_keys(config_file_name: &str) -> Vec<String> {
+    let mut config_keys: Vec<String> = CONFIG_FIELD_HELP
+        .iter()
+        .filter(|config_field_help| config_field_help.config_file_name == config_file_name)
+        .map(|config_field_help| config_field_help.config_key.to_string())
+        .collect();
+    config_keys.sort();
+    config_keys
+}
+
+#[test]
+fn explain_covers_every_key_that_koshi_kdl_accepts() {
+    let every_app_config_key_text = r##"version 2
+theme "midnight"
+allow-beta-features #true
+allow-other-users #true
+shared-sessions-dir "/var/run/koshi"
+remote-listen "192.0.2.20:7654"
+auto-close-session #true
+image-support #false
+reduced-motion #true
+stay-in-pane-placement-mode-after-placement #false
+remote-reconnect #false
+remote-link-timeout-ms 45000
+max-frames-per-second 120
+pane {
+    min-cols 3
+    min-rows 2
+    gap 1
+}
+scrollback {
+    max-lines 500
+    max-bytes 4096
+    scroll-on-input #false
+}
+layout {
+    new-pane-direction "down"
+}
+mouse {
+    border-resize #false
+    scroll-lines 5
+    wheel "ignore"
+}
+copy {
+    trim-trailing-whitespace #false
+}
+pane-clipboard-writes {
+    allow #true
+    max-copy-bytes 1024
+}
+terminal {
+    term "xterm-kitty"
+    colorterm "24bit"
+    default-shell "/bin/sh"
+    extended-keys "always"
+}
+logging {
+    enabled #true
+    level "info"
+    format "json"
+}
+update {
+    auto-check #false
+    check-interval-days 7
+    allow-prerelease #true
+}
+"##;
+
+    let app_config_file =
+        parse_app_config(Path::new("koshi.kdl"), every_app_config_key_text).unwrap();
+
+    assert_eq!(
+        app_config_file,
+        AppConfigFile {
+            layer: PartialKoshiConfig {
+                pane: Some(PartialPaneConfig {
+                    minimum_column_count: Some(3),
+                    minimum_row_count: Some(2),
+                    gap_cell_count: Some(1),
+                }),
+                scrollback: Some(PartialScrollbackConfig {
+                    maximum_line_count: Some(500),
+                    maximum_byte_count: Some(4096),
+                    should_scroll_to_input: Some(false),
+                }),
+                keybindings: None,
+                layout: Some(PartialLayoutDefaults {
+                    new_pane_direction: Some(Direction::Down),
+                }),
+                mouse: Some(PartialMouseConfig {
+                    can_resize_pane_border: Some(false),
+                    scroll_line_count: Some(5),
+                    wheel_scroll: Some(WheelScroll::Ignore),
+                }),
+                copy: Some(PartialCopyConfig {
+                    should_trim_trailing_whitespace: Some(false),
+                }),
+                terminal: Some(PartialTerminalConfig {
+                    term: Some("xterm-kitty".to_string()),
+                    colorterm: Some("24bit".to_string()),
+                    default_shell: Some(Some("/bin/sh".to_string())),
+                    extended_keys_mode: Some(ExtendedKeysMode::Always),
+                }),
+                theme: None,
+                logging: Some(PartialLoggingConfig {
+                    is_enabled: Some(true),
+                    log_level: Some(LogLevel::Info),
+                    log_format: Some(LogFormat::Json),
+                }),
+                update: Some(PartialUpdateConfig {
+                    should_auto_check_for_updates: Some(false),
+                    check_interval_days: Some(7),
+                    should_allow_prerelease_updates: Some(true),
+                }),
+                supports_image_protocols: Some(false),
+                should_reduce_motion: Some(true),
+                should_stay_in_pane_placement_mode_after_placement: Some(false),
+                should_reconnect_remote_session: Some(false),
+                remote_link_timeout_ms: Some(45000),
+                max_frames_per_second: Some(120),
+                should_allow_beta_features: Some(true),
+                should_allow_other_users: Some(true),
+                remote_listen_address: Some(Some(SocketAddr::from(([192, 0, 2, 20], 7654)))),
+                shared_sessions_directory: Some(Some(PathBuf::from("/var/run/koshi"))),
+                should_auto_close_session: Some(true),
+                pane_clipboard_writes: Some(PartialPaneClipboardWriteConfig {
+                    should_allow_writes: Some(true),
+                    maximum_copy_byte_count: Some(1024),
+                }),
+            },
+            theme_name: Some("midnight".to_string()),
+            parse_warnings: Vec::new(),
+        }
+    );
+    assert_eq!(
+        list_config_keys_in_text("koshi", every_app_config_key_text, &[]),
+        list_explained_config_keys("koshi.kdl")
+    );
+}
+
+#[test]
+fn explain_covers_every_key_that_keybinding_kdl_accepts() {
+    let every_keybinding_key_text = r#"version 2
+chord-timeout-ms 750
+which-key-delay-ms 100
+max-chord-depth 6
+leader "A-"
+unlock-alternative "<C-g>"
+"#;
+
+    let keybinding_layer =
+        parse_keybindings(Path::new("keybinding.kdl"), every_keybinding_key_text).unwrap();
+
+    assert_eq!(
+        keybinding_layer,
+        PartialKeybindingsConfig {
+            chord_timeout_ms: Some(750),
+            which_key_delay_ms: Some(100),
+            maximum_chord_depth: Some(6),
+            leader: Some(Leader::Modifiers(BindingModifierFlags::ALT)),
+            mode_bindings_by_name: None,
+            unlock_alternative: Some(Some(KeyChord::from_parts(
+                BindingModifierFlags::CTRL,
+                Key::Char('g'),
+            ))),
+        }
+    );
+    assert_eq!(
+        list_config_keys_in_text("keybinding", every_keybinding_key_text, &[]),
+        list_explained_config_keys("keybinding.kdl")
+    );
+}
+
+#[test]
+fn explain_covers_every_key_that_a_theme_file_accepts() {
+    let every_theme_key_text = r##"version 2
+colors {
+    ramp-start "#000001"
+    ramp-end "#000002"
+    on-ramp "#000003"
+    on-ramp-dim "#000004"
+    accent "#000005"
+    on-accent "#000006"
+    bar-bg "#000007"
+    border-focused "#000008"
+    border-unfocused "#000009"
+    border-hover "#00000a"
+    stack-header-fg "#00000b"
+    stack-header-bg "#00000c"
+    letterbox "#00000d"
+}
+"##;
+
+    let theme_layer = parse_theme(Path::new("themes/test.kdl"), every_theme_key_text).unwrap();
+
+    assert_eq!(
+        theme_layer,
+        (
+            PartialThemeConfig {
+                theme_name: None,
+                colors: Some(PartialColorPalette {
+                    ramp_start: Some(RgbColor::from_channels(0, 0, 1)),
+                    ramp_end: Some(RgbColor::from_channels(0, 0, 2)),
+                    on_ramp: Some(RgbColor::from_channels(0, 0, 3)),
+                    on_ramp_dim: Some(RgbColor::from_channels(0, 0, 4)),
+                    accent: Some(RgbColor::from_channels(0, 0, 5)),
+                    on_accent: Some(RgbColor::from_channels(0, 0, 6)),
+                    bar_bg: Some(RgbColor::from_channels(0, 0, 7)),
+                    border_focused: Some(RgbColor::from_channels(0, 0, 8)),
+                    border_unfocused: Some(RgbColor::from_channels(0, 0, 9)),
+                    border_hover: Some(RgbColor::from_channels(0, 0, 10)),
+                    stack_header_fg: Some(RgbColor::from_channels(0, 0, 11)),
+                    stack_header_bg: Some(RgbColor::from_channels(0, 0, 12)),
+                    letterbox: Some(RgbColor::from_channels(0, 0, 13)),
+                }),
+            },
+            Vec::new(),
+        )
+    );
+    assert_eq!(
+        list_config_keys_in_text("theme", every_theme_key_text, &[]),
+        list_explained_config_keys("themes/<name>.kdl")
+    );
+}
+
+#[test]
+fn explain_covers_every_key_that_a_profile_file_accepts() {
+    let every_profile_key_text = "version 2\nlock\ntab {\n    pane\n}\n";
+
+    let ProfileTemplate {
+        tabs: _,
+        focused_tab_index: _,
+        is_locked,
+    } = parse_profile(Path::new("profile/test.kdl"), every_profile_key_text).unwrap();
+
+    assert!(is_locked);
+    assert_eq!(
+        list_config_keys_in_text("profile", every_profile_key_text, &["tab"]),
+        list_explained_config_keys("profile/<name>.kdl")
     );
 }
 
