@@ -8,8 +8,9 @@ use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use koshi_config::conflict::{KeymapLayer, LayerOrigin};
+use koshi_config::conflict::{KeymapLayer, KeymapVerdict, LayerOrigin};
 use koshi_config::hints::KeymapHintCatalog;
+use koshi_config::layer::PartialKeybindingsConfig;
 use koshi_config::types::{KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget, TiledPlacementTarget};
 use koshi_core::geometry::{Direction, Point, Rect, Size, SplitDirection};
@@ -903,7 +904,30 @@ fn shift_arrow_toward_a_stack_selects_insertion_beside_the_whole_stack() {
 }
 
 #[test]
-fn locked_mode_opens_pane_placement_without_changing_the_base_mode() {
+fn locked_mode_passes_ctrl_p_and_the_next_key_to_the_pane() {
+    let ctrl_p_key_chord = build_key_chord(BindingModifierFlags::CTRL, 'p');
+    for next_key_character in ['m', 'l'] {
+        let mut client = build_test_client();
+        client.set_lock_mode(LockMode::Locked);
+        let next_key_chord = build_key_chord(BindingModifierFlags::NONE, next_key_character);
+
+        assert_eq!(
+            client.resolve_key(ctrl_p_key_chord, Instant::now()),
+            KeyOutcome::PassThrough(ctrl_p_key_chord)
+        );
+        assert_eq!(client.get_pending_key_sequence(), None);
+        assert_eq!(
+            client.resolve_key(next_key_chord, Instant::now()),
+            KeyOutcome::PassThrough(next_key_chord)
+        );
+        assert_eq!(client.get_pending_key_sequence(), None);
+        assert_eq!(client.get_lock_mode(), LockMode::Locked);
+        assert_eq!(client.get_active_input_mode(), LockMode::Locked);
+    }
+}
+
+#[test]
+fn a_user_bound_locked_opener_opens_placement_and_keeps_the_client_locked() {
     let mut client = build_test_client();
     let source_tab_id = TabId::new();
     let source_pane_id = PaneId::new();
@@ -913,26 +937,45 @@ fn locked_mode_opens_pane_placement_without_changing_the_base_mode() {
         Some(source_pane_id),
         vec![source_tab_id],
     );
+    let ctrl_p_key_chord = build_key_chord(BindingModifierFlags::CTRL, 'p');
+    let m_key_chord = build_key_chord(BindingModifierFlags::NONE, 'm');
+    let mut bound_action_by_key_sequence = BTreeMap::new();
+    bound_action_by_key_sequence.insert(
+        KeySequence::from_first_and_rest(ctrl_p_key_chord, vec![m_key_chord]),
+        build_core_bound_action("begin-pane-placement"),
+    );
+    let mut mode_bindings_by_name = BTreeMap::new();
+    mode_bindings_by_name.insert(
+        ModeName::from_text("locked"),
+        ModeBindings {
+            bound_action_by_key_sequence,
+            removed_key_sequences: BTreeSet::new(),
+        },
+    );
+    let keymap_conflict_report = client.load_startup_config(
+        None,
+        None,
+        Some(PartialKeybindingsConfig {
+            mode_bindings_by_name: Some(mode_bindings_by_name),
+            ..PartialKeybindingsConfig::default()
+        }),
+    );
+    assert_eq!(
+        keymap_conflict_report
+            .expect("a keybinding file was given")
+            .get_verdict(),
+        KeymapVerdict::Apply
+    );
     client.set_lock_mode(LockMode::Locked);
 
     assert_eq!(
-        client.resolve_key(
-            KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
-            Instant::now(),
-        ),
+        client.resolve_key(ctrl_p_key_chord, Instant::now()),
         KeyOutcome::Pending
     );
-    let KeyOutcome::Fire(bound_action) = client.resolve_key(
-        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('m')),
-        Instant::now(),
-    ) else {
-        panic!("the locked pane placement opener must fire");
-    };
     assert_eq!(
-        bound_action.action_reference,
-        ActionReference::from_core_action_name("begin-pane-placement").expect("valid action name")
+        client.resolve_key(m_key_chord, Instant::now()),
+        KeyOutcome::Fire(build_core_bound_action("begin-pane-placement"))
     );
-
     assert_eq!(
         client.apply_client_action(ClientActionKind::BeginPanePlacement, None),
         PlacementInputAction::Consumed
@@ -946,6 +989,18 @@ fn locked_mode_opens_pane_placement_without_changing_the_base_mode() {
     );
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
     assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
+
+    assert_eq!(
+        client.resolve_key(ESCAPE_KEY_CHORD, Instant::now()),
+        KeyOutcome::Fire(build_core_bound_action("cancel-pane-placement"))
+    );
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::CancelPanePlacement, None),
+        PlacementInputAction::Consumed
+    );
+    assert_eq!(client.find_placement_preview_target(), None);
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(client.get_active_input_mode(), LockMode::Locked);
 }
 
 #[test]

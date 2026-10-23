@@ -2323,13 +2323,8 @@ fn frame_hints_follow_the_viewers_own_mode() {
     );
     assert_eq!(
         list_sorted_hint_labels(&locked_mode_hints),
-        [
-            ("Begin Pane Placement", false),
-            ("Mouse Select", false),
-            ("Quit", false),
-            ("Unlock", true),
-        ]
-        .map(|(hint_label, is_pinned)| (hint_label.to_string(), is_pinned))
+        [("Mouse Select", false), ("Quit", false), ("Unlock", true)]
+            .map(|(hint_label, is_pinned)| (hint_label.to_string(), is_pinned))
     );
 }
 

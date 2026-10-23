@@ -2931,6 +2931,58 @@ fn plain_handle_press_in_normal_mode_starts_pane_placement() {
 }
 
 #[test]
+fn a_tiled_handle_drag_while_locked_opens_pane_placement_and_keeps_the_client_locked() {
+    let pane_id = PaneId::new();
+    let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let mut client = build_test_client();
+    client.set_frame_view(
+        active_tab_id,
+        Some(pane_id),
+        Some(pane_id),
+        vec![active_tab_id],
+    );
+    client.set_lock_mode(LockMode::Locked);
+    client.placement_handle_pane_id = Some(pane_id);
+    let mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
+    let handle_position = Point { column: 1, row: 1 };
+    assert_eq!(
+        resolve_hit_region(mouse_frame.build_frame_layout(), handle_position),
+        HitRegion::PlacementHandle { pane_id }
+    );
+
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_press(handle_position),
+            &mouse_frame,
+            Instant::now(),
+        ),
+        Some(PlacementInputAction::FocusPane { pane_id })
+    );
+    assert_eq!(
+        client.find_placement_preview_target(),
+        Some(PanePlacementPreviewTarget {
+            source_pane_id: pane_id,
+            destination_tab_id: active_tab_id,
+        })
+    );
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
+
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_release(handle_position),
+            &mouse_frame,
+            Instant::now(),
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert_eq!(client.find_placement_preview_target(), None);
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(client.get_active_input_mode(), LockMode::Locked);
+}
+
+#[test]
 fn submitted_mouse_placement_consumes_mouse_input_until_the_frame_reconciles() {
     let pane_id = PaneId::new();
     let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));

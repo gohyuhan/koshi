@@ -7756,7 +7756,7 @@ fn the_frame_that_locks_the_client_draws_the_locked_hint_bar() {
 
     assert_eq!(
         locked_hint_row,
-        " Ctrl +  l  Unlock  g  Mouse Select  p  PANE  q  Quit"
+        " Ctrl +  l  Unlock  g  Mouse Select  q  Quit"
     );
     assert_ne!(normal_hint_row, locked_hint_row);
 }

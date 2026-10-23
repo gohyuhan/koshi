@@ -601,16 +601,11 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
 
     // Locked mode intercepts exactly its bound chords and passes every other
     // key to the pane: the reserved unlock (the same chord that locks in
-    // normal mode), the pane placement opener, the quit chord, and the mouse-select
-    // chord.
+    // normal mode), the quit chord, and the mouse-select chord.
     let locked_mode_bindings: BTreeMap<KeySequence, BoundAction> = [
         (
             build_reserved_unlock_sequence(),
             build_bound_action("unlock"),
-        ),
-        (
-            parse_default_key_sequence("<leader>p m"),
-            build_bound_action("begin-pane-placement"),
         ),
         (
             parse_default_key_sequence("<leader>q"),

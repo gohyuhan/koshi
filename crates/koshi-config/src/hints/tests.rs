@@ -93,9 +93,9 @@ fn quit_binding_surfaces_in_both_modes() {
 #[test]
 fn locked_mode_pins_the_reserved_unlock() {
     let hints = build_default_hint_catalog().build_frame_hints(LockMode::Locked, false, false);
-    // The reserved unlock (the same `<C-l>` that locks in normal mode), the
-    // pane placement opener, and the quit and mouse-select chords.
-    assert_eq!(hints.hint_bindings.len(), 4);
+    // The reserved unlock (the same `<C-l>` that locks in normal mode), and
+    // the quit and mouse-select chords.
+    assert_eq!(hints.hint_bindings.len(), 3);
     let hint_binding = hints
         .hint_bindings
         .iter()
@@ -616,7 +616,7 @@ fn every_locked_entry_firing_unlock_is_pinned() {
     );
     let hints = hint_catalog.build_frame_hints(LockMode::Locked, false, false);
 
-    assert_eq!(hints.hint_bindings.len(), 5);
+    assert_eq!(hints.hint_bindings.len(), 4);
     let pinned_key_sequences: Vec<String> = hints
         .hint_bindings
         .iter()
@@ -825,7 +825,7 @@ fn a_locked_sequence_holding_the_unlock_chord_yields_no_hint() {
     );
     let hints = hint_catalog.build_frame_hints(LockMode::Locked, false, false);
 
-    assert_eq!(hints.hint_bindings.len(), 4);
+    assert_eq!(hints.hint_bindings.len(), 3);
     assert_eq!(
         hints
             .hint_bindings
