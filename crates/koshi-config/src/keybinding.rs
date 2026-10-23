@@ -45,6 +45,14 @@ use crate::types::{BoundAction, ModeBindings, ModeName};
 #[cfg(test)]
 mod tests;
 
+/// The setting node that sets the most chords one key sequence holds:
+/// `max-chord-depth 4`.
+pub(crate) const MAX_CHORD_DEPTH_SETTING_NAME: &str = "max-chord-depth";
+
+/// The setting node that names the chord that unlocks input in place of
+/// the reserved `<C-l>`: `unlock-alternative "<A-u>"`.
+pub(crate) const UNLOCK_ALTERNATIVE_SETTING_NAME: &str = "unlock-alternative";
+
 /// A keybinding file that could not be used.
 #[derive(Debug, Error, Diagnostic)]
 pub enum KeybindingParseError {
@@ -185,8 +193,12 @@ impl KeybindingDocumentWalker {
         for kdl_node in keybinding_document.nodes() {
             let node_name = kdl_node.name().value();
             match node_name {
-                "version" | "chord-timeout-ms" | "which-key-delay-ms" | "max-chord-depth"
-                | "leader" | "unlock-alternative" => {
+                "version"
+                | "chord-timeout-ms"
+                | "which-key-delay-ms"
+                | MAX_CHORD_DEPTH_SETTING_NAME
+                | "leader"
+                | UNLOCK_ALTERNATIVE_SETTING_NAME => {
                     if !seen_setting_names.insert(node_name) {
                         self.record_diagnostic(
                             kdl_node.span(),
@@ -206,9 +218,9 @@ impl KeybindingDocumentWalker {
                                 "version",
                                 "chord-timeout-ms",
                                 "which-key-delay-ms",
-                                "max-chord-depth",
+                                MAX_CHORD_DEPTH_SETTING_NAME,
                                 "leader",
-                                "unlock-alternative",
+                                UNLOCK_ALTERNATIVE_SETTING_NAME,
                                 "mode",
                             ],
                         ),
@@ -271,7 +283,7 @@ impl KeybindingDocumentWalker {
                         Some(u32::try_from(integer_value).expect("bounded"));
                 }
             }
-            "max-chord-depth" => {
+            MAX_CHORD_DEPTH_SETTING_NAME => {
                 if let Some(integer_value) =
                     self.parse_integer_argument(kdl_node, u64::from(u8::MAX))
                 {
@@ -293,11 +305,11 @@ impl KeybindingDocumentWalker {
                     }
                 }
             }
-            "unlock-alternative" => {
+            UNLOCK_ALTERNATIVE_SETTING_NAME => {
                 if kdl_node.children().is_some() {
                     self.record_diagnostic(
                         kdl_node.span(),
-                        "`unlock-alternative` takes no children",
+                        format!("`{UNLOCK_ALTERNATIVE_SETTING_NAME}` takes no children"),
                     );
                     return;
                 }

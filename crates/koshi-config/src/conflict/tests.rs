@@ -1338,7 +1338,7 @@ fn display_messages_are_exact() {
     assert_eq!(
         reserved_unlock_shadowed.to_string(),
         "the reserved unlock key is bound by user to `core:lock` in locked mode; \
-         declare `unlock_alternative` before rebinding it"
+         declare `unlock-alternative` before rebinding it"
     );
 
     let reserved_unlock_missing = ConflictDiagnostic::ReservedUnlockMissing {
@@ -1355,7 +1355,7 @@ fn display_messages_are_exact() {
     };
     assert_eq!(
         typeable_unlock_alternative.to_string(),
-        "`unlock_alternative` `u` is a key plain typing produces; hold Ctrl, Alt, or Super"
+        "`unlock-alternative` `u` is a key plain typing produces; hold Ctrl, Alt, or Super"
     );
 
     assert_eq!(
@@ -1864,7 +1864,7 @@ fn binding_past_the_chord_depth_cap_warns_and_applies() {
     assert_eq!(
         report.diagnostics[0].to_string(),
         "`<C-y> x` in mode `normal` (user, `core:new-tab`) is 2 chords, over the \
-         `maximum_chord_depth` cap of 1; the binding can never fire"
+         `max-chord-depth` cap of 1; the binding can never fire"
     );
 }
 

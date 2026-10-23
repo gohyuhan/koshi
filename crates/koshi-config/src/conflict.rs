@@ -50,6 +50,7 @@ use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::{resolve_action, ResolveError};
 
 use crate::key::Leader;
+use crate::keybinding::{MAX_CHORD_DEPTH_SETTING_NAME, UNLOCK_ALTERNATIVE_SETTING_NAME};
 use crate::types::{
     build_default_mode_bindings, BoundAction, KeybindingsConfig, ModeBindings, ModeName,
 };
@@ -360,7 +361,7 @@ impl fmt::Display for ConflictDiagnostic {
             } => write!(
                 formatter,
                 "the reserved unlock key is bound by {layer_origin} to `{action_reference}` in locked mode; \
-                 declare `unlock_alternative` before rebinding it"
+                 declare `{UNLOCK_ALTERNATIVE_SETTING_NAME}` before rebinding it"
             ),
             Self::ReservedUnlockMissing {
                 reserved_unlock_chord,
@@ -373,7 +374,7 @@ impl fmt::Display for ConflictDiagnostic {
                 unlock_alternative_chord,
             } => write!(
                 formatter,
-                "`unlock_alternative` `{unlock_alternative_chord}` is a key plain typing produces; \
+                "`{UNLOCK_ALTERNATIVE_SETTING_NAME}` `{unlock_alternative_chord}` is a key plain typing produces; \
                  hold Ctrl, Alt, or Super"
             ),
             Self::ModeCancelBindingMissing {
@@ -404,7 +405,7 @@ impl fmt::Display for ConflictDiagnostic {
             } => write!(
                 formatter,
                 "`{key_sequence}` in mode `{}` ({layer_origin}, `{action_reference}`) is {} chords, over the \
-                 `maximum_chord_depth` cap of {maximum_chord_depth}; the binding can never fire",
+                 `{MAX_CHORD_DEPTH_SETTING_NAME}` cap of {maximum_chord_depth}; the binding can never fire",
                 mode_name.get_name(),
                 key_sequence.list_chords().len()
             ),
