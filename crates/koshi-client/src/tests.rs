@@ -1240,48 +1240,53 @@ fn placement_drag_stays_moved_when_pointer_returns_to_the_press_position() {
 }
 
 #[test]
-fn an_accepted_mouse_drop_keeps_pane_placement_mode_until_esc_by_default() {
-    let command_id = CommandId::new();
-    let mut client = build_client_with_submitted_placement(
-        PlacementModeLifetime::UntilDragEnds,
-        PaneId::new(),
-        TabId::new(),
-    );
-    record_pending_placement_command(&mut client, command_id);
+fn an_accepted_drop_ends_the_mode_a_handle_drag_opened_with_either_stay_setting() {
+    for should_stay in [true, false] {
+        let command_id = CommandId::new();
+        let mut client = build_client_with_submitted_placement(
+            PlacementModeLifetime::UntilDragEnds,
+            PaneId::new(),
+            TabId::new(),
+        );
+        client
+            .client_config
+            .should_stay_in_pane_placement_mode_after_placement = should_stay;
+        let pending_key_sequence = client.pending_key_sequence.clone();
+        record_pending_placement_command(&mut client, command_id);
 
-    apply_frame_keeping_view(&mut client, Some(command_id), None);
+        apply_frame_keeping_view(&mut client, Some(command_id), None);
 
-    assert!(client.is_placement_mode_active());
-    assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
-    assert_eq!(
-        client.placement_state.placement_mode_lifetime,
-        PlacementModeLifetime::UntilCancelled
-    );
-    assert!(!client.should_placement_mode_end_with_drag());
-    assert_eq!(client.get_placement_target(), None);
-    assert!(!client.is_placement_confirmation_pending());
+        assert_eq!(
+            client.placement_state.placement_mode, None,
+            "stay setting {should_stay}"
+        );
+        assert!(!client.is_placement_confirmation_pending());
+        assert!(!client.is_placement_mode_active());
+        assert_eq!(client.get_active_input_mode(), LockMode::Normal);
+        assert_eq!(client.pending_key_sequence, pending_key_sequence);
+    }
 }
 
 #[test]
-fn an_accepted_mouse_drop_ends_pane_placement_mode_when_staying_is_off() {
-    let command_id = CommandId::new();
-    let mut client = build_client_with_submitted_placement(
-        PlacementModeLifetime::UntilDragEnds,
-        PaneId::new(),
-        TabId::new(),
-    );
-    client
-        .client_config
-        .should_stay_in_pane_placement_mode_after_placement = false;
-    let pending_key_sequence = client.pending_key_sequence.clone();
-    record_pending_placement_command(&mut client, command_id);
+fn a_resync_ends_the_mode_a_handle_drag_opened_with_the_next_frame() {
+    for is_drop_applied in [true, false] {
+        let command_id = CommandId::new();
+        let mut client = build_client_with_submitted_placement(
+            PlacementModeLifetime::UntilDragEnds,
+            PaneId::new(),
+            TabId::new(),
+        );
+        record_pending_placement_command(&mut client, command_id);
+        client.prepare_placement_reconciliation();
 
-    apply_frame_keeping_view(&mut client, Some(command_id), None);
+        apply_frame_keeping_view(&mut client, is_drop_applied.then_some(command_id), None);
 
-    assert_eq!(client.placement_state.placement_mode, None);
-    assert!(!client.is_placement_confirmation_pending());
-    assert!(!client.is_placement_mode_active());
-    assert_eq!(client.pending_key_sequence, pending_key_sequence);
+        assert_eq!(
+            client.placement_state.placement_mode, None,
+            "drop applied {is_drop_applied}"
+        );
+        assert_eq!(client.get_active_input_mode(), LockMode::Normal);
+    }
 }
 
 #[test]

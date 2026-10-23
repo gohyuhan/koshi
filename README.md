@@ -322,8 +322,10 @@ The default leader is Ctrl.
 In locked mode, `<C-l>`, `<C-g>`, and `<C-q>` keep their actions, and every
 other key goes to the program in the focused pane.
 
-Drag a pane's handle in normal or locked mode to swap it with another pane. In
-pane placement mode, dragging a pane onto another also swaps them. To insert,
+Drag a pane's handle in normal or locked mode to swap it with another pane.
+After the drop, the client stays in normal or locked mode, and the keys you
+type go where they went before the drag. In pane placement mode, dragging a
+pane onto another also swaps them. To insert,
 press `<C-p> m` in normal mode, wait for `PLACE PANE` in the tabline, then hold
 Shift when you start the drag. Koshi asks compatible terminals to send Shift
 mouse events during this mode. A terminal that honors the request sends Shift

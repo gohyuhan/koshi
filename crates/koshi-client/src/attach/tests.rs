@@ -6845,25 +6845,19 @@ fn attachment_commits_entered_pane_swap_without_waiting_for_resize() {
 }
 
 #[test]
-fn attachment_commits_mouse_released_pane_swap_without_waiting_for_resize() {
-    assert_attachment_commits_pane_swap_without_waiting_for_resize(
-        PlacementModeLifetime::UntilDragEnds,
-        true,
-    );
+fn attachment_commits_a_handle_drag_swap_and_ends_the_mode_with_either_stay_setting() {
+    for should_stay_in_pane_placement_mode_after_placement in [true, false] {
+        assert_attachment_commits_pane_swap_without_waiting_for_resize(
+            PlacementModeLifetime::UntilDragEnds,
+            should_stay_in_pane_placement_mode_after_placement,
+        );
+    }
 }
 
 #[test]
 fn attachment_commits_entered_pane_swap_and_ends_pane_placement_mode_when_staying_is_off() {
     assert_attachment_commits_pane_swap_without_waiting_for_resize(
         PlacementModeLifetime::UntilCancelled,
-        false,
-    );
-}
-
-#[test]
-fn attachment_commits_mouse_released_pane_swap_and_ends_pane_placement_mode_when_staying_is_off() {
-    assert_attachment_commits_pane_swap_without_waiting_for_resize(
-        PlacementModeLifetime::UntilDragEnds,
         false,
     );
 }
@@ -7176,17 +7170,14 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
         .expect("the attachment confirmed and painted the placement");
 
     assert_eq!(attachment_ending, AttachmentEnding::Detached);
+    let is_placement_mode_kept = placement_mode_lifetime == PlacementModeLifetime::UntilCancelled
+        && should_stay_in_pane_placement_mode_after_placement;
     assert_eq!(
         terminal_mode_bytes,
-        match (
-            placement_mode_lifetime,
-            should_stay_in_pane_placement_mode_after_placement,
-        ) {
-            (PlacementModeLifetime::UntilCancelled, true) => b"\x1b[>1s".as_slice(),
-            (PlacementModeLifetime::UntilDragEnds, true) => {
-                b"\x1b[>1s\x1b[>0s\x1b[>1s".as_slice()
-            }
-            (_, false) => b"\x1b[>1s\x1b[>0s".as_slice(),
+        if is_placement_mode_kept {
+            b"\x1b[>1s".as_slice()
+        } else {
+            b"\x1b[>1s\x1b[>0s".as_slice()
         }
     );
     assert!(
@@ -7203,7 +7194,7 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
         .shown_viewer_paint
         .as_ref()
         .and_then(|viewer_paint| viewer_paint.placement_presentation.as_ref());
-    if should_stay_in_pane_placement_mode_after_placement {
+    if is_placement_mode_kept {
         assert_eq!(
             shown_placement_presentation.map(|placement_presentation| (
                 placement_presentation.source_pane_id,

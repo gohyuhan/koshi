@@ -130,12 +130,14 @@ pub(crate) struct PlacementTabHover {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum PlacementModeLifetime {
     /// Until Esc. `core:begin-pane-placement` (`<C-p> m` by default) opens
-    /// this lifetime. A mouse drop the session accepts switches to it while
-    /// `stay-in-pane-placement-mode-after-placement` is `#true`. With that
-    /// setting `#false`, an accepted placement ends it.
+    /// this lifetime. With `stay-in-pane-placement-mode-after-placement`
+    /// `#false`, an accepted placement also ends it.
     #[default]
     UntilCancelled,
-    /// Until the pane-handle drag that opened it ends.
+    /// Until the pane-handle drag that opened it ends. After a release that
+    /// confirmed a placement, it lasts until a frame shows that placement,
+    /// the session rejects it, or the first frame after a resync arrives,
+    /// whatever `stay-in-pane-placement-mode-after-placement` says.
     UntilDragEnds,
 }
 
@@ -871,11 +873,15 @@ impl Client {
     /// Settle the placement confirmation that waits for the session when the
     /// newest frame names it as `last_applied_placement_command_id`: that frame
     /// shows the placement, and [`set_frame_view`](Self::set_frame_view)
-    /// reconciles it. With `stay-in-pane-placement-mode-after-placement
-    /// #true`, pane placement mode stays on until Esc with no target; a mode
-    /// opened by a pane-handle drag switches to
-    /// [`PlacementModeLifetime::UntilCancelled`]. With `#false`, and in
-    /// dock/undock mode whatever the setting says, the mode ends.
+    /// reconciles it.
+    ///
+    /// - Pane placement mode that lasts until Esc stays on with no target while
+    ///   `stay-in-pane-placement-mode-after-placement` is `#true`, and ends
+    ///   while it is `#false`.
+    /// - Pane placement mode opened by a pane-handle drag
+    ///   ([`PlacementModeLifetime::UntilDragEnds`]) ends, whatever the setting
+    ///   says.
+    /// - In dock/undock mode, the mode ends whatever the setting says.
     ///
     /// A frame that names another placement, or none, changes nothing: the
     /// confirmation stays pending until the session rejects it or a frame
@@ -892,9 +898,6 @@ impl Client {
             && self
                 .client_config
                 .should_stay_in_pane_placement_mode_after_placement;
-        if should_stay_in_pane_placement_mode {
-            self.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
-        }
         self.clear_placement_draft();
         if is_placement_mode_active && !should_stay_in_pane_placement_mode {
             self.cancel_placement_mode();

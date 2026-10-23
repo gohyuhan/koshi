@@ -225,7 +225,11 @@ The default `pane-placement` bindings are:
   starts. On a tab you only preview, focus stays where it is and a collapsed
   member stays collapsed. A release over a target with no room sends nothing,
   and the target stays selected. A drag that began on a grab handle outside
-  pane placement mode ends there, and nothing moves.
+  pane placement mode ends there, and nothing moves. A valid release of that
+  drag ends pane placement mode: the tabline shows the mode the client was in
+  before the drag, such as `BASE` or `LOCK`, whether the session accepts or
+  rejects the placement, and whatever
+  `stay-in-pane-placement-mode-after-placement` says.
 - Enter submits the selected placement. Pane placement mode stays active after
   the session accepts it, unless `koshi.kdl` sets
   `stay-in-pane-placement-mode-after-placement #false`.

@@ -123,7 +123,9 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "koshi.stay-in-pane-placement-mode-after-placement",
         "koshi.kdl",
         "#true",
-        "Keep pane placement mode on after the session accepts a placement.",
+        "Keep pane placement mode opened by a key, and floating pane move mode, on after the \
+         session accepts a placement or runs a move. The mode that a drag of a pane's grab \
+         handle opens ends with its drop.",
     ),
     build_config_field_help(
         "koshi.pane.min-cols",
