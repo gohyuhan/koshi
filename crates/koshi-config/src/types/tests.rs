@@ -537,7 +537,7 @@ fn a_chord_leader_prefixes_the_locked_bindings_and_leaves_the_unlock_chord() {
         )
     };
 
-    assert_eq!(locked_mode_bindings.bound_action_by_key_sequence.len(), 4);
+    assert_eq!(locked_mode_bindings.bound_action_by_key_sequence.len(), 3);
     // The reserved unlock is written literally: it stays `<C-l>`.
     assert_eq!(
         locked_mode_bindings.bound_action_by_key_sequence
@@ -551,16 +551,6 @@ fn a_chord_leader_prefixes_the_locked_bindings_and_leaves_the_unlock_chord() {
     assert_eq!(
         locked_mode_bindings.bound_action_by_key_sequence[&build_sequence_after_leader('g')],
         build_bound_action("mouse-select")
-    );
-    assert_eq!(
-        locked_mode_bindings.bound_action_by_key_sequence[&KeySequence::from_first_and_rest(
-            space_leader_key_chord,
-            vec![
-                build_character_chord(BindingModifierFlags::NONE, 'p'),
-                build_character_chord(BindingModifierFlags::NONE, 'm'),
-            ],
-        )],
-        build_bound_action("begin-pane-placement")
     );
 }
 
@@ -845,12 +835,6 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
                 is_locked: false,
                 client_id: None,
             })),
-        ),
-        build_expected_client_binding(
-            "locked",
-            "<C-p> m",
-            "begin-pane-placement",
-            ClientActionKind::BeginPanePlacement,
         ),
         build_expected_binding("locked", "<C-q>", "quit", Ok(Command::Quit)),
         build_expected_client_binding(
@@ -1233,8 +1217,8 @@ fn reserved_unlock_is_the_locked_mode_binding() {
 
     let locked_mode_bindings =
         &client_config.keybindings.mode_bindings_by_name[&ModeName::from_text("locked")];
-    // The reserved unlock, the pane placement opener, quit, and mouse-select.
-    assert_eq!(locked_mode_bindings.bound_action_by_key_sequence.len(), 4);
+    // The reserved unlock, quit, and mouse-select.
+    assert_eq!(locked_mode_bindings.bound_action_by_key_sequence.len(), 3);
     let reserved_unlock_bound_action = locked_mode_bindings
         .bound_action_by_key_sequence
         .get(&KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK))

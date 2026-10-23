@@ -19,7 +19,7 @@ once beside the `mode` blocks.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `chord-timeout-ms` | integer — ms to wait for the next key in a multi-key shortcut before giving up | `500` | ≥ 0.1.0 |
+| `chord-timeout-ms` | integer — ms a shortcut waits for its next key when it is a complete binding and also the start of a longer one. When the time passes, the complete binding fires. A shortcut that only starts longer ones has no time limit (see [Key sequences](#key-sequences)) | `500` | ≥ 0.1.0 |
 | `which-key-delay-ms` | integer — ms before the hint bar shows the keys that continue a shortcut | `300` | ≥ 0.1.0 |
 | `max-chord-depth` | integer 0–255 — most keys a single shortcut may chain. A shortcut longer than this can never fire, and `koshi keys conflicts` reports it | `4` | ≥ 0.1.0 |
 | `leader` | string — the key `<leader>` stands for in bindings; a modifier run like `"C-"` or a single chord like `"<Space>"` | `"C-"` (the Ctrl modifier run) | ≥ 0.1.0 |
@@ -35,6 +35,16 @@ Keys use angle brackets. Spaces join keys into a sequence.
 - `<leader>p` — leader plus `p`. Leader `"C-"` makes `<C-p>`. Leader
   `"<Space>"` makes `<Space>` then `p`. Explicit keys such as `<A-f>` do not
   move when the leader changes.
+
+### Key sequences
+
+A key that starts a longer shortcut opens a sequence. While the sequence is
+open, no key reaches the program. A sequence that is not also a complete
+binding waits for its next key with no time limit. A key that continues
+nothing is discarded, and the sequence stays open. The sequence ends when a key
+completes a binding, when you press `<Esc>`, or, in locked mode, when you press
+the unlock chord. For example, in normal mode `<C-p>` then `z` discards `z` and
+leaves `<C-p>` open, and a following `n` opens a new pane.
 
 ## `mode` blocks
 
@@ -105,7 +115,6 @@ mode "locked" {
     // locked mode passes every other key straight to the program.
     bind "<C-l>" "core:unlock"
     bind "<leader>q" "core:quit"
-    bind "<leader>p m" "core:begin-pane-placement"
     bind "<leader>g" "core:mouse-select"
 }
 
@@ -174,8 +183,11 @@ move chooser (see [below](#the-pane-move-chooser)). Pane placement mode moves
 tiled and stacked panes only: its pane is the focused pane of the active tab,
 also while a floating pane is focused. While it is open, this client draws no
 floating pane, and a click never reaches one. The mode keeps the
-current base mode: entering from locked mode keeps the client locked after
-cancellation. While it is active, the `pane-placement` keymap has priority over
+current base mode: a client that enters it from locked mode is still locked
+when the mode ends. The default `locked` keymap binds no key that opens it. A
+locked client opens it by dragging a pane's grab handle, or with a key bound in
+the `locked` block, such as `bind "<leader>p m" "core:begin-pane-placement"`.
+While it is active, the `pane-placement` keymap has priority over
 the normal or locked keymap. An unbound key and every key release are consumed
 by placement.
 
