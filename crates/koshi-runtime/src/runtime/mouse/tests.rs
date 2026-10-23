@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::runtime::command::tests::{
     attach_client_through_server, build_floating_new_pane_args, create_floating_pane,
+    create_session_with_attached_client,
 };
 use crate::runtime::pty_inbox::InboxSink;
 use crate::runtime::tests::{apply_mouse_actions, build_viewer, dispatch_mouse_input_at_time};
@@ -91,9 +92,13 @@ fn build_sized_runtime(viewport_size: Size) -> (Server, Arc<FakePtyBackend>, Cli
         InboxSink::from_event_sender(inbox_event_sender),
     )));
     let mut server = Server::from_runtime_parts(fake_pty_backend.clone(), runtime_event_receiver);
-    let client_id = server
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::UNIX_EPOCH)
-        .expect("bootstrap client");
+    let client_id = create_session_with_attached_client(
+        &mut server,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("bootstrap client");
     (server, fake_pty_backend, client_id)
 }
 

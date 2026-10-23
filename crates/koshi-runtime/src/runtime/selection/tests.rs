@@ -3,7 +3,7 @@
 //! stores, snaps, and copies what came back.
 
 use super::*;
-use crate::runtime::command::tests::attach_client_record;
+use crate::runtime::command::tests::{attach_client_record, create_session_with_attached_client};
 use crate::runtime::delivery_queue::DeliveryReceiver;
 use crate::runtime::snapshot::tests::find_selection_row_spans;
 
@@ -36,16 +36,16 @@ fn build_selection_server() -> (Server, ClientId, PaneId) {
         InboxSink::from_event_sender(event_sender),
     )));
     let mut server = Server::from_runtime_parts(fake_pty_backend, event_receiver);
-    let client_id = server
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::UNIX_EPOCH,
-        )
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut server,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("bootstrap");
     let pane_id = *server.live_pane_ids.iter().next().expect("one pane");
     (server, client_id, pane_id)
 }

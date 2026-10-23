@@ -92,7 +92,7 @@ use koshi_core::command::{
     ScrollPaneArgs, SetSelectionArgs, TabTarget, TiledPlacementTarget, VisualCommand,
 };
 use koshi_core::geometry::{Direction, Rect as CoreRect, Size, SplitDirection};
-use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
+use koshi_core::ids::{CommandId, PaneId, TabId};
 use koshi_core::key::{
     BindingModifierFlags, Key, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
 };
@@ -123,7 +123,7 @@ use koshi_test_support::output_workloads::SeededSequence;
 
 use koshi_link::config::LoadedConfig;
 
-use crate::tests::TEST_VIEWPORT_SIZE;
+use crate::tests::{create_session_with_attached_client, TEST_VIEWPORT_SIZE};
 
 fn build_committed_regions(viewport_size: Size) -> CommittedRegions {
     CommittedRegions::build_core(viewport_size, 0)
@@ -201,9 +201,7 @@ fn build_test_server_with_pane() -> (Server, ClientId, PaneId) {
     )));
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
     let mut server = Server::from_runtime_parts(pty_backend, event_receiver);
-    let client_id = server
-        .bootstrap_local(SessionId::new(), TEST_VIEWPORT_SIZE, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(&mut server);
     let pane_id = fake_pty_backend.list_spawned_pane_ids()[0];
     (server, client_id, pane_id)
 }

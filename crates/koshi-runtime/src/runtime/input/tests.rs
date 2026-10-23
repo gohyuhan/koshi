@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{mpsc, Arc};
 
 use crate::runtime::command::tests::{
-    attach_second_client, build_floating_new_pane_args, create_floating_pane, get_command_outcome,
+    attach_second_client, build_floating_new_pane_args, create_floating_pane,
+    create_session_with_attached_client, get_command_outcome,
 };
 use crate::runtime::pty_inbox::InboxSink;
 use crate::runtime::render_schedule::tests::{
@@ -238,16 +239,16 @@ fn build_test_server() -> (Server, Arc<FakePtyBackend>, ClientId, ViewerClient) 
         InboxSink::from_event_sender(event_sender),
     )));
     let mut server = Server::from_runtime_parts(fake_pty_backend.clone(), inbox_receiver);
-    let client_id = server
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::UNIX_EPOCH,
-        )
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut server,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("bootstrap");
     let viewer = build_viewer(client_id);
     (server, fake_pty_backend, client_id, viewer)
 }

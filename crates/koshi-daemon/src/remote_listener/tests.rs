@@ -1988,7 +1988,6 @@ mod bridge_round_trip {
                 "quiet-lake".to_string(),
                 TEST_VIEWPORT_SIZE,
                 SystemTime::now(),
-                None,
             )
             .expect("the session is seeded");
 

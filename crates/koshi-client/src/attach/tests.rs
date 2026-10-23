@@ -90,8 +90,8 @@ use super::*;
 use crate::attach::paint::build_render_snapshot;
 use crate::mouse::tests::build_plain_mouse_pane;
 use crate::tests::{
-    build_core_bound_action, build_test_client, float_placement_source_pane,
-    get_source_tab_snapshot_mut, NO_ROOM_TAB_SIZE, TEST_VIEWPORT_SIZE,
+    build_core_bound_action, build_test_client, create_session_with_attached_client,
+    float_placement_source_pane, get_source_tab_snapshot_mut, NO_ROOM_TAB_SIZE, TEST_VIEWPORT_SIZE,
 };
 use crate::{
     DockUndockMode, FloatingPaneMoveSelection, PaneMoveMode, PlacementMode, PlacementModeLifetime,
@@ -13994,9 +13994,7 @@ fn each_read_of_keys_for_the_pane_reaches_it_in_one_write_at_every_split() {
         )));
         let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
         let mut server = Server::from_runtime_parts(pty_backend, event_receiver);
-        let server_client_id = server
-            .bootstrap_local(SessionId::new(), TEST_VIEWPORT_SIZE, SystemTime::now())
-            .expect("bootstrap");
+        let server_client_id = create_session_with_attached_client(&mut server);
         let pane_id = fake_pty_backend.list_spawned_pane_ids()[0];
         let mut client = build_test_client();
         let (request_sender, request_receiver) = mpsc::channel();

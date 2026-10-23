@@ -188,7 +188,6 @@ fn serve_session(
             "quiet-lake".to_string(),
             ATTACH_VIEWPORT_SIZE,
             SystemTime::now(),
-            None,
         )
         .expect("the session is seeded");
 

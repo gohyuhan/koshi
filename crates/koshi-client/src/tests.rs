@@ -48,6 +48,40 @@ pub(crate) const TEST_VIEWPORT_SIZE: Size = Size {
     row_count: 24,
 };
 
+/// Seed a session named `S-example` on `server`, holding one tab with one
+/// shell pane, as the session server does, then attach a fresh local client to
+/// that tab with a [`TEST_VIEWPORT_SIZE`] terminal. Returns the client's id.
+pub(crate) fn create_session_with_attached_client(
+    server: &mut koshi_runtime::server::Server,
+) -> ClientId {
+    let session_id = SessionId::new();
+    server
+        .bootstrap_session(
+            session_id,
+            "S-example".to_string(),
+            TEST_VIEWPORT_SIZE,
+            std::time::SystemTime::UNIX_EPOCH,
+        )
+        .expect("seed the session");
+    let tab_id = *server.list_sessions()[&session_id]
+        .tabs
+        .keys()
+        .next()
+        .expect("the seeded tab");
+    let client_id = ClientId::new();
+    let _ = server.handle_client_attach(
+        session_id,
+        client_id,
+        TEST_VIEWPORT_SIZE,
+        None,
+        tab_id,
+        None,
+        std::time::SystemTime::UNIX_EPOCH,
+        false,
+    );
+    client_id
+}
+
 /// A destination tab size that no placement into a tab of two panes fits:
 /// `4x2`.
 pub(crate) const NO_ROOM_TAB_SIZE: Size = Size {

@@ -46,7 +46,7 @@ use super::*;
 use crate::runtime::bus::SUBSCRIBER_QUEUE_CAPACITY;
 use crate::runtime::command::tests::{
     attach_client_through_server, build_floating_new_pane_args, build_tab, create_floating_pane,
-    get_command_outcome,
+    create_session_with_attached_client, get_command_outcome,
 };
 use crate::runtime::event::{AttachAccepted, SessionEnding};
 use crate::runtime::render_schedule::tests::{
@@ -111,9 +111,13 @@ const REMOTE_VIEWPORT_SIZE: Size = Size {
 /// its client id.
 fn boot_server() -> (Server, ClientId) {
     let (mut server, _event_sender) = build_test_server_with_event_sender();
-    let client_id = server
-        .bootstrap_local(SessionId::new(), TEST_VIEWPORT_SIZE, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut server,
+        SessionId::new(),
+        TEST_VIEWPORT_SIZE,
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     (server, client_id)
 }
 

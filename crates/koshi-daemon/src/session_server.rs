@@ -636,7 +636,6 @@ fn seed_initial_session(
             session_start.session_name.clone(),
             STARTING_VIEWPORT,
             session_start_time,
-            None,
         ) {
             end_every_pane(&pty_owner);
             return Err(bootstrap_error.into());
@@ -933,7 +932,6 @@ fn seed_shell_after_failed_restore(
         session_start.session_name.clone(),
         STARTING_VIEWPORT,
         SystemTime::now(),
-        None,
     ) {
         end_every_pane(pty_owner);
         return Err(bootstrap_error.into());
