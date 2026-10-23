@@ -226,8 +226,7 @@ fn a_grant_block_with_no_listen_address_names_the_config_key_that_sets_one() {
         rendered_output,
         "anyone holding this token can run anything you can.\n\
          f00d\n\
-         no remote listen address is set; add `remote-listen \"<ip>:<port>\"` to koshi.kdl, then \
-         run `koshi share grant` again.\n"
+         no remote listen address is set; add `remote-listen \"<ip>:<port>\"` to koshi.kdl.\n"
     );
     assert_eq!(rendered_output.matches("f00d").count(), 1);
     assert!(!rendered_output.contains("://"));
@@ -293,8 +292,7 @@ fn a_grant_block_that_replaced_one_opens_with_the_grant_that_stopped() {
          working.\n\
          anyone holding this token can run anything you can.\n\
          f00d\n\
-         no remote listen address is set; add `remote-listen \"<ip>:<port>\"` to koshi.kdl, then \
-         run `koshi share grant` again.\n"
+         no remote listen address is set; add `remote-listen \"<ip>:<port>\"` to koshi.kdl.\n"
     );
 }
 
@@ -1391,38 +1389,141 @@ fn a_listener_on_one_address_names_it_as_the_only_one_and_offers_a_plain_identit
     );
 }
 
-#[test]
-fn a_listener_on_a_loopback_address_says_no_other_machine_can_connect() {
-    for (remote_listen_address, expected_output) in [
-        (
-            "127.0.0.1:7654",
-            "remote-listen in koshi.kdl is 127.0.0.1:7654, a loopback address, so no other \
-             machine can connect to it. Set it to an address of this machine, such as \
-             0.0.0.0:7654, then run `koshi share grant` again.\n",
-        ),
-        (
-            "[::1]:7654",
-            "remote-listen in koshi.kdl is [::1]:7654, a loopback address, so no other machine \
-             can connect to it. Set it to an address of this machine, such as 0.0.0.0:7654, then \
-             run `koshi share grant` again.\n",
-        ),
-    ] {
-        let rendered_output = output::render_remote_ready(
-            "alice",
-            &RemoteReady::On {
-                remote_listen_address: parse_listen_address(remote_listen_address),
-                host_addresses: Vec::new(),
-                certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
-            },
-        );
+/// What a grant to `alice` closes with when the remote listener serves on
+/// `remote_listen_address_text` and this machine has `host_addresses`.
+fn render_serving_remote_ready_for_alice(
+    remote_listen_address_text: &str,
+    host_addresses: Vec<HostAddress>,
+) -> String {
+    output::render_remote_ready(
+        "alice",
+        &RemoteReady::On {
+            remote_listen_address: parse_listen_address(remote_listen_address_text),
+            host_addresses,
+            certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+        },
+    )
+}
 
-        assert_eq!(rendered_output, expected_output);
-    }
+#[test]
+fn a_listener_on_ipv4_loopback_names_the_command_for_this_machine_with_its_fingerprint() {
+    assert_eq!(
+        render_serving_remote_ready_for_alice("127.0.0.1:7654", Vec::new()),
+        format!(
+            "connect from this machine:\n\
+             \x20 koshi attach --remote 127.0.0.1:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+             remote-listen is 127.0.0.1:7654, a loopback address, so no other machine can \
+             connect to it. To let another machine connect, set remote-listen in koshi.kdl to an \
+             address of this machine, such as 0.0.0.0:7654.\n"
+        )
+    );
+}
+
+#[test]
+fn a_listener_on_another_ipv4_loopback_address_names_the_command_for_this_machine() {
+    assert_eq!(
+        render_serving_remote_ready_for_alice("127.0.0.2:7654", Vec::new()),
+        format!(
+            "connect from this machine:\n\
+             \x20 koshi attach --remote 127.0.0.2:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+             remote-listen is 127.0.0.2:7654, a loopback address, so no other machine can \
+             connect to it. To let another machine connect, set remote-listen in koshi.kdl to an \
+             address of this machine, such as 0.0.0.0:7654.\n"
+        )
+    );
+}
+
+#[test]
+fn a_listener_on_ipv6_loopback_names_the_command_for_this_machine_in_brackets() {
+    assert_eq!(
+        render_serving_remote_ready_for_alice("[::1]:7654", Vec::new()),
+        format!(
+            "connect from this machine:\n\
+             \x20 koshi attach --remote [::1]:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+             remote-listen is [::1]:7654, a loopback address, so no other machine can connect to \
+             it. To let another machine connect, set remote-listen in koshi.kdl to an address of \
+             this machine, such as 0.0.0.0:7654.\n"
+        )
+    );
+}
+
+#[test]
+fn a_listener_on_ipv4_mapped_loopback_names_the_ipv4_command_for_this_machine() {
+    assert_eq!(
+        render_serving_remote_ready_for_alice("[::ffff:127.0.0.1]:7654", Vec::new()),
+        format!(
+            "connect from this machine:\n\
+             \x20 koshi attach --remote 127.0.0.1:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+             remote-listen is [::ffff:127.0.0.1]:7654, a loopback address, so no other machine \
+             can connect to it. To let another machine connect, set remote-listen in koshi.kdl to \
+             an address of this machine, such as 0.0.0.0:7654.\n"
+        )
+    );
+}
+
+#[test]
+fn a_listener_on_one_ipv4_mapped_address_renders_as_its_ipv4_form() {
+    let expected_output = format!(
+        "connect from another machine:\n\
+         \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
+         {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+         this machine accepts connections on 192.0.2.20 only (remote-listen in koshi.kdl); \
+         the other machine must connect to that address.\n"
+    );
+
+    assert_eq!(
+        render_serving_remote_ready_for_alice("[::ffff:192.0.2.20]:7654", Vec::new()),
+        expected_output
+    );
+    assert_eq!(
+        render_serving_remote_ready_for_alice("192.0.2.20:7654", Vec::new()),
+        expected_output
+    );
+}
+
+#[test]
+fn a_listener_on_ipv4_mapped_every_address_names_each_ipv4_address_of_this_machine() {
+    let expected_output = format!(
+        "connect from another machine, at the address of this one it can reach:\n\
+         \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
+         {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # en0\n\
+         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+    );
+
+    assert_eq!(
+        render_serving_remote_ready_for_alice(
+            "[::ffff:0.0.0.0]:7654",
+            vec![build_host_address("192.0.2.20", "en0")]
+        ),
+        expected_output
+    );
+    assert_eq!(
+        render_serving_remote_ready_for_alice(
+            "0.0.0.0:7654",
+            vec![build_host_address("192.0.2.20", "en0")]
+        ),
+        expected_output
+    );
 }
 
 #[test]
 fn list_host_addresses_for_listen_address_reads_nothing_for_one_address() {
-    for remote_listen_address in ["192.0.2.20:7654", "[2001:db8::20]:7654", "127.0.0.1:7654"] {
+    for remote_listen_address in [
+        "192.0.2.20:7654",
+        "[2001:db8::20]:7654",
+        "127.0.0.1:7654",
+        "[::ffff:192.0.2.20]:7654",
+        "[::ffff:127.0.0.1]:7654",
+    ] {
         assert_eq!(
             list_host_addresses_for_listen_address(
                 parse_listen_address(remote_listen_address),
@@ -1463,6 +1564,26 @@ fn list_host_addresses_for_listen_address_keeps_the_family_of_the_listen_address
         vec![
             build_host_address("2001:db8::20", "en0"),
             build_host_address("2001:db8::5", "utun3"),
+        ]
+    );
+}
+
+#[test]
+fn list_host_addresses_for_listen_address_reads_the_ipv4_addresses_for_ipv4_mapped_every_address() {
+    assert_eq!(
+        list_host_addresses_for_listen_address(
+            parse_listen_address("[::ffff:0.0.0.0]:7654"),
+            || {
+                vec![
+                    build_host_address("2001:db8::20", "en0"),
+                    build_host_address("192.0.2.20", "en0"),
+                    build_host_address("198.51.100.2", "utun3"),
+                ]
+            }
+        ),
+        vec![
+            build_host_address("192.0.2.20", "en0"),
+            build_host_address("198.51.100.2", "utun3"),
         ]
     );
 }
