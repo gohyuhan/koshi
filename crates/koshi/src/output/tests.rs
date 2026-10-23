@@ -1142,7 +1142,7 @@ fn keys_validate_renders_both_outcome_shapes() {
     assert!(!is_validation_applicable(&parse_failed_outcome));
 }
 
-/// The offline view for a user file whose `unlock_alternative` sits on a chord
+/// The offline view for a user file whose `unlock-alternative` sits on a chord
 /// plain typing produces, which detection rejects as fatal.
 fn build_keymap_view_with_typeable_unlock_alternative() -> KeymapView {
     build_keymap_view_from_partial(
@@ -1171,7 +1171,7 @@ fn keys_conflicts_reports_a_reject_verdict_and_a_fatal_finding() {
   "conflict_findings": [
     {
       "severity": "fatal",
-      "finding_message": "`unlock_alternative` `u` is a key plain typing produces; hold Ctrl, Alt, or Super"
+      "finding_message": "`unlock-alternative` `u` is a key plain typing produces; hold Ctrl, Alt, or Super"
     },
     {
       "severity": "fatal",
