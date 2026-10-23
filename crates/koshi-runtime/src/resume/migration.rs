@@ -1174,7 +1174,7 @@ fn migrate_client(client: &mut Value, json_path: &str) -> Result<(), StorageErro
 }
 
 /// Adds the format-5 fields that `resume_body` lacks: `floating_set`
-/// `{"members":[]}` on each session, `solved_tab_size`
+/// `{"members":[]}` and `starting_tab_id` `null` on each session, `solved_tab_size`
 /// `{"column_count":0,"row_count":0}` on each of its tabs, and
 /// `floating_pane_view_by_pane_id` `{}`, `shown_floating_pane_ids` `[]` and
 /// `focused_floating_pane_id` `null` on each of its clients. A field that is
@@ -1202,6 +1202,9 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
         session_fields
             .entry("floating_set")
             .or_insert(serde_json::json!({"members": []}));
+        session_fields
+            .entry("starting_tab_id")
+            .or_insert(Value::Null);
         session_fields.remove("placement_revision");
         let tabs = get_required_json_field(session_fields, "tabs", session_path)?;
         migrate_json_object_members(tabs, "session.tabs", |tab, tab_path| {

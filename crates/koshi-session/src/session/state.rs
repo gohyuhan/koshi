@@ -412,8 +412,9 @@ impl SessionViewChanges {
 /// Anything one client may see differently from another — focus, viewport,
 /// input mode — lives on that client's entry in [`ClientRegistry`], never as a
 /// session-global field. Two attached clients can look at different tabs and
-/// panes at the same time. `should_start_locked` is the mode the session hands the
-/// first client to attach, not a mode the session is in.
+/// panes at the same time. `should_start_locked` and `starting_tab_id` are the
+/// mode and the tab the session hands the first client to attach, not a mode
+/// or a focus the session holds.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Session {
     /// Unique id, stable for the session's whole life.
@@ -443,6 +444,13 @@ pub struct Session {
     /// it and clears it: exactly one attach is locked. A session seeded
     /// without that marker holds `false` and locks nobody.
     pub should_start_locked: bool,
+    /// The tab the first client to attach opens on, while the session holds
+    /// that tab. A profile sets it to the tab it marks `focus`, or to its first
+    /// tab. [`Session::take_starting_tab_id`] reads it and clears it: the client
+    /// that takes it also focuses the newest pane of each tab's focus history
+    /// ([`Tab::list_focus_mru`]). A session seeded without a profile holds
+    /// `None`.
+    pub starting_tab_id: Option<TabId>,
 
     /// A restart seeded a new shell after the carried session could not be
     /// restored. The statusline shows the notice until input reaches a pane.
@@ -466,9 +474,9 @@ pub struct Session {
 
 impl Session {
     /// A session with no tabs and no panes, holding the supplied client
-    /// registry. Starts in `Starting` with `should_start_locked`
-    /// `false`. `created_at` is supplied by the caller at the creation
-    /// boundary, never read from the clock here.
+    /// registry. Starts in `Starting` with `should_start_locked` `false` and
+    /// no `starting_tab_id`. `created_at` is supplied by the caller at the
+    /// creation boundary, never read from the clock here.
     #[must_use]
     pub fn from_identity_and_client_registry(
         session_id: SessionId,
@@ -485,6 +493,7 @@ impl Session {
             panes: PaneRegistry::new(),
             clients: client_registry,
             should_start_locked: false,
+            starting_tab_id: None,
             is_recovery_notice_visible: false,
             pane_sizing: PaneSizing::default(),
             lifecycle: SessionLifecycle::Starting,
@@ -563,6 +572,16 @@ impl Session {
     /// it returns `true` at most once per session.
     pub fn take_start_lock(&mut self) -> bool {
         std::mem::take(&mut self.should_start_locked)
+    }
+
+    /// The tab the first client to attach opens on, clearing it as it reads
+    /// it.
+    ///
+    /// Reads [`starting_tab_id`](Self::starting_tab_id) and clears it in one
+    /// step: it returns `Some` at most once per session. The id it returns
+    /// names a tab the session may no longer hold.
+    pub fn take_starting_tab_id(&mut self) -> Option<TabId> {
+        self.starting_tab_id.take()
     }
 
     /// The session's current lifecycle state.

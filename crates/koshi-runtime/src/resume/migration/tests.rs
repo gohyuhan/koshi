@@ -615,7 +615,7 @@ fn migrate_resume_body_refuses_format_four_session_ids_repeated_with_different_l
 }
 
 #[test]
-fn step_four_adds_the_missing_floating_and_tab_size_fields_and_keeps_the_ones_present() {
+fn step_four_adds_every_missing_format_five_field_and_keeps_the_ones_present() {
     let mut resume_body = serde_json::json!({
         "session_by_id": {
             "first": {
@@ -639,6 +639,7 @@ fn step_four_adds_the_missing_floating_and_tab_size_fields_and_keeps_the_ones_pr
             },
             "second": {
                 "floating_set": {"members": ["kept-member"]},
+                "starting_tab_id": "kept-starting-tab",
                 "tabs": {},
                 "clients": {"client_by_id": {}},
                 "panes": {"pane_record_by_id": {}}
@@ -656,6 +657,7 @@ fn step_four_adds_the_missing_floating_and_tab_size_fields_and_keeps_the_ones_pr
                 "first": {
                     "session_name": "carried",
                     "floating_set": {"members": []},
+                    "starting_tab_id": null,
                     "tabs": {
                         "fresh-tab": {
                             "tab_name": "code",
@@ -686,6 +688,7 @@ fn step_four_adds_the_missing_floating_and_tab_size_fields_and_keeps_the_ones_pr
                 },
                 "second": {
                     "floating_set": {"members": ["kept-member"]},
+                    "starting_tab_id": "kept-starting-tab",
                     "tabs": {},
                     "clients": {"client_by_id": {}},
                     "panes": {"pane_record_by_id": {}}
@@ -767,6 +770,7 @@ fn step_four_removes_the_placement_revision_of_each_session_and_client() {
             "session_by_id": {
                 "first": {
                     "floating_set": {"members": []},
+                    "starting_tab_id": null,
                     "tabs": {},
                     "clients": {"client_by_id": {
                         "client": {

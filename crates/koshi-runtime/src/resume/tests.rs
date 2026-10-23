@@ -119,6 +119,7 @@ fn migrate_format_four_restores_the_session_with_no_floating_panes_and_empty_cli
     assert_eq!(session.clients.count_clients(), 2);
     assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
     assert_eq!(session.validate_session_consistency(), Ok(()));
+    assert_eq!(session.starting_tab_id, None);
     assert_eq!(
         session
             .clients
@@ -2914,5 +2915,77 @@ fn ten_panes_with_full_history_encode_as_a_stream_of_small_pieces() {
             <= koshi_storage::atomic::STAGED_WRITE_BUFFER_BYTE_COUNT,
         "a piece of {} bytes",
         piece_recording_writer.largest_piece_byte_count
+    );
+}
+
+#[test]
+fn a_profile_session_carried_before_any_attach_keeps_its_starting_tab_and_pane() {
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("session.resume");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(inbox_sender),
+    )));
+    let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver);
+    let session_id = SessionId::new();
+    let profile_template = koshi_config::profile::parse_profile(
+        Path::new("profile/test.kdl"),
+        "version 2\ntab {\n    pane\n}\n\
+         tab {\n    focus\n    horizontal {\n        pane\n        pane {\n            focus\n        }\n    }\n}",
+    )
+    .expect("valid profile");
+    server
+        .bootstrap_profile(
+            session_id,
+            "carried".to_string(),
+            profile_template,
+            FIRST_CLIENT_VIEWPORT_SIZE,
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect("profile launches");
+    let starting_tab_id = server.session_by_id[&session_id]
+        .starting_tab_id
+        .expect("the profile's starting tab");
+    let starting_tab_pane_ids = server.session_by_id[&session_id].tabs[&starting_tab_id]
+        .get_layout_tree()
+        .list_leaf_pane_ids();
+    let carried_pty_panes = build_carried_pty_panes(&server, session_id);
+    let (resume_header, resume_body) = server
+        .carry_out(&carried_pty_panes)
+        .expect("a session to carry");
+    write_resume_file(&resume_file_path, &resume_header, &resume_body)
+        .expect("write the resume file");
+    let (read_header, raw_body) =
+        read_resume_header(&resume_file_path).expect("read the header back");
+    let read_body =
+        read_resume_body(read_header.resume_format, &raw_body).expect("read the body back");
+    let (mut resumed_server, _inbox_sender) = build_resumed_server(&read_header, read_body);
+    assert_eq!(
+        resumed_server.session_by_id[&session_id].starting_tab_id,
+        Some(starting_tab_id)
+    );
+
+    let attachment = resumed_server
+        .handle_ipc_attach(
+            None,
+            None,
+            FIRST_CLIENT_VIEWPORT_SIZE,
+            None,
+            None,
+            SystemTime::UNIX_EPOCH,
+            false,
+            60,
+            None,
+        )
+        .expect("the resumed session accepts the attach");
+
+    let client = resumed_server.session_by_id[&session_id]
+        .clients
+        .get_client_by_id(attachment.client_id)
+        .expect("the attached client");
+    assert_eq!(client.get_active_tab_id(), starting_tab_id);
+    assert_eq!(
+        client.get_focused_pane_id(starting_tab_id),
+        Some(starting_tab_pane_ids[1])
     );
 }
