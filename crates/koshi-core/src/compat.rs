@@ -285,10 +285,11 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 ///
 /// `v0.3.0` writes 2, `v0.4.0` writes 3, and `v0.5.0` writes 4. This build
 /// writes 5: format 5 adds each session's floating panes, each client's view of
-/// them, each tab's solved tab size, the views detached clients left with the
-/// resume-token hashes, and the process IDs of the children closed panes left
-/// running. It turns each client's focused pane in each tab into a one-pane
-/// focus history, and drops each pane record's lifecycle and close policy.
+/// them, each session's starting tab, each tab's solved tab size, the views
+/// detached clients left with the resume-token hashes, and the process IDs of
+/// the children closed panes left running. It turns each client's focused pane
+/// in each tab into a one-pane focus history, and drops each pane record's
+/// lifecycle and close policy.
 /// Formats 4 and 5 use the declared field names in the saved records. Formats 1
 /// through 4 pass through the ordered migration steps before they are restored.
 ///

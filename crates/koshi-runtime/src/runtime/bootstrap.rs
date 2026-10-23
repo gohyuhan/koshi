@@ -16,7 +16,6 @@ use std::time::SystemTime;
 
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_core::lock::LockMode;
 use koshi_core::naming::{generate_name, NameKind};
 use koshi_core::process::{KillPolicy, PtySize, ShellKind, SpawnSpec};
 use koshi_layout::template::{ProfileTemplate, TemplateError, TerminalTemplate};
@@ -210,15 +209,17 @@ impl Server {
         }
     }
 
-    /// Seed the first session from a `--profile` template: one session holding
-    /// every tab the profile defines, each with its own tree of panes. The
-    /// session is registered under the caller-supplied `session_id`, as in
-    /// [`bootstrap_local`](Self::bootstrap_local).
+    /// Seed one session under `session_id` and `session_name` from a
+    /// `--profile` template: every tab the profile defines, each with its own
+    /// tree of panes. The session holds no client.
     ///
-    /// `client_id` names the one client viewing it, focused on the profile's
-    /// starting tab and pane. `None` seeds the session with no client at all,
-    /// which is what a session server started with nothing attached holds; the
-    /// tabs still record which pane a client attaching later lands on.
+    /// Each tab records the pane its profile marks `focus` as the newest entry
+    /// of its focus history. The session records the tab the profile marks
+    /// `focus`, else the profile's first tab, as its starting tab
+    /// ([`Session::starting_tab_id`]), and the `lock` marker as its starting
+    /// lock ([`Session::should_start_locked`]). The first client to attach
+    /// opens on the starting tab, locked when the marker is set, focused in
+    /// each tab on the pane that tab records.
     ///
     /// Every child is spawned before any state is committed, so a failed launch
     /// commits nothing and kills whatever it already spawned — the caller then
@@ -232,40 +233,10 @@ impl Server {
     pub fn bootstrap_profile(
         &mut self,
         session_id: SessionId,
-        template: ProfileTemplate,
-        viewport_size: Size,
-        session_started_at: SystemTime,
-        client_id: Option<ClientId>,
-    ) -> Result<(), ProfileLaunchError> {
-        // This is the first session, so no existing name can collide.
-        let session_name = generate_name(NameKind::Session, |_| false);
-        self.bootstrap_profile_named(
-            session_id,
-            session_name,
-            template,
-            viewport_size,
-            session_started_at,
-            client_id,
-        )
-    }
-
-    /// [`bootstrap_profile`](Self::bootstrap_profile) under a caller-chosen
-    /// display name, for a session server whose name was picked by the router
-    /// that started it.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `template` holds no tab, or when one of its tabs holds no
-    /// leaf. [`parse_profile`](koshi_config::profile::parse_profile) rejects
-    /// both.
-    pub fn bootstrap_profile_named(
-        &mut self,
-        session_id: SessionId,
         session_name: String,
         template: ProfileTemplate,
         viewport_size: Size,
         session_started_at: SystemTime,
-        client_id: Option<ClientId>,
     ) -> Result<(), ProfileLaunchError> {
         let pty_backend = Arc::clone(self.get_pty_backend());
         let tab_pane_area_size = compute_default_pane_area_size(viewport_size);
@@ -319,7 +290,7 @@ impl Server {
                 add_koshi_environment(
                     &mut pane_spawn_spec.environment_variables,
                     session_id,
-                    client_id,
+                    None,
                     *pane_id,
                     runtime_directory_path.as_deref(),
                     should_add_clipboard_tools,
@@ -339,12 +310,9 @@ impl Server {
             }
         }
 
-        // Assemble the session and its client, if any, viewing the tab the
-        // profile starts focused on.
         let focused_tab_index = template
             .focused_tab_index
             .min(profile_tab_plans.len().saturating_sub(1));
-        let focused_tab_id = profile_tab_plans[focused_tab_index].tab_id;
         let mut session = Session::from_identity_and_client_registry(
             session_id,
             session_name,
@@ -352,17 +320,10 @@ impl Server {
             ClientRegistry::new(),
         );
         session.should_start_locked = template.is_locked;
+        session.starting_tab_id = Some(profile_tab_plans[focused_tab_index].tab_id);
         let _ = session.update_pane_sizing(pane_sizing);
-        attach_first_client(
-            &mut session,
-            client_id,
-            viewport_size,
-            focused_tab_id,
-            session_started_at,
-        );
 
-        // Commit each tab; only the focused one moves the client onto it.
-        for (tab_index, tab_plan) in profile_tab_plans.into_iter().enumerate() {
+        for tab_plan in profile_tab_plans {
             let tab_name = generate_tab_name(&session);
             let _ = tab_ops::commit_profile_tab(
                 &mut session,
@@ -374,8 +335,6 @@ impl Server {
                     focused_leaf_index: tab_plan.focused_leaf_index,
                 },
                 tab_name,
-                client_id,
-                tab_index == focused_tab_index,
                 tab_pane_area_size,
             );
         }
@@ -384,17 +343,6 @@ impl Server {
         for (pane_id, pane_pty_size) in spawned_pane_pty_sizes {
             self.park_pane_pty(pane_id, pane_pty_size);
         }
-
-        // Resize the focused tab's panes to the rects a client viewing it
-        // solves; a tab no client views keeps the sizes its panes spawned at.
-        // The resize events are dropped.
-        let mut reflow_events = Vec::new();
-        self.reflow_tab_if_viewed(
-            pty_backend.as_ref(),
-            session_id,
-            focused_tab_id,
-            &mut reflow_events,
-        );
 
         Ok(())
     }
@@ -406,13 +354,7 @@ impl Server {
 /// `client_id` attaches nobody and leaves `session` untouched.
 ///
 /// The client is recorded with no pane area report; its pane area resolves to
-/// the viewport minus two rows.
-///
-/// The client takes the session's starting lock: a session seeded from a
-/// profile carrying `lock` attaches it in
-/// [`LockMode::Locked`], and the flag is
-/// spent, so no later attach is locked. Emits no event; the first frame this
-/// client is painted into carries the mode.
+/// the viewport minus two rows. Emits no event.
 fn attach_first_client(
     session: &mut Session,
     client_id: Option<ClientId>,
@@ -425,7 +367,7 @@ fn attach_first_client(
     };
     // The session holds no other client, so no existing label can collide.
     let client_label = generate_name(NameKind::Client, |_| false);
-    let mut client = Client::from_attachment(
+    let client = Client::from_attachment(
         client_id,
         session.session_id,
         session_started_at,
@@ -436,9 +378,6 @@ fn attach_first_client(
         client_label,
         0,
     );
-    if session.take_start_lock() {
-        client.update_lock_mode(LockMode::Locked);
-    }
     session.attach_client(client);
 }
 

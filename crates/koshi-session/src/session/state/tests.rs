@@ -935,6 +935,7 @@ fn an_empty_session_survives_a_serde_round_trip() {
     assert_eq!(decoded_session.created_at, SystemTime::UNIX_EPOCH);
     assert_eq!(*decoded_session.get_lifecycle(), SessionLifecycle::Starting);
     assert!(!decoded_session.should_start_locked);
+    assert_eq!(decoded_session.starting_tab_id, None);
     assert_eq!(decoded_session.tabs.len(), 0);
     assert_eq!(decoded_session.panes.count_pane_records(), 0);
     assert_eq!(decoded_session.clients.count_clients(), 0);
@@ -1620,6 +1621,41 @@ fn the_starting_lock_is_stored_as_a_plain_json_bool() {
         serialized_session["should_start_locked"],
         serde_json::Value::Bool(true)
     );
+}
+
+#[test]
+fn the_starting_tab_is_taken_once() {
+    let mut session = build_empty_session();
+    let starting_tab_id = TabId::new();
+    session.starting_tab_id = Some(starting_tab_id);
+
+    assert_eq!(session.take_starting_tab_id(), Some(starting_tab_id));
+    assert_eq!(session.take_starting_tab_id(), None);
+    assert_eq!(session.starting_tab_id, None);
+}
+
+#[test]
+fn a_session_seeded_without_a_profile_has_no_starting_tab() {
+    let mut session = build_empty_session();
+
+    assert_eq!(session.take_starting_tab_id(), None);
+}
+
+#[test]
+fn the_starting_tab_survives_a_serde_round_trip() {
+    let mut session = build_empty_session();
+    let starting_tab_id = TabId::new();
+    session.starting_tab_id = Some(starting_tab_id);
+
+    let serialized_session = serde_json::to_value(&session).expect("serialize");
+    let restored_session: Session =
+        serde_json::from_value(serialized_session.clone()).expect("deserialize");
+
+    assert_eq!(
+        serialized_session["starting_tab_id"],
+        serde_json::to_value(starting_tab_id).expect("serialize the tab id")
+    );
+    assert_eq!(restored_session.starting_tab_id, Some(starting_tab_id));
 }
 
 #[test]

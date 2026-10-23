@@ -77,7 +77,7 @@ impl Server {
     /// that caller's last client detached. A token that proves a
     /// `resume_client_id` claim has no view filed under it: a client's view is
     /// filed only once its record goes. A view that comes back puts the client on the
-    /// tab it names — the session's first tab when that tab is gone — and then
+    /// tab it names while the session holds that tab, and then
     /// restores the rest of the view onto the freshly minted client
     /// ([`Self::restore_saved_view`]). The token
     /// is consumed by this one attach: presenting it again restores nothing. A
@@ -96,6 +96,13 @@ impl Server {
     /// machine dials again before the session read that its first link
     /// dropped; the dial gets the view back, and the session holds one client
     /// for that viewer, not two.
+    ///
+    /// A freshly minted client with no saved view, or with a saved view whose
+    /// tab the session no longer holds, opens on the session's starting tab
+    /// ([`Session::starting_tab_id`]) while the session holds it, else on the
+    /// tab with the lowest index. Example: the first terminal of a profile
+    /// whose second tab carries `focus` opens on that tab, and a second
+    /// terminal opens on the first tab.
     ///
     /// Every accepted attach mints a new token, carried back on
     /// [`AttachAccepted::resume_token`].
@@ -184,10 +191,12 @@ impl Server {
                     .session_by_id
                     .get(&session_id)
                     .expect("session located above");
+                let is_held_tab = |tab_id: &TabId| session.tabs.contains_key(tab_id);
                 let active_tab_id = saved_view
                     .as_ref()
                     .map(|saved_view| saved_view.active_tab_id)
-                    .filter(|tab_id| session.tabs.contains_key(tab_id))
+                    .filter(is_held_tab)
+                    .or_else(|| session.starting_tab_id.filter(is_held_tab))
                     .unwrap_or(first_tab_id);
                 (ClientId::new(), active_tab_id)
             }
@@ -358,6 +367,16 @@ impl Server {
     /// flag is spent by that attach, so every client after it starts in
     /// [`LockMode::Normal`].
     ///
+    /// A fresh id that takes the session's starting tab
+    /// ([`Session::take_starting_tab_id`]) focuses, in every tab, the newest
+    /// pane of that tab's focus history
+    /// ([`Tab::list_focus_mru`](koshi_session::session::state::Tab::list_focus_mru)).
+    /// Only the tab it views emits an [`Event::PaneFocused`]. A tab with an
+    /// empty history is left to the landing pane. Example: in a session seeded
+    /// from a profile whose first tab marks its second pane `focus`, the first
+    /// client focuses that second pane, and a second client focuses the first
+    /// pane.
+    ///
     /// `is_remote` names whether the connection carrying this attach came from another
     /// process. It
     /// is recorded as the client's [`ClientOrigin`]: [`ClientOrigin::Remote`]
@@ -491,6 +510,27 @@ impl Server {
                 }));
             }
             session.attach_client(client);
+            // The first client of a session seeded from a profile focuses, in
+            // each tab, the newest pane of that tab's focus history.
+            if session.take_starting_tab_id().is_some() {
+                let tab_active_pane_ids: Vec<(TabId, PaneId)> = session
+                    .tabs
+                    .values()
+                    .filter_map(|tab| Some((tab.get_tab_id(), *tab.list_focus_mru().first()?)))
+                    .collect();
+                for (tab_id, tab_active_pane_id) in tab_active_pane_ids {
+                    if tab_id == active_tab_id {
+                        emitted_events.extend(update_client_tab_focus(
+                            session,
+                            client_id,
+                            tab_id,
+                            tab_active_pane_id,
+                        ));
+                    } else if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
+                        let _ = client.update_focused_pane(tab_id, tab_active_pane_id);
+                    }
+                }
+            }
             None
         };
 

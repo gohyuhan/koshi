@@ -33,7 +33,8 @@ pub struct ProfileTemplate {
     /// The tabs in file order. Never empty: a profile without tabs is a
     /// parse error.
     pub tabs: Vec<TabTemplate>,
-    /// Index into `tabs` of the tab selected when the profile opens.
+    /// Index into `tabs` of the tab the first client to attach to the
+    /// session this template seeds opens on.
     pub focused_tab_index: usize,
     /// True when the file carries the `lock` marker. The session this
     /// template seeds starts its first client in
@@ -47,8 +48,8 @@ pub struct ProfileTemplate {
 pub struct TabTemplate {
     /// The tab's layout tree.
     pub root: TemplateNode,
-    /// Index into the root's leaves (layout order) of the pane focused when
-    /// this tab is first shown.
+    /// Index into the root's leaves (layout order) of the pane the first
+    /// client to attach focuses in this tab.
     pub focused_leaf_index: usize,
 }
 

@@ -612,13 +612,12 @@ fn seed_initial_session(
     let is_profile_seeded = match profile_template_document {
         // The name is the router's, not a fresh one: the router registered this
         // session under it and a `koshi attach <name>` resolves against it.
-        Some(profile_template_document) => match session_server.bootstrap_profile_named(
+        Some(profile_template_document) => match session_server.bootstrap_profile(
             session_start.session_id,
             session_start.session_name.clone(),
             profile_template_document,
             STARTING_VIEWPORT,
             session_start_time,
-            None,
         ) {
             Ok(()) => true,
             Err(profile_start_error) => {
