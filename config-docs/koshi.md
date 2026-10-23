@@ -116,6 +116,11 @@ On a floating pane's titlebar row:
 - `[ ]` pins the pane at its cell, and `[⚪]` unpins it. `–` minimizes the
   pane, and `✕` closes it.
 
+A pane you minimized keeps its program running. `<C-p> <Tab>` steps through
+the floating panes, and shows and focuses each pane it lands on
+(`keybinding.md`, *Floating pane actions*). `koshi restore-pane --all` shows
+every floating pane you minimized.
+
 Drag a floating pane's border to resize it, up to the edge of your pane area
 on that side. A drag on a corner moves the two borders that meet there. A pane
 you pinned resizes from its right and bottom borders only. A pinned pane that
