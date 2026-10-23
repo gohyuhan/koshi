@@ -23,12 +23,13 @@
 //! for up to 5 seconds, and runs once more.
 //!
 //! Three asks never start one: restarting the running router, reading its
-//! build version, and counting the connections it holds from another machine.
+//! build version, and reading what its remote access is set to.
 //! Each opens one connection, or a second one after a Hello refused for its
 //! connection token, and reports back when the last connect finds no router
 //! running.
 
-use std::path::Path;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::time::{Duration, Instant};
 
@@ -310,13 +311,63 @@ pub fn restart_running_router(
     }
 }
 
-/// What asking the running router for its count of connections from another
-/// machine produced.
+/// What the running router answered about this machine's remote access, as a
+/// [`RouterResult::RemoteStatus`] answer carries it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RemoteConnections {
-    /// A router answered with the count of connections it holds from another
-    /// machine, whether they have attached to a session or not.
-    Answered(usize),
+pub struct RemoteAccessStatus {
+    /// The IP address and port the router read from `koshi.kdl` when it
+    /// started, or `None` when that file named none.
+    pub remote_listen_address: Option<SocketAddr>,
+    /// The `koshi.kdl` the router read `remote_listen_address` from, or `None`
+    /// when the router names none: a router with no config directory, and a
+    /// koshi 0.5.0 router.
+    pub config_file_path: Option<PathBuf>,
+    /// Whether the operator has switched remote access on.
+    pub is_remote_access_enabled: bool,
+    /// Whether the router holds the port right now.
+    pub is_listening: bool,
+    /// The fingerprint of the certificate the open listener presents, as 64
+    /// lowercase hex characters, or `None` when the router names none.
+    pub certificate_fingerprint: Option<String>,
+    /// How many connections from another machine the router holds admitted,
+    /// whether they have attached to a session or not.
+    pub remote_connection_count: usize,
+}
+
+impl RemoteAccessStatus {
+    /// The status a [`RouterResult::RemoteStatus`] answer carries.
+    ///
+    /// # Errors
+    /// Every other answer, handed back unchanged.
+    pub fn from_router_result(
+        router_result: RouterResult,
+    ) -> Result<RemoteAccessStatus, RouterResult> {
+        match router_result {
+            RouterResult::RemoteStatus {
+                remote_listen_address,
+                config_file_path,
+                is_remote_access_enabled,
+                is_listening,
+                certificate_fingerprint,
+                remote_connection_count,
+            } => Ok(RemoteAccessStatus {
+                remote_listen_address,
+                config_file_path,
+                is_remote_access_enabled,
+                is_listening,
+                certificate_fingerprint,
+                remote_connection_count,
+            }),
+            other_router_result => Err(other_router_result),
+        }
+    }
+}
+
+/// What asking the running router for its remote access status produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunningRouterRemoteStatus {
+    /// A router answered with its remote access status.
+    Answered(RemoteAccessStatus),
     /// No endpoint file, nothing listening behind it, or a router that closed
     /// the connection before its Hello answer.
     NotRunning,
@@ -327,7 +378,7 @@ pub enum RemoteConnections {
     PreviousRelease,
     /// A router is listening and did not answer the question.
     NoAnswer {
-        /// Why there is no count: the sentence the router refused with, the
+        /// Why there is no status: the sentence the router refused with, the
         /// sentence naming a reply that answers nothing this asked, or the
         /// sentence naming a failure to talk.
         error_detail: String,
@@ -337,8 +388,10 @@ pub enum RemoteConnections {
     },
 }
 
-/// How many connections from another machine the running router holds
-/// admitted, whether they have attached to a session or not.
+/// What the running router's remote access is set to: the address it read
+/// from `koshi.kdl`, the file it read it from, whether remote access is on,
+/// whether it holds the port, the certificate fingerprint, and how many
+/// connections from another machine it holds admitted.
 ///
 /// Sends one RemoteStatus exchange. After a Hello refused for its connection
 /// token, it sends one more when the endpoint file carries another token or
@@ -348,41 +401,45 @@ pub enum RemoteConnections {
 ///
 /// A router whose build has no such request kind refuses it with
 /// [`IpcErrorCode::UnsupportedKind`], which is
-/// [`RemoteConnections::OlderBuild`]. A router that replies in the envelope of
-/// koshi 0.4.0 or older is [`RemoteConnections::PreviousRelease`]. Every other
-/// refusal, unexpected reply and transport failure, and a router that has not
-/// answered by `answer_deadline`, is [`RemoteConnections::NoAnswer`], carrying
+/// [`RunningRouterRemoteStatus::OlderBuild`]. A router that replies in the
+/// envelope of koshi 0.4.0 or older is
+/// [`RunningRouterRemoteStatus::PreviousRelease`]. Every other refusal,
+/// unexpected reply and transport failure, and a router that has not answered
+/// by `answer_deadline`, is [`RunningRouterRemoteStatus::NoAnswer`], carrying
 /// the process id `router.json` names at that moment.
 ///
 /// Example: a router that accepts the connection and answers nothing gives
 /// `NoAnswer` with the detail `IPC unavailable: the router did not answer in
 /// time` at `answer_deadline`.
 #[must_use]
-pub fn query_running_router_remote_connections(
+pub fn query_running_router_remote_status(
     runtime_directory: &Path,
     answer_deadline: Instant,
-) -> RemoteConnections {
+) -> RunningRouterRemoteStatus {
     let error_detail = match exchange_router_request(
         runtime_directory,
         &RouterRequestKind::RemoteStatus,
         Some(answer_deadline),
     ) {
-        Ok(None) => return RemoteConnections::NotRunning,
-        Ok(Some(RouterResult::RemoteStatus {
-            remote_connection_count,
-            ..
-        })) => return RemoteConnections::Answered(remote_connection_count),
-        Ok(Some(RouterResult::Error(refusal))) if refusal.code == IpcErrorCode::UnsupportedKind => {
-            return RemoteConnections::OlderBuild
+        Ok(None) => return RunningRouterRemoteStatus::NotRunning,
+        Ok(Some(router_result)) => match RemoteAccessStatus::from_router_result(router_result) {
+            Ok(remote_access_status) => {
+                return RunningRouterRemoteStatus::Answered(remote_access_status)
+            }
+            Err(RouterResult::Error(refusal)) if refusal.code == IpcErrorCode::UnsupportedKind => {
+                return RunningRouterRemoteStatus::OlderBuild
+            }
+            Err(RouterResult::Error(refusal)) => refusal.message,
+            Err(unexpected_router_result) => talk::ROUTER_PEER_WORDS
+                .build_unexpected_reply_error(&unexpected_router_result)
+                .to_string(),
+        },
+        Err(CliError::PreviousReleaseServer { .. }) => {
+            return RunningRouterRemoteStatus::PreviousRelease
         }
-        Ok(Some(RouterResult::Error(refusal))) => refusal.message,
-        Ok(Some(unexpected_router_result)) => talk::ROUTER_PEER_WORDS
-            .build_unexpected_reply_error(&unexpected_router_result)
-            .to_string(),
-        Err(CliError::PreviousReleaseServer { .. }) => return RemoteConnections::PreviousRelease,
         Err(router_exchange_error) => router_exchange_error.to_string(),
     };
-    RemoteConnections::NoAnswer {
+    RunningRouterRemoteStatus::NoAnswer {
         error_detail,
         router_process_id: EndpointFile::load_from_path(&resolve_router_endpoint_path(
             runtime_directory,

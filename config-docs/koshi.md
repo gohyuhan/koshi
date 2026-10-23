@@ -850,14 +850,31 @@ This only says where the sockets go. Nobody else reaches them until
 
 `remote-listen "0.0.0.0:7654"` names the address the remote listener binds, and
 does nothing else: writing this line opens no port and makes this machine
-reachable by nobody. The port opens the first time you run `koshi share grant`
-and answer yes to the offer it makes, and on every start after that.
+reachable by nobody. The port opens the first time you run `koshi share open`,
+or answer yes to the offer `koshi share grant` makes, and on every start after
+that.
 The value is an IP address and a port: IPv4 such as `192.0.2.20:7654`, or
 IPv6 in brackets such as `[::1]:7654`. A host name, such as
 `laptop.local:7654`, is ignored with a warning, and nothing binds. `0.0.0.0`
 and `[::]` accept connections on every IPv4 or IPv6 address of this machine.
-`koshi share grant` then names each of those addresses in its connect command,
-as `koshi share grant` in `cli.md` shows.
+`koshi share grant` and `koshi share open` then name each of those addresses
+in their connect command, as `koshi share grant` in `cli.md` shows.
+
+The router reads this line when it starts, and reads it again only when it
+starts again. A line you add, change, or remove while the router runs applies
+after `koshi restart-servers`, which restarts every session and the router with
+their panes kept. Until then the router keeps the address it read, and a
+listener that is open keeps serving on it. `koshi share grant`, `koshi share
+open` and `koshi doctor` compare that address with the line in `koshi.kdl`, and
+name the restart when the two differ:
+
+```text
+koshi: /home/user/.config/koshi/koshi.kdl names the remote listen address 127.0.0.1:7654, and the running router read no remote listen address from it when it started. Run `koshi restart-servers` so the router reads it again, then run `koshi share open`.
+```
+
+The router reads the `koshi.kdl` of the environment that started it. When it
+reads another `koshi.kdl` than the `koshi` command you run, the message names
+both files, and the line to change is the one in the router's file.
 
 `allow-other-users` is a separate switch, about other users logged in to this
 same machine. Neither key turns the other on.

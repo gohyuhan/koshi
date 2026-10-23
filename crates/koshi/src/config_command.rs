@@ -74,7 +74,8 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "koshi.kdl",
         "unset",
         "IP address and port the remote listener binds to, such as 192.0.2.20:7654. Setting \
-         it opens nothing; `koshi share grant` asks before the port opens.",
+         it opens nothing; `koshi share open` opens the port. The router reads it when it \
+         starts, so a change applies after `koshi restart-servers`.",
     ),
     build_config_field_help(
         "koshi.auto-close-session",

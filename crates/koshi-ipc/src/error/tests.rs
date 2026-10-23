@@ -128,8 +128,8 @@ fn connect_refused_display_names_the_address_and_the_way_out() {
     assert_eq!(
         ipc_error.to_string(),
         "laptop.local:7654 refused the connection: nothing is listening on that port. \
-         if remote access is not enabled on that machine, run `koshi share grant` \
-         there and answer yes to the offer to open the port"
+         if remote access is not enabled on that machine, run `koshi share open` \
+         there to open the port"
     );
 }
 
@@ -244,7 +244,7 @@ fn a_certificate_mismatch_names_both_fingerprints_and_where_the_new_one_comes_fr
         format!(
             "the certificate laptop.local:7654 presented is not the expected one: expected {}, \
              presented {}. the secret was not sent. if that machine's certificate changed on \
-             purpose, `koshi share grant` there prints the new fingerprint: give it with \
+             purpose, `koshi share open` there prints the new fingerprint: give it with \
              --certificate-fingerprint, or with `koshi remote edit` for a saved server.",
             "aa".repeat(32),
             "bb".repeat(32)

@@ -8,6 +8,7 @@
 use super::*;
 
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use clap::Parser;
@@ -19,6 +20,7 @@ use koshi_core::lock::LockMode;
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::remote_tokens::TokenEntry;
 use koshi_link::in_session::InSessionContext;
+use tempfile::TempDir;
 use uuid::Uuid;
 
 use crate::cli::{parse_expiry, Cli, CliCommand, OutputFormat};
@@ -216,34 +218,37 @@ fn a_listing_takes_the_json_format_flag() {
 }
 
 #[test]
-fn a_grant_block_with_no_listen_address_names_the_config_key_that_sets_one() {
+fn a_grant_block_with_no_listen_address_names_the_line_to_set_and_share_open() {
     let connection_token = ConnectionToken::from_secret("f00d");
     let rendered_output =
         output::render_share_grant(&connection_token, "alice", &TokenScope::HostWide, false)
-            + &output::render_remote_ready("alice", &RemoteReady::NoAddress);
+            + &output::render_remote_ready(Some("alice"), &RemoteReady::NoAddress);
 
     assert_eq!(
         rendered_output,
         "anyone holding this token can run anything you can.\n\
          f00d\n\
-         no remote listen address is set; add `remote-listen \"<ip>:<port>\"` to koshi.kdl.\n"
+         koshi.kdl names no remote listen address, so this token cannot be used to connect \
+         yet. Set `remote-listen \"<ip>:<port>\"` in koshi.kdl, run `koshi restart-servers`, \
+         then run `koshi share open`.\n"
     );
     assert_eq!(rendered_output.matches("f00d").count(), 1);
     assert!(!rendered_output.contains("://"));
 }
 
 #[test]
-fn a_grant_block_with_remote_access_left_off_says_the_token_cannot_connect_yet() {
+fn a_grant_block_with_remote_access_left_off_names_share_open() {
     let connection_token = ConnectionToken::from_secret("f00d");
     let rendered_output =
         output::render_share_grant(&connection_token, "alice", &TokenScope::HostWide, false)
-            + &output::render_remote_ready("alice", &RemoteReady::Off);
+            + &output::render_remote_ready(Some("alice"), &RemoteReady::Off);
 
     assert_eq!(
         rendered_output,
         "anyone holding this token can run anything you can.\n\
          f00d\n\
-         remote access stays off; this token cannot be used to connect yet.\n"
+         remote access stays off. Run `koshi share open` to open the port. This token cannot \
+         be used to connect until the port opens.\n"
     );
 }
 
@@ -253,11 +258,12 @@ fn a_grant_block_with_remote_access_on_ends_with_the_command_that_connects() {
     let rendered_output =
         output::render_share_grant(&connection_token, "alice", &TokenScope::HostWide, false)
             + &output::render_remote_ready(
-                "alice",
+                Some("alice"),
                 &RemoteReady::On {
                     remote_listen_address: parse_listen_address("192.0.2.20:7654"),
                     host_addresses: Vec::new(),
                     certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+                    config_mismatch: None,
                 },
             );
 
@@ -270,8 +276,8 @@ fn a_grant_block_with_remote_access_on_ends_with_the_command_that_connects() {
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
              {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-             this machine accepts connections on 192.0.2.20 only (remote-listen in koshi.kdl); \
-             the other machine must connect to that address.\n"
+             this machine accepts connections on 192.0.2.20 only; the other machine must \
+             connect to that address.\n"
         )
     );
 }
@@ -284,7 +290,7 @@ fn a_grant_block_that_replaced_one_opens_with_the_grant_that_stopped() {
         "alice",
         &TokenScope::Session(build_fixed_session_id()),
         true,
-    ) + &output::render_remote_ready("alice", &RemoteReady::NoAddress);
+    ) + &output::render_remote_ready(Some("alice"), &RemoteReady::NoAddress);
 
     assert_eq!(
         rendered_output,
@@ -292,7 +298,9 @@ fn a_grant_block_that_replaced_one_opens_with_the_grant_that_stopped() {
          working.\n\
          anyone holding this token can run anything you can.\n\
          f00d\n\
-         no remote listen address is set; add `remote-listen \"<ip>:<port>\"` to koshi.kdl.\n"
+         koshi.kdl names no remote listen address, so this token cannot be used to connect \
+         yet. Set `remote-listen \"<ip>:<port>\"` in koshi.kdl, run `koshi restart-servers`, \
+         then run `koshi share open`.\n"
     );
 }
 
@@ -423,11 +431,12 @@ fn the_secret_block_stands_on_its_own_and_says_nothing_about_connecting() {
 fn an_identity_shaped_like_an_address_is_not_offered_as_a_saved_name() {
     // `desk:22` has the `host:port` shape: the command carries no `--save-as`.
     let rendered_output = output::render_remote_ready(
-        "desk:22",
+        Some("desk:22"),
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+            config_mismatch: None,
         },
     );
 
@@ -438,8 +447,8 @@ fn an_identity_shaped_like_an_address_is_not_offered_as_a_saved_name() {
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
              {TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-             this machine accepts connections on 192.0.2.20 only (remote-listen in koshi.kdl); \
-             the other machine must connect to that address.\n"
+             this machine accepts connections on 192.0.2.20 only; the other machine must \
+             connect to that address.\n"
         )
     );
 }
@@ -448,11 +457,12 @@ fn an_identity_shaped_like_an_address_is_not_offered_as_a_saved_name() {
 fn an_identity_with_a_space_in_it_is_not_offered_as_a_saved_name() {
     // `ada lovelace` is two words: the command carries no `--save-as`.
     let rendered_output = output::render_remote_ready(
-        "ada lovelace",
+        Some("ada lovelace"),
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+            config_mismatch: None,
         },
     );
 
@@ -463,8 +473,8 @@ fn an_identity_with_a_space_in_it_is_not_offered_as_a_saved_name() {
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
              {TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-             this machine accepts connections on 192.0.2.20 only (remote-listen in koshi.kdl); \
-             the other machine must connect to that address.\n"
+             this machine accepts connections on 192.0.2.20 only; the other machine must \
+             connect to that address.\n"
         )
     );
 }
@@ -482,6 +492,7 @@ fn a_router_that_could_not_answer_leaves_the_state_unread_rather_than_off() {
         remote_listen_address: parse_listen_address("192.0.2.20:7654"),
         host_addresses: Vec::new(),
         certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+        config_mismatch: None,
     }));
     assert_eq!(
         answered_remote_ready,
@@ -489,6 +500,7 @@ fn a_router_that_could_not_answer_leaves_the_state_unread_rather_than_off() {
             remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+            config_mismatch: None,
         },
         "an answer is passed through as it stands"
     );
@@ -501,14 +513,31 @@ fn a_router_that_could_not_answer_leaves_the_state_unread_rather_than_off() {
     );
 }
 
-/// A `RemoteStatus` answer for the listen address `192.0.2.20:7654`.
+/// Write a `koshi.kdl` in `config_directory` with a `remote-listen` line
+/// naming `remote_listen_text`, or none for `None`, and hand back its path.
+fn write_koshi_config(config_directory: &Path, remote_listen_text: Option<&str>) -> PathBuf {
+    let config_file_path = config_directory.join("koshi.kdl");
+    let config_text = match remote_listen_text {
+        Some(remote_listen_text) => format!("version 2\nremote-listen \"{remote_listen_text}\"\n"),
+        None => "version 2\n".to_string(),
+    };
+    std::fs::write(&config_file_path, config_text).expect("the koshi.kdl is written");
+    config_file_path
+}
+
+/// A `RemoteStatus` answer for a router that read `router_listen_text` from
+/// `router_config_file_path` when it started, holding no connection from
+/// another machine.
 fn build_remote_status(
+    router_listen_text: Option<&str>,
+    router_config_file_path: Option<&Path>,
     is_remote_access_enabled: bool,
     is_listening: bool,
     certificate_fingerprint: Option<String>,
 ) -> RouterResult {
     RouterResult::RemoteStatus {
-        remote_listen_address: Some(parse_listen_address("192.0.2.20:7654")),
+        remote_listen_address: router_listen_text.map(parse_listen_address),
+        config_file_path: router_config_file_path.map(Path::to_path_buf),
         is_remote_access_enabled,
         is_listening,
         certificate_fingerprint,
@@ -516,20 +545,39 @@ fn build_remote_status(
     }
 }
 
-#[test]
-fn a_serving_router_gives_the_fingerprint_it_names_and_nothing_is_asked() {
-    let remote_ready = resolve_remote_access_ready(
-        |_| panic!("a serving router is not asked to open anything"),
+/// What `resolve_remote_access_ready` gives for a router that answers the
+/// status request with `remote_status` and asks nothing more, with this koshi
+/// reading `config_file_path`. A question or an enable request fails the test.
+fn resolve_without_asking(
+    config_file_path: Option<&Path>,
+    remote_status: RouterResult,
+) -> RemoteReady {
+    resolve_remote_access_ready(
+        config_file_path,
+        |prompt_text| panic!("nothing is asked, got {prompt_text:?}"),
         |router_request_kind| match router_request_kind {
-            RouterRequestKind::RemoteStatus => Ok(build_remote_status(
-                true,
-                true,
-                Some(TEST_CERTIFICATE_FINGERPRINT.to_string()),
-            )),
+            RouterRequestKind::RemoteStatus => Ok(remote_status.clone()),
             unexpected_request_kind => panic!("unexpected request {unexpected_request_kind:?}"),
         },
     )
-    .expect("the router answers");
+    .expect("the router answers")
+}
+
+#[test]
+fn a_serving_router_gives_the_fingerprint_it_names_and_nothing_is_asked() {
+    let config_directory = TempDir::new().expect("a config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), Some("192.0.2.20:7654"));
+
+    let remote_ready = resolve_without_asking(
+        Some(&config_file_path),
+        build_remote_status(
+            Some("192.0.2.20:7654"),
+            Some(&config_file_path),
+            true,
+            true,
+            Some(TEST_CERTIFICATE_FINGERPRINT.to_string()),
+        ),
+    );
 
     assert_eq!(
         remote_ready,
@@ -537,16 +585,28 @@ fn a_serving_router_gives_the_fingerprint_it_names_and_nothing_is_asked() {
             remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+            config_mismatch: None,
         }
     );
 }
 
 #[test]
 fn a_serving_router_that_names_no_fingerprint_gives_no_connect_command() {
+    let config_directory = TempDir::new().expect("a config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), Some("192.0.2.20:7654"));
+    let remote_status = build_remote_status(
+        Some("192.0.2.20:7654"),
+        Some(&config_file_path),
+        true,
+        true,
+        None,
+    );
+
     let remote_ready_error = resolve_remote_access_ready(
+        Some(&config_file_path),
         |_| panic!("a serving router is not asked to open anything"),
         |router_request_kind| match router_request_kind {
-            RouterRequestKind::RemoteStatus => Ok(build_remote_status(true, true, None)),
+            RouterRequestKind::RemoteStatus => Ok(remote_status.clone()),
             unexpected_request_kind => panic!("unexpected request {unexpected_request_kind:?}"),
         },
     )
@@ -563,14 +623,23 @@ fn a_serving_router_that_names_no_fingerprint_gives_no_connect_command() {
 
 #[test]
 fn an_enable_the_user_confirms_gives_the_fingerprint_the_router_answers_with() {
+    let config_directory = TempDir::new().expect("a config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), Some("192.0.2.20:7654"));
     let mut asked_prompt_texts = Vec::new();
     let remote_ready = resolve_remote_access_ready(
+        Some(&config_file_path),
         |prompt_text| {
             asked_prompt_texts.push(prompt_text.to_string());
             true
         },
         |router_request_kind| match router_request_kind {
-            RouterRequestKind::RemoteStatus => Ok(build_remote_status(false, false, None)),
+            RouterRequestKind::RemoteStatus => Ok(build_remote_status(
+                Some("192.0.2.20:7654"),
+                Some(&config_file_path),
+                false,
+                false,
+                None,
+            )),
             RouterRequestKind::EnableRemote => Ok(RouterResult::RemoteEnabled {
                 remote_listen_address: parse_listen_address("192.0.2.20:7654"),
                 certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
@@ -590,41 +659,538 @@ fn an_enable_the_user_confirms_gives_the_fingerprint_the_router_answers_with() {
             remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+            config_mismatch: None,
         }
+    );
+}
+
+#[test]
+fn an_enable_the_router_refuses_carries_its_sentence_and_leaves_remote_access_off() {
+    // The bind fails: the router writes no record, so remote access stays off,
+    // and the block names the router's own sentence.
+    let config_directory = TempDir::new().expect("a config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), Some("192.0.2.20:7654"));
+    let remote_ready = resolve_remote_access_ready(
+        Some(&config_file_path),
+        |_| true,
+        |router_request_kind| match router_request_kind {
+            RouterRequestKind::RemoteStatus => Ok(build_remote_status(
+                Some("192.0.2.20:7654"),
+                Some(&config_file_path),
+                false,
+                false,
+                None,
+            )),
+            RouterRequestKind::EnableRemote => Ok(RouterResult::Error(IpcErrorPayload {
+                code: IpcErrorCode::RequestFailed,
+                message: "the remote listener could not open 192.0.2.20:7654: Address already \
+                          in use (os error 48)"
+                    .to_string(),
+            })),
+            unexpected_request_kind => panic!("unexpected request {unexpected_request_kind:?}"),
+        },
+    )
+    .expect("the router answers");
+
+    assert_eq!(
+        remote_ready,
+        RemoteReady::Blocked {
+            remote_listen_address: parse_listen_address("192.0.2.20:7654"),
+            is_remote_access_enabled: false,
+            open_refusal: Some(
+                "the remote listener could not open 192.0.2.20:7654: Address already in use (os \
+                 error 48)"
+                    .to_string()
+            ),
+        }
+    );
+    assert_eq!(
+        output::render_remote_ready(Some("alice"), &remote_ready),
+        "remote access stays off, and the port did not open: the remote listener could not \
+         open 192.0.2.20:7654: Address already in use (os error 48). Run `koshi share open` once \
+         that is fixed. This token cannot be used to connect until the port opens.\n"
+    );
+    assert_eq!(
+        output::render_remote_ready(None, &remote_ready),
+        "remote access stays off, and the port did not open: the remote listener could not \
+         open 192.0.2.20:7654: Address already in use (os error 48). Run `koshi share open` once \
+         that is fixed.\n"
+    );
+}
+
+#[test]
+fn a_no_to_trying_the_port_again_leaves_remote_access_on_and_the_port_shut() {
+    let config_directory = TempDir::new().expect("a config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), Some("192.0.2.20:7654"));
+    let mut asked_prompt_texts = Vec::new();
+    let remote_ready = resolve_remote_access_ready(
+        Some(&config_file_path),
+        |prompt_text| {
+            asked_prompt_texts.push(prompt_text.to_string());
+            false
+        },
+        |router_request_kind| match router_request_kind {
+            RouterRequestKind::RemoteStatus => Ok(build_remote_status(
+                Some("192.0.2.20:7654"),
+                Some(&config_file_path),
+                true,
+                false,
+                None,
+            )),
+            unexpected_request_kind => panic!("unexpected request {unexpected_request_kind:?}"),
+        },
+    )
+    .expect("the router answers");
+
+    assert_eq!(
+        asked_prompt_texts,
+        vec![
+            "remote access is on, and nothing is listening on 192.0.2.20:7654.\n\
+             try to open 192.0.2.20:7654 now? [y/N] "
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        remote_ready,
+        RemoteReady::Blocked {
+            remote_listen_address: parse_listen_address("192.0.2.20:7654"),
+            is_remote_access_enabled: true,
+            open_refusal: None,
+        }
+    );
+    assert_eq!(
+        output::render_remote_ready(Some("alice"), &remote_ready),
+        "remote access is on, and nothing is listening on 192.0.2.20:7654: the router could not \
+         open it when it started. Run `koshi share open` to try again. This token cannot be used \
+         to connect until the port opens.\n"
+    );
+}
+
+#[test]
+fn a_no_to_switching_remote_access_on_names_share_open() {
+    let config_directory = TempDir::new().expect("a config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), Some("192.0.2.20:7654"));
+    let remote_ready = resolve_remote_access_ready(
+        Some(&config_file_path),
+        |_| false,
+        |router_request_kind| match router_request_kind {
+            RouterRequestKind::RemoteStatus => Ok(build_remote_status(
+                Some("192.0.2.20:7654"),
+                Some(&config_file_path),
+                false,
+                false,
+                None,
+            )),
+            unexpected_request_kind => panic!("unexpected request {unexpected_request_kind:?}"),
+        },
+    )
+    .expect("the router answers");
+
+    assert_eq!(remote_ready, RemoteReady::Off);
+    assert_eq!(
+        output::render_remote_ready(Some("alice"), &remote_ready),
+        "remote access stays off. Run `koshi share open` to open the port. This token cannot be \
+         used to connect until the port opens.\n"
+    );
+}
+
+#[test]
+fn share_open_switches_remote_access_on_without_a_question() {
+    // `share open` answers the offer itself: the enable is sent, and the block
+    // names the secret `koshi share grant` printed and no saved name.
+    let config_directory = TempDir::new().expect("a config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), Some("192.0.2.20:7654"));
+    let mut is_enable_sent = false;
+    let remote_ready = resolve_remote_access_ready(
+        Some(&config_file_path),
+        |_| true,
+        |router_request_kind| match router_request_kind {
+            RouterRequestKind::RemoteStatus => Ok(build_remote_status(
+                Some("192.0.2.20:7654"),
+                Some(&config_file_path),
+                false,
+                false,
+                None,
+            )),
+            RouterRequestKind::EnableRemote => {
+                is_enable_sent = true;
+                Ok(RouterResult::RemoteEnabled {
+                    remote_listen_address: parse_listen_address("192.0.2.20:7654"),
+                    certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+                })
+            }
+            unexpected_request_kind => panic!("unexpected request {unexpected_request_kind:?}"),
+        },
+    )
+    .expect("the router answers");
+
+    assert!(is_enable_sent, "the port is opened");
+    assert_eq!(
+        output::render_remote_ready(None, &remote_ready),
+        format!(
+            "connect from another machine:\n\
+             \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
+             set KOSHI_REMOTE_SECRET to the secret `koshi share grant` printed, or paste it when \
+             asked.\n\
+             this machine accepts connections on 192.0.2.20 only; the other machine must connect \
+             to that address.\n"
+        )
+    );
+}
+
+#[test]
+fn share_open_on_a_serving_router_sends_no_enable_and_prints_the_fingerprint() {
+    let config_directory = TempDir::new().expect("a config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), Some("127.0.0.1:7654"));
+
+    let remote_ready = resolve_without_asking(
+        Some(&config_file_path),
+        build_remote_status(
+            Some("127.0.0.1:7654"),
+            Some(&config_file_path),
+            true,
+            true,
+            Some(TEST_CERTIFICATE_FINGERPRINT.to_string()),
+        ),
+    );
+
+    assert_eq!(
+        output::render_remote_ready(None, &remote_ready),
+        format!(
+            "connect from this machine:\n\
+             \x20 koshi attach --remote 127.0.0.1:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
+             set KOSHI_REMOTE_SECRET to the secret `koshi share grant` printed, or paste it when \
+             asked.\n\
+             the router listens on 127.0.0.1:7654, a loopback address, so no other machine can \
+             connect to it. To let another machine connect, set remote-listen in koshi.kdl to an \
+             address of this machine, such as 0.0.0.0:7654, then run `koshi restart-servers`.\n"
+        )
+    );
+}
+
+#[test]
+fn no_address_in_the_router_or_the_file_asks_nothing_and_names_the_line_to_set() {
+    let config_directory = TempDir::new().expect("a config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), None);
+
+    let remote_ready = resolve_without_asking(
+        Some(&config_file_path),
+        build_remote_status(None, Some(&config_file_path), false, false, None),
+    );
+
+    assert_eq!(remote_ready, RemoteReady::NoAddress);
+    assert_eq!(
+        output::render_remote_ready(None, &remote_ready),
+        "koshi.kdl names no remote listen address. Set `remote-listen \"<ip>:<port>\"` in \
+         koshi.kdl, run `koshi restart-servers`, then run `koshi share open` again.\n"
+    );
+}
+
+#[test]
+fn a_router_started_before_remote_listen_was_set_names_the_restart_and_asks_nothing() {
+    // The router read no address when it started; the file names one now.
+    let config_directory = TempDir::new().expect("a config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), Some("127.0.0.1:7654"));
+
+    let remote_ready = resolve_without_asking(
+        Some(&config_file_path),
+        build_remote_status(None, Some(&config_file_path), false, false, None),
+    );
+
+    assert_eq!(
+        remote_ready,
+        RemoteReady::ConfigMismatched {
+            router_listen_address: None,
+            config_mismatch: ConfigMismatch::FileChanged {
+                config_file_path: config_file_path.clone(),
+                configured_address: Some(parse_listen_address("127.0.0.1:7654")),
+            },
+        }
+    );
+    assert_eq!(
+        output::render_remote_ready(Some("alice"), &remote_ready),
+        format!(
+            "{} names the remote listen address 127.0.0.1:7654, and the running router read no \
+             remote listen address from it when it started. Run `koshi restart-servers` so the \
+             router reads it again, then run `koshi share open`. This token cannot be used to \
+             connect until the port opens.\n",
+            config_file_path.display()
+        )
+    );
+}
+
+#[test]
+fn a_router_whose_file_dropped_its_address_names_the_restart_and_no_open() {
+    // The router read an address it never opened; the file names none now.
+    let config_directory = TempDir::new().expect("a config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), None);
+
+    let remote_ready = resolve_without_asking(
+        Some(&config_file_path),
+        build_remote_status(
+            Some("192.0.2.20:7654"),
+            Some(&config_file_path),
+            false,
+            false,
+            None,
+        ),
+    );
+
+    assert_eq!(
+        output::render_remote_ready(None, &remote_ready),
+        format!(
+            "{} names no remote listen address, and the running router read the remote listen \
+             address 192.0.2.20:7654 from it when it started. Run `koshi restart-servers` so the \
+             router reads it again.\n",
+            config_file_path.display()
+        )
+    );
+}
+
+#[test]
+fn a_serving_router_whose_file_now_names_another_address_keeps_serving_and_names_the_restart() {
+    // A guest may be attached on 192.0.2.20:7654: the router keeps serving it,
+    // and the block names the address the file names now.
+    let config_directory = TempDir::new().expect("a config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), Some("0.0.0.0:7654"));
+
+    let remote_ready = resolve_without_asking(
+        Some(&config_file_path),
+        build_remote_status(
+            Some("192.0.2.20:7654"),
+            Some(&config_file_path),
+            true,
+            true,
+            Some(TEST_CERTIFICATE_FINGERPRINT.to_string()),
+        ),
+    );
+
+    assert_eq!(
+        remote_ready,
+        RemoteReady::On {
+            remote_listen_address: parse_listen_address("192.0.2.20:7654"),
+            host_addresses: Vec::new(),
+            certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+            config_mismatch: Some(ConfigMismatch::FileChanged {
+                config_file_path: config_file_path.clone(),
+                configured_address: Some(parse_listen_address("0.0.0.0:7654")),
+            }),
+        }
+    );
+    assert_eq!(
+        output::render_remote_ready(Some("alice"), &remote_ready),
+        format!(
+            "connect from another machine:\n\
+             \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
+             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+             this machine accepts connections on 192.0.2.20 only; the other machine must connect \
+             to that address.\n\
+             {} names the remote listen address 0.0.0.0:7654, and the running router read the \
+             remote listen address 192.0.2.20:7654 from it when it started. Run `koshi \
+             restart-servers` so the router reads it again.\n",
+            config_file_path.display()
+        )
+    );
+}
+
+#[test]
+fn a_router_reading_another_config_file_names_both_files_and_asks_nothing() {
+    let router_config_directory = TempDir::new().expect("the router's config directory");
+    let router_config_file_path =
+        write_koshi_config(router_config_directory.path(), Some("192.0.2.20:7654"));
+    let config_directory = TempDir::new().expect("this koshi's config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), Some("127.0.0.1:7654"));
+
+    let remote_ready = resolve_without_asking(
+        Some(&config_file_path),
+        build_remote_status(
+            Some("192.0.2.20:7654"),
+            Some(&router_config_file_path),
+            false,
+            false,
+            None,
+        ),
+    );
+
+    assert_eq!(
+        remote_ready,
+        RemoteReady::ConfigMismatched {
+            router_listen_address: Some(parse_listen_address("192.0.2.20:7654")),
+            config_mismatch: ConfigMismatch::OtherFile {
+                router_config_file_path: Some(router_config_file_path.clone()),
+                config_file_path: Some(config_file_path.clone()),
+                configured_address: Some(parse_listen_address("127.0.0.1:7654")),
+            },
+        }
+    );
+    assert_eq!(
+        output::render_remote_ready(None, &remote_ready),
+        format!(
+            "the running router reads {}, which names the remote listen address 192.0.2.20:7654, \
+             and this koshi reads {}, which names the remote listen address 127.0.0.1:7654. Set \
+             remote-listen in {}, then run `koshi restart-servers`, then run `koshi share open`.\n",
+            router_config_file_path.display(),
+            config_file_path.display(),
+            router_config_file_path.display()
+        )
+    );
+}
+
+#[test]
+fn a_router_naming_no_config_file_and_another_address_names_the_restart() {
+    // A koshi 0.5.0 router names no file.
+    let config_directory = TempDir::new().expect("a config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), Some("127.0.0.1:7654"));
+
+    let remote_ready = resolve_without_asking(
+        Some(&config_file_path),
+        build_remote_status(Some("192.0.2.20:7654"), None, false, false, None),
+    );
+
+    assert_eq!(
+        output::render_remote_ready(None, &remote_ready),
+        format!(
+            "the running router does not name the koshi.kdl it reads, and read the remote listen \
+             address 192.0.2.20:7654 when it started; this koshi reads {}, which names the remote \
+             listen address 127.0.0.1:7654. Run `koshi restart-servers`, then run `koshi share \
+             open`.\n",
+            config_file_path.display()
+        )
+    );
+}
+
+#[test]
+fn a_mismatch_check_finds_nothing_while_both_reads_agree() {
+    let config_directory = TempDir::new().expect("a config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), Some("127.0.0.1:7654"));
+    let other_config_directory = TempDir::new().expect("the router's config directory");
+    let other_config_file_path =
+        write_koshi_config(other_config_directory.path(), Some("127.0.0.1:7654"));
+    let listen_address = Some(parse_listen_address("127.0.0.1:7654"));
+
+    assert_eq!(
+        find_config_mismatch(
+            listen_address,
+            Some(&config_file_path),
+            Some(&config_file_path),
+            listen_address
+        ),
+        None,
+        "one file, one address"
+    );
+    assert_eq!(
+        find_config_mismatch(
+            listen_address,
+            Some(&other_config_file_path),
+            Some(&config_file_path),
+            listen_address
+        ),
+        None,
+        "two files naming the address the router read"
+    );
+    assert_eq!(
+        find_config_mismatch(
+            listen_address,
+            None,
+            Some(&config_file_path),
+            listen_address
+        ),
+        None,
+        "a router naming no file, and this file naming its address"
+    );
+    assert_eq!(
+        find_config_mismatch(None, None, None, None),
+        None,
+        "no file and no address anywhere"
+    );
+}
+
+#[test]
+fn a_mismatch_check_reads_the_routers_own_file_when_it_is_another_one() {
+    // The router's file changed since the router started: that file is named,
+    // whatever this koshi's file says.
+    let router_config_directory = TempDir::new().expect("the router's config directory");
+    let router_config_file_path =
+        write_koshi_config(router_config_directory.path(), Some("0.0.0.0:7654"));
+    let config_directory = TempDir::new().expect("this koshi's config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), Some("127.0.0.1:7654"));
+
+    assert_eq!(
+        find_config_mismatch(
+            Some(parse_listen_address("127.0.0.1:7654")),
+            Some(&router_config_file_path),
+            Some(&config_file_path),
+            Some(parse_listen_address("127.0.0.1:7654")),
+        ),
+        Some(ConfigMismatch::FileChanged {
+            config_file_path: router_config_file_path,
+            configured_address: Some(parse_listen_address("0.0.0.0:7654")),
+        })
+    );
+}
+
+#[test]
+fn a_mismatch_check_reads_a_missing_router_file_as_naming_no_address() {
+    let config_directory = TempDir::new().expect("a config directory");
+    let missing_config_file_path = config_directory.path().join("koshi.kdl");
+
+    assert_eq!(
+        find_config_mismatch(
+            Some(parse_listen_address("127.0.0.1:7654")),
+            Some(&missing_config_file_path),
+            None,
+            None,
+        ),
+        Some(ConfigMismatch::FileChanged {
+            config_file_path: missing_config_file_path,
+            configured_address: None,
+        })
+    );
+}
+
+#[test]
+fn a_mismatch_check_names_no_koshi_kdl_for_a_koshi_with_no_config_directory() {
+    let router_config_directory = TempDir::new().expect("the router's config directory");
+    let router_config_file_path =
+        write_koshi_config(router_config_directory.path(), Some("127.0.0.1:7654"));
+    let config_mismatch = find_config_mismatch(
+        Some(parse_listen_address("127.0.0.1:7654")),
+        Some(&router_config_file_path),
+        None,
+        None,
+    )
+    .expect("this koshi names no address");
+
+    assert_eq!(
+        output::render_config_mismatch_fact(
+            &config_mismatch,
+            Some(parse_listen_address("127.0.0.1:7654"))
+        ),
+        format!(
+            "the running router reads {}, which names the remote listen address 127.0.0.1:7654, \
+             and this koshi reads no koshi.kdl",
+            router_config_file_path.display()
+        )
     );
 }
 
 #[test]
 fn remote_access_that_could_not_be_read_says_so_rather_than_saying_it_is_off() {
     // `Unknown` renders its own block, not the `Off` one.
-    let rendered_text = output::render_remote_ready("alice", &RemoteReady::Unknown);
+    let rendered_text = output::render_remote_ready(Some("alice"), &RemoteReady::Unknown);
 
     assert_eq!(
         rendered_text,
-        "this machine's remote access could not be read, so whether this token can \
-         connect is unknown; run `koshi share grant` again, or check the reason \
-         printed above.\n"
+        "this machine's remote access could not be read, so whether this token can connect is \
+         unknown; check the reason printed above, then run `koshi share open`, which prints how \
+         to connect.\n"
     );
     assert!(
         !rendered_text.contains("stays off"),
         "an unread state is not the same as switched off: {rendered_text}"
-    );
-}
-
-#[test]
-fn a_port_held_by_something_else_says_what_to_run_to_try_again() {
-    let rendered_text = output::render_remote_ready(
-        "alice",
-        &RemoteReady::Blocked {
-            remote_listen_address: parse_listen_address("192.0.2.20:7654"),
-        },
-    );
-
-    assert_eq!(
-        rendered_text,
-        "remote access is on, and nothing is listening on 192.0.2.20:7654: another program \
-         holds it. Free that address, then run `koshi share grant` again to open the port. This \
-         token cannot be used to connect until then.\n"
     );
 }
 
@@ -712,7 +1278,8 @@ fn the_secret_is_written_before_anything_that_could_prompt_or_fail() {
         output_recorder.get_written_text(),
         "anyone holding this token can run anything you can.\n\
          f00d\n\
-         remote access stays off; this token cannot be used to connect yet.\n"
+         remote access stays off. Run `koshi share open` to open the port. This token cannot \
+         be used to connect until the port opens.\n"
     );
 }
 
@@ -1274,7 +1841,7 @@ fn build_host_address(ip_address_text: &str, interface_name: &str) -> HostAddres
 #[test]
 fn a_listener_on_every_ipv4_address_names_each_address_of_this_machine_with_its_interface() {
     let rendered_output = output::render_remote_ready(
-        "alice",
+        Some("alice"),
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("0.0.0.0:7654"),
             host_addresses: vec![
@@ -1282,6 +1849,7 @@ fn a_listener_on_every_ipv4_address_names_each_address_of_this_machine_with_its_
                 build_host_address("198.51.100.2", "utun3"),
             ],
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+            config_mismatch: None,
         },
     );
 
@@ -1301,11 +1869,12 @@ fn a_listener_on_every_ipv4_address_names_each_address_of_this_machine_with_its_
 #[test]
 fn a_listener_on_every_ipv6_address_names_each_address_in_brackets() {
     let rendered_output = output::render_remote_ready(
-        "desk:22",
+        Some("desk:22"),
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("[::]:7654"),
             host_addresses: vec![build_host_address("2001:db8::20", "Wi-Fi")],
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+            config_mismatch: None,
         },
     );
 
@@ -1323,11 +1892,12 @@ fn a_listener_on_every_ipv6_address_names_each_address_in_brackets() {
 #[test]
 fn an_interface_name_is_printed_without_its_control_characters() {
     let rendered_output = output::render_remote_ready(
-        "alice",
+        Some("alice"),
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("0.0.0.0:7654"),
             host_addresses: vec![build_host_address("192.0.2.20", "en0\u{1b}]0;x\u{7}")],
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+            config_mismatch: None,
         },
     );
 
@@ -1345,11 +1915,12 @@ fn an_interface_name_is_printed_without_its_control_characters() {
 #[test]
 fn a_listener_on_every_address_of_a_machine_with_none_names_a_placeholder() {
     let rendered_output = output::render_remote_ready(
-        "alice",
+        Some("alice"),
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("0.0.0.0:7654"),
             host_addresses: Vec::new(),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+            config_mismatch: None,
         },
     );
 
@@ -1368,11 +1939,12 @@ fn a_listener_on_every_address_of_a_machine_with_none_names_a_placeholder() {
 fn a_listener_on_one_address_names_it_as_the_only_one_and_offers_a_plain_identity_as_the_saved_name(
 ) {
     let rendered_output = output::render_remote_ready(
-        "alice",
+        Some("alice"),
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+            config_mismatch: None,
         },
     );
 
@@ -1383,8 +1955,8 @@ fn a_listener_on_one_address_names_it_as_the_only_one_and_offers_a_plain_identit
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
              {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-             this machine accepts connections on 192.0.2.20 only (remote-listen in koshi.kdl); \
-             the other machine must connect to that address.\n"
+             this machine accepts connections on 192.0.2.20 only; the other machine must \
+             connect to that address.\n"
         )
     );
 }
@@ -1396,11 +1968,12 @@ fn render_serving_remote_ready_for_alice(
     host_addresses: Vec<HostAddress>,
 ) -> String {
     output::render_remote_ready(
-        "alice",
+        Some("alice"),
         &RemoteReady::On {
             remote_listen_address: parse_listen_address(remote_listen_address_text),
             host_addresses,
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
+            config_mismatch: None,
         },
     )
 }
@@ -1414,9 +1987,9 @@ fn a_listener_on_ipv4_loopback_names_the_command_for_this_machine_with_its_finge
              \x20 koshi attach --remote 127.0.0.1:7654 --certificate-fingerprint \
              {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-             remote-listen is 127.0.0.1:7654, a loopback address, so no other machine can \
+             the router listens on 127.0.0.1:7654, a loopback address, so no other machine can \
              connect to it. To let another machine connect, set remote-listen in koshi.kdl to an \
-             address of this machine, such as 0.0.0.0:7654.\n"
+             address of this machine, such as 0.0.0.0:7654, then run `koshi restart-servers`.\n"
         )
     );
 }
@@ -1430,9 +2003,9 @@ fn a_listener_on_another_ipv4_loopback_address_names_the_command_for_this_machin
              \x20 koshi attach --remote 127.0.0.2:7654 --certificate-fingerprint \
              {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-             remote-listen is 127.0.0.2:7654, a loopback address, so no other machine can \
+             the router listens on 127.0.0.2:7654, a loopback address, so no other machine can \
              connect to it. To let another machine connect, set remote-listen in koshi.kdl to an \
-             address of this machine, such as 0.0.0.0:7654.\n"
+             address of this machine, such as 0.0.0.0:7654, then run `koshi restart-servers`.\n"
         )
     );
 }
@@ -1446,9 +2019,9 @@ fn a_listener_on_ipv6_loopback_names_the_command_for_this_machine_in_brackets() 
              \x20 koshi attach --remote [::1]:7654 --certificate-fingerprint \
              {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-             remote-listen is [::1]:7654, a loopback address, so no other machine can connect to \
-             it. To let another machine connect, set remote-listen in koshi.kdl to an address of \
-             this machine, such as 0.0.0.0:7654.\n"
+             the router listens on [::1]:7654, a loopback address, so no other machine can \
+             connect to it. To let another machine connect, set remote-listen in koshi.kdl to an \
+             address of this machine, such as 0.0.0.0:7654, then run `koshi restart-servers`.\n"
         )
     );
 }
@@ -1462,9 +2035,9 @@ fn a_listener_on_ipv4_mapped_loopback_names_the_ipv4_command_for_this_machine() 
              \x20 koshi attach --remote 127.0.0.1:7654 --certificate-fingerprint \
              {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-             remote-listen is [::ffff:127.0.0.1]:7654, a loopback address, so no other machine \
-             can connect to it. To let another machine connect, set remote-listen in koshi.kdl to \
-             an address of this machine, such as 0.0.0.0:7654.\n"
+             the router listens on [::ffff:127.0.0.1]:7654, a loopback address, so no other machine can \
+             connect to it. To let another machine connect, set remote-listen in koshi.kdl to an \
+             address of this machine, such as 0.0.0.0:7654, then run `koshi restart-servers`.\n"
         )
     );
 }
@@ -1476,8 +2049,8 @@ fn a_listener_on_one_ipv4_mapped_address_renders_as_its_ipv4_form() {
          \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
          {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
          set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-         this machine accepts connections on 192.0.2.20 only (remote-listen in koshi.kdl); \
-         the other machine must connect to that address.\n"
+         this machine accepts connections on 192.0.2.20 only; the other machine must \
+         connect to that address.\n"
     );
 
     assert_eq!(

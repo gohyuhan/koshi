@@ -583,13 +583,28 @@ fn a_refusal_that_is_not_an_unknown_kind_is_left_as_the_router_wrote_it() {
     router_thread.join().expect("the stand-in router exits");
 }
 
-// --- Counting the connections from another machine --------------------------
+// --- Reading the remote access status ---------------------------------------
 
 /// A remote-status answer reporting `remote_connection_count`, with
-/// `0.0.0.0:7654`, remote access on and listening, and a fixed fingerprint.
+/// `0.0.0.0:7654` read from `/home/user/.config/koshi/koshi.kdl`, remote
+/// access on and listening, and a fixed fingerprint.
 fn build_remote_status_result(remote_connection_count: usize) -> RouterResult {
     RouterResult::RemoteStatus {
         remote_listen_address: Some(std::net::SocketAddr::from(([0, 0, 0, 0], 7654))),
+        config_file_path: Some(PathBuf::from("/home/user/.config/koshi/koshi.kdl")),
+        is_remote_access_enabled: true,
+        is_listening: true,
+        certificate_fingerprint: Some("aa".repeat(32)),
+        remote_connection_count,
+    }
+}
+
+/// The status [`build_remote_status_result`] carries for
+/// `remote_connection_count`.
+fn build_expected_remote_access_status(remote_connection_count: usize) -> RemoteAccessStatus {
+    RemoteAccessStatus {
+        remote_listen_address: Some(std::net::SocketAddr::from(([0, 0, 0, 0], 7654))),
+        config_file_path: Some(PathBuf::from("/home/user/.config/koshi/koshi.kdl")),
         is_remote_access_enabled: true,
         is_listening: true,
         certificate_fingerprint: Some("aa".repeat(32)),
@@ -598,7 +613,7 @@ fn build_remote_status_result(remote_connection_count: usize) -> RouterResult {
 }
 
 #[test]
-fn the_count_of_connections_from_another_machine_comes_back_as_the_router_sent_it() {
+fn the_remote_access_status_comes_back_as_the_router_sent_it() {
     let runtime_directory = build_test_runtime_directory();
     let router_thread = spawn_fake_router(
         runtime_directory.path(),
@@ -606,11 +621,8 @@ fn the_count_of_connections_from_another_machine_comes_back_as_the_router_sent_i
     );
 
     assert_eq!(
-        query_running_router_remote_connections(
-            runtime_directory.path(),
-            build_test_answer_deadline(),
-        ),
-        RemoteConnections::Answered(3)
+        query_running_router_remote_status(runtime_directory.path(), build_test_answer_deadline(),),
+        RunningRouterRemoteStatus::Answered(build_expected_remote_access_status(3))
     );
     router_thread.join().expect("the stand-in router exits");
 }
@@ -624,25 +636,19 @@ fn a_router_holding_no_such_connection_answers_a_count_of_zero() {
     );
 
     assert_eq!(
-        query_running_router_remote_connections(
-            runtime_directory.path(),
-            build_test_answer_deadline(),
-        ),
-        RemoteConnections::Answered(0)
+        query_running_router_remote_status(runtime_directory.path(), build_test_answer_deadline(),),
+        RunningRouterRemoteStatus::Answered(build_expected_remote_access_status(0))
     );
     router_thread.join().expect("the stand-in router exits");
 }
 
 #[test]
-fn no_running_router_reports_nothing_running_rather_than_a_count() {
+fn no_running_router_reports_nothing_running_rather_than_a_status() {
     let runtime_directory = build_test_runtime_directory();
 
     assert_eq!(
-        query_running_router_remote_connections(
-            runtime_directory.path(),
-            build_test_answer_deadline(),
-        ),
-        RemoteConnections::NotRunning
+        query_running_router_remote_status(runtime_directory.path(), build_test_answer_deadline(),),
+        RunningRouterRemoteStatus::NotRunning
     );
     assert!(!resolve_router_endpoint_path(runtime_directory.path()).exists());
 }
@@ -661,11 +667,8 @@ fn a_router_with_no_such_request_kind_reads_as_an_older_build() {
     );
 
     assert_eq!(
-        query_running_router_remote_connections(
-            runtime_directory.path(),
-            build_test_answer_deadline(),
-        ),
-        RemoteConnections::OlderBuild
+        query_running_router_remote_status(runtime_directory.path(), build_test_answer_deadline(),),
+        RunningRouterRemoteStatus::OlderBuild
     );
     router_thread.join().expect("the stand-in router exits");
 }
@@ -682,17 +685,14 @@ fn a_router_of_koshi_0_4_0_reads_as_a_previous_release() {
     );
 
     assert_eq!(
-        query_running_router_remote_connections(
-            runtime_directory.path(),
-            build_test_answer_deadline(),
-        ),
-        RemoteConnections::PreviousRelease
+        query_running_router_remote_status(runtime_directory.path(), build_test_answer_deadline(),),
+        RunningRouterRemoteStatus::PreviousRelease
     );
     router_thread.join().expect("the stand-in router exits");
 }
 
 #[test]
-fn any_other_refusal_of_the_count_carries_the_sentence_the_router_gave() {
+fn any_other_refusal_of_the_status_carries_the_sentence_the_router_gave() {
     let runtime_directory = build_test_runtime_directory();
     let router_thread = spawn_fake_router(
         runtime_directory.path(),
@@ -705,11 +705,8 @@ fn any_other_refusal_of_the_count_carries_the_sentence_the_router_gave() {
     );
 
     assert_eq!(
-        query_running_router_remote_connections(
-            runtime_directory.path(),
-            build_test_answer_deadline(),
-        ),
-        RemoteConnections::NoAnswer {
+        query_running_router_remote_status(runtime_directory.path(), build_test_answer_deadline(),),
+        RunningRouterRemoteStatus::NoAnswer {
             error_detail: "the bytes received are not a request this build can read".to_string(),
             router_process_id: Some(std::process::id()),
         }
@@ -733,11 +730,8 @@ fn a_refusal_loses_what_a_terminal_would_act_on() {
     );
 
     assert_eq!(
-        query_running_router_remote_connections(
-            runtime_directory.path(),
-            build_test_answer_deadline(),
-        ),
-        RemoteConnections::NoAnswer {
+        query_running_router_remote_status(runtime_directory.path(), build_test_answer_deadline(),),
+        RunningRouterRemoteStatus::NoAnswer {
             error_detail: "[2Jthe bytes are not a request".to_string(),
             router_process_id: Some(std::process::id()),
         }
@@ -752,11 +746,11 @@ fn a_router_that_answers_nothing_by_the_deadline_reports_no_answer() {
         spawn_router_answering_no_request(runtime_directory.path(), None);
 
     assert_eq!(
-        query_running_router_remote_connections(
+        query_running_router_remote_status(
             runtime_directory.path(),
             Instant::now() + Duration::from_millis(300),
         ),
-        RemoteConnections::NoAnswer {
+        RunningRouterRemoteStatus::NoAnswer {
             error_detail: "IPC unavailable: the router did not answer in time".to_string(),
             router_process_id: Some(std::process::id()),
         }
@@ -779,11 +773,11 @@ fn a_router_that_answers_the_hello_and_no_count_by_the_deadline_reports_no_answe
     );
 
     assert_eq!(
-        query_running_router_remote_connections(
+        query_running_router_remote_status(
             runtime_directory.path(),
             Instant::now() + Duration::from_millis(300),
         ),
-        RemoteConnections::NoAnswer {
+        RunningRouterRemoteStatus::NoAnswer {
             error_detail: "IPC unavailable: the router did not answer in time".to_string(),
             router_process_id: Some(std::process::id()),
         }
@@ -808,11 +802,8 @@ fn a_reply_that_answers_no_count_is_reported_as_unexpected() {
     );
 
     assert_eq!(
-        query_running_router_remote_connections(
-            runtime_directory.path(),
-            build_test_answer_deadline(),
-        ),
-        RemoteConnections::NoAnswer {
+        query_running_router_remote_status(runtime_directory.path(), build_test_answer_deadline(),),
+        RunningRouterRemoteStatus::NoAnswer {
             error_detail: "IPC unavailable: the router answered with an unexpected Tokens reply"
                 .to_string(),
             router_process_id: Some(std::process::id()),
@@ -847,14 +838,12 @@ fn a_router_that_hangs_up_and_leaves_no_endpoint_file_reports_no_process_id() {
         std::fs::remove_file(&router_endpoint_path).expect("remove the router endpoint file");
     });
 
-    let remote_connections = query_running_router_remote_connections(
-        runtime_directory.path(),
-        build_test_answer_deadline(),
-    );
+    let running_router_remote_status =
+        query_running_router_remote_status(runtime_directory.path(), build_test_answer_deadline());
 
     assert_eq!(
-        remote_connections,
-        RemoteConnections::NoAnswer {
+        running_router_remote_status,
+        RunningRouterRemoteStatus::NoAnswer {
             error_detail: build_ipc_unavailable_error(IpcError::Disconnected).to_string(),
             router_process_id: None,
         }
@@ -903,15 +892,16 @@ fn a_router_that_closes_the_connection_before_its_hello_answer_reads_as_no_route
     let router_restart =
         restart_running_router(runtime_directory.path(), build_test_answer_deadline())
             .expect("a closed connection is no failure");
-    let remote_connections = query_running_router_remote_connections(
-        runtime_directory.path(),
-        build_test_answer_deadline(),
-    );
+    let running_router_remote_status =
+        query_running_router_remote_status(runtime_directory.path(), build_test_answer_deadline());
 
     assert_eq!(router_result, None);
     assert_eq!(router_hello_answer, None);
     assert_eq!(router_restart, RouterRestart::NotRunning);
-    assert_eq!(remote_connections, RemoteConnections::NotRunning);
+    assert_eq!(
+        running_router_remote_status,
+        RunningRouterRemoteStatus::NotRunning
+    );
     router_thread.join().expect("the stand-in router exits");
 }
 

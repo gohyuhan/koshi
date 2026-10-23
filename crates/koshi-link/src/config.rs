@@ -202,9 +202,28 @@ pub fn resolve_shared_sessions_directory(server_config: &ServerConfig) -> PathBu
 /// built-in defaults.
 #[must_use]
 pub fn load_current_server_config(config_directory: Option<&Path>) -> ServerConfig {
+    match config_directory {
+        Some(config_directory) => load_server_config_file(&config_directory.join("koshi.kdl")),
+        None => ServerConfig::default(),
+    }
+}
+
+/// The `server` settings the `koshi.kdl` at `app_config_path` carries right
+/// now, folded onto the built-in defaults. Reads and parses the file on each
+/// call. A file that is absent, unreadable, or unparseable gives the built-in
+/// defaults. Warnings are dropped.
+///
+/// Example: a file holding `remote-listen "127.0.0.1:7654"` gives a config
+/// whose `remote_listen_address` is `127.0.0.1:7654`.
+#[must_use]
+pub fn load_server_config_file(app_config_path: &Path) -> ServerConfig {
+    let mut config_warnings = Vec::new();
     merge_server(
         ServerConfig::default(),
-        load_app_layer(config_directory).into_iter().collect(),
+        load_app_config(app_config_path, &mut config_warnings)
+            .map(|app_config_file| app_config_file.layer)
+            .into_iter()
+            .collect(),
     )
 }
 
