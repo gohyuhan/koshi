@@ -15,6 +15,7 @@ const KEYS_DETAIL_HEADERS: &[&str] = &[
     "description",
     "scope",
     "source",
+    "displaced_by",
     "continuous",
 ];
 
@@ -61,8 +62,12 @@ struct KeyBindingDetail {
     description: String,
     /// How broad the action's effect is.
     scope: String,
-    /// The layer that authored the winning entry.
+    /// The layer that authored the entry: `defaults`, `user`, or `defaults
+    /// (unbound)` for a built-in binding the user displaced.
     binding_source: String,
+    /// For a `defaults (unbound)` entry, the user entry that displaced it:
+    /// `user bind` or `user remove`. `None` for every other entry.
+    displaced_by: Option<String>,
     /// Whether the action re-arms its prefix when fired from a multi-chord
     /// binding.
     is_continuous: bool,
@@ -159,7 +164,10 @@ pub fn render_keys_list(
             key_bindings.push(KeyBindingSummary {
                 input_mode: mode_name.get_name().to_string(),
                 key_sequence: key_sequence.to_string(),
-                action_reference: displaced_default_binding.action_reference.to_string(),
+                action_reference: displaced_default_binding
+                    .bound_action
+                    .action_reference
+                    .to_string(),
                 binding_source: "defaults (unbound)".to_string(),
             });
         }
@@ -181,14 +189,22 @@ pub fn render_keys_list(
 }
 
 /// Render a `koshi keys describe <key-sequence>` answer: one detail block
-/// per binding that is the sequence or starts with it, mode by mode in
-/// mode-name order, and in key order within a mode. A prefix that binds
-/// nothing itself describes the bindings it opens: `<C-t>` describes
-/// `<C-t> n` and `<C-t> x`.
+/// per `koshi keys list` row whose key is the sequence or starts with it,
+/// mode by mode in mode-name order, and in key order within a mode. A user
+/// entry comes before the `defaults (unbound)` entry it displaced on the
+/// same key.
+///
+/// - A prefix that binds nothing itself describes the bindings it opens:
+///   `<C-t>` describes `<C-t> n` and `<C-t> x`.
+/// - A `defaults (unbound)` entry names the user entry that displaced it in
+///   `displaced_by`: `user bind` when a user binding took the key, `user
+///   remove` when a `remove` cleared it. Every other entry prints `-` there
+///   in a table and `null` in JSON.
 ///
 /// # Errors
 /// The parser's message when `key_sequence_text` is not a valid key sequence; `Ok(None)`
-/// when it parses but no binding in any mode is the sequence or starts with it.
+/// when it parses but no `koshi keys list` row in any mode has the sequence
+/// as its key or as the start of its key.
 pub fn render_keys_describe(
     keymap_view: &crate::keymap::KeymapView,
     key_sequence_text: &str,
@@ -212,6 +228,7 @@ pub fn render_keys_describe(
                 key_sequence,
                 &merged_binding.bound_action,
                 merged_binding.layer_origin.to_string(),
+                None,
             )
         });
         let default_bindings = list_bindings_starting_with(
@@ -219,12 +236,30 @@ pub fn render_keys_describe(
             &parsed_key_sequence,
         )
         .map(|(key_sequence, default_binding)| {
-            (key_sequence, default_binding, "defaults".to_string())
+            (key_sequence, default_binding, "defaults".to_string(), None)
         });
-        let mut mode_bindings: Vec<_> = user_bindings.chain(default_bindings).collect();
-        mode_bindings.sort_by_key(|(key_sequence, _, _)| *key_sequence);
+        let displaced_default_bindings = list_bindings_starting_with(
+            &merged_mode_keymap.unbound_default_bindings_by_key_sequence,
+            &parsed_key_sequence,
+        )
+        .map(|(key_sequence, displaced_default_binding)| {
+            (
+                key_sequence,
+                &displaced_default_binding.bound_action,
+                "defaults (unbound)".to_string(),
+                Some(format_default_displacement_label(
+                    displaced_default_binding.default_displacement,
+                )),
+            )
+        });
+        // A stable sort keeps a user entry ahead of the default it displaced.
+        let mut mode_bindings: Vec<_> = user_bindings
+            .chain(default_bindings)
+            .chain(displaced_default_bindings)
+            .collect();
+        mode_bindings.sort_by_key(|(key_sequence, _, _, _)| *key_sequence);
 
-        for (key_sequence, matched_binding, binding_source) in mode_bindings {
+        for (key_sequence, matched_binding, binding_source, displaced_by) in mode_bindings {
             let action_metadata = keymap_view
                 .action_registry
                 .find_action_metadata(&matched_binding.action_reference);
@@ -244,6 +279,7 @@ pub fn render_keys_describe(
                     })
                     .to_string(),
                 binding_source,
+                displaced_by,
                 is_continuous: action_metadata
                     .is_some_and(|action_metadata_entry| action_metadata_entry.is_continuous),
             });
@@ -380,8 +416,27 @@ fn render_key_detail_cells(key_binding_detail: &KeyBindingDetail) -> Vec<String>
         key_binding_detail.description.clone(),
         key_binding_detail.scope.clone(),
         key_binding_detail.binding_source.clone(),
+        key_binding_detail
+            .displaced_by
+            .clone()
+            .unwrap_or_else(|| "-".to_string()),
         key_binding_detail.is_continuous.to_string(),
     ]
+}
+
+/// The `displaced_by` label of one displaced default: the displacing layer,
+/// then `bind` or `remove`. A `remove` in the user layer is `user remove`.
+fn format_default_displacement_label(
+    default_displacement: koshi_config::keymap_merge::DefaultDisplacement,
+) -> String {
+    match default_displacement {
+        koshi_config::keymap_merge::DefaultDisplacement::Rebound { layer_origin } => {
+            format!("{layer_origin} bind")
+        }
+        koshi_config::keymap_merge::DefaultDisplacement::Removed { layer_origin } => {
+            format!("{layer_origin} remove")
+        }
+    }
 }
 
 /// Append the findings table to `rendered_output`, or nothing when there are no

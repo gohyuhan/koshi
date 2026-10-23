@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use koshi_config::layer::PartialKeybindingsConfig;
-use koshi_config::types::{BoundAction, ModeName};
+use koshi_config::types::{BoundAction, ModeName, SCHEMA_VERSION};
 use koshi_core::action::{build_core_action_seeds, ActionReference, ActionScope, TargetKind};
 use koshi_core::discovery::{
     ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, TabDiscovery,
@@ -992,6 +992,7 @@ display_name: Close Pane Tree
 description: Close the focused pane and kill every process it started
 scope: pane-session
 source: defaults
+displaced_by: -
 continuous: false
 ";
     assert_eq!(rendered_text, expected_text);
@@ -1017,6 +1018,7 @@ fn keys_describe_json_carries_exactly_its_fields() {
             "action_reference",
             "binding_source",
             "description",
+            "displaced_by",
             "display_name",
             "input_mode",
             "is_continuous",
@@ -1047,23 +1049,117 @@ fn keys_describe_reports_unbound_and_malformed_sequences() {
 }
 
 #[test]
-fn keys_describe_reports_the_user_entry_alone_when_it_displaced_a_default() {
+fn keys_describe_reports_the_user_entry_then_the_default_its_bind_displaced() {
     let keymap_view = build_test_keymap_view_with_binding("<A-f>", "core:close-pane");
     let rendered_text = render_keys_describe(&keymap_view, "<A-f>", OutputFormat::Json)
         .expect("sequence parses")
         .expect("bound in normal mode");
     let json_document: serde_json::Value =
         serde_json::from_str(&rendered_text).expect("valid JSON");
-    let action_details = json_document.as_array().expect("a JSON array");
-
-    assert_eq!(action_details.len(), 1);
     assert_eq!(
-        action_details[0]["action_reference"],
-        serde_json::json!("core:close-pane")
+        json_document,
+        serde_json::json!([
+            {
+                "key_sequence": "<A-f>",
+                "input_mode": "normal",
+                "action_reference": "core:close-pane",
+                "display_name": "Close Pane",
+                "description": "Close the focused pane",
+                "scope": "pane-session",
+                "binding_source": "user",
+                "displaced_by": null,
+                "is_continuous": false,
+            },
+            {
+                "key_sequence": "<A-f>",
+                "input_mode": "normal",
+                "action_reference": "core:toggle-pane-fullscreen",
+                "display_name": "Toggle Pane Fullscreen",
+                "description": "Toggle fullscreen for the focused pane",
+                "scope": "pane-session",
+                "binding_source": "defaults (unbound)",
+                "displaced_by": "user bind",
+                "is_continuous": false,
+            },
+        ])
     );
+}
+
+/// The offline view for a `keybinding.kdl` holding `keybinding_source_text`.
+fn build_test_keymap_view_from_keybinding_text(keybinding_source_text: &str) -> KeymapView {
+    let partial_keybindings_config = koshi_config::keybinding::parse_keybindings(
+        std::path::Path::new("keybinding.kdl"),
+        keybinding_source_text,
+    )
+    .expect("the test keybinding file parses");
+    build_keymap_view_from_partial(Some(partial_keybindings_config), None, None)
+}
+
+#[test]
+fn keys_describe_reports_a_removed_default_and_the_remove_that_cleared_it() {
+    // A removed key binds nothing, and describing it still answers: the
+    // default it held, marked unbound, and the `remove` that cleared it.
+    let keymap_view = build_test_keymap_view_from_keybinding_text(&format!(
+        "version {SCHEMA_VERSION}\nmode \"normal\" {{\n    remove \"<A-f>\"\n}}\n"
+    ));
+    let rendered_text = render_keys_describe(&keymap_view, "<A-f>", OutputFormat::Table)
+        .expect("sequence parses")
+        .expect("the removed default is described");
+    let expected_text = "\
+key: <A-f>
+mode: normal
+action: core:toggle-pane-fullscreen
+display_name: Toggle Pane Fullscreen
+description: Toggle fullscreen for the focused pane
+scope: pane-session
+source: defaults (unbound)
+displaced_by: user remove
+continuous: false
+";
+    assert_eq!(rendered_text, expected_text);
+}
+
+#[test]
+fn keys_describe_of_a_prefix_includes_a_continuation_the_user_removed() {
+    let keymap_view = build_test_keymap_view_from_keybinding_text(&format!(
+        "version {SCHEMA_VERSION}\nmode \"normal\" {{\n    remove \"<C-t> x\"\n}}\n"
+    ));
+    let rendered_text = render_keys_describe(&keymap_view, "<C-t>", OutputFormat::Json)
+        .expect("sequence parses")
+        .expect("the prefix opens one binding and held another");
+    let json_document: serde_json::Value =
+        serde_json::from_str(&rendered_text).expect("valid JSON");
+    let described_bindings: Vec<(&str, &str, &str, &serde_json::Value)> = json_document
+        .as_array()
+        .expect("a JSON array")
+        .iter()
+        .map(|key_binding_detail| {
+            (
+                key_binding_detail["key_sequence"].as_str().expect("text"),
+                key_binding_detail["action_reference"]
+                    .as_str()
+                    .expect("text"),
+                key_binding_detail["binding_source"].as_str().expect("text"),
+                &key_binding_detail["displaced_by"],
+            )
+        })
+        .collect();
     assert_eq!(
-        action_details[0]["binding_source"],
-        serde_json::json!("user")
+        described_bindings,
+        [
+            (
+                "<C-t> n",
+                "core:new-tab",
+                "defaults",
+                &serde_json::Value::Null
+            ),
+            (
+                "<C-t> x",
+                "core:close-tab",
+                "defaults (unbound)",
+                &serde_json::json!("user remove")
+            ),
+        ]
     );
 }
 
@@ -1276,6 +1372,7 @@ display_name: New Tab
 description: Create a new tab
 scope: tab
 source: defaults
+displaced_by: -
 continuous: false
 
 key: <A-y>
@@ -1285,6 +1382,7 @@ display_name: New Tab
 description: Create a new tab
 scope: tab
 source: defaults
+displaced_by: -
 continuous: false
 ";
     assert_eq!(rendered_text, expected_text);
@@ -1396,6 +1494,7 @@ display_name: New Tab
 description: Create a new tab
 scope: tab
 source: defaults
+displaced_by: -
 continuous: false
 
 key: <C-t> x
@@ -1405,6 +1504,7 @@ display_name: Close Tab
 description: Close the focused tab
 scope: tab
 source: defaults
+displaced_by: -
 continuous: false
 ";
     assert_eq!(rendered_text, expected_text);
