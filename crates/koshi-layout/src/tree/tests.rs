@@ -148,64 +148,192 @@ fn an_empty_split_has_no_leaves() {
 }
 
 #[test]
-fn expanded_leaves_of_a_tree_with_no_stack_are_every_leaf() {
+fn a_tree_with_no_stack_collapses_no_pane_and_shows_itself() {
     let (left_pane_id, upper_right_pane_id, lower_right_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
     let layout_tree =
         build_nested_layout_tree(left_pane_id, upper_right_pane_id, lower_right_pane_id);
 
+    for pane_id in [left_pane_id, upper_right_pane_id, lower_right_pane_id] {
+        assert!(!layout_tree.is_pane_collapsed(pane_id, &[]));
+    }
     assert_eq!(
-        layout_tree.list_expanded_leaf_pane_ids(),
-        [left_pane_id, upper_right_pane_id, lower_right_pane_id]
+        layout_tree.build_shown_layout_tree(&[lower_right_pane_id]),
+        None
     );
+    assert!(!LayoutNode::Pane(left_pane_id).is_pane_collapsed(left_pane_id, &[]));
     assert_eq!(
-        LayoutNode::Pane(left_pane_id).list_expanded_leaf_pane_ids(),
-        [left_pane_id]
-    );
-    assert_eq!(
-        LayoutNode::Split(SplitNode::with_equal_weights(
-            SplitDirection::Horizontal,
-            Vec::new(),
-        ))
-        .list_expanded_leaf_pane_ids(),
-        []
+        LayoutNode::Pane(left_pane_id).build_shown_layout_tree(&[left_pane_id]),
+        None
     );
 }
 
 #[test]
-fn expanded_leaves_skip_the_collapsed_members_of_a_stack() {
+fn a_pane_the_tree_does_not_hold_is_not_collapsed() {
     let (outside_pane_id, first_stack_pane_id, second_stack_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
     let layout_tree =
         build_stack_beside_pane(outside_pane_id, first_stack_pane_id, second_stack_pane_id);
 
+    assert!(!layout_tree.is_pane_collapsed(PaneId::new(), &[]));
+}
+
+#[test]
+fn a_stack_shows_its_active_member_when_the_history_holds_none_of_its_panes() {
+    let (outside_pane_id, first_stack_pane_id, second_stack_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let layout_tree =
+        build_stack_beside_pane(outside_pane_id, first_stack_pane_id, second_stack_pane_id);
+
+    for focus_history in [&[][..], &[outside_pane_id][..]] {
+        assert!(!layout_tree.is_pane_collapsed(outside_pane_id, focus_history));
+        assert!(!layout_tree.is_pane_collapsed(first_stack_pane_id, focus_history));
+        assert!(layout_tree.is_pane_collapsed(second_stack_pane_id, focus_history));
+        assert_eq!(layout_tree.build_shown_layout_tree(focus_history), None);
+    }
+}
+
+#[test]
+fn a_stack_shows_the_member_holding_the_newest_history_pane_it_holds() {
+    let (outside_pane_id, first_stack_pane_id, second_stack_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let layout_tree =
+        build_stack_beside_pane(outside_pane_id, first_stack_pane_id, second_stack_pane_id);
+    let focus_history = [outside_pane_id, second_stack_pane_id, first_stack_pane_id];
+
+    assert!(layout_tree.is_pane_collapsed(first_stack_pane_id, &focus_history));
+    assert!(!layout_tree.is_pane_collapsed(second_stack_pane_id, &focus_history));
     assert_eq!(
-        layout_tree.list_expanded_leaf_pane_ids(),
-        [outside_pane_id, first_stack_pane_id]
+        layout_tree.build_shown_layout_tree(&focus_history),
+        Some(LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                build_pane_leaf_node(outside_pane_id),
+                LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+                    vec![first_stack_pane_id, second_stack_pane_id],
+                    1,
+                )),
+            ],
+        )))
+    );
+    assert_eq!(
+        layout_tree,
+        build_stack_beside_pane(outside_pane_id, first_stack_pane_id, second_stack_pane_id),
+        "the tree itself keeps its active member"
     );
 }
 
 #[test]
-fn expanded_leaves_skip_every_leaf_of_a_collapsed_subtree() {
+fn nested_stacks_each_show_the_member_the_same_history_picks() {
+    // `stack(a, stack(b active, c) active)`.
     let (first_pane_id, nested_first_pane_id, nested_second_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
-    let mut stack_node =
-        build_nested_stack_layout(first_pane_id, nested_first_pane_id, nested_second_pane_id);
-    assert_eq!(
-        LayoutNode::Split(stack_node.clone()).list_expanded_leaf_pane_ids(),
-        [nested_first_pane_id]
-    );
+    let layout_tree = LayoutNode::Split(build_nested_stack_layout(
+        first_pane_id,
+        nested_first_pane_id,
+        nested_second_pane_id,
+    ));
 
-    stack_node.active_child_index = 0;
+    // No history pane in either stack: each shows its active member.
+    assert!(layout_tree.is_pane_collapsed(first_pane_id, &[]));
+    assert!(!layout_tree.is_pane_collapsed(nested_first_pane_id, &[]));
+    assert!(layout_tree.is_pane_collapsed(nested_second_pane_id, &[]));
+    assert_eq!(layout_tree.build_shown_layout_tree(&[]), None);
 
+    // `c` shows the outer member that holds it, and `c` inside it.
+    let focus_history = [nested_second_pane_id];
+    assert!(layout_tree.is_pane_collapsed(first_pane_id, &focus_history));
+    assert!(layout_tree.is_pane_collapsed(nested_first_pane_id, &focus_history));
+    assert!(!layout_tree.is_pane_collapsed(nested_second_pane_id, &focus_history));
+
+    // `a` before `c`: the outer stack shows `a`, which collapses every leaf
+    // of the inner stack. The inner stack still shows `c` inside it.
+    let focus_history = [first_pane_id, nested_second_pane_id];
+    assert!(!layout_tree.is_pane_collapsed(first_pane_id, &focus_history));
+    assert!(layout_tree.is_pane_collapsed(nested_first_pane_id, &focus_history));
+    assert!(layout_tree.is_pane_collapsed(nested_second_pane_id, &focus_history));
     assert_eq!(
-        LayoutNode::Split(stack_node).list_expanded_leaf_pane_ids(),
-        [first_pane_id]
+        layout_tree.build_shown_layout_tree(&focus_history),
+        Some(LayoutNode::Split(SplitNode {
+            direction: SplitDirection::Stacked,
+            children: vec![
+                LayoutNode::Pane(first_pane_id),
+                LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+                    vec![nested_first_pane_id, nested_second_pane_id],
+                    1,
+                )),
+            ],
+            weights: vec![SizeWeight::default(); 2],
+            active_child_index: 0,
+        }))
     );
 }
 
 #[test]
-fn expanded_leaves_of_a_stack_with_an_active_index_past_its_end_hold_its_last_member() {
+fn get_shown_child_index_finds_the_member_holding_the_newest_history_pane() {
+    // `stack(a, b active)`, and `stack(a, horizontal(b, c))`.
+    let (first_pane_id, second_pane_id, third_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let stack_node = SplitNode::from_stacked_pane_ids(vec![first_pane_id, second_pane_id], 1);
+    assert_eq!(
+        stack_node.get_shown_child_index(&[first_pane_id, second_pane_id]),
+        0
+    );
+    assert_eq!(
+        stack_node.get_shown_child_index(&[third_pane_id, second_pane_id, first_pane_id]),
+        1
+    );
+    assert_eq!(stack_node.get_shown_child_index(&[]), 1);
+
+    let stack_with_split_member_node = SplitNode {
+        direction: SplitDirection::Stacked,
+        children: vec![
+            LayoutNode::Pane(first_pane_id),
+            LayoutNode::Split(SplitNode::with_equal_weights(
+                SplitDirection::Horizontal,
+                vec![
+                    LayoutNode::Pane(second_pane_id),
+                    LayoutNode::Pane(third_pane_id),
+                ],
+            )),
+        ],
+        weights: vec![SizeWeight::default(); 2],
+        active_child_index: 0,
+    };
+    assert_eq!(
+        stack_with_split_member_node.get_shown_child_index(&[third_pane_id]),
+        1
+    );
+}
+
+#[test]
+fn a_stack_with_a_member_holding_no_pane_shows_it_only_as_its_active_member() {
+    // `stack(a, horizontal(), c)` with the empty middle member active.
+    let (first_pane_id, last_pane_id) = (PaneId::new(), PaneId::new());
+    let stack_node = SplitNode {
+        direction: SplitDirection::Stacked,
+        children: vec![
+            LayoutNode::Pane(first_pane_id),
+            LayoutNode::Split(SplitNode::with_equal_weights(
+                SplitDirection::Horizontal,
+                Vec::new(),
+            )),
+            LayoutNode::Pane(last_pane_id),
+        ],
+        weights: vec![SizeWeight::default(); 3],
+        active_child_index: 1,
+    };
+    let layout_tree = LayoutNode::Split(stack_node.clone());
+
+    assert_eq!(stack_node.get_shown_child_index(&[]), 1);
+    assert!(layout_tree.is_pane_collapsed(first_pane_id, &[]));
+    assert!(layout_tree.is_pane_collapsed(last_pane_id, &[]));
+    assert_eq!(stack_node.get_shown_child_index(&[last_pane_id]), 2);
+    assert!(!layout_tree.is_pane_collapsed(last_pane_id, &[last_pane_id]));
+}
+
+#[test]
+fn a_stack_with_an_active_index_past_its_end_shows_its_last_member() {
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
     let stack_node = SplitNode {
         direction: SplitDirection::Stacked,
@@ -216,10 +344,17 @@ fn expanded_leaves_of_a_stack_with_an_active_index_past_its_end_hold_its_last_me
         weights: vec![SizeWeight::default(); 2],
         active_child_index: 5,
     };
+    let layout_tree = LayoutNode::Split(stack_node.clone());
 
+    assert!(layout_tree.is_pane_collapsed(first_pane_id, &[]));
+    assert!(!layout_tree.is_pane_collapsed(second_pane_id, &[]));
+    assert_eq!(layout_tree.build_shown_layout_tree(&[second_pane_id]), None);
     assert_eq!(
-        LayoutNode::Split(stack_node).list_expanded_leaf_pane_ids(),
-        [second_pane_id]
+        layout_tree.build_shown_layout_tree(&[first_pane_id]),
+        Some(LayoutNode::Split(SplitNode {
+            active_child_index: 0,
+            ..stack_node
+        }))
     );
 }
 

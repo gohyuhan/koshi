@@ -1,6 +1,7 @@
 //! Session domain errors.
 
 use koshi_core::constant::MAX_FLOATING_PANES_PER_SESSION;
+use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use thiserror::Error;
 
@@ -16,8 +17,8 @@ pub struct InvalidTransition {
     pub lifecycle_event: SessionLifecycleEvent,
 }
 
-/// Why [`FloatingSet::add_member`](crate::session::state::FloatingSet::add_member) refused a
-/// member. The set is unchanged.
+/// Why [`Session::add_floating_member`](crate::session::state::Session::add_floating_member)
+/// refused a member. The set is unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum FloatingSetError {
     /// The member's pane is already a floating pane of the session. `PaneId`
@@ -35,8 +36,8 @@ pub enum FloatingSetError {
     TooManyPanes,
 }
 
-/// A way a session's tabs, layout trees, floating panes, pane registry, and client focus, zoom
-/// and floating views can disagree with one another.
+/// A way a session's tabs, layout trees, stored tab solves, floating panes, pane registry, and
+/// client focus, zoom and floating views can disagree with one another.
 /// [`Session::validate_session_consistency`](crate::session::state::Session::validate_session_consistency)
 /// returns every violation it finds in one pass. Each variant names what it found: the offending
 /// pane, tab or client, the bar index two tabs claim, or the number of floating members.
@@ -51,9 +52,10 @@ pub enum SessionConsistencyError {
     #[error("pane {pane_id:?} is absent from every layout and from the floating panes")]
     OrphanedPaneRecord { pane_id: PaneId },
 
-    /// A client focuses a pane that has no record in the registry at all.
+    /// A pane of a client's focus history in a tab has no record in the
+    /// registry at all.
     #[error(
-        "client {client_id:?} focuses pane {pane_id:?} (tab {tab_id:?}) with no registry record"
+        "client {client_id:?} remembers pane {pane_id:?} (tab {tab_id:?}) with no registry record"
     )]
     FocusPaneNotInRegistry {
         client_id: ClientId,
@@ -63,14 +65,14 @@ pub enum SessionConsistencyError {
 
     /// A client remembers focus in a tab that is no longer in the session.
     /// Distinct from [`SessionConsistencyError::ActiveTabMissing`]: this is a
-    /// stale `focused_pane_id_by_tab_id` entry for a closed tab, not the tab shown now.
+    /// stale focus history for a closed tab, not the tab shown now.
     #[error("client {client_id:?} remembers focus in tab {tab_id:?} that is not in the session")]
     FocusTabMissing { client_id: ClientId, tab_id: TabId },
 
-    /// A client's remembered focus names a pane that is not a leaf in that
+    /// A pane of a client's focus history in a tab is not a leaf in that
     /// tab's layout. The tab is in the session; the pane may or may not have a
     /// registry record.
-    #[error("client {client_id:?} focuses pane {pane_id:?} absent from tab {tab_id:?} layout")]
+    #[error("client {client_id:?} remembers pane {pane_id:?} absent from tab {tab_id:?} layout")]
     FocusTargetMissing {
         client_id: ClientId,
         tab_id: TabId,
@@ -157,51 +159,77 @@ pub enum SessionConsistencyError {
         pane_id: PaneId,
     },
 
-    /// A client's floating focus order lists a pane that is not a floating
+    /// A client holds no floating view of a floating pane of its session.
+    #[error("client {client_id:?} holds no floating view of floating pane {pane_id:?}")]
+    FloatingViewMissing {
+        client_id: ClientId,
+        pane_id: PaneId,
+    },
+
+    /// A client's shown floating panes list a pane that is not a floating
     /// pane.
-    #[error(
-        "client {client_id:?} floating focus order lists pane {pane_id:?}, which is not floating"
-    )]
-    FloatingFocusOrderTargetMissing {
+    #[error("client {client_id:?} shows pane {pane_id:?} as floating, and it is not floating")]
+    ShownFloatingPaneMissing {
         client_id: ClientId,
         pane_id: PaneId,
     },
 
-    /// A client's floating focus order lists the same pane more than once.
+    /// A client's shown floating panes list the same pane more than once.
     /// Reported once for each repeat after the first entry.
-    #[error("client {client_id:?} floating focus order lists pane {pane_id:?} more than once")]
-    DuplicateFloatingFocusOrderEntry {
+    #[error("client {client_id:?} shows floating pane {pane_id:?} more than once")]
+    DuplicateShownFloatingPane {
         client_id: ClientId,
         pane_id: PaneId,
     },
 
-    /// A client's floating focus names a pane that is not a floating pane.
-    #[error("client {client_id:?} focuses pane {pane_id:?} as floating, and it is not floating")]
-    FocusedFloatingPaneMissing {
+    /// A client's view of a floating pane says minimized while its shown
+    /// floating panes list it, or says not minimized while they do not.
+    #[error("client {client_id:?} view of floating pane {pane_id:?} says is_minimized {is_minimized}, which its shown floating panes contradict")]
+    FloatingPaneShownStateMismatch {
+        client_id: ClientId,
+        pane_id: PaneId,
+        is_minimized: bool,
+    },
+
+    /// A client's floating focus is not the newest pane it shows: a focus set
+    /// while it shows none, a focus on another pane, or no focus while it
+    /// shows one.
+    #[error("client {client_id:?} focuses floating pane {focused_pane_id:?}, and the newest floating pane it shows is {newest_shown_pane_id:?}")]
+    FloatingFocusNotNewestShown {
+        client_id: ClientId,
+        focused_pane_id: Option<PaneId>,
+        newest_shown_pane_id: Option<PaneId>,
+    },
+
+    /// A client that cannot draw floating panes shows one: it reports a
+    /// `Starving` pane area or one smaller than `5x6` on either axis, or its
+    /// own view of its active tab has every pane suppressed.
+    #[error("client {client_id:?} cannot draw floating panes and shows floating pane {pane_id:?}")]
+    UndrawableFloatingPaneShown {
         client_id: ClientId,
         pane_id: PaneId,
     },
 
-    /// A client's floating focus names a pane that is not the last entry of
-    /// that client's floating focus order.
-    #[error("client {client_id:?} focuses floating pane {pane_id:?}, which is not last in its floating focus order")]
-    FocusedFloatingPaneNotOnTop {
-        client_id: ClientId,
-        pane_id: PaneId,
+    /// A tab's stored solve differs from a fresh solve of its tree at the tab
+    /// size it is solved at, with the session's pane sizing.
+    #[error("tab {tab_id:?} stores a solve that its tree does not give")]
+    TabSolveStale { tab_id: TabId },
+
+    /// A tab that a client views is solved at a tab size other than its
+    /// shared tab size, `0x0` when no viewer contributes one.
+    #[error("tab {tab_id:?} is solved at {solved_tab_size:?}, and its tab size is {tab_size:?}")]
+    TabSolveSizeStale {
+        tab_id: TabId,
+        solved_tab_size: Size,
+        tab_size: Size,
     },
 
-    /// A client's floating focus names a pane that client minimized.
-    #[error("client {client_id:?} focuses floating pane {pane_id:?}, which it minimized")]
-    FocusedFloatingPaneMinimized {
+    /// A client that views its active tab tiled focuses a pane that the tab's
+    /// solve suppresses, while the solve draws another pane of the tab.
+    #[error("client {client_id:?} focuses pane {pane_id:?} of tab {tab_id:?}, which the tab's solve suppresses")]
+    SuppressedPaneFocused {
         client_id: ClientId,
-        pane_id: PaneId,
-    },
-
-    /// A client minimized a floating pane that its floating focus order does
-    /// not list.
-    #[error("client {client_id:?} minimized floating pane {pane_id:?}, which its floating focus order does not list")]
-    MinimizedFloatingPaneNotInFocusOrder {
-        client_id: ClientId,
+        tab_id: TabId,
         pane_id: PaneId,
     },
 }

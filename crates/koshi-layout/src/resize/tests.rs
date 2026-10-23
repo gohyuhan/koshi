@@ -55,11 +55,8 @@ fn compute_solved_pane_rect(
     pane_id: PaneId,
 ) -> Rect {
     solve_layout_with_sizing(layout_tree, layout_area, pane_sizing)
-        .pane_rects
-        .into_iter()
-        .find(|&(candidate_pane_id, _)| candidate_pane_id == pane_id)
+        .find_pane_rect(pane_id)
         .expect("pane is in the layout")
-        .1
 }
 
 fn build_leaf_node(pane_id: PaneId) -> LayoutNode {
@@ -83,11 +80,8 @@ fn build_two_pane_split(
 /// Solves the layout and returns the allocated size for the given pane.
 fn compute_solved_pane_size(layout_tree: &LayoutNode, layout_area: Rect, pane_id: PaneId) -> Size {
     solve_layout(layout_tree, layout_area)
-        .pane_rects
-        .into_iter()
-        .find(|&(candidate_pane_id, _)| candidate_pane_id == pane_id)
+        .find_pane_rect(pane_id)
         .expect("pane is in the layout")
-        .1
         .size
 }
 
@@ -1050,13 +1044,7 @@ fn a_pane_still_resizes_after_a_sibling_was_closed() {
         ],
     ));
 
-    let (after_close, _) = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        closed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
+    let after_close = remove_pane(&layout_tree, closed_pane_id).unwrap();
     assert_eq!(
         after_close.list_leaf_pane_ids(),
         [left_pane_id, right_pane_id]

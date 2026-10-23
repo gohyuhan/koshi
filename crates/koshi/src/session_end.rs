@@ -476,10 +476,14 @@ fn list_running_process_records(session_id: SessionId) -> Result<Vec<ProcessReco
 /// On Windows each one is found by its pipe, named
 /// [`compute_supervisor_socket_address`](koshi_ipc::supervisor::compute_supervisor_socket_address)
 /// for its own process id. A pipe counts when the process serving it has the
-/// id its name ends with, and [`is_other_koshi_process_of_current_user`]
-/// accepts that process. On Linux and macOS the session's process holds its
-/// own panes, and the list is empty.
-fn list_pane_holder_records(runtime_directory: &Path, session_id: SessionId) -> Vec<ProcessRecord> {
+/// id its name ends with, runs as the current user, runs a koshi program, as
+/// [`is_koshi_executable_name`](process_tree::is_koshi_executable_name) reads
+/// it, and is not this process. On Linux and macOS the session's process holds
+/// its own panes, and the list is empty.
+pub fn list_pane_holder_records(
+    runtime_directory: &Path,
+    session_id: SessionId,
+) -> Vec<ProcessRecord> {
     #[cfg(windows)]
     {
         process_tree::list_pipe_names()

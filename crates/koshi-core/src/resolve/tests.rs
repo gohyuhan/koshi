@@ -14,27 +14,30 @@ fn build_core_action_reference(action_name: &str) -> ActionReference {
 
 /// The core actions that no binding can invoke: each takes a required value
 /// that no binding supplies (a resize amount, a move direction, a pane id, a
-/// tab index, the text to type, or the program to run), so it is reachable
-/// only through a CLI command, which builds its [`Command`] directly.
+/// tab index, a destination tab, a top-left cell, the text to type, or the
+/// program to run). Only a CLI command reaches it, and that command builds
+/// its [`Command`] directly.
 /// `resolve_action` refuses every one of them. Pinned against the seed table
 /// by [`action_tables_match_seeds`].
-const CLI_ONLY: [&str; 9] = [
+const CLI_ONLY: [&str; 12] = [
     "resize-pane",
     "focus-pane",
     "focus-tab",
     "move-tab",
     "move-pane",
     "place-pane",
+    "dock-pane",
+    "move-floating-pane",
+    "restore-pane",
     "run",
     "scroll-pane",
     "write-to-pane",
 ];
 
-/// The viewer-local actions. They are resolved to [`DispatchPlan::ClientAction`]
-/// and therefore do not belong to the command table below.
-const CLIENT_ACTIONS: [&str; 27] = [
+/// The viewer-local actions: each resolves to [`DispatchPlan::ClientAction`].
+const CLIENT_ACTIONS: [&str; 30] = [
     "begin-pane-placement",
-    "undock-or-dock-pane",
+    "begin-dock-undock",
     "select-pane-target-left",
     "select-pane-target-down",
     "select-pane-target-up",
@@ -44,10 +47,13 @@ const CLIENT_ACTIONS: [&str; 27] = [
     "select-pane-insertion-up",
     "select-pane-insertion-right",
     "cycle-pane-placement-span",
+    "toggle-pane-placement-stack",
     "select-next-placement-tab",
     "select-previous-placement-tab",
     "confirm-pane-placement",
     "cancel-pane-placement",
+    "confirm-dock-undock",
+    "cancel-dock-undock",
     "begin-tiled-pane-placement",
     "begin-floating-pane-move",
     "confirm-pane-move-choice",
@@ -251,6 +257,48 @@ fn build_bindable_action_table() -> Vec<(&'static str, Command)> {
             }),
         ),
         ("toggle-pane-fullscreen", Command::TogglePaneFullscreen),
+        (
+            "undock-pane",
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: None,
+                placement_target: PanePlacementTarget::Floating {
+                    top_left_cell: None,
+                },
+            }),
+        ),
+        (
+            "pin-pane",
+            Command::SetPanePinned(SetPanePinnedArgs {
+                pane_id: None,
+                is_pinned: true,
+            }),
+        ),
+        (
+            "unpin-pane",
+            Command::SetPanePinned(SetPanePinnedArgs {
+                pane_id: None,
+                is_pinned: false,
+            }),
+        ),
+        (
+            "minimize-pane",
+            Command::SetPaneMinimized(SetPaneMinimizedArgs {
+                pane_id: None,
+                is_minimized: true,
+            }),
+        ),
+        (
+            "minimize-all-floating-panes",
+            Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs {
+                is_minimized: true,
+            }),
+        ),
+        (
+            "restore-all-floating-panes",
+            Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs {
+                is_minimized: false,
+            }),
+        ),
         ("new-tab", Command::NewTab(NewTabArgs::default())),
         ("close-tab", Command::CloseTab(CloseTabArgs::default())),
         (
@@ -379,6 +427,7 @@ fn scroll_actions_scroll_the_caller_line_count() {
         ))))
     );
 }
+
 /// The [`CommandKind`] that names `command`, or `None` for a command no action
 /// builds.
 fn find_command_kind(command: &Command) -> Option<CommandKind> {
@@ -399,12 +448,12 @@ fn find_command_kind(command: &Command) -> Option<CommandKind> {
         Command::MovePane(_) => Some(CommandKind::MovePane),
         Command::PlacePane(_) => Some(CommandKind::PlacePane),
         Command::ScrollPane(_) => Some(CommandKind::ScrollPane),
+        Command::MoveFloatingPane(_) => Some(CommandKind::MoveFloatingPane),
+        Command::SetPanePinned(_) => Some(CommandKind::SetPanePinned),
+        Command::SetPaneMinimized(_) => Some(CommandKind::SetPaneMinimized),
+        Command::SetAllFloatingPanesMinimized(_) => Some(CommandKind::SetAllFloatingPanesMinimized),
         Command::Quit => Some(CommandKind::Quit),
         Command::Visual(_)
-        | Command::MoveFloatingPane(_)
-        | Command::SetPanePinned(_)
-        | Command::SetPaneMinimized(_)
-        | Command::SetAllFloatingPanesMinimized(_)
         | Command::Detach(_)
         | Command::DetachAll
         | Command::SwitchSession(_) => None,
@@ -449,6 +498,7 @@ fn cli_only_actions_are_refused_as_needing_arguments() {
         );
     }
 }
+
 #[test]
 fn resolve_error_messages_name_the_action() {
     let action_reference = build_core_action_reference("new-pane");

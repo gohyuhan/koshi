@@ -1,10 +1,11 @@
 //! Unit tests for rectangular geometry operations and layout enums.
 //!
 //! Tests `Rect` containment, intersection, insetting, moving inside a
-//! container, and serde round-trips; the `Size` fit check and cell count; the
-//! `RequiredSize` sum and fit check; `Direction` and `SplitDirection` enum
-//! serialization; the range `AxisPercent` and `FloatingPaneDimension` accept
-//! and their encoding; and the cell count of a percent of an axis.
+//! container, and serde round-trips; the `Size` fit check, centered origin and
+//! cell count; the `RequiredSize` sum and fit check; `Direction` and
+//! `SplitDirection` enum serialization; the range `AxisPercent` and
+//! `FloatingPaneDimension` accept and their encoding; and the cell count of a
+//! percent of an axis.
 
 use super::*;
 
@@ -466,6 +467,44 @@ fn a_size_fits_inside_a_container_only_when_both_axes_fit() {
         row_count: 0,
     };
     assert!(empty_size.can_fit_inside(empty_size));
+}
+
+#[test]
+fn a_centered_origin_rounds_each_offset_down_and_is_zero_on_an_axis_the_content_overflows() {
+    let area_size = Size {
+        column_count: 100,
+        row_count: 30,
+    };
+    for (content_size, expected_origin) in [
+        ((80, 22), (10, 4)),
+        ((81, 23), (9, 3)),
+        ((100, 30), (0, 0)),
+        ((120, 40), (0, 0)),
+        ((120, 10), (0, 10)),
+        ((0, 0), (50, 15)),
+    ] {
+        let (column_count, row_count) = content_size;
+        let (column, row) = expected_origin;
+        assert_eq!(
+            area_size.compute_centered_origin(Size {
+                column_count,
+                row_count,
+            }),
+            Point { column, row },
+            "{column_count}x{row_count} in 100x30"
+        );
+    }
+    let empty_size = Size {
+        column_count: 0,
+        row_count: 0,
+    };
+    assert_eq!(
+        empty_size.compute_centered_origin(Size {
+            column_count: 80,
+            row_count: 22,
+        }),
+        Point { column: 0, row: 0 }
+    );
 }
 
 #[test]

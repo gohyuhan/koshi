@@ -111,6 +111,17 @@ impl Size {
         self.column_count <= container_size.column_count
             && self.row_count <= container_size.row_count
     }
+
+    /// The top-left cell of `content_size`, cut to `self` on each axis,
+    /// centered in an area of `self`, each offset rounding down. `80x22` in
+    /// `100x30` → `(10, 4)`; `120x40` in `100x30` → `(0, 0)`.
+    #[must_use]
+    pub fn compute_centered_origin(self, content_size: Size) -> Point {
+        Point {
+            column: (self.column_count - content_size.column_count.min(self.column_count)) / 2,
+            row: (self.row_count - content_size.row_count.min(self.row_count)) / 2,
+        }
+    }
 }
 
 /// The cells a layout needs on each axis. An axis can be larger than

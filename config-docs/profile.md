@@ -60,7 +60,8 @@ equally. `size` and `weight` are the same slot: give one of the two, once.
 ## Stacks
 
 Inside a `stack`, `expanded` marks the one member shown open; the rest collapse
-to a one-row header.
+to a one-row header. A client that then focuses another member of the stack
+shows that member open on its own screen.
 
 ## Starting locked
 

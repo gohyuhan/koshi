@@ -68,7 +68,7 @@ fn build_test_tab_discovery() -> TabDiscovery {
 fn build_test_pane_discovery() -> PaneDiscovery {
     PaneDiscovery {
         pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
-        tab_id: TabId::from_uuid(build_fixed_test_uuid()),
+        tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
         session_id: SessionId::from_uuid(build_fixed_test_uuid()),
         pane_title: Some("htop".to_string()),
         working_directory: Some(PathBuf::from("/home/user")),
@@ -100,8 +100,8 @@ fn build_test_pane_row() -> PaneRow {
     PaneRow {
         pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
         pane_name: Some("htop".to_string()),
-        tab_id: TabId::from_uuid(build_fixed_test_uuid()),
-        tab_name: "amber-fox".to_string(),
+        tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
+        tab_name: Some("amber-fox".to_string()),
         session_id: SessionId::from_uuid(build_fixed_test_uuid()),
         session_name: "quiet-lake".to_string(),
     }
@@ -512,6 +512,60 @@ fn an_untitled_pane_lists_a_dash_for_its_name() {
             "quiet-lake",
         ]
     );
+}
+
+#[test]
+fn a_floating_pane_lists_a_null_tab_in_json() {
+    let floating_pane_row = PaneRow {
+        tab_id: None,
+        tab_name: None,
+        ..build_test_pane_row()
+    };
+    assert_eq!(
+        render_panes(&[floating_pane_row], OutputFormat::Json),
+        r#"[
+  {
+    "pane_id": "00000000-0000-0000-0000-000000000001",
+    "pane_name": "htop",
+    "tab_id": null,
+    "tab_name": null,
+    "session_id": "00000000-0000-0000-0000-000000000001",
+    "session_name": "quiet-lake"
+  }
+]
+"#
+    );
+}
+
+#[test]
+fn a_floating_pane_lists_float_and_a_dash_for_its_tab() {
+    let floating_pane_row = PaneRow {
+        tab_id: None,
+        tab_name: None,
+        ..build_test_pane_row()
+    };
+    let rendered_text = render_panes(&[floating_pane_row], OutputFormat::Table);
+    let rendered_row = rendered_text.lines().nth(1).expect("one data row");
+    let rendered_cells: Vec<&str> = rendered_row.split_whitespace().collect();
+    assert_eq!(
+        rendered_cells,
+        vec![
+            "pane-00000000-0000-0000-0000-000000000001",
+            "htop",
+            "float",
+            "-",
+            "session-00000000-0000-0000-0000-000000000001",
+            "quiet-lake",
+        ]
+    );
+}
+
+#[test]
+fn a_floating_pane_inspect_prints_float_as_its_tab() {
+    let mut pane_discovery = build_test_pane_discovery();
+    pane_discovery.tab_id = None;
+    let rendered_text = render_pane(&pane_discovery, OutputFormat::Table);
+    assert_eq!(rendered_text.lines().nth(1), Some("tab: float"));
 }
 
 #[test]

@@ -398,8 +398,11 @@ are running; name one with --session <name-or-id>`.
 only that viewer's screen. Example: terminals `client-1a2b…` and `client-3c4d…`
 both watch the same tab. `koshi toggle-pane-fullscreen --client client-3c4d…`
 zooms the focused pane on `client-3c4d…` alone, and `client-1a2b…` keeps its
-panes tiled. A session started by koshi 0.3.0 cannot carry the named viewer, so
-against one the command refuses instead of zooming the wrong viewer.
+panes tiled. A pane command typed inside a pane of the same session still acts
+on that pane: `koshi pin-pane --client client-3c4d…` typed in floating pane
+`htop` pins `htop` on `client-3c4d…`, whatever pane `client-3c4d…` focuses. A
+session started by koshi 0.3.0 cannot carry the named viewer, so against one
+the command refuses instead of zooming the wrong viewer.
 
 Session and tab flags that say `NAME_OR_ID` accept either their generated name
 or printed id. A value that reads as an id is always the id — it never falls
@@ -456,6 +459,14 @@ id line.
 
 Every list and inspect command accepts `--format table` or `--format json`.
 Table is the default.
+
+`koshi list-panes` lists the tiled panes of each session in tab order, then
+its floating panes in the order they became floating. A floating pane prints
+`float` in the `tab` column and `-` in the `tab_name` column, and `--format
+json` writes `"tab_id": null` and `"tab_name": null` for it. `koshi inspect
+pane` prints `float` as the `tab` of a floating pane. A `--pane` flag finds a
+floating pane's session from outside koshi too: `koshi close-pane --pane
+pane-…` closes that floating pane.
 
 `koshi list-sessions` names each session's machine in its `server` column:
 `local` for a session on this machine, else the saved server it runs on. Its
@@ -585,14 +596,18 @@ in `koshi.kdl`, which ends it once the last terminal leaves.
 
 | Command | Main flags | Result |
 |---|---|---|
-| `koshi new-pane` | `--direction`, `--stacked`, `--pane`, `--tab`, `--session`, `--client` | Open a shell pane |
+| `koshi new-pane` | `--direction`, `--stacked`, `--floating`, `--pane`, `--tab`, `--session`, `--client` | Open a shell pane |
 | `koshi run -- <COMMAND>...` | Same placement flags as `new-pane` | Open a pane running the command |
 | `koshi close-pane` | `--pane`, `--force` | Close a pane |
 | `koshi resize-pane` | `--direction`, `--size`, `--pane`, `--client` | Move one border by signed cell count |
-| `koshi move-pane` | `--direction`, `--pane` | Swap a pane with its visible neighbor in one step |
-| `koshi place-pane` | `--pane`, `--tab`, `--direction`, `--client` | Insert a pane at one side of another tab's tiled layout |
+| `koshi move-pane` | `--direction` and `--pane`, or `--pane`, `--x`, `--y` and `--client` | Swap a tiled pane with its visible neighbor in one step, or move a floating pane |
+| `koshi place-pane` | `--pane`, `--tab` and `--direction` or `--stack-onto`, `--client` | Insert a pane at one side of a tab's tiled layout, or into a stack |
+| `koshi undock-pane` | `--pane`, `--x`, `--y`, `--client` | Float a tiled pane up where it is drawn |
+| `koshi dock-pane` | `--pane`, `--tab` and `--direction` or `--stack-onto`, `--client` | Put a floating pane into a tab's tiled layout |
+| `koshi pin-pane`, `koshi unpin-pane` | `--pane`, `--client` | Pin or unpin a floating pane on one screen |
+| `koshi minimize-pane`, `koshi restore-pane` | `--pane` or `--all`, `--client` | Minimize or restore floating panes on one screen |
 | `koshi scroll-pane` | `--lines`, `--pane`, `--client` | Scroll one client's view of a pane by signed line count |
-| `koshi focus-pane` | `--pane`, `--client` | Focus a pane |
+| `koshi focus-pane` | `--pane`, `--next-floating` or `--previous-floating`, `--client` | Focus a pane |
 | `koshi toggle-pane-fullscreen` | `--client <CLIENT_ID>` | Toggle the focused pane's fullscreen view |
 | `koshi input "<TEXT>"` | `--pane`, `--no-enter` | Type text; Enter follows unless held back |
 
@@ -607,15 +622,18 @@ becomes 60 columns wide. A pane that client pinned keeps its pinned cell. On a
 tiled pane, the resize ends the fullscreen view of the client `--client` names.
 A positive `scroll-pane --lines` moves toward history.
 
-`focus-pane --pane` also takes a floating pane. That pane then takes the
-client's keys and shows above the client's other floating panes. A floating
-pane that client minimized is refused with `<pane> is minimized`.
+`focus-pane --pane` also takes a floating pane, minimized or not. That pane
+then shows above the client's other floating panes and takes the client's keys.
+A client that cannot draw floating panes refuses it with `<pane> cannot be
+drawn on this client`. `scroll-pane --pane` on a floating pane that the client
+minimized is refused with `<pane> is minimized; restore it first`.
 
 Without `--pane`, `close-pane`, `resize-pane`, `scroll-pane` and `input` act on
 one pane. Inside a koshi pane, the command acts on that pane. Outside koshi, the
 command acts on the pane that takes the client's keys: its focused floating
 pane, else its focused pane in its tab. `new-pane` without `--pane` is refused
-with `<pane> is floating and has no split to divide`, and
+with `<pane> is floating and has no split to divide; use new-pane --floating, or
+dock-pane first`, and
 `toggle-pane-fullscreen` with `<pane> is floating; fullscreen fills a tab`, in
 two cases: inside a floating pane, and outside koshi while a floating pane takes
 the client's keys.
@@ -625,6 +643,114 @@ outside koshi closes `htop`, and the keys return to the shell.
 
 Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 `git status` at that pane's prompt without running it.
+
+### Floating panes
+
+`koshi new-pane --floating` and `koshi run --floating -- <COMMAND>...` open a
+pane that floats above the tiled panes and belongs to no tab. The client that
+`--client` names, else the issuing client, else the session's only attached
+client, shows it and gives it its input. Every other client holds it
+minimized. A client that cannot draw floating panes also holds it minimized,
+and its input stays where it was: its pane area is smaller than `5x6`, or its
+tab shows `Terminal too small — enlarge window` in place of every pane.
+
+- `--cols` and `--rows` set its size: a cell count such as `80`, or a percent
+  of the pane area such as `60%`. Each needs the other. Without them the pane
+  takes 60% of each axis. Each axis is cut to 90% of the smallest pane area of
+  the attached clients, rounded down: `--cols 100% --rows 100%` on an `80x22`
+  pane area gives `72x19`. A client with a pane area smaller than `5x6` does
+  not count.
+- `--x` and `--y` set its top-left cell, counted from the top-left corner of
+  the pane area. Each needs the other.
+- `--pinned` pins it on the client that shows it.
+- `--floating` is refused with `--direction`, `--stacked`, `--pane` and
+  `--tab`.
+
+Example: `koshi run --floating --cols 80 --rows 60% --x 4 --y 2 -- htop` opens
+`htop` in a floating pane 80 columns wide and 60% of the pane area high, with
+its top-left cell at column 4, row 2.
+
+`koshi undock-pane` floats a tiled or stacked pane up where the client draws
+it: the pane keeps its top-left cell and its size, each axis cut to 90% as
+above. A stack member that the client draws collapsed, on its header, keeps
+the top-left cell and the size it opens into in its stack. `--x` and `--y`
+move its top-left cell. The client shows it and gives
+it its input, unless it cannot draw floating panes, as above. Every other
+client whose input is on the pane does the same, at the top-left cell where
+that client draws the pane. Every other client holds it minimized. The other
+panes of its tab fill the space it leaves. The last tiled pane of the
+session's only tab is refused with `the last pane of the last tab cannot be
+undocked; a session needs one tiled pane`, and a 13th floating pane with `a
+session holds at most 12 floating panes`.
+
+Example: tab `#1` holds `A | B` in an `80x22` pane area. `koshi undock-pane
+--pane <B>` leaves `A` alone in the tab, and `B` floats at `(40, 0)` with the
+size `40x19`. In an `80x22` tab that holds only the stack `[vim, htop]` with
+`vim` open, `koshi undock-pane --pane <htop>` floats `htop` at `(0, 1)` with
+the size `72x19`.
+
+`koshi dock-pane` puts a floating pane into a tab's tiled layout. `--tab`
+names the tab, and `--direction` the side of the whole tab where the pane
+lands, `right` when omitted. Without `--tab`, the pane docks into the first
+tab of this list:
+
+1. The tab the `--client` client views.
+2. The tab of the tiled pane the command runs in.
+3. The tab the issuing client views: the client of the pane the command runs
+   in while it is attached, else the session's only attached client.
+4. The session's only tab.
+
+When no step gives a tab, the command refuses. For a session `work` with 3
+tabs, the refusal is ``session `work` has 3 tabs; name one with --tab or
+--stack-onto``. Example: tabs `one` and `two`, and one client that views
+`two`. `koshi dock-pane` typed in a floating pane docks it into `two`.
+
+`--stack-onto <PANE_ID>` puts the pane into the stack of that tiled pane as its
+last member instead. A tiled pane in no stack forms a new stack with it. A
+tiled pane moves to that place, as `place-pane` moves it. The client moves to
+the destination tab, and the docked pane takes its input: every floating pane
+the client shows is minimized. A tab with no room refuses with `tab <name> has
+no room for another pane`. `koshi place-pane --stack-onto <PANE_ID>` puts any
+pane, tiled or floating, into that stack.
+
+A pane that `dock-pane` or `place-pane` moves takes along every other client
+whose input is on it: that client moves to the pane's tab and keeps typing in
+it, and every floating pane it shows is minimized. Every other client keeps
+its tab, its input and its floating panes.
+
+Each client shows open, in each stack, the member it focused last there. A
+client that focused no member of a stack sees the stack's active member. A
+pane that joins a stack opens for another client only when that client
+focused it more recently than every other member of the stack. Example: two
+clients view the stack `[vim, htop]`, one focused on `vim`, one on `htop`. The
+first runs `koshi place-pane --pane <logs> --stack-onto <vim>`: it sees `logs`
+open and focused, and the second still sees `htop`.
+
+Example: tab `#1` holds `[S1, S2]` stacked, and `F` floats. `koshi dock-pane
+--pane <F> --stack-onto <S2>` gives the stack `[S1, S2, F]`, with `F` open on
+the screen of the client that docked it.
+
+`koshi move-pane --pane <PANE_ID> --x <COLUMN> --y <ROW>` moves a floating
+pane on one client's screen. A pinned pane is refused with `<pane> is pinned;
+unpin it to move it`. `koshi move-pane --direction` on a floating pane is
+refused with `<pane> is floating and has no tiled position; use move-pane --x
+--y`.
+
+`pin-pane`, `unpin-pane`, `minimize-pane` and `restore-pane` change one
+client's screen. Without `--pane`, they act on the pane they run in, or from
+outside koshi on the client's focused floating pane. `minimize-pane --all`
+minimizes every floating pane the client shows. `restore-pane --all` restores
+every floating pane the client minimized, and focuses the last one.
+
+Example: terminals `client-1a2b…` and `client-3c4d…` both show `htop` floating.
+`koshi minimize-pane --all --client client-3c4d…` minimizes it on
+`client-3c4d…` alone.
+
+`koshi focus-pane --next-floating` shows and focuses the floating pane after
+the focused one, in the order the panes became floating, and wraps past the
+last to the first. `--previous-floating` goes the other way. With no floating
+pane in the session, both are refused with `the session holds no floating
+pane`.
 
 ## Tabs
 

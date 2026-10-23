@@ -255,7 +255,7 @@ fn another_local_user_lists_and_kills_a_session_while_the_switch_is_on() {
         session_process.wait_for_session_endpoint(&owner_runtime_directory, session_id);
 
     // The switch moved the socket out of the private runtime directory, so the
-    // second user below really walks the shared one.
+    // second user below walks the shared one.
     let owner_shared_directory = shared_directory_base
         .path()
         .join(get_effective_user_id().to_string());
@@ -409,7 +409,7 @@ fn this_users_own_session_is_listed_once_while_the_switch_is_on() {
     let endpoint_file = session_process.wait_for_session_endpoint(&runtime_directory, session_id);
 
     // The switch moved the socket into this user's directory under the shared
-    // one, so the listing below really walks that directory.
+    // one, so the listing below walks that directory.
     let own_shared_directory = shared_directory_base
         .path()
         .join(get_effective_user_id().to_string());
@@ -520,7 +520,11 @@ fn start_session_server_with_the_switch_forced(
             .stdout(Stdio::null())
             .stderr(Stdio::null()),
     );
-    SessionProcess { child_process }
+    SessionProcess {
+        child_process,
+        runtime_directory: runtime_directory.to_path_buf(),
+        session_id,
+    }
 }
 
 /// Open a connection to the session at `endpoint_file` and complete the Hello,

@@ -19,7 +19,7 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 use crate::runtime::event::RuntimeEvent;
 
 use super::*;
-use crate::runtime::command::tests::build_horizontal_split;
+use crate::runtime::command::tests::{attach_client_record, build_horizontal_split, build_tab};
 use crate::runtime::discovery::tests::build_empty_session;
 use koshi_test_support::fixtures::build_test_uuid_with_suffix;
 
@@ -57,12 +57,13 @@ fn add_session_tab(
 ) {
     session.tabs.insert(
         tab_id,
-        Tab::from_root_pane(tab_id, tab_name.to_string(), tab_index, root_pane),
+        build_tab(tab_id, tab_name, tab_index, LayoutNode::Pane(root_pane)),
     );
 }
 
 /// Attach `client_id` viewing `tab_id` at `viewport_size` reporting `pane_area`,
-/// focused on `focused_pane_id`, and zoomed on `zoomed_pane_id`.
+/// focused on `focused_pane_id`, and zoomed on `zoomed_pane_id`, then solve
+/// `tab_id` at its tab size ([`Session::update_tab_solve`]).
 fn attach_test_client(
     session: &mut Session,
     client_id: ClientId,
@@ -89,7 +90,7 @@ fn attach_test_client(
     if let Some(zoomed_pane_id) = zoomed_pane_id {
         attached_client.zoom_pane(tab_id, zoomed_pane_id);
     }
-    session.attach_client(attached_client);
+    attach_client_record(session, attached_client);
 }
 
 /// A runtime holding exactly `session`.
@@ -693,11 +694,7 @@ fn a_zoomed_client_reports_fullscreen_and_gives_the_whole_tab_to_one_pane() {
     let client_id = ClientId::new();
     let mut session = build_empty_session(session_id);
     add_session_tab(&mut session, tab_id, "editor", 0, left_pane_id);
-    session
-        .tabs
-        .get_mut(&tab_id)
-        .expect("the tab was just added")
-        .update_layout(build_horizontal_split(left_pane_id, right_pane_id));
+    let _ = session.update_tab_layout(tab_id, build_horizontal_split(left_pane_id, right_pane_id));
     attach_test_client(
         &mut session,
         client_id,
@@ -749,11 +746,7 @@ fn two_clients_on_one_tab_each_get_their_own_solve_of_the_same_tree() {
     let [tiled_client_id, zoomed_client_id] = client_ids;
     let mut session = build_empty_session(session_id);
     add_session_tab(&mut session, tab_id, "editor", 0, left_pane_id);
-    session
-        .tabs
-        .get_mut(&tab_id)
-        .expect("the tab was just added")
-        .update_layout(build_horizontal_split(left_pane_id, right_pane_id));
+    let _ = session.update_tab_layout(tab_id, build_horizontal_split(left_pane_id, right_pane_id));
     attach_test_client(
         &mut session,
         tiled_client_id,
@@ -898,14 +891,13 @@ fn a_collapsed_stack_member_reports_its_header_strip() {
     let client_id = ClientId::new();
     let mut session = build_empty_session(session_id);
     add_session_tab(&mut session, tab_id, "editor", 0, shown_pane_id);
-    session
-        .tabs
-        .get_mut(&tab_id)
-        .expect("the tab was just added")
-        .update_layout(LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+    let _ = session.update_tab_layout(
+        tab_id,
+        LayoutNode::Split(SplitNode::from_stacked_pane_ids(
             vec![shown_pane_id, collapsed_pane_id],
             0,
-        )));
+        )),
+    );
     attach_test_client(
         &mut session,
         client_id,
@@ -972,7 +964,7 @@ fn a_terminal_too_small_for_one_pane_suppresses_every_pane() {
     let client_id = ClientId::new();
     let mut session = build_empty_session(session_id);
     add_session_tab(&mut session, tab_id, "editor", 0, pane_id);
-    // Three columns leaves no room for a bordered pane_id, which needs four.
+    // Three columns leave no room for a bordered pane, which needs four.
     attach_test_client(
         &mut session,
         client_id,
@@ -1019,11 +1011,7 @@ fn a_pane_that_no_longer_fits_beside_its_neighbor_is_the_only_one_suppressed() {
     let client_id = ClientId::new();
     let mut session = build_empty_session(session_id);
     add_session_tab(&mut session, tab_id, "editor", 0, left_pane_id);
-    session
-        .tabs
-        .get_mut(&tab_id)
-        .expect("the tab was just added")
-        .update_layout(build_horizontal_split(left_pane_id, right_pane_id));
+    let _ = session.update_tab_layout(tab_id, build_horizontal_split(left_pane_id, right_pane_id));
     // Six columns hold one bordered pane of four, never two.
     attach_test_client(
         &mut session,

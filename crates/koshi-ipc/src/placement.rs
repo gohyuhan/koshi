@@ -1,301 +1,303 @@
-//! Bounded read-only placement previews.
+//! Pane placement previews: the layouts a viewer draws one placement preview
+//! from.
 //!
-//! A placement preview carries the source and selected destination layout trees,
-//! solved slots, each visible pane's rows in the row encoding, and image
-//! references. It carries no scrollback metadata and does not change session
-//! state.
+//! A preview rides the painted update of the client that names a placement
+//! target ([`painted_update`](crate::painted_update)). It carries the source
+//! pane's tab, or no tab when that pane floats, the destination tab's tree and
+//! solved slots, and the tab sizes the session checks a placement at. The
+//! panes' content travels in the frame's own panes, and the preview changes no
+//! session state.
 
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::HashSet;
 
-use koshi_core::geometry::{PaneArea, Point, Rect, Size, SplitDirection};
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::geometry::{Rect, SplitDirection};
+use koshi_core::ids::{PaneId, TabId};
 use koshi_layout::mode::LayoutMode;
+use koshi_layout::placement::{PlacementTabSizes, SwapTabSizes};
 use koshi_layout::size::SizeConstraint;
+use koshi_layout::solver::PaneSizing;
 use koshi_layout::tree::LayoutNode;
 use serde::{Deserialize, Serialize};
 
-use crate::frame::{
-    compute_frame_image_byte_count, FrameImageAction, FrameImagePlacement, FrameSlot,
-};
+use crate::frame::FrameTab;
 
-/// The maximum number of layout leaves in one placement preview.
-pub const MAX_PLACEMENT_SNAPSHOT_PANE_COUNT: usize = 256;
+/// One placement target a viewer previews: the pane it places and the tab it
+/// may place the pane in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PanePlacementPreviewTarget {
+    /// The pane being placed.
+    pub source_pane_id: PaneId,
+    /// The tab the pane may move to.
+    pub destination_tab_id: TabId,
+}
 
-/// The maximum number of cells carried by one placement preview.
-pub const MAX_PLACEMENT_SNAPSHOT_CELL_COUNT: u64 = 262_144;
+/// The pane placement preview of one placement target: a source pane and the
+/// destination tab it may move to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PanePlacementPreview {
+    /// The layouts the target's source pane and destination tab have now.
+    Available(Box<PanePlacementSnapshot>),
+    /// The session holds the target's source pane in no tab and among no
+    /// floating panes, or holds no tab with its destination tab id.
+    Unavailable {
+        /// The source pane of the target.
+        source_pane_id: PaneId,
+        /// The destination tab of the target.
+        destination_tab_id: TabId,
+    },
+}
 
-/// The maximum number of image placements carried by one placement preview.
-pub const MAX_PLACEMENT_SNAPSHOT_IMAGE_COUNT: usize = 4_096;
-
-/// The maximum total RGBA bytes referenced by one placement preview.
-pub const MAX_PLACEMENT_SNAPSHOT_IMAGE_BYTE_COUNT: u64 =
-    crate::frame::MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT;
-
-/// A read-only placement preview for one attached client.
+/// The layouts one client's pane placement preview is built from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PanePlacementSnapshot {
-    /// The session that produced the preview.
-    pub session_id: SessionId,
-    /// The source pane named by the request.
+    /// The pane being placed.
     pub source_pane_id: PaneId,
-    /// The source tab that currently contains `source_pane_id`.
-    pub source_tab_id: TabId,
-    /// The destination tab named by the request.
+    /// Where `source_pane_id` sits: the tab whose layout holds it, or
+    /// [`PanePlacementSource::Floating`].
+    pub source: PanePlacementSource,
+    /// The tab the pane may move to.
     pub destination_tab_id: TabId,
-    /// The session placement revision used to build the preview.
-    pub session_placement_revision: u64,
-    /// The requesting client's placement revision used to build the preview.
-    pub client_placement_revision: u64,
-    /// The source tab's read-only layout and pane content.
-    pub source_tab_snapshot: PanePlacementTabSnapshot,
-    /// The destination tab's read-only layout and visible pane content. `None`
-    /// means the destination is the source tab and the source snapshot is used.
+    /// The destination tab's tree and solved layout. `None` exactly when the
+    /// destination is the tab of a [`PanePlacementSource::Tiled`] source.
     pub destination_tab_snapshot: Option<PanePlacementTabSnapshot>,
-    /// The requesting client's view inputs.
-    pub client_snapshot: PanePlacementClientSnapshot,
     /// The shared sizing values used by the layout solver.
     pub pane_sizing: PanePlacementSizing,
+    /// The tab sizes the session checks and solves a split or a stack at, and
+    /// any placement within the source pane's own tab or of a floating source
+    /// pane.
+    pub insertion_tab_sizes: PlacementTabSizes,
+    /// The tab sizes of a swap with each destination pane, in the destination
+    /// tree's leaf order, when the source pane is tiled in another tab than
+    /// the destination. Empty otherwise.
+    pub swap_tab_sizes: Vec<SwapTabSizes>,
 }
 
-const MAX_PLACEMENT_SNAPSHOT_LAYOUT_NODE_COUNT: usize = MAX_PLACEMENT_SNAPSHOT_PANE_COUNT * 2 - 1;
-
-struct PanePlacementValidationState {
-    pane_ids: HashSet<PaneId>,
-    pane_count: usize,
-    cell_count: u64,
-    image_count: usize,
-    image_byte_count: u64,
-    image_dimensions_by_content_id: HashMap<u64, (u32, u32)>,
-    expected_gap_cell_count: u16,
-}
-
-impl PanePlacementSnapshot {
-    /// Validate the bounds and relationships that protect a client from malformed previews.
-    pub fn validate(&self) -> Result<(), PanePlacementSnapshotValidationError> {
-        if self.source_tab_snapshot.tab_id != self.source_tab_id {
-            return Err(PanePlacementSnapshotValidationError::TabIdentityMismatch);
-        }
-        if self
-            .destination_tab_snapshot
-            .as_ref()
-            .is_some_and(|tab_snapshot| tab_snapshot.tab_id != self.destination_tab_id)
-            || self.destination_tab_snapshot.is_none()
-                != (self.source_tab_id == self.destination_tab_id)
-        {
-            return Err(PanePlacementSnapshotValidationError::TabIdentityMismatch);
-        }
-
-        let mut placement_validation = PanePlacementValidationState {
-            pane_ids: HashSet::new(),
-            pane_count: 0,
-            cell_count: 0,
-            image_count: 0,
-            image_byte_count: 0,
-            image_dimensions_by_content_id: HashMap::new(),
-            expected_gap_cell_count: self.pane_sizing.gap_cell_count,
-        };
-        validate_tab_snapshot(
-            &self.source_tab_snapshot,
-            &mut placement_validation,
-            (self.source_tab_id != self.destination_tab_id).then_some(self.source_pane_id),
-        )?;
-        if !self
-            .source_tab_snapshot
-            .pane_slots
-            .iter()
-            .any(|pane_slot| pane_slot.pane_id == self.source_pane_id)
-        {
-            return Err(PanePlacementSnapshotValidationError::SourcePaneMissing);
-        }
-        if let Some(destination_tab_snapshot) = &self.destination_tab_snapshot {
-            validate_tab_snapshot(destination_tab_snapshot, &mut placement_validation, None)?;
-        }
-        if placement_validation.pane_count > MAX_PLACEMENT_SNAPSHOT_PANE_COUNT {
-            return Err(PanePlacementSnapshotValidationError::PaneCountExceeded);
-        }
-        if placement_validation.cell_count > MAX_PLACEMENT_SNAPSHOT_CELL_COUNT {
-            return Err(PanePlacementSnapshotValidationError::CellCountExceeded);
-        }
-        if placement_validation.image_count > MAX_PLACEMENT_SNAPSHOT_IMAGE_COUNT {
-            return Err(PanePlacementSnapshotValidationError::ImageCountExceeded);
-        }
-        if placement_validation.image_byte_count > MAX_PLACEMENT_SNAPSHOT_IMAGE_BYTE_COUNT {
-            return Err(PanePlacementSnapshotValidationError::ImageByteCountExceeded);
-        }
-        Ok(())
-    }
+/// Where the source pane of a placement preview sits before the placement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PanePlacementSource {
+    /// A leaf of this tab's layout: the source tab's tree and solved layout.
+    Tiled(PanePlacementTabSnapshot),
+    /// A floating pane.
+    Floating,
 }
 
 /// The source or destination tab in a placement preview.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PanePlacementTabSnapshot {
-    /// The tab's stable id.
-    pub tab_id: TabId,
-    /// The tab's display name.
-    pub tab_name: String,
-    /// The unsolved layout tree the client uses for local placement previews.
+    /// The tab's unsolved layout tree, each stack at its shared active member.
+    /// The client edits it for local placement previews.
     pub layout_tree: LayoutNode,
-    /// The solved pane slots for this client's preview view.
-    pub pane_slots: Vec<FrameSlot>,
-    /// The size the tab's layout was solved for; the pane slots live in this
-    /// space with origin `(0, 0)`.
-    pub tab_size: Size,
-    /// Header strips for collapsed stack members.
-    pub stack_headers: Vec<koshi_layout::solver::StackHeader>,
-    /// The layout mode this client retains for the tab.
-    pub layout_mode: LayoutMode,
-    /// Whether all panes are suppressed because the tab has no room.
-    pub is_every_pane_suppressed: bool,
-    /// Blank cells between adjacent split panes.
-    pub gap_cell_count: u16,
-    /// Visible cells and image references, matched to `pane_slots` by pane id.
-    /// The source pane may retain cells while its source slot is suppressed so
-    /// a cross-tab preview can display that pane after transfer.
-    pub pane_snapshots: Vec<PanePlacementPaneSnapshot>,
-}
-
-/// One pane's bounded visible content in a placement preview.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PanePlacementPaneSnapshot {
-    /// The pane this content belongs to.
-    pub pane_id: PaneId,
-    /// The visible terminal rows, without scrollback metadata.
-    pub terminal_window: Option<PlacementWindow>,
-    /// Native-image placements. A record the client does not hold follows the
-    /// preview as one `ImageContentStart` and its image chunk frames.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub image_placement_snapshots: Vec<FrameImagePlacement>,
-}
-
-/// One pane's visible rows in a placement preview.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlacementWindow {
-    /// The width of every row, in cells.
-    pub column_count: u16,
-    /// The rows, top row first.
-    pub encoded_rows: Vec<EncodedRow>,
-}
-
-/// One row in the row encoding, written on the wire as one base64 string.
-/// The first varint of the bytes counts the bytes after it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct EncodedRow {
-    /// The encoded row.
-    #[serde(with = "crate::bytes")]
-    pub encoded_row_bytes: Vec<u8>,
-}
-
-/// The requesting client's retained view inputs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PanePlacementClientSnapshot {
-    /// The requesting client.
-    pub client_id: ClientId,
-    /// The client's outer terminal size.
-    pub viewport_size: Size,
-    /// The pane area reported by the client, if any.
-    pub pane_area: Option<PaneArea>,
-    /// The tab the client viewed when it requested the preview.
-    pub active_tab_id: TabId,
-    /// The pane that takes the client's input, if any: its focused floating
-    /// pane, else the pane focused in the active tab.
-    pub focused_pane_id: Option<PaneId>,
+    /// The client's focus history in the tab, newest first, with
+    /// only panes of `layout_tree`. Each stack of `tab_snapshot` shows the
+    /// member this history gives ([`LayoutNode::build_shown_layout_tree`]).
+    pub focus_history: Vec<PaneId>,
+    /// The tab's solved layout for the client whose frames carry the preview,
+    /// tiled.
+    pub tab_snapshot: FrameTab,
 }
 
 /// The shared layout sizing inputs used for a placement preview.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PanePlacementSizing {
     /// The minimum pane size used by the solver.
-    pub minimum_size: Size,
+    pub minimum_size: koshi_core::geometry::Size,
     /// The blank-cell gap between adjacent split panes.
     pub gap_cell_count: u16,
 }
 
-/// Why a decoded placement preview is not safe to retain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PanePlacementSnapshotValidationError {
-    /// The source or destination tab id disagrees with its record.
-    TabIdentityMismatch,
-    /// The requested source pane is not in the source tab.
-    SourcePaneMissing,
-    /// The preview has too many panes.
-    PaneCountExceeded,
-    /// The preview has too many cells.
-    CellCountExceeded,
-    /// The preview has too many image placements.
-    ImageCountExceeded,
-    /// The preview references too many image bytes.
-    ImageByteCountExceeded,
-    /// The same pane id appears more than once in the preview.
-    DuplicatePaneId,
-    /// The layout tree is not a bounded, canonical tree for the pane slots.
-    LayoutMismatch,
-    /// The preview does not carry one pane snapshot for each pane slot.
-    PaneSnapshotMismatch,
-    /// A pane slot has inconsistent geometry or visibility flags.
-    PaneSlotMismatch,
-    /// The terminal window has no column or no row, or more than 65 535
-    /// rows.
-    TerminalWindowMismatch,
-    /// An image placement is malformed or outside its terminal window.
-    ImagePlacementMismatch,
-    /// One image content id carries different pixel dimensions.
-    ImageIdentityMismatch,
-    /// A pane repeats one terminal-local image placement identity.
-    DuplicateImagePlacementId,
+/// The same minimum pane size and gap, field for field.
+impl From<PaneSizing> for PanePlacementSizing {
+    fn from(pane_sizing: PaneSizing) -> Self {
+        PanePlacementSizing {
+            minimum_size: pane_sizing.minimum_size,
+            gap_cell_count: pane_sizing.gap_cell_count,
+        }
+    }
 }
 
-fn validate_tab_snapshot(
-    tab_snapshot: &PanePlacementTabSnapshot,
-    placement_validation: &mut PanePlacementValidationState,
-    retained_source_pane_id: Option<PaneId>,
-) -> Result<(), PanePlacementSnapshotValidationError> {
-    if tab_snapshot.pane_slots.len() > MAX_PLACEMENT_SNAPSHOT_PANE_COUNT
-        || tab_snapshot.pane_snapshots.len() > MAX_PLACEMENT_SNAPSHOT_PANE_COUNT
-        || placement_validation
-            .pane_count
-            .checked_add(tab_snapshot.pane_slots.len())
-            .is_none_or(|pane_count| pane_count > MAX_PLACEMENT_SNAPSHOT_PANE_COUNT)
-    {
-        return Err(PanePlacementSnapshotValidationError::PaneCountExceeded);
+/// The same minimum pane size and gap, field for field.
+impl From<PanePlacementSizing> for PaneSizing {
+    fn from(pane_placement_sizing: PanePlacementSizing) -> Self {
+        PaneSizing {
+            minimum_size: pane_placement_sizing.minimum_size,
+            gap_cell_count: pane_placement_sizing.gap_cell_count,
+        }
     }
+}
+
+/// Why a decoded placement preview is not safe to draw from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanePlacementSnapshotValidationError {
+    /// The destination tab id disagrees with its record, or the destination
+    /// record is present for the source tab or absent for any other tab.
+    TabIdentityMismatch,
+    /// The source pane is not in the source tab.
+    SourcePaneMissing,
+    /// The same pane id appears more than once in the preview.
+    DuplicatePaneId,
+    /// The layout tree is not a canonical tree for the pane slots, a tab is
+    /// not tiled or has another gap than the preview's sizing, the focus
+    /// history repeats a pane or names a pane the tree does not hold, or a
+    /// stack header disagrees with the tab.
+    LayoutMismatch,
+    /// The swap tab sizes do not name each destination pane once, in leaf
+    /// order, for a tiled source in another tab, or are not empty for any
+    /// other preview.
+    TabSizesMismatch,
+    /// A pane slot has inconsistent geometry or visibility flags.
+    PaneSlotMismatch,
+}
+
+impl PanePlacementPreview {
+    /// The target this preview shows.
+    #[must_use]
+    pub fn get_placement_target(&self) -> PanePlacementPreviewTarget {
+        match self {
+            PanePlacementPreview::Available(placement_snapshot) => PanePlacementPreviewTarget {
+                source_pane_id: placement_snapshot.source_pane_id,
+                destination_tab_id: placement_snapshot.destination_tab_id,
+            },
+            PanePlacementPreview::Unavailable {
+                source_pane_id,
+                destination_tab_id,
+            } => PanePlacementPreviewTarget {
+                source_pane_id: *source_pane_id,
+                destination_tab_id: *destination_tab_id,
+            },
+        }
+    }
+}
+
+impl PanePlacementSnapshot {
+    /// The tab snapshot whose layout holds the source pane, or `None` when the
+    /// source pane floats.
+    #[must_use]
+    pub fn find_source_tab_snapshot(&self) -> Option<&PanePlacementTabSnapshot> {
+        match &self.source {
+            PanePlacementSource::Tiled(source_tab_snapshot) => Some(source_tab_snapshot),
+            PanePlacementSource::Floating => None,
+        }
+    }
+
+    /// Validate the relationships a client relies on to draw and edit the
+    /// preview.
+    ///
+    /// # Errors
+    ///
+    /// - [`PanePlacementSnapshotValidationError::TabIdentityMismatch`] when
+    ///   the destination snapshot names another tab than
+    ///   `destination_tab_id`, or is present for the source tab or absent for
+    ///   any other tab. A floating source counts as no tab.
+    /// - [`PanePlacementSnapshotValidationError::SourcePaneMissing`] when the
+    ///   source tab's slots do not hold `source_pane_id`.
+    /// - [`PanePlacementSnapshotValidationError::DuplicatePaneId`] when a pane
+    ///   appears in both tabs, twice in one tab, or as a floating source pane
+    ///   in the destination tab.
+    /// - [`PanePlacementSnapshotValidationError::LayoutMismatch`] for a tab
+    ///   whose tree, focus history or stack headers disagree with its slots,
+    ///   and [`PanePlacementSnapshotValidationError::PaneSlotMismatch`] for a
+    ///   slot whose geometry or flags disagree.
+    /// - [`PanePlacementSnapshotValidationError::TabSizesMismatch`] when the
+    ///   swap tab sizes do not name each destination pane once, in leaf order,
+    ///   for a tiled source in another tab, or are not empty for any other
+    ///   preview.
+    pub fn validate(&self) -> Result<(), PanePlacementSnapshotValidationError> {
+        let source_tab_id = self
+            .find_source_tab_snapshot()
+            .map(|source_tab_snapshot| source_tab_snapshot.tab_snapshot.tab_id);
+        if self
+            .destination_tab_snapshot
+            .as_ref()
+            .is_some_and(|tab_snapshot| tab_snapshot.tab_snapshot.tab_id != self.destination_tab_id)
+            || self.destination_tab_snapshot.is_none()
+                != (source_tab_id == Some(self.destination_tab_id))
+        {
+            return Err(PanePlacementSnapshotValidationError::TabIdentityMismatch);
+        }
+        let mut preview_pane_ids = HashSet::new();
+        if let Some(source_tab_snapshot) = self.find_source_tab_snapshot() {
+            validate_tab_snapshot(
+                source_tab_snapshot,
+                self.pane_sizing.gap_cell_count,
+                &mut preview_pane_ids,
+            )?;
+            if !source_tab_snapshot
+                .tab_snapshot
+                .pane_slots
+                .iter()
+                .any(|pane_slot| pane_slot.pane_id == self.source_pane_id)
+            {
+                return Err(PanePlacementSnapshotValidationError::SourcePaneMissing);
+            }
+        }
+        if let Some(destination_tab_snapshot) = &self.destination_tab_snapshot {
+            validate_tab_snapshot(
+                destination_tab_snapshot,
+                self.pane_sizing.gap_cell_count,
+                &mut preview_pane_ids,
+            )?;
+        }
+        if source_tab_id.is_none() && !preview_pane_ids.insert(self.source_pane_id) {
+            return Err(PanePlacementSnapshotValidationError::DuplicatePaneId);
+        }
+        let swap_target_pane_ids: Vec<PaneId> = self
+            .swap_tab_sizes
+            .iter()
+            .map(|swap_tab_sizes| swap_tab_sizes.target_pane_id)
+            .collect();
+        let expected_swap_target_pane_ids = match (&self.source, &self.destination_tab_snapshot) {
+            (PanePlacementSource::Tiled(_), Some(destination_tab_snapshot)) => {
+                destination_tab_snapshot
+                    .tab_snapshot
+                    .pane_slots
+                    .iter()
+                    .map(|pane_slot| pane_slot.pane_id)
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        if swap_target_pane_ids != expected_swap_target_pane_ids {
+            return Err(PanePlacementSnapshotValidationError::TabSizesMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Check one tab of a preview: it is tiled with `expected_gap_cell_count`, its
+/// tree is canonical and lists the slots' panes in slot order, its focus
+/// history names only those panes and each once, and its slots and stack
+/// headers sit inside the tab. Adds the tab's panes to `preview_pane_ids`.
+fn validate_tab_snapshot(
+    placement_tab_snapshot: &PanePlacementTabSnapshot,
+    expected_gap_cell_count: u16,
+    preview_pane_ids: &mut HashSet<PaneId>,
+) -> Result<(), PanePlacementSnapshotValidationError> {
+    let tab_snapshot = &placement_tab_snapshot.tab_snapshot;
     if tab_snapshot.layout_mode != LayoutMode::Tiled
-        || tab_snapshot.gap_cell_count != placement_validation.expected_gap_cell_count
+        || tab_snapshot.gap_cell_count != expected_gap_cell_count
     {
         return Err(PanePlacementSnapshotValidationError::LayoutMismatch);
     }
-    if tab_snapshot.pane_slots.len() != tab_snapshot.pane_snapshots.len() {
-        return Err(PanePlacementSnapshotValidationError::PaneSnapshotMismatch);
-    }
-
-    let layout_pane_ids = collect_layout_pane_ids(&tab_snapshot.layout_tree)?;
+    let layout_pane_ids = collect_layout_pane_ids(&placement_tab_snapshot.layout_tree)?;
     let slot_pane_ids: Vec<PaneId> = tab_snapshot
         .pane_slots
         .iter()
         .map(|pane_slot| pane_slot.pane_id)
         .collect();
     for pane_id in &slot_pane_ids {
-        if !placement_validation.pane_ids.insert(*pane_id) {
+        if !preview_pane_ids.insert(*pane_id) {
             return Err(PanePlacementSnapshotValidationError::DuplicatePaneId);
         }
     }
     if layout_pane_ids != slot_pane_ids {
         return Err(PanePlacementSnapshotValidationError::LayoutMismatch);
     }
-
-    let mut pane_snapshot_ids = HashSet::new();
-    for pane_snapshot in &tab_snapshot.pane_snapshots {
-        if !pane_snapshot_ids.insert(pane_snapshot.pane_id) {
-            return Err(PanePlacementSnapshotValidationError::DuplicatePaneId);
+    let layout_pane_id_set: HashSet<PaneId> = layout_pane_ids.iter().copied().collect();
+    let mut focus_history_pane_ids = HashSet::new();
+    for pane_id in &placement_tab_snapshot.focus_history {
+        if !layout_pane_id_set.contains(pane_id) || !focus_history_pane_ids.insert(*pane_id) {
+            return Err(PanePlacementSnapshotValidationError::LayoutMismatch);
         }
-    }
-    let snapshot_pane_ids: Vec<PaneId> = tab_snapshot
-        .pane_snapshots
-        .iter()
-        .map(|pane_snapshot| pane_snapshot.pane_id)
-        .collect();
-    if snapshot_pane_ids != slot_pane_ids {
-        return Err(PanePlacementSnapshotValidationError::PaneSnapshotMismatch);
     }
 
     let tab_rect = Rect::from_size_at_origin(tab_snapshot.tab_size);
@@ -318,50 +320,27 @@ fn validate_tab_snapshot(
     if tab_snapshot.is_every_pane_suppressed != is_every_pane_suppressed {
         return Err(PanePlacementSnapshotValidationError::PaneSlotMismatch);
     }
-    validate_stack_headers(tab_snapshot)?;
-
-    placement_validation.pane_count = placement_validation
-        .pane_count
-        .checked_add(tab_snapshot.pane_slots.len())
-        .ok_or(PanePlacementSnapshotValidationError::PaneCountExceeded)?;
-    for (pane_slot, pane_snapshot) in tab_snapshot
-        .pane_slots
-        .iter()
-        .zip(&tab_snapshot.pane_snapshots)
-    {
-        validate_pane_snapshot(
-            pane_slot,
-            pane_snapshot,
-            placement_validation,
-            retained_source_pane_id == Some(pane_slot.pane_id),
-        )?;
-    }
-    Ok(())
+    validate_stack_headers(tab_snapshot, &layout_pane_id_set)
 }
 
+/// The panes of `layout_tree`, in leaf order.
+///
+/// # Errors
+///
+/// [`PanePlacementSnapshotValidationError::LayoutMismatch`] when a split holds
+/// fewer than two children, another number of weights than children, an
+/// invalid weight, or an active child index that is out of range for a stack
+/// or not `0` for another split.
 fn collect_layout_pane_ids(
     layout_tree: &LayoutNode,
 ) -> Result<Vec<PaneId>, PanePlacementSnapshotValidationError> {
     let mut layout_nodes = vec![layout_tree];
     let mut layout_pane_ids = Vec::new();
-    let mut layout_node_count = 0usize;
     while let Some(layout_node) = layout_nodes.pop() {
-        layout_node_count = layout_node_count
-            .checked_add(1)
-            .ok_or(PanePlacementSnapshotValidationError::LayoutMismatch)?;
-        if layout_node_count > MAX_PLACEMENT_SNAPSHOT_LAYOUT_NODE_COUNT {
-            return Err(PanePlacementSnapshotValidationError::PaneCountExceeded);
-        }
         match layout_node {
-            LayoutNode::Pane(pane_id) => {
-                layout_pane_ids.push(*pane_id);
-                if layout_pane_ids.len() > MAX_PLACEMENT_SNAPSHOT_PANE_COUNT {
-                    return Err(PanePlacementSnapshotValidationError::PaneCountExceeded);
-                }
-            }
+            LayoutNode::Pane(pane_id) => layout_pane_ids.push(*pane_id),
             LayoutNode::Split(split_node) => {
                 if split_node.children.len() < 2
-                    || split_node.children.len() > MAX_PLACEMENT_SNAPSHOT_PANE_COUNT
                     || split_node.weights.len() != split_node.children.len()
                     || (split_node.direction == SplitDirection::Stacked
                         && split_node.active_child_index >= split_node.children.len())
@@ -375,20 +354,14 @@ fn collect_layout_pane_ids(
                     return Err(PanePlacementSnapshotValidationError::LayoutMismatch);
                 }
                 layout_nodes.extend(split_node.children.iter().rev());
-                if layout_node_count
-                    .checked_add(layout_nodes.len())
-                    .is_none_or(|layout_node_count| {
-                        layout_node_count > MAX_PLACEMENT_SNAPSHOT_LAYOUT_NODE_COUNT
-                    })
-                {
-                    return Err(PanePlacementSnapshotValidationError::PaneCountExceeded);
-                }
             }
         }
     }
     Ok(layout_pane_ids)
 }
 
+/// Whether `size_weight` holds a positive weight, a percent from 1 to 100, or
+/// a positive cell count, and positive optional bounds.
 fn is_valid_size_weight(size_weight: &koshi_layout::size::SizeWeight) -> bool {
     let is_valid_primary_constraint = match size_weight.primary_constraint {
         SizeConstraint::Flex(flex_weight) => flex_weight > 0,
@@ -406,158 +379,22 @@ fn is_valid_size_weight(size_weight: &koshi_layout::size::SizeWeight) -> bool {
             .is_none_or(|cell_count| cell_count > 0)
 }
 
+/// Check that each stack header names a pane of `layout_pane_ids` once, counts
+/// at least two members with its index among them, and sits inside the tab.
 fn validate_stack_headers(
-    tab_snapshot: &PanePlacementTabSnapshot,
+    tab_snapshot: &FrameTab,
+    layout_pane_ids: &HashSet<PaneId>,
 ) -> Result<(), PanePlacementSnapshotValidationError> {
-    if tab_snapshot.stack_headers.len() > tab_snapshot.pane_slots.len() {
-        return Err(PanePlacementSnapshotValidationError::LayoutMismatch);
-    }
-    let pane_ids: HashSet<PaneId> = tab_snapshot
-        .pane_slots
-        .iter()
-        .map(|pane_slot| pane_slot.pane_id)
-        .collect();
     let mut header_pane_ids = HashSet::new();
+    let tab_rect = Rect::from_size_at_origin(tab_snapshot.tab_size);
     for stack_header in &tab_snapshot.stack_headers {
-        if !pane_ids.contains(&stack_header.pane_id)
+        if !layout_pane_ids.contains(&stack_header.pane_id)
             || !header_pane_ids.insert(stack_header.pane_id)
             || stack_header.member_count < 2
             || stack_header.member_index >= stack_header.member_count
-            || !stack_header
-                .header_rect
-                .is_inside_rect(Rect::from_size_at_origin(tab_snapshot.tab_size))
+            || !stack_header.header_rect.is_inside_rect(tab_rect)
         {
             return Err(PanePlacementSnapshotValidationError::LayoutMismatch);
-        }
-    }
-    Ok(())
-}
-
-fn validate_pane_snapshot(
-    pane_slot: &FrameSlot,
-    pane_snapshot: &PanePlacementPaneSnapshot,
-    placement_validation: &mut PanePlacementValidationState,
-    is_retained_source_pane: bool,
-) -> Result<(), PanePlacementSnapshotValidationError> {
-    if pane_slot.content_rect.is_none()
-        && !is_retained_source_pane
-        && (pane_snapshot.terminal_window.is_some()
-            || !pane_snapshot.image_placement_snapshots.is_empty())
-    {
-        return Err(PanePlacementSnapshotValidationError::PaneSlotMismatch);
-    }
-    if !pane_snapshot.image_placement_snapshots.is_empty()
-        && pane_snapshot.terminal_window.is_none()
-    {
-        return Err(PanePlacementSnapshotValidationError::ImagePlacementMismatch);
-    }
-    if let Some(terminal_window) = &pane_snapshot.terminal_window {
-        validate_terminal_window(terminal_window, &mut placement_validation.cell_count)?;
-    }
-    placement_validation.image_count = placement_validation
-        .image_count
-        .checked_add(pane_snapshot.image_placement_snapshots.len())
-        .ok_or(PanePlacementSnapshotValidationError::ImageCountExceeded)?;
-    if placement_validation.image_count > MAX_PLACEMENT_SNAPSHOT_IMAGE_COUNT {
-        return Err(PanePlacementSnapshotValidationError::ImageCountExceeded);
-    }
-    let mut image_placement_ids = HashSet::new();
-    for image_placement in &pane_snapshot.image_placement_snapshots {
-        if !image_placement_ids.insert(image_placement.placement_id) {
-            return Err(PanePlacementSnapshotValidationError::DuplicateImagePlacementId);
-        }
-        validate_image_placement(
-            image_placement,
-            pane_snapshot
-                .terminal_window
-                .as_ref()
-                .ok_or(PanePlacementSnapshotValidationError::ImagePlacementMismatch)?,
-            placement_validation,
-        )?;
-    }
-    Ok(())
-}
-
-/// Check that `terminal_window` holds 1 to 65 535 rows of at least one
-/// column, and add its cells to `cell_count`. Each row's own width is checked
-/// where the row is decoded.
-fn validate_terminal_window(
-    terminal_window: &PlacementWindow,
-    cell_count: &mut u64,
-) -> Result<(), PanePlacementSnapshotValidationError> {
-    if terminal_window.column_count == 0
-        || terminal_window.encoded_rows.is_empty()
-        || terminal_window.encoded_rows.len() > usize::from(u16::MAX)
-    {
-        return Err(PanePlacementSnapshotValidationError::TerminalWindowMismatch);
-    }
-    let window_cell_count =
-        terminal_window.encoded_rows.len() as u64 * u64::from(terminal_window.column_count);
-    *cell_count = cell_count
-        .checked_add(window_cell_count)
-        .ok_or(PanePlacementSnapshotValidationError::CellCountExceeded)?;
-    if *cell_count > MAX_PLACEMENT_SNAPSHOT_CELL_COUNT {
-        return Err(PanePlacementSnapshotValidationError::CellCountExceeded);
-    }
-    Ok(())
-}
-
-fn validate_image_placement(
-    image_placement: &FrameImagePlacement,
-    terminal_window: &PlacementWindow,
-    placement_validation: &mut PanePlacementValidationState,
-) -> Result<(), PanePlacementSnapshotValidationError> {
-    let terminal_window_size = Size {
-        column_count: terminal_window.column_count,
-        row_count: u16::try_from(terminal_window.encoded_rows.len())
-            .map_err(|_| PanePlacementSnapshotValidationError::TerminalWindowMismatch)?,
-    };
-    let image_size = Size {
-        column_count: image_placement.column_count,
-        row_count: image_placement.row_count,
-    };
-    let (anchor_row, anchor_column) = image_placement.anchor_cell;
-    let image_rect = Rect::from_origin_and_size(
-        Point {
-            column: anchor_column,
-            row: anchor_row,
-        },
-        image_size,
-    );
-    if !image_rect.is_inside_rect(Rect::from_size_at_origin(terminal_window_size))
-        || image_placement
-            .image_record
-            .as_ref()
-            .is_some_and(|image_record| image_record.image_action == FrameImageAction::Transmit)
-    {
-        return Err(PanePlacementSnapshotValidationError::ImagePlacementMismatch);
-    }
-    if let Some(image_record) = &image_placement.image_record {
-        let image_dimensions = (image_record.pixel_width, image_record.pixel_height);
-        match placement_validation
-            .image_dimensions_by_content_id
-            .entry(image_placement.image_content_id)
-        {
-            Entry::Occupied(existing_image_dimensions_entry) => {
-                if *existing_image_dimensions_entry.get() != image_dimensions {
-                    return Err(PanePlacementSnapshotValidationError::ImageIdentityMismatch);
-                }
-            }
-            Entry::Vacant(vacant_image_dimensions_entry) => {
-                vacant_image_dimensions_entry.insert(image_dimensions);
-                let image_record_byte_count = compute_frame_image_byte_count(
-                    image_record.pixel_width,
-                    image_record.pixel_height,
-                )
-                .map_err(|_| PanePlacementSnapshotValidationError::ImagePlacementMismatch)?;
-                placement_validation.image_byte_count = placement_validation
-                    .image_byte_count
-                    .checked_add(image_record_byte_count)
-                    .ok_or(PanePlacementSnapshotValidationError::ImageByteCountExceeded)?;
-                if placement_validation.image_byte_count > MAX_PLACEMENT_SNAPSHOT_IMAGE_BYTE_COUNT {
-                    return Err(PanePlacementSnapshotValidationError::ImageByteCountExceeded);
-                }
-            }
         }
     }
     Ok(())

@@ -9,7 +9,9 @@ use koshi_ipc::attach::TabStructure;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 use koshi_session::client::ClientRegistry;
-use koshi_session::session::state::{Session, Tab};
+use koshi_session::session::state::Session;
+
+use crate::runtime::command::tests::build_tab;
 
 use super::*;
 
@@ -49,7 +51,7 @@ fn a_single_pane_tab_carries_its_name_index_layout_and_focus() {
     let mut session = build_test_session("session");
     let pane_id = register_test_pane(&mut session);
     let tab_id = TabId::new();
-    let mut tab = Tab::from_root_pane(tab_id, "edit".to_string(), 0, pane_id);
+    let mut tab = build_tab(tab_id, "edit", 0, LayoutNode::Pane(pane_id));
     tab.record_focus_mru(pane_id);
     session.tabs.insert(tab_id, tab);
 
@@ -80,8 +82,7 @@ fn a_split_layout_travels_unsolved_with_its_weights_and_direction() {
         ],
     );
     let tab_id = TabId::new();
-    let mut tab = Tab::from_root_pane(tab_id, "edit".to_string(), 0, left_pane_id);
-    tab.update_layout(LayoutNode::Split(split_node.clone()));
+    let tab = build_tab(tab_id, "edit", 0, LayoutNode::Split(split_node.clone()));
     session.tabs.insert(tab_id, tab);
 
     let session_structure = build_session_structure_snapshot(&session);
@@ -102,8 +103,7 @@ fn a_stacked_tab_keeps_every_collapsed_flag_and_the_active_index() {
     let stack =
         SplitNode::from_stacked_pane_ids(vec![first_pane_id, second_pane_id, third_pane_id], 1);
     let tab_id = TabId::new();
-    let mut tab = Tab::from_root_pane(tab_id, "stacked".to_string(), 0, first_pane_id);
-    tab.update_layout(LayoutNode::Split(stack));
+    let tab = build_tab(tab_id, "stacked", 0, LayoutNode::Split(stack));
     session.tabs.insert(tab_id, tab);
 
     let session_structure = build_session_structure_snapshot(&session);
@@ -134,12 +134,12 @@ fn tabs_come_out_in_display_order_not_map_order() {
     let second_tab_id = TabId::new();
     session.tabs.insert(
         second_tab_id,
-        Tab::from_root_pane(second_tab_id, "logs".to_string(), 1, second_pane_id),
+        build_tab(second_tab_id, "logs", 1, LayoutNode::Pane(second_pane_id)),
     );
     let first_tab_id = TabId::new();
     session.tabs.insert(
         first_tab_id,
-        Tab::from_root_pane(first_tab_id, "edit".to_string(), 0, first_pane_id),
+        build_tab(first_tab_id, "edit", 0, LayoutNode::Pane(first_pane_id)),
     );
 
     let session_structure = build_session_structure_snapshot(&session);
@@ -163,11 +163,11 @@ fn every_tab_is_carried_not_only_the_first() {
     let second_tab_id = TabId::new();
     session.tabs.insert(
         first_tab_id,
-        Tab::from_root_pane(first_tab_id, "edit".to_string(), 0, first_pane_id),
+        build_tab(first_tab_id, "edit", 0, LayoutNode::Pane(first_pane_id)),
     );
     session.tabs.insert(
         second_tab_id,
-        Tab::from_root_pane(second_tab_id, "logs".to_string(), 1, second_pane_id),
+        build_tab(second_tab_id, "logs", 1, LayoutNode::Pane(second_pane_id)),
     );
 
     let session_structure = build_session_structure_snapshot(&session);
@@ -188,7 +188,12 @@ fn the_tab_list_is_strictly_ascending_by_display_index() {
         let tab_id = TabId::new();
         session.tabs.insert(
             tab_id,
-            Tab::from_root_pane(tab_id, format!("t{tab_index}"), tab_index, pane_id),
+            build_tab(
+                tab_id,
+                &format!("t{tab_index}"),
+                tab_index,
+                LayoutNode::Pane(pane_id),
+            ),
         );
     }
 
@@ -218,11 +223,11 @@ fn a_tab_nothing_has_focused_carries_an_empty_focus_history() {
     let mut session = build_test_session("session");
     let pane_id = register_test_pane(&mut session);
     let tab_id = TabId::new();
-    // `Tab::from_root_pane` records no focus, which is the state of a freshly created tab
+    // `Tab::from_layout_tree` records no focus, which is the state of a freshly created tab
     // and of a tab whose last focused pane was closed with no client attached.
     session.tabs.insert(
         tab_id,
-        Tab::from_root_pane(tab_id, "edit".to_string(), 0, pane_id),
+        build_tab(tab_id, "edit", 0, LayoutNode::Pane(pane_id)),
     );
 
     let session_structure = build_session_structure_snapshot(&session);
@@ -236,7 +241,7 @@ fn focus_history_carries_an_id_the_registry_no_longer_holds() {
     let retained_pane_id = register_test_pane(&mut session);
     let removed_pane_id = register_test_pane(&mut session);
     let tab_id = TabId::new();
-    let mut tab = Tab::from_root_pane(tab_id, "edit".to_string(), 0, retained_pane_id);
+    let mut tab = build_tab(tab_id, "edit", 0, LayoutNode::Pane(retained_pane_id));
     tab.record_focus_mru(retained_pane_id);
     tab.record_focus_mru(removed_pane_id);
     session.tabs.insert(tab_id, tab);
@@ -260,7 +265,12 @@ fn the_session_and_tab_names_are_carried_byte_for_byte() {
     let tab_id = TabId::new();
     session.tabs.insert(
         tab_id,
-        Tab::from_root_pane(tab_id, "編集 \u{1f5c2}\u{200b}".to_string(), 0, pane_id),
+        build_tab(
+            tab_id,
+            "編集 \u{1f5c2}\u{200b}",
+            0,
+            LayoutNode::Pane(pane_id),
+        ),
     );
 
     let session_structure = build_session_structure_snapshot(&session);
@@ -275,7 +285,7 @@ fn focus_history_is_carried_most_recent_first() {
     let first_pane_id = register_test_pane(&mut session);
     let second_pane_id = register_test_pane(&mut session);
     let tab_id = TabId::new();
-    let mut tab = Tab::from_root_pane(tab_id, "edit".to_string(), 0, first_pane_id);
+    let mut tab = build_tab(tab_id, "edit", 0, LayoutNode::Pane(first_pane_id));
     tab.record_focus_mru(first_pane_id);
     tab.record_focus_mru(second_pane_id);
     session.tabs.insert(tab_id, tab);

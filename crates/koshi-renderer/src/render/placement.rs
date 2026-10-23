@@ -37,9 +37,8 @@ pub(super) fn draw_pane_placement_presentation(
         DESTINATION_PANE_TINT_PERCENTAGE,
     );
     let tab_snapshot = &render_snapshot.session_snapshot.active_tab_snapshot;
-    let source_pane_slot = tab_snapshot.pane_slots.iter().find(|pane_slot| {
-        pane_slot.pane_id == placement_presentation.source_pane_id && pane_slot.is_visible
-    });
+    let source_pane_slot =
+        tab_snapshot.find_visible_pane_slot(placement_presentation.source_pane_id);
     let source_visible_pane_area =
         source_pane_slot.map(|pane_slot| place_cell_rect(pane_slot.outer_rect, layout_origin));
     let has_source_stack_header = tab_snapshot
@@ -208,9 +207,7 @@ fn find_legible_target_message_area(
             continue;
         }
         let pane_content_rect = tab_snapshot
-            .pane_slots
-            .iter()
-            .find(|pane_slot| pane_slot.pane_id == *pane_id && pane_slot.is_visible)
+            .find_visible_pane_slot(*pane_id)
             .and_then(|pane_slot| pane_slot.content_rect);
         let Some(pane_content_rect) = pane_content_rect else {
             continue;

@@ -29,6 +29,9 @@
 //! whose capture koshi ended, and the floating pane move this viewer sent and
 //! draws ahead of the session. While floating pane move mode is on, it owns
 //! every mouse event, and a left drag of an unpinned floating pane moves it.
+//! While dock/undock mode is on, it owns every mouse event
+//! (`Client::handle_placement_mouse`): a left drag floats a tiled pane, or
+//! docks or moves the selected floating pane.
 //!
 //! What the viewer does **not** decide is how a forwarded event is encoded, how
 //! far a scroll may travel, or which text a highlight covers. It names a pane
@@ -63,10 +66,9 @@ use koshi_core::key::BindingModifierFlags;
 use koshi_core::mouse::{
     is_mouse_kind_reported, MouseButton, MouseInput, MouseKind, MouseTracking, ScrollDirection,
 };
-use koshi_ipc::placement::PanePlacementTabSnapshot;
 use koshi_layout::placement::PlacementDestinations;
 use koshi_renderer::snapshot::{
-    FloatingPaneMoveDraft, FrameLayout, MouseFrame, MousePane, PaneSlot, ViewerChrome,
+    FloatingPaneMoveDraft, FrameLayout, MouseFrame, MousePane, TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::{
     compute_clamped_pane_cell, compute_content_rect, compute_pane_area,
@@ -74,11 +76,12 @@ use koshi_renderer::{
     resolve_hit_region, HitRegion,
 };
 
-use crate::input::{
-    build_placement_destinations, find_destination_tab_snapshot, is_same_tab_placement_noop,
-};
+use crate::input::is_same_tab_placement_noop;
 use crate::terminal::project_core_rect;
-use crate::{Client, FloatingPaneMoveSelection, LinkStatus, PaneMoveMode, PlacementInputAction};
+use crate::{
+    Client, DockUndockMode, FloatingPaneMoveSelection, LinkStatus, PaneMoveMode,
+    PlacementInputAction, PlacementModeLifetime,
+};
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -213,16 +216,21 @@ pub(crate) struct SelectionDrag {
 }
 
 /// A pane-border drag under way: the pane whose border was grabbed, which side
-/// it is, and the cell the last *accepted* resize tracked to. The tracked cell
-/// advances only over the cells a resize was accepted for, so pushing the
-/// pointer past a pane's minimum size leaves the border at that limit and a
-/// reverse drag moves it the instant the pointer crosses back.
+/// it is, the second side of a grabbed corner, and the cell the last *accepted*
+/// resize tracked to. The tracked cell advances only over the cells a resize
+/// was accepted for, so pushing the pointer past a pane's minimum size leaves
+/// the border at that limit and a reverse drag moves it the instant the
+/// pointer crosses back. A left or right side tracks the cell's column, and an
+/// up or down side tracks its row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ResizeDrag {
     /// The pane whose border is being dragged.
     pane_id: PaneId,
     /// Which of the pane's borders was grabbed.
     border_side: Direction,
+    /// The `Up` or `Down` border a corner press also moves, beside a `Left` or
+    /// `Right` `border_side`. `None` when the press moves one border.
+    corner_horizontal_side: Option<Direction>,
     /// The cell the last accepted resize tracked to; the next drag delta is
     /// measured from here.
     last_accepted_position: Point,
@@ -435,6 +443,8 @@ impl Client {
     /// Route `mouse_input` while pane placement owns the mouse. Returns `None`
     /// when the event is not placement input and takes the normal mouse path.
     ///
+    /// - While dock/undock mode is on, that mode answers every event
+    ///   ([`handle_dock_undock_mouse`](Self::handle_dock_undock_mouse)).
     /// - While floating pane move mode is on, every event returns `None`.
     /// - While a submitted placement waits for the session, every event is
     ///   consumed and the placement drag ends.
@@ -446,9 +456,9 @@ impl Client {
     ///   left press on pane content, a placement handle, or a stack header
     ///   starts a drag, and picks that pane as the source unless it already is
     ///   the source. A pane picked in the session's active tab also takes
-    ///   focus: a press on the header of collapsed `pane-123` returns a read
-    ///   that focuses `pane-123`, which expands it in its stack. A pane picked
-    ///   while another tab is previewed keeps focus where it is.
+    ///   focus: a press on the header of collapsed `pane-123` returns a
+    ///   `FocusPane` of `pane-123`, which expands it in its stack. A pane
+    ///   picked while another tab is previewed keeps focus where it is.
     /// - A left drag selects the target under the pointer: a swap, or an
     ///   insertion while Shift was held at the press. A left drag onto a scroll
     ///   arrow also steps the tab strip one tab, as a wheel tick over the tab
@@ -461,6 +471,9 @@ impl Client {
         mouse_frame: &MouseFrame,
         current_time: Instant,
     ) -> Option<PlacementInputAction> {
+        if self.dock_undock_mode.is_some() {
+            return Some(self.handle_dock_undock_mouse(mouse_input, mouse_frame, current_time));
+        }
         if self.is_floating_pane_move_mode_on() {
             return None;
         }
@@ -487,44 +500,27 @@ impl Client {
                     return None;
                 }
                 let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
-                let Some((source_pane_id, destination_tab_id)) =
-                    self.begin_mouse_placement_mode(pane_id, active_tab_id)
-                else {
+                if !self.begin_mouse_placement_mode(pane_id, active_tab_id) {
                     return Some(PlacementInputAction::Consumed);
-                };
+                }
                 self.begin_placement_drag(mouse_input.position, false);
-                return Some(PlacementInputAction::ReadPlacement {
-                    pane_id_to_focus: Some(source_pane_id),
-                    source_pane_id,
-                    destination_tab_id,
-                });
+                return Some(PlacementInputAction::FocusPane { pane_id });
             }
             return None;
         }
-        self.update_pointer_hover(mouse_frame, mouse_input.position, hit_region);
-        self.update_placement_tab_hover(
-            match hit_region {
-                HitRegion::Tab { tab_id } => Some(tab_id),
-                _ => None,
-            },
-            current_time,
-        );
+        self.update_placement_hovers(mouse_frame, mouse_input.position, hit_region, current_time);
         let placement_action = match mouse_input.mouse_kind {
             MouseKind::Press(MouseButton::Left) => match hit_region {
-                HitRegion::Tab { tab_id } => self.select_placement_destination_tab(tab_id).map_or(
-                    PlacementInputAction::Consumed,
-                    |(source_pane_id, destination_tab_id)| PlacementInputAction::ReadPlacement {
-                        pane_id_to_focus: None,
-                        source_pane_id,
-                        destination_tab_id,
-                    },
-                ),
+                HitRegion::Tab { tab_id } => {
+                    self.select_placement_destination_tab(tab_id);
+                    PlacementInputAction::Consumed
+                }
                 HitRegion::PlacementHandle { pane_id }
                 | HitRegion::PaneContent { pane_id }
                 | HitRegion::StackHeader { pane_id } => {
                     let displayed_tab_id = mouse_frame.client_snapshot.active_tab_id;
                     let is_displayed_tab_active = self.active_tab_id == Some(displayed_tab_id);
-                    let placement_source_selection =
+                    let is_source_pane_selected =
                         self.select_placement_source_pane(pane_id, displayed_tab_id);
                     self.begin_placement_drag(
                         mouse_input.position,
@@ -532,16 +528,11 @@ impl Client {
                             .modifier_flags
                             .has_all_modifiers(BindingModifierFlags::SHIFT),
                     );
-                    placement_source_selection.map_or(
-                        PlacementInputAction::Consumed,
-                        |(source_pane_id, destination_tab_id)| {
-                            PlacementInputAction::ReadPlacement {
-                                pane_id_to_focus: is_displayed_tab_active.then_some(source_pane_id),
-                                source_pane_id,
-                                destination_tab_id,
-                            }
-                        },
-                    )
+                    if is_source_pane_selected && is_displayed_tab_active {
+                        PlacementInputAction::FocusPane { pane_id }
+                    } else {
+                        PlacementInputAction::Consumed
+                    }
                 }
                 HitRegion::PaneBorder { .. }
                 | HitRegion::PaneTitlebar { .. }
@@ -610,6 +601,240 @@ impl Client {
         Some(placement_action)
     }
 
+    /// Answer `mouse_input` while dock/undock mode owns the mouse. The pane
+    /// under the pointer follows the pointer, and no event reaches a pane's
+    /// program.
+    ///
+    /// - A left press drops the left-button gesture under way. While the mode
+    ///   waits for the undock or the dock it sent, it does nothing more.
+    /// - A left press on a tab previews that tab while a floating pane is
+    ///   selected.
+    /// - A left press on a pane, or on a collapsed stack member's header,
+    ///   begins a pane drag
+    ///   ([`begin_dock_undock_pane_drag`](Self::begin_dock_undock_pane_drag)).
+    /// - A left drag of a tiled pane that moves the pointer off the press cell
+    ///   sends the `PlacePane` that floats the pane where it is drawn, and the
+    ///   pane becomes the selected pane
+    ///   ([`submit_undock_command`](Self::submit_undock_command)). The drag
+    ///   goes on.
+    /// - A left drag of the selected floating pane moves it with the pointer,
+    ///   unless this viewer pinned it, and selects the insertion under the
+    ///   pointer, on the edge of the pane nearest it, as a Shift drag in pane
+    ///   placement mode does. A left drag onto a scroll arrow steps the tab
+    ///   strip one tab.
+    /// - A left release of the selected floating pane over a target confirms
+    ///   the placement that docks it there
+    ///   ([`submit_placement_command`](Self::submit_placement_command)). A
+    ///   release over no target, or over a target the session refuses in the
+    ///   held preview, such as a tab with no room, clears the target and sends
+    ///   one `MoveFloatingPane` to the cell the pane is drawn at
+    ///   ([`submit_floating_pane_move`](Self::submit_floating_pane_move)), or
+    ///   nothing for a pinned pane. A release of a tiled pane's drag sends
+    ///   nothing. A frame that floats the dragged tiled pane makes it the
+    ///   selected floating pane, and the drag goes on from where that frame
+    ///   draws it
+    ///   ([`update_dock_undock_selection`](Self::update_dock_undock_selection)).
+    /// - A wheel tick over the tab strip steps it one tab. Every other event
+    ///   changes nothing.
+    ///
+    /// Every answer is `Consumed` unless it names a command or a confirmation
+    /// above.
+    fn handle_dock_undock_mouse(
+        &mut self,
+        mouse_input: MouseInput,
+        mouse_frame: &MouseFrame,
+        current_time: Instant,
+    ) -> PlacementInputAction {
+        let hit_region = resolve_hit_region(mouse_frame.build_frame_layout(), mouse_input.position);
+        self.update_placement_hovers(mouse_frame, mouse_input.position, hit_region, current_time);
+        match mouse_input.mouse_kind {
+            MouseKind::Press(MouseButton::Left) => {
+                self.left_button_gesture = None;
+                if self.is_dock_undock_command_pending() {
+                    self.end_placement_drag();
+                    return PlacementInputAction::Consumed;
+                }
+                match hit_region {
+                    HitRegion::Tab { tab_id } => {
+                        self.select_placement_destination_tab(tab_id);
+                        PlacementInputAction::Consumed
+                    }
+                    HitRegion::PaneContent { pane_id }
+                    | HitRegion::PlacementHandle { pane_id }
+                    | HitRegion::StackHeader { pane_id }
+                    | HitRegion::PaneTitlebar { pane_id } => {
+                        self.begin_dock_undock_pane_drag(
+                            pane_id,
+                            mouse_input.position,
+                            mouse_frame,
+                        );
+                        PlacementInputAction::Consumed
+                    }
+                    _ => PlacementInputAction::Consumed,
+                }
+            }
+            MouseKind::Drag(MouseButton::Left) => {
+                match hit_region {
+                    HitRegion::TablineScrollLeft => {
+                        self.step_tabline_peek(mouse_frame, ScrollDirection::Left);
+                    }
+                    HitRegion::TablineScrollRight => {
+                        self.step_tabline_peek(mouse_frame, ScrollDirection::Right);
+                    }
+                    _ => {}
+                }
+                let Some(LeftButtonGesture::FloatingPaneMove(floating_pane_handle_drag)) =
+                    self.left_button_gesture
+                else {
+                    return PlacementInputAction::Consumed;
+                };
+                self.drag_floating_pane_to(floating_pane_handle_drag, mouse_input.position);
+                let pane_id = floating_pane_handle_drag.pane_id;
+                if self.get_placement_source_pane_id() == Some(pane_id) {
+                    if self.update_placement_drag_movement(mouse_input.position) {
+                        let placement_target =
+                            self.find_placement_target_at(mouse_input.position, mouse_frame);
+                        self.set_mouse_placement_target(placement_target);
+                    }
+                    return PlacementInputAction::Consumed;
+                }
+                let is_tiled_pane_dragged = mouse_input.position
+                    != floating_pane_handle_drag.press_position
+                    && !mouse_frame
+                        .session_snapshot
+                        .floating_pane_ids
+                        .contains(&pane_id);
+                if !is_tiled_pane_dragged || self.is_dock_undock_command_pending() {
+                    return PlacementInputAction::Consumed;
+                }
+                self.cancel_placement_mode();
+                self.submit_undock_command(pane_id)
+            }
+            MouseKind::Release(MouseButton::Left) => {
+                let Some(LeftButtonGesture::FloatingPaneMove(floating_pane_handle_drag)) =
+                    self.left_button_gesture
+                else {
+                    self.end_placement_drag();
+                    return PlacementInputAction::Consumed;
+                };
+                if self.get_placement_source_pane_id() != Some(floating_pane_handle_drag.pane_id) {
+                    self.left_button_gesture = None;
+                    return PlacementInputAction::Consumed;
+                }
+                let placement_target = if self.update_placement_drag_movement(mouse_input.position)
+                {
+                    self.find_placement_target_at(mouse_input.position, mouse_frame)
+                } else {
+                    None
+                };
+                self.end_placement_drag();
+                if placement_target.is_some() {
+                    self.set_mouse_placement_target(placement_target);
+                    let placement_action = self
+                        .submit_placement_command()
+                        .unwrap_or(PlacementInputAction::Consumed);
+                    if self.is_placement_confirmation_pending() {
+                        self.left_button_gesture = None;
+                        return placement_action;
+                    }
+                }
+                self.clear_mouse_placement_target();
+                self.submit_floating_pane_move(
+                    floating_pane_handle_drag,
+                    mouse_input.position,
+                    mouse_frame,
+                )
+                .map_or(
+                    PlacementInputAction::Consumed,
+                    |(command_id, command_args)| PlacementInputAction::SubmitCommand {
+                        command_id,
+                        command: Command::MoveFloatingPane(command_args),
+                    },
+                )
+            }
+            MouseKind::Scroll(scroll_direction) => {
+                if is_tab_strip_region(hit_region) {
+                    self.step_tabline_peek(mouse_frame, scroll_direction);
+                }
+                PlacementInputAction::Consumed
+            }
+            _ => PlacementInputAction::Consumed,
+        }
+    }
+
+    /// Begin the dock/undock mode drag of `pane_id`, which `mouse_frame`
+    /// draws, from the left press at `press_position`: a grab-handle drag that
+    /// starts where the frame draws the pane, counted from the pane-area
+    /// origin. A tiled pane's drawn rect is its pane box, and a collapsed
+    /// stack member's is its header strip.
+    ///
+    /// - The selected floating pane, drawn floating or in the dock preview,
+    ///   also begins pane placement mode's insertion drag, and its target
+    ///   clears.
+    /// - Another floating pane becomes the selected pane: pane placement mode
+    ///   opens for it with no target, and previews the frame's active tab.
+    /// - A tiled pane starts the drag only. Its first move floats the pane.
+    ///
+    /// Changes nothing while a floating pane move this viewer sent waits for
+    /// the session and the pane is floating, and for a pane the frame draws
+    /// nowhere.
+    fn begin_dock_undock_pane_drag(
+        &mut self,
+        pane_id: PaneId,
+        press_position: Point,
+        mouse_frame: &MouseFrame,
+    ) {
+        let pane_area = compute_mouse_frame_pane_area(mouse_frame);
+        let drawn_floating_pane_slot = mouse_frame
+            .build_frame_layout()
+            .find_drawn_floating_pane_slot(pane_id);
+        let drawn_top_left_cell = match drawn_floating_pane_slot {
+            Some(floating_pane_slot) => floating_pane_slot.outer_rect.origin,
+            None => {
+                let active_tab_snapshot = &mouse_frame.session_snapshot.active_tab_snapshot;
+                let Some(pane_slot) = active_tab_snapshot.pane_slots.iter().find(|pane_slot| {
+                    pane_slot.pane_id == pane_id && !pane_slot.outer_rect.is_empty()
+                }) else {
+                    return;
+                };
+                let tab_origin = Size {
+                    column_count: pane_area.width,
+                    row_count: pane_area.height,
+                }
+                .compute_centered_origin(active_tab_snapshot.tab_size);
+                let pane_slot_origin = pane_slot.outer_rect.origin;
+                Point {
+                    column: pane_slot_origin.column.saturating_add(tab_origin.column),
+                    row: pane_slot_origin.row.saturating_add(tab_origin.row),
+                }
+            }
+        };
+        let is_pane_floating = mouse_frame
+            .session_snapshot
+            .floating_pane_ids
+            .contains(&pane_id);
+        if is_pane_floating && self.sent_floating_pane_move.is_some() {
+            return;
+        }
+        let is_selected_pane = self.get_placement_source_pane_id() == Some(pane_id);
+        if is_pane_floating && !is_selected_pane {
+            self.cancel_placement_mode();
+            let destination_tab_id = mouse_frame.client_snapshot.active_tab_id;
+            self.dock_undock_mode = Some(DockUndockMode::default());
+            self.open_placement_mode(
+                pane_id,
+                None,
+                destination_tab_id,
+                PlacementModeLifetime::UntilCancelled,
+            );
+        }
+        self.begin_floating_pane_handle_drag(pane_id, drawn_top_left_cell, press_position);
+        if is_pane_floating {
+            self.clear_mouse_placement_target();
+            self.begin_placement_drag(press_position, true);
+        }
+    }
+
     /// Clear the placement target. Does nothing while a submitted placement
     /// waits for the session.
     fn clear_mouse_placement_target(&mut self) {
@@ -638,7 +863,7 @@ impl Client {
         let Some(placement_mode) = self.placement_state.placement_mode.as_mut() else {
             return;
         };
-        let is_target_source_pane = placement_mode.destination_tab_id
+        let is_target_source_pane = Some(placement_mode.destination_tab_id)
             == placement_mode.source_tab_id
             && placement_target.as_ref().is_some_and(|placement_target| {
                 matches!(
@@ -666,11 +891,9 @@ impl Client {
     ) -> Option<TiledPlacementTarget> {
         let placement_mode = self.placement_state.placement_mode.as_ref()?;
         let placement_snapshot = self.get_placement_snapshot()?;
-        if placement_snapshot.destination_tab_id != placement_mode.destination_tab_id {
-            return None;
-        }
-        let tab_snapshot =
-            find_destination_tab_snapshot(placement_snapshot, placement_mode.destination_tab_id)?;
+        let tab_snapshot = &placement_snapshot
+            .find_displayed_tab_snapshot()?
+            .tab_snapshot;
         if tab_snapshot.is_every_pane_suppressed {
             return None;
         }
@@ -691,11 +914,7 @@ impl Client {
         }
         let placement_drag = self.placement_state.placement_drag?;
         let destination_tab_id = placement_mode.destination_tab_id;
-        let placement_destinations = build_placement_destinations(
-            tab_snapshot,
-            placement_mode.source_pane_id,
-            placement_snapshot.pane_sizing,
-        );
+        let placement_destinations = placement_snapshot.list_placement_destinations()?;
         if placement_drag.is_insertion_drag {
             let hovered_insertion_pane_id = hovered_pane_id.filter(|target_pane_id| {
                 placement_destinations
@@ -733,12 +952,12 @@ impl Client {
         }
 
         let target_pane_id = hovered_pane_id?;
-        let swap_slot = placement_destinations
-            .swap_slots
+        let target_pane_slot = placement_destinations
+            .target_pane_slots
             .iter()
-            .find(|swap_slot| swap_slot.pane_id == target_pane_id)?;
+            .find(|target_pane_slot| target_pane_slot.pane_id == target_pane_id)?;
         Some(TiledPlacementTarget::Swap {
-            target_pane_id: swap_slot.pane_id,
+            target_pane_id: target_pane_slot.pane_id,
         })
     }
 
@@ -750,7 +969,7 @@ impl Client {
     fn find_placement_pane_id_at(
         screen_point: Point,
         placement_layout_rect: RatatuiRect,
-        placement_tab_snapshot: &PanePlacementTabSnapshot,
+        placement_tab_snapshot: &TabSnapshot,
     ) -> Option<PaneId> {
         let layout_point = Point {
             column: screen_point.column.saturating_sub(placement_layout_rect.x),
@@ -955,7 +1174,7 @@ impl Client {
                 else {
                     return Vec::new();
                 };
-                self.submit_floating_pane_move(
+                self.submit_floating_pane_move_as_mouse_actions(
                     floating_pane_handle_drag,
                     mouse_input.position,
                     mouse_frame,
@@ -1162,9 +1381,9 @@ impl Client {
     /// when a new link to the session replaces the old one.
     /// Placement mode that lasts until its drag ends is cancelled. Placement
     /// mode that lasts until Esc stays on and loses its unconfirmed target.
-    /// The move chooser and floating pane move mode stay on, and floating
-    /// pane move mode keeps its selected pane. A wait for the move the mode
-    /// sent ends at the next applied frame.
+    /// The move chooser, floating pane move mode, and dock/undock mode stay
+    /// on, and floating pane move mode keeps its selected pane. A wait for the
+    /// move the mode sent ends at the next applied frame.
     ///
     /// The pane under the pointer, where the tab strip is peeked, and the line a
     /// pending edge-scroll was asked from are left as they are.
@@ -1310,22 +1529,31 @@ impl Client {
             HitRegion::PaneContent { pane_id } => {
                 self.press_pane_content(pane_id, mouse_input, mouse_frame, current_time)
             }
-            HitRegion::PaneBorder { pane_id, side } => {
+            HitRegion::PaneBorder {
+                pane_id,
+                side,
+                corner_horizontal_side,
+            } => {
                 let floating_pane_slot = frame_layout.find_drawn_floating_pane_slot(pane_id);
-                let can_border_move = match floating_pane_slot {
+                let can_border_move = |border_side: Direction| match floating_pane_slot {
                     // A pinned float keeps its left and top edges.
                     Some(floating_pane_slot) => {
                         !floating_pane_slot.is_pinned
-                            || matches!(side, Direction::Right | Direction::Down)
+                            || matches!(border_side, Direction::Right | Direction::Down)
                     }
                     // Only a real divider — one with a pane drawn beside it to
                     // resize against — begins a drag.
-                    None => has_border_neighbor(mouse_frame, pane_id, side),
+                    None => has_border_neighbor(mouse_frame, pane_id, border_side),
                 };
-                if self.client_config.mouse.can_resize_pane_border && can_border_move {
+                let can_resize_pane_border = self.client_config.mouse.can_resize_pane_border;
+                let mut movable_border_sides = std::iter::once(side)
+                    .chain(corner_horizontal_side)
+                    .filter(|border_side| can_resize_pane_border && can_border_move(*border_side));
+                if let Some(border_side) = movable_border_sides.next() {
                     self.left_button_gesture = Some(LeftButtonGesture::BorderResize(ResizeDrag {
                         pane_id,
-                        border_side: side,
+                        border_side,
+                        corner_horizontal_side: movable_border_sides.next(),
                         last_accepted_position: mouse_input.position,
                     }));
                 }
@@ -1566,7 +1794,7 @@ impl Client {
                 Vec::new()
             }
             Some(LeftButtonGesture::FloatingPaneMove(floating_pane_handle_drag)) => self
-                .submit_floating_pane_move(
+                .submit_floating_pane_move_as_mouse_actions(
                     floating_pane_handle_drag,
                     mouse_input.position,
                     mouse_frame,
@@ -1628,38 +1856,46 @@ impl Client {
         )))]
     }
 
-    /// Move the grabbed border to follow a drag whose pointer is now at `pointer_position`.
+    /// Move the grabbed border, and the second border of a grabbed corner, to
+    /// follow a drag whose pointer is now at `pointer_position`: one
+    /// [`MouseAction::Resize`] for each border the pointer moved along. A
+    /// bottom-right corner grabbed at `(40, 10)` and dragged to `(43, 12)` asks
+    /// for `Right` 3 cells, then `Down` 2 cells.
     ///
     /// Asks for the whole distance from the anchor every time. The session
-    /// moves the border as far as it can, so a fast drag that jumps several
-    /// cells fills right up to a pane's minimum size instead of being refused
-    /// whole; [`note_resize_applied`](Self::note_resize_applied) moves the
-    /// anchor over the cells the session says the pane's size changed.
+    /// moves the border as far as it can: a fast drag that jumps several cells
+    /// fills right up to a pane's minimum size.
+    /// [`note_resize_applied`](Self::note_resize_applied) moves the anchor over
+    /// the cells the session says the pane's size changed.
     fn drag_resize_to(&self, resize_drag: ResizeDrag, pointer_position: Point) -> Vec<MouseAction> {
-        let resize_cell_delta = compute_resize_cell_delta(
-            resize_drag.border_side,
-            resize_drag.last_accepted_position,
-            pointer_position,
-        );
-        if resize_cell_delta == 0 {
-            return Vec::new();
-        }
-        vec![MouseAction::Resize {
-            pane_id: resize_drag.pane_id,
-            border_side: resize_drag.border_side,
-            resize_step: resize_cell_delta.signum(),
-            requested_cell_count: resize_cell_delta.unsigned_abs(),
-        }]
+        std::iter::once(resize_drag.border_side)
+            .chain(resize_drag.corner_horizontal_side)
+            .filter_map(|border_side| {
+                let resize_cell_delta = compute_resize_cell_delta(
+                    border_side,
+                    resize_drag.last_accepted_position,
+                    pointer_position,
+                );
+                (resize_cell_delta != 0).then_some(MouseAction::Resize {
+                    pane_id: resize_drag.pane_id,
+                    border_side,
+                    resize_step: resize_cell_delta.signum(),
+                    requested_cell_count: resize_cell_delta.unsigned_abs(),
+                })
+            })
+            .collect()
     }
 
     /// Advance the border drag's anchor over the `applied_cell_count` cells the session
     /// changed `pane_id`'s size by, for a move of its `border_side` border asked for in
-    /// direction `resize_step`. Where the resize stopped is the wall, so the anchor stops
-    /// there and a reverse drag resizes the pane the instant the pointer crosses back.
+    /// direction `resize_step`. The anchor stops where the resize stopped, and a reverse
+    /// drag resizes the pane the instant the pointer crosses back.
     ///
-    /// Nothing moves unless the drag now held is the one `pane_id` and
-    /// `border_side` name: an answer for a border the viewer has let go of, or
-    /// for another border of the same pane, leaves the anchor where it is.
+    /// Nothing moves unless the drag now held is the one `pane_id` names and
+    /// grabbed `border_side`: an answer for a border the viewer has let go of,
+    /// or for another border of the same pane, leaves the anchor where it is.
+    /// An answer for a left or right border moves the anchor's column, and one
+    /// for an up or down border moves its row.
     ///
     /// `resize_step` and `applied_cell_count` are the whole of the distance —
     /// the pointer is never read here, so an answer that lands while the
@@ -1675,15 +1911,14 @@ impl Client {
         let Some(LeftButtonGesture::BorderResize(resize_drag)) = self.left_button_gesture else {
             return;
         };
-        if resize_drag.pane_id != pane_id
-            || resize_drag.border_side != border_side
-            || applied_cell_count == 0
-        {
+        let is_grabbed_border_side = resize_drag.border_side == border_side
+            || resize_drag.corner_horizontal_side == Some(border_side);
+        if resize_drag.pane_id != pane_id || !is_grabbed_border_side || applied_cell_count == 0 {
             return;
         }
         self.left_button_gesture = Some(LeftButtonGesture::BorderResize(ResizeDrag {
             last_accepted_position: advance_resize_anchor(
-                resize_drag.border_side,
+                border_side,
                 resize_drag.last_accepted_position,
                 resize_step,
                 applied_cell_count,
@@ -1947,6 +2182,25 @@ impl Client {
         }
     }
 
+    /// Update the pointer hover ([`update_pointer_hover`](Self::update_pointer_hover))
+    /// and the placement tab hover from `hit_region`, the region under
+    /// `screen_point`: a tab region starts the hover of that tab, and any
+    /// other region clears it.
+    fn update_placement_hovers(
+        &mut self,
+        mouse_frame: &MouseFrame,
+        screen_point: Point,
+        hit_region: HitRegion,
+        current_time: Instant,
+    ) {
+        self.update_pointer_hover(mouse_frame, screen_point, hit_region);
+        let hovered_tab_id = match hit_region {
+            HitRegion::Tab { tab_id } => Some(tab_id),
+            _ => None,
+        };
+        self.update_placement_tab_hover(hovered_tab_id, current_time);
+    }
+
     /// Update the viewer-owned hover state from the region under the pointer.
     fn update_pointer_hover(
         &mut self,
@@ -1960,6 +2214,7 @@ impl Client {
             | HitRegion::PaneBorder {
                 pane_id,
                 side: Direction::Up,
+                ..
             } => Some(pane_id),
             _ => find_content_pane(hit_region),
         };
@@ -1977,6 +2232,7 @@ impl Client {
             | HitRegion::PaneBorder {
                 pane_id,
                 side: Direction::Up,
+                ..
             } => find_visible_pane_handle(mouse_frame, pane_id, screen_point),
             _ => None,
         };
@@ -2041,9 +2297,10 @@ impl Client {
     /// the cell the press found it at, and a pane the frame no longer draws or
     /// this viewer pinned, send nothing, and the pane is drawn where the frame
     /// places it. Any other release sends one `MoveFloatingPane` under a new
-    /// command id. The viewer keeps drawing the pane at the sent cell until the
-    /// session rejects the move, or until it applies a frame that names the
-    /// move ([`settle_floating_pane_move`](Self::settle_floating_pane_move)).
+    /// command id, returned with its arguments. The viewer keeps drawing the
+    /// pane at the sent cell until the session rejects the move, or until it
+    /// applies a frame that names the move
+    /// ([`settle_floating_pane_move`](Self::settle_floating_pane_move)).
     ///
     /// A `40`-column pane drawn at column `30` of an `80`-column pane area,
     /// pressed at `(32, 6)`, sends nothing on a release at `(32, 6)`, even
@@ -2054,7 +2311,7 @@ impl Client {
         floating_pane_handle_drag: FloatingPaneHandleDrag,
         release_position: Point,
         mouse_frame: &MouseFrame,
-    ) -> Vec<MouseAction> {
+    ) -> Option<(CommandId, MoveFloatingPaneArgs)> {
         let FloatingPaneHandleDrag {
             pane_id,
             press_position,
@@ -2066,24 +2323,40 @@ impl Client {
             .build_frame_layout_with_current_chrome(mouse_frame)
             .find_drawn_floating_pane_slot(pane_id);
         self.left_button_gesture = None;
-        let Some(floating_pane_slot) = drawn_floating_pane_slot else {
-            return Vec::new();
-        };
+        let floating_pane_slot = drawn_floating_pane_slot?;
         let top_left_cell = floating_pane_slot.outer_rect.origin;
         if release_position == press_position
             || floating_pane_slot.is_pinned
             || top_left_cell == press_top_left_cell
         {
-            return Vec::new();
+            return None;
         }
         let command_id = self.record_sent_floating_pane_move(pane_id, top_left_cell);
-        vec![MouseAction::MoveFloatingPane {
+        Some((
             command_id,
-            command_args: MoveFloatingPaneArgs {
+            MoveFloatingPaneArgs {
                 pane_id,
                 top_left_cell,
             },
-        }]
+        ))
+    }
+
+    /// [`submit_floating_pane_move`](Self::submit_floating_pane_move), as the
+    /// mouse actions this viewer writes: one [`MouseAction::MoveFloatingPane`],
+    /// or none.
+    fn submit_floating_pane_move_as_mouse_actions(
+        &mut self,
+        floating_pane_handle_drag: FloatingPaneHandleDrag,
+        release_position: Point,
+        mouse_frame: &MouseFrame,
+    ) -> Vec<MouseAction> {
+        self.submit_floating_pane_move(floating_pane_handle_drag, release_position, mouse_frame)
+            .map(|(command_id, command_args)| MouseAction::MoveFloatingPane {
+                command_id,
+                command_args,
+            })
+            .into_iter()
+            .collect()
     }
 
     /// Record a floating pane move of `pane_id` to `top_left_cell` under a new
@@ -2127,13 +2400,52 @@ impl Client {
     /// Drop the floating pane handle drag under way and return `true`, or
     /// return `false` when no handle drag is under way. A move already sent
     /// stays. The pane is drawn where the frame places it again, and nothing
-    /// reaches the session.
+    /// reaches the session. In dock/undock mode, the pane placement drag and
+    /// the dock target end with it.
     pub(crate) fn cancel_floating_pane_move_drag(&mut self) -> bool {
-        self.left_button_gesture
+        let is_handle_drag_cancelled = self
+            .left_button_gesture
             .take_if(|left_button_gesture| {
                 matches!(left_button_gesture, LeftButtonGesture::FloatingPaneMove(_))
             })
-            .is_some()
+            .is_some();
+        if is_handle_drag_cancelled && self.dock_undock_mode.is_some() {
+            self.end_placement_drag();
+            self.clear_mouse_placement_target();
+        }
+        is_handle_drag_cancelled
+    }
+
+    /// Move the grab-handle drag of floating pane `pane_id`: the pane starts
+    /// at `drawn_top_left_cell` and moves by the pointer's travel since the
+    /// press. Returns the screen cell of that press. Returns `None`,
+    /// changing nothing, when no grab-handle drag of `pane_id` is under way.
+    ///
+    /// A drag that moved a pane from `(4, 2)` to `(7, 4)` and is rebased to
+    /// `(30, 2)` draws the pane at `(33, 4)`.
+    pub(crate) fn rebase_floating_pane_handle_drag(
+        &mut self,
+        pane_id: PaneId,
+        drawn_top_left_cell: Point,
+    ) -> Option<Point> {
+        let Some(LeftButtonGesture::FloatingPaneMove(floating_pane_handle_drag)) =
+            self.left_button_gesture.as_mut()
+        else {
+            return None;
+        };
+        if floating_pane_handle_drag.pane_id != pane_id {
+            return None;
+        }
+        let column_delta = i32::from(floating_pane_handle_drag.top_left_cell.column)
+            - i32::from(floating_pane_handle_drag.press_top_left_cell.column);
+        let row_delta = i32::from(floating_pane_handle_drag.top_left_cell.row)
+            - i32::from(floating_pane_handle_drag.press_top_left_cell.row);
+        floating_pane_handle_drag.press_top_left_cell = drawn_top_left_cell;
+        floating_pane_handle_drag.top_left_cell = Point {
+            column: shift_cell_coordinate(drawn_top_left_cell.column, column_delta),
+            row: shift_cell_coordinate(drawn_top_left_cell.row, row_delta),
+        };
+        Some(floating_pane_handle_drag.press_position)
     }
 
     /// Stop drawing the sent floating pane move ahead of the session when
@@ -2391,10 +2703,19 @@ fn compute_nearest_edge_direction(screen_point: Point, target_rect: RatatuiRect)
     }
 }
 
-/// Return the visible pane's outer rectangle in client screen coordinates.
-fn find_pane_outer_screen_rect(mouse_frame: &MouseFrame, pane_id: PaneId) -> Option<Rect> {
+/// Return `pane_id` when it is a visible tiled pane and `screen_point` is inside its
+/// painted placement handle, else `None`. A floating pane returns `None`.
+fn find_visible_pane_handle(
+    mouse_frame: &MouseFrame,
+    pane_id: PaneId,
+    screen_point: Point,
+) -> Option<PaneId> {
+    mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .find_visible_pane_slot(pane_id)?;
     let content_rect = find_pane_content_rect(mouse_frame.build_frame_layout(), pane_id)?;
-    Some(Rect::from_origin_and_size(
+    let pane_outer_rect = Rect::from_origin_and_size(
         Point {
             column: content_rect.origin.column.saturating_sub(1),
             row: content_rect.origin.row.saturating_sub(1),
@@ -2403,18 +2724,7 @@ fn find_pane_outer_screen_rect(mouse_frame: &MouseFrame, pane_id: PaneId) -> Opt
             column_count: content_rect.size.column_count.saturating_add(2),
             row_count: content_rect.size.row_count.saturating_add(2),
         },
-    ))
-}
-
-/// Return `pane_id` when it is a visible tiled pane and `screen_point` is inside its
-/// painted placement handle, else `None`. A floating pane returns `None`.
-fn find_visible_pane_handle(
-    mouse_frame: &MouseFrame,
-    pane_id: PaneId,
-    screen_point: Point,
-) -> Option<PaneId> {
-    find_visible_pane_slot(mouse_frame, pane_id)?;
-    let pane_outer_rect = find_pane_outer_screen_rect(mouse_frame, pane_id)?;
+    );
     compute_placement_handle_rect(pane_outer_rect)
         .filter(|handle_rect| handle_rect.is_point_inside(screen_point))
         .map(|_| pane_id)
@@ -2433,8 +2743,11 @@ fn find_visible_pane_handle(
 ///
 /// [`TabSnapshot::gap_cell_count`]: koshi_renderer::snapshot::TabSnapshot::gap_cell_count
 fn has_border_neighbor(mouse_frame: &MouseFrame, pane_id: PaneId, border_side: Direction) -> bool {
-    let Some(pane_outer_rect) =
-        find_visible_pane_slot(mouse_frame, pane_id).map(|pane_slot| pane_slot.outer_rect)
+    let Some(pane_outer_rect) = mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .find_visible_pane_slot(pane_id)
+        .map(|pane_slot| pane_slot.outer_rect)
     else {
         return false;
     };
@@ -2479,21 +2792,14 @@ fn has_border_neighbor(mouse_frame: &MouseFrame, pane_id: PaneId, border_side: D
         })
 }
 
-/// The box `mouse_frame` draws for `pane_id`, or `None` when the frame shows it nowhere —
-/// a pane that closed, was hidden, or sits on a tab this frame is not showing.
-fn find_visible_pane_slot(mouse_frame: &MouseFrame, pane_id: PaneId) -> Option<&PaneSlot> {
-    mouse_frame
-        .session_snapshot
-        .active_tab_snapshot
-        .pane_slots
-        .iter()
-        .find(|pane_slot| pane_slot.is_visible && pane_slot.pane_id == pane_id)
-}
-
 /// Whether `mouse_frame` draws `pane_id`: a visible slot of its active tab, or
 /// a floating pane this viewer draws.
 fn is_pane_drawn(mouse_frame: &MouseFrame, pane_id: PaneId) -> bool {
-    find_visible_pane_slot(mouse_frame, pane_id).is_some()
+    mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .find_visible_pane_slot(pane_id)
+        .is_some()
         || mouse_frame
             .build_frame_layout()
             .find_drawn_floating_pane_slot(pane_id)

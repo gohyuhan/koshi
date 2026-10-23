@@ -11,15 +11,18 @@ use super::*;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use koshi_core::event::{PaneFocused, PaneMinimizedChanged};
 use koshi_core::geometry::{Size, SplitDirection};
 use koshi_core::ids::SessionId;
 use koshi_layout::tree::SplitNode;
 use koshi_pane::pane::state::PaneRecord;
 
-use crate::client::{ClientOrigin, ClientRegistry};
+use crate::client::ClientOrigin;
 use crate::error::SessionConsistencyError;
 use crate::session::lifecycle::SessionLifecycle;
-use crate::session::state::tests::build_default_floating_member;
+use crate::session::state::tests::{
+    build_default_floating_member, build_empty_session, build_tab, TEST_TAB_SIZE,
+};
 
 const TEST_VIEWPORT_SIZE: Size = Size {
     column_count: 80,
@@ -28,7 +31,7 @@ const TEST_VIEWPORT_SIZE: Size = Size {
 
 /// A single-pane tab named `"code"` at display position `tab_index`.
 fn build_single_pane_tab(tab_id: TabId, pane_id: PaneId, tab_index: usize) -> Tab {
-    Tab::from_root_pane(tab_id, "code".to_owned(), tab_index, pane_id)
+    build_tab(tab_id, "code", tab_index, LayoutNode::Pane(pane_id))
 }
 
 /// A tab split left/right between `left_pane_id` and `right_pane_id` at display
@@ -39,15 +42,18 @@ fn build_two_pane_tab(
     right_pane_id: PaneId,
     tab_index: usize,
 ) -> Tab {
-    let mut tab = Tab::from_root_pane(tab_id, "code".to_owned(), tab_index, left_pane_id);
-    tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
-        SplitDirection::Horizontal,
-        vec![
-            LayoutNode::Pane(left_pane_id),
-            LayoutNode::Pane(right_pane_id),
-        ],
-    )));
-    tab
+    build_tab(
+        tab_id,
+        "code",
+        tab_index,
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutNode::Pane(left_pane_id),
+                LayoutNode::Pane(right_pane_id),
+            ],
+        )),
+    )
 }
 
 /// A client of `session_id` viewing `tab_id`, no per-tab focus recorded yet.
@@ -71,12 +77,7 @@ fn build_client_on(session_id: SessionId, tab_id: TabId) -> Client {
 /// attached yet. Attach clients afterward with [`Session::attach_client`] so
 /// each carries the session's own id.
 fn build_session_with(tabs: Vec<Tab>, pane_ids: Vec<PaneId>) -> Session {
-    let mut session = Session::from_identity_and_client_registry(
-        SessionId::new(),
-        "main".to_owned(),
-        SystemTime::UNIX_EPOCH,
-        ClientRegistry::new(),
-    );
+    let mut session = build_empty_session();
     for tab in tabs {
         session.tabs.insert(tab.get_tab_id(), tab);
     }
@@ -140,6 +141,7 @@ fn commit_new_tab_registers_its_pane_and_emits_created_then_pane_created() {
         "logs".to_owned(),
         None,
         NewPaneSpec::default(),
+        TEST_TAB_SIZE,
     );
 
     assert_eq!(previous_active_tab_id, None);
@@ -169,12 +171,7 @@ fn commit_new_tab_registers_its_pane_and_emits_created_then_pane_created() {
 
 #[test]
 fn commit_new_tab_first_tab_transitions_the_session_to_running() {
-    let mut session = Session::from_identity_and_client_registry(
-        SessionId::new(),
-        "main".to_owned(),
-        SystemTime::UNIX_EPOCH,
-        ClientRegistry::new(),
-    );
+    let mut session = build_empty_session();
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Starting);
 
     let _ = commit_new_tab(
@@ -184,6 +181,7 @@ fn commit_new_tab_first_tab_transitions_the_session_to_running() {
         "first".to_owned(),
         None,
         NewPaneSpec::default(),
+        TEST_TAB_SIZE,
     );
 
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Running);
@@ -199,6 +197,7 @@ fn commit_new_tab_after_the_first_leaves_the_session_running() {
         "first".to_owned(),
         None,
         NewPaneSpec::default(),
+        TEST_TAB_SIZE,
     );
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Running);
 
@@ -209,6 +208,7 @@ fn commit_new_tab_after_the_first_leaves_the_session_running() {
         "second".to_owned(),
         None,
         NewPaneSpec::default(),
+        TEST_TAB_SIZE,
     );
 
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Running);
@@ -230,6 +230,7 @@ fn commit_new_tab_on_a_stopping_session_leaves_it_stopping() {
         "logs".to_owned(),
         None,
         NewPaneSpec::default(),
+        TEST_TAB_SIZE,
     );
 
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Stopping);
@@ -264,6 +265,7 @@ fn commit_new_tab_appends_after_existing_tabs() {
         "second".to_owned(),
         None,
         NewPaneSpec::default(),
+        TEST_TAB_SIZE,
     );
 
     assert_eq!(session.tabs.len(), 2);
@@ -290,6 +292,7 @@ fn commit_new_tab_switches_the_focus_client_and_emits_focus_events() {
         "second".to_owned(),
         Some(client_id),
         NewPaneSpec::default(),
+        TEST_TAB_SIZE,
     );
 
     assert_eq!(previous_active_tab_id, Some(existing_tab_id));
@@ -339,6 +342,7 @@ fn commit_new_tab_does_not_move_other_clients() {
         "second".to_owned(),
         Some(focused_client_id),
         NewPaneSpec::default(),
+        TEST_TAB_SIZE,
     );
 
     assert_eq!(
@@ -380,6 +384,7 @@ fn commit_new_tab_with_a_stale_focus_client_moves_no_view() {
         "second".to_owned(),
         Some(ClientId::new()),
         NewPaneSpec::default(),
+        TEST_TAB_SIZE,
     );
 
     assert_eq!(previous_active_tab_id, None);
@@ -427,6 +432,7 @@ fn commit_new_tab_records_the_new_pane_spec_on_the_root_pane() {
         "logs".to_owned(),
         None,
         new_pane_spec,
+        TEST_TAB_SIZE,
     );
 
     let pane_record = session.panes.get_pane_record_by_id(new_pane_id).unwrap();
@@ -584,7 +590,7 @@ fn close_tab_moves_a_viewing_client_to_the_nearest_tab() {
 #[test]
 fn close_tab_at_the_first_index_moves_viewers_to_the_next_tab() {
     // Closing index 0 has no previous tab to fall back on, so
-    // `nearest_surviving_tab` takes the smallest index above it.
+    // `find_nearest_surviving_tab_by_index` takes the smallest index above it.
     let (mut session, tab_ids) = build_three_tab_session();
     let client_id = attach_client_on(&mut session, tab_ids[0]);
     let closed_pane_id = get_only_pane_id(&session, tab_ids[0]);
@@ -1023,9 +1029,9 @@ fn focus_tab_preserves_per_tab_pane_focus() {
 }
 
 #[test]
-fn focus_tab_lands_on_the_tabs_most_recent_pane() {
-    // A client that never focused a pane in the tab it switches to lands on
-    // that tab's focus history head, not on the first leaf in layout order.
+fn focus_tab_lands_a_client_with_no_focus_there_on_the_first_leaf_not_another_clients_focus() {
+    // The tab's most recent focus is another client's `right`. A client that
+    // never focused a pane in the tab lands on the first leaf, `left`.
     let (first_tab_id, target_tab_id) = (TabId::new(), TabId::new());
     let (first_pane_id, left_pane_id, right_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
@@ -1051,7 +1057,7 @@ fn focus_tab_lands_on_the_tabs_most_recent_pane() {
             .get_client_by_id(client_id)
             .unwrap()
             .get_focused_pane_id(target_tab_id),
-        Some(right_pane_id)
+        Some(left_pane_id)
     );
     assert_eq!(
         emitted_events,
@@ -1064,7 +1070,7 @@ fn focus_tab_lands_on_the_tabs_most_recent_pane() {
             Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: Some(target_tab_id),
-                pane_id: right_pane_id,
+                pane_id: left_pane_id,
                 previous_pane_id: None,
             }),
         ]
@@ -1136,38 +1142,31 @@ fn focus_tab_skips_a_landing_candidate_with_no_registry_record() {
 }
 
 #[test]
-fn focus_tab_skips_a_history_entry_that_is_not_a_leaf() {
-    // A focus history entry naming a pane the tab's layout no longer holds is
-    // passed over, so the landing never focuses a pane outside the tab.
-    let (first_tab_id, target_tab_id) = (TabId::new(), TabId::new());
-    let (first_pane_id, target_pane_id, stale_pane_id) =
+fn find_landing_pane_skips_a_history_entry_that_is_not_a_leaf() {
+    // The client's newest history entry names a pane the tab's layout no
+    // longer holds: the landing passes over it to `right`, the next history
+    // entry, and not to `left`, the first leaf.
+    let (left_pane_id, right_pane_id, stale_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
+    let target_tab_id = TabId::new();
     let mut session = build_session_with(
-        vec![
-            build_single_pane_tab(first_tab_id, first_pane_id, 0),
-            build_single_pane_tab(target_tab_id, target_pane_id, 1),
-        ],
-        vec![first_pane_id, target_pane_id],
+        vec![build_two_pane_tab(
+            target_tab_id,
+            left_pane_id,
+            right_pane_id,
+            0,
+        )],
+        vec![left_pane_id, right_pane_id, stale_pane_id],
     );
-    let _ = session
-        .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(stale_pane_id));
-    session
-        .tabs
-        .get_mut(&target_tab_id)
-        .unwrap()
-        .record_focus_mru(stale_pane_id);
-    let client_id = attach_client_on(&mut session, first_tab_id);
+    let client_id = attach_client_on(&mut session, target_tab_id);
+    let client = session.clients.get_client_mut_by_id(client_id).unwrap();
+    let _ = client.update_focused_pane(target_tab_id, right_pane_id);
+    let _ = client.update_focused_pane(target_tab_id, stale_pane_id);
 
-    let _ = focus_tab(&mut session, client_id, TabTarget::Id(target_tab_id));
-
+    let client = session.clients.get_client_by_id(client_id).unwrap();
     assert_eq!(
-        session
-            .clients
-            .get_client_by_id(client_id)
-            .unwrap()
-            .get_focused_pane_id(target_tab_id),
-        Some(target_pane_id)
+        find_landing_pane(&session, client, target_tab_id),
+        Some(right_pane_id)
     );
 }
 
@@ -1179,65 +1178,54 @@ fn build_stacked_tab(
     expanded_pane_id: PaneId,
     tab_index: usize,
 ) -> Tab {
-    let mut tab = Tab::from_root_pane(tab_id, "code".to_owned(), tab_index, collapsed_pane_id);
-    tab.update_layout(LayoutNode::Split(SplitNode::from_stacked_pane_ids(
-        vec![collapsed_pane_id, expanded_pane_id],
-        1,
-    )));
-    tab
+    build_tab(
+        tab_id,
+        "code",
+        tab_index,
+        LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+            vec![collapsed_pane_id, expanded_pane_id],
+            1,
+        )),
+    )
 }
 
 #[test]
-fn focus_tab_skips_a_history_entry_collapsed_to_a_stack_header() {
-    // The newest history entry is a stack member collapsed to its header,
-    // which draws no content: the landing passes over it to the expanded
-    // member.
-    let (first_tab_id, target_tab_id) = (TabId::new(), TabId::new());
-    let (first_pane_id, collapsed_pane_id, expanded_pane_id) =
-        (PaneId::new(), PaneId::new(), PaneId::new());
+fn find_landing_pane_lands_on_the_stack_member_the_clients_own_history_shows() {
+    // The stack `[collapsed, expanded]` has `expanded` active. A client with
+    // no focus history there lands on `expanded`. A client whose history
+    // there is `[collapsed]` sees `collapsed` open and lands on it.
+    let target_tab_id = TabId::new();
+    let (collapsed_pane_id, expanded_pane_id) = (PaneId::new(), PaneId::new());
     let mut session = build_session_with(
-        vec![
-            build_single_pane_tab(first_tab_id, first_pane_id, 0),
-            build_stacked_tab(target_tab_id, collapsed_pane_id, expanded_pane_id, 1),
-        ],
-        vec![first_pane_id, collapsed_pane_id, expanded_pane_id],
+        vec![build_stacked_tab(
+            target_tab_id,
+            collapsed_pane_id,
+            expanded_pane_id,
+            0,
+        )],
+        vec![collapsed_pane_id, expanded_pane_id],
     );
-    let target_tab = session.tabs.get_mut(&target_tab_id).unwrap();
-    target_tab.record_focus_mru(expanded_pane_id);
-    target_tab.record_focus_mru(collapsed_pane_id);
-    let client_id = attach_client_on(&mut session, first_tab_id);
+    let fresh_client_id = attach_client_on(&mut session, target_tab_id);
+    let remembering_client_id = attach_client_on(&mut session, target_tab_id);
+    let _ = session
+        .clients
+        .get_client_mut_by_id(remembering_client_id)
+        .unwrap()
+        .update_focused_pane(target_tab_id, collapsed_pane_id);
 
-    let emitted_events = focus_tab(&mut session, client_id, TabTarget::Id(target_tab_id));
-
+    let fresh_client = session.clients.get_client_by_id(fresh_client_id).unwrap();
     assert_eq!(
-        session
-            .clients
-            .get_client_by_id(client_id)
-            .unwrap()
-            .get_focused_pane_id(target_tab_id),
+        find_landing_pane(&session, fresh_client, target_tab_id),
         Some(expanded_pane_id)
     );
+    let remembering_client = session
+        .clients
+        .get_client_by_id(remembering_client_id)
+        .unwrap();
     assert_eq!(
-        emitted_events,
-        vec![
-            Event::TabFocused(TabFocused {
-                client_id,
-                tab_id: target_tab_id,
-                previous_tab_id: first_tab_id,
-            }),
-            Event::PaneFocused(PaneFocused {
-                client_id,
-                tab_id: Some(target_tab_id),
-                pane_id: expanded_pane_id,
-                previous_pane_id: None,
-            }),
-        ]
+        find_landing_pane(&session, remembering_client, target_tab_id),
+        Some(collapsed_pane_id)
     );
-    assert_eq!(
-        session.tabs[&target_tab_id].list_focus_mru(),
-        [expanded_pane_id, collapsed_pane_id]
-    );
-    assert_eq!(session.validate_session_consistency(), Ok(()));
 }
 
 #[test]
@@ -1304,10 +1292,11 @@ fn focus_tab_lands_on_nothing_when_no_leaf_has_a_record() {
 }
 
 #[test]
-fn close_tab_lands_a_moved_client_on_the_surviving_tabs_recent_pane() {
+fn close_tab_lands_a_moved_client_with_no_focus_in_the_survivor_on_its_first_leaf() {
     // Closing the tab a client views moves it to the nearest survivor and
-    // gives it that tab's most recent pane, so the arriving client always has
-    // a pane to type into.
+    // focuses a pane there, so the arriving client always has a pane to type
+    // into. The survivor's most recent focus is another client's `right`; a
+    // client with no focus history there lands on the first leaf, `left`.
     let (surviving_tab_id, closed_tab_id) = (TabId::new(), TabId::new());
     let (left_pane_id, right_pane_id, closed_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
@@ -1341,7 +1330,7 @@ fn close_tab_lands_a_moved_client_on_the_surviving_tabs_recent_pane() {
             .get_client_by_id(client_id)
             .unwrap()
             .get_focused_pane_id(surviving_tab_id),
-        Some(right_pane_id)
+        Some(left_pane_id)
     );
     assert_eq!(
         emitted_events,
@@ -1364,7 +1353,7 @@ fn close_tab_lands_a_moved_client_on_the_surviving_tabs_recent_pane() {
             Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: Some(surviving_tab_id),
-                pane_id: right_pane_id,
+                pane_id: left_pane_id,
                 previous_pane_id: None,
             }),
         ]
@@ -1863,9 +1852,8 @@ fn closing_the_last_tab_leaves_a_viewing_clients_active_tab_pointing_at_it() {
 
 #[test]
 fn a_dangling_active_tab_is_still_reported_while_other_tabs_remain() {
-    // The zero-tab scoping must not swallow the real corruption case: a
-    // client viewing a gone tab while the session still has tabs is an
-    // inconsistency and stays reported.
+    // A client whose active tab is gone, while the session still has tabs, is
+    // reported as `ActiveTabMissing`.
     let first_tab_id = TabId::new();
     let second_tab_id = TabId::new();
     let first_pane_id = PaneId::new();
@@ -1975,6 +1963,7 @@ fn commit_profile_tab_registers_every_pane_and_emits_created_events() {
         "dev".to_owned(),
         None,
         true,
+        TEST_TAB_SIZE,
     );
 
     // The first tab moves the session from Starting to Running.
@@ -2010,9 +1999,8 @@ fn commit_profile_tab_registers_every_pane_and_emits_created_events() {
 
 #[test]
 fn commit_profile_tab_without_a_client_still_records_the_focus_leaf() {
-    // A profile committed with no client — a session started detached — must
-    // still put its chosen leaf in the tab's focus history, so the first
-    // client to view the tab lands on it, not on layout order.
+    // A profile committed with no client, as in a session started detached,
+    // records its chosen leaf as the tab's newest focus history entry.
     let mut session = build_session_with(vec![], vec![]);
     let tab_id = TabId::new();
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
@@ -2030,6 +2018,7 @@ fn commit_profile_tab_without_a_client_still_records_the_focus_leaf() {
         "dev".to_owned(),
         None,
         true,
+        TEST_TAB_SIZE,
     );
 
     assert_eq!(session.tabs[&tab_id].list_focus_mru(), &[second_pane_id]);
@@ -2046,6 +2035,7 @@ fn commit_profile_tab_focuses_the_focus_leaf_and_switches_the_client() {
         "code".to_owned(),
         None,
         NewPaneSpec::default(),
+        TEST_TAB_SIZE,
     );
     let client_id = attach_client_on(&mut session, start_tab_id);
 
@@ -2065,6 +2055,7 @@ fn commit_profile_tab_focuses_the_focus_leaf_and_switches_the_client() {
         "dev".to_owned(),
         Some(client_id),
         true,
+        TEST_TAB_SIZE,
     );
 
     let client = session.clients.get_client_by_id(client_id).unwrap();
@@ -2115,6 +2106,7 @@ fn commit_profile_tab_out_of_range_focus_leaf_focuses_the_root_pane() {
         "code".to_owned(),
         None,
         NewPaneSpec::default(),
+        TEST_TAB_SIZE,
     );
     let client_id = attach_client_on(&mut session, start_tab_id);
 
@@ -2134,6 +2126,7 @@ fn commit_profile_tab_out_of_range_focus_leaf_focuses_the_root_pane() {
         "dev".to_owned(),
         Some(client_id),
         true,
+        TEST_TAB_SIZE,
     );
 
     let client = session.clients.get_client_by_id(client_id).unwrap();
@@ -2155,6 +2148,7 @@ fn commit_profile_tab_inactive_records_focus_without_switching_the_view() {
         "code".to_owned(),
         None,
         NewPaneSpec::default(),
+        TEST_TAB_SIZE,
     );
     let client_id = attach_client_on(&mut session, first_tab_id);
 
@@ -2174,6 +2168,7 @@ fn commit_profile_tab_inactive_records_focus_without_switching_the_view() {
         "dev".to_owned(),
         Some(client_id),
         false,
+        TEST_TAB_SIZE,
     );
 
     let client = session.clients.get_client_by_id(client_id).unwrap();
@@ -2222,6 +2217,7 @@ fn commit_profile_tab_with_a_stale_focus_client_emits_only_creation_events() {
         "code".to_owned(),
         None,
         NewPaneSpec::default(),
+        TEST_TAB_SIZE,
     );
     let attached_client_id = attach_client_on(&mut session, first_tab_id);
 
@@ -2241,6 +2237,7 @@ fn commit_profile_tab_with_a_stale_focus_client_emits_only_creation_events() {
         "dev".to_owned(),
         Some(ClientId::new()),
         true,
+        TEST_TAB_SIZE,
     );
 
     assert_eq!(
@@ -2292,6 +2289,7 @@ fn commit_profile_tab_with_no_panes_panics() {
         "dev".to_owned(),
         None,
         true,
+        TEST_TAB_SIZE,
     );
 }
 
@@ -2313,6 +2311,7 @@ fn a_new_tab_after_a_close_takes_the_freed_index_densely() {
         "d".to_owned(),
         None,
         NewPaneSpec::default(),
+        TEST_TAB_SIZE,
     );
 
     assert_eq!(session.tabs[&new_tab_id].get_tab_index(), 2);
@@ -2332,7 +2331,7 @@ fn add_floating_pane(session: &mut Session, pane_id: PaneId) {
 }
 
 #[test]
-fn closing_the_last_tab_removes_every_floating_pane_in_creation_order_before_the_quit() {
+fn closing_the_last_tab_removes_floating_panes_in_the_order_they_became_floating_then_quits() {
     let tab_id = TabId::new();
     let tiled_pane_id = PaneId::new();
     let (first_floating_pane_id, second_floating_pane_id) = (PaneId::new(), PaneId::new());
@@ -2405,15 +2404,7 @@ fn closing_a_tab_that_is_not_the_last_keeps_every_floating_pane() {
             }),
         ]
     );
-    assert_eq!(
-        session
-            .floating_set
-            .list_members()
-            .iter()
-            .map(|floating_member| floating_member.pane_id)
-            .collect::<Vec<PaneId>>(),
-        vec![floating_pane_id]
-    );
+    assert_eq!(session.floating_set.list_pane_ids(), vec![floating_pane_id]);
     assert_eq!(
         session
             .panes
@@ -2455,6 +2446,7 @@ fn commit_new_tab_takes_over_the_input_from_a_focused_floating_pane() {
         "second".to_owned(),
         Some(client_id),
         NewPaneSpec::default(),
+        TEST_TAB_SIZE,
     );
 
     assert_eq!(
@@ -2470,6 +2462,11 @@ fn commit_new_tab_takes_over_the_input_from_a_focused_floating_pane() {
                 tab_id: new_tab_id,
                 previous_tab_id: existing_tab_id,
             }),
+            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+                client_id,
+                pane_id: floating_pane_id,
+                is_minimized: true,
+            }),
             Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: Some(new_tab_id),
@@ -2480,6 +2477,7 @@ fn commit_new_tab_takes_over_the_input_from_a_focused_floating_pane() {
     );
     let client = session.clients.get_client_by_id(client_id).unwrap();
     assert_eq!(client.get_focused_floating_pane_id(), None);
+    assert_eq!(client.list_shown_floating_pane_ids(), &[] as &[PaneId]);
     assert_eq!(client.get_active_focused_pane_id(), Some(new_pane_id));
 }
 
@@ -2510,6 +2508,7 @@ fn an_active_profile_tab_takes_over_the_input_from_a_focused_floating_pane() {
         "dev".to_owned(),
         Some(client_id),
         true,
+        TEST_TAB_SIZE,
     );
 
     assert_eq!(
@@ -2531,6 +2530,11 @@ fn an_active_profile_tab_takes_over_the_input_from_a_focused_floating_pane() {
                 tab_id: profile_tab_id,
                 previous_tab_id: existing_tab_id,
             }),
+            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+                client_id,
+                pane_id: floating_pane_id,
+                is_minimized: true,
+            }),
             Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: Some(profile_tab_id),
@@ -2541,6 +2545,7 @@ fn an_active_profile_tab_takes_over_the_input_from_a_focused_floating_pane() {
     );
     let client = session.clients.get_client_by_id(client_id).unwrap();
     assert_eq!(client.get_focused_floating_pane_id(), None);
+    assert_eq!(client.list_shown_floating_pane_ids(), &[] as &[PaneId]);
     assert_eq!(client.get_active_focused_pane_id(), Some(second_pane_id));
 }
 
@@ -2571,6 +2576,7 @@ fn an_inactive_profile_tab_leaves_the_input_on_a_focused_floating_pane() {
         "dev".to_owned(),
         Some(client_id),
         false,
+        TEST_TAB_SIZE,
     );
 
     assert_eq!(

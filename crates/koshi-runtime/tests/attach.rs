@@ -24,11 +24,10 @@ use common::{
 use koshi_core::command::{
     CloseTabArgs, Command, CommandEnvelope, CommandSource, DetachArgs, FocusPaneArgs, FocusTabArgs,
     FocusTarget, LockModeArgs, MoveFloatingPaneArgs, NewPaneArgs, NewPanePlacement, NewTabArgs,
-    PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, PlacementRevision, TabTarget,
-    TiledPlacementTarget,
+    PanePlacementAnchor, PanePlacementTarget, TabTarget, TiledPlacementTarget,
 };
 use koshi_core::event::{Event, QuitCause};
-use koshi_core::geometry::{Direction, Point, Size};
+use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord};
 use koshi_core::lock::LockMode;
@@ -36,11 +35,19 @@ use koshi_core::mouse::{MouseAnswer, MouseButton, MouseKind};
 use koshi_core::process::{ExitStatus, PtySize};
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::event::SessionEvent;
+use koshi_ipc::frame::PaintedFrame;
+use koshi_ipc::placement::{
+    PanePlacementPreview, PanePlacementPreviewTarget, PanePlacementSnapshot, PanePlacementSource,
+};
 use koshi_ipc::protocol::{
     ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, WireMouseAction,
 };
 use koshi_ipc::transport::{Connection, ReceivedFrame};
 use koshi_layout::mode::LayoutMode;
+use koshi_layout::placement::{
+    place_pane_within_tab, solve_placed_tab, PlacedTabLayout, PlacementTarget,
+};
+use koshi_layout::solver::PaneSizing;
 use koshi_layout::tree::LayoutNode;
 use koshi_runtime::runtime::painted_update::SessionFrame;
 use koshi_session::client::{compute_default_pane_area_size, Client, ClientOrigin};
@@ -105,6 +112,7 @@ fn attach_test_client_with_resume_token(
                 cell_size: None,
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
+                placement_preview_target: None,
             },
         },
     );
@@ -1323,60 +1331,39 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
                 3,
             );
 
-            let (mut viewer_connection, initial_session_frames) =
+            let (viewer_connection, initial_session_frames) =
                 read_session_frames_until_two_panes_show(viewer_connection, client_id);
             let (observer_connection, observer_initial_session_frames) =
                 read_session_frames_until_two_panes_show(observer_connection, observer_client_id);
             let initial_frame = &get_last_painted_frame(&initial_session_frames).painted_frame;
             let active_tab_id = initial_frame.client_snapshot.active_tab_id;
-            let source_rect_before = initial_frame
-                .session_snapshot
-                .active_tab_snapshot
-                .pane_slots
-                .iter()
-                .find(|pane_slot| pane_slot.pane_id == source_pane_id)
-                .expect("the source pane has a slot before the swap")
-                .outer_rect;
-            let target_rect_before = initial_frame
-                .session_snapshot
-                .active_tab_snapshot
-                .pane_slots
-                .iter()
-                .find(|pane_slot| pane_slot.pane_id == target_pane_id)
-                .expect("the target pane has a slot before the swap")
-                .outer_rect;
-            let session_revision_before = initial_frame.session_snapshot.session_revision;
-            let client_revision_before = initial_frame.client_snapshot.client_revision;
+            let source_rect_before = find_pane_outer_rect(initial_frame, source_pane_id);
+            let target_rect_before = find_pane_outer_rect(initial_frame, target_pane_id);
             let target_pane_resize_history = fake_pty_backend
                 .list_pane_sizes(target_pane_id)
                 .expect("the target PTY was spawned");
             let source_pane_resize_history = fake_pty_backend
                 .list_pane_sizes(source_pane_id)
                 .expect("the source PTY was spawned");
+            let (mut viewer_connection, placement_snapshot) =
+                read_placement_preview(viewer_connection, source_pane_id, active_tab_id);
+            let placement_target = TiledPlacementTarget::Swap { target_pane_id };
+            let expected_placed_tab_layout =
+                build_same_tab_placed_tab_layout(&placement_snapshot, &placement_target);
             let placement_command_id = CommandId::new();
 
             viewer_connection
                 .ipc_connection
                 .send(&IpcRequest {
-                    request_id: 3,
-                    request_kind: IpcRequestKind::SubmitCommand(Box::new(
-                        CommandEnvelope::from_parts(
-                            placement_command_id,
-                            CommandSource::from_key_binding(client_id),
-                            Command::PlacePane(PlacePaneArgs {
-                                source_pane_id,
-                                placement_target: PanePlacementTarget::Tiled(
-                                    TiledPlacementTarget::Swap { target_pane_id },
-                                ),
-                                expected_placement_revision: Some(PlacementRevision {
-                                    session_revision: session_revision_before,
-                                    client_revision: client_revision_before,
-                                }),
-                            }),
-                        ),
-                    )),
+                    request_id: 4,
+                    request_kind: IpcRequestKind::ConfirmPanePlacement {
+                        command_id: placement_command_id,
+                        source_pane_id,
+                        placement_target: placement_target.clone(),
+                        expected_placed_tab_layout: expected_placed_tab_layout.clone(),
+                    },
                 })
-                .expect("send the checked pane swap");
+                .expect("send the confirmed pane swap");
 
             let (viewer_connection, committed_session_frames) =
                 read_session_frames_until_painted_frame(
@@ -1384,9 +1371,9 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
                     move |received_painted_frame| {
                         received_painted_frame
                             .painted_frame
-                            .session_snapshot
-                            .session_revision
-                            == session_revision_before + 1
+                            .client_snapshot
+                            .last_applied_placement_command_id
+                            == Some(placement_command_id)
                     },
                 );
             let (observer_connection, observer_committed_session_frames) =
@@ -1395,8 +1382,8 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
                     move |received_painted_frame| {
                         let painted_frame = &received_painted_frame.painted_frame;
                         painted_frame.client_snapshot.client_id == observer_client_id
-                            && painted_frame.session_snapshot.session_revision
-                                == session_revision_before + 1
+                            && find_pane_outer_rect(painted_frame, source_pane_id)
+                                == target_rect_before
                     },
                 );
             let committed_frame = &get_last_painted_frame(&committed_session_frames).painted_frame;
@@ -1407,9 +1394,7 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
                 source_pane_id,
                 source_tab_id: Some(active_tab_id),
                 destination_tab_id: Some(active_tab_id),
-                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
-                    target_pane_id,
-                }),
+                placement_target: PanePlacementTarget::Tiled(placement_target),
             });
             for committed_client_frames in [
                 &committed_session_frames,
@@ -1432,32 +1417,23 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
                     .pane_slots,
                 "the observer starts from the same committed layout"
             );
-            let source_rect_after = committed_frame
-                .session_snapshot
-                .active_tab_snapshot
-                .pane_slots
-                .iter()
-                .find(|pane_slot| pane_slot.pane_id == source_pane_id)
-                .expect("the source pane remains in the committed frame")
-                .outer_rect;
-            let target_rect_after = committed_frame
-                .session_snapshot
-                .active_tab_snapshot
-                .pane_slots
-                .iter()
-                .find(|pane_slot| pane_slot.pane_id == target_pane_id)
-                .expect("the target pane remains in the committed frame")
-                .outer_rect;
             assert_eq!(
                 committed_frame.client_snapshot.viewport_size,
                 TEST_VIEWPORT_SIZE
             );
             assert_eq!(
-                committed_frame.session_snapshot.session_revision,
-                session_revision_before + 1
+                list_pane_outer_rects(committed_frame),
+                expected_placed_tab_layout.layout_solve.pane_rects,
+                "the committed tab is the tab the preview showed"
             );
-            assert_eq!(source_rect_after, target_rect_before);
-            assert_eq!(target_rect_after, source_rect_before);
+            assert_eq!(
+                find_pane_outer_rect(committed_frame, source_pane_id),
+                target_rect_before
+            );
+            assert_eq!(
+                find_pane_outer_rect(committed_frame, target_pane_id),
+                source_rect_before
+            );
 
             assert_eq!(
                 fake_pty_backend
@@ -1510,9 +1486,15 @@ fn a_pane_swap_confirmed_before_another_viewers_new_pane_is_rejected_to_its_view
             );
             let (viewer_connection, initial_session_frames) =
                 read_session_frames_until_two_panes_show(viewer_connection, client_id);
-            let initial_frame = &get_last_painted_frame(&initial_session_frames).painted_frame;
-            let session_revision_before = initial_frame.session_snapshot.session_revision;
-            let client_revision_before = initial_frame.client_snapshot.client_revision;
+            let active_tab_id = get_last_painted_frame(&initial_session_frames)
+                .painted_frame
+                .client_snapshot
+                .active_tab_id;
+            let (viewer_connection, placement_snapshot) =
+                read_placement_preview(viewer_connection, source_pane_id, active_tab_id);
+            let placement_target = TiledPlacementTarget::Swap { target_pane_id };
+            let earlier_placed_tab_layout =
+                build_same_tab_placed_tab_layout(&placement_snapshot, &placement_target);
 
             create_right_split_pane(
                 &mut caller_connection,
@@ -1527,31 +1509,23 @@ fn a_pane_swap_confirmed_before_another_viewers_new_pane_is_rejected_to_its_view
                     received_painted_frame
                         .painted_frame
                         .session_snapshot
-                        .session_revision
-                        > session_revision_before
+                        .active_tab_snapshot
+                        .pane_slots
+                        .len()
+                        == 3
                 },
             );
             let placement_command_id = CommandId::new();
             viewer_connection
                 .ipc_connection
                 .send(&IpcRequest {
-                    request_id: 3,
-                    request_kind: IpcRequestKind::SubmitCommand(Box::new(
-                        CommandEnvelope::from_parts(
-                            placement_command_id,
-                            CommandSource::from_key_binding(client_id),
-                            Command::PlacePane(PlacePaneArgs {
-                                source_pane_id,
-                                placement_target: PanePlacementTarget::Tiled(
-                                    TiledPlacementTarget::Swap { target_pane_id },
-                                ),
-                                expected_placement_revision: Some(PlacementRevision {
-                                    session_revision: session_revision_before,
-                                    client_revision: client_revision_before,
-                                }),
-                            }),
-                        ),
-                    )),
+                    request_id: 5,
+                    request_kind: IpcRequestKind::ConfirmPanePlacement {
+                        command_id: placement_command_id,
+                        source_pane_id,
+                        placement_target,
+                        expected_placed_tab_layout: earlier_placed_tab_layout,
+                    },
                 })
                 .expect("send the pane swap built on the earlier layout");
 
@@ -1644,47 +1618,34 @@ fn an_accepted_pane_insertion_delivers_its_frame_without_a_resize() {
                 3,
             );
 
-            let (mut viewer_connection, initial_session_frames) =
+            let (viewer_connection, initial_session_frames) =
                 read_session_frames_until_two_panes_show(viewer_connection, client_id);
             let initial_frame = &get_last_painted_frame(&initial_session_frames).painted_frame;
             let active_tab_id = initial_frame.session_snapshot.active_tab_snapshot.tab_id;
-            let target_rect_before = initial_frame
-                .session_snapshot
-                .active_tab_snapshot
-                .pane_slots
-                .iter()
-                .find(|pane_slot| pane_slot.pane_id == target_pane_id)
-                .expect("the target pane has a slot before insertion")
-                .outer_rect;
-            let session_revision_before = initial_frame.session_snapshot.session_revision;
-            let client_revision_before = initial_frame.client_snapshot.client_revision;
+            let target_rect_before = find_pane_outer_rect(initial_frame, target_pane_id);
+            let (mut viewer_connection, placement_snapshot) =
+                read_placement_preview(viewer_connection, source_pane_id, active_tab_id);
+            let placement_target = TiledPlacementTarget::Split {
+                destination_tab_id: active_tab_id,
+                anchor: PanePlacementAnchor::Pane(target_pane_id),
+                direction: Direction::Down,
+            };
+            let expected_placed_tab_layout =
+                build_same_tab_placed_tab_layout(&placement_snapshot, &placement_target);
+            let placement_command_id = CommandId::new();
 
             viewer_connection
                 .ipc_connection
                 .send(&IpcRequest {
-                    request_id: 3,
-                    request_kind: IpcRequestKind::SubmitCommand(Box::new(
-                        CommandEnvelope::from_parts(
-                            CommandId::new(),
-                            CommandSource::from_key_binding(client_id),
-                            Command::PlacePane(PlacePaneArgs {
-                                source_pane_id,
-                                placement_target: PanePlacementTarget::Tiled(
-                                    TiledPlacementTarget::Split {
-                                        destination_tab_id: active_tab_id,
-                                        anchor: PanePlacementAnchor::Pane(target_pane_id),
-                                        direction: Direction::Down,
-                                    },
-                                ),
-                                expected_placement_revision: Some(PlacementRevision {
-                                    session_revision: session_revision_before,
-                                    client_revision: client_revision_before,
-                                }),
-                            }),
-                        ),
-                    )),
+                    request_id: 4,
+                    request_kind: IpcRequestKind::ConfirmPanePlacement {
+                        command_id: placement_command_id,
+                        source_pane_id,
+                        placement_target,
+                        expected_placed_tab_layout: expected_placed_tab_layout.clone(),
+                    },
                 })
-                .expect("send the checked pane insertion");
+                .expect("send the confirmed pane insertion");
 
             let (viewer_connection, committed_session_frames) =
                 read_session_frames_until_painted_frame(
@@ -1692,35 +1653,22 @@ fn an_accepted_pane_insertion_delivers_its_frame_without_a_resize() {
                     move |received_painted_frame| {
                         received_painted_frame
                             .painted_frame
-                            .session_snapshot
-                            .session_revision
-                            == session_revision_before + 1
+                            .client_snapshot
+                            .last_applied_placement_command_id
+                            == Some(placement_command_id)
                     },
                 );
             let committed_frame = &get_last_painted_frame(&committed_session_frames).painted_frame;
-            let source_rect_after = committed_frame
-                .session_snapshot
-                .active_tab_snapshot
-                .pane_slots
-                .iter()
-                .find(|pane_slot| pane_slot.pane_id == source_pane_id)
-                .expect("the source pane remains in the committed frame")
-                .outer_rect;
-            let target_rect_after = committed_frame
-                .session_snapshot
-                .active_tab_snapshot
-                .pane_slots
-                .iter()
-                .find(|pane_slot| pane_slot.pane_id == target_pane_id)
-                .expect("the target pane remains in the committed frame")
-                .outer_rect;
+            let source_rect_after = find_pane_outer_rect(committed_frame, source_pane_id);
+            let target_rect_after = find_pane_outer_rect(committed_frame, target_pane_id);
             assert_eq!(
                 committed_frame.client_snapshot.viewport_size,
                 TEST_VIEWPORT_SIZE
             );
             assert_eq!(
-                committed_frame.session_snapshot.session_revision,
-                session_revision_before + 1
+                list_pane_outer_rects(committed_frame),
+                expected_placed_tab_layout.layout_solve.pane_rects,
+                "the committed tab is the tab the preview showed"
             );
             let target_row_count_after = target_rect_before.size.row_count / 2;
             let source_row_count_after = target_rect_before.size.row_count - target_row_count_after;
@@ -1753,6 +1701,117 @@ fn an_accepted_pane_insertion_delivers_its_frame_without_a_resize() {
             )
         },
     );
+}
+
+/// The outer rect of `pane_id`'s slot in the active tab of `painted_frame`.
+///
+/// # Panics
+/// When the active tab has no slot for `pane_id`.
+fn find_pane_outer_rect(painted_frame: &PaintedFrame, pane_id: PaneId) -> Rect {
+    painted_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots
+        .iter()
+        .find(|pane_slot| pane_slot.pane_id == pane_id)
+        .expect("the active tab has a slot for the pane")
+        .outer_rect
+}
+
+/// Each slot of the active tab of `painted_frame` as `(pane_id, outer_rect)`,
+/// in slot order.
+fn list_pane_outer_rects(painted_frame: &PaintedFrame) -> Vec<(PaneId, Rect)> {
+    painted_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots
+        .iter()
+        .map(|pane_slot| (pane_slot.pane_id, pane_slot.outer_rect))
+        .collect()
+}
+
+/// Name `source_pane_id` and `destination_tab_id` as the pane placement
+/// preview of `viewer_connection`'s client, and read its stream until a
+/// painted update carries the preview.
+///
+/// Returns the connection and the preview's layouts.
+///
+/// # Panics
+/// When the preview the session sends is unavailable.
+fn read_placement_preview(
+    mut viewer_connection: ViewerConnection,
+    source_pane_id: PaneId,
+    destination_tab_id: TabId,
+) -> (ViewerConnection, PanePlacementSnapshot) {
+    viewer_connection
+        .ipc_connection
+        .send(&IpcRequest {
+            request_id: 3,
+            request_kind: IpcRequestKind::SetPanePlacementPreview {
+                placement_target: Some(PanePlacementPreviewTarget {
+                    source_pane_id,
+                    destination_tab_id,
+                }),
+            },
+        })
+        .expect("send the previewed placement target");
+    let (viewer_connection, session_frames) =
+        read_session_frames_until_painted_frame(viewer_connection, |received_painted_frame| {
+            received_painted_frame.placement_preview.is_some()
+        });
+    let placement_preview = get_last_painted_frame(&session_frames)
+        .placement_preview
+        .clone()
+        .expect("the update carries the preview");
+    let PanePlacementPreview::Available(placement_snapshot) = placement_preview.as_ref() else {
+        panic!("the preview is available, got {placement_preview:?}");
+    };
+    (
+        viewer_connection,
+        PanePlacementSnapshot::clone(placement_snapshot),
+    )
+}
+
+/// The source pane's own tab of `placement_snapshot` once
+/// `placement_target` places the pane in it, solved for the previewing client
+/// at the tab size the session checks the placement at
+/// ([`solve_placed_tab`]).
+///
+/// # Panics
+/// When the source pane floats, the session gave the tab no size, or the
+/// placement does not fit the tab.
+fn build_same_tab_placed_tab_layout(
+    placement_snapshot: &PanePlacementSnapshot,
+    placement_target: &TiledPlacementTarget,
+) -> PlacedTabLayout {
+    let PanePlacementSource::Tiled(source_tab_snapshot) = &placement_snapshot.source else {
+        panic!("the source pane is tiled");
+    };
+    let pane_sizing = PaneSizing::from(placement_snapshot.pane_sizing);
+    let tab_size = placement_snapshot
+        .insertion_tab_sizes
+        .destination_tab_size
+        .expect("the session sizes the tab");
+    let placed_layout_tree = place_pane_within_tab(
+        &source_tab_snapshot.layout_tree,
+        placement_snapshot.source_pane_id,
+        &PlacementTarget::from_tiled_placement_target(placement_target),
+        Rect::from_size_at_origin(tab_size),
+        pane_sizing,
+    )
+    .expect("the placement fits the tab");
+    PlacedTabLayout {
+        tab_id: placement_snapshot.destination_tab_id,
+        tab_size,
+        layout_solve: solve_placed_tab(
+            &placed_layout_tree,
+            placement_snapshot.source_pane_id,
+            &source_tab_snapshot.focus_history,
+            tab_size,
+            pane_sizing,
+        )
+        .layout_solve,
+    }
 }
 
 /// [`read_session_frames_until_painted_frame`] stopping at the first frame

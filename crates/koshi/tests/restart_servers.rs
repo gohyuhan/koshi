@@ -185,6 +185,8 @@ fn start_koshi_0_2_0_session(
                 .stdout(Stdio::null())
                 .stderr(Stdio::null()),
         ),
+        runtime_directory: runtime_directory.to_path_buf(),
+        session_id,
     };
     let endpoint_file_path =
         EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);

@@ -59,7 +59,7 @@ fn build_session_overview(
             .iter()
             .map(|(pane_id, tab_id)| PaneDiscovery {
                 pane_id: *pane_id,
-                tab_id: *tab_id,
+                tab_id: Some(*tab_id),
                 session_id,
                 pane_title: None,
                 working_directory: None,
@@ -216,9 +216,8 @@ fn no_running_session_reports_no_sessions() {
 
 #[test]
 fn a_sole_answering_session_is_not_the_default_while_another_is_unasked() {
-    // One session answered, one is running but could not be asked. Acting on
-    // the one that answered would aim the command at a session the user may
-    // not have meant, so it refuses instead.
+    // One session answered, one is running but could not be asked. The
+    // selection picks neither and refuses.
     let discovered_sessions = build_incomplete_discovery(
         [build_session_overview(
             "amber-fox",
@@ -241,8 +240,8 @@ fn a_sole_answering_session_is_not_the_default_while_another_is_unasked() {
 
 #[test]
 fn no_answer_at_all_is_not_reported_as_no_sessions() {
-    // The only running session could not be asked: "no koshi session is
-    // running" would be false.
+    // The only running session could not be asked. The error names the
+    // session that did not answer.
     let selection_error =
         select_target_session(None, None, None, None, &build_incomplete_discovery([], 1))
             .expect_err("census empty");
@@ -330,8 +329,8 @@ fn a_session_name_with_one_match_is_refused_while_a_session_is_unasked() {
 
 #[test]
 fn a_tab_name_with_one_match_is_refused_while_a_session_is_unasked() {
-    // The unasked session may hold a tab of the same name, so the sole match
-    // is not provably the only one.
+    // One answering session holds tab `logs`, and one session could not be
+    // asked. The tab name is refused.
     let tab_id = TabId::new();
     let discovered_sessions = build_incomplete_discovery(
         [build_session_overview(
@@ -359,7 +358,8 @@ fn a_tab_name_with_one_match_is_refused_while_a_session_is_unasked() {
 
 #[test]
 fn two_answering_sessions_stay_ambiguous_even_with_one_unasked() {
-    // Naming a session is the fix either way, so the actionable message wins.
+    // Two sessions answered and one could not be asked: the selection is
+    // ambiguous.
     let discovered_sessions = build_incomplete_discovery(
         [
             build_session_overview("amber-fox", SessionId::new(), &[], &[], &[]),
@@ -659,7 +659,7 @@ fn a_new_tab_client_flag_reaches_the_session_lookup() {
         client_id: Some(client_id),
     };
     let (target_session_id, resolved_targets) =
-        resolve_command_targets(&command, &discovered_sessions)
+        resolve_command_targets(&command, &discovered_sessions, None)
             .expect("the client names its session");
     assert_eq!(target_session_id, client_session_id);
     assert_eq!(
@@ -667,6 +667,7 @@ fn a_new_tab_client_flag_reaches_the_session_lookup() {
         ResolvedTargets {
             session_id: Some(client_session_id),
             tab_id: None,
+            pane_id: None,
         }
     );
 }
@@ -690,7 +691,7 @@ fn a_fullscreen_client_flag_reaches_the_session_lookup() {
         client_id: Some(client_id),
     };
     let (target_session_id, resolved_targets) =
-        resolve_command_targets(&command, &discovered_sessions)
+        resolve_command_targets(&command, &discovered_sessions, None)
             .expect("the client names its session");
     assert_eq!(target_session_id, client_session_id);
     assert_eq!(
@@ -698,6 +699,7 @@ fn a_fullscreen_client_flag_reaches_the_session_lookup() {
         ResolvedTargets {
             session_id: Some(client_session_id),
             tab_id: None,
+            pane_id: None,
         }
     );
 }
@@ -1122,6 +1124,7 @@ fn in_session_command_naming_its_own_session_id_in_another_users_folder_routes_t
             targets: ResolvedTargets {
                 session_id: Some(in_session_context.session_id),
                 tab_id: None,
+                pane_id: None,
             },
         }
     );
@@ -1363,9 +1366,9 @@ fn a_session_id_scopes_to_that_session_alone() {
     let target_session_id = target_session_overview.session.session_id;
     let discovery_server_thread =
         serve_discovery(&runtime_directory, target_session_overview.clone());
-    // A second advertised session whose endpoint file cannot be read: asking
-    // every session would count it unanswered, so `unasked_session_count: 0` here is proof
-    // only the named session was asked.
+    // A second advertised session whose endpoint file cannot be read. A sweep
+    // of every session counts it unanswered; asking the named session alone
+    // leaves `unasked_session_count` at `0`.
     std::fs::write(
         EndpointFile::resolve_endpoint_file_path(&runtime_directory, SessionId::new()),
         b"not an endpoint file",
@@ -1460,4 +1463,446 @@ fn an_explicit_id_no_remote_session_carries_asks_nothing() {
         remote_session_rows
     )
     .is_empty());
+}
+
+/// The discovery row of floating pane `pane_id` in session `session_id`: no
+/// tab, no title, no working directory, no command, focused by no client.
+fn build_floating_pane_discovery(pane_id: PaneId, session_id: SessionId) -> PaneDiscovery {
+    PaneDiscovery {
+        pane_id,
+        tab_id: None,
+        session_id,
+        pane_title: None,
+        working_directory: None,
+        command_argv: None,
+        lifecycle: PaneLifecycle::Running,
+        focused_by_client_ids: Vec::new(),
+    }
+}
+
+/// A bare `dock-pane`: no `--pane`, `--tab`, `--stack-onto`, `--direction` or
+/// `--client`.
+fn build_bare_dock_pane_command() -> CliCommand {
+    CliCommand::DockPane {
+        pane_id: None,
+        tab_reference: None,
+        direction: None,
+        stack_onto_pane_id: None,
+        client_id: None,
+    }
+}
+
+#[test]
+fn a_bare_dock_pane_resolves_the_sole_tab_of_the_target_session() {
+    let session_id = SessionId::new();
+    let tab_id = TabId::new();
+    let discovered_sessions = build_complete_discovery([build_session_overview(
+        "amber-fox",
+        session_id,
+        &[(tab_id, "one")],
+        &[(PaneId::new(), tab_id)],
+        &[],
+    )]);
+    assert_eq!(
+        resolve_command_targets(&build_bare_dock_pane_command(), &discovered_sessions, None)
+            .expect("one tab resolves"),
+        (
+            session_id,
+            ResolvedTargets {
+                session_id: Some(session_id),
+                tab_id: Some(tab_id),
+                pane_id: None,
+            }
+        )
+    );
+}
+
+#[test]
+fn a_bare_dock_pane_with_two_tabs_and_no_client_to_read_names_the_tab_count() {
+    let first_tab_id = TabId::new();
+    let second_tab_id = TabId::new();
+    for client_ids in [Vec::new(), vec![ClientId::new(), ClientId::new()]] {
+        let discovered_sessions = build_complete_discovery([build_session_overview(
+            "amber-fox",
+            SessionId::new(),
+            &[(first_tab_id, "one"), (second_tab_id, "two")],
+            &[
+                (PaneId::new(), first_tab_id),
+                (PaneId::new(), second_tab_id),
+            ],
+            &client_ids,
+        )]);
+        let selection_error =
+            resolve_command_targets(&build_bare_dock_pane_command(), &discovered_sessions, None)
+                .expect_err("two tabs with no client to read are ambiguous");
+        assert_eq!(
+            read_rejection_reason(&selection_error),
+            RejectReason::TargetAmbiguous,
+            "with {} clients",
+            client_ids.len()
+        );
+        assert_eq!(
+            read_rejection_help(&selection_error),
+            "session `amber-fox` has 2 tabs; name one with --tab or --stack-onto",
+            "with {} clients",
+            client_ids.len()
+        );
+    }
+}
+
+#[test]
+fn a_bare_dock_pane_docks_into_the_tab_the_only_attached_client_views() {
+    let first_tab_id = TabId::new();
+    let second_tab_id = TabId::new();
+    let mut session_overview = build_session_overview(
+        "amber-fox",
+        SessionId::new(),
+        &[(first_tab_id, "one"), (second_tab_id, "two")],
+        &[(PaneId::new(), first_tab_id)],
+        &[ClientId::new()],
+    );
+    session_overview.clients[0].active_tab_id = second_tab_id;
+    assert_eq!(
+        resolve_command_tab(&build_bare_dock_pane_command(), &session_overview, None)
+            .expect("the client's tab resolves"),
+        Some(second_tab_id)
+    );
+}
+
+#[test]
+fn a_bare_dock_pane_with_a_client_flag_docks_into_the_tab_that_client_views() {
+    let first_tab_id = TabId::new();
+    let second_tab_id = TabId::new();
+    let tiled_pane_id = PaneId::new();
+    let first_client_id = ClientId::new();
+    let second_client_id = ClientId::new();
+    let mut session_overview = build_session_overview(
+        "amber-fox",
+        SessionId::new(),
+        &[(first_tab_id, "one"), (second_tab_id, "two")],
+        &[(tiled_pane_id, first_tab_id)],
+        &[first_client_id, second_client_id],
+    );
+    session_overview.clients[1].active_tab_id = second_tab_id;
+    let command = CliCommand::DockPane {
+        pane_id: None,
+        tab_reference: None,
+        direction: None,
+        stack_onto_pane_id: None,
+        client_id: Some(second_client_id),
+    };
+    // `--client` wins over the tiled pane the CLI runs in and over its own
+    // client.
+    let in_session_context = InSessionContext {
+        session_id: session_overview.session.session_id,
+        client_id: Some(first_client_id),
+        pane_id: tiled_pane_id,
+    };
+    for in_session_context in [None, Some(&in_session_context)] {
+        assert_eq!(
+            resolve_command_tab(&command, &session_overview, in_session_context)
+                .expect("the named client's tab resolves"),
+            Some(second_tab_id),
+            "with in-session context {in_session_context:?}"
+        );
+    }
+}
+
+#[test]
+fn a_bare_dock_pane_typed_in_a_tiled_pane_docks_into_that_panes_tab() {
+    let first_tab_id = TabId::new();
+    let second_tab_id = TabId::new();
+    let tiled_pane_id = PaneId::new();
+    let client_id = ClientId::new();
+    let mut session_overview = build_session_overview(
+        "amber-fox",
+        SessionId::new(),
+        &[(first_tab_id, "one"), (second_tab_id, "two")],
+        &[(tiled_pane_id, first_tab_id)],
+        &[client_id],
+    );
+    session_overview.clients[0].active_tab_id = second_tab_id;
+    let in_session_context = InSessionContext {
+        session_id: session_overview.session.session_id,
+        client_id: Some(client_id),
+        pane_id: tiled_pane_id,
+    };
+    assert_eq!(
+        resolve_command_tab(
+            &build_bare_dock_pane_command(),
+            &session_overview,
+            Some(&in_session_context)
+        )
+        .expect("the pane's tab resolves"),
+        Some(first_tab_id)
+    );
+}
+
+#[test]
+fn a_bare_dock_pane_typed_in_a_floating_pane_docks_into_the_tab_its_client_views() {
+    let first_tab_id = TabId::new();
+    let second_tab_id = TabId::new();
+    let floating_pane_id = PaneId::new();
+    let first_client_id = ClientId::new();
+    let second_client_id = ClientId::new();
+    let mut session_overview = build_session_overview(
+        "amber-fox",
+        SessionId::new(),
+        &[(first_tab_id, "one"), (second_tab_id, "two")],
+        &[(PaneId::new(), first_tab_id)],
+        &[first_client_id, second_client_id],
+    );
+    session_overview.clients[1].active_tab_id = second_tab_id;
+    session_overview.panes.push(build_floating_pane_discovery(
+        floating_pane_id,
+        session_overview.session.session_id,
+    ));
+    let in_session_context = InSessionContext {
+        session_id: session_overview.session.session_id,
+        client_id: Some(second_client_id),
+        pane_id: floating_pane_id,
+    };
+    assert_eq!(
+        resolve_command_tab(
+            &build_bare_dock_pane_command(),
+            &session_overview,
+            Some(&in_session_context)
+        )
+        .expect("the pane's client's tab resolves"),
+        Some(second_tab_id)
+    );
+
+    // A client that is gone leaves two attached clients to choose from.
+    let detached_client_context = InSessionContext {
+        client_id: Some(ClientId::new()),
+        ..in_session_context
+    };
+    let selection_error = resolve_command_tab(
+        &build_bare_dock_pane_command(),
+        &session_overview,
+        Some(&detached_client_context),
+    )
+    .expect_err("two attached clients are ambiguous");
+    assert_eq!(
+        read_rejection_help(&selection_error),
+        "session `amber-fox` has 2 tabs; name one with --tab or --stack-onto"
+    );
+}
+
+#[test]
+fn a_dock_pane_with_a_stack_target_resolves_no_tab() {
+    let session_id = SessionId::new();
+    let first_tab_id = TabId::new();
+    let stack_pane_id = PaneId::new();
+    let discovered_sessions = build_complete_discovery([build_session_overview(
+        "amber-fox",
+        session_id,
+        &[(first_tab_id, "one"), (TabId::new(), "two")],
+        &[(stack_pane_id, first_tab_id)],
+        &[],
+    )]);
+    let command = CliCommand::DockPane {
+        pane_id: None,
+        tab_reference: None,
+        direction: None,
+        stack_onto_pane_id: Some(stack_pane_id),
+        client_id: None,
+    };
+    assert_eq!(
+        resolve_command_targets(&command, &discovered_sessions, None)
+            .expect("stack target resolves"),
+        (
+            session_id,
+            ResolvedTargets {
+                session_id: Some(session_id),
+                tab_id: None,
+                pane_id: None,
+            }
+        )
+    );
+}
+
+#[test]
+fn an_in_session_bare_dock_pane_asks_its_own_session_for_its_panes_tab() {
+    let runtime_directory = build_test_runtime_directory("dock-pane-tab");
+    let in_session_context = InSessionContext {
+        session_id: SessionId::new(),
+        client_id: None,
+        pane_id: PaneId::new(),
+    };
+    let tab_id = TabId::new();
+    let discovery_server_thread = serve_discovery(
+        &runtime_directory,
+        build_session_overview(
+            "amber-fox",
+            in_session_context.session_id,
+            &[(TabId::new(), "one"), (tab_id, "two")],
+            &[(in_session_context.pane_id, tab_id)],
+            &[],
+        ),
+    );
+    let command_route = resolve_command_route_in_runtime_directory(
+        &runtime_directory,
+        None,
+        &build_bare_dock_pane_command(),
+        Some(&in_session_context),
+    )
+    .expect("the session answers");
+    assert_eq!(
+        command_route,
+        Route::InSession(ResolvedTargets {
+            session_id: None,
+            tab_id: Some(tab_id),
+            pane_id: None,
+        })
+    );
+    discovery_server_thread
+        .join()
+        .expect("stand-in session exits");
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[test]
+fn a_client_flag_typed_in_a_pane_goes_external_with_that_pane_as_the_default_pane() {
+    let runtime_directory = build_test_runtime_directory("client-flag-default-pane");
+    let named_client_id = ClientId::new();
+    let in_session_context = InSessionContext {
+        session_id: SessionId::new(),
+        client_id: None,
+        pane_id: PaneId::new(),
+    };
+    let tab_id = TabId::new();
+    let discovery_server_thread = serve_discovery(
+        &runtime_directory,
+        build_session_overview(
+            "amber-fox",
+            in_session_context.session_id,
+            &[(tab_id, "one")],
+            &[(in_session_context.pane_id, tab_id)],
+            &[named_client_id],
+        ),
+    );
+    let command = CliCommand::PinPane {
+        pane_id: None,
+        client_id: Some(named_client_id),
+    };
+
+    let command_route = resolve_command_route_in_runtime_directory(
+        &runtime_directory,
+        None,
+        &command,
+        Some(&in_session_context),
+    )
+    .expect("the session answers");
+
+    discovery_server_thread
+        .join()
+        .expect("stand-in session exits");
+    assert_eq!(
+        command_route,
+        Route::External {
+            session_id: in_session_context.session_id,
+            owner_user_id: None,
+            targets: ResolvedTargets {
+                session_id: Some(in_session_context.session_id),
+                tab_id: None,
+                pane_id: Some(in_session_context.pane_id),
+            },
+        }
+    );
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[test]
+fn a_client_flag_naming_another_sessions_client_carries_no_default_pane() {
+    let runtime_directory = build_test_runtime_directory("client-flag-other-session");
+    let named_client_id = ClientId::new();
+    let in_session_context = InSessionContext {
+        session_id: SessionId::new(),
+        client_id: None,
+        pane_id: PaneId::new(),
+    };
+    let (home_tab_id, other_tab_id) = (TabId::new(), TabId::new());
+    let other_session_id = SessionId::new();
+    let home_discovery_server_thread = serve_discovery(
+        &runtime_directory,
+        build_session_overview(
+            "amber-fox",
+            in_session_context.session_id,
+            &[(home_tab_id, "one")],
+            &[(in_session_context.pane_id, home_tab_id)],
+            &[],
+        ),
+    );
+    let other_discovery_server_thread = serve_discovery(
+        &runtime_directory,
+        build_session_overview(
+            "blue-owl",
+            other_session_id,
+            &[(other_tab_id, "one")],
+            &[(PaneId::new(), other_tab_id)],
+            &[named_client_id],
+        ),
+    );
+    let command = CliCommand::PinPane {
+        pane_id: None,
+        client_id: Some(named_client_id),
+    };
+
+    let command_route = resolve_command_route_in_runtime_directory(
+        &runtime_directory,
+        None,
+        &command,
+        Some(&in_session_context),
+    )
+    .expect("both sessions answer");
+
+    for discovery_server_thread in [home_discovery_server_thread, other_discovery_server_thread] {
+        discovery_server_thread
+            .join()
+            .expect("stand-in session exits");
+    }
+    assert_eq!(
+        command_route,
+        Route::External {
+            session_id: other_session_id,
+            owner_user_id: None,
+            targets: ResolvedTargets {
+                session_id: Some(other_session_id),
+                tab_id: None,
+                pane_id: None,
+            },
+        }
+    );
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[test]
+fn an_explicit_floating_pane_picks_its_owning_session() {
+    let target_session_id = SessionId::new();
+    let floating_pane_id = PaneId::new();
+    let mut target_session_overview =
+        build_session_overview("blue-owl", target_session_id, &[], &[], &[]);
+    target_session_overview
+        .panes
+        .push(build_floating_pane_discovery(
+            floating_pane_id,
+            target_session_id,
+        ));
+    let discovered_sessions = build_complete_discovery([
+        build_session_overview("amber-fox", SessionId::new(), &[], &[], &[]),
+        target_session_overview,
+    ]);
+    let selected_session_overview = select_target_session(
+        None,
+        Some(floating_pane_id),
+        None,
+        None,
+        &discovered_sessions,
+    )
+    .expect("owner found");
+    assert_eq!(
+        selected_session_overview.session.session_id,
+        target_session_id
+    );
 }

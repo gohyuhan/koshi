@@ -27,12 +27,9 @@ use koshi_ipc::protocol::{
 };
 use koshi_ipc::transport::ReceivedFrame;
 use koshi_layout::mode::LayoutMode;
-use koshi_layout::solver::PaneSizing;
-use koshi_layout::tree::LayoutNode;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, PaneSnapshot,
-    PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot, PlacementTabSnapshot,
-    RenderSnapshot, ScrollbackMetadata, SessionSnapshot, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, PaneSnapshot, RenderSnapshot,
+    ScrollbackMetadata, SessionSnapshot, TabSnapshot,
 };
 use koshi_terminal::graphics::{
     DecodedAnimation, DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
@@ -193,7 +190,6 @@ fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> 
         is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id,
-            session_revision: 0,
             session_name: String::from("session"),
             active_tab_snapshot: TabSnapshot {
                 tab_id,
@@ -242,7 +238,6 @@ fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> 
         }],
         client_snapshot: ClientSnapshot {
             client_id,
-            client_revision: 0,
             viewport_size: CLIENT_VIEWPORT_SIZE,
             active_tab_id: tab_id,
             focused_pane_id: Some(pane_id),
@@ -251,7 +246,9 @@ fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> 
             last_applied_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
+            last_applied_placement_command_id: None,
         },
+        placement_preview: None,
     }
 }
 
@@ -384,38 +381,6 @@ fn build_image_placements(image_records: &[Arc<ImageRecord>]) -> Vec<ImagePlacem
             .expect("the placement is valid")
         })
         .collect()
-}
-
-/// A placement preview for `render_snapshot`'s client whose source tab holds
-/// one pane showing `image_records`.
-fn build_placement_snapshot_showing_records(
-    render_snapshot: &RenderSnapshot,
-    image_records: &[Arc<ImageRecord>],
-) -> PlacementSnapshot {
-    let source_pane_id = render_snapshot.pane_snapshots[0].pane_id;
-    PlacementSnapshot {
-        session_id: render_snapshot.session_snapshot.session_id,
-        source_pane_id,
-        source_tab_id: render_snapshot.client_snapshot.active_tab_id,
-        destination_tab_id: render_snapshot.client_snapshot.active_tab_id,
-        session_placement_revision: 0,
-        client_placement_revision: 0,
-        source_tab_snapshot: PlacementTabSnapshot {
-            layout_tree: LayoutNode::Pane(source_pane_id),
-            tab_snapshot: render_snapshot.session_snapshot.active_tab_snapshot.clone(),
-            pane_snapshots: vec![PlacementPaneSnapshot {
-                pane_id: source_pane_id,
-                terminal_grid_view: None,
-                image_placement_snapshots: build_image_placements(image_records),
-            }],
-        },
-        destination_tab_snapshot: None,
-        client_snapshot: PlacementClientSnapshot {
-            client_snapshot: render_snapshot.client_snapshot.clone(),
-            reported_pane_area: None,
-        },
-        pane_sizing: PaneSizing::default(),
-    }
 }
 
 /// The content id and availability of every image placement in
@@ -1240,6 +1205,7 @@ fn build_attach_request(
             cell_size: None,
             link_timeout_ms,
             max_frames_per_second: 60,
+            placement_preview_target: None,
         },
     }
 }
@@ -1282,6 +1248,7 @@ fn attach_test_client_with_graphics(
                 cell_size: None,
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
+                placement_preview_target: None,
             },
         },
     );
@@ -1328,6 +1295,7 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
                 cell_size: Some(measured_cell_size),
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
+                placement_preview_target: None,
             },
         },
     );
@@ -1576,22 +1544,19 @@ impl AttachedFrameStream {
 }
 
 /// Read every frame the client of `frame_stream` receives through
-/// `end_event`, and keep what the client shows: the available image
-/// placements of the newest painted update, and of the newest placement
-/// preview. Each paint report names that preview as held. An
-/// `ImageCacheReset` clears both. Returns every identity the
+/// `end_event`, keep the available image placements of the newest painted
+/// update, and report each painted update painted. An `ImageCacheReset`
+/// clears the kept placements. Returns every identity the
 /// `ImageContentReleased` frames name, in order.
 ///
 /// # Panics
 /// When an `ImageContentReleased` names an identity that the newest painted
-/// update or the held preview shows.
+/// update shows.
 fn read_frames_checking_image_releases(
     frame_stream: &mut AttachedFrameStream,
     end_event: &SessionEvent,
 ) -> Vec<u64> {
     let mut painted_image_content_ids: HashSet<u64> = HashSet::new();
-    let mut preview_image_content_ids: HashSet<u64> = HashSet::new();
-    let mut held_placement_request_id = None;
     let mut released_image_content_ids = Vec::new();
     loop {
         let received_frame = frame_stream
@@ -1620,10 +1585,7 @@ fn read_frames_checking_image_releases(
                     .connection
                     .send(&IpcRequest {
                         request_id: update_sequence,
-                        request_kind: IpcRequestKind::PaintedUpdate {
-                            update_sequence,
-                            shown_placement_request_id: held_placement_request_id,
-                        },
+                        request_kind: IpcRequestKind::PaintedUpdate { update_sequence },
                     })
                     .expect("the paint report is written");
             }
@@ -1633,37 +1595,12 @@ fn read_frames_checking_image_releases(
             }
             SessionFrame::Event(SessionEvent::ImageCacheReset) => {
                 painted_image_content_ids.clear();
-                preview_image_content_ids.clear();
-                held_placement_request_id = None;
-            }
-            SessionFrame::Event(SessionEvent::PanePlacementSnapshot {
-                request_id,
-                snapshot,
-            }) => {
-                preview_image_content_ids = [
-                    Some(&snapshot.source_tab_snapshot),
-                    snapshot.destination_tab_snapshot.as_ref(),
-                ]
-                .into_iter()
-                .flatten()
-                .flat_map(|placement_tab_snapshot| &placement_tab_snapshot.pane_snapshots)
-                .flat_map(|placement_pane_snapshot| {
-                    &placement_pane_snapshot.image_placement_snapshots
-                })
-                .filter(|image_placement| image_placement.is_available)
-                .map(|image_placement| image_placement.image_content_id)
-                .collect();
-                held_placement_request_id = Some(request_id);
             }
             SessionFrame::Event(SessionEvent::ImageContentReleased { image_content_ids }) => {
                 for image_content_id in &image_content_ids {
                     assert!(
                         !painted_image_content_ids.contains(image_content_id),
                         "release of record {image_content_id}, which the newest painted update shows"
-                    );
-                    assert!(
-                        !preview_image_content_ids.contains(image_content_id),
-                        "release of record {image_content_id}, which the held preview shows"
                     );
                 }
                 released_image_content_ids.extend(image_content_ids);
@@ -2562,170 +2499,6 @@ fn an_animation_that_fills_the_byte_budget_exactly_stays_whole() {
 }
 
 #[test]
-fn a_frame_image_that_does_not_fit_beside_a_held_preview_travels_without_its_record() {
-    // Frame 1 shows the small `first_frame_image` under id 1. The preview
-    // that answers request 5 shows the 40 MiB `preview_image` under id 2. The
-    // next frame shows the 40 MiB `next_frame_image`, which does not fit
-    // beside `preview_image`: `next_frame_image` travels with its own content
-    // id 1, no record and `is_available` `false`, and `first_frame_image` is
-    // released.
-    let first_frame_image = build_image_record(1);
-    let preview_image = build_sized_image_record(2, 4096, 2560);
-    let next_frame_image = build_sized_image_record(3, 4096, 2560);
-    let frame_snapshot = build_image_snapshot(ClientId::new(), Arc::clone(&first_frame_image));
-    let placement_snapshot =
-        build_placement_snapshot_showing_records(&frame_snapshot, &[Arc::clone(&preview_image)]);
-    let mut image_cache = ConnectionImageCache::new();
-    image_cache.prepare_image_frame(&frame_snapshot);
-    let prepared_placement_snapshot =
-        image_cache.prepare_placement_snapshot(5, 1, &placement_snapshot);
-
-    let prepared_image_frame = image_cache.prepare_image_frame(&build_snapshot_showing_records(
-        &frame_snapshot,
-        &[next_frame_image],
-    ));
-
-    assert_eq!(
-        list_upload_content_ids(&prepared_placement_snapshot.image_uploads),
-        vec![2]
-    );
-    assert_eq!(
-        list_upload_content_ids(&prepared_image_frame.image_uploads),
-        Vec::<u64>::new()
-    );
-    assert_eq!(prepared_image_frame.released_image_content_ids, vec![1]);
-    assert_eq!(
-        list_painted_image_availability(&prepared_image_frame.painted_frame),
-        vec![(1, false)]
-    );
-}
-
-#[test]
-fn a_preview_image_that_does_not_fit_beside_the_frame_travels_without_its_record() {
-    // The frame shows the 40 MiB `frame_image` under id 1. The preview shows
-    // the 40 MiB `preview_image`, which does not fit beside `frame_image`:
-    // `preview_image` travels with its own content id 1, no record and
-    // `is_available` `false`, and nothing is released.
-    let frame_image = build_sized_image_record(1, 4096, 2560);
-    let preview_image = build_sized_image_record(2, 4096, 2560);
-    let frame_snapshot = build_image_snapshot(ClientId::new(), Arc::clone(&frame_image));
-    let placement_snapshot =
-        build_placement_snapshot_showing_records(&frame_snapshot, &[Arc::clone(&preview_image)]);
-    let mut image_cache = ConnectionImageCache::new();
-    image_cache.prepare_image_frame(&frame_snapshot);
-
-    let prepared_placement_snapshot =
-        image_cache.prepare_placement_snapshot(5, 1, &placement_snapshot);
-
-    assert_eq!(
-        list_upload_content_ids(&prepared_placement_snapshot.image_uploads),
-        Vec::<u64>::new()
-    );
-    assert_eq!(
-        prepared_placement_snapshot.released_image_content_ids,
-        Vec::<u64>::new()
-    );
-    assert_eq!(
-        prepared_placement_snapshot
-            .placement_snapshot
-            .source_tab_snapshot
-            .pane_snapshots[0]
-            .image_placement_snapshots
-            .iter()
-            .map(|image_placement| (
-                image_placement.image_content_id,
-                image_placement.is_available
-            ))
-            .collect::<Vec<_>>(),
-        vec![(1, false)]
-    );
-}
-
-#[test]
-fn a_placement_preview_keeps_its_records_until_a_paint_report_leaves_it_out() {
-    // Frame 1 shows `frame_image`. The preview that answers request 5 goes
-    // out after update 1 and shows `frame_image` and `preview_only_image`.
-    // `preview_only_image` stays while a report could come from a client
-    // that holds the preview: a report of update 1, and a report of update 2
-    // that names request 5. A report of update 2 that names no preview
-    // releases `preview_only_image`.
-    let frame_image = build_image_record(1);
-    let preview_only_image = build_image_record(4);
-    let frame_snapshot = build_image_snapshot(ClientId::new(), Arc::clone(&frame_image));
-    let placement_snapshot = build_placement_snapshot_showing_records(
-        &frame_snapshot,
-        &[Arc::clone(&frame_image), Arc::clone(&preview_only_image)],
-    );
-    let mut image_cache = ConnectionImageCache::new();
-
-    let first_prepared_frame = image_cache.prepare_image_frame(&frame_snapshot);
-    let prepared_placement_snapshot =
-        image_cache.prepare_placement_snapshot(5, 1, &placement_snapshot);
-    let second_prepared_frame = image_cache.prepare_image_frame(&frame_snapshot);
-
-    assert_eq!(
-        list_upload_content_ids(&first_prepared_frame.image_uploads),
-        vec![1]
-    );
-    assert_eq!(
-        list_upload_content_ids(&prepared_placement_snapshot.image_uploads),
-        vec![2]
-    );
-    assert_eq!(
-        prepared_placement_snapshot.released_image_content_ids,
-        Vec::<u64>::new()
-    );
-    assert_eq!(
-        second_prepared_frame.released_image_content_ids,
-        Vec::<u64>::new()
-    );
-    assert_eq!(image_cache.record_paint_report(1, None), Vec::<u64>::new());
-    assert_eq!(
-        image_cache.record_paint_report(2, Some(5)),
-        Vec::<u64>::new()
-    );
-    assert_eq!(image_cache.record_paint_report(2, None), vec![2]);
-    assert_eq!(
-        list_upload_content_ids(
-            &image_cache
-                .prepare_image_frame(&build_image_snapshot(ClientId::new(), preview_only_image))
-                .image_uploads
-        ),
-        vec![3]
-    );
-}
-
-#[test]
-fn a_frame_that_shows_an_image_a_preview_sent_reuses_its_record() {
-    // The preview sent `preview_image` under id 2. The next frame shows
-    // `preview_image` in place of `first_frame_image`: it names id 2, sends no
-    // pixels, and releases `first_frame_image`.
-    let first_frame_image = build_image_record(1);
-    let preview_image = build_image_record(2);
-    let frame_snapshot = build_image_snapshot(ClientId::new(), Arc::clone(&first_frame_image));
-    let placement_snapshot =
-        build_placement_snapshot_showing_records(&frame_snapshot, &[Arc::clone(&preview_image)]);
-    let mut image_cache = ConnectionImageCache::new();
-    image_cache.prepare_image_frame(&frame_snapshot);
-    image_cache.prepare_placement_snapshot(5, 1, &placement_snapshot);
-
-    let prepared_image_frame = image_cache.prepare_image_frame(&build_snapshot_showing_record(
-        &frame_snapshot,
-        preview_image,
-    ));
-
-    assert_eq!(
-        list_upload_content_ids(&prepared_image_frame.image_uploads),
-        Vec::<u64>::new()
-    );
-    assert_eq!(prepared_image_frame.released_image_content_ids, vec![1]);
-    assert_eq!(
-        list_painted_image_availability(&prepared_image_frame.painted_frame),
-        vec![(2, true)]
-    );
-}
-
-#[test]
 fn an_image_shown_again_after_its_release_gets_a_new_identity() {
     let shown_image = build_image_record(1);
     let frame_snapshot = build_image_snapshot(ClientId::new(), Arc::clone(&shown_image));
@@ -2834,42 +2607,29 @@ fn an_update_over_the_frame_cap_sends_no_release_and_the_next_update_resets_the_
 }
 
 #[test]
-fn every_image_release_names_no_record_the_newest_update_or_the_held_preview_shows() {
-    // Images 1 to 6 take content ids 1 to 6 in the order they first show.
-    // The third update shows no image, and the release of id 3, which only
-    // the second update showed, follows it.
+fn every_image_release_names_no_record_the_newest_update_shows() {
+    // Images 1, 3, 4 and 5 take content ids 1 to 4 in the order they first
+    // show. The third update shows no image, and the release of id 2, which
+    // only the second update showed, follows it.
     let mut frame_stream =
         AttachedFrameStream::attach_frame_stream("image-release-rule", KITTY_GRAPHICS_CAPABILITIES);
-    let image_records: Vec<Arc<ImageRecord>> = (1..=6).map(build_image_record).collect();
+    let image_records: Vec<Arc<ImageRecord>> = (1..=5).map(build_image_record).collect();
     let base_snapshot = build_image_snapshot(frame_stream.client_id, Arc::clone(&image_records[0]));
-    let list_image_records = |image_indexes: &[usize]| -> Vec<Arc<ImageRecord>> {
-        image_indexes
+    let build_frame_delivery = |image_indexes: &[usize]| {
+        let shown_image_records: Vec<Arc<ImageRecord>> = image_indexes
             .iter()
             .map(|image_index| Arc::clone(&image_records[*image_index]))
-            .collect()
-    };
-    let build_frame_delivery = |image_indexes: &[usize]| {
+            .collect();
         Delivery::Frame(Box::new(build_snapshot_showing_records(
             &base_snapshot,
-            &list_image_records(image_indexes),
+            &shown_image_records,
         )))
     };
-    let build_preview_delivery =
-        |request_id: u64, image_indexes: &[usize]| Delivery::PanePlacementSnapshot {
-            request_id,
-            snapshot: Box::new(build_placement_snapshot_showing_records(
-                &base_snapshot,
-                &list_image_records(image_indexes),
-            )),
-        };
     for delivery in [
         build_frame_delivery(&[0]),
-        build_preview_delivery(5, &[0, 1]),
         build_frame_delivery(&[2]),
-        build_preview_delivery(6, &[3]),
         build_frame_delivery(&[]),
         build_frame_delivery(&[3, 4]),
-        build_preview_delivery(7, &[5]),
         build_frame_delivery(&[4]),
         build_frame_delivery(&[]),
     ] {
@@ -2881,80 +2641,8 @@ fn every_image_release_names_no_record_the_newest_update_or_the_held_preview_sho
         read_frames_checking_image_releases(&mut frame_stream, &rejected_placement_command_event);
 
     assert!(
-        released_image_content_ids.contains(&3),
+        released_image_content_ids.contains(&2),
         "released {released_image_content_ids:?}"
-    );
-    frame_stream.close_frame_stream();
-}
-
-#[test]
-fn a_paint_report_after_a_preview_releases_the_records_only_the_preview_showed() {
-    // The preview that answers request 5 shows `frame_image` and
-    // `preview_only_image`, and `preview_only_image` travels under id 2. The
-    // client reads update 2 and reports it holding no preview: the session
-    // releases `preview_only_image` at once.
-    let mut frame_stream =
-        AttachedFrameStream::attach_frame_stream("preview-release", KITTY_GRAPHICS_CAPABILITIES);
-    let frame_image = build_image_record(1);
-    let preview_only_image = build_image_record(4);
-    let first_snapshot = build_image_snapshot(frame_stream.client_id, Arc::clone(&frame_image));
-    let mut second_snapshot = first_snapshot.clone();
-    second_snapshot.pane_snapshots[0]
-        .cursor_snapshot
-        .column_index = 1;
-    let placement_snapshot = build_placement_snapshot_showing_records(
-        &first_snapshot,
-        &[Arc::clone(&frame_image), Arc::clone(&preview_only_image)],
-    );
-    frame_stream.send_delivery(Delivery::Frame(Box::new(first_snapshot.clone())));
-    assert_eq!(
-        frame_stream.read_painted_frame(),
-        build_wire_frame(&first_snapshot)
-    );
-    for expected_session_frame in build_image_transfer_frames(1, &frame_image) {
-        assert_eq!(
-            frame_stream.read_next_session_frame(),
-            expected_session_frame
-        );
-    }
-    frame_stream.send_delivery(Delivery::PanePlacementSnapshot {
-        request_id: 5,
-        snapshot: Box::new(placement_snapshot.clone()),
-    });
-    let mut next_image_content_id = 0;
-    assert_eq!(
-        frame_stream.read_session_event(),
-        SessionEvent::PanePlacementSnapshot {
-            request_id: 5,
-            snapshot: Box::new(
-                crate::runtime::frame::build_wire_placement_snapshot_with_content_ids(
-                    &placement_snapshot,
-                    |_, _| {
-                        next_image_content_id += 1;
-                        Some(next_image_content_id)
-                    },
-                )
-            ),
-        }
-    );
-    for expected_session_frame in build_image_transfer_frames(2, &preview_only_image) {
-        assert_eq!(
-            frame_stream.read_next_session_frame(),
-            expected_session_frame
-        );
-    }
-
-    frame_stream.send_delivery(Delivery::Frame(Box::new(second_snapshot.clone())));
-
-    assert_eq!(
-        frame_stream.read_painted_frame(),
-        build_wire_frame(&second_snapshot)
-    );
-    assert_eq!(
-        frame_stream.read_session_event(),
-        SessionEvent::ImageContentReleased {
-            image_content_ids: vec![2]
-        }
     );
     frame_stream.close_frame_stream();
 }
@@ -7613,6 +7301,7 @@ fn an_attach_with_a_link_timeout_below_the_minimum_is_refused_and_the_connection
                 cell_size: None,
                 link_timeout_ms: Some(link_timeout_ms),
                 max_frames_per_second: 60,
+                placement_preview_target: None,
             },
         };
 
@@ -7668,6 +7357,7 @@ fn an_attach_with_a_viewport_over_the_cell_limit_is_refused_and_the_connection_k
             cell_size: None,
             link_timeout_ms: None,
             max_frames_per_second: 60,
+            placement_preview_target: None,
         },
     };
 
@@ -7749,6 +7439,7 @@ fn an_attach_with_a_frame_rate_outside_30_to_120_is_refused_and_the_connection_k
                 cell_size: None,
                 link_timeout_ms: None,
                 max_frames_per_second,
+                placement_preview_target: None,
             },
         };
 

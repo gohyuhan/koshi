@@ -2,25 +2,31 @@
 //!
 //! When a client's focused pane disappears — closed, its shell exited, or it was
 //! suppressed out of view — focus has to land somewhere deterministic.
-//! [`repair_focus`] is the pure decision that picks it: given the tab and the
-//! layout's ranked survivors, it walks a fixed recovery order and returns the
-//! pane to focus, or a defined fallback when nothing is focusable.
+//! [`repair_focus`] is the pure decision that picks it: given the client's
+//! focus history and the layout's ranked survivors, it walks a fixed recovery
+//! order and returns the pane to focus, or a defined fallback when nothing is
+//! focusable.
 //!
-//! It chooses, it does not mutate; the caller applies the verdict. The removed
-//! pane must have been the client's focus: the removal pipeline runs it only
-//! for the clients whose focused pane vanished.
+//! It chooses, it does not mutate; the caller applies the verdict. The pane
+//! that left must have been the client's focus: the callers run it only for
+//! the clients whose focused pane left the tab or is suppressed.
 //!
 //! [`build_pane_focused_event`] reports a change of the pane that takes a
-//! client's input, floating or tiled.
+//! client's input, floating or tiled, and
+//! [`build_pane_minimized_changed_events`] a change of the floating panes one
+//! client shows. [`apply_tiled_pane_focus`] focuses a tiled pane for one
+//! client and reports both. [`update_client_tab_focus`] focuses a tiled pane
+//! in one tab for one client and leaves its input where it is.
 
 use koshi_core::{
-    event::{Event, PaneFocused},
-    ids::PaneId,
+    event::{Event, PaneFocused, PaneMinimizedChanged},
+    ids::{ClientId, PaneId, TabId},
 };
 use koshi_layout::focus::FocusCandidates;
 use koshi_pane::registry::PaneRegistry;
 
-use crate::{client::Client, session::state::Tab};
+use crate::client::Client;
+use crate::session::state::Session;
 
 /// The outcome of focus recovery: where focus should go now, or why it cannot
 /// go to a pane.
@@ -37,12 +43,14 @@ pub enum FocusRepairResult {
     TerminalTooSmall,
 }
 
-/// Pick the pane that inherits focus after the focused pane in `tab` is gone.
+/// Pick the pane that inherits a client's focus after its focused pane left
+/// the tab or was suppressed.
 ///
 /// The recovery order is fixed, and the first eligible pane wins:
-/// 1. the tab's focus history, newest first ([`Tab::list_focus_mru`]);
-/// 2. the spatial neighbor of the removed pane's old rect;
-/// 3. the pane that absorbed the most of the removed pane's space;
+/// 1. `focus_history`, the client's focus history in the tab, newest first
+///    ([`Client::list_focus_history`]);
+/// 2. the spatial neighbor of the rect the pane that left held;
+/// 3. the pane that absorbed the most of that rect;
 /// 4. the first eligible pane in layout order, as a last resort.
 ///
 /// `ranked_focus_candidates` is the layout's ranked survivors after the removal
@@ -56,7 +64,7 @@ pub enum FocusRepairResult {
 /// [`FocusRepairResult::TerminalTooSmall`].
 #[must_use]
 pub fn repair_focus(
-    tab: &Tab,
+    focus_history: &[PaneId],
     pane_registry: &PaneRegistry,
     ranked_focus_candidates: FocusCandidates,
 ) -> FocusRepairResult {
@@ -68,8 +76,7 @@ pub fn repair_focus(
     };
 
     // The recovery order in one pass, focus history newest-first.
-    let focus_pane_id = tab
-        .list_focus_mru()
+    let focus_pane_id = focus_history
         .iter()
         .copied()
         .chain(ranked_focus_candidates.spatial_neighbor_pane_id)
@@ -117,6 +124,85 @@ pub fn build_pane_focused_event(
         pane_id: focused_pane_id,
         previous_pane_id: previous_focused_pane_id,
     }))
+}
+
+/// Focus `pane_id` in `tab_id` for `client` ([`Client::focus_tiled_pane`]):
+/// in `client`'s active tab, `pane_id` takes its input and every floating
+/// pane it shows is minimized.
+///
+/// Returns one [`Event::PaneMinimizedChanged`] with `is_minimized: true` per
+/// floating pane minimized, oldest shown first, then an
+/// [`Event::PaneFocused`] with `tab_id: Some(tab_id)` naming the pane that
+/// held the focus before as `previous_pane_id`. With `htop` shown and
+/// focused, focusing tiled `a` in the active tab → `PaneMinimizedChanged
+/// { pane_id: htop, is_minimized: true }`, then `PaneFocused { pane_id: a,
+/// previous_pane_id: Some(htop) }`. No `PaneFocused` when `pane_id` held the
+/// focus already.
+#[must_use]
+pub fn apply_tiled_pane_focus(client: &mut Client, tab_id: TabId, pane_id: PaneId) -> Vec<Event> {
+    let client_id = client.get_client_id();
+    let tiled_pane_focus_change = client.focus_tiled_pane(tab_id, pane_id);
+    let mut emitted_events: Vec<Event> = build_pane_minimized_changed_events(
+        client_id,
+        &tiled_pane_focus_change.minimized_floating_pane_ids,
+        true,
+    )
+    .collect();
+    if tiled_pane_focus_change.previous_pane_id != Some(pane_id) {
+        emitted_events.push(Event::PaneFocused(PaneFocused {
+            client_id,
+            tab_id: Some(tab_id),
+            pane_id,
+            previous_pane_id: tiled_pane_focus_change.previous_pane_id,
+        }));
+    }
+    emitted_events
+}
+
+/// Focus `pane_id` in `tab_id` for `client_id` ([`Client::update_focused_pane`])
+/// and record it as the tab's most-recent focus. A floating pane that takes the
+/// client's input keeps it.
+///
+/// Returns the [`Event::PaneFocused`] with `tab_id: Some(tab_id)` that names the
+/// pane the client focused in `tab_id` before as `previous_pane_id`. A client
+/// focused on `a` in tab `t` that focuses `b` there →
+/// `PaneFocused { tab_id: Some(t), pane_id: b, previous_pane_id: Some(a) }`.
+/// `None`, with nothing changed, when `client_id` is not attached.
+pub fn update_client_tab_focus(
+    session: &mut Session,
+    client_id: ClientId,
+    tab_id: TabId,
+    pane_id: PaneId,
+) -> Option<Event> {
+    let previous_pane_id = session
+        .clients
+        .get_client_mut_by_id(client_id)?
+        .update_focused_pane(tab_id, pane_id);
+    if let Some(tab) = session.tabs.get_mut(&tab_id) {
+        tab.record_focus_mru(pane_id);
+    }
+    Some(Event::PaneFocused(PaneFocused {
+        client_id,
+        tab_id: Some(tab_id),
+        pane_id,
+        previous_pane_id,
+    }))
+}
+
+/// One [`Event::PaneMinimizedChanged`] per pane of `pane_ids`, in that order,
+/// each naming `client_id` and `is_minimized`.
+pub fn build_pane_minimized_changed_events(
+    client_id: ClientId,
+    pane_ids: &[PaneId],
+    is_minimized: bool,
+) -> impl Iterator<Item = Event> + '_ {
+    pane_ids.iter().map(move |&pane_id| {
+        Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            client_id,
+            pane_id,
+            is_minimized,
+        })
+    })
 }
 
 #[cfg(test)]

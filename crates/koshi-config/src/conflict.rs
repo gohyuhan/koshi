@@ -18,9 +18,9 @@
 //!   only by the defaults layer is a *steal*, not a collision: the user's
 //!   binding takes the key and the displaced default action becomes unbound.
 //! - **A fatal finding** — the locked-mode unlock escape is shadowed, missing,
-//!   or typeable, or the `pane-placement`, `pane-move-choice` or
-//!   `floating-pane-move` mode has no live cancellation binding — refuses the
-//!   keymap outright ([`KeymapVerdict::Reject`]).
+//!   or typeable, or the `pane-placement`, `pane-move-choice`,
+//!   `floating-pane-move` or `dock-undock` mode has no live cancellation
+//!   binding — refuses the keymap outright ([`KeymapVerdict::Reject`]).
 //!
 //! Every judgment above runs on **firing bindings only**. A binding fires
 //! when the resolver accepts it as written AND a keypress can reach it. It
@@ -206,8 +206,9 @@ pub enum ConflictDiagnostic {
     /// The effective map of `mode_name` has no live binding to
     /// `cancel_action_reference`, so the mode, once open, has no keyboard
     /// cancellation. Checked for `pane-placement` (`core:cancel-pane-placement`),
-    /// `pane-move-choice` (`core:cancel-pane-move-choice`) and
-    /// `floating-pane-move` (`core:cancel-floating-pane-move`).
+    /// `pane-move-choice` (`core:cancel-pane-move-choice`),
+    /// `floating-pane-move` (`core:cancel-floating-pane-move`) and
+    /// `dock-undock` (`core:cancel-dock-undock`).
     ModeCancelBindingMissing {
         /// The viewer-local mode with no cancellation key.
         mode_name: ModeName,
@@ -962,10 +963,11 @@ fn validate_reserved_unlock_binding(
 
 /// The viewer-local modes that own the keyboard until cancelled, each with
 /// the action that cancels it.
-const CANCEL_ACTION_NAME_BY_MODE: [(LockMode, &str); 3] = [
+const CANCEL_ACTION_NAME_BY_MODE: [(LockMode, &str); 4] = [
     (LockMode::PanePlacement, "cancel-pane-placement"),
     (LockMode::PaneMoveChoice, "cancel-pane-move-choice"),
     (LockMode::FloatingPaneMove, "cancel-floating-pane-move"),
+    (LockMode::DockUndock, "cancel-dock-undock"),
 ];
 
 /// Push one [`ConflictDiagnostic::ModeCancelBindingMissing`] for each mode in

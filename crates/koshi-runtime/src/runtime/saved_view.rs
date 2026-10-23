@@ -44,9 +44,10 @@ const MAX_SAVED_VIEW_RECORD_COUNT: usize = 32;
 pub struct SavedView {
     /// The tab the client was viewing.
     pub active_tab_id: TabId,
-    /// The pane the client had focused in each tab, keyed by tab id. A tab with
-    /// no entry had no focused pane.
-    pub focused_pane_id_by_tab_id: HashMap<TabId, PaneId>,
+    /// The panes the client focused in each tab, newest first
+    /// ([`Client::list_focus_history`]), keyed by tab id. A tab with no entry
+    /// had no focused pane.
+    pub focus_history_by_tab_id: HashMap<TabId, Vec<PaneId>>,
     /// The pane the client had zoomed in each tab, keyed by tab id. A tab with
     /// no entry was tiled.
     pub zoomed_pane_id_by_tab_id: HashMap<TabId, PaneId>,
@@ -54,15 +55,12 @@ pub struct SavedView {
     /// value the lines scrolled up from the live bottom. A pane with no entry
     /// sat at the live bottom.
     pub scroll_offset_by_pane_id: HashMap<PaneId, usize>,
-    /// The client's view of each floating pane, keyed by pane id: where it drew
-    /// the pane, and whether it pinned or minimized the pane. A pane with no
-    /// entry drew at the default placement, unpinned and not minimized.
+    /// The client's view of each floating pane of its session, keyed by pane
+    /// id: where it drew the pane, and whether it minimized the pane.
     pub floating_pane_view_by_pane_id: HashMap<PaneId, FloatingPaneView>,
-    /// The floating panes the client focused or restored, least recently first.
-    pub floating_pane_focus_order: Vec<PaneId>,
-    /// The floating pane that took the client's input, or `None` when no
-    /// floating pane did.
-    pub focused_floating_pane_id: Option<PaneId>,
+    /// The floating panes the client showed, oldest first. The last one held
+    /// the client's input.
+    pub shown_floating_pane_ids: Vec<PaneId>,
 }
 
 /// One filed view: the sha256 of the token that takes it back, when it stops
@@ -130,12 +128,11 @@ impl SavedViewStore {
             expires_at,
             saved_view: SavedView {
                 active_tab_id: client.get_active_tab_id(),
-                focused_pane_id_by_tab_id: client.list_focused_pane_ids().clone(),
+                focus_history_by_tab_id: client.list_focus_histories().clone(),
                 zoomed_pane_id_by_tab_id: client.list_zoomed_pane_ids().clone(),
                 scroll_offset_by_pane_id: client.list_scroll_offsets().clone(),
                 floating_pane_view_by_pane_id: client.list_floating_pane_views().clone(),
-                floating_pane_focus_order: client.list_floating_pane_focus_order().to_vec(),
-                focused_floating_pane_id: client.get_focused_floating_pane_id(),
+                shown_floating_pane_ids: client.list_shown_floating_pane_ids().to_vec(),
             },
         });
         while self.saved_view_records.len() > MAX_SAVED_VIEW_RECORD_COUNT {

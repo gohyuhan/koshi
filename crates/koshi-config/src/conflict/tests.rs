@@ -106,6 +106,7 @@ fn list_builtin_mode_names_returns_every_lock_mode() {
             "scroll",
             "pane-move-choice",
             "floating-pane-move",
+            "dock-undock",
         ]
         .map(ModeName::from_text),
     );
@@ -738,6 +739,7 @@ fn no_layers_report_missing_required_bindings() {
             build_mode_cancel_binding_missing("pane-placement", "cancel-pane-placement"),
             build_mode_cancel_binding_missing("pane-move-choice", "cancel-pane-move-choice"),
             build_mode_cancel_binding_missing("floating-pane-move", "cancel-floating-pane-move"),
+            build_mode_cancel_binding_missing("dock-undock", "cancel-dock-undock"),
         ]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Reject);
@@ -745,9 +747,9 @@ fn no_layers_report_missing_required_bindings() {
 
 #[test]
 fn user_prefix_of_default_sequences_warns_without_revert() {
-    // The defaults bind `<C-p> n`, the four `<C-p>` vim-letter splits,
-    // `<C-p> x`, and the four `<C-p>` arrow focus sequences; the user binds
-    // bare `<C-p>`.
+    // The defaults bind fifteen `<C-p>` sequences: the four vim-letter
+    // splits, `m`, `n`, `s`, `u`, `x`, `<Tab>`, `<S-Tab>`, and the four arrow
+    // focus keys. The user binds bare `<C-p>`.
     let prefix_key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'p');
     let report = detect_test_conflicts(&[
         build_default_keymap_layer(),
@@ -778,12 +780,23 @@ fn user_prefix_of_default_sequences_warns_without_revert() {
             build_ambiguous_prefix(Key::Char('m'), "begin-pane-placement"),
             build_ambiguous_prefix(Key::Char('n'), "new-pane"),
             build_ambiguous_prefix(Key::Char('s'), "new-pane-stacked"),
-            build_ambiguous_prefix(Key::Char('u'), "undock-or-dock-pane"),
+            build_ambiguous_prefix(Key::Char('u'), "begin-dock-undock"),
             build_ambiguous_prefix(Key::Char('x'), "close-pane-tree"),
+            build_ambiguous_prefix(Key::Named(NamedKey::Tab), "focus-next-floating-pane"),
             build_ambiguous_prefix(Key::Named(NamedKey::Left), "focus-pane-left"),
             build_ambiguous_prefix(Key::Named(NamedKey::Right), "focus-pane-right"),
             build_ambiguous_prefix(Key::Named(NamedKey::Up), "focus-pane-up"),
             build_ambiguous_prefix(Key::Named(NamedKey::Down), "focus-pane-down"),
+            ConflictDiagnostic::AmbiguousPrefix {
+                mode_name: ModeName::from_text("normal"),
+                prefix_sequence: prefix_key_sequence.clone(),
+                prefix_action_reference: build_core_action("lock"),
+                longer_sequence: build_two_chord_sequence(
+                    build_character_chord(BindingModifierFlags::CTRL, 'p'),
+                    KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Tab)),
+                ),
+                longer_action_reference: build_core_action("focus-previous-floating-pane"),
+            },
         ]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Apply);
@@ -1361,6 +1374,11 @@ fn display_messages_are_exact() {
         "the `floating-pane-move` mode has no live `core:cancel-floating-pane-move` binding; bind that action \
          to a key before removing its last cancellation key"
     );
+    assert_eq!(
+        build_mode_cancel_binding_missing("dock-undock", "cancel-dock-undock").to_string(),
+        "the `dock-undock` mode has no live `core:cancel-dock-undock` binding; bind that action to a key \
+         before removing its last cancellation key"
+    );
 
     let dead_under_reserved_unlock = ConflictDiagnostic::DeadUnderReservedUnlock {
         layer_origin: LayerOrigin::User,
@@ -1645,6 +1663,32 @@ fn removing_the_floating_pane_move_cancel_binding_is_fatal() {
 }
 
 #[test]
+fn removing_the_dock_undock_cancel_binding_is_fatal() {
+    let escape_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::NONE,
+        Key::Named(NamedKey::Esc),
+    ));
+    let report = detect_test_conflicts(&[
+        build_default_keymap_layer(),
+        build_keymap_layer_with_removed_key_sequences(
+            LayerOrigin::User,
+            "dock-undock",
+            Vec::new(),
+            vec![escape_sequence],
+        ),
+    ]);
+
+    assert_eq!(
+        report.diagnostics,
+        vec![build_mode_cancel_binding_missing(
+            "dock-undock",
+            "cancel-dock-undock"
+        )]
+    );
+    assert_eq!(report.get_verdict(), KeymapVerdict::Reject);
+}
+
+#[test]
 fn rebinding_pane_placement_cancel_action_keeps_the_effective_map_valid() {
     let escape_sequence = KeySequence::from(KeyChord::from_parts(
         BindingModifierFlags::NONE,
@@ -1915,8 +1959,9 @@ fn an_orphan_action_on_a_reserved_led_sequence_warns_orphan_not_dead() {
 fn a_chord_depth_of_zero_fails_the_unlock_guarantee() {
     // With every sequence at least one chord, a cap of 0 makes the whole
     // keymap unreachable — including the locked-mode unlock binding and the
-    // cancel binding of `pane-placement`, `pane-move-choice`, and
-    // `floating-pane-move`, which the guarantee checks report as missing.
+    // cancel binding of `pane-placement`, `pane-move-choice`,
+    // `floating-pane-move`, and `dock-undock`, which the guarantee checks
+    // report as missing.
     let report = detect_conflicts(
         &[build_default_keymap_layer()],
         Leader::default(),
@@ -1933,6 +1978,7 @@ fn a_chord_depth_of_zero_fails_the_unlock_guarantee() {
             build_mode_cancel_binding_missing("pane-placement", "cancel-pane-placement"),
             build_mode_cancel_binding_missing("pane-move-choice", "cancel-pane-move-choice"),
             build_mode_cancel_binding_missing("floating-pane-move", "cancel-floating-pane-move"),
+            build_mode_cancel_binding_missing("dock-undock", "cancel-dock-undock"),
         ]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Reject);

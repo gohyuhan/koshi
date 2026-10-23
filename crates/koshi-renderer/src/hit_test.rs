@@ -27,7 +27,7 @@
 //!   **content**, and a collapsed stack member's title strip is its own region.
 //!   A cell inside the pane area that no pane box covers hits nothing.
 
-use koshi_core::geometry::{Direction, Point, Rect};
+use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{PaneId, TabId};
 use ratatui::layout::Rect as RatatuiRect;
 
@@ -56,6 +56,9 @@ pub enum HitRegion {
         /// The side the cell lies on. A corner cell resolves to the vertical
         /// side ([`Left`](Direction::Left)/[`Right`](Direction::Right)).
         side: Direction,
+        /// The horizontal side ([`Up`](Direction::Up)/[`Down`](Direction::Down))
+        /// a corner cell also lies on. `None` on every other border cell.
+        corner_horizontal_side: Option<Direction>,
     },
     /// The painted placement handle in a tiled pane's top border, or the grab
     /// handle `⣿⣿` in a floating pane's titlebar.
@@ -84,7 +87,7 @@ pub enum HitRegion {
         /// The floating pane whose close button was hit.
         pane_id: PaneId,
     },
-    /// A collapsed stack member's title strip; clicking it activates that pane.
+    /// A collapsed stack member's title strip; clicking it focuses that pane.
     StackHeader {
         /// The collapsed pane the strip represents.
         pane_id: PaneId,
@@ -190,21 +193,25 @@ pub fn resolve_hit_region(frame_layout: FrameLayout<'_>, screen_point: Point) ->
                 };
             }
         }
-        if pane_slot.outer_rect.is_point_inside(layout_point) {
-            let border_side = resolve_border_side(pane_slot.outer_rect, layout_point);
-            if border_side == Direction::Up
-                && frame_layout.viewer_chrome.placement_handle_pane_id == Some(pane_slot.pane_id)
-                && is_placement_handle_cell(pane_slot.outer_rect, layout_point)
-            {
-                return HitRegion::PlacementHandle {
-                    pane_id: pane_slot.pane_id,
-                };
-            }
-            return HitRegion::PaneBorder {
+        let Some((border_side, corner_horizontal_side)) =
+            resolve_border_side(pane_slot.outer_rect, layout_point)
+        else {
+            continue;
+        };
+        if border_side == Direction::Up
+            && frame_layout.viewer_chrome.placement_handle_pane_id == Some(pane_slot.pane_id)
+            && compute_placement_handle_rect(pane_slot.outer_rect)
+                .is_some_and(|handle_rect| handle_rect.is_point_inside(layout_point))
+        {
+            return HitRegion::PlacementHandle {
                 pane_id: pane_slot.pane_id,
-                side: border_side,
             };
         }
+        return HitRegion::PaneBorder {
+            pane_id: pane_slot.pane_id,
+            side: border_side,
+            corner_horizontal_side,
+        };
     }
 
     HitRegion::None
@@ -247,19 +254,14 @@ fn classify_floating_pane_region(
     if is_on_titlebar_part(titlebar.close_button_rect) {
         return HitRegion::PaneCloseButton { pane_id };
     }
-    let right_column = outer_rect.origin.column + outer_rect.size.column_count - 1;
-    let bottom_row = outer_rect.origin.row + outer_rect.size.row_count - 1;
-    let is_on_border_ring = pane_area_point.column == outer_rect.origin.column
-        || pane_area_point.column == right_column
-        || pane_area_point.row == outer_rect.origin.row
-        || pane_area_point.row == bottom_row;
-    if is_on_border_ring {
-        return HitRegion::PaneBorder {
+    match resolve_border_side(outer_rect, pane_area_point) {
+        Some((side, corner_horizontal_side)) => HitRegion::PaneBorder {
             pane_id,
-            side: resolve_border_side(outer_rect, pane_area_point),
-        };
+            side,
+            corner_horizontal_side,
+        },
+        None => HitRegion::PaneTitlebar { pane_id },
     }
-    HitRegion::PaneTitlebar { pane_id }
 }
 
 /// `screen_point` counted from the top-left cell of `frame_pane_area`, or
@@ -275,15 +277,6 @@ fn compute_pane_area_point(frame_pane_area: RatatuiRect, screen_point: Point) ->
 /// The number of cells painted for one placement handle.
 pub const PLACEMENT_HANDLE_COLUMN_COUNT: u16 = 3;
 
-/// Return whether `screen_point` is one of the painted placement-handle cells.
-#[must_use]
-pub fn is_placement_handle_cell(outer_rect: Rect, screen_point: Point) -> bool {
-    let Some(handle_rect) = compute_placement_handle_rect(outer_rect) else {
-        return false;
-    };
-    handle_rect.is_point_inside(screen_point)
-}
-
 /// Return the placement handle's cells in layout coordinates.
 #[must_use]
 pub fn compute_placement_handle_rect(outer_rect: Rect) -> Option<Rect> {
@@ -294,7 +287,7 @@ pub fn compute_placement_handle_rect(outer_rect: Rect) -> Option<Rect> {
                 column: outer_rect.origin.column.saturating_add(1),
                 row: outer_rect.origin.row,
             },
-            koshi_core::geometry::Size {
+            Size {
                 column_count: PLACEMENT_HANDLE_COLUMN_COUNT,
                 row_count: 1,
             },
@@ -360,11 +353,9 @@ pub fn find_pane_content_rect(frame_layout: FrameLayout<'_>, pane_id: PaneId) ->
         ));
     }
     let effective_layout_rect = compute_content_rect(frame_pane_area, active_tab_snapshot.tab_size);
-    let pane_slot = active_tab_snapshot
-        .pane_slots
-        .iter()
-        .find(|pane_slot| pane_slot.is_visible && pane_slot.pane_id == pane_id)?;
-    let content_rect = pane_slot.content_rect?;
+    let content_rect = active_tab_snapshot
+        .find_visible_pane_slot(pane_id)?
+        .content_rect?;
     Some(Rect::from_origin_and_size(
         Point {
             column: effective_layout_rect.x + content_rect.origin.column,
@@ -507,26 +498,35 @@ fn is_screen_point_inside(screen_rect: RatatuiRect, screen_point: Point) -> bool
         && u32::from(screen_point.row) < u32::from(screen_rect.y) + u32::from(screen_rect.height)
 }
 
-/// The side of `outer_rect`'s one-cell border ring that `screen_point` lies on.
-/// `screen_point` must be within `outer_rect` but not within its inner content
-/// area. A corner cell resolves to its vertical side: a border drag on a corner
-/// reads as the left or right edge.
-fn resolve_border_side(outer_rect: Rect, screen_point: Point) -> Direction {
+/// The side of `outer_rect`'s one-cell border ring that `screen_point` lies on,
+/// and the horizontal side a corner cell also lies on. `None` when
+/// `screen_point` is outside `outer_rect` or inside the ring. A corner cell
+/// resolves to its vertical side and names its horizontal side. On a `10x5`
+/// rect at `(0, 0)`: `(0, 0)` gives `Some((Left, Some(Up)))`, `(4, 0)` gives
+/// `Some((Up, None))`, and `(4, 2)` gives `None`.
+fn resolve_border_side(
+    outer_rect: Rect,
+    screen_point: Point,
+) -> Option<(Direction, Option<Direction>)> {
+    if !outer_rect.is_point_inside(screen_point) {
+        return None;
+    }
     let right_column = outer_rect.origin.column + outer_rect.size.column_count - 1;
     let bottom_row = outer_rect.origin.row + outer_rect.size.row_count - 1;
-    if screen_point.column == outer_rect.origin.column {
-        Direction::Left
-    } else if screen_point.column == right_column {
-        Direction::Right
-    } else if screen_point.row == outer_rect.origin.row {
-        Direction::Up
+    let horizontal_side = if screen_point.row == outer_rect.origin.row {
+        Some(Direction::Up)
+    } else if screen_point.row == bottom_row {
+        Some(Direction::Down)
     } else {
-        debug_assert_eq!(
-            screen_point.row, bottom_row,
-            "border cell is on one of the four edges"
-        );
-        Direction::Down
+        None
+    };
+    if screen_point.column == outer_rect.origin.column {
+        return Some((Direction::Left, horizontal_side));
     }
+    if screen_point.column == right_column {
+        return Some((Direction::Right, horizontal_side));
+    }
+    horizontal_side.map(|side| (side, None))
 }
 
 #[cfg(test)]

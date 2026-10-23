@@ -20,6 +20,9 @@
 //! [`PaintedFrame`](crate::frame::PaintedFrame): the layout, the tab bar, the
 //! client's own state and everything else about each pane, as JSON. The JSON
 //! travels only when its bytes differ from the JSON the client received last.
+//! An update also carries the client's placement preview
+//! ([`PanePlacementPreview`](crate::placement::PanePlacementPreview)) as JSON,
+//! when the preview differs from the one the client holds.
 //!
 //! # Layout
 //!
@@ -29,11 +32,16 @@
 //! ```text
 //! frame_kind                 one byte, 1
 //! part_flags                 one byte: bit 0, the part opens an update;
-//!                            bit 1, the part ends it
+//!                            bit 1, the part ends it; bit 2, the update
+//!                            changes the placement preview, only with bit 0
 //! if the part opens an update:
 //!     update_sequence        the update's number on this connection
 //!     structure_byte_count   0 when the client keeps the JSON it holds
 //!     structure_bytes        the PaintedFrame as JSON
+//!     if the update changes the placement preview:
+//!         placement_preview_byte_count   0 when the client drops the preview
+//!                                        it holds
+//!         placement_preview_bytes        the PanePlacementPreview as JSON
 //! section_count, then each section:
 //!     pane_id                16 bytes, the pane's UUID
 //!     section_flags          one byte: bit 0, the section opens the pane and
@@ -75,6 +83,7 @@ use uuid::Uuid;
 
 use crate::frame::PaintedFrame;
 use crate::image_chunk::{decode_image_chunk_frame, ImageChunkFrame, IMAGE_CHUNK_FRAME_KIND};
+use crate::placement::PanePlacementPreview;
 use crate::transport::MAX_FRAME_BYTE_COUNT;
 
 /// The kind byte of a binary frame that holds one part of a painted update.
@@ -82,6 +91,7 @@ pub const PAINTED_UPDATE_FRAME_KIND: u8 = 1;
 
 const PART_OPENS_UPDATE_FLAG: u8 = 1 << 0;
 const PART_ENDS_UPDATE_FLAG: u8 = 1 << 1;
+const PART_CHANGES_PLACEMENT_PREVIEW_FLAG: u8 = 1 << 2;
 
 const SECTION_OPENS_PANE_FLAG: u8 = 1 << 0;
 const SECTION_HAS_WINDOW_FLAG: u8 = 1 << 1;
@@ -143,6 +153,21 @@ pub struct PaintedUpdateOpening {
     /// The update's [`PaintedFrame`]. `None` when its JSON equals the JSON
     /// the client received last, and the client keeps that one.
     pub painted_frame: Option<Box<PaintedFrame>>,
+    /// How the update changes the placement preview the client holds.
+    pub placement_preview_update: PlacementPreviewUpdate<Box<PanePlacementPreview>>,
+}
+
+/// How a painted update changes the placement preview its client holds.
+/// `PreviewValue` is the preview's JSON bytes for an update being encoded, and
+/// the decoded [`PanePlacementPreview`] for an update read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlacementPreviewUpdate<PreviewValue> {
+    /// The client keeps the preview it holds, or keeps holding none.
+    Unchanged,
+    /// The client drops the preview it holds.
+    Cleared,
+    /// The client holds this preview in place of the one it holds.
+    Replaced(PreviewValue),
 }
 
 /// One pane's section of one part.
@@ -255,12 +280,18 @@ pub struct PaneUpdate<'row> {
 /// Why [`encode_painted_update`] built no frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum PaintedUpdateEncodeError {
-    /// The JSON of the update's [`PaintedFrame`] does not fit one frame with
-    /// the part's own bytes.
-    #[error("the painted structure of {structure_byte_count} bytes does not fit one frame")]
+    /// The JSON of the update's [`PaintedFrame`] and of its placement preview
+    /// do not fit one frame with the part's own bytes.
+    #[error(
+        "the painted structure of {structure_byte_count} bytes and the placement preview of \
+         {placement_preview_byte_count} bytes do not fit one frame"
+    )]
     StructureTooLarge {
-        /// The JSON's byte count.
+        /// The structure JSON's byte count.
         structure_byte_count: usize,
+        /// The placement preview JSON's byte count, `0` when the update
+        /// carries no preview.
+        placement_preview_byte_count: usize,
     },
     /// One row instruction does not fit one frame with the bytes of a part
     /// and a section.
@@ -312,7 +343,8 @@ pub enum SessionBinaryFrameDecodeError {
         /// The count of bytes after the last section.
         trailing_byte_count: usize,
     },
-    /// The JSON of the [`PaintedFrame`] does not decode.
+    /// The JSON of the [`PaintedFrame`] or of the [`PanePlacementPreview`]
+    /// does not decode.
     #[error("the painted structure does not decode: {error_detail}")]
     MalformedStructure {
         /// The JSON decoder's message.
@@ -323,7 +355,8 @@ pub enum SessionBinaryFrameDecodeError {
 /// Encode one painted update as the payloads of its binary frames, in order.
 /// Each payload is at most [`MAX_FRAME_BYTE_COUNT`] bytes. `structure_json_bytes`
 /// is the update's [`PaintedFrame`] as JSON, or `None` for a client that keeps
-/// the JSON it holds.
+/// the JSON it holds. `placement_preview_update` carries the client's
+/// [`PanePlacementPreview`] as JSON when it replaces the one the client holds.
 ///
 /// # Errors
 /// [`PaintedUpdateEncodeError::StructureTooLarge`] for JSON that does not fit
@@ -332,11 +365,13 @@ pub enum SessionBinaryFrameDecodeError {
 pub fn encode_painted_update(
     update_sequence: u64,
     structure_json_bytes: Option<&[u8]>,
+    placement_preview_update: PlacementPreviewUpdate<&[u8]>,
     pane_updates: &[PaneUpdate<'_>],
 ) -> Result<Vec<Vec<u8>>, PaintedUpdateEncodeError> {
     encode_painted_update_in_parts(
         update_sequence,
         structure_json_bytes,
+        placement_preview_update,
         pane_updates,
         MAX_FRAME_BYTE_COUNT as usize,
     )
@@ -347,6 +382,7 @@ pub fn encode_painted_update(
 fn encode_painted_update_in_parts(
     update_sequence: u64,
     structure_json_bytes: Option<&[u8]>,
+    placement_preview_update: PlacementPreviewUpdate<&[u8]>,
     pane_updates: &[PaneUpdate<'_>],
     maximum_part_byte_count: usize,
 ) -> Result<Vec<Vec<u8>>, PaintedUpdateEncodeError> {
@@ -355,15 +391,35 @@ fn encode_painted_update_in_parts(
     let structure_json_bytes = structure_json_bytes.unwrap_or_default();
     write_varint(structure_json_bytes.len() as u64, &mut opening_bytes);
     opening_bytes.extend_from_slice(structure_json_bytes);
+    let placement_preview_json_bytes: Option<&[u8]> = match placement_preview_update {
+        PlacementPreviewUpdate::Unchanged => None,
+        PlacementPreviewUpdate::Cleared => Some(&[]),
+        PlacementPreviewUpdate::Replaced(placement_preview_json_bytes) => {
+            Some(placement_preview_json_bytes)
+        }
+    };
+    if let Some(placement_preview_json_bytes) = placement_preview_json_bytes {
+        write_varint(
+            placement_preview_json_bytes.len() as u64,
+            &mut opening_bytes,
+        );
+        opening_bytes.extend_from_slice(placement_preview_json_bytes);
+    }
     if PART_FRAME_BYTE_COUNT + opening_bytes.len() > maximum_part_byte_count {
         return Err(PaintedUpdateEncodeError::StructureTooLarge {
             structure_byte_count: structure_json_bytes.len(),
+            placement_preview_byte_count: placement_preview_json_bytes.map_or(0, <[u8]>::len),
         });
     }
     let mut part_writer = PartWriter {
         maximum_part_byte_count,
         part_payloads: Vec::new(),
         opening_bytes,
+        opening_flags: if placement_preview_json_bytes.is_some() {
+            PART_OPENS_UPDATE_FLAG | PART_CHANGES_PLACEMENT_PREVIEW_FLAG
+        } else {
+            PART_OPENS_UPDATE_FLAG
+        },
         section_bytes: Vec::new(),
         section_count: 0,
     };
@@ -409,6 +465,8 @@ struct PartWriter {
     /// The update's sequence and JSON while the first part is being filled,
     /// empty after.
     opening_bytes: Vec<u8>,
+    /// The part flags the first part opens the update with.
+    opening_flags: u8,
     section_bytes: Vec<u8>,
     section_count: u64,
 }
@@ -443,7 +501,7 @@ impl PartWriter {
         let is_first_part = self.part_payloads.is_empty();
         let mut part_flags = 0u8;
         if is_first_part {
-            part_flags |= PART_OPENS_UPDATE_FLAG;
+            part_flags |= self.opening_flags;
         }
         if is_last_part {
             part_flags |= PART_ENDS_UPDATE_FLAG;
@@ -597,6 +655,21 @@ pub fn decode_session_binary_frame(
     Ok(SessionBinaryFrame::PaintedUpdatePart(painted_update_part))
 }
 
+/// Decode one JSON value of a painted update's opening.
+///
+/// # Errors
+/// [`SessionBinaryFrameDecodeError::MalformedStructure`] with the JSON
+/// decoder's message when the bytes do not decode.
+fn parse_structure_json<StructureValue: serde::de::DeserializeOwned>(
+    structure_json_bytes: &[u8],
+) -> Result<StructureValue, SessionBinaryFrameDecodeError> {
+    serde_json::from_slice(structure_json_bytes).map_err(|parse_error| {
+        SessionBinaryFrameDecodeError::MalformedStructure {
+            error_detail: parse_error.to_string(),
+        }
+    })
+}
+
 /// A cursor over the bytes of one painted update part, after its kind byte.
 struct PartReader<'payload> {
     remaining_bytes: &'payload [u8],
@@ -607,30 +680,46 @@ impl<'payload> PartReader<'payload> {
         &mut self,
     ) -> Result<PaintedUpdatePart, SessionBinaryFrameDecodeError> {
         let part_flags = self.read_byte()?;
-        if part_flags & !(PART_OPENS_UPDATE_FLAG | PART_ENDS_UPDATE_FLAG) != 0 {
+        let is_update_opening = part_flags & PART_OPENS_UPDATE_FLAG != 0;
+        let is_placement_preview_changed = part_flags & PART_CHANGES_PLACEMENT_PREVIEW_FLAG != 0;
+        if part_flags
+            & !(PART_OPENS_UPDATE_FLAG
+                | PART_ENDS_UPDATE_FLAG
+                | PART_CHANGES_PLACEMENT_PREVIEW_FLAG)
+            != 0
+            || (is_placement_preview_changed && !is_update_opening)
+        {
             return Err(SessionBinaryFrameDecodeError::UnknownFlags {
                 field_name: "part_flags",
                 flag_bits: part_flags,
             });
         }
-        let update_opening = if part_flags & PART_OPENS_UPDATE_FLAG != 0 {
+        let update_opening = if is_update_opening {
             let update_sequence = self.read_varint()?;
             let structure_byte_count = self.read_varint()?;
             let structure_json_bytes = self.read_bytes(structure_byte_count)?;
             let painted_frame = if structure_json_bytes.is_empty() {
                 None
             } else {
-                Some(Box::new(
-                    serde_json::from_slice(structure_json_bytes).map_err(|parse_error| {
-                        SessionBinaryFrameDecodeError::MalformedStructure {
-                            error_detail: parse_error.to_string(),
-                        }
-                    })?,
-                ))
+                Some(Box::new(parse_structure_json(structure_json_bytes)?))
+            };
+            let placement_preview_update = if is_placement_preview_changed {
+                let placement_preview_byte_count = self.read_varint()?;
+                let placement_preview_json_bytes = self.read_bytes(placement_preview_byte_count)?;
+                if placement_preview_json_bytes.is_empty() {
+                    PlacementPreviewUpdate::Cleared
+                } else {
+                    PlacementPreviewUpdate::Replaced(Box::new(parse_structure_json(
+                        placement_preview_json_bytes,
+                    )?))
+                }
+            } else {
+                PlacementPreviewUpdate::Unchanged
             };
             Some(PaintedUpdateOpening {
                 update_sequence,
                 painted_frame,
+                placement_preview_update,
             })
         } else {
             None

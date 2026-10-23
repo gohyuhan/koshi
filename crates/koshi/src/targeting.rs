@@ -63,7 +63,8 @@ pub enum Route {
         /// The user id whose folder of the shared directory advertises the
         /// session, or `None` for a session looked up by its id alone.
         owner_user_id: Option<u32>,
-        /// The command's resolved `--session`/`--tab` flags.
+        /// The command's resolved `--session`/`--tab` flags, and its default
+        /// pane.
         targets: ResolvedTargets,
     },
 }
@@ -73,10 +74,16 @@ pub enum Route {
 ///
 /// With an in-session identity and no `--session` flag (or one naming the
 /// current session by its id), the command stays home: only a `--tab` given as
-/// a name costs a lookup, answered by the session itself. The other sessions
-/// in scope are the ones [`resolve_session_scope`] gives for the `--session`
-/// flag. A session another user's folder of the shared directory advertises is
-/// sent the command with that user's id.
+/// a name and a bare `dock-pane` cost a lookup, answered by the session
+/// itself. The other sessions in scope are the ones [`resolve_session_scope`]
+/// gives for the `--session` flag. A session another user's folder of the
+/// shared directory advertises is sent the command with that user's id.
+///
+/// A command that names `--client` ([`CliCommand::get_source_client_id`])
+/// always goes as an external command. When it goes to the session of the
+/// pane this CLI runs in, [`ResolvedTargets::pane_id`] names that pane:
+/// `koshi pin-pane --client <client>` typed in floating pane `F` pins `F` on
+/// that client's screen.
 pub fn resolve_command_route(
     command: &CliCommand,
     in_session_context: Option<&InSessionContext>,
@@ -105,8 +112,8 @@ fn resolve_command_route_in_runtime_directory(
 
     // In-session, targeting home: the command stays on its own socket.
     // Flags given as ids ride into the command as-is (`build_action_command` reads
-    // them); only a `--tab` NAME costs a lookup, answered by the session
-    // itself.
+    // them); only a `--tab` NAME and a bare `dock-pane` cost a lookup, answered
+    // by the session itself.
     if let Some(in_session_context) = in_session_context {
         let is_staying_home = !has_source_client
             && match command.get_target_session_reference() {
@@ -120,24 +127,29 @@ fn resolve_command_route_in_runtime_directory(
                 Some(SessionReference::SessionName(_)) => false,
             };
         if is_staying_home {
-            let target_tab_id = match command.get_target_tab_reference() {
-                Some(tab_reference @ TabReference::TabName(_)) => {
-                    // The pane's own session advertises in this user's runtime
-                    // directory.
-                    let session_overview = discovery::fetch_session_overview(
-                        runtime_directory,
-                        None,
-                        in_session_context.session_id,
-                        None,
-                        None,
-                    )?;
-                    Some(resolve_target_tab(&session_overview, tab_reference)?)
-                }
-                _ => None,
+            let is_tab_lookup_needed = command.is_bare_dock_pane()
+                || matches!(
+                    command.get_target_tab_reference(),
+                    Some(TabReference::TabName(_))
+                );
+            let target_tab_id = if is_tab_lookup_needed {
+                // The pane's own session advertises in this user's runtime
+                // directory.
+                let session_overview = discovery::fetch_session_overview(
+                    runtime_directory,
+                    None,
+                    in_session_context.session_id,
+                    None,
+                    None,
+                )?;
+                resolve_command_tab(command, &session_overview, Some(in_session_context))?
+            } else {
+                None
             };
             return Ok(Route::InSession(ResolvedTargets {
                 session_id: None,
                 tab_id: target_tab_id,
+                pane_id: None,
             }));
         }
     }
@@ -149,19 +161,30 @@ fn resolve_command_route_in_runtime_directory(
     )?;
 
     let (target_session_id, resolved_targets) =
-        resolve_command_targets(command, &discovered_sessions)?;
+        resolve_command_targets(command, &discovered_sessions, in_session_context)?;
     let target_owner_user_id = discovered_sessions.find_owner_user_id(target_session_id);
 
     // A probe can land back on the session this CLI runs inside (e.g.
     // `--session` naming it); then the command still travels as the pane's
-    // own, keeping the issuing pane as the default target.
+    // own, keeping the issuing pane as the default target. A command that
+    // names `--client` travels as an external command there, with the issuing
+    // pane as its default pane.
     match in_session_context {
         Some(in_session_context)
             if in_session_context.session_id == target_session_id
-                && target_owner_user_id.is_none()
-                && !has_source_client =>
+                && target_owner_user_id.is_none() =>
         {
-            Ok(Route::InSession(resolved_targets))
+            if !has_source_client {
+                return Ok(Route::InSession(resolved_targets));
+            }
+            Ok(Route::External {
+                session_id: target_session_id,
+                owner_user_id: None,
+                targets: ResolvedTargets {
+                    pane_id: Some(in_session_context.pane_id),
+                    ..resolved_targets
+                },
+            })
         }
         _ => Ok(Route::External {
             session_id: target_session_id,
@@ -215,7 +238,7 @@ pub fn submit_remote(
     );
 
     let (target_session_id, resolved_targets) =
-        resolve_command_targets(command, &discovered_sessions)?;
+        resolve_command_targets(command, &discovered_sessions, None)?;
 
     let (_, action) = command
         .build_action_command(&resolved_targets, new_pane_direction)
@@ -289,11 +312,14 @@ fn discover_remote_sessions(
 /// `--session`/`--tab` flags resolved to ids.
 ///
 /// [`select_target_session`] picks the session; the resolved `session_id` field
-/// always carries that session's id, and `tab_id` carries the id a `--tab` flag
-/// names within it, or `None` when the flag is absent.
+/// always carries that session's id, and `tab_id` carries the tab
+/// [`resolve_command_tab`] gives. `in_session_context` is the identity of the
+/// pane this CLI runs in, or `None` outside a pane and for a `--remote`
+/// command.
 fn resolve_command_targets(
     command: &CliCommand,
     discovered_sessions: &Discovered,
+    in_session_context: Option<&InSessionContext>,
 ) -> Result<(SessionId, ResolvedTargets), CliError> {
     let session_overview = select_target_session(
         command.get_target_session_reference(),
@@ -302,18 +328,106 @@ fn resolve_command_targets(
         command.get_target_client_id(),
         discovered_sessions,
     )?;
-    let target_tab_id = command
-        .get_target_tab_reference()
-        .map(|tab_reference| resolve_target_tab(session_overview, tab_reference))
-        .transpose()?;
+    let target_tab_id = resolve_command_tab(command, session_overview, in_session_context)?;
     let target_session_id = session_overview.session.session_id;
     Ok((
         target_session_id,
         ResolvedTargets {
             session_id: Some(target_session_id),
             tab_id: target_tab_id,
+            pane_id: None,
         },
     ))
+}
+
+/// The tab `command` names within `session_overview`: its `--tab` flag
+/// ([`resolve_target_tab`]). A bare `dock-pane`
+/// ([`CliCommand::is_bare_dock_pane`]) gets the tab
+/// [`find_bare_dock_pane_tab`] reads, else the session's only tab. Every other
+/// command without `--tab` gets `None`.
+///
+/// # Errors
+/// [`resolve_target_tab`]'s refusals; for a bare `dock-pane` that
+/// [`find_bare_dock_pane_tab`] reads no tab for, against a session that holds
+/// several tabs, [`CliError::CommandRejected`] with
+/// [`RejectReason::TargetAmbiguous`] and, for a session `work` with 3 tabs,
+/// ``session `work` has 3 tabs; name one with --tab or --stack-onto``.
+fn resolve_command_tab(
+    command: &CliCommand,
+    session_overview: &SessionOverview,
+    in_session_context: Option<&InSessionContext>,
+) -> Result<Option<TabId>, CliError> {
+    if let Some(tab_reference) = command.get_target_tab_reference() {
+        return resolve_target_tab(session_overview, tab_reference).map(Some);
+    }
+    if !command.is_bare_dock_pane() {
+        return Ok(None);
+    }
+    if let Some(tab_id) = find_bare_dock_pane_tab(command, session_overview, in_session_context) {
+        return Ok(Some(tab_id));
+    }
+    match session_overview.tabs.as_slice() {
+        [only_tab_record] => Ok(Some(only_tab_record.tab_id)),
+        tab_records => Err(build_target_rejection(
+            RejectReason::TargetAmbiguous,
+            format!(
+                "session `{}` has {} tabs; name one with --tab or --stack-onto",
+                session_overview.session.session_name,
+                tab_records.len()
+            ),
+        )),
+    }
+}
+
+/// The tab a bare `dock-pane` docks into, read from `session_overview`:
+///
+/// 1. with `--client`, the tab that client views, and no other step runs;
+/// 2. else, for a CLI that runs in a tiled pane of this session, the tab
+///    holding that pane;
+/// 3. else the tab the issuing client views: the client of the pane this CLI
+///    runs in while that client is attached, else the session's only attached
+///    client.
+///
+/// `None` when `session_overview` lists no `--client` client, and when no
+/// step finds a tab: a CLI outside a pane or in a floating pane whose client
+/// is not attached, and several clients or none attached.
+///
+/// Example: tabs `one` and `two`, one client viewing `two`. `koshi dock-pane`
+/// typed in a floating pane docks it into `two`; typed in a tiled pane of
+/// `one`, it docks into `one`.
+fn find_bare_dock_pane_tab(
+    command: &CliCommand,
+    session_overview: &SessionOverview,
+    in_session_context: Option<&InSessionContext>,
+) -> Option<TabId> {
+    let find_client_tab_id = |client_id: ClientId| {
+        session_overview
+            .clients
+            .iter()
+            .find(|client_record| client_record.client_id == client_id)
+            .map(|client_record| client_record.active_tab_id)
+    };
+    if let Some(client_id) = command.get_source_client_id() {
+        return find_client_tab_id(client_id);
+    }
+    if let Some(in_session_context) = in_session_context {
+        let own_pane_tab_id = session_overview
+            .panes
+            .iter()
+            .find(|pane_record| pane_record.pane_id == in_session_context.pane_id)
+            .and_then(|pane_record| pane_record.tab_id);
+        if own_pane_tab_id.is_some() {
+            return own_pane_tab_id;
+        }
+        let own_client_tab_id = in_session_context.client_id.and_then(find_client_tab_id);
+        if own_client_tab_id.is_some() {
+            return own_client_tab_id;
+        }
+    }
+    match session_overview.clients.as_slice() {
+        [only_client_record] => Some(only_client_record.active_tab_id),
+        _ => None,
+    }
 }
 
 /// The one running session named `session_name`, over the discovered sessions.

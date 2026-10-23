@@ -256,6 +256,7 @@ impl Server {
                 attached_at,
                 is_remote,
                 max_frames_per_second,
+                placement_preview_target,
                 response_sender,
             } => {
                 // The client and its subscription are registered together here:
@@ -270,6 +271,7 @@ impl Server {
                     attached_at,
                     is_remote,
                     max_frames_per_second,
+                    placement_preview_target,
                 ));
             }
             RuntimeEvent::IpcDiscovery { response_sender } => {
@@ -281,17 +283,24 @@ impl Server {
             } => {
                 let _ = response_sender.send(self.build_session_layout(tab_id));
             }
-            RuntimeEvent::ReadPanePlacement {
+            RuntimeEvent::SetPanePlacementPreview {
                 client_id,
-                request_id,
+                placement_target,
+            } => self.set_pane_placement_preview(client_id, placement_target),
+            RuntimeEvent::ConfirmPanePlacement {
+                client_id,
+                command_id,
                 source_pane_id,
-                destination_tab_id,
+                placement_target,
+                expected_placed_tab_layout,
             } => {
-                self.send_placement_snapshot(
+                self.allow_client_frame_now(client_id);
+                let _ = self.confirm_pane_placement(
                     client_id,
-                    request_id,
+                    command_id,
                     source_pane_id,
-                    destination_tab_id,
+                    placement_target,
+                    &expected_placed_tab_layout,
                 );
             }
             // The restart is taken here, and the swap runs after the loop
@@ -499,7 +508,9 @@ impl Server {
             .set_pane_render_deadline(pane_id, synchronized_output_deadline);
     }
 
-    /// Run the timed renders due at `current_time`
+    /// Mark the views the pass changed and build again the placement previews
+    /// that read a changed state (`mark_changed_views`),
+    /// run the timed renders due at `current_time`
     /// ([`advance_due_pane_renders`](Self::advance_due_pane_renders)), hand a
     /// fresh snapshot to each paused subscriber that can take one
     /// ([`resync_lagged`](Self::resync_lagged)), then put each client's
@@ -508,6 +519,7 @@ impl Server {
     /// built from the same state. A serve loop calls it once per pass, after
     /// the events it read.
     pub fn push_due_frames(&mut self, current_time: Instant) {
+        self.mark_changed_views();
         self.advance_due_pane_renders(current_time);
         self.resync_lagged(current_time);
         self.push_frames(current_time);

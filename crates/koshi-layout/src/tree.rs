@@ -60,29 +60,77 @@ impl LayoutNode {
         }
     }
 
-    /// The leaf pane ids that no stack collapses, in layout order: a `Stacked`
-    /// split contributes its active member's leaves only, and a directional
-    /// split contributes every child's. Example: `horizontal(stack(a, b
-    /// expanded), c)` yields `[b, c]`.
+    /// `true` when a stack on the path to `pane_id` shows a member that does
+    /// not hold `pane_id`: the member [`SplitNode::get_shown_child_index`]
+    /// gives for `focus_history`. `false` when this subtree holds no
+    /// `pane_id`.
+    ///
+    /// `horizontal(stack(a, b active), c)`: `a` with focus history `[]` gives
+    /// `true`, `a` with `[a]` gives `false`, `b` with `[c, a]` gives `true`,
+    /// and `c` gives `false`.
     #[must_use]
-    pub fn list_expanded_leaf_pane_ids(&self) -> Vec<PaneId> {
-        let mut expanded_leaf_pane_ids = Vec::new();
-        self.collect_expanded_leaf_pane_ids(&mut expanded_leaf_pane_ids);
-        expanded_leaf_pane_ids
+    pub fn is_pane_collapsed(&self, pane_id: PaneId, focus_history: &[PaneId]) -> bool {
+        let Self::Split(split_node) = self else {
+            return false;
+        };
+        let Some(pane_child_index) = split_node
+            .children
+            .iter()
+            .position(|child_node| child_node.has_pane(pane_id))
+        else {
+            return false;
+        };
+        if split_node.direction == SplitDirection::Stacked
+            && pane_child_index != split_node.get_shown_child_index(focus_history)
+        {
+            return true;
+        }
+        split_node.children[pane_child_index].is_pane_collapsed(pane_id, focus_history)
     }
 
-    /// Recursively appends the leaf pane IDs of this subtree that no stack
-    /// collapses to `expanded_leaf_pane_ids`, in layout order.
-    fn collect_expanded_leaf_pane_ids(&self, expanded_leaf_pane_ids: &mut Vec<PaneId>) {
-        match self {
-            Self::Pane(pane_id) => expanded_leaf_pane_ids.push(*pane_id),
-            Self::Split(split_node) => {
-                for (split_child_index, child_node) in split_node.children.iter().enumerate() {
-                    if !split_node.is_child_collapsed(split_child_index) {
-                        child_node.collect_expanded_leaf_pane_ids(expanded_leaf_pane_ids);
-                    }
-                }
-            }
+    /// This tree with every stack's active member set to the member it shows
+    /// for `focus_history` ([`SplitNode::get_shown_child_index`]). `None`
+    /// when every stack already shows its active member.
+    ///
+    /// `horizontal(stack(a, b active), c)` with focus history `[a]` gives
+    /// `horizontal(stack(a active, b), c)`; with `[c]` it gives `None`.
+    #[must_use]
+    pub fn build_shown_layout_tree(&self, focus_history: &[PaneId]) -> Option<LayoutNode> {
+        if !self.has_stack_showing_inactive_member(focus_history) {
+            return None;
+        }
+        let mut shown_layout_tree = self.clone();
+        shown_layout_tree.apply_shown_stack_members(focus_history);
+        Some(shown_layout_tree)
+    }
+
+    /// `true` when a stack of this subtree shows another member than its
+    /// active member for `focus_history`.
+    fn has_stack_showing_inactive_member(&self, focus_history: &[PaneId]) -> bool {
+        let Self::Split(split_node) = self else {
+            return false;
+        };
+        let is_inactive_member_shown = split_node.direction == SplitDirection::Stacked
+            && split_node.get_shown_child_index(focus_history)
+                != split_node.get_active_child_index();
+        is_inactive_member_shown
+            || split_node
+                .children
+                .iter()
+                .any(|child_node| child_node.has_stack_showing_inactive_member(focus_history))
+    }
+
+    /// Set every stack's active member in this subtree to the member it shows
+    /// for `focus_history`.
+    fn apply_shown_stack_members(&mut self, focus_history: &[PaneId]) {
+        let Self::Split(split_node) = self else {
+            return;
+        };
+        if split_node.direction == SplitDirection::Stacked {
+            split_node.active_child_index = split_node.get_shown_child_index(focus_history);
+        }
+        for child_node in &mut split_node.children {
+            child_node.apply_shown_stack_members(focus_history);
         }
     }
 
@@ -197,10 +245,12 @@ pub struct SplitNode {
     pub children: Vec<LayoutNode>,
     /// Per-child size constraints, parallel to `children`.
     pub weights: Vec<SizeWeight>,
-    /// Index of the expanded child. Only meaningful for `Stacked` splits,
-    /// where it names the one expanded member; every other member is
-    /// collapsed to its one-row header. Directional splits carry `0` and
-    /// collapse no child.
+    /// Index of the active child. Only meaningful for `Stacked` splits: the
+    /// solve shows the active member in the stack's open area and collapses
+    /// every other member to its one-row header. A client sees the member
+    /// [`SplitNode::get_shown_child_index`] gives for its focus history, and
+    /// the active member when its history holds no pane of the stack.
+    /// Directional splits carry `0` and collapse no child.
     pub active_child_index: usize,
 }
 
@@ -240,6 +290,23 @@ impl SplitNode {
     pub fn get_active_child_index(&self) -> usize {
         self.active_child_index
             .min(self.children.len().saturating_sub(1))
+    }
+
+    /// The member a `Stacked` split shows in its open area: the child holding
+    /// the first pane of `focus_history` that any child holds, else
+    /// [`SplitNode::get_active_child_index`]. `focus_history` is a client's
+    /// focus history in the tab, newest first.
+    ///
+    /// `stack(a, b active)`: `[a, b]` gives `0`, `[c, b, a]` gives `1`, and
+    /// `[]` gives `1`.
+    #[must_use]
+    pub fn get_shown_child_index(&self, focus_history: &[PaneId]) -> usize {
+        let shown_child_index = focus_history.iter().find_map(|&history_pane_id| {
+            self.children
+                .iter()
+                .position(|child_node| child_node.has_pane(history_pane_id))
+        });
+        shown_child_index.unwrap_or_else(|| self.get_active_child_index())
     }
 
     /// `true` when the child at `split_child_index` is collapsed to its one-row header:

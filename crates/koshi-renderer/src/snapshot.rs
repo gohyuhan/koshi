@@ -28,16 +28,19 @@
 //! scrolled to, whether it is dialing the session again, and where it draws a
 //! floating pane it moves. The session stores none of them.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use koshi_core::event::{Event, SubscriberLagged};
-use koshi_core::geometry::{PaneArea, Point, Rect, Size};
+use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
+use koshi_layout::content::list_content_rects;
 use koshi_layout::mode::LayoutMode;
+use koshi_layout::placement::{PlacementTabSizes, SwapTabSizes};
 use koshi_layout::regions::SolvedRegions;
-use koshi_layout::solver::{PaneSizing, StackHeader};
+use koshi_layout::solver::{LayoutSolve, PaneSizing, StackHeader};
 use koshi_layout::tree::LayoutNode;
 use koshi_terminal::graphics::{
     ImageAction, ImageRecord, MAX_IMAGE_BYTE_COUNT, MAX_IMAGE_PIXEL_COUNT,
@@ -75,32 +78,116 @@ pub struct RenderSnapshot {
     pub pane_snapshots: Vec<PaneSnapshot>,
     /// The viewing client's own state (viewport, focus, lock mode).
     pub client_snapshot: ClientSnapshot,
+    /// The pane placement preview of the viewing client's placement target
+    /// ([`PlacementPreview`]), or `None` while the client names no target.
+    /// Frames built from the same preview share one value: a preview the
+    /// session built again with no change keeps its `Arc`.
+    pub placement_preview: Option<Arc<PlacementPreview>>,
 }
 
-/// A read-only placement preview built from one client's view.
+/// The pane placement preview of one placement target: a source pane and the
+/// destination tab it may move to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlacementPreview {
+    /// The layouts the target's source pane and destination tab have now.
+    Available(Box<PlacementSnapshot>),
+    /// The session holds the target's source pane in no tab and among no
+    /// floating panes, or holds no tab with its destination tab id.
+    Unavailable {
+        /// The source pane of the target.
+        source_pane_id: PaneId,
+        /// The destination tab of the target.
+        destination_tab_id: TabId,
+    },
+}
+
+impl PlacementPreview {
+    /// The target's source pane and destination tab, as
+    /// `(source_pane_id, destination_tab_id)`.
+    #[must_use]
+    pub fn get_placement_target(&self) -> (PaneId, TabId) {
+        match self {
+            PlacementPreview::Available(placement_snapshot) => (
+                placement_snapshot.source_pane_id,
+                placement_snapshot.destination_tab_id,
+            ),
+            PlacementPreview::Unavailable {
+                source_pane_id,
+                destination_tab_id,
+            } => (*source_pane_id, *destination_tab_id),
+        }
+    }
+
+    /// The layouts of an available preview, or `None` for an unavailable one.
+    #[must_use]
+    pub fn find_placement_snapshot(&self) -> Option<&PlacementSnapshot> {
+        match self {
+            PlacementPreview::Available(placement_snapshot) => Some(placement_snapshot),
+            PlacementPreview::Unavailable { .. } => None,
+        }
+    }
+}
+
+/// The layouts one client's pane placement preview is built from. The panes'
+/// content travels in the frame's own [`PaneSnapshot`]s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementSnapshot {
-    /// The session that produced the preview.
-    pub session_id: SessionId,
-    /// The pane named by the request.
+    /// The pane being placed.
     pub source_pane_id: PaneId,
-    /// The tab that currently contains `source_pane_id`.
-    pub source_tab_id: TabId,
-    /// The tab named as the destination.
+    /// Where `source_pane_id` sits: the tab whose layout holds it, or
+    /// [`PlacementSource::Floating`].
+    pub source: PlacementSource,
+    /// The tab the pane may move to.
     pub destination_tab_id: TabId,
-    /// The session placement revision used for this preview.
-    pub session_placement_revision: u64,
-    /// The client placement revision used for this preview.
-    pub client_placement_revision: u64,
-    /// The source tab's solved layout, tree, and visible pane content.
-    pub source_tab_snapshot: PlacementTabSnapshot,
-    /// The destination tab's solved layout, tree, and visible pane content.
-    /// `None` means that the destination is the source tab.
+    /// The destination tab's tree and solved layout. `None` exactly when the
+    /// destination is the tab of a [`PlacementSource::Tiled`] source.
     pub destination_tab_snapshot: Option<PlacementTabSnapshot>,
-    /// The client's retained view inputs.
-    pub client_snapshot: PlacementClientSnapshot,
     /// The shared sizing inputs used by the solver.
     pub pane_sizing: PaneSizing,
+    /// The tab sizes the session checks and solves a split or a stack at, and
+    /// any placement within the source pane's own tab or of a floating source
+    /// pane.
+    pub insertion_tab_sizes: PlacementTabSizes,
+    /// The tab sizes of a swap with each destination pane, in the destination
+    /// tree's leaf order, when the source pane is tiled in another tab than
+    /// the destination. Empty otherwise.
+    pub swap_tab_sizes: Vec<SwapTabSizes>,
+}
+
+/// Where the source pane of a placement preview sits before the placement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlacementSource {
+    /// A leaf of this tab's layout: the source tab's tree and solved layout.
+    Tiled(PlacementTabSnapshot),
+    /// A floating pane.
+    Floating,
+}
+
+impl PlacementSnapshot {
+    /// The tab snapshot whose layout holds the source pane, or `None` when the
+    /// source pane floats.
+    #[must_use]
+    pub fn find_source_tab_snapshot(&self) -> Option<&PlacementTabSnapshot> {
+        match &self.source {
+            PlacementSource::Tiled(source_tab_snapshot) => Some(source_tab_snapshot),
+            PlacementSource::Floating => None,
+        }
+    }
+
+    /// The tab the preview shows: the source tab snapshot when the destination
+    /// is the source pane's tab, else the destination tab snapshot. `None` for
+    /// another tab with no destination snapshot.
+    #[must_use]
+    pub fn find_displayed_tab_snapshot(&self) -> Option<&PlacementTabSnapshot> {
+        match self.find_source_tab_snapshot() {
+            Some(source_tab_snapshot)
+                if source_tab_snapshot.tab_snapshot.tab_id == self.destination_tab_id =>
+            {
+                Some(source_tab_snapshot)
+            }
+            _ => self.destination_tab_snapshot.as_ref(),
+        }
+    }
 }
 
 /// Text drawn inside one softened pane during placement.
@@ -140,51 +227,14 @@ impl PanePlacementPresentation {
 /// One source or destination tab in a placement preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementTabSnapshot {
-    /// The unsolved layout tree.
+    /// The tab's unsolved layout tree, each stack at its shared active member.
     pub layout_tree: LayoutNode,
+    /// The requesting client's focus history in the tab, newest first, with
+    /// only panes of `layout_tree`. Each stack of `tab_snapshot` shows the
+    /// member this history gives ([`LayoutNode::build_shown_layout_tree`]).
+    pub focus_history: Vec<PaneId>,
     /// The solved tab layout.
     pub tab_snapshot: TabSnapshot,
-    /// Visible content matched to the tab's pane slots by pane id.
-    pub pane_snapshots: Vec<PlacementPaneSnapshot>,
-}
-
-/// One pane's bounded content in a placement preview.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlacementPaneSnapshot {
-    /// The pane this content belongs to.
-    pub pane_id: PaneId,
-    /// The visible terminal cells, without scrollback metadata.
-    pub terminal_grid_view: Option<GridView>,
-    /// Native-image placements whose records may follow in bounded events.
-    pub image_placement_snapshots: Vec<ImagePlacementSnapshot>,
-}
-
-/// The client view values that are needed to reproduce a placement preview.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlacementClientSnapshot {
-    /// The requesting client.
-    pub client_snapshot: ClientSnapshot,
-    /// The pane area this client reported, if any.
-    pub reported_pane_area: Option<PaneArea>,
-}
-
-/// The typed reasons a placement preview cannot be built.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlacementSnapshotErrorCode {
-    /// The requesting client is not attached, or the source pane, its tiled
-    /// slot, or the destination tab does not exist.
-    NotFound,
-    /// The requested preview exceeds a bounded resource limit.
-    ResourceLimit,
-}
-
-/// A placement preview refusal that travels through the attached event stream.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlacementSnapshotError {
-    /// The typed refusal code.
-    pub code: PlacementSnapshotErrorCode,
-    /// The human-readable refusal message.
-    pub message: String,
 }
 
 impl RenderSnapshot {
@@ -257,8 +307,7 @@ impl CommittedRegions {
 
 /// One item on a subscriber's queue: a live event, the frame composed for the
 /// subscriber's client, a fresh frame that resyncs a subscriber whose queue
-/// overflowed, a pane placement preview or its refusal, the answers to one
-/// round of mouse actions, a wake-up for the bytes that wait for the
+/// overflowed, the answers to one round of mouse actions, a wake-up for the bytes that wait for the
 /// subscriber's own terminal, the session its client moves to, or a pane
 /// placement command or floating pane move the session rejected.
 ///
@@ -279,20 +328,6 @@ pub enum Delivery {
         /// Which subscriber lagged, how many events were dropped, and their
         /// class.
         lag_report: SubscriberLagged,
-    },
-    /// A bounded read-only placement preview for the client that asked for it.
-    PanePlacementSnapshot {
-        /// The request this preview answers.
-        request_id: u64,
-        /// The source and destination snapshot.
-        snapshot: Box<PlacementSnapshot>,
-    },
-    /// A placement preview request was refused.
-    PanePlacementRefused {
-        /// The request this refusal answers.
-        request_id: u64,
-        /// The typed refusal.
-        refusal: PlacementSnapshotError,
     },
     /// What one round of mouse actions did, for the client that asked for the
     /// round.
@@ -363,7 +398,8 @@ pub struct ViewerChrome {
     pub reconnecting: Option<Reconnecting>,
     /// The floating pane this viewer is moving, drawn and hit-tested at the
     /// draft's top-left cell, moved inside the pane area, instead of the cell
-    /// the frame places it at. `None` while no move is under way.
+    /// the frame places it at. A pinned pane stays at the frame's cell. `None`
+    /// while no move is under way.
     pub floating_pane_move_draft: Option<FloatingPaneMoveDraft>,
 }
 
@@ -374,7 +410,8 @@ pub struct ViewerChrome {
 /// top-left cell becomes `top_left_cell`, moved left and up until the slot lies
 /// inside the pane area ([`FrameLayout::list_drawn_floating_pane_slots`]). In
 /// a `120x38` pane area, a slot at `(24, 8)` `72x22` with a draft at `(29, 8)`
-/// draws at `(29, 8)` `72x22`, its content at `(30, 11)`.
+/// draws at `(29, 8)` `72x22`, its content at `(30, 11)`. A pinned slot keeps
+/// the cell the frame places it at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FloatingPaneMoveDraft {
     /// The floating pane being moved.
@@ -458,13 +495,15 @@ impl<'a> FrameLayout<'a> {
 
     /// The floating panes this viewer draws in this frame, back to front:
     /// every slot in the session's
-    /// [`floating_pane_slots`](SessionSnapshot::floating_pane_slots). The slot
-    /// that `viewer_chrome.floating_pane_move_draft` names starts at the
-    /// draft's top-left cell, then moves left and up until it lies inside this
-    /// frame's pane area ([`Rect::compute_moved_inside`]). None while
-    /// `viewer_chrome.is_pane_placement_visible` is `true`, and none while the
-    /// active tab's `is_every_pane_suppressed` is `true` (the frame shows the
-    /// "terminal too small" overlay).
+    /// [`floating_pane_slots`](SessionSnapshot::floating_pane_slots). The
+    /// unpinned slot that `viewer_chrome.floating_pane_move_draft` names starts
+    /// at the draft's top-left cell, then moves left and up until it lies
+    /// inside this frame's pane area ([`Rect::compute_moved_inside`]). While
+    /// `viewer_chrome.is_pane_placement_visible` is `true`, the only slot is
+    /// that of `viewer_chrome.placement_source_pane_id`, and only while the
+    /// active tab holds no slot of that pane. None while the active tab's
+    /// `is_every_pane_suppressed` is `true`: the frame shows
+    /// `Terminal too small — enlarge window` instead.
     ///
     /// The pane area comes from `committed_regions`, or is the whole viewport
     /// when they are `None`. Example: a `72x22` slot with a draft at `(60, 20)`
@@ -472,41 +511,56 @@ impl<'a> FrameLayout<'a> {
     pub fn list_drawn_floating_pane_slots(
         &self,
     ) -> impl DoubleEndedIterator<Item = FloatingPaneSlot> + 'a {
-        let floating_pane_slots: &'a [FloatingPaneSlot] =
-            if self.viewer_chrome.is_pane_placement_visible
-                || self
-                    .session_snapshot
-                    .active_tab_snapshot
-                    .is_every_pane_suppressed
-            {
-                &[]
-            } else {
-                &self.session_snapshot.floating_pane_slots
-            };
+        let floating_pane_slots: &'a [FloatingPaneSlot] = if self
+            .session_snapshot
+            .active_tab_snapshot
+            .is_every_pane_suppressed
+        {
+            &[]
+        } else {
+            &self.session_snapshot.floating_pane_slots
+        };
         let frame_layout = *self;
-        floating_pane_slots.iter().map(move |floating_pane_slot| {
-            match frame_layout.viewer_chrome.floating_pane_move_draft {
-                Some(floating_pane_move_draft)
-                    if floating_pane_move_draft.pane_id == floating_pane_slot.pane_id =>
-                {
-                    let frame_pane_area =
-                        compute_frame_pane_area(frame_layout, compute_viewport_area(frame_layout));
-                    FloatingPaneSlot::from_outer_rect(
-                        floating_pane_slot.pane_id,
-                        Rect::from_origin_and_size(
-                            floating_pane_move_draft.top_left_cell,
-                            floating_pane_slot.outer_rect.size,
+        let is_drawn_floating_pane_slot = move |floating_pane_slot: &&FloatingPaneSlot| {
+            !frame_layout.viewer_chrome.is_pane_placement_visible
+                || (frame_layout.viewer_chrome.placement_source_pane_id
+                    == Some(floating_pane_slot.pane_id)
+                    && !frame_layout
+                        .session_snapshot
+                        .active_tab_snapshot
+                        .pane_slots
+                        .iter()
+                        .any(|pane_slot| pane_slot.pane_id == floating_pane_slot.pane_id))
+        };
+        floating_pane_slots
+            .iter()
+            .filter(is_drawn_floating_pane_slot)
+            .map(move |floating_pane_slot| {
+                match frame_layout.viewer_chrome.floating_pane_move_draft {
+                    Some(floating_pane_move_draft)
+                        if floating_pane_move_draft.pane_id == floating_pane_slot.pane_id
+                            && !floating_pane_slot.is_pinned =>
+                    {
+                        let frame_pane_area = compute_frame_pane_area(
+                            frame_layout,
+                            compute_viewport_area(frame_layout),
+                        );
+                        FloatingPaneSlot::from_outer_rect(
+                            floating_pane_slot.pane_id,
+                            Rect::from_origin_and_size(
+                                floating_pane_move_draft.top_left_cell,
+                                floating_pane_slot.outer_rect.size,
+                            )
+                            .compute_moved_inside(Size {
+                                column_count: frame_pane_area.width,
+                                row_count: frame_pane_area.height,
+                            }),
+                            floating_pane_slot.is_pinned,
                         )
-                        .compute_moved_inside(Size {
-                            column_count: frame_pane_area.width,
-                            row_count: frame_pane_area.height,
-                        }),
-                        floating_pane_slot.is_pinned,
-                    )
+                    }
+                    _ => *floating_pane_slot,
                 }
-                _ => *floating_pane_slot,
-            }
-        })
+            })
     }
 
     /// The slot of the floating pane `pane_id` as this frame draws it
@@ -627,8 +681,6 @@ impl From<&PaneSnapshot> for MousePane {
 pub struct SessionSnapshot {
     /// The session's stable id.
     pub session_id: SessionId,
-    /// The session's committed layout, membership, and shared-sizing revision.
-    pub session_revision: u64,
     /// The session's display name.
     pub session_name: String,
     /// The tab currently shown, solved and ready to draw.
@@ -636,10 +688,9 @@ pub struct SessionSnapshot {
     /// Lightweight entry per tab for the tab bar (index, name, active marker).
     pub tabs_metadata: Vec<TabMetadata>,
     /// The floating panes the viewing client shows, back to front: the pane
-    /// that client focused least recently first, its minimized panes left
-    /// out. Empty when the client has no floating viewport: it reports
-    /// [`PaneArea::Starving`], or a pane area narrower than 4 columns or shorter
-    /// than 5 rows.
+    /// shown longest first, the focused one last. Empty when the client has no
+    /// floating viewport: it reports [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving), or a pane area
+    /// narrower than 5 columns or shorter than 6 rows.
     pub floating_pane_slots: Vec<FloatingPaneSlot>,
     /// Every floating pane of the session, in the order the panes became
     /// floating, whether or not the viewing client shows it. With floats `a`,
@@ -672,7 +723,8 @@ pub struct TabSnapshot {
     /// rects and coarse status.
     pub pane_slots: Vec<PaneSlot>,
     /// The size the tab's layout was solved for: the per-axis minimum pane
-    /// area across the clients viewing this tab.
+    /// area across the clients viewing this tab, or `0x0` while each of them
+    /// reports [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving).
     /// The [`pane_slots`](Self::pane_slots) rects live in this space with
     /// origin `(0, 0)`. A client whose own
     /// [`viewport_size`](ClientSnapshot::viewport_size)
@@ -693,6 +745,18 @@ pub struct TabSnapshot {
     pub gap_cell_count: u16,
 }
 
+impl TabSnapshot {
+    /// The slot of `pane_id` when its [`is_visible`](PaneSlot::is_visible) is
+    /// `true`. `None` when the tab has no slot for `pane_id`, or the slot is
+    /// hidden.
+    #[must_use]
+    pub fn find_visible_pane_slot(&self, pane_id: PaneId) -> Option<&PaneSlot> {
+        self.pane_slots
+            .iter()
+            .find(|pane_slot| pane_slot.is_visible && pane_slot.pane_id == pane_id)
+    }
+}
+
 /// One pane's placement in the solved layout: where its box sits, its content
 /// area, and coarse status flags. Paired with a [`PaneSnapshot`] by
 /// [`pane_id`](Self::pane_id).
@@ -711,8 +775,7 @@ pub struct PaneSlot {
     /// The outer pane box, including the 1-cell border gutter.
     pub outer_rect: Rect,
     /// The content area inside the border — the layout-owned rect the PTY was
-    /// sized from, taken verbatim from
-    /// [`list_content_rects`](koshi_layout::content::list_content_rects). `None` when the
+    /// sized from, taken verbatim from [`list_content_rects`]. `None` when the
     /// pane shows no content (suppressed, hidden, or a collapsed stack member).
     /// The renderer draws cells and places the cursor here and never re-computes
     /// the inset.
@@ -721,6 +784,33 @@ pub struct PaneSlot {
     pub is_visible: bool,
     /// Whether the pane is suppressed for lack of room.
     pub is_suppressed: bool,
+}
+
+/// One [`PaneSlot`] per leaf of `layout_solve`, in solve order: the outer rect
+/// from the solve, the content rect from [`list_content_rects`], and
+/// `is_suppressed` for each pane in
+/// [`suppressed_pane_ids`](LayoutSolve::suppressed_pane_ids).
+#[must_use]
+pub fn list_pane_slots(layout_solve: &LayoutSolve) -> Vec<PaneSlot> {
+    let suppressed_pane_ids: HashSet<PaneId> =
+        layout_solve.suppressed_pane_ids.iter().copied().collect();
+    layout_solve
+        .pane_rects
+        .iter()
+        .zip(list_content_rects(layout_solve))
+        .map(
+            |(&(pane_id, outer_rect), (content_pane_id, content_rect))| {
+                debug_assert_eq!(pane_id, content_pane_id);
+                PaneSlot {
+                    pane_id,
+                    outer_rect,
+                    content_rect,
+                    is_visible: content_rect.is_some(),
+                    is_suppressed: suppressed_pane_ids.contains(&pane_id),
+                }
+            },
+        )
+        .collect()
 }
 
 /// One floating pane the viewing client shows, placed for that client.
@@ -979,7 +1069,7 @@ impl GridView {
 
 /// One validated terminal image placement carried in a read-only frame.
 ///
-/// The image record is shared so a local snapshot does not copy RGBA pixels.
+/// A local snapshot shares the image record and copies no RGBA pixels.
 /// A remote frame first carries the placement without a record, then rebuilds
 /// the record after its bounded content events pass the wire checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1248,8 +1338,6 @@ pub struct ScrollbackMetadata {
 pub struct ClientSnapshot {
     /// The client's stable identifier.
     pub client_id: ClientId,
-    /// The client's committed geometry and view revision.
-    pub client_revision: u64,
     /// The client's terminal size in cells.
     pub viewport_size: Size,
     /// The tab the client is currently viewing.
@@ -1275,15 +1363,21 @@ pub struct ClientSnapshot {
     pub last_applied_lock_command_id: Option<CommandId>,
     /// The last floating pane move that the client's own connection sent,
     /// from its mouse or a key binding, and the session ran before it built
-    /// this snapshot. `None` before the session
-    /// runs one, and again after the session restarts. A viewer that sent a
-    /// move keeps drawing the pane at the move's cell until a frame names that
-    /// move here.
+    /// this snapshot. `None` before the session runs one, and again after the
+    /// session restarts. A viewer that sent a move keeps drawing the pane at
+    /// the move's cell until a frame names that move here.
     pub last_applied_floating_pane_move_command_id: Option<CommandId>,
+    /// The last tiled pane placement that the client's own connection
+    /// confirmed and the session ran before it built this snapshot. `None`
+    /// before the session runs one, and again after the session restarts. A
+    /// viewer that confirmed a placement waits until a frame names it here,
+    /// and that frame shows the placement.
+    pub last_applied_placement_command_id: Option<CommandId>,
     /// Whether this client grabs the mouse for text selection. Adds the `SELECT`
     /// tag to the mode indicator. It is independent of
-    /// [`lock_mode`](Self::lock_mode): both can be on at once. The viewer also reads it off a painted frame
-    /// to decide whether a press in a mouse-aware pane begins a highlight.
+    /// [`lock_mode`](Self::lock_mode): both can be on at once. The viewer also
+    /// reads it off a painted frame to decide whether a press in a mouse-aware
+    /// pane begins a highlight.
     pub is_mouse_selection_enabled: bool,
 }
 

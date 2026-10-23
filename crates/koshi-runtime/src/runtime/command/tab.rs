@@ -108,13 +108,6 @@ impl Server {
         }
         let new_tab_pty_size =
             compute_root_pane_pty_size(new_pane_id, designated_pane_area, pane_sizing);
-        let affected_client_ids = list_clients_affected_by_tabs(
-            session,
-            &[new_tab_id, client.get_active_tab_id()],
-            Some(tab_target.client_id),
-        );
-        ensure_session_placement_revision_capacity(session)?;
-        ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
 
         // The tab's name is generated before the spawn: a name no existing
         // tab in the session uses.
@@ -154,9 +147,8 @@ impl Server {
             tab_name,
             Some(tab_target.client_id),
             new_pane_spec,
+            designated_pane_area,
         );
-        advance_session_placement_revision(session);
-        advance_client_placement_revisions(session, &affected_client_ids);
 
         // Register the live pane and its spawn size, and create the terminal
         // engine that receives the child's output.
@@ -228,25 +220,11 @@ impl Server {
             command_args.should_force_close,
             command_args.should_kill_process_tree,
         );
-        let landing_tab_id = tab_ops::find_nearest_surviving_tab(session, tab_id);
-        let mut affected_tab_ids = vec![tab_id];
-        if let Some(landing_tab_id) = landing_tab_id {
-            affected_tab_ids.push(landing_tab_id);
-        }
-        let affected_client_ids = list_clients_affected_by_tabs(
-            session,
-            &affected_tab_ids,
-            command_source.get_client_id(),
-        );
-        ensure_session_placement_revision_capacity(session)?;
-        ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
-        let floating_pane_ids = list_floating_pane_ids(session);
+        let floating_pane_ids = session.floating_set.list_pane_ids();
 
         // Commit the state removal: pane records drop, the tab goes, viewers
         // move to the nearest surviving tab, last-tab close quits the session.
         let mut emitted_events = tab_ops::close_tab(session, tab_id);
-        advance_session_placement_revision(session);
-        advance_client_placement_revisions(session, &affected_client_ids);
 
         // The panes are gone from the session. Remove their live IDs, size
         // caches, terminal engines, scroll offsets, and selections. The layout's
@@ -316,21 +294,12 @@ impl Server {
         if previous_tab_id == tab_target.tab_id {
             return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
         }
-        let affected_client_ids = list_clients_affected_by_tabs(
-            session,
-            &[tab_target.tab_id, previous_tab_id],
-            Some(tab_target.client_id),
-        );
-        ensure_session_placement_revision_capacity(session)?;
-        ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
 
         let mut emitted_events = tab_ops::focus_tab(
             session,
             tab_target.client_id,
             tab_ops::TabTarget::Id(tab_target.tab_id),
         );
-        advance_session_placement_revision(session);
-        advance_client_placement_revisions(session, &affected_client_ids);
 
         // Both tabs' viewer sets changed: the target tab gained the arriving
         // viewer, the left tab lost it. Reflow each that still has a viewer;

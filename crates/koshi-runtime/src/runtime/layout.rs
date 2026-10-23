@@ -5,15 +5,19 @@
 //! viewing it — and packs the split trees, the rectangles those trees solve
 //! to, and every attached client's focus into one [`SessionLayout`].
 //!
-//! A tab solves once per viewing client, against that client's own layout
-//! mode. Two clients on one tab, one tiled and one with a pane fullscreen,
-//! give that tab two sets of rectangles in the same turn. The size is shared
-//! across those clients: the per-axis smallest pane area among the clients
-//! viewing the tab. A client that reported no pane area contributes its own
-//! terminal minus the two chrome rows; a client that reported
+//! Each viewing client gets the solve of its own view of the tab
+//! ([`Session::compute_client_solve`]): its zoom, and in each stack the member
+//! its focus history opens. Two clients on one tab, one tiled and one with a
+//! pane fullscreen, give that tab two sets of rectangles in the same turn.
+//! The size is shared across those clients: the per-axis smallest pane area
+//! among the clients viewing the tab. A client that reported no pane area
+//! contributes its own terminal minus the two chrome rows; a client that
+//! reported
 //! [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving)
 //! contributes none. An 80x24 and a 120x40 client, neither reporting a pane
 //! area, both solve against 80x22.
+//!
+//! [`Session::compute_client_solve`]: koshi_session::session::state::Session::compute_client_solve
 
 use koshi_core::ids::TabId;
 use koshi_ipc::layout::{ClientFocus, SessionLayout, SolvedPane, SolvedTab, TabLayout};
@@ -36,7 +40,6 @@ impl Server {
     #[must_use]
     pub fn build_session_layout(&self, requested_tab_id: Option<TabId>) -> Option<SessionLayout> {
         let session = self.get_sole_session()?;
-        let pane_sizing = self.get_pane_sizing();
 
         let mut selected_tab_records: Vec<&Tab> = session
             .tabs
@@ -63,16 +66,12 @@ impl Server {
                         .filter(|client_record| {
                             client_record.get_active_tab_id() == tab_record.get_tab_id()
                         })
-                        .map(|client_record| {
+                        .filter_map(|client_record| {
                             let layout_mode =
                                 client_record.get_layout_mode(tab_record.get_tab_id());
-                            let layout_solve = crate::runtime::snapshot::solve_tab_layout(
-                                tab_record,
-                                layout_mode,
-                                tab_size,
-                                pane_sizing,
-                            );
-                            SolvedTab {
+                            let layout_solve = session
+                                .compute_client_solve(client_record, tab_record.get_tab_id())?;
+                            Some(SolvedTab {
                                 client_id: client_record.get_client_id(),
                                 viewport_size: tab_size,
                                 layout_mode,
@@ -84,10 +83,10 @@ impl Server {
                                         outer_rect: pane_rect,
                                     })
                                     .collect(),
-                                suppressed_pane_ids: layout_solve.suppressed_pane_ids,
+                                suppressed_pane_ids: layout_solve.suppressed_pane_ids.clone(),
                                 is_every_pane_suppressed: layout_solve.is_every_pane_suppressed,
-                                stack_headers: layout_solve.stack_headers,
-                            }
+                                stack_headers: layout_solve.stack_headers.clone(),
+                            })
                         })
                         .collect(),
                 };

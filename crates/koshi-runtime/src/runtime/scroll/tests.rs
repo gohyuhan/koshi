@@ -14,17 +14,19 @@ use koshi_core::command::{GridPosition, Selection, SelectionKind};
 use koshi_core::geometry::Size;
 use koshi_core::ids::{SessionId, TabId};
 use koshi_core::process::PtySize;
+use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
-use koshi_session::session::state::{Session, Tab};
+use koshi_session::session::state::Session;
 use koshi_terminal::engine::TerminalEngine;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use crate::runtime::command::tests::attach_second_client;
+use crate::runtime::command::tests::{attach_client_record, attach_second_client, build_tab};
 use crate::runtime::event::RuntimeEvent;
 use crate::runtime::render_schedule::tests::{
-    get_frame_wait, subscribe_and_push_first_frame, DEFAULT_FRAME_INTERVAL_DURATION,
+    mark_changed_views_then_compute_frame_wait, subscribe_and_push_first_frame,
+    DEFAULT_FRAME_INTERVAL_DURATION,
 };
 
 /// A runtime holding one session, one attached client, and one 1-row terminal
@@ -59,10 +61,9 @@ fn attach_test_session_with_pane(runtime: &mut Server) -> (PaneId, ClientId) {
         .panes
         .register_pane_record(PaneRecord::from_terminal_pane(pane_id))
         .expect("unique pane id");
-    session.tabs.insert(
-        tab_id,
-        Tab::from_root_pane(tab_id, "t".to_string(), 0, pane_id),
-    );
+    session
+        .tabs
+        .insert(tab_id, build_tab(tab_id, "t", 0, LayoutNode::Pane(pane_id)));
     let mut client = Client::from_attachment(
         client_id,
         session_id,
@@ -78,7 +79,7 @@ fn attach_test_session_with_pane(runtime: &mut Server) -> (PaneId, ClientId) {
         0,
     );
     client.update_focused_pane(tab_id, pane_id);
-    session.attach_client(client);
+    attach_client_record(&mut session, client);
     runtime.session_by_id.insert(session_id, session);
 
     runtime.terminal_engine_by_pane_id.insert(
@@ -443,11 +444,14 @@ fn a_no_op_scroll_marks_no_view_change() {
     runtime.scroll_down(client_id, pane_id, 1); // already following live
     runtime.scroll_up(client_id, pane_id, 0); // zero-line move
     runtime.scroll_up(ClientId::new(), pane_id, 1); // unknown client
-    assert_eq!(get_frame_wait(&runtime, client_id, now), None);
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(&mut runtime, client_id, now),
+        None
+    );
 
     runtime.scroll_up(client_id, pane_id, 1); // a real move marks the view changed
     assert_eq!(
-        get_frame_wait(&runtime, client_id, now),
+        mark_changed_views_then_compute_frame_wait(&mut runtime, client_id, now),
         Some(DEFAULT_FRAME_INTERVAL_DURATION)
     );
 }
@@ -466,10 +470,13 @@ fn a_scroll_marks_the_view_of_the_scrolling_client_and_of_no_other() {
     runtime.scroll_down(client_id, pane_id, 1);
 
     assert_eq!(
-        get_frame_wait(&runtime, client_id, now),
+        mark_changed_views_then_compute_frame_wait(&mut runtime, client_id, now),
         Some(DEFAULT_FRAME_INTERVAL_DURATION)
     );
-    assert_eq!(get_frame_wait(&runtime, other_client_id, now), None);
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(&mut runtime, other_client_id, now),
+        None
+    );
 }
 
 #[test]
@@ -488,7 +495,10 @@ fn scrolling_a_pane_with_no_terminal_moves_nothing() {
         0
     );
     assert!(!is_view_held(&runtime, client_id, engineless_pane_id));
-    assert_eq!(get_frame_wait(&runtime, client_id, now), None);
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(&mut runtime, client_id, now),
+        None
+    );
 }
 
 #[test]
@@ -503,7 +513,10 @@ fn scrolling_down_as_an_unknown_client_moves_nothing() {
     runtime.scroll_to_bottom(ClientId::new(), pane_id);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 2); // the attached client is untouched
     assert!(is_view_held(&runtime, client_id, pane_id));
-    assert_eq!(get_frame_wait(&runtime, client_id, now), None);
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(&mut runtime, client_id, now),
+        None
+    );
 }
 
 #[test]
@@ -518,7 +531,10 @@ fn scrolling_by_zero_lines_leaves_a_scrolled_view_where_it_is() {
     runtime.scroll_down(client_id, pane_id, 0);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 2);
     assert!(is_view_held(&runtime, client_id, pane_id));
-    assert_eq!(get_frame_wait(&runtime, client_id, now), None);
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(&mut runtime, client_id, now),
+        None
+    );
 }
 
 #[test]
@@ -531,7 +547,10 @@ fn scroll_up_by_the_maximum_with_no_history_stays_at_the_newest_line() {
     assert_eq!(get_retained_line_count(&runtime, pane_id), 0);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 0);
     assert!(!is_view_held(&runtime, client_id, pane_id));
-    assert_eq!(get_frame_wait(&runtime, client_id, now), None);
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(&mut runtime, client_id, now),
+        None
+    );
 }
 
 #[test]
@@ -545,15 +564,21 @@ fn scrolling_to_the_bottom_twice_gives_one_frame() {
     runtime.scroll_to_bottom(client_id, pane_id);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 0);
     assert_eq!(
-        get_frame_wait(&runtime, client_id, now),
+        mark_changed_views_then_compute_frame_wait(&mut runtime, client_id, now),
         Some(DEFAULT_FRAME_INTERVAL_DURATION)
     );
     let painted_at = now + DEFAULT_FRAME_INTERVAL_DURATION;
     runtime.push_frames(painted_at);
-    assert_eq!(get_frame_wait(&runtime, client_id, painted_at), None);
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(&mut runtime, client_id, painted_at),
+        None
+    );
 
     runtime.scroll_to_bottom(client_id, pane_id); // already at the newest line
-    assert_eq!(get_frame_wait(&runtime, client_id, painted_at), None);
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(&mut runtime, client_id, painted_at),
+        None
+    );
 }
 
 #[test]
@@ -698,11 +723,7 @@ fn output_re_anchors_each_client_on_a_shared_pane_on_its_own() {
             "C-test-client".to_string(),
             0,
         );
-        runtime
-            .session_by_id
-            .get_mut(&session_id)
-            .unwrap()
-            .attach_client(client);
+        attach_client_record(runtime.session_by_id.get_mut(&session_id).unwrap(), client);
     }
 
     runtime.scroll_up(first_client_id, pane_id, 2);

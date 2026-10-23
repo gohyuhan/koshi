@@ -3,6 +3,7 @@
 //! stores, snaps, and copies what came back.
 
 use super::*;
+use crate::runtime::command::tests::attach_client_record;
 use crate::runtime::delivery_queue::DeliveryReceiver;
 use crate::runtime::snapshot::tests::find_selection_row_spans;
 
@@ -1774,11 +1775,10 @@ fn two_clients_selecting_in_one_pane_never_see_each_others_highlight() {
         0,
     );
     second_client.update_focused_pane(tab_id, pane_id);
-    server
-        .session_by_id
-        .get_mut(&session_id)
-        .expect("session")
-        .attach_client(second_client);
+    attach_client_record(
+        server.session_by_id.get_mut(&session_id).expect("session"),
+        second_client,
+    );
 
     // The first client highlights.
     let start_point = get_pane_screen_cell(&server, first_client_id, pane_id, 0, 0);

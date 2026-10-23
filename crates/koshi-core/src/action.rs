@@ -311,22 +311,28 @@ pub enum ClientActionKind {
     /// Move the selected floating pane's draft one cell in `direction` during
     /// floating pane move mode.
     MoveFloatingPane(Direction),
-    /// Select the next floating pane in creation order during floating pane
-    /// move mode.
+    /// Select the next floating pane, in the order the panes became floating,
+    /// during floating pane move mode.
     SelectNextFloatingPane,
-    /// Select the previous floating pane in creation order during floating
-    /// pane move mode.
+    /// Select the previous floating pane, in the order the panes became
+    /// floating, during floating pane move mode.
     SelectPreviousFloatingPane,
     /// Send the selected floating pane's draft as a floating pane move.
     ConfirmFloatingPaneMove,
     /// Discard the draft and leave floating pane move mode.
     CancelFloatingPaneMove,
-    /// Undock the pane that takes the viewer's input: send a
-    /// [`PlacePane`](crate::command::Command::PlacePane) whose target is
-    /// [`PanePlacementTarget::Floating`](crate::command::PanePlacementTarget::Floating)
-    /// with no top-left cell and no expected placement revision. A frame that
-    /// focuses no pane sends nothing.
-    UndockOrDockPane,
+    /// Open dock/undock mode with the pane that takes the viewer's input
+    /// selected.
+    BeginDockUndock,
+    /// In dock/undock mode, float the selected tiled pane where it is drawn,
+    /// or dock the selected floating pane at the selected target.
+    ConfirmDockUndock,
+    /// Leave dock/undock mode and return to the base input mode.
+    CancelDockUndock,
+    /// Switch the selected placement target between a swap with a pane, or an
+    /// insertion beside a pane or a whole stack, and the stack of that pane or
+    /// that stack.
+    TogglePanePlacementStack,
 }
 
 /// Everything the registry knows about one action: how to show it, what it can
@@ -379,9 +385,9 @@ fn build_core_action_seed(
 /// the action's registry display name.
 pub const MOUSE_SELECT_HINT: &str = "Mouse Select";
 
-/// The hint-bar label for `core:mouse-select` while the mode is **on**. The
-/// viewer swaps [`MOUSE_SELECT_HINT`] for this as it paints each frame, for as
-/// long as mouse-select is on.
+/// The hint-bar label for `core:mouse-select` while the mode is **on**. A
+/// frame painted while mouse-select is on shows it in place of
+/// [`MOUSE_SELECT_HINT`].
 pub const MOUSE_UNSELECT_HINT: &str = "Mouse Unselect";
 
 /// The registry display name of `core:begin-tiled-pane-placement`, and the
@@ -394,9 +400,8 @@ pub const MOVE_TILED_PANE_HINT: &str = "Move Tiled Pane";
 /// takes the viewer's input.
 pub const MOVE_FLOATING_PANE_HINT: &str = "Move Floating Pane";
 
-/// The registry display name of `core:confirm-pane-move-choice`. The viewer
-/// swaps it for [`MOVE_TILED_PANE_HINT`] or [`MOVE_FLOATING_PANE_HINT`] as it
-/// paints each frame.
+/// The registry display name of `core:confirm-pane-move-choice`. Every frame
+/// shows [`MOVE_TILED_PANE_HINT`] or [`MOVE_FLOATING_PANE_HINT`] in its place.
 pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
 
 /// The built-in action table, loaded into the runtime registry at startup.
@@ -411,7 +416,10 @@ pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
 /// family's command with the named direction; `focus-next-floating-pane` and
 /// `focus-previous-floating-pane` build `FocusPane` with the floating pane
 /// target they name; `next-tab`/`previous-tab`/`focus-tab` all build
-/// `FocusTab`.
+/// `FocusTab`; `undock-pane` builds `PlacePane` with a floating target;
+/// `pin-pane`/`unpin-pane` both build `SetPanePinned`; `minimize-pane` builds
+/// `SetPaneMinimized`; `minimize-all-floating-panes` and
+/// `restore-all-floating-panes` both build `SetAllFloatingPanesMinimized`.
 ///
 /// The `resize-pane*`, `focus-pane*`, `focus-next-floating-pane`,
 /// `focus-previous-floating-pane`, and `scroll-pane-up`/`scroll-pane-down`
@@ -537,12 +545,12 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             CoreClient(ClientActionKind::BeginPanePlacement),
         ),
         build_core_action_seed(
-            "undock-or-dock-pane",
-            "Undock Or Dock Pane",
-            "Make the focused tiled or stacked pane a floating pane",
+            "begin-dock-undock",
+            "Dock Or Undock Pane",
+            "Open dock/undock mode for the pane that takes the input",
             PaneSession,
             vec![Pane],
-            CoreClient(ClientActionKind::UndockOrDockPane),
+            CoreClient(ClientActionKind::BeginDockUndock),
         ),
         build_core_action_seed(
             "select-pane-target-left",
@@ -617,6 +625,14 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             CoreClient(ClientActionKind::CyclePanePlacementSpan),
         ),
         build_core_action_seed(
+            "toggle-pane-placement-stack",
+            "Toggle Pane Placement Stack",
+            "Switch the selected target between beside a pane or stack and into that stack",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::TogglePanePlacementStack),
+        ),
+        build_core_action_seed(
             "select-next-placement-tab",
             "Select Next Placement Tab",
             "Preview the next visible tab in placement mode",
@@ -647,6 +663,22 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::CancelPanePlacement),
+        ),
+        build_core_action_seed(
+            "confirm-dock-undock",
+            "Dock Or Undock",
+            "Float the selected tiled pane where it is, or dock the selected floating pane at its target",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::ConfirmDockUndock),
+        ),
+        build_core_action_seed(
+            "cancel-dock-undock",
+            "Cancel Dock Or Undock",
+            "Leave dock/undock mode and return to the base input mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::CancelDockUndock),
         ),
         build_core_action_seed(
             "begin-tiled-pane-placement",
@@ -715,7 +747,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
         build_core_action_seed(
             "select-next-floating-pane",
             "Select Next Floating Pane",
-            "Select and focus the next floating pane in creation order in floating pane move mode",
+            "Select and focus the next floating pane, in the order the panes became floating, in floating pane move mode",
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::SelectNextFloatingPane),
@@ -723,7 +755,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
         build_core_action_seed(
             "select-previous-floating-pane",
             "Select Previous Floating Pane",
-            "Select and focus the previous floating pane in creation order in floating pane move mode",
+            "Select and focus the previous floating pane, in the order the panes became floating, in floating pane move mode",
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::SelectPreviousFloatingPane),
@@ -755,10 +787,82 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
         build_core_action_seed(
             "place-pane",
             "Place Pane",
-            "Insert a pane into another tab's tiled layout",
+            "Put a pane into a tab's tiled layout, beside a pane or into its stack; a floating pane docks",
             PaneSession,
             vec![Pane, TabTarget],
             CoreCommand(CommandKind::PlacePane),
+        ),
+        build_core_action_seed(
+            "undock-pane",
+            "Undock Pane",
+            "Float the focused tiled pane above the tiled panes, at the top-left cell and the size where it is drawn, each axis cut to 90% of the smallest pane area",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::PlacePane),
+        ),
+        build_core_action_seed(
+            "dock-pane",
+            "Dock Pane",
+            "Insert a floating pane into a tab's tiled layout",
+            PaneSession,
+            vec![Pane, TabTarget],
+            CoreCommand(CommandKind::PlacePane),
+        ),
+        build_core_action_seed(
+            "move-floating-pane",
+            "Move Floating Pane To Cell",
+            "Move a floating pane to a top-left cell on one client's screen",
+            Client,
+            vec![Pane, ClientTarget],
+            CoreCommand(CommandKind::MoveFloatingPane),
+        ),
+        build_core_action_seed(
+            "pin-pane",
+            "Pin Pane",
+            "Pin the focused floating pane at its top-left cell on the issuing client's screen",
+            Client,
+            vec![Pane, ClientTarget],
+            CoreCommand(CommandKind::SetPanePinned),
+        ),
+        build_core_action_seed(
+            "unpin-pane",
+            "Unpin Pane",
+            "Unpin the focused floating pane on the issuing client's screen",
+            Client,
+            vec![Pane, ClientTarget],
+            CoreCommand(CommandKind::SetPanePinned),
+        ),
+        build_core_action_seed(
+            "minimize-pane",
+            "Minimize Pane",
+            "Minimize the focused floating pane on the issuing client's screen",
+            Client,
+            vec![Pane, ClientTarget],
+            CoreCommand(CommandKind::SetPaneMinimized),
+        ),
+        build_core_action_seed(
+            "restore-pane",
+            "Restore Pane",
+            "Restore a minimized floating pane on one client's screen and focus it",
+            Client,
+            vec![Pane, ClientTarget],
+            CoreCommand(CommandKind::SetPaneMinimized),
+        ),
+        build_core_action_seed(
+            "minimize-all-floating-panes",
+            "Minimize All Floating Panes",
+            "Minimize every floating pane the issuing client shows",
+            Client,
+            vec![ClientTarget],
+            CoreCommand(CommandKind::SetAllFloatingPanesMinimized),
+        ),
+        build_core_action_seed(
+            "restore-all-floating-panes",
+            "Restore All Floating Panes",
+            "Restore every floating pane the issuing client minimized, and focus the last one",
+            Client,
+            vec![ClientTarget],
+            CoreCommand(CommandKind::SetAllFloatingPanesMinimized),
         ),
         build_core_action_seed(
             "focus-pane",
@@ -803,7 +907,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
         build_core_action_seed(
             "focus-next-floating-pane",
             "Focus Next Floating Pane",
-            "Move the issuing client's focus to the next floating pane it shows and raise it",
+            "Show and focus the floating pane after the focused one, in the order the panes became floating",
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::FocusPane),
@@ -811,7 +915,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
         build_core_action_seed(
             "focus-previous-floating-pane",
             "Focus Previous Floating Pane",
-            "Move the issuing client's focus to the previous floating pane it shows and raise it",
+            "Show and focus the floating pane before the focused one, in the order the panes became floating",
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::FocusPane),

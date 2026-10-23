@@ -25,6 +25,7 @@ pub mod input;
 pub mod layout;
 pub mod mouse;
 pub mod painted_update;
+pub(crate) mod placement_preview;
 pub mod pty_inbox;
 pub mod pty_output;
 pub mod reload;

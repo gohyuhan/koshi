@@ -12,8 +12,8 @@
 //! or the single record an `inspect` prints.
 //!
 //! A listing row is an id chain plus the names on it: a pane row names its
-//! pane, its tab, and its session, in the form a `--pane`/`--tab`/`--session`
-//! flag takes. The full detail of one
+//! pane, its tab (none for a floating pane), and its session, in the form a
+//! `--pane`/`--tab`/`--session` flag takes. The full detail of one
 //! entity — creation time, working directory, argv, lock state — belongs to
 //! `inspect`, which renders the `koshi-core` structs themselves.
 
@@ -96,10 +96,10 @@ pub struct PaneRow {
     pub pane_id: PaneId,
     /// The pane's title, once the child has set one.
     pub pane_name: Option<String>,
-    /// The tab holding the pane.
-    pub tab_id: TabId,
-    /// That tab's display name.
-    pub tab_name: String,
+    /// The tab whose layout holds the pane; `None` for a floating pane.
+    pub tab_id: Option<TabId>,
+    /// That tab's display name; `None` for a floating pane.
+    pub tab_name: Option<String>,
     /// The session holding the pane.
     pub session_id: SessionId,
     /// That session's display name.
@@ -792,27 +792,35 @@ pub fn build_tab_rows(session_overviews: &[SessionOverview]) -> Vec<TabRow> {
 }
 
 /// The `list-panes` answer: every pane of every listed session, in the
-/// overview's own order — tab-bar order, then layout order within a tab.
+/// overview's own order — tab-bar order, then layout order within a tab, then
+/// the floating panes in the order the panes became floating.
 ///
-/// A pane whose tab is not in the overview's tab list is left out.
+/// A tiled pane whose tab is not in the overview's tab list is left out. A
+/// floating pane's row carries no tab.
 #[must_use]
 pub fn build_pane_rows(session_overviews: &[SessionOverview]) -> Vec<PaneRow> {
     session_overviews
         .iter()
         .flat_map(|session_overview| {
             session_overview.panes.iter().filter_map(|pane_discovery| {
-                let tab_discovery = session_overview
-                    .tabs
-                    .iter()
-                    .find(|tab_discovery| tab_discovery.tab_id == pane_discovery.tab_id)?;
+                let tab_name = match pane_discovery.tab_id {
+                    Some(tab_id) => {
+                        let tab_discovery = session_overview
+                            .tabs
+                            .iter()
+                            .find(|tab_discovery| tab_discovery.tab_id == tab_id)?;
+                        Some(sanitize_reported_text(&tab_discovery.tab_name))
+                    }
+                    None => None,
+                };
                 Some(PaneRow {
                     pane_id: pane_discovery.pane_id,
                     pane_name: pane_discovery
                         .pane_title
                         .as_deref()
                         .map(sanitize_reported_text),
-                    tab_id: tab_discovery.tab_id,
-                    tab_name: sanitize_reported_text(&tab_discovery.tab_name),
+                    tab_id: pane_discovery.tab_id,
+                    tab_name,
                     session_id: session_overview.session.session_id,
                     session_name: sanitize_reported_text(&session_overview.session.session_name),
                 })

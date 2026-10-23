@@ -46,7 +46,7 @@ pub const MIN_PANE_SIZE: Size = Size {
     row_count: 1,
 };
 
-/// The per-pane sizing every solve, resize and removal takes: the smallest
+/// The per-pane sizing every solve, resize and placement takes: the smallest
 /// content size of a leaf pane and the blank cells between two children of
 /// one horizontal or vertical split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,8 +74,9 @@ impl Default for PaneSizing {
     }
 }
 
-/// The solved placement for one tree over one tab rectangle.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The solved placement for one tree over one tab rectangle. The default is
+/// the solve of no pane: every list empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutSolve {
     /// Every leaf pane exactly once, in layout order, with its solved
     /// rectangle. A collapsed stack member's rect is its one-row header
@@ -95,16 +96,28 @@ pub struct LayoutSolve {
     pub stack_headers: Vec<StackHeader>,
 }
 
+impl LayoutSolve {
+    /// The rect this solve gives `pane_id`. `None` when no leaf of the solved
+    /// tree is `pane_id`.
+    #[must_use]
+    pub fn find_pane_rect(&self, pane_id: PaneId) -> Option<Rect> {
+        self.pane_rects
+            .iter()
+            .find(|&&(solved_pane_id, _)| solved_pane_id == pane_id)
+            .map(|&(_, pane_rect)| pane_rect)
+    }
+}
+
 /// The one-row strip standing in for a collapsed stack member.
 ///
 /// A member is collapsed when it is not the stack's active member (the
 /// stack's `active_child_index`, clamped into bounds). The strip is a
 /// Koshi-owned region: the renderer draws it and mouse routing hit-tests it, and a click on it
-/// activates the member instead of reaching a PTY.
+/// focuses the member instead of reaching a PTY.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackHeader {
     /// The collapsed pane this header represents; clicking the strip
-    /// activates it.
+    /// focuses it.
     pub pane_id: PaneId,
     /// The strip itself: one row spanning the stack's width.
     pub header_rect: Rect,

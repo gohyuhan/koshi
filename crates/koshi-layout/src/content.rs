@@ -34,14 +34,33 @@ pub fn list_content_rects(solved_layout: &LayoutSolve) -> Vec<(PaneId, Option<Re
         .pane_rects
         .iter()
         .map(|&(pane_id, outer_pane_rect)| {
-            let has_visible_content = !solved_layout.suppressed_pane_ids.contains(&pane_id)
-                && is_content_visible(pane_id, outer_pane_rect, &solved_layout.stack_headers);
             (
                 pane_id,
-                has_visible_content.then(|| outer_pane_rect.compute_inner_with_border()),
+                compute_content_rect(solved_layout, pane_id, outer_pane_rect),
             )
         })
         .collect()
+}
+
+/// The content rect of `pane_id` alone, as [`list_content_rects`] gives it.
+/// `None` when `solved_layout` holds no `pane_id`, or the pane shows no
+/// content.
+#[must_use]
+pub fn find_content_rect(solved_layout: &LayoutSolve, pane_id: PaneId) -> Option<Rect> {
+    let outer_pane_rect = solved_layout.find_pane_rect(pane_id)?;
+    compute_content_rect(solved_layout, pane_id, outer_pane_rect)
+}
+
+/// The content rect of `pane_id` at `outer_pane_rect` in `solved_layout`, by
+/// the rules of [`list_content_rects`].
+fn compute_content_rect(
+    solved_layout: &LayoutSolve,
+    pane_id: PaneId,
+    outer_pane_rect: Rect,
+) -> Option<Rect> {
+    let has_visible_content = !solved_layout.suppressed_pane_ids.contains(&pane_id)
+        && is_content_visible(pane_id, outer_pane_rect, &solved_layout.stack_headers);
+    has_visible_content.then(|| outer_pane_rect.compute_inner_with_border())
 }
 
 #[cfg(test)]

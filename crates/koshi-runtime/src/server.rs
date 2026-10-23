@@ -31,7 +31,7 @@ use koshi_observability::logging::recent_events;
 use koshi_observability::repeated_warning::WarningRateLimiter;
 use koshi_pty::backend::state::{CarriedPtyPane, PtyBackend, UNOBSERVED_EXIT};
 use koshi_session::client::Client;
-use koshi_session::session::state::Session;
+use koshi_session::session::state::{Session, SessionViewChanges};
 use koshi_terminal::engine::TerminalEngine;
 
 use crate::{
@@ -45,6 +45,7 @@ use crate::{
         delivery_queue::DeliveryReceiver,
         event::RuntimeEvent,
         mouse::HeldMouseButton,
+        placement_preview::ClientPlacementPreview,
         pty_inbox::PaneOutputQueue,
         reload::{merge_app_layer_into_client_config, merge_app_layer_into_server_config},
         render_schedule::{FramePace, PaneRenderDeadlines},
@@ -242,6 +243,12 @@ pub struct Server {
     /// answer goes to the subscriber that views the client whose viewer sent
     /// the round.
     pub(crate) subscriptions: Vec<FrameSubscription>,
+    /// The pane placement preview each client names, by client id
+    /// ([`set_pane_placement_preview`](Self::set_pane_placement_preview)).
+    /// [`mark_changed_views`](Self::mark_changed_views) builds a preview again
+    /// when a state it reads changed, and drops the preview of a client
+    /// attached to no session. Nothing in it is carried across an image swap.
+    pub(crate) placement_preview_by_client_id: HashMap<ClientId, ClientPlacementPreview>,
     /// Every mouse button whose press the session wrote to a pane's program
     /// and whose release it has not written, in the order the presses were
     /// written. [`forward_mouse_to_pane`](Self::forward_mouse_to_pane) adds and
@@ -336,6 +343,7 @@ impl Server {
             pty_size_by_pane_id: HashMap::new(),
             event_bus: EventBus::new(),
             subscriptions: Vec::new(),
+            placement_preview_by_client_id: HashMap::new(),
             held_mouse_buttons: Vec::new(),
             ipc_server: None,
             pane_animation_deadlines: PaneRenderDeadlines::default(),
@@ -362,8 +370,7 @@ impl Server {
         self.session_by_id
             .get_mut(&session_id)
             .expect("the recovered session was seeded")
-            .is_recovery_notice_visible = true;
-        self.mark_every_view_changed();
+            .set_recovery_notice_visible(true);
     }
 
     /// Rebuild a server from the state a previous process image carried out,
@@ -377,8 +384,9 @@ impl Server {
     ///
     /// `startup_app_config` is applied through [`load_startup_config`](Self::load_startup_config)
     /// before any pane is matched, so the session comes back on the `koshi.kdl` the caller read:
-    /// a blank screen takes its scrollback limits from it, and a closed pane's tab reflows under
-    /// its pane sizes. `None` keeps the built-in defaults.
+    /// a blank screen takes its scrollback limits from it, and every tab of every carried session
+    /// is solved with its pane sizes ([`Session::update_pane_sizing`]). `None` keeps the built-in
+    /// defaults.
     ///
     /// `pty_size_by_pane_id` names every pane whose child the backend drives, with the size its
     /// terminal holds. Two callers reach this: the new image after a successful swap passes the
@@ -407,6 +415,10 @@ impl Server {
     /// and the hash minted for each carried client. A carried client with no
     /// hash in it, as every client of a body converted from format 4 or older,
     /// is not handed back by its id and waits for the grace window.
+    ///
+    /// After the panes are matched, every viewed tab of every carried session resizes each live
+    /// PTY to the size its solve gives, and so does every floating pane: a pane whose size did
+    /// not change is not resized.
     pub fn resume(
         pty_backend: Arc<dyn PtyBackend>,
         inbox_receiver: Receiver<RuntimeEvent>,
@@ -425,6 +437,7 @@ impl Server {
             .collect();
         server.saved_view_store = body.saved_view_store;
         server.session_by_id = body.session_by_id;
+        let mut resume_events = server.update_every_session_pane_sizing();
         // A quit applied before the swap comes back with its kind. The serve
         // loop leaves it alone while any carried client is still expected, so
         // the clients that were told to come back are the ones it ends for.
@@ -468,8 +481,25 @@ impl Server {
                 ),
             );
         }
-        let exit_events = server.close_undriven_panes(session_pane_ids, exit_status_by_pane_id);
-        server.publish_events(&exit_events);
+        resume_events.extend(server.close_undriven_panes(session_pane_ids, exit_status_by_pane_id));
+        let pty_backend = Arc::clone(&server.pty_backend);
+        let tab_ids_by_session_id: Vec<(SessionId, Vec<TabId>)> = server
+            .session_by_id
+            .iter()
+            .map(|(&session_id, session)| (session_id, session.tabs.keys().copied().collect()))
+            .collect();
+        for (session_id, tab_ids) in tab_ids_by_session_id {
+            for tab_id in tab_ids {
+                server.reflow_tab_if_viewed(
+                    pty_backend.as_ref(),
+                    session_id,
+                    tab_id,
+                    &mut resume_events,
+                );
+            }
+            server.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut resume_events);
+        }
+        server.publish_events(&resume_events);
         server
     }
 
@@ -760,13 +790,63 @@ impl Server {
         self.remove_ended_subscriptions();
     }
 
-    /// Mark the view of every subscriber changed
-    /// ([`FramePace::mark_view_changed`]). Called for each command, attach,
-    /// detach, resize and session-wide change.
-    pub(crate) fn mark_every_view_changed(&mut self) {
-        for frame_subscription in &mut self.subscriptions {
-            frame_subscription.frame_pace.mark_view_changed();
+    /// Read each session's view changes ([`Session::take_view_changes`]),
+    /// build again each placement preview that reads a changed state
+    /// ([`update_changed_placement_previews`](Self::update_changed_placement_previews)),
+    /// then mark the view changed ([`FramePace::mark_view_changed`]) of every
+    /// subscriber whose client's frame shows a changed state
+    /// ([`is_client_frame_changed`](Self::is_client_frame_changed)). A pass in
+    /// which no session changed reads no client and no subscriber.
+    pub(crate) fn mark_changed_views(&mut self) {
+        let view_changes_by_session_id: HashMap<SessionId, SessionViewChanges> = self
+            .session_by_id
+            .iter_mut()
+            .map(|(&session_id, session)| (session_id, session.take_view_changes()))
+            .filter(|(_, view_changes)| !view_changes.is_empty())
+            .collect();
+        if view_changes_by_session_id.is_empty() {
+            return;
         }
+        self.update_changed_placement_previews(&view_changes_by_session_id);
+        for subscription_index in 0..self.subscriptions.len() {
+            let client_id = self.subscriptions[subscription_index].client_id;
+            if self.is_client_frame_changed(client_id, &view_changes_by_session_id) {
+                self.subscriptions[subscription_index]
+                    .frame_pace
+                    .mark_view_changed();
+            }
+        }
+    }
+
+    /// Whether `view_changes_by_session_id` lists a state that a frame of
+    /// `client_id` shows: the tab bar, the floating panes, the pane sizing or
+    /// the recovery notice of the client's session, the client's own view, or
+    /// the layout of its active tab. `false` for a client attached to no
+    /// session.
+    fn is_client_frame_changed(
+        &self,
+        client_id: ClientId,
+        view_changes_by_session_id: &HashMap<SessionId, SessionViewChanges>,
+    ) -> bool {
+        let Some(session) = self.get_session_for_client(client_id) else {
+            return false;
+        };
+        let Some(view_changes) = view_changes_by_session_id.get(&session.session_id) else {
+            return false;
+        };
+        view_changes.is_tab_bar_changed
+            || view_changes.is_floating_set_changed
+            || view_changes.is_pane_sizing_changed
+            || view_changes.is_recovery_notice_changed
+            || view_changes.changed_client_ids.contains(&client_id)
+            || session
+                .clients
+                .get_client_by_id(client_id)
+                .is_some_and(|client| {
+                    view_changes
+                        .layout_changed_tab_ids
+                        .contains(&client.get_active_tab_id())
+                })
     }
 
     /// Mark the view changed of every subscriber that views `client_id`.
@@ -803,11 +883,24 @@ impl Server {
         }
     }
 
-    /// Whether a frame of `client_id` can show `pane_id`: the pane is a leaf
-    /// of the client's active tab, or a floating pane of the client's session.
-    /// `false` when the client or the pane is in no session, or they are in
-    /// different sessions.
+    /// Whether a frame of `client_id` can show `pane_id`: the pane is a pane
+    /// of the client's placement preview
+    /// ([`ClientPlacementPreview::list_preview_pane_ids`]), a leaf of the
+    /// client's active tab, or a floating pane of the client's session that
+    /// the client shows ([`Client::is_floating_pane_shown`]). `false` when the
+    /// client or the pane is in no session, or they are in different sessions.
     pub(crate) fn is_pane_shown_to_client(&self, client_id: ClientId, pane_id: PaneId) -> bool {
+        let is_preview_pane = self
+            .placement_preview_by_client_id
+            .get(&client_id)
+            .is_some_and(|client_placement_preview| {
+                client_placement_preview
+                    .list_preview_pane_ids()
+                    .contains(&pane_id)
+            });
+        if is_preview_pane {
+            return true;
+        }
         let Some(session) = self.get_session_for_client(client_id) else {
             return false;
         };
@@ -815,7 +908,7 @@ impl Server {
             return false;
         };
         if session.floating_set.has_pane(pane_id) {
-            return true;
+            return client.is_floating_pane_shown(pane_id);
         }
         session
             .find_tab_by_pane_id(pane_id)
@@ -870,31 +963,6 @@ impl Server {
             .iter()
             .find(|frame_subscription| frame_subscription.client_id == client_id)
             .map(|frame_subscription| frame_subscription.subscriber_id)
-    }
-
-    /// Build and queue one read-only placement preview for `client_id`.
-    pub(crate) fn send_placement_snapshot(
-        &mut self,
-        client_id: ClientId,
-        request_id: u64,
-        source_pane_id: PaneId,
-        destination_tab_id: TabId,
-    ) -> bool {
-        let Some(subscriber_id) = self.find_subscriber_id_by_client_id(client_id) else {
-            return false;
-        };
-        match self.build_placement_snapshot(client_id, source_pane_id, destination_tab_id) {
-            Ok(placement_snapshot) => self.event_bus.try_send_placement_snapshot(
-                subscriber_id,
-                request_id,
-                Box::new(placement_snapshot),
-            ),
-            Err(placement_error) => self.event_bus.try_send_placement_refusal(
-                subscriber_id,
-                request_id,
-                placement_error,
-            ),
-        }
     }
 
     /// Put one rejected pane placement command or floating pane move on the
@@ -1148,6 +1216,28 @@ impl Server {
             },
             gap_cell_count: self.config.pane.gap_cell_count,
         }
+    }
+
+    /// The id of every session this server holds, in session-id order.
+    pub(crate) fn list_session_ids(&self) -> Vec<SessionId> {
+        let mut session_ids: Vec<SessionId> = self.session_by_id.keys().copied().collect();
+        session_ids.sort_unstable();
+        session_ids
+    }
+
+    /// Solve every tab of every session again with
+    /// [`get_pane_sizing`](Self::get_pane_sizing)
+    /// ([`Session::update_pane_sizing`]), session by session in session-id
+    /// order. Returns the events of those solves, in the same order.
+    pub(crate) fn update_every_session_pane_sizing(&mut self) -> Vec<Event> {
+        let pane_sizing = self.get_pane_sizing();
+        let mut emitted_events = Vec::new();
+        for session_id in self.list_session_ids() {
+            if let Some(session) = self.session_by_id.get_mut(&session_id) {
+                emitted_events.extend(session.update_pane_sizing(pane_sizing));
+            }
+        }
+        emitted_events
     }
 
     /// Borrow the shared PTY backend.

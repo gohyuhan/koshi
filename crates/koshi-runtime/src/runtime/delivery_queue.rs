@@ -56,15 +56,11 @@ pub fn create_delivery_queue(capacity: usize) -> (DeliverySender, DeliveryReceiv
 }
 
 /// The client's report that it painted the update numbered `update_sequence`,
-/// the placement preview it holds, and when its connection's reading thread
-/// read the report.
+/// and when its connection's reading thread read the report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaintedUpdateReport {
     /// The last painted update the client applied before it painted.
     pub update_sequence: u64,
-    /// The request whose placement preview the client holds, or `None` when
-    /// it holds no preview.
-    pub shown_placement_request_id: Option<u64>,
     /// When the reading thread read the report.
     pub reported_at: Instant,
 }

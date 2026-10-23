@@ -7,7 +7,7 @@ use super::*;
 use crate::event::SessionEvent;
 use crate::frame::{
     FrameGraphicsProtocol, FrameImageAction, FrameImageDisplay, FrameImageRecordHeader,
-    FrameImageTransfer, FrameSlot,
+    FrameImageTransfer,
 };
 use crate::protocol::{ConnectionToken, IpcRequestKind, IpcResult};
 use crate::router::{RouterRequestKind, RouterResult};
@@ -738,17 +738,6 @@ fn sample_events() -> Vec<SessionEvent> {
         SessionEvent::ImageContentReleased {
             image_content_ids: vec![1],
         },
-        SessionEvent::PanePlacementSnapshot {
-            request_id: 1,
-            snapshot: Box::new(build_test_placement_snapshot()),
-        },
-        SessionEvent::PanePlacementRefused {
-            request_id: 1,
-            refusal: crate::protocol::IpcErrorPayload {
-                code: crate::protocol::IpcErrorCode::ResourceLimit,
-                message: String::new(),
-            },
-        },
         SessionEvent::PanePlacementCommitted {
             command_id,
             source_pane_id,
@@ -826,88 +815,6 @@ fn sample_events() -> Vec<SessionEvent> {
         },
         SessionEvent::Pong,
     ]
-}
-
-#[test]
-fn placement_snapshot_fixture_passes_validation() {
-    build_test_placement_snapshot()
-        .validate()
-        .expect("the wire placement fixture must remain valid");
-}
-
-/// A placement preview that passes validation: a source tab and a destination
-/// tab of one 80x24 pane each, with the destination pane focused.
-pub(crate) fn build_test_placement_snapshot() -> crate::placement::PanePlacementSnapshot {
-    use koshi_core::geometry::{Rect, Size};
-    use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-    use koshi_layout::mode::LayoutMode;
-    use koshi_layout::tree::LayoutNode;
-
-    let source_pane_id = PaneId::new();
-    let destination_pane_id = PaneId::new();
-    let source_tab_id = TabId::new();
-    let destination_tab_id = TabId::new();
-    let viewport_size = Size {
-        column_count: 80,
-        row_count: 24,
-    };
-    let viewport_rect = Rect::from_size_at_origin(viewport_size);
-    let build_tab_snapshot = |tab_id: TabId, pane_id: PaneId, tab_name: &str| {
-        crate::placement::PanePlacementTabSnapshot {
-            tab_id,
-            tab_name: tab_name.to_string(),
-            layout_tree: LayoutNode::Pane(pane_id),
-            pane_slots: vec![FrameSlot {
-                pane_id,
-                outer_rect: viewport_rect,
-                content_rect: Some(viewport_rect),
-                is_visible: true,
-                is_suppressed: false,
-            }],
-            tab_size: viewport_size,
-            stack_headers: Vec::new(),
-            layout_mode: LayoutMode::Tiled,
-            is_every_pane_suppressed: false,
-            gap_cell_count: 0,
-            pane_snapshots: vec![crate::placement::PanePlacementPaneSnapshot {
-                pane_id,
-                terminal_window: Some(crate::placement::tests::build_test_window(
-                    viewport_size.column_count,
-                    viewport_size.row_count,
-                )),
-                image_placement_snapshots: Vec::new(),
-            }],
-        }
-    };
-
-    crate::placement::PanePlacementSnapshot {
-        session_id: SessionId::new(),
-        source_pane_id,
-        source_tab_id,
-        destination_tab_id,
-        session_placement_revision: 1,
-        client_placement_revision: 2,
-        source_tab_snapshot: build_tab_snapshot(source_tab_id, source_pane_id, "source"),
-        destination_tab_snapshot: Some(build_tab_snapshot(
-            destination_tab_id,
-            destination_pane_id,
-            "destination",
-        )),
-        client_snapshot: crate::placement::PanePlacementClientSnapshot {
-            client_id: ClientId::new(),
-            viewport_size,
-            pane_area: None,
-            active_tab_id: destination_tab_id,
-            focused_pane_id: Some(destination_pane_id),
-        },
-        pane_sizing: crate::placement::PanePlacementSizing {
-            minimum_size: Size {
-                column_count: 1,
-                row_count: 1,
-            },
-            gap_cell_count: 0,
-        },
-    }
 }
 
 /// One value per [`RouterRequestKind`] variant.

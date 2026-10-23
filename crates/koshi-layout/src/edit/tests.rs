@@ -12,7 +12,7 @@ use koshi_test_support::layout_assert::check_exact_tiling;
 use super::*;
 use crate::size::SizeWeight;
 use crate::solver::tests::build_pane_sizing;
-use crate::solver::{solve_layout, solve_layout_with_sizing, PaneSizing};
+use crate::solver::{solve_layout, solve_layout_with_sizing};
 use crate::test_trees::build_deep_alternating_layout;
 
 /// Wraps a single pane ID as a leaf node ready to insert into a layout tree.
@@ -264,36 +264,12 @@ fn removing_a_middle_pane_reflows_with_no_dead_region() {
         ],
     ));
 
-    let (removed_layout_tree, removal_outcome) = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        removed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
+    let removed_layout_tree = remove_pane(&layout_tree, removed_pane_id).unwrap();
     assert_eq!(
         removed_layout_tree.list_leaf_pane_ids(),
         [first_pane_id, third_pane_id]
     );
     assert_tiles(&removed_layout_tree, build_cell_rect(0, 0, 80, 24));
-
-    // Before: the first pane is 0..26, the removed pane is 26..53, and the third pane is 53..80.
-    // After: the first pane is 0..40 and takes 14 of the removed pane's columns; the third pane is
-    // 40..80 and takes 13, so the first pane absorbed more.
-    assert_eq!(
-        removal_outcome.removed_pane_rect,
-        Rect::from_origin_and_size(
-            Point { column: 26, row: 0 },
-            Size {
-                column_count: 27,
-                row_count: 24
-            }
-        )
-    );
-    assert_eq!(
-        removal_outcome.absorbing_pane_ids,
-        [first_pane_id, third_pane_id]
-    );
 }
 
 #[test]
@@ -310,16 +286,9 @@ fn removing_a_siblingless_leaf_prunes_the_emptied_split() {
         vec![build_leaf_node(left_pane_id), column],
     ));
 
-    let (removed_layout_tree, removal_outcome) = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        removed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
+    let removed_layout_tree = remove_pane(&layout_tree, removed_pane_id).unwrap();
     assert_eq!(removed_layout_tree.list_leaf_pane_ids(), [left_pane_id]);
     assert_tiles(&removed_layout_tree, build_cell_rect(0, 0, 80, 24));
-    assert_eq!(removal_outcome.absorbing_pane_ids, [left_pane_id]);
 }
 
 #[test]
@@ -338,13 +307,7 @@ fn removing_the_last_pane_in_a_split_leaves_a_unary_split_for_normalization() {
         vec![build_leaf_node(left_pane_id), column],
     ));
 
-    let (removed_layout_tree, _) = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        removed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
+    let removed_layout_tree = remove_pane(&layout_tree, removed_pane_id).unwrap();
     assert_eq!(
         removed_layout_tree.list_leaf_pane_ids(),
         [left_pane_id, top_pane_id]
@@ -362,81 +325,7 @@ fn removing_the_last_pane_in_a_split_leaves_a_unary_split_for_normalization() {
 }
 
 #[test]
-fn absorbed_by_skips_collapsed_stack_members() {
-    // A pane beside a stack: removing that pane widens the stack, so the collapsed
-    // member's header strip crosses the removed pane's old rect. Only the active member
-    // absorbed real content space; the header must not be listed.
-    let (removed_pane_id, active_pane_id, collapsed_pane_id) =
-        (PaneId::new(), PaneId::new(), PaneId::new());
-    let stack = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
-        vec![active_pane_id, collapsed_pane_id],
-        0,
-    ));
-    let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
-        SplitDirection::Horizontal,
-        vec![build_leaf_node(removed_pane_id), stack],
-    ));
-
-    let (removed_layout_tree, removal_outcome) = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        removed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
-    let solved = solve_layout(&removed_layout_tree, build_cell_rect(0, 0, 80, 24));
-    assert_eq!(solved.stack_headers.len(), 1);
-    assert_eq!(solved.stack_headers[0].pane_id, collapsed_pane_id);
-    assert_eq!(
-        solved.stack_headers[0]
-            .header_rect
-            .compute_intersection(removal_outcome.removed_pane_rect),
-        Some(build_cell_rect(0, 23, 40, 1))
-    );
-    assert_eq!(removal_outcome.absorbing_pane_ids, [active_pane_id]);
-}
-
-#[test]
-fn removing_a_collapsed_member_frees_exactly_its_header_row() {
-    let (active_pane_id, first_collapsed_pane_id, removed_pane_id) =
-        (PaneId::new(), PaneId::new(), PaneId::new());
-    let layout_tree = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
-        vec![active_pane_id, first_collapsed_pane_id, removed_pane_id],
-        0,
-    ));
-
-    // The active pane expands over rows 0..22; the headers of the other panes take rows 22
-    // and 23. The freed rect is the removed pane's one-row header strip.
-    let layout_before_removal = solve_layout(&layout_tree, build_cell_rect(0, 0, 80, 24));
-    let removed_header_rect = layout_before_removal
-        .stack_headers
-        .iter()
-        .find(|header| header.pane_id == removed_pane_id)
-        .unwrap()
-        .header_rect;
-    assert_eq!(
-        removed_header_rect,
-        Rect::from_origin_and_size(
-            Point { column: 0, row: 23 },
-            Size {
-                column_count: 80,
-                row_count: 1
-            }
-        )
-    );
-
-    let (_, removal_outcome) = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        removed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
-    assert_eq!(removal_outcome.removed_pane_rect, removed_header_rect);
-}
-
-#[test]
-fn removing_the_active_member_lists_the_member_that_expands_into_its_place() {
+fn removing_the_active_member_expands_the_collapsed_member_into_its_place() {
     let (left_pane_id, active_pane_id, collapsed_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
     let stack = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
@@ -451,251 +340,18 @@ fn removing_the_active_member_lists_the_member_that_expands_into_its_place() {
     // The active pane held columns 40..80 over rows 0..23, with the collapsed pane's header on row
     // 23. Removing the active pane expands the collapsed pane over the whole column; the left pane
     // keeps its size.
-    let (removed_layout_tree, removal_outcome) = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        active_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
+    let removed_layout_tree = remove_pane(&layout_tree, active_pane_id).unwrap();
     assert_eq!(
         removed_layout_tree.list_leaf_pane_ids(),
         [left_pane_id, collapsed_pane_id]
     );
     assert_eq!(
-        removal_outcome.removed_pane_rect,
-        Rect::from_origin_and_size(
-            Point { column: 40, row: 0 },
-            Size {
-                column_count: 40,
-                row_count: 23
-            }
-        )
-    );
-    assert_eq!(removal_outcome.absorbing_pane_ids, [collapsed_pane_id]);
-    assert_eq!(
         solve_layout(&removed_layout_tree, build_cell_rect(0, 0, 80, 24)).pane_rects,
         [
-            (
-                left_pane_id,
-                Rect::from_size_at_origin(Size {
-                    column_count: 40,
-                    row_count: 24
-                })
-            ),
-            (
-                collapsed_pane_id,
-                Rect::from_origin_and_size(
-                    Point { column: 40, row: 0 },
-                    Size {
-                        column_count: 40,
-                        row_count: 24
-                    }
-                )
-            ),
+            (left_pane_id, build_cell_rect(0, 0, 40, 24)),
+            (collapsed_pane_id, build_cell_rect(40, 0, 40, 24)),
         ]
     );
-}
-
-#[test]
-fn absorbed_by_lists_the_regrown_active_member_of_a_shrunk_stack() {
-    // Removing the bottom collapsed member frees only its header row, which
-    // the surviving header slides down onto — the active member regrows
-    // above it without ever crossing the freed strip. It still changed
-    // size, so it must be reported for the PTY resize.
-    let (active_pane_id, collapsed_pane_id, removed_pane_id) =
-        (PaneId::new(), PaneId::new(), PaneId::new());
-    let layout_tree = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
-        vec![active_pane_id, collapsed_pane_id, removed_pane_id],
-        0,
-    ));
-
-    let (removed_layout_tree, removal_outcome) = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        removed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
-    let solved = solve_layout(&removed_layout_tree, build_cell_rect(0, 0, 80, 24));
-    let active_pane_rect = solved
-        .pane_rects
-        .iter()
-        .find(|&&(pane_id, _)| pane_id == active_pane_id)
-        .unwrap()
-        .1;
-    assert!(active_pane_rect
-        .compute_intersection(removal_outcome.removed_pane_rect)
-        .is_none());
-    assert_eq!(removal_outcome.absorbing_pane_ids, [active_pane_id]);
-}
-
-#[test]
-fn absorbed_by_includes_resized_panes_beyond_the_freed_rect() {
-    // Four equal columns; removing the third resizes every survivor, but
-    // the leftmost one's new rect never reaches the freed span. It is
-    // still listed — last, after the panes that absorbed actual cells.
-    let (first_pane_id, second_pane_id, removed_pane_id, fourth_pane_id) =
-        (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
-    let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
-        SplitDirection::Horizontal,
-        vec![
-            build_leaf_node(first_pane_id),
-            build_leaf_node(second_pane_id),
-            build_leaf_node(removed_pane_id),
-            build_leaf_node(fourth_pane_id),
-        ],
-    ));
-
-    let (removed_layout_tree, removal_outcome) = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        removed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
-    let solved = solve_layout(&removed_layout_tree, build_cell_rect(0, 0, 80, 24));
-    let first_pane_rect = solved
-        .pane_rects
-        .iter()
-        .find(|&&(pane_id, _)| pane_id == first_pane_id)
-        .unwrap()
-        .1;
-    assert!(first_pane_rect
-        .compute_intersection(removal_outcome.removed_pane_rect)
-        .is_none());
-    assert_eq!(
-        removal_outcome.absorbing_pane_ids,
-        [second_pane_id, fourth_pane_id, first_pane_id]
-    );
-}
-
-#[test]
-fn absorbed_by_keeps_layout_order_on_an_exact_tie() {
-    let (first_pane_id, removed_pane_id, third_pane_id) =
-        (PaneId::new(), PaneId::new(), PaneId::new());
-    let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
-        SplitDirection::Horizontal,
-        vec![
-            build_leaf_node(first_pane_id),
-            build_leaf_node(removed_pane_id),
-            build_leaf_node(third_pane_id),
-        ],
-    ));
-    let wide_layout_rect = Rect::from_size_at_origin(Size {
-        column_count: 90,
-        row_count: 24,
-    });
-
-    // Three even 30-column panes; removing the middle one leaves a 50/50
-    // split where both survivors absorb exactly 15 of its freed columns —
-    // an exact tie, broken by layout order.
-    let (removed_layout_tree, removal_outcome) = remove_pane(
-        &layout_tree,
-        wide_layout_rect,
-        removed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
-    assert_eq!(
-        removed_layout_tree.list_leaf_pane_ids(),
-        [first_pane_id, third_pane_id]
-    );
-    assert_eq!(
-        removal_outcome.absorbing_pane_ids,
-        [first_pane_id, third_pane_id]
-    );
-}
-
-#[test]
-fn remove_pane_measures_the_freed_rect_against_the_given_min() {
-    let (left_pane_id, right_pane_id) = (PaneId::new(), PaneId::new());
-    let layout_tree =
-        build_equal_split_node(SplitDirection::Horizontal, left_pane_id, right_pane_id);
-    let layout_area = Rect::from_size_at_origin(Size {
-        column_count: 12,
-        row_count: 24,
-    });
-
-    // Under the default floor both panes fit, so the left pane frees only its half.
-    let (_, default_floor_pane_removal) = remove_pane(
-        &layout_tree,
-        layout_area,
-        left_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
-    assert_eq!(
-        default_floor_pane_removal.removed_pane_rect,
-        Rect::from_size_at_origin(Size {
-            column_count: 6,
-            row_count: 24
-        })
-    );
-
-    // An 8-column floor needs ten bordered columns per pane, so the right pane
-    // is suppressed and the left pane owns the whole layout area. Its freed
-    // rect is the full width.
-    let (_, raised_floor_pane_removal) = remove_pane(
-        &layout_tree,
-        layout_area,
-        left_pane_id,
-        PaneSizing {
-            minimum_size: Size {
-                column_count: 8,
-                row_count: 1,
-            },
-            gap_cell_count: 0,
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        raised_floor_pane_removal.removed_pane_rect,
-        Rect::from_size_at_origin(Size {
-            column_count: 12,
-            row_count: 24
-        })
-    );
-}
-
-#[test]
-fn removing_a_suppressed_pane_reports_a_zero_area_old_rect() {
-    let (first_pane_id, second_pane_id, suppressed_pane_id) =
-        (PaneId::new(), PaneId::new(), PaneId::new());
-    let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
-        SplitDirection::Horizontal,
-        vec![
-            build_leaf_node(first_pane_id),
-            build_leaf_node(second_pane_id),
-            build_leaf_node(suppressed_pane_id),
-        ],
-    ));
-    // Three bordered panes need twelve columns. Nine columns fit only the first
-    // and second panes, so the suppressed pane solves to a zero-area rect before
-    // removal.
-    let narrow_layout_rect = Rect::from_size_at_origin(Size {
-        column_count: 9,
-        row_count: 24,
-    });
-
-    let (removed_layout_tree, removal_outcome) = remove_pane(
-        &layout_tree,
-        narrow_layout_rect,
-        suppressed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
-    assert_eq!(
-        removed_layout_tree.list_leaf_pane_ids(),
-        [first_pane_id, second_pane_id]
-    );
-    assert_eq!(
-        removal_outcome.removed_pane_rect,
-        Rect::build_empty_at_origin()
-    );
-    // The first and second panes already sit at their floor-clamped sizes.
-    // Removing the suppressed pane changes neither of them.
-    assert!(removal_outcome.absorbing_pane_ids.is_empty());
 }
 
 #[test]
@@ -707,13 +363,7 @@ fn removing_the_active_stack_child_activates_the_next_one() {
         1,
     ));
 
-    let (removed_tree, _) = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        removed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
+    let removed_tree = remove_pane(&layout_tree, removed_pane_id).unwrap();
     let LayoutNode::Split(stack) = &removed_tree else {
         panic!("stack must survive");
     };
@@ -736,13 +386,7 @@ fn removing_the_last_active_stack_child_steps_back() {
         1,
     ));
 
-    let (removed_tree, _) = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        removed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
+    let removed_tree = remove_pane(&layout_tree, removed_pane_id).unwrap();
     let LayoutNode::Split(stack) = &removed_tree else {
         panic!("stack must survive");
     };
@@ -759,13 +403,7 @@ fn removing_before_the_active_stack_child_keeps_it_active() {
         2,
     ));
 
-    let (removed_tree, _) = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        removed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
+    let removed_tree = remove_pane(&layout_tree, removed_pane_id).unwrap();
     let LayoutNode::Split(stack) = &removed_tree else {
         panic!("stack must survive");
     };
@@ -787,13 +425,7 @@ fn removing_after_the_active_stack_child_keeps_it_active() {
         1,
     ));
 
-    let (removed_tree, _) = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        removed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
+    let removed_tree = remove_pane(&layout_tree, removed_pane_id).unwrap();
     let LayoutNode::Split(stack) = &removed_tree else {
         panic!("stack must survive");
     };
@@ -822,13 +454,7 @@ fn a_stack_reduced_to_one_member_normalizes_to_a_plain_leaf() {
         vec![build_leaf_node(left_pane_id), stack],
     ));
 
-    let (removed_layout_tree, _) = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        first_stack_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
+    let removed_layout_tree = remove_pane(&layout_tree, first_stack_pane_id).unwrap();
     let live_pane_ids: HashSet<PaneId> = [left_pane_id, second_stack_pane_id].into_iter().collect();
     let normalized = normalize_layout_tree(&removed_layout_tree, &live_pane_ids).unwrap();
 
@@ -848,7 +474,6 @@ fn a_stack_reduced_to_one_member_normalizes_to_a_plain_leaf() {
 fn a_non_active_stack_member_keeps_its_header_and_stays_selectable() {
     use std::collections::HashSet;
 
-    use crate::focus::activate_stack_member;
     use crate::normalize::normalize_layout_tree;
 
     let (active_pane_id, inactive_pane_id) = (PaneId::new(), PaneId::new());
@@ -859,22 +484,19 @@ fn a_non_active_stack_member_keeps_its_header_and_stays_selectable() {
 
     // Both panes are in the live set, so normalization keeps the whole stack.
     let live_pane_ids: HashSet<PaneId> = [active_pane_id, inactive_pane_id].into_iter().collect();
-    let mut normalized = normalize_layout_tree(&layout_tree, &live_pane_ids).unwrap();
+    let normalized = normalize_layout_tree(&layout_tree, &live_pane_ids).unwrap();
     assert_eq!(
         normalized.list_leaf_pane_ids(),
         [active_pane_id, inactive_pane_id]
     );
 
-    // The non-active member's header is still drawn, and it can be activated.
+    // The non-active member's header is still drawn, and a view whose focus
+    // history holds it shows it.
     let layout_result = solve_layout(&normalized, build_cell_rect(0, 0, 80, 24));
     assert_eq!(layout_result.stack_headers.len(), 1);
     assert_eq!(layout_result.stack_headers[0].pane_id, inactive_pane_id);
-
-    let stack = normalized
-        .find_containing_stack_mut(inactive_pane_id)
-        .unwrap();
-    assert!(activate_stack_member(stack, inactive_pane_id));
-    assert_eq!(stack.active_child_index, 1);
+    assert!(normalized.is_pane_collapsed(inactive_pane_id, &[]));
+    assert!(!normalized.is_pane_collapsed(inactive_pane_id, &[inactive_pane_id]));
 }
 
 #[test]
@@ -886,15 +508,8 @@ fn removing_the_last_stack_member_prunes_the_stack() {
         vec![build_leaf_node(left_pane_id), stack],
     ));
 
-    let (removed_layout_tree, removal_outcome) = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        removed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
+    let removed_layout_tree = remove_pane(&layout_tree, removed_pane_id).unwrap();
     assert_eq!(removed_layout_tree.list_leaf_pane_ids(), [left_pane_id]);
-    assert_eq!(removal_outcome.absorbing_pane_ids, [left_pane_id]);
     assert_tiles(&removed_layout_tree, build_cell_rect(0, 0, 80, 24));
 }
 
@@ -921,13 +536,7 @@ fn close_all_but_one_in_order(removal_order: &[usize], kept_pane_index: usize) {
             "the kept pane is never removed"
         );
         let removed_pane_id = pane_ids[pane_index];
-        let (next_tree, _) = remove_pane(
-            &layout_tree,
-            large_layout_rect,
-            removed_pane_id,
-            build_pane_sizing(0),
-        )
-        .unwrap();
+        let next_tree = remove_pane(&layout_tree, removed_pane_id).unwrap();
         live_pane_ids.remove(&removed_pane_id);
         layout_tree = normalize_layout_tree(&next_tree, &live_pane_ids).unwrap();
 
@@ -965,8 +574,8 @@ fn deep_tree_closed_oldest_first_collapses_to_the_deepest_pane() {
 
 #[test]
 fn deep_tree_closed_in_a_fixed_scrambled_order_stays_consistent() {
-    // A fixed permutation (i*20 mod 51 is a full cycle since 20 and 51 are
-    // coprime), skipping the pane we keep. Same invariants, arbitrary order.
+    // A fixed permutation: i*20 mod 51 visits each index once. The kept pane
+    // is skipped. Same invariants, arbitrary order.
     let kept_pane_index = 25;
     let removal_order: Vec<usize> = (0..51)
         .map(|pane_index| (pane_index * 20) % 51)
@@ -983,13 +592,7 @@ fn splitting_a_removed_pane_is_rejected_then_a_live_pane_still_splits() {
     let (removed_pane_id, live_pane_id) = (PaneId::new(), PaneId::new());
     let layout_tree =
         build_equal_split_node(SplitDirection::Horizontal, removed_pane_id, live_pane_id);
-    let (tree_after_removal, _) = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        removed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
+    let tree_after_removal = remove_pane(&layout_tree, removed_pane_id).unwrap();
     assert_eq!(tree_after_removal.list_leaf_pane_ids(), [live_pane_id]);
 
     let original_tree_after_removal = tree_after_removal.clone();
@@ -1025,13 +628,7 @@ fn removing_the_last_pane_is_rejected_then_it_can_still_be_split() {
     // a following split succeeds.
     let pane_id = PaneId::new();
     let layout_tree = LayoutNode::Pane(pane_id);
-    let removal_error = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap_err();
+    let removal_error = remove_pane(&layout_tree, pane_id).unwrap_err();
     assert_eq!(removal_error, RemoveError::LastPane { pane_id });
     assert_eq!(layout_tree, LayoutNode::Pane(pane_id));
 
@@ -1057,13 +654,7 @@ fn removing_stack_members_until_one_remains_then_normalizing_gives_a_leaf() {
     ));
 
     for removed_pane_id in [fourth_pane_id, first_pane_id, second_pane_id] {
-        let (next_layout_tree, _) = remove_pane(
-            &layout_tree,
-            build_cell_rect(0, 0, 80, 24),
-            removed_pane_id,
-            build_pane_sizing(0),
-        )
-        .unwrap();
+        let next_layout_tree = remove_pane(&layout_tree, removed_pane_id).unwrap();
         layout_tree = next_layout_tree;
         // After every removal exactly one child stays expanded.
         if let LayoutNode::Split(stack) = &layout_tree {
@@ -1090,13 +681,7 @@ fn removing_stack_members_until_one_remains_then_normalizing_gives_a_leaf() {
 fn removing_the_only_pane_is_rejected() {
     let pane_id = PaneId::new();
     let layout_tree = LayoutNode::Pane(pane_id);
-    let removal_error = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap_err();
+    let removal_error = remove_pane(&layout_tree, pane_id).unwrap_err();
     assert_eq!(removal_error, RemoveError::LastPane { pane_id });
 }
 
@@ -1108,13 +693,7 @@ fn removing_a_missing_pane_is_rejected_and_the_input_is_unchanged() {
     let original_tree = layout_tree.clone();
 
     let missing_pane_id = PaneId::new();
-    let removal_error = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        missing_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap_err();
+    let removal_error = remove_pane(&layout_tree, missing_pane_id).unwrap_err();
     assert_eq!(
         removal_error,
         RemoveError::PaneNotFound {
@@ -1125,7 +704,7 @@ fn removing_a_missing_pane_is_rejected_and_the_input_is_unchanged() {
 }
 
 #[test]
-fn stacking_onto_a_plain_pane_creates_a_stack_with_the_new_pane_active() {
+fn stacking_onto_a_plain_pane_creates_a_stack_with_the_target_active() {
     let (left_pane_id, target_pane_id, new_pane_id) = (PaneId::new(), PaneId::new(), PaneId::new());
     let layout_tree =
         build_equal_split_node(SplitDirection::Horizontal, left_pane_id, target_pane_id);
@@ -1142,20 +721,20 @@ fn stacking_onto_a_plain_pane_creates_a_stack_with_the_new_pane_active() {
         panic!("the target pane's slot must become a stack");
     };
     assert_eq!(stack_split_node.direction, SplitDirection::Stacked);
-    assert_eq!(stack_split_node.active_child_index, 1);
+    assert_eq!(stack_split_node.active_child_index, 0);
     let collapsed_child_flags: Vec<bool> = (0..stack_split_node.children.len())
         .map(|child_index| stack_split_node.is_child_collapsed(child_index))
         .collect();
-    assert_eq!(collapsed_child_flags, [true, false]);
+    assert_eq!(collapsed_child_flags, [false, true]);
 }
 
 #[test]
-fn stacking_onto_a_stack_member_appends_to_that_stack() {
+fn stacking_onto_a_stack_member_appends_to_that_stack_and_keeps_its_active_member() {
     let (first_pane_id, second_pane_id, new_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
     let layout_tree = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
         vec![first_pane_id, second_pane_id],
-        0,
+        1,
     ));
 
     let stacked_tree = add_pane_to_stack(&layout_tree, first_pane_id, new_pane_id).unwrap();
@@ -1164,7 +743,7 @@ fn stacking_onto_a_stack_member_appends_to_that_stack() {
     };
     assert_eq!(stack_split_node.children.len(), 3);
     assert_eq!(stack_split_node.weights.len(), 3);
-    assert_eq!(stack_split_node.active_child_index, 2);
+    assert_eq!(stack_split_node.active_child_index, 1);
     assert_eq!(
         stacked_tree.list_leaf_pane_ids(),
         [first_pane_id, second_pane_id, new_pane_id]
@@ -1172,7 +751,7 @@ fn stacking_onto_a_stack_member_appends_to_that_stack() {
     let collapsed_child_flags: Vec<bool> = (0..stack_split_node.children.len())
         .map(|child_index| stack_split_node.is_child_collapsed(child_index))
         .collect();
-    assert_eq!(collapsed_child_flags, [true, true, false]);
+    assert_eq!(collapsed_child_flags, [true, false, true]);
 }
 
 #[test]
@@ -1194,14 +773,14 @@ fn stacking_onto_a_pane_inside_a_split_member_appends_to_that_stack() {
     });
 
     // The right nested pane is a leaf of the second member; the new pane becomes a third
-    // member of the stack, beside that split, and takes the active slot.
+    // member of the stack, beside that split, and the first member stays active.
     let stacked_tree = add_pane_to_stack(&layout_tree, right_nested_pane_id, new_pane_id).unwrap();
     let LayoutNode::Split(stack_split_node) = &stacked_tree else {
         panic!("stack must survive");
     };
     assert_eq!(stack_split_node.children.len(), 3);
     assert_eq!(stack_split_node.weights.len(), 3);
-    assert_eq!(stack_split_node.active_child_index, 2);
+    assert_eq!(stack_split_node.active_child_index, 0);
     assert_eq!(
         stack_split_node.children[1],
         build_equal_split_node(
@@ -1214,7 +793,7 @@ fn stacking_onto_a_pane_inside_a_split_member_appends_to_that_stack() {
     let collapsed_child_flags: Vec<bool> = (0..stack_split_node.children.len())
         .map(|child_index| stack_split_node.is_child_collapsed(child_index))
         .collect();
-    assert_eq!(collapsed_child_flags, [true, true, false]);
+    assert_eq!(collapsed_child_flags, [false, true, true]);
     assert_eq!(
         stacked_tree.list_leaf_pane_ids(),
         [
@@ -1252,12 +831,12 @@ fn stacking_onto_a_member_of_a_nested_stack_joins_the_innermost_stack() {
         panic!("the inner stack must survive");
     };
     assert_eq!(inner_split_node.children.len(), 3);
-    assert_eq!(inner_split_node.active_child_index, 2);
+    assert_eq!(inner_split_node.active_child_index, 0);
     assert_eq!(inner_split_node.children[2], LayoutNode::Pane(new_pane_id));
     let collapsed_child_flags: Vec<bool> = (0..inner_split_node.children.len())
         .map(|child_index| inner_split_node.is_child_collapsed(child_index))
         .collect();
-    assert_eq!(collapsed_child_flags, [true, true, false]);
+    assert_eq!(collapsed_child_flags, [false, true, true]);
     assert_eq!(
         stacked_tree.list_leaf_pane_ids(),
         [
@@ -1400,13 +979,7 @@ fn a_removal_leaves_every_surviving_child_with_its_own_weight() {
         row_count: 24,
     });
 
-    let (removed_layout_tree, _) = remove_pane(
-        &layout_tree,
-        wide_layout_rect,
-        removed_pane_id,
-        build_pane_sizing(0),
-    )
-    .unwrap();
+    let removed_layout_tree = remove_pane(&layout_tree, removed_pane_id).unwrap();
     let LayoutNode::Split(remaining_split_node) = &removed_layout_tree else {
         panic!("the row must survive");
     };
@@ -1487,13 +1060,7 @@ fn removing_a_pane_reflows_the_survivors_with_one_gap_between_them() {
 
     // Three columns reserve two gaps; two columns reserve one, so the
     // survivors share 118 cells as 59 each.
-    let (removed_layout_tree, _) = remove_pane(
-        &layout_tree,
-        wide_layout_rect,
-        removed_pane_id,
-        build_pane_sizing(2),
-    )
-    .unwrap();
+    let removed_layout_tree = remove_pane(&layout_tree, removed_pane_id).unwrap();
     let layout_after_removal =
         solve_layout_with_sizing(&removed_layout_tree, wide_layout_rect, build_pane_sizing(2));
     assert_eq!(
@@ -1537,13 +1104,8 @@ fn removing_the_last_pane_beside_an_empty_split_is_rejected() {
         vec![build_leaf_node(pane_id), empty_split],
     ));
 
-    let removal_error = remove_pane(
-        &layout_tree,
-        build_cell_rect(0, 0, 80, 24),
-        pane_id,
-        PaneSizing::default(),
-    )
-    .expect_err("the layout_tree holds no other pane");
+    let removal_error =
+        remove_pane(&layout_tree, pane_id).expect_err("the layout_tree holds no other pane");
 
     assert_eq!(removal_error, RemoveError::LastPane { pane_id });
 }

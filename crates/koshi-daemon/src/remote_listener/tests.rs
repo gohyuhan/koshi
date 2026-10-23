@@ -1416,6 +1416,7 @@ mod admission_answers {
         TestRemoteListener {
             remote_listen_address,
             certificate_fingerprint,
+            _program_directory: None,
         }
     }
 
@@ -1437,7 +1438,6 @@ mod admission_answers {
         ));
 
         std::thread::spawn(move || {
-            let _program_directory = program_directory;
             run_remote_accept_loop(
                 &listener,
                 &tls_config,
@@ -1449,6 +1449,7 @@ mod admission_answers {
         TestRemoteListener {
             remote_listen_address,
             certificate_fingerprint,
+            _program_directory: Some(program_directory),
         }
     }
 
@@ -1458,6 +1459,10 @@ mod admission_answers {
         remote_listen_address: String,
         /// The fingerprint of the certificate the listener presents.
         certificate_fingerprint: String,
+        /// The empty directory of the program path an accept loop watches,
+        /// removed when the test drops this listener. `None` for a listener
+        /// that serves one connection.
+        _program_directory: Option<tempfile::TempDir>,
     }
 
     /// Dial `test_remote_listener`, expecting the certificate it presents,
@@ -2184,6 +2189,7 @@ mod bridge_round_trip {
                     cell_size: None,
                     link_timeout_ms,
                     max_frames_per_second: 60,
+                    placement_preview_target: None,
                 },
             },
         );

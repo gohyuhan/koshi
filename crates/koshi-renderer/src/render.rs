@@ -131,8 +131,9 @@ impl<'rows> DrawnRows<'rows> {
 /// 8. Draws the floating panes this viewer draws, back to front, over every
 ///    cell drawn before them: each one's chrome and cells, then the
 ///    unavailable-image text over its images. They sit in the pane area with
-///    no letterbox offset. None is drawn while
-///    `viewer_chrome.is_pane_placement_visible` is `true` or every pane of the
+///    no letterbox offset. While `viewer_chrome.is_pane_placement_visible` is
+///    `true`, only the placement source pane is drawn, and only while the
+///    active tab holds no slot of it. None is drawn while every pane of the
 ///    active tab is suppressed.
 /// 9. Draws the tabline in the first committed region, over that margin.
 /// 10. Draws the statusline in the second committed region, over that margin.
@@ -356,7 +357,8 @@ pub fn render_frame(
 /// shared rows at its index ([`Arc::ptr_eq`]). That row lands on the buffer
 /// row of its pane's content area, tiled or floating, when that area shows
 /// it. Each pane's cursor, mouse modes, alternate screen state, top line
-/// number and `has_selection` are drawn into no cell and may differ. Every
+/// number and `has_selection` are drawn into no cell and may differ, and so
+/// may the placement preview, which [`render_frame`] does not read. Every
 /// other field must be equal, each grid view must keep its row count, column
 /// count and scroll offset, and each pane must show the same scroll position
 /// text.
@@ -376,6 +378,7 @@ pub fn list_changed_screen_rows(
         session_snapshot,
         pane_snapshots,
         client_snapshot,
+        placement_preview: _,
     } = next_render_snapshot;
     if previous_render_snapshot.is_recovery_notice_visible != *is_recovery_notice_visible
         || previous_render_snapshot.session_snapshot != *session_snapshot
@@ -410,9 +413,7 @@ pub fn list_changed_screen_rows(
         let pane_id = next_pane_snapshot.pane_id;
         let tiled_content_area = session_snapshot
             .active_tab_snapshot
-            .pane_slots
-            .iter()
-            .find(|pane_slot| pane_slot.pane_id == pane_id && pane_slot.is_visible)
+            .find_visible_pane_slot(pane_id)
             .and_then(|pane_slot| pane_slot.content_rect)
             .map(|content_rect| place_cell_rect(content_rect, layout_origin));
         let floating_content_area = placed_floating_panes
@@ -574,12 +575,7 @@ pub fn get_cursor_position(
                 let pane_slot = render_snapshot
                     .session_snapshot
                     .active_tab_snapshot
-                    .pane_slots
-                    .iter()
-                    .find(|pane_slot| pane_slot.pane_id == focused_pane_id)?;
-                if !pane_slot.is_visible {
-                    return None;
-                }
+                    .find_visible_pane_slot(focused_pane_id)?;
                 // `content_rect` is in tab-layout space; `place_cell_rect`
                 // shifts it by the same letterbox offset `render_frame`
                 // centers with.
@@ -857,9 +853,9 @@ fn draw_pane_scroll_position(
 
 /// Return whether `placement_target` names `pane_id` in the tab `displayed_tab_id`.
 ///
-/// A swap names its target pane in every tab. An insertion names panes only in
-/// its destination tab: its anchor pane, every pane of its anchor group, or
-/// every pane for a whole-tab anchor. `None` names no pane.
+/// A swap and a stack name their target pane in every tab. An insertion names
+/// panes only in its destination tab: its anchor pane, every pane of its
+/// anchor group, or every pane for a whole-tab anchor. `None` names no pane.
 #[must_use]
 pub fn is_placement_target_pane(
     pane_id: PaneId,
@@ -867,7 +863,10 @@ pub fn is_placement_target_pane(
     placement_target: Option<&TiledPlacementTarget>,
 ) -> bool {
     match placement_target {
-        Some(TiledPlacementTarget::Swap { target_pane_id }) => pane_id == *target_pane_id,
+        Some(
+            TiledPlacementTarget::Swap { target_pane_id }
+            | TiledPlacementTarget::Stack { target_pane_id },
+        ) => pane_id == *target_pane_id,
         Some(TiledPlacementTarget::Split {
             destination_tab_id,
             anchor,
@@ -1307,6 +1306,7 @@ fn lock_mode_tag(lock_mode: LockMode) -> Option<&'static str> {
         LockMode::ScrollMode => Some("SCROLL"),
         LockMode::PaneMoveChoice => Some("MOVE"),
         LockMode::FloatingPaneMove => Some("MOVE FLOAT"),
+        LockMode::DockUndock => Some("DOCK"),
     }
 }
 
@@ -1324,8 +1324,8 @@ fn get_pane_scroll(pane_snapshot: &PaneSnapshot) -> Option<(usize, usize)> {
 }
 
 /// The top-left cell of a ratatui rect, as the layout origin [`place_cell_rect`]
-/// shifts by. An
-/// area at `column: 20, row: 1` gives `Point { column: 20, row: 1 }`.
+/// shifts by. An area at `column: 20, row: 1` gives
+/// `Point { column: 20, row: 1 }`.
 fn get_area_origin(screen_area: RatatuiRect) -> Point {
     Point {
         column: screen_area.x,
@@ -1495,13 +1495,16 @@ pub(crate) fn set_line_clipped(
 /// A pane area larger than `tab_size` leaves a letterbox margin around the
 /// rect. Each dimension is clamped to the pane area's own.
 pub fn compute_content_rect(pane_area: RatatuiRect, tab_size: Size) -> RatatuiRect {
-    let column_count = tab_size.column_count.min(pane_area.width);
-    let row_count = tab_size.row_count.min(pane_area.height);
+    let pane_area_size = Size {
+        column_count: pane_area.width,
+        row_count: pane_area.height,
+    };
+    let content_origin = pane_area_size.compute_centered_origin(tab_size);
     RatatuiRect {
-        x: pane_area.x + (pane_area.width - column_count) / 2,
-        y: pane_area.y + (pane_area.height - row_count) / 2,
-        width: column_count,
-        height: row_count,
+        x: pane_area.x + content_origin.column,
+        y: pane_area.y + content_origin.row,
+        width: tab_size.column_count.min(pane_area.width),
+        height: tab_size.row_count.min(pane_area.height),
     }
 }
 

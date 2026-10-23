@@ -55,8 +55,7 @@ impl Server {
 
     /// Seed the first session/tab/root-pane/client under a caller-chosen id and
     /// display name, and return the client's id. The session is registered
-    /// under `session_id` (the caller mints it so the log file can be named for
-    /// the session before genesis) and carries `session_name`. The root pane
+    /// under the caller's `session_id` and carries `session_name`. The root pane
     /// runs the default shell, sized to the middle pane region of `viewport_size`;
     /// `session_started_at` stamps the session and its first client.
     ///
@@ -103,11 +102,9 @@ impl Server {
         let pane_id = PaneId::new();
 
         // Chrome owns one row above and below the pane region.
-        let root_pane_pty_size = compute_root_pane_pty_size(
-            pane_id,
-            compute_default_pane_area_size(viewport_size),
-            self.get_pane_sizing(),
-        );
+        let pane_area_size = compute_default_pane_area_size(viewport_size);
+        let root_pane_pty_size =
+            compute_root_pane_pty_size(pane_id, pane_area_size, self.get_pane_sizing());
 
         // Launch the shell first: on failure nothing is registered. The spawn spec
         // carries the pane's in-session identity vars in its env overlay.
@@ -122,15 +119,15 @@ impl Server {
         );
         pty_backend.spawn_pane(pane_id, spawn_spec, root_pane_pty_size)?;
 
-        // Assemble the session with its client, if any, viewing the tab we are
-        // about to create, then commit the tab + root pane and focus the client
-        // on it.
+        // Assemble the session with its client, if any, viewing the tab created
+        // below, then commit the tab + root pane and focus the client on it.
         let mut session = Session::from_identity_and_client_registry(
             session_id,
             session_name,
             session_started_at,
             ClientRegistry::new(),
         );
+        let _ = session.update_pane_sizing(self.get_pane_sizing());
         attach_first_client(
             &mut session,
             client_id,
@@ -151,6 +148,7 @@ impl Server {
             tab_name,
             client_id,
             new_pane_spec,
+            pane_area_size,
         );
 
         self.session_by_id.insert(session_id, session);
@@ -164,9 +162,10 @@ impl Server {
     /// order.
     ///
     /// Each pane is recorded live at the size its entry names, gets a blank
-    /// screen, and shows [`LAYOUT_NOT_RESTORED_NOTICE_BYTES`]. The session holds
-    /// no client; a client attaching later lands on the tab each tab records
-    /// as its own.
+    /// screen, and shows [`LAYOUT_NOT_RESTORED_NOTICE_BYTES`]. Each tab is
+    /// solved at `0x0` until a client views it. The session holds no client.
+    /// A client that attaches goes to the tab its saved view names while that
+    /// tab exists, else to the tab with the lowest index.
     ///
     /// Before → after: panes `A` (80×24) and `B` (120×40) → a session with two
     /// tabs, `A` alone in the first and `B` alone in the second, each showing
@@ -184,6 +183,7 @@ impl Server {
             session_started_at,
             ClientRegistry::new(),
         );
+        let _ = session.update_pane_sizing(self.get_pane_sizing());
         for (pane_id, pty_size) in carried_pane_sizes {
             let tab_name = generate_tab_name(&session);
             let new_pane_spec = NewPaneSpec {
@@ -197,6 +197,10 @@ impl Server {
                 tab_name,
                 None,
                 new_pane_spec,
+                Size {
+                    column_count: 0,
+                    row_count: 0,
+                },
             );
             self.park_pane_pty(*pane_id, *pty_size);
         }
@@ -295,14 +299,14 @@ impl Server {
         }
 
         // Spawn every pane before committing anything. On any failure, kill
-        // what was already spawned so no orphan child outlives the launch.
+        // every pane already spawned: no child outlives the launch.
         let runtime_directory_path = koshi_paths::resolve_runtime_directory();
         let should_add_clipboard_tools = self.config.pane_clipboard_writes.should_allow_writes;
         let mut spawned_pane_pty_sizes: Vec<(PaneId, PtySize)> = Vec::new();
         let pane_sizing = self.get_pane_sizing();
         for tab_plan in &profile_tab_plans {
-            // Size every pane against the tab's whole tree, so a multi-pane tab
-            // spawns each child at its tiled slice rather than the full tab.
+            // Size every pane against the tab's whole tree: each child of a
+            // multi-pane tab spawns at its tiled slice of the tab.
             let pane_spawn_pty_sizes =
                 compute_pane_spawn_sizes(&tab_plan.layout_tree, tab_pane_area_size, pane_sizing);
             for (pane_id, spawn_spec) in tab_plan.pane_ids.iter().zip(&tab_plan.spawn_specs) {
@@ -323,9 +327,9 @@ impl Server {
                 match pty_backend.spawn_pane(*pane_id, pane_spawn_spec, pane_pty_size) {
                     Ok(()) => spawned_pane_pty_sizes.push((*pane_id, pane_pty_size)),
                     Err(spawn_error) => {
-                        // Group-kill each already-spawned pane so a profile
-                        // command that forked or backgrounded a child leaves no
-                        // orphaned grandchild behind when the launch aborts.
+                        // Group-kill each already-spawned pane: a child that a
+                        // profile command forked or put in the background dies
+                        // with its pane when the launch aborts.
                         for (spawned_pane_id, _) in &spawned_pane_pty_sizes {
                             let _ = pty_backend.kill_pane(*spawned_pane_id, KillPolicy::Tree);
                         }
@@ -348,6 +352,7 @@ impl Server {
             ClientRegistry::new(),
         );
         session.should_start_locked = template.is_locked;
+        let _ = session.update_pane_sizing(pane_sizing);
         attach_first_client(
             &mut session,
             client_id,
@@ -371,6 +376,7 @@ impl Server {
                 tab_name,
                 client_id,
                 tab_index == focused_tab_index,
+                tab_pane_area_size,
             );
         }
 

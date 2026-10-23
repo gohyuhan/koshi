@@ -87,56 +87,50 @@ fn pane_command_variants_round_trip_through_json() {
     let source_pane_id = PaneId::new();
     let destination_tab_id = TabId::new();
     let split_place_pane_command = Command::PlacePane(PlacePaneArgs {
-        source_pane_id,
+        source_pane_id: Some(source_pane_id),
         placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
             destination_tab_id,
             anchor: PanePlacementAnchor::Group(vec![PaneId::new(), PaneId::new()]),
             direction: Direction::Up,
         }),
-        expected_placement_revision: None,
     });
     assert_json_roundtrip(&split_place_pane_command);
     let swap_place_pane_command = Command::PlacePane(PlacePaneArgs {
-        source_pane_id,
+        source_pane_id: Some(source_pane_id),
         placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
             target_pane_id: PaneId::new(),
-        }),
-        expected_placement_revision: Some(PlacementRevision {
-            session_revision: 7,
-            client_revision: 11,
         }),
     });
     assert_json_roundtrip(&swap_place_pane_command);
     assert_json_roundtrip(&Command::PlacePane(PlacePaneArgs {
-        source_pane_id,
+        source_pane_id: Some(source_pane_id),
         placement_target: PanePlacementTarget::Floating {
             top_left_cell: Some(Point { column: 7, row: 3 }),
         },
-        expected_placement_revision: None,
     }));
     assert_json_roundtrip(&Command::PlacePane(PlacePaneArgs {
-        source_pane_id,
+        source_pane_id: Some(source_pane_id),
         placement_target: PanePlacementTarget::Floating {
             top_left_cell: None,
         },
-        expected_placement_revision: None,
     }));
-    let mut omitted_revision_json =
-        serde_json::to_value(&split_place_pane_command).expect("serialize place-pane command");
-    omitted_revision_json
-        .get_mut("PlacePane")
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("place-pane command object")
-        .remove("expected_placement_revision");
+    let stack_target_pane_id = PaneId::new();
+    let stack_place_pane_command = Command::PlacePane(PlacePaneArgs {
+        source_pane_id: None,
+        placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Stack {
+            target_pane_id: stack_target_pane_id,
+        }),
+    });
+    assert_json_roundtrip(&stack_place_pane_command);
     assert_eq!(
-        serde_json::from_value::<Command>(omitted_revision_json).expect("decode omitted revision"),
-        Command::PlacePane(PlacePaneArgs {
-            source_pane_id,
-            placement_target: match split_place_pane_command {
-                Command::PlacePane(place_pane_args) => place_pane_args.placement_target,
-                _ => unreachable!("split command variant"),
-            },
-            expected_placement_revision: None,
+        serde_json::to_value(&stack_place_pane_command).expect("serialize stack command"),
+        json!({
+            "PlacePane": {
+                "source_pane_id": null,
+                "placement_target": {
+                    "Tiled": { "Stack": { "target_pane_id": stack_target_pane_id } }
+                },
+            }
         })
     );
     assert_json_roundtrip(&Command::ScrollPane(ScrollPaneArgs {
@@ -398,11 +392,10 @@ fn command_variant_names_are_canonical() {
         ),
         (
             Command::PlacePane(PlacePaneArgs {
-                source_pane_id: PaneId::new(),
+                source_pane_id: Some(PaneId::new()),
                 placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
                     target_pane_id: PaneId::new(),
                 }),
-                expected_placement_revision: None,
             }),
             "PlacePane",
         ),

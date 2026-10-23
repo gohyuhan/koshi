@@ -97,6 +97,7 @@ fn default_server_and_client_configs_match_expected_settings() {
             .keys()
             .collect::<Vec<_>>(),
         vec![
+            &ModeName::from_text("dock-undock"),
             &ModeName::from_text("floating-pane-move"),
             &ModeName::from_text("locked"),
             &ModeName::from_text("normal"),
@@ -428,6 +429,7 @@ fn the_default_modes_remove_no_sequences() {
         "pane-placement",
         "pane-move-choice",
         "floating-pane-move",
+        "dock-undock",
     ] {
         assert_eq!(
             default_mode_bindings_by_name[&ModeName::from_text(mode_name)].removed_key_sequences,
@@ -499,7 +501,7 @@ fn a_shift_modifier_leader_moves_every_leader_binding() {
         build_default_mode_bindings(Leader::Modifiers(BindingModifierFlags::SHIFT));
     let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
 
-    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 25);
+    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 27);
     assert_eq!(
         normal_mode_bindings.bound_action_by_key_sequence
             [&build_single_chord_sequence(BindingModifierFlags::SHIFT, 'q')],
@@ -566,12 +568,12 @@ fn a_chord_leader_prefixes_the_locked_bindings_and_leaves_the_unlock_chord() {
 fn a_leader_chord_that_is_also_a_binding_keeps_both() {
     // `<A-f>` is the fullscreen binding and, here, the leader as well. The
     // one-chord sequence and the sequences it opens are separate map keys:
-    // the table holds all 25 normal-mode bindings.
+    // the table holds all 27 normal-mode bindings.
     let fullscreen_key_chord = build_character_chord(BindingModifierFlags::ALT, 'f');
     let mode_bindings_by_name = build_default_mode_bindings(Leader::Chord(fullscreen_key_chord));
     let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
 
-    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 25);
+    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 27);
     assert_eq!(
         normal_mode_bindings.bound_action_by_key_sequence[&KeySequence::from(fullscreen_key_chord)],
         build_bound_action("toggle-pane-fullscreen")
@@ -717,8 +719,26 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
         build_expected_client_binding(
             "normal",
             "<C-p> u",
-            "undock-or-dock-pane",
-            ClientActionKind::UndockOrDockPane,
+            "begin-dock-undock",
+            ClientActionKind::BeginDockUndock,
+        ),
+        build_expected_binding(
+            "normal",
+            "<C-p> <Tab>",
+            "focus-next-floating-pane",
+            Ok(Command::FocusPane(FocusPaneArgs {
+                focus_target: FocusTarget::NextFloatingPane,
+                client_id: None,
+            })),
+        ),
+        build_expected_binding(
+            "normal",
+            "<C-p> <S-Tab>",
+            "focus-previous-floating-pane",
+            Ok(Command::FocusPane(FocusPaneArgs {
+                focus_target: FocusTarget::PreviousFloatingPane,
+                client_id: None,
+            })),
         ),
         build_expected_binding(
             "normal",
@@ -889,6 +909,12 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
         ),
         build_expected_client_binding(
             "pane-placement",
+            "s",
+            "toggle-pane-placement-stack",
+            ClientActionKind::TogglePanePlacementStack,
+        ),
+        build_expected_client_binding(
+            "pane-placement",
             "<Tab>",
             "select-next-placement-tab",
             ClientActionKind::SelectNextPlacementTab,
@@ -982,6 +1008,90 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
             "<Esc>",
             "cancel-floating-pane-move",
             ClientActionKind::CancelFloatingPaneMove,
+        ),
+        build_expected_client_binding(
+            "dock-undock",
+            "<Left>",
+            "select-pane-target-left",
+            ClientActionKind::SelectPaneTarget(Direction::Left),
+        ),
+        build_expected_client_binding(
+            "dock-undock",
+            "<Down>",
+            "select-pane-target-down",
+            ClientActionKind::SelectPaneTarget(Direction::Down),
+        ),
+        build_expected_client_binding(
+            "dock-undock",
+            "<Up>",
+            "select-pane-target-up",
+            ClientActionKind::SelectPaneTarget(Direction::Up),
+        ),
+        build_expected_client_binding(
+            "dock-undock",
+            "<Right>",
+            "select-pane-target-right",
+            ClientActionKind::SelectPaneTarget(Direction::Right),
+        ),
+        build_expected_client_binding(
+            "dock-undock",
+            "<S-Left>",
+            "select-pane-insertion-left",
+            ClientActionKind::SelectPaneInsertion(Direction::Left),
+        ),
+        build_expected_client_binding(
+            "dock-undock",
+            "<S-Down>",
+            "select-pane-insertion-down",
+            ClientActionKind::SelectPaneInsertion(Direction::Down),
+        ),
+        build_expected_client_binding(
+            "dock-undock",
+            "<S-Up>",
+            "select-pane-insertion-up",
+            ClientActionKind::SelectPaneInsertion(Direction::Up),
+        ),
+        build_expected_client_binding(
+            "dock-undock",
+            "<S-Right>",
+            "select-pane-insertion-right",
+            ClientActionKind::SelectPaneInsertion(Direction::Right),
+        ),
+        build_expected_client_binding(
+            "dock-undock",
+            "<Space>",
+            "cycle-pane-placement-span",
+            ClientActionKind::CyclePanePlacementSpan,
+        ),
+        build_expected_client_binding(
+            "dock-undock",
+            "s",
+            "toggle-pane-placement-stack",
+            ClientActionKind::TogglePanePlacementStack,
+        ),
+        build_expected_client_binding(
+            "dock-undock",
+            "<Tab>",
+            "select-next-placement-tab",
+            ClientActionKind::SelectNextPlacementTab,
+        ),
+        build_expected_client_binding(
+            "dock-undock",
+            "<S-Tab>",
+            "select-previous-placement-tab",
+            ClientActionKind::SelectPreviousPlacementTab,
+        ),
+        build_expected_client_binding(
+            "dock-undock",
+            "<CR>",
+            "confirm-dock-undock",
+            ClientActionKind::ConfirmDockUndock,
+        ),
+        build_expected_client_binding(
+            "dock-undock",
+            "<Esc>",
+            "cancel-dock-undock",
+            ClientActionKind::CancelDockUndock,
         ),
         build_expected_binding(
             "normal",
@@ -1084,8 +1194,13 @@ fn default_keybindings_use_non_typeable_openers_and_avoid_ambiguous_ctrl_chords(
     ];
     for (mode_name, mode_bindings) in &client_config.keybindings.mode_bindings_by_name {
         // The viewer-local modes discard every key they do not bind.
-        if ["pane-placement", "pane-move-choice", "floating-pane-move"]
-            .contains(&mode_name.get_name())
+        if [
+            "pane-placement",
+            "pane-move-choice",
+            "floating-pane-move",
+            "dock-undock",
+        ]
+        .contains(&mode_name.get_name())
         {
             continue;
         }

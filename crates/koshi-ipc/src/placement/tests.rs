@@ -1,91 +1,55 @@
-//! Tests for bounded placement-preview validation.
+//! Tests for placement-preview validation.
 
-use crate::frame::{FrameImageAction, FrameImagePlacement, FrameImageRecordHeader};
 use koshi_core::geometry::{Rect, Size};
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::ids::{PaneId, TabId};
 use koshi_layout::mode::LayoutMode;
+use koshi_layout::solver::StackHeader;
 use koshi_layout::tree::LayoutNode;
+
+use crate::frame::FrameSlot;
 
 use super::*;
 
-/// A window of `row_count` rows, each the same placeholder bytes. Validation
-/// reads no row's bytes.
-pub(crate) fn build_test_window(column_count: u16, row_count: u16) -> PlacementWindow {
-    PlacementWindow {
-        column_count,
-        encoded_rows: vec![
-            EncodedRow {
-                encoded_row_bytes: vec![0x00],
-            };
-            usize::from(row_count)
-        ],
-    }
-}
+/// The `80x24` tab every test tab is solved at.
+const TEST_TAB_SIZE: Size = Size {
+    column_count: 80,
+    row_count: 24,
+};
 
-fn build_test_image_placement(placement_id: u64, image_content_id: u64) -> FrameImagePlacement {
-    FrameImagePlacement {
-        cell_geometry: None,
-        image_record: Some(FrameImageRecordHeader {
-            protocol: Default::default(),
-            pixel_width: 4_096,
-            pixel_height: 4_096,
-            image_action: FrameImageAction::Display,
-            display: Default::default(),
-            anchor_cell: (0, 0),
-        }),
-        placement_id,
-        image_content_id,
-        is_available: true,
-        anchor_cell: (0, 0),
-        column_count: 1,
-        row_count: 1,
-    }
-}
-
-fn build_test_snapshot() -> PanePlacementSnapshot {
-    let pane_id = PaneId::new();
-    let tab_id = TabId::new();
-    let viewport_size = Size {
-        column_count: 80,
-        row_count: 24,
-    };
-    PanePlacementSnapshot {
-        session_id: SessionId::new(),
-        source_pane_id: pane_id,
-        source_tab_id: tab_id,
-        destination_tab_id: tab_id,
-        session_placement_revision: 3,
-        client_placement_revision: 4,
-        source_tab_snapshot: PanePlacementTabSnapshot {
+/// A tiled tab `tab_id` holding only `pane_id`, solved at [`TEST_TAB_SIZE`],
+/// with `pane_id` focused.
+fn build_test_tab_snapshot(tab_id: TabId, pane_id: PaneId) -> PanePlacementTabSnapshot {
+    PanePlacementTabSnapshot {
+        layout_tree: LayoutNode::Pane(pane_id),
+        focus_history: vec![pane_id],
+        tab_snapshot: FrameTab {
             tab_id,
             tab_name: "main".to_string(),
-            layout_tree: LayoutNode::Pane(pane_id),
             pane_slots: vec![FrameSlot {
                 pane_id,
-                outer_rect: Rect::from_size_at_origin(viewport_size),
-                content_rect: Some(Rect::from_size_at_origin(viewport_size)),
+                outer_rect: Rect::from_size_at_origin(TEST_TAB_SIZE),
+                content_rect: Some(Rect::from_size_at_origin(TEST_TAB_SIZE)),
                 is_visible: true,
                 is_suppressed: false,
             }],
-            tab_size: viewport_size,
+            tab_size: TEST_TAB_SIZE,
             stack_headers: Vec::new(),
             layout_mode: LayoutMode::Tiled,
             is_every_pane_suppressed: false,
             gap_cell_count: 0,
-            pane_snapshots: vec![PanePlacementPaneSnapshot {
-                pane_id,
-                terminal_window: None,
-                image_placement_snapshots: Vec::new(),
-            }],
         },
+    }
+}
+
+/// A preview of the only pane of one tab within that tab.
+fn build_test_snapshot() -> PanePlacementSnapshot {
+    let pane_id = PaneId::new();
+    let tab_id = TabId::new();
+    PanePlacementSnapshot {
+        source_pane_id: pane_id,
+        source: PanePlacementSource::Tiled(build_test_tab_snapshot(tab_id, pane_id)),
+        destination_tab_id: tab_id,
         destination_tab_snapshot: None,
-        client_snapshot: PanePlacementClientSnapshot {
-            client_id: ClientId::new(),
-            viewport_size,
-            pane_area: None,
-            active_tab_id: tab_id,
-            focused_pane_id: Some(pane_id),
-        },
         pane_sizing: PanePlacementSizing {
             minimum_size: Size {
                 column_count: 1,
@@ -93,7 +57,50 @@ fn build_test_snapshot() -> PanePlacementSnapshot {
             },
             gap_cell_count: 0,
         },
+        insertion_tab_sizes: PlacementTabSizes {
+            destination_tab_size: Some(TEST_TAB_SIZE),
+            source_tab_size: None,
+        },
+        swap_tab_sizes: Vec::new(),
     }
+}
+
+/// The source tab snapshot of `placement_snapshot`, for in-place edits.
+/// Panics when the source pane floats.
+fn get_source_tab_snapshot_mut(
+    placement_snapshot: &mut PanePlacementSnapshot,
+) -> &mut PanePlacementTabSnapshot {
+    let PanePlacementSource::Tiled(source_tab_snapshot) = &mut placement_snapshot.source else {
+        panic!("the test snapshot's source pane is tiled");
+    };
+    source_tab_snapshot
+}
+
+/// [`build_test_snapshot`] previewing a move into another tab `[D]` of the
+/// same size, with the swap tab sizes of `D`.
+pub(crate) fn build_cross_tab_test_snapshot() -> PanePlacementSnapshot {
+    let mut placement_snapshot = build_test_snapshot();
+    let destination_tab_id = TabId::new();
+    let destination_pane_id = PaneId::new();
+    placement_snapshot.destination_tab_id = destination_tab_id;
+    placement_snapshot.destination_tab_snapshot = Some(build_test_tab_snapshot(
+        destination_tab_id,
+        destination_pane_id,
+    ));
+    placement_snapshot.swap_tab_sizes = vec![SwapTabSizes {
+        target_pane_id: destination_pane_id,
+        tab_sizes: placement_snapshot.insertion_tab_sizes,
+    }];
+    placement_snapshot
+}
+
+/// [`build_cross_tab_test_snapshot`] with its pane floating: the preview
+/// carries no source tab and no swap tab sizes.
+fn build_floating_source_test_snapshot() -> PanePlacementSnapshot {
+    let mut placement_snapshot = build_cross_tab_test_snapshot();
+    placement_snapshot.source = PanePlacementSource::Floating;
+    placement_snapshot.swap_tab_sizes.clear();
+    placement_snapshot
 }
 
 #[test]
@@ -113,16 +120,29 @@ fn snapshot_rejects_a_missing_cross_tab_snapshot() {
 }
 
 #[test]
-fn snapshot_rejects_duplicate_pane_slots() {
-    let mut placement_snapshot = build_test_snapshot();
-    placement_snapshot
-        .source_tab_snapshot
-        .pane_slots
-        .push(placement_snapshot.source_tab_snapshot.pane_slots[0].clone());
+fn snapshot_rejects_a_destination_snapshot_that_names_another_tab() {
+    let mut placement_snapshot = build_cross_tab_test_snapshot();
+    placement_snapshot.destination_tab_id = TabId::new();
 
     assert_eq!(
         placement_snapshot.validate(),
-        Err(PanePlacementSnapshotValidationError::PaneSnapshotMismatch)
+        Err(PanePlacementSnapshotValidationError::TabIdentityMismatch)
+    );
+}
+
+#[test]
+fn snapshot_rejects_duplicate_pane_slots() {
+    let mut placement_snapshot = build_test_snapshot();
+    let source_tab_snapshot = get_source_tab_snapshot_mut(&mut placement_snapshot);
+    let duplicate_pane_slot = source_tab_snapshot.tab_snapshot.pane_slots[0].clone();
+    source_tab_snapshot
+        .tab_snapshot
+        .pane_slots
+        .push(duplicate_pane_slot);
+
+    assert_eq!(
+        placement_snapshot.validate(),
+        Err(PanePlacementSnapshotValidationError::DuplicatePaneId)
     );
 }
 
@@ -140,7 +160,8 @@ fn snapshot_rejects_a_source_pane_outside_the_source_tab() {
 #[test]
 fn snapshot_rejects_a_layout_tree_that_does_not_match_the_slots() {
     let mut placement_snapshot = build_test_snapshot();
-    placement_snapshot.source_tab_snapshot.layout_tree = LayoutNode::Pane(PaneId::new());
+    get_source_tab_snapshot_mut(&mut placement_snapshot).layout_tree =
+        LayoutNode::Pane(PaneId::new());
 
     assert_eq!(
         placement_snapshot.validate(),
@@ -149,16 +170,158 @@ fn snapshot_rejects_a_layout_tree_that_does_not_match_the_slots() {
 }
 
 #[test]
-fn snapshot_rejects_missing_pane_content() {
+fn snapshot_rejects_a_zoomed_tab_or_a_gap_other_than_the_sizing_gap() {
+    let mut zoomed_snapshot = build_test_snapshot();
+    let source_pane_id = zoomed_snapshot.source_pane_id;
+    get_source_tab_snapshot_mut(&mut zoomed_snapshot)
+        .tab_snapshot
+        .layout_mode = LayoutMode::Fullscreen {
+        focused_pane_id: source_pane_id,
+    };
+    let mut gap_snapshot = build_test_snapshot();
+    get_source_tab_snapshot_mut(&mut gap_snapshot)
+        .tab_snapshot
+        .gap_cell_count = 1;
+
+    assert_eq!(
+        [zoomed_snapshot.validate(), gap_snapshot.validate()],
+        [Err(PanePlacementSnapshotValidationError::LayoutMismatch); 2]
+    );
+}
+
+#[test]
+fn snapshot_rejects_a_focus_history_that_names_a_pane_outside_the_tree() {
     let mut placement_snapshot = build_test_snapshot();
-    placement_snapshot
-        .source_tab_snapshot
-        .pane_snapshots
-        .clear();
+    get_source_tab_snapshot_mut(&mut placement_snapshot)
+        .focus_history
+        .push(PaneId::new());
 
     assert_eq!(
         placement_snapshot.validate(),
-        Err(PanePlacementSnapshotValidationError::PaneSnapshotMismatch)
+        Err(PanePlacementSnapshotValidationError::LayoutMismatch)
+    );
+}
+
+#[test]
+fn snapshot_rejects_a_focus_history_that_repeats_a_pane() {
+    let mut placement_snapshot = build_test_snapshot();
+    let source_pane_id = placement_snapshot.source_pane_id;
+    get_source_tab_snapshot_mut(&mut placement_snapshot)
+        .focus_history
+        .push(source_pane_id);
+
+    assert_eq!(
+        placement_snapshot.validate(),
+        Err(PanePlacementSnapshotValidationError::LayoutMismatch)
+    );
+}
+
+#[test]
+fn snapshot_rejects_a_slot_outside_the_tab_or_with_flags_that_disagree() {
+    let mut outside_snapshot = build_test_snapshot();
+    get_source_tab_snapshot_mut(&mut outside_snapshot)
+        .tab_snapshot
+        .pane_slots[0]
+        .outer_rect = Rect::from_size_at_origin(Size {
+        column_count: 81,
+        row_count: 24,
+    });
+    let mut hidden_content_snapshot = build_test_snapshot();
+    get_source_tab_snapshot_mut(&mut hidden_content_snapshot)
+        .tab_snapshot
+        .pane_slots[0]
+        .is_visible = false;
+    let mut suppressed_snapshot = build_test_snapshot();
+    get_source_tab_snapshot_mut(&mut suppressed_snapshot)
+        .tab_snapshot
+        .pane_slots[0]
+        .is_suppressed = true;
+
+    assert_eq!(
+        [
+            outside_snapshot.validate(),
+            hidden_content_snapshot.validate(),
+            suppressed_snapshot.validate(),
+        ],
+        [Err(PanePlacementSnapshotValidationError::PaneSlotMismatch); 3]
+    );
+}
+
+#[test]
+fn snapshot_rejects_a_stack_header_for_a_pane_outside_the_tree() {
+    let mut placement_snapshot = build_test_snapshot();
+    get_source_tab_snapshot_mut(&mut placement_snapshot)
+        .tab_snapshot
+        .stack_headers
+        .push(StackHeader {
+            pane_id: PaneId::new(),
+            header_rect: Rect::from_size_at_origin(Size {
+                column_count: 80,
+                row_count: 1,
+            }),
+            member_index: 0,
+            member_count: 2,
+        });
+
+    assert_eq!(
+        placement_snapshot.validate(),
+        Err(PanePlacementSnapshotValidationError::LayoutMismatch)
+    );
+}
+
+#[test]
+fn a_cross_tab_snapshot_with_swap_tab_sizes_for_each_destination_pane_passes_validation() {
+    assert_eq!(build_cross_tab_test_snapshot().validate(), Ok(()));
+}
+
+#[test]
+fn snapshot_rejects_swap_tab_sizes_that_do_not_name_each_destination_pane_once() {
+    let mut missing_swap_snapshot = build_cross_tab_test_snapshot();
+    missing_swap_snapshot.swap_tab_sizes.clear();
+    let mut foreign_swap_snapshot = build_cross_tab_test_snapshot();
+    foreign_swap_snapshot.swap_tab_sizes[0].target_pane_id = PaneId::new();
+    let mut repeated_swap_snapshot = build_cross_tab_test_snapshot();
+    let repeated_swap_tab_sizes = repeated_swap_snapshot.swap_tab_sizes[0];
+    repeated_swap_snapshot
+        .swap_tab_sizes
+        .push(repeated_swap_tab_sizes);
+
+    assert_eq!(
+        [
+            missing_swap_snapshot.validate(),
+            foreign_swap_snapshot.validate(),
+            repeated_swap_snapshot.validate(),
+        ],
+        [Err(PanePlacementSnapshotValidationError::TabSizesMismatch); 3]
+    );
+}
+
+#[test]
+fn snapshot_rejects_swap_tab_sizes_within_one_tab_or_for_a_floating_source() {
+    let mut same_tab_snapshot = build_test_snapshot();
+    same_tab_snapshot.swap_tab_sizes = vec![SwapTabSizes {
+        target_pane_id: same_tab_snapshot.source_pane_id,
+        tab_sizes: same_tab_snapshot.insertion_tab_sizes,
+    }];
+    let mut floating_source_snapshot = build_floating_source_test_snapshot();
+    let destination_pane_id = floating_source_snapshot
+        .destination_tab_snapshot
+        .as_ref()
+        .expect("the floating source previews a destination tab")
+        .tab_snapshot
+        .pane_slots[0]
+        .pane_id;
+    floating_source_snapshot.swap_tab_sizes = vec![SwapTabSizes {
+        target_pane_id: destination_pane_id,
+        tab_sizes: floating_source_snapshot.insertion_tab_sizes,
+    }];
+
+    assert_eq!(
+        [
+            same_tab_snapshot.validate(),
+            floating_source_snapshot.validate()
+        ],
+        [Err(PanePlacementSnapshotValidationError::TabSizesMismatch); 2]
     );
 }
 
@@ -166,10 +329,11 @@ fn snapshot_rejects_missing_pane_content() {
 fn snapshot_rejects_duplicate_pane_ids_across_tabs() {
     let mut placement_snapshot = build_test_snapshot();
     let destination_tab_id = TabId::new();
-    let mut destination_tab_snapshot = placement_snapshot.source_tab_snapshot.clone();
-    destination_tab_snapshot.tab_id = destination_tab_id;
     placement_snapshot.destination_tab_id = destination_tab_id;
-    placement_snapshot.destination_tab_snapshot = Some(destination_tab_snapshot);
+    placement_snapshot.destination_tab_snapshot = Some(build_test_tab_snapshot(
+        destination_tab_id,
+        placement_snapshot.source_pane_id,
+    ));
 
     assert_eq!(
         placement_snapshot.validate(),
@@ -178,133 +342,55 @@ fn snapshot_rejects_duplicate_pane_ids_across_tabs() {
 }
 
 #[test]
-fn snapshot_accepts_a_window_that_does_not_match_the_preview_slot() {
-    let mut placement_snapshot = build_test_snapshot();
-    placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
-        Some(build_test_window(1, 1));
-
-    assert_eq!(placement_snapshot.validate(), Ok(()));
+fn a_floating_source_with_a_destination_tab_passes_validation() {
+    assert_eq!(build_floating_source_test_snapshot().validate(), Ok(()));
 }
 
 #[test]
-fn snapshot_rejects_a_window_with_no_column_or_no_row() {
-    for terminal_window in [build_test_window(0, 1), build_test_window(1, 0)] {
-        let mut placement_snapshot = build_test_snapshot();
-        placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
-            Some(terminal_window);
+fn a_floating_source_that_the_destination_tab_holds_is_refused() {
+    let mut placement_snapshot = build_floating_source_test_snapshot();
+    placement_snapshot.source_pane_id = placement_snapshot
+        .destination_tab_snapshot
+        .as_ref()
+        .expect("the destination tab is carried")
+        .tab_snapshot
+        .pane_slots[0]
+        .pane_id;
+
+    assert_eq!(
+        placement_snapshot.validate(),
+        Err(PanePlacementSnapshotValidationError::DuplicatePaneId)
+    );
+}
+
+#[test]
+fn a_floating_source_with_no_destination_tab_is_refused() {
+    let mut placement_snapshot = build_floating_source_test_snapshot();
+    placement_snapshot.destination_tab_snapshot = None;
+
+    assert_eq!(
+        placement_snapshot.validate(),
+        Err(PanePlacementSnapshotValidationError::TabIdentityMismatch)
+    );
+}
+
+#[test]
+fn a_preview_survives_a_serde_round_trip() {
+    for placement_preview in [
+        PanePlacementPreview::Available(Box::new(build_cross_tab_test_snapshot())),
+        PanePlacementPreview::Available(Box::new(build_floating_source_test_snapshot())),
+        PanePlacementPreview::Unavailable {
+            source_pane_id: PaneId::new(),
+            destination_tab_id: TabId::new(),
+        },
+    ] {
+        let preview_json_bytes =
+            serde_json::to_vec(&placement_preview).expect("a preview serializes");
 
         assert_eq!(
-            placement_snapshot.validate(),
-            Err(PanePlacementSnapshotValidationError::TerminalWindowMismatch)
+            serde_json::from_slice::<PanePlacementPreview>(&preview_json_bytes)
+                .expect("a preview decodes"),
+            placement_preview
         );
     }
-}
-
-#[test]
-fn snapshot_rejects_a_window_of_more_than_65_535_rows() {
-    let mut placement_snapshot = build_test_snapshot();
-    let mut terminal_window = build_test_window(1, u16::MAX);
-    terminal_window.encoded_rows.push(EncodedRow {
-        encoded_row_bytes: vec![0x00],
-    });
-    placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
-        Some(terminal_window);
-
-    assert_eq!(
-        placement_snapshot.validate(),
-        Err(PanePlacementSnapshotValidationError::TerminalWindowMismatch)
-    );
-}
-
-#[test]
-fn snapshot_rejects_cells_over_the_preview_limit() {
-    let mut placement_snapshot = build_test_snapshot();
-    let oversized_size = Size {
-        column_count: u16::MAX,
-        row_count: 5,
-    };
-    let oversized_rect = Rect::from_size_at_origin(oversized_size);
-    placement_snapshot.source_tab_snapshot.tab_size = oversized_size;
-    placement_snapshot.source_tab_snapshot.pane_slots[0].outer_rect = oversized_rect;
-    placement_snapshot.source_tab_snapshot.pane_slots[0].content_rect = Some(oversized_rect);
-    placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
-        Some(build_test_window(u16::MAX, 5));
-
-    assert_eq!(
-        placement_snapshot.validate(),
-        Err(PanePlacementSnapshotValidationError::CellCountExceeded)
-    );
-}
-
-#[test]
-fn snapshot_rejects_duplicate_image_placement_ids() {
-    let mut placement_snapshot = build_test_snapshot();
-    let image_placement = build_test_image_placement(1, 1);
-    placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
-        Some(build_test_window(80, 24));
-    placement_snapshot.source_tab_snapshot.pane_snapshots[0].image_placement_snapshots =
-        vec![image_placement.clone(), image_placement];
-
-    assert_eq!(
-        placement_snapshot.validate(),
-        Err(PanePlacementSnapshotValidationError::DuplicateImagePlacementId)
-    );
-}
-
-#[test]
-fn snapshot_rejects_image_bytes_over_the_preview_limit() {
-    let mut placement_snapshot = build_test_snapshot();
-    placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
-        Some(build_test_window(80, 24));
-    placement_snapshot.source_tab_snapshot.pane_snapshots[0].image_placement_snapshots = vec![
-        build_test_image_placement(1, 1),
-        build_test_image_placement(2, 2),
-    ];
-
-    assert_eq!(
-        placement_snapshot.validate(),
-        Err(PanePlacementSnapshotValidationError::ImageByteCountExceeded)
-    );
-}
-
-#[test]
-fn snapshot_counts_shared_image_bytes_once() {
-    let mut placement_snapshot = build_test_snapshot();
-    placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
-        Some(build_test_window(80, 24));
-    placement_snapshot.source_tab_snapshot.pane_snapshots[0].image_placement_snapshots = vec![
-        build_test_image_placement(1, 1),
-        build_test_image_placement(2, 1),
-    ];
-
-    assert_eq!(placement_snapshot.validate(), Ok(()));
-}
-
-#[test]
-fn snapshot_accepts_an_image_outside_the_preview_slot_inside_the_terminal_window() {
-    let mut placement_snapshot = build_test_snapshot();
-    placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
-        Some(build_test_window(100, 30));
-    let mut image_placement = build_test_image_placement(1, 1);
-    image_placement.anchor_cell = (25, 90);
-    placement_snapshot.source_tab_snapshot.pane_snapshots[0].image_placement_snapshots =
-        vec![image_placement];
-
-    assert_eq!(placement_snapshot.validate(), Ok(()));
-}
-
-#[test]
-fn snapshot_rejects_an_image_outside_the_terminal_window() {
-    let mut placement_snapshot = build_test_snapshot();
-    placement_snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =
-        Some(build_test_window(100, 30));
-    let mut image_placement = build_test_image_placement(1, 1);
-    image_placement.anchor_cell = (30, 90);
-    placement_snapshot.source_tab_snapshot.pane_snapshots[0].image_placement_snapshots =
-        vec![image_placement];
-
-    assert_eq!(
-        placement_snapshot.validate(),
-        Err(PanePlacementSnapshotValidationError::ImagePlacementMismatch)
-    );
 }

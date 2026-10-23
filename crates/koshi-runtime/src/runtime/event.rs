@@ -20,16 +20,18 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Instant, SystemTime};
 
 use koshi_core::{
-    command::{CommandEnvelope, CommandResult},
+    command::{CommandEnvelope, CommandResult, TiledPlacementTarget},
     discovery::SessionOverview,
     geometry::{PaneArea, Size},
-    ids::{ClientId, PaneId, SessionId, TabId},
+    ids::{ClientId, CommandId, PaneId, SessionId, TabId},
     key::KeyInput,
     mouse::MouseInput,
 };
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::layout::SessionLayout;
+use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_ipc::protocol::{ConnectionToken, WireMouseAction};
+use koshi_layout::placement::PlacedTabLayout;
 
 use crate::runtime::bus::WriterHandoff;
 use crate::runtime::delivery_queue::DeliveryReceiver;
@@ -208,6 +210,9 @@ pub enum RuntimeEvent {
         /// [`compute_frame_interval`](koshi_core::constant::compute_frame_interval)
         /// of it.
         max_frames_per_second: u16,
+        /// The placement target the client previews from its first frame on
+        /// (`Server::set_pane_placement_preview`), or `None`.
+        placement_preview_target: Option<PanePlacementPreviewTarget>,
         /// Where the dispatcher sends what it minted.
         response_sender: Sender<Option<AttachAccepted>>,
     },
@@ -229,16 +234,28 @@ pub enum RuntimeEvent {
         /// Where the dispatcher sends the layout.
         response_sender: Sender<Option<SessionLayout>>,
     },
-    /// A client requests a bounded read-only preview of a pane placement.
-    ReadPanePlacement {
-        /// The client whose attached event stream receives the reply.
+    /// A client names the placement target whose preview its frames carry,
+    /// or ends its preview with `None`
+    /// (`Server::set_pane_placement_preview`).
+    SetPanePlacementPreview {
+        /// The client whose frames carry the preview.
         client_id: ClientId,
-        /// The request this reply answers.
-        request_id: u64,
-        /// The pane whose current content is previewed.
+        /// The pane and the destination tab the client previews.
+        placement_target: Option<PanePlacementPreviewTarget>,
+    },
+    /// A client confirms one tiled pane placement that it previews
+    /// (`Server::confirm_pane_placement`).
+    ConfirmPanePlacement {
+        /// The client that confirmed the placement.
+        client_id: ClientId,
+        /// The id the client chose for the placement.
+        command_id: CommandId,
+        /// The pane being placed.
         source_pane_id: PaneId,
-        /// The destination tab whose current layout is previewed.
-        destination_tab_id: TabId,
+        /// Where the pane goes.
+        placement_target: TiledPlacementTarget,
+        /// The destination tab as the client draws it after the placement.
+        expected_placed_tab_layout: Box<PlacedTabLayout>,
     },
     /// A restart request whose restart check passed on the thread that asks:
     /// the caller asks this process to replace its own image with the binary at

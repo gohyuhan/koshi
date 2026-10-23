@@ -615,19 +615,31 @@ fn migrate_resume_body_refuses_format_four_session_ids_repeated_with_different_l
 }
 
 #[test]
-fn step_four_adds_the_missing_floating_fields_and_keeps_the_ones_present() {
+fn step_four_adds_the_missing_floating_and_tab_size_fields_and_keeps_the_ones_present() {
     let mut resume_body = serde_json::json!({
         "session_by_id": {
             "first": {
                 "session_name": "carried",
+                "tabs": {
+                    "fresh-tab": {"tab_name": "code"},
+                    "kept-tab": {
+                        "tab_name": "logs",
+                        "solved_tab_size": {"column_count": 80, "row_count": 22}
+                    }
+                },
                 "clients": {"client_by_id": {
-                    "fresh": {"label": "C-fresh"},
-                    "kept": {"label": "C-kept", "floating_pane_focus_order": ["kept-pane"]}
+                    "fresh": {"label": "C-fresh", "focused_pane_id_by_tab_id": {}},
+                    "kept": {
+                        "label": "C-kept",
+                        "focused_pane_id_by_tab_id": {},
+                        "shown_floating_pane_ids": ["kept-pane"]
+                    }
                 }},
                 "panes": {"pane_record_by_id": {}}
             },
             "second": {
                 "floating_set": {"members": ["kept-member"]},
+                "tabs": {},
                 "clients": {"client_by_id": {}},
                 "panes": {"pane_record_by_id": {}}
             }
@@ -644,17 +656,29 @@ fn step_four_adds_the_missing_floating_fields_and_keeps_the_ones_present() {
                 "first": {
                     "session_name": "carried",
                     "floating_set": {"members": []},
+                    "tabs": {
+                        "fresh-tab": {
+                            "tab_name": "code",
+                            "solved_tab_size": {"column_count": 0, "row_count": 0}
+                        },
+                        "kept-tab": {
+                            "tab_name": "logs",
+                            "solved_tab_size": {"column_count": 80, "row_count": 22}
+                        }
+                    },
                     "clients": {"client_by_id": {
                         "fresh": {
                             "label": "C-fresh",
+                            "focus_history_by_tab_id": {},
                             "floating_pane_view_by_pane_id": {},
-                            "floating_pane_focus_order": [],
+                            "shown_floating_pane_ids": [],
                             "focused_floating_pane_id": null
                         },
                         "kept": {
                             "label": "C-kept",
+                            "focus_history_by_tab_id": {},
                             "floating_pane_view_by_pane_id": {},
-                            "floating_pane_focus_order": ["kept-pane"],
+                            "shown_floating_pane_ids": ["kept-pane"],
                             "focused_floating_pane_id": null
                         }
                     }},
@@ -662,7 +686,96 @@ fn step_four_adds_the_missing_floating_fields_and_keeps_the_ones_present() {
                 },
                 "second": {
                     "floating_set": {"members": ["kept-member"]},
+                    "tabs": {},
                     "clients": {"client_by_id": {}},
+                    "panes": {"pane_record_by_id": {}}
+                }
+            },
+            "carried_pane_state_by_pane_id": {}
+        })
+    );
+}
+
+#[test]
+fn step_four_turns_each_focused_pane_into_a_one_pane_focus_history() {
+    let mut resume_body = serde_json::json!({
+        "session_by_id": {
+            "first": {
+                "floating_set": {"members": []},
+                "tabs": {},
+                "clients": {"client_by_id": {
+                    "client": {
+                        "focused_pane_id_by_tab_id": {
+                            "code-tab": "vim-pane",
+                            "logs-tab": "tail-pane"
+                        },
+                        "floating_pane_view_by_pane_id": {},
+                        "shown_floating_pane_ids": [],
+                        "focused_floating_pane_id": null
+                    }
+                }},
+                "panes": {"pane_record_by_id": {}}
+            }
+        },
+        "carried_pane_state_by_pane_id": {}
+    });
+
+    migrate_resume_four_to_five(&mut resume_body).expect("step 4 converts the body");
+
+    assert_eq!(
+        resume_body["session_by_id"]["first"]["clients"]["client_by_id"]["client"],
+        serde_json::json!({
+            "focus_history_by_tab_id": {
+                "code-tab": ["vim-pane"],
+                "logs-tab": ["tail-pane"]
+            },
+            "floating_pane_view_by_pane_id": {},
+            "shown_floating_pane_ids": [],
+            "focused_floating_pane_id": null
+        })
+    );
+}
+
+#[test]
+fn step_four_removes_the_placement_revision_of_each_session_and_client() {
+    let mut resume_body = serde_json::json!({
+        "session_by_id": {
+            "first": {
+                "placement_revision": 4,
+                "floating_set": {"members": []},
+                "tabs": {},
+                "clients": {"client_by_id": {
+                    "client": {
+                        "placement_revision": 2,
+                        "focused_pane_id_by_tab_id": {},
+                        "floating_pane_view_by_pane_id": {},
+                        "shown_floating_pane_ids": [],
+                        "focused_floating_pane_id": null
+                    }
+                }},
+                "panes": {"pane_record_by_id": {}}
+            }
+        },
+        "carried_pane_state_by_pane_id": {}
+    });
+
+    migrate_resume_four_to_five(&mut resume_body).expect("step 4 converts the body");
+
+    assert_eq!(
+        resume_body,
+        serde_json::json!({
+            "session_by_id": {
+                "first": {
+                    "floating_set": {"members": []},
+                    "tabs": {},
+                    "clients": {"client_by_id": {
+                        "client": {
+                            "focus_history_by_tab_id": {},
+                            "floating_pane_view_by_pane_id": {},
+                            "shown_floating_pane_ids": [],
+                            "focused_floating_pane_id": null
+                        }
+                    }},
                     "panes": {"pane_record_by_id": {}}
                 }
             },
@@ -677,6 +790,7 @@ fn step_four_removes_the_lifecycle_and_close_policy_of_each_pane_record() {
         "session_by_id": {
             "first": {
                 "floating_set": {"members": []},
+                "tabs": {},
                 "clients": {"client_by_id": {}},
                 "panes": {"pane_record_by_id": {
                     "running": {
@@ -730,26 +844,50 @@ fn step_four_names_the_missing_or_misshapen_field() {
         ),
         (
             serde_json::json!({"session_by_id": {"S": {}}}),
+            "body.session_by_id.S.tabs is missing",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {"tabs": 7}}}),
+            "session.tabs must be an object",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {"tabs": {"T": 7}}}}),
+            "session.tabs.T must be an object",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {"tabs": {}}}}),
             "body.session_by_id.S.clients is missing",
         ),
         (
-            serde_json::json!({"session_by_id": {"S": {"clients": 7}}}),
+            serde_json::json!({"session_by_id": {"S": {"tabs": {}, "clients": 7}}}),
             "session.clients must be an object",
         ),
         (
-            serde_json::json!({"session_by_id": {"S": {"clients": {}}}}),
+            serde_json::json!({"session_by_id": {"S": {"tabs": {}, "clients": {}}}}),
             "session.clients.client_by_id is missing",
         ),
         (
-            serde_json::json!({"session_by_id": {"S": {"clients": {"client_by_id": {"C": 7}}}}}),
+            serde_json::json!({"session_by_id": {"S": {"tabs": {}, "clients": {"client_by_id": {"C": 7}}}}}),
             "session.clients.client_by_id.C must be an object",
         ),
         (
-            serde_json::json!({"session_by_id": {"S": {"clients": {"client_by_id": {}}}}}),
+            serde_json::json!({"session_by_id": {"S": {"tabs": {}, "clients": {"client_by_id": {"C": {}}}}}}),
+            "session.clients.client_by_id.C.focused_pane_id_by_tab_id is missing",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {
+                "tabs": {},
+                "clients": {"client_by_id": {"C": {"focused_pane_id_by_tab_id": 7}}}
+            }}}),
+            "client.focused_pane_id_by_tab_id must be an object",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {"tabs": {}, "clients": {"client_by_id": {}}}}}),
             "body.session_by_id.S.panes is missing",
         ),
         (
             serde_json::json!({"session_by_id": {"S": {
+                "tabs": {},
                 "clients": {"client_by_id": {}},
                 "panes": 7
             }}}),
@@ -757,6 +895,7 @@ fn step_four_names_the_missing_or_misshapen_field() {
         ),
         (
             serde_json::json!({"session_by_id": {"S": {
+                "tabs": {},
                 "clients": {"client_by_id": {}},
                 "panes": {}
             }}}),
@@ -764,6 +903,7 @@ fn step_four_names_the_missing_or_misshapen_field() {
         ),
         (
             serde_json::json!({"session_by_id": {"S": {
+                "tabs": {},
                 "clients": {"client_by_id": {}},
                 "panes": {"pane_record_by_id": 7}
             }}}),
@@ -771,6 +911,7 @@ fn step_four_names_the_missing_or_misshapen_field() {
         ),
         (
             serde_json::json!({"session_by_id": {"S": {
+                "tabs": {},
                 "clients": {"client_by_id": {}},
                 "panes": {"pane_record_by_id": {"P": 7}}
             }}}),

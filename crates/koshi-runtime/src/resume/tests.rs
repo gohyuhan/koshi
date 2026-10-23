@@ -8,7 +8,7 @@
 //! resume-token hashes the body carries read back as, and what a write over an
 //! existing file and a write into a directory that is not there each do.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, SystemTime};
@@ -117,16 +117,15 @@ fn migrate_format_four_restores_the_session_with_no_floating_panes_and_empty_cli
     assert_eq!(session.tabs.len(), 2);
     assert_eq!(session.panes.count_pane_records(), 4);
     assert_eq!(session.clients.count_clients(), 2);
-    assert_eq!(session.get_placement_revision(), 4);
     assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
     assert_eq!(session.validate_session_consistency(), Ok(()));
     assert_eq!(
         session
             .clients
             .list_attached_clients()
-            .map(|client| (client.get_label(), client.get_placement_revision()))
-            .collect::<BTreeMap<&str, u64>>(),
-        BTreeMap::from([("C-silver-marble", 4), ("C-自在-月亮", 0)])
+            .map(Client::get_label)
+            .collect::<BTreeSet<&str>>(),
+        BTreeSet::from(["C-silver-marble", "C-自在-月亮"])
     );
     let session_json = serde_json::to_value(session).expect("serialize migrated session");
     assert_eq!(
@@ -143,7 +142,7 @@ fn migrate_format_four_restores_the_session_with_no_floating_panes_and_empty_cli
             serde_json::json!({})
         );
         assert_eq!(
-            client_record["floating_pane_focus_order"],
+            client_record["shown_floating_pane_ids"],
             serde_json::json!([])
         );
         assert_eq!(
@@ -2724,12 +2723,11 @@ fn a_saved_view_store_crosses_the_file_with_its_waiting_hash_and_its_filed_view(
         read_saved_view_store.take_saved_view(&filed_resume_token, filed_at),
         Some(SavedView {
             active_tab_id: filed_tab_id,
-            focused_pane_id_by_tab_id: HashMap::new(),
+            focus_history_by_tab_id: HashMap::new(),
             zoomed_pane_id_by_tab_id: HashMap::new(),
             scroll_offset_by_pane_id: HashMap::new(),
             floating_pane_view_by_pane_id: HashMap::new(),
-            floating_pane_focus_order: Vec::new(),
-            focused_floating_pane_id: None,
+            shown_floating_pane_ids: Vec::new(),
         })
     );
 }

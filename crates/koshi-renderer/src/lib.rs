@@ -8,6 +8,7 @@
 pub mod floating_pane_chrome;
 pub mod hit_test;
 pub mod images;
+pub mod placement;
 pub mod region;
 pub mod render;
 pub mod snapshot;
@@ -16,8 +17,7 @@ pub mod theme;
 
 pub use hit_test::{
     compute_clamped_pane_cell, compute_placement_handle_rect, find_first_visible_tab_index,
-    find_pane_content_rect, is_placement_handle_cell, resolve_hit_region, HitRegion,
-    PLACEMENT_HANDLE_COLUMN_COUNT,
+    find_pane_content_rect, resolve_hit_region, HitRegion, PLACEMENT_HANDLE_COLUMN_COUNT,
 };
 pub use images::{
     build_image_cell_snapshot, build_image_paints, draw_image_placeholders, ImageCellSnapshot,

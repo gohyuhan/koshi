@@ -2,17 +2,17 @@
 //!
 //! [`Server::build_overview`] answers an IPC `Discovery` request: it walks the
 //! process's session — tabs in bar order, every pane a tab's layout holds,
-//! every attached client — and packs them into one [`SessionOverview`], the
-//! serializable answer the CLI filters for whichever listing or inspect query
-//! it was given. The dispatcher thread builds it, from the same state a
-//! command reads.
+//! every floating pane, every attached client — and packs them into one
+//! [`SessionOverview`], the serializable answer the CLI filters for whichever
+//! listing or inspect query it was given. The dispatcher thread builds it,
+//! from the same state a command reads.
 
 use std::collections::HashMap;
 
 use koshi_core::discovery::{
     ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, SessionOverview, TabDiscovery,
 };
-use koshi_core::ids::PaneId;
+use koshi_core::ids::{PaneId, TabId};
 use koshi_core::process::SpawnSpec;
 use koshi_session::session::state::{Session, Tab};
 
@@ -83,12 +83,11 @@ impl Server {
     }
 }
 
-/// One [`PaneDiscovery`] row per pane that a tab's layout holds and the session
-/// registry knows, in the tab-bar order of the tabs holding them and layout
-/// order within each tab. A layout leaf the registry does not hold gets no row.
-/// Every row's lifecycle is [`PaneLifecycle::Running`]. A pane whose child
-/// exited is gone from the registry and gets no row. The title is the pane
-/// terminal's OSC 0/1/2 title, once the child has set one.
+/// One [`PaneDiscovery`] row per pane that a tab's layout or the floating set
+/// holds and the session registry knows: the tabs' panes in the tab-bar order
+/// of the tabs holding them and layout order within each tab, then the
+/// floating panes in the order the panes became floating, with `tab_id: None`.
+/// A pane the registry does not hold gets no row.
 fn list_pane_discoveries(
     session: &Session,
     tabs: &[&Tab],
@@ -97,30 +96,57 @@ fn list_pane_discoveries(
     let mut pane_discoveries = Vec::with_capacity(session.panes.count_pane_records());
     for tab in tabs {
         for pane_id in tab.get_layout_tree().list_leaf_pane_ids() {
-            let Some(pane_record) = session.panes.get_pane_record_by_id(pane_id) else {
-                continue;
-            };
-            let focused_by_client_ids = session
-                .clients
-                .list_attached_clients()
-                .filter(|client| client.get_active_focused_pane_id() == Some(pane_id))
-                .map(|client| client.get_client_id())
-                .collect();
-            pane_discoveries.push(PaneDiscovery {
+            pane_discoveries.extend(build_pane_discovery(
+                session,
+                Some(tab.get_tab_id()),
                 pane_id,
-                tab_id: tab.get_tab_id(),
-                session_id: session.session_id,
-                pane_title: terminal_engine_by_pane_id
-                    .get(&pane_id)
-                    .and_then(|engine| engine.get_terminal_state().get_title().map(str::to_owned)),
-                working_directory: pane_record.working_directory.clone(),
-                command_argv: pane_record.spawn_spec.as_ref().map(list_spawn_argv),
-                lifecycle: PaneLifecycle::Running,
-                focused_by_client_ids,
-            });
+                terminal_engine_by_pane_id,
+            ));
         }
     }
+    for floating_member in session.floating_set.list_members() {
+        pane_discoveries.extend(build_pane_discovery(
+            session,
+            None,
+            floating_member.pane_id,
+            terminal_engine_by_pane_id,
+        ));
+    }
     pane_discoveries
+}
+
+/// The [`PaneDiscovery`] row of `pane_id`, held by tab `tab_id` or, for
+/// `None`, by the floating set. `None` when the session registry does not hold
+/// the pane: a pane whose child exited is gone from the registry. The lifecycle
+/// is [`PaneLifecycle::Running`]. The title is the pane terminal's OSC 0/1/2
+/// title, once the child has set one. `focused_by_client_ids` lists every
+/// attached client whose input the pane takes
+/// ([`Client::get_active_focused_pane_id`](koshi_session::client::Client::get_active_focused_pane_id)).
+fn build_pane_discovery(
+    session: &Session,
+    tab_id: Option<TabId>,
+    pane_id: PaneId,
+    terminal_engine_by_pane_id: &HashMap<PaneId, TerminalEngine>,
+) -> Option<PaneDiscovery> {
+    let pane_record = session.panes.get_pane_record_by_id(pane_id)?;
+    let focused_by_client_ids = session
+        .clients
+        .list_attached_clients()
+        .filter(|client| client.get_active_focused_pane_id() == Some(pane_id))
+        .map(|client| client.get_client_id())
+        .collect();
+    Some(PaneDiscovery {
+        pane_id,
+        tab_id,
+        session_id: session.session_id,
+        pane_title: terminal_engine_by_pane_id
+            .get(&pane_id)
+            .and_then(|engine| engine.get_terminal_state().get_title().map(str::to_owned)),
+        working_directory: pane_record.working_directory.clone(),
+        command_argv: pane_record.spawn_spec.as_ref().map(list_spawn_argv),
+        lifecycle: PaneLifecycle::Running,
+        focused_by_client_ids,
+    })
 }
 
 /// A spawn spec as the argv discovery reports: the program first, then its

@@ -162,6 +162,7 @@ fn attach_test_client(server: &mut Server) -> AttachAccepted {
         is_remote: false,
         max_frames_per_second: 60,
         response_sender: attach_response_sender,
+        placement_preview_target: None,
     });
     attach_response_receiver
         .try_recv()
@@ -2297,6 +2298,7 @@ fn a_line_a_client_sends_after_reading_the_restart_frame_reaches_its_pane_before
             cell_size: None,
             link_timeout_ms: None,
             max_frames_per_second: 60,
+            placement_preview_target: None,
         },
     );
     frame_writer

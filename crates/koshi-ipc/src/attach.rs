@@ -48,9 +48,8 @@ pub struct TabStructure {
     /// terminal size.
     pub layout: LayoutNode,
     /// Panes this tab has focused, most-recent first, across every client that
-    /// has viewed it. The head is the tab's most-recently-focused pane. Focus
-    /// recovery walks the rest as panes close. Empty when nothing in the tab
-    /// has been focused yet.
+    /// has viewed it. The head is the tab's most-recently-focused pane. Empty
+    /// when nothing in the tab has been focused yet.
     pub focus_mru: Vec<PaneId>,
 }
 

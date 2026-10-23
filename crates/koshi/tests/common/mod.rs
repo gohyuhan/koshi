@@ -26,8 +26,10 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use koshi::session_end::list_pane_holder_records;
 use koshi_core::ids::SessionId;
 use koshi_core::process::{ShellKind, SpawnSpec};
+use koshi_host::process_tree;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::remote_servers::{resolve_server_store_path, SavedServer, ServerStore};
@@ -71,16 +73,36 @@ pub fn terminate_process(process_id: u32) {
         .status();
 }
 
-/// End the process with id `process_id`, whatever it is doing.
+/// End the process with id `process_id`, whatever it is doing, and return
+/// once it is gone or [`WAIT_DURATION`] has passed. Nothing happens when no
+/// process has that id.
 #[cfg(windows)]
 pub fn terminate_process(process_id: u32) {
-    let _ = Command::new("taskkill")
-        .arg("/PID")
-        .arg(process_id.to_string())
-        .arg("/F")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let Some(process_record) = process_tree::find_process_record(process_id) else {
+        return;
+    };
+    let process_records = std::slice::from_ref(&process_record);
+    process_tree::stop_processes(process_records, Duration::ZERO);
+    let _ = process_tree::wait_for_processes_to_end(process_records, WAIT_DURATION);
+}
+
+/// End every process holding a pane of the session `session_id`, which serves
+/// `runtime_directory`, and every process under them, and return once each of
+/// them is gone or [`WAIT_DURATION`] has passed. The pane holders are the ones
+/// [`list_pane_holder_records`] finds: the PTY supervisors on Windows, and none
+/// on Linux and macOS, where a session server holds its own panes.
+pub fn end_session_pane_holders(runtime_directory: &Path, session_id: SessionId) {
+    let pane_holder_records = list_pane_holder_records(runtime_directory, session_id);
+    if pane_holder_records.is_empty() {
+        return;
+    }
+    let mut pane_holder_tree_records = process_tree::list_member_records(
+        &pane_holder_records,
+        &process_tree::list_process_records().unwrap_or_default(),
+    );
+    pane_holder_tree_records.extend(pane_holder_records);
+    process_tree::stop_processes(&pane_holder_tree_records, Duration::ZERO);
+    let _ = process_tree::wait_for_processes_to_end(&pane_holder_tree_records, WAIT_DURATION);
 }
 
 /// A process the test did not start itself, held by its process id. Dropping it
@@ -95,24 +117,31 @@ impl Drop for RunningProcess {
     }
 }
 
-/// The session servers a test made a router start. Dropping it ends them, so a
-/// test that kills its router leaves no session server behind.
+/// The session servers a test made a router start in `runtime_directory`, one
+/// per session address. Dropping it ends each session server, then the
+/// processes holding that session's panes ([`end_session_pane_holders`]).
 pub struct RunningSessions {
-    pub session_server_process_ids: Vec<u32>,
+    pub runtime_directory: PathBuf,
+    pub session_addresses: Vec<SessionAddress>,
 }
 
 impl Drop for RunningSessions {
     fn drop(&mut self) {
-        for process_id in &self.session_server_process_ids {
-            terminate_process(*process_id);
+        for session_address in &self.session_addresses {
+            terminate_process(session_address.process_id);
+            end_session_pane_holders(&self.runtime_directory, session_address.session_id);
         }
     }
 }
 
 /// A session server the test started as its own `koshi serve-session`
-/// process. Dropping it ends that process.
+/// process, serving `session_id` in `runtime_directory`. Dropping it ends that
+/// process, then the processes holding the session's panes
+/// ([`end_session_pane_holders`]).
 pub struct SessionProcess {
     pub child_process: Child,
+    pub runtime_directory: PathBuf,
+    pub session_id: SessionId,
 }
 
 impl SessionProcess {
@@ -203,6 +232,7 @@ impl Drop for SessionProcess {
     fn drop(&mut self) {
         let _ = self.child_process.kill();
         let _ = self.child_process.wait();
+        end_session_pane_holders(&self.runtime_directory, self.session_id);
     }
 }
 
@@ -433,6 +463,8 @@ pub fn start_session_server_under_home(
                 .arg(runtime_directory)
                 .stdout(Stdio::null()),
         ),
+        runtime_directory: runtime_directory.to_path_buf(),
+        session_id,
     }
 }
 

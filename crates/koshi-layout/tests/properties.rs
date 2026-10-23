@@ -218,12 +218,7 @@ fn apply_layout_operation(
         }
         LayoutOperation::Remove { target_leaf_index } => {
             let removed_pane_id = select_leaf_pane_id(target_leaf_index);
-            if let Ok((next_layout_tree, _)) = remove_pane(
-                layout_tree,
-                tab_rect,
-                removed_pane_id,
-                build_pane_sizing(gap_cell_count),
-            ) {
+            if let Ok(next_layout_tree) = remove_pane(layout_tree, removed_pane_id) {
                 *layout_tree = next_layout_tree;
                 live_pane_ids.remove(&removed_pane_id);
             }
@@ -384,7 +379,7 @@ fn a_fixed_layout_operation_sequence_lands_on_its_exact_layout() {
                 LayoutNode::Pane(leaf_pane_ids[0]),
                 LayoutNode::Split(SplitNode::from_stacked_pane_ids(
                     vec![leaf_pane_ids[1], leaf_pane_ids[2]],
-                    1
+                    0
                 )),
             ],
             weights: vec![
@@ -402,9 +397,12 @@ fn a_fixed_layout_operation_sequence_lands_on_its_exact_layout() {
     );
 
     // The resized pane holds 45 of the 80 columns, and the stack's 35 split
-    // into one header row plus the active member's 23.
+    // into the active member's 23 rows plus one header row below it.
     let stack_header_rect = Rect::from_origin_and_size(
-        Point { column: 45, row: 0 },
+        Point {
+            column: 45,
+            row: 23,
+        },
         Size {
             column_count: 35,
             row_count: 1,
@@ -421,24 +419,24 @@ fn a_fixed_layout_operation_sequence_lands_on_its_exact_layout() {
                         row_count: 24
                     })
                 ),
-                (leaf_pane_ids[1], stack_header_rect),
                 (
-                    leaf_pane_ids[2],
+                    leaf_pane_ids[1],
                     Rect::from_origin_and_size(
-                        Point { column: 45, row: 1 },
+                        Point { column: 45, row: 0 },
                         Size {
                             column_count: 35,
                             row_count: 23
                         }
                     )
                 ),
+                (leaf_pane_ids[2], stack_header_rect),
             ],
             suppressed_pane_ids: Vec::new(),
             is_every_pane_suppressed: false,
             stack_headers: vec![StackHeader {
-                pane_id: leaf_pane_ids[1],
+                pane_id: leaf_pane_ids[2],
                 header_rect: stack_header_rect,
-                member_index: 0,
+                member_index: 1,
                 member_count: 2,
             }],
         }

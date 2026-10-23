@@ -702,6 +702,8 @@ fn start_session_with_fake_tool(config_text: &str) -> SessionWithFakeTool {
                 .arg(&runtime_directory)
                 .stdout(Stdio::null()),
         ),
+        runtime_directory: runtime_directory.clone(),
+        session_id,
     };
     let session_endpoint =
         session_process.wait_for_session_endpoint(&runtime_directory, session_id);

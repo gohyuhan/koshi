@@ -20,9 +20,8 @@
 //! [`RenderSnapshot`] on its queue and returns it to live delivery. The
 //! snapshot rides the same queue as events, so the subscriber reads the
 //! backlog it already had, then the snapshot, then live events again. A mouse
-//! answer, session switch, placement preview, placement refusal, or placement
-//! command rejection that does not fit marks the subscriber desynced the same
-//! way; a frame that does not fit is dropped and the subscriber stays live.
+//! answer, session switch, or placement command rejection that does not fit
+//! marks the subscriber desynced the same way; a frame that does not fit is dropped and the subscriber stays live.
 //!
 //! A frame or a resync snapshot that does not fit also marks the subscriber's
 //! [`WriterHandoff`] owed a frame. The thread that writes the subscriber's
@@ -59,9 +58,7 @@ use koshi_core::event::{Event, SubscriberLagged};
 use koshi_core::ids::{CommandId, SessionId, SubscriberId};
 use koshi_core::mouse::MouseAnswer;
 use koshi_ipc::event::{SessionEvent, MAX_HOST_WRITE_BYTE_COUNT};
-use koshi_renderer::snapshot::{
-    Delivery, PlacementSnapshot, PlacementSnapshotError, PlacementSnapshotErrorCode, RenderSnapshot,
-};
+use koshi_renderer::snapshot::{Delivery, RenderSnapshot};
 
 use crate::runtime::clipboard::encode_osc52_copy;
 use crate::runtime::delivery_queue::{create_delivery_queue, DeliveryReceiver, DeliverySender};
@@ -550,64 +547,6 @@ impl EventBus {
         }
     }
 
-    /// Put one placement preview on a live subscriber's queue.
-    ///
-    /// Returns `true` when queued. A full queue marks the subscriber
-    /// desynchronized, and a missing or disconnected subscriber returns
-    /// `false`.
-    pub(crate) fn try_send_placement_snapshot(
-        &mut self,
-        subscriber_id: SubscriberId,
-        request_id: u64,
-        placement_snapshot: Box<PlacementSnapshot>,
-    ) -> bool {
-        match self.try_send_delivery(
-            subscriber_id,
-            Delivery::PanePlacementSnapshot {
-                request_id,
-                snapshot: placement_snapshot,
-            },
-        ) {
-            QueueDeliveryStatus::Sent => true,
-            QueueDeliveryStatus::Dropped => {
-                tracing::warn!(
-                    subscriber_id = %subscriber_id,
-                    request_id,
-                    "placement preview dropped; subscriber desynced, awaiting snapshot"
-                );
-                false
-            }
-            QueueDeliveryStatus::Skipped => false,
-        }
-    }
-
-    /// Put a placement preview refusal on a live subscriber's queue.
-    pub(crate) fn try_send_placement_refusal(
-        &mut self,
-        subscriber_id: SubscriberId,
-        request_id: u64,
-        placement_error: PlacementSnapshotError,
-    ) -> bool {
-        match self.try_send_delivery(
-            subscriber_id,
-            Delivery::PanePlacementRefused {
-                request_id,
-                refusal: placement_error,
-            },
-        ) {
-            QueueDeliveryStatus::Sent => true,
-            QueueDeliveryStatus::Dropped => {
-                tracing::warn!(
-                    subscriber_id = %subscriber_id,
-                    request_id,
-                    "placement refusal dropped; subscriber desynced, awaiting snapshot"
-                );
-                false
-            }
-            QueueDeliveryStatus::Skipped => false,
-        }
-    }
-
     /// Put `mouse_answers`, the answer to mouse round `request_id`, on a live
     /// subscriber's queue.
     ///
@@ -901,32 +840,6 @@ pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             | Event::PaneMinimizedChanged(_) => None,
         },
         Delivery::Frame(_) => None,
-        Delivery::PanePlacementSnapshot {
-            request_id,
-            snapshot,
-        } => Some(SessionEvent::PanePlacementSnapshot {
-            request_id: *request_id,
-            snapshot: Box::new(crate::runtime::frame::build_wire_placement_snapshot(
-                snapshot,
-            )),
-        }),
-        Delivery::PanePlacementRefused {
-            request_id,
-            refusal,
-        } => Some(SessionEvent::PanePlacementRefused {
-            request_id: *request_id,
-            refusal: koshi_ipc::protocol::IpcErrorPayload {
-                code: match refusal.code {
-                    PlacementSnapshotErrorCode::NotFound => {
-                        koshi_ipc::protocol::IpcErrorCode::NotFound
-                    }
-                    PlacementSnapshotErrorCode::ResourceLimit => {
-                        koshi_ipc::protocol::IpcErrorCode::ResourceLimit
-                    }
-                },
-                message: refusal.message.clone(),
-            },
-        }),
         Delivery::Snapshot { lag_report, .. } => Some(SessionEvent::Resync {
             dropped_event_count: lag_report.dropped_event_count,
         }),

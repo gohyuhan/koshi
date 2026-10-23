@@ -14,7 +14,9 @@ use std::num::NonZeroU16;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::runtime::command::tests::{build_floating_new_pane_args, create_floating_pane};
+use crate::runtime::command::tests::{
+    attach_client_through_server, build_floating_new_pane_args, create_floating_pane,
+};
 use crate::runtime::pty_inbox::InboxSink;
 use crate::runtime::tests::{apply_mouse_actions, build_viewer, dispatch_mouse_input_at_time};
 use koshi_client::mouse::{MouseAction, TABLINE_DRAG_CELL_COUNT};
@@ -197,7 +199,8 @@ fn build_mouse_input_at(mouse_kind: MouseKind, column_index: u16, row_index: u16
     }
 }
 
-fn build_tab(server: &mut Server, client_id: ClientId) {
+/// Open a new tab with a `NewTab` command from `client_id`'s keybinding.
+fn create_tab(server: &mut Server, client_id: ClientId) {
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
@@ -281,7 +284,7 @@ fn scroll_tabline_to_index(
 fn clicking_an_inactive_tab_focuses_it_and_clears_the_peek() {
     let (mut server, client_id) = build_runtime();
     for _ in 0..30 {
-        build_tab(&mut server, client_id); // overflow the 80-column strip
+        create_tab(&mut server, client_id); // overflow the 80-column strip
     }
     let mut viewer = build_viewer(client_id);
 
@@ -327,7 +330,7 @@ fn a_tab_switch_by_any_route_reveals_the_new_tab() {
     // anywhere — here a `focus-tab` command, not a click — reveals the new tab.
     let (mut server, client_id) = build_runtime();
     for _ in 0..30 {
-        build_tab(&mut server, client_id);
+        create_tab(&mut server, client_id);
     }
     let mut viewer = build_viewer(client_id);
     scroll_tabline_to_index(&mut server, &mut viewer, 3);
@@ -362,7 +365,7 @@ fn a_tab_switch_by_any_route_reveals_the_new_tab() {
 fn clicking_the_right_scroll_arrow_peeks_one_tab_toward_the_end() {
     let (mut server, client_id) = build_runtime();
     for _ in 0..30 {
-        build_tab(&mut server, client_id); // overflow the 80-column strip
+        create_tab(&mut server, client_id); // overflow the 80-column strip
     }
     let mut viewer = build_viewer(client_id);
     scroll_tabline_to_index(&mut server, &mut viewer, 0);
@@ -384,7 +387,7 @@ fn clicking_the_right_scroll_arrow_peeks_one_tab_toward_the_end() {
 fn wheel_over_the_tabline_steps_the_offset() {
     let (mut server, client_id) = build_runtime();
     for _ in 0..30 {
-        build_tab(&mut server, client_id);
+        create_tab(&mut server, client_id);
     }
     let mut viewer = build_viewer(client_id);
     scroll_tabline_to_index(&mut server, &mut viewer, 0);
@@ -419,7 +422,7 @@ fn wheel_over_the_tabline_steps_the_offset() {
 fn a_wheel_off_the_tabline_row_does_not_scroll_it() {
     let (mut server, client_id) = build_runtime();
     for _ in 0..30 {
-        build_tab(&mut server, client_id);
+        create_tab(&mut server, client_id);
     }
     let mut viewer = build_viewer(client_id);
     scroll_tabline_to_index(&mut server, &mut viewer, 2);
@@ -448,7 +451,7 @@ fn a_wheel_off_the_tabline_row_does_not_scroll_it() {
 fn motion_and_non_left_buttons_leave_state_untouched() {
     let (mut server, client_id) = build_runtime();
     for _ in 0..30 {
-        build_tab(&mut server, client_id);
+        create_tab(&mut server, client_id);
     }
     let mut viewer = build_viewer(client_id);
     scroll_tabline_to_index(&mut server, &mut viewer, 2);
@@ -497,7 +500,7 @@ fn motion_and_non_left_buttons_leave_state_untouched() {
 fn dragging_scrolls_from_the_anchor_and_release_ends_it() {
     let (mut server, client_id) = build_runtime();
     for _ in 0..30 {
-        build_tab(&mut server, client_id);
+        create_tab(&mut server, client_id);
     }
     let mut viewer = build_viewer(client_id);
     scroll_tabline_to_index(&mut server, &mut viewer, 2);
@@ -609,6 +612,7 @@ fn find_vertical_border(server: &Server, client_id: ClientId) -> (Point, PaneId,
         if let HitRegion::PaneBorder {
             pane_id,
             side: border_side,
+            ..
         } = resolve_hit_region(
             render_snapshot.build_frame_layout(ViewerChrome::default()),
             Point {
@@ -901,6 +905,7 @@ fn find_horizontal_border(server: &Server, client_id: ClientId) -> (Point, PaneI
         if let HitRegion::PaneBorder {
             pane_id,
             side: border_side,
+            ..
         } = resolve_hit_region(
             render_snapshot.build_frame_layout(ViewerChrome::default()),
             Point {
@@ -952,6 +957,7 @@ fn find_outer_vertical_frame(server: &Server, client_id: ClientId) -> (Point, Pa
         if let HitRegion::PaneBorder {
             pane_id,
             side: border_side,
+            ..
         } = resolve_hit_region(
             render_snapshot.build_frame_layout(ViewerChrome::default()),
             Point {
@@ -1305,7 +1311,7 @@ fn a_forwarded_report_clears_the_recovery_notice_only_when_the_pane_takes_it() {
         Vec::<Vec<u8>>::new(),
         "a pane in no mouse mode receives nothing"
     );
-    assert!(server.list_sessions()[&session_id].is_recovery_notice_visible);
+    assert!(server.list_sessions()[&session_id].is_recovery_notice_visible());
 
     // Normal tracking with SGR encoding: the press is written.
     server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
@@ -1323,7 +1329,7 @@ fn a_forwarded_report_clears_the_recovery_notice_only_when_the_pane_takes_it() {
         vec![format!("\x1b[<0;{pane_column};{pane_row}M").into_bytes()],
         "the press reached the program"
     );
-    assert!(!server.list_sessions()[&session_id].is_recovery_notice_visible);
+    assert!(!server.list_sessions()[&session_id].is_recovery_notice_visible());
 
     // The pane refuses the bytes: nothing is recorded.
     server.show_session_recovery_notice(session_id);
@@ -1342,7 +1348,7 @@ fn a_forwarded_report_clears_the_recovery_notice_only_when_the_pane_takes_it() {
         vec![format!("\x1b[<0;{pane_column};{pane_row}M").into_bytes()],
         "the refused press left no record"
     );
-    assert!(server.list_sessions()[&session_id].is_recovery_notice_visible);
+    assert!(server.list_sessions()[&session_id].is_recovery_notice_visible());
 }
 
 /// A tab whose only viewer reports [`PaneArea::Starving`] has no effective
@@ -1356,13 +1362,15 @@ fn a_click_from_a_starving_sole_viewer_forwards_nothing() {
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
     server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
 
-    server
-        .get_session_for_client_mut(client_id)
-        .expect("session")
-        .clients
-        .get_client_mut_by_id(client_id)
-        .expect("client")
-        .update_pane_area(Some(PaneArea::Starving));
+    let _ = server.handle_client_resize(
+        client_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        Some(PaneArea::Starving),
+        None,
+    );
     let mut viewer = build_viewer(client_id);
 
     dispatch_mouse_input_at_time(
@@ -1820,7 +1828,7 @@ fn a_wheel_on_the_alternate_screen_with_alternate_scroll_sends_arrow_keys() {
         vec![b"\x1b[A\x1b[A\x1b[A".to_vec()],
         "wheel up becomes three up-arrows under default cursor keys"
     );
-    assert!(!server.list_sessions()[&session_id].is_recovery_notice_visible);
+    assert!(!server.list_sessions()[&session_id].is_recovery_notice_visible());
 
     dispatch_mouse_input(
         &mut server,
@@ -3056,40 +3064,6 @@ fn create_forty_by_twelve_floating_pane(
     )
 }
 
-/// Attach a new local client to `client_id`'s session through the server, on
-/// `client_id`'s active tab and an `80x24` terminal that reports `pane_area`,
-/// and return the new client's id.
-fn attach_second_client(
-    server: &mut Server,
-    client_id: ClientId,
-    pane_area: Option<PaneArea>,
-) -> ClientId {
-    let session_id = server
-        .get_session_for_client(client_id)
-        .expect("session")
-        .session_id;
-    let active_tab_id = server
-        .build_snapshot(client_id)
-        .expect("render snapshot")
-        .client_snapshot
-        .active_tab_id;
-    let second_client_id = ClientId::new();
-    server.handle_client_attach(
-        session_id,
-        second_client_id,
-        Size {
-            column_count: 80,
-            row_count: 24,
-        },
-        pane_area,
-        active_tab_id,
-        None,
-        SystemTime::UNIX_EPOCH,
-        false,
-    );
-    second_client_id
-}
-
 /// The box `client_id` draws `pane_id` in, counted from its pane area.
 fn get_floating_pane_outer_rect(server: &Server, client_id: ClientId, pane_id: PaneId) -> Rect {
     server
@@ -3166,11 +3140,6 @@ fn a_floating_pane_move_from_the_clients_own_connection_is_named_in_its_next_fra
 
     // A move to the cell the client already stores changes nothing, and the
     // next frame still names it.
-    let client_revision_before_the_repeat = server
-        .build_snapshot(client_id)
-        .expect("render snapshot")
-        .client_snapshot
-        .client_revision;
     let repeated_command_id = CommandId::new();
     server.run_client_mouse(
         client_id,
@@ -3185,12 +3154,8 @@ fn a_floating_pane_move_from_the_clients_own_connection_is_named_in_its_next_fra
         Some(repeated_command_id)
     );
     assert_eq!(
-        server
-            .build_snapshot(client_id)
-            .expect("render snapshot")
-            .client_snapshot
-            .client_revision,
-        client_revision_before_the_repeat
+        get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+        moved_outer_rect
     );
 
     // A move from the client's own key bindings comes from its own
@@ -3553,6 +3518,7 @@ fn a_pinned_floating_pane_drawn_pulled_in_shrinks_only_as_far_as_its_right_borde
             ) == HitRegion::PaneBorder {
                 pane_id: floating_pane_id,
                 side: Direction::Right,
+                corner_horizontal_side: None,
             }
         })
         .expect("the pane's right border on screen row 11");
@@ -3602,9 +3568,13 @@ fn a_floating_pane_border_drag_from_a_too_short_client_answers_the_cells_a_talle
         Point { column: 30, row: 4 },
         false,
     );
-    let _ = attach_second_client(
+    let _ = attach_client_through_server(
         &mut server,
         client_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
         Some(PaneArea::Reported(Size {
             column_count: 80,
             row_count: 22,
@@ -3671,7 +3641,15 @@ fn a_handle_drag_moves_only_the_dragging_viewers_view_of_the_floating_pane() {
         Point { column: 10, row: 4 },
         false,
     );
-    let bob_client_id = attach_second_client(&mut server, alice_client_id, None);
+    let bob_client_id = attach_client_through_server(
+        &mut server,
+        alice_client_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        None,
+    );
     let mut alice_viewer = build_viewer(alice_client_id);
     let bob_frame_before_the_drag = server.build_snapshot(bob_client_id).expect("bob's frame");
 
@@ -3844,7 +3822,7 @@ fn removing_a_client_releases_its_held_button_at_the_cell_of_its_last_drag() {
         "the left release goes out at the cell of the last drag"
     );
     assert!(
-        server.list_sessions()[&session_id].is_recovery_notice_visible,
+        server.list_sessions()[&session_id].is_recovery_notice_visible(),
         "the release koshi writes itself leaves the recovery notice up"
     );
 
@@ -3952,6 +3930,7 @@ fn a_token_that_takes_a_client_over_releases_the_button_that_client_held() {
             SystemTime::UNIX_EPOCH,
             true,
             60,
+            None,
         )
         .expect("the first dial attaches");
     forward_mouse_at(
@@ -3973,6 +3952,7 @@ fn a_token_that_takes_a_client_over_releases_the_button_that_client_held() {
             SystemTime::UNIX_EPOCH,
             true,
             60,
+            None,
         )
         .expect("the second dial attaches");
 

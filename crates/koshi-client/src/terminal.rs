@@ -4,7 +4,7 @@
 //! Every item here belongs to one attached terminal. The session it is joined
 //! to owns none of them.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::{self, IsTerminal, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,15 +40,11 @@ use koshi_kitty::{
     write_kitty_abort, write_kitty_delete_all, write_kitty_support_query, KittyOutputError,
     KITTY_QUERY_IMAGE_ID,
 };
-use koshi_layout::content::list_content_rects;
-use koshi_layout::mode::LayoutMode;
-use koshi_layout::placement::{place_pane_across_tabs, place_pane_within_tab, PlacementTarget};
-use koshi_layout::solver::solve_layout_with_mode;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{
     CommittedRegions, CursorStyle, FloatingPaneSlot, KeymapHints, PanePlacementPresentation,
-    PaneSlot, PaneSnapshot, PlacementPaneSnapshot, PlacementSnapshot, PlacementTabSnapshot,
-    RenderSnapshot, TabSnapshot, ViewerChrome,
+    PaneSnapshot, PlacementSnapshot, PlacementTabSnapshot, RenderSnapshot, TabSnapshot,
+    ViewerChrome,
 };
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{
@@ -107,9 +103,9 @@ const APPLICATION_MODE_CLEANUP_BYTES: &[u8] =
     b"\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q";
 
 /// Paints a render snapshot into ratatui's frame buffer with
-/// [`koshi_renderer::render_frame`]. With a placement
-/// display snapshot and a placement target, it then outlines the target's
-/// slot in the retained placement snapshot.
+/// [`koshi_renderer::render_frame`]. With a placement preview, a displayed
+/// placement tab and a placement target, it then outlines the target's slot
+/// in the preview's displayed tab.
 pub(crate) struct SnapshotWidget<'a> {
     /// The frame the session handed out.
     pub(crate) render_snapshot: &'a RenderSnapshot,
@@ -128,10 +124,10 @@ pub(crate) struct SnapshotWidget<'a> {
     /// The image placements that show the unavailable-image text in native
     /// image mode.
     pub(crate) unavailable_image_placement_keys: &'a [ImagePlacementKey],
-    /// The accepted read-only placement snapshot.
+    /// The layouts of the placement preview the paint draws from.
     pub(crate) placement_snapshot: Option<&'a PlacementSnapshot>,
-    /// The placement snapshot at the current animation time.
-    pub(crate) placement_display_snapshot: Option<&'a PlacementSnapshot>,
+    /// The tab the placement preview shows, at the current animation time.
+    pub(crate) placement_display_tab_snapshot: Option<&'a PlacementTabSnapshot>,
     /// The target selected by the viewer's placement interaction.
     pub(crate) placement_target: Option<&'a TiledPlacementTarget>,
     /// The whole-pane visual explanation for the viewer's placement.
@@ -157,34 +153,41 @@ impl Widget for SnapshotWidget<'_> {
             self.drawn_rows,
             render_buffer,
         );
-        if let Some(placement_display_snapshot) = self.placement_display_snapshot {
-            let placement_snapshot = self
-                .placement_snapshot
-                .unwrap_or(placement_display_snapshot);
-            if let Some(placement_target) = self.placement_target {
-                draw_placement_target_outline(
-                    placement_snapshot,
-                    placement_display_snapshot,
-                    self.render_snapshot,
-                    placement_target,
-                    self.theme,
-                    self.committed_regions,
-                    render_area,
-                    render_buffer,
-                );
-            }
+        if let (
+            Some(placement_snapshot),
+            Some(placement_display_tab_snapshot),
+            Some(placement_target),
+        ) = (
+            self.placement_snapshot,
+            self.placement_display_tab_snapshot,
+            self.placement_target,
+        ) {
+            draw_placement_target_outline(
+                placement_snapshot,
+                placement_display_tab_snapshot,
+                self.render_snapshot,
+                placement_target,
+                self.theme,
+                self.committed_regions,
+                render_area,
+                render_buffer,
+            );
         }
     }
 }
 
-/// Build the frame shown for a placement tab. A drag previewing tab `work`
-/// returns `work` with its proposed pane slots. The floating pane slots and
-/// their pane content stay as `render_snapshot` holds them.
+/// Build the frame shown for a placement tab: `render_snapshot` with
+/// `displayed_tab_snapshot` as its active tab, focused on `source_pane_id`
+/// when that tab shows it. Each pane of that tab and each floating pane keeps
+/// the content `render_snapshot` carries for it, and a pane it carries none
+/// for is drawn empty. A drag previewing tab `work` returns `work` with its
+/// proposed pane slots. The floating pane slots stay as `render_snapshot`
+/// holds them.
 pub(crate) fn build_placement_render_snapshot(
     render_snapshot: &RenderSnapshot,
-    placement_display_snapshot: &PlacementSnapshot,
-) -> Option<RenderSnapshot> {
-    let displayed_tab_snapshot = find_displayed_placement_tab_snapshot(placement_display_snapshot)?;
+    displayed_tab_snapshot: &PlacementTabSnapshot,
+    source_pane_id: PaneId,
+) -> RenderSnapshot {
     let mut placement_render_snapshot = render_snapshot.clone();
     let displayed_tab_id = displayed_tab_snapshot.tab_snapshot.tab_id;
     placement_render_snapshot
@@ -193,16 +196,11 @@ pub(crate) fn build_placement_render_snapshot(
     placement_render_snapshot.client_snapshot.active_tab_id = displayed_tab_id;
     placement_render_snapshot.client_snapshot.focused_pane_id = displayed_tab_snapshot
         .tab_snapshot
-        .pane_slots
-        .iter()
-        .find(|pane_slot| {
-            pane_slot.pane_id == placement_display_snapshot.source_pane_id && pane_slot.is_visible
-        })
-        .map(|_| placement_display_snapshot.source_pane_id);
+        .find_visible_pane_slot(source_pane_id)
+        .map(|_| source_pane_id);
     for tab_metadata in &mut placement_render_snapshot.session_snapshot.tabs_metadata {
         tab_metadata.is_active = tab_metadata.tab_id == displayed_tab_id;
     }
-    let base_pane_snapshots = std::mem::take(&mut placement_render_snapshot.pane_snapshots);
     let displayed_pane_ids = displayed_tab_snapshot
         .tab_snapshot
         .pane_slots
@@ -216,62 +214,22 @@ pub(crate) fn build_placement_render_snapshot(
                 .map(|floating_pane_slot| floating_pane_slot.pane_id),
         )
         .collect::<HashSet<_>>();
-    let placement_pane_snapshot_by_id = displayed_tab_snapshot
+    placement_render_snapshot
+        .pane_snapshots
+        .retain(|pane_snapshot| displayed_pane_ids.contains(&pane_snapshot.pane_id));
+    let content_pane_ids = placement_render_snapshot
         .pane_snapshots
         .iter()
-        .map(|placement_pane_snapshot| (placement_pane_snapshot.pane_id, placement_pane_snapshot))
-        .collect::<HashMap<_, _>>();
-    let mut displayed_pane_snapshot_ids = HashSet::new();
-    let mut displayed_pane_snapshots = base_pane_snapshots
-        .iter()
-        .filter(|pane_snapshot| displayed_pane_ids.contains(&pane_snapshot.pane_id))
-        .map(|base_pane_snapshot| {
-            displayed_pane_snapshot_ids.insert(base_pane_snapshot.pane_id);
-            let mut pane_snapshot = base_pane_snapshot.clone();
-            let Some(placement_pane_snapshot) = placement_pane_snapshot_by_id
-                .get(&base_pane_snapshot.pane_id)
-                .copied()
-            else {
-                return pane_snapshot;
-            };
-            pane_snapshot.terminal_grid_view = placement_pane_snapshot.terminal_grid_view.clone();
-            pane_snapshot.image_placement_snapshots =
-                placement_pane_snapshot.image_placement_snapshots.clone();
-            pane_snapshot
-        })
-        .collect::<Vec<_>>();
-    for placement_pane_snapshot in &displayed_tab_snapshot.pane_snapshots {
-        if !displayed_pane_snapshot_ids.insert(placement_pane_snapshot.pane_id) {
-            continue;
-        }
-        let mut pane_snapshot = PaneSnapshot::from_empty_pane(placement_pane_snapshot.pane_id);
-        pane_snapshot.terminal_grid_view = placement_pane_snapshot.terminal_grid_view.clone();
-        pane_snapshot.image_placement_snapshots =
-            placement_pane_snapshot.image_placement_snapshots.clone();
-        displayed_pane_snapshots.push(pane_snapshot);
-    }
+        .map(|pane_snapshot| pane_snapshot.pane_id)
+        .collect::<HashSet<_>>();
     for pane_slot in &displayed_tab_snapshot.tab_snapshot.pane_slots {
-        if !displayed_pane_snapshot_ids.insert(pane_slot.pane_id) {
-            continue;
+        if !content_pane_ids.contains(&pane_slot.pane_id) {
+            placement_render_snapshot
+                .pane_snapshots
+                .push(PaneSnapshot::from_empty_pane(pane_slot.pane_id));
         }
-        displayed_pane_snapshots.push(PaneSnapshot::from_empty_pane(pane_slot.pane_id));
     }
-    placement_render_snapshot.pane_snapshots = displayed_pane_snapshots;
-    Some(placement_render_snapshot)
-}
-
-/// Return the tab a placement snapshot shows: `source_tab_snapshot` when
-/// `source_tab_id` equals `destination_tab_id`, otherwise
-/// `destination_tab_snapshot`. A snapshot for another tab with no
-/// `destination_tab_snapshot` returns `None`.
-pub(crate) fn find_displayed_placement_tab_snapshot(
-    placement_snapshot: &PlacementSnapshot,
-) -> Option<&PlacementTabSnapshot> {
-    if placement_snapshot.source_tab_id == placement_snapshot.destination_tab_id {
-        Some(&placement_snapshot.source_tab_snapshot)
-    } else {
-        placement_snapshot.destination_tab_snapshot.as_ref()
-    }
+    placement_render_snapshot
 }
 
 /// Build the frame shown while a committed placement or a floated pane
@@ -318,10 +276,7 @@ pub(crate) fn find_tiled_pane_rect_in_pane_area(
     pane_area_size: Size,
     pane_id: PaneId,
 ) -> Option<CoreRect> {
-    let pane_slot = tab_snapshot
-        .pane_slots
-        .iter()
-        .find(|pane_slot| pane_slot.pane_id == pane_id && pane_slot.is_visible)?;
+    let pane_slot = tab_snapshot.find_visible_pane_slot(pane_id)?;
     let tab_area = koshi_renderer::compute_content_rect(
         Rect {
             x: 0,
@@ -344,13 +299,14 @@ pub(crate) fn find_tiled_pane_rect_in_pane_area(
     ))
 }
 
-/// Draw the target border at the destination pane's original slot. If
-/// `pane-123` swaps with `pane-456`, the outline stays at `pane-456`'s original
-/// slot while `pane-123` animates there.
+/// Draw the target border at the destination pane's original slot in
+/// `placement_snapshot`'s displayed tab, placed by the size that tab is
+/// solved at. If `pane-123` swaps with `pane-456`, the outline stays at
+/// `pane-456`'s original slot while `pane-123` animates there.
 #[allow(clippy::too_many_arguments)]
 fn draw_placement_target_outline(
     placement_snapshot: &PlacementSnapshot,
-    placement_display_snapshot: &PlacementSnapshot,
+    placement_display_tab_snapshot: &PlacementTabSnapshot,
     displayed_render_snapshot: &RenderSnapshot,
     placement_target: &TiledPlacementTarget,
     theme: &Theme,
@@ -366,27 +322,26 @@ fn draw_placement_target_outline(
             return;
         }
     }
-    let (Some(base_tab_snapshot), Some(displayed_tab_snapshot)) = (
-        find_displayed_placement_tab_snapshot(placement_snapshot),
-        find_displayed_placement_tab_snapshot(placement_display_snapshot),
-    ) else {
+    let Some(base_tab_snapshot) = placement_snapshot.find_displayed_tab_snapshot() else {
         return;
     };
-    let tab_size = displayed_tab_snapshot.tab_snapshot.tab_size;
+    let tab_size = placement_display_tab_snapshot.tab_snapshot.tab_size;
     let pane_area = koshi_renderer::compute_pane_area(committed_regions, render_area);
     let layout_rect = koshi_renderer::compute_content_rect(pane_area, tab_size);
-    let Some(target_outline) =
-        build_target_outline_rect(base_tab_snapshot, placement_target, tab_size, layout_rect)
-    else {
+    let base_tab_size = base_tab_snapshot.tab_snapshot.tab_size;
+    let base_layout_rect = koshi_renderer::compute_content_rect(pane_area, base_tab_size);
+    let Some(target_outline) = build_target_outline_rect(
+        base_tab_snapshot,
+        placement_target,
+        base_tab_size,
+        base_layout_rect,
+    ) else {
         return;
     };
     let source_pane_rect = displayed_render_snapshot
         .session_snapshot
         .active_tab_snapshot
-        .pane_slots
-        .iter()
-        .find(|pane_slot| pane_slot.pane_id == placement_snapshot.source_pane_id)
-        .filter(|pane_slot| pane_slot.is_visible)
+        .find_visible_pane_slot(placement_snapshot.source_pane_id)
         .and_then(|pane_slot| project_core_rect(pane_slot.outer_rect, tab_size, layout_rect));
     apply_placement_target_outline_style(target_outline, source_pane_rect, theme, render_buffer);
 }
@@ -426,150 +381,10 @@ fn is_point_on_rect_border(column_index: u16, row_index: u16, pane_rect: Rect) -
             || row_index + 1 == pane_rect.bottom())
 }
 
-/// Build the local proposed layouts without changing the retained snapshot.
-pub(crate) fn build_placement_preview_snapshot(
-    placement_snapshot: &PlacementSnapshot,
-    placement_target: Option<&TiledPlacementTarget>,
-) -> PlacementSnapshot {
-    placement_target
-        .and_then(|placement_target| {
-            build_proposed_placement_snapshot(placement_snapshot, placement_target)
-        })
-        .unwrap_or_else(|| placement_snapshot.clone())
-}
-
-fn build_proposed_placement_snapshot(
-    placement_snapshot: &PlacementSnapshot,
-    placement_target: &TiledPlacementTarget,
-) -> Option<PlacementSnapshot> {
-    let layout_target = PlacementTarget::from_tiled_placement_target(placement_target);
-    if let TiledPlacementTarget::Split {
-        destination_tab_id, ..
-    } = placement_target
-    {
-        if *destination_tab_id != placement_snapshot.destination_tab_id {
-            return None;
-        }
-    }
-    let source_tab_snapshot = &placement_snapshot.source_tab_snapshot;
-    let source_tab_rect = CoreRect::from_size_at_origin(source_tab_snapshot.tab_snapshot.tab_size);
-    let mut known_pane_ids = source_tab_snapshot
-        .tab_snapshot
-        .pane_slots
-        .iter()
-        .map(|pane_slot| pane_slot.pane_id)
-        .collect::<HashSet<_>>();
-    let mut pane_snapshots = source_tab_snapshot.pane_snapshots.clone();
-
-    let Some(destination_tab_snapshot) = placement_snapshot.destination_tab_snapshot.as_ref()
-    else {
-        let proposed_layout_tree = place_pane_within_tab(
-            &source_tab_snapshot.layout_tree,
-            placement_snapshot.source_pane_id,
-            &layout_target,
-            source_tab_rect,
-            placement_snapshot.pane_sizing,
-        )
-        .ok()?;
-        let proposed_source_tab_snapshot = build_proposed_placement_tab_snapshot(
-            source_tab_snapshot,
-            &proposed_layout_tree,
-            &known_pane_ids,
-            &pane_snapshots,
-            placement_snapshot.pane_sizing,
-        )?;
-        let mut proposed_snapshot = placement_snapshot.clone();
-        proposed_snapshot.source_tab_snapshot = proposed_source_tab_snapshot;
-        return Some(proposed_snapshot);
-    };
-
-    known_pane_ids.extend(
-        destination_tab_snapshot
-            .tab_snapshot
-            .pane_slots
-            .iter()
-            .map(|pane_slot| pane_slot.pane_id),
-    );
-    for pane_snapshot in &destination_tab_snapshot.pane_snapshots {
-        if pane_snapshots
-            .iter()
-            .all(|known_pane_snapshot| known_pane_snapshot.pane_id != pane_snapshot.pane_id)
-        {
-            pane_snapshots.push(pane_snapshot.clone());
-        }
-    }
-    let destination_tab_rect =
-        CoreRect::from_size_at_origin(destination_tab_snapshot.tab_snapshot.tab_size);
-    let cross_tab_placement = place_pane_across_tabs(
-        &source_tab_snapshot.layout_tree,
-        placement_snapshot.source_pane_id,
-        &destination_tab_snapshot.layout_tree,
-        &layout_target,
-        destination_tab_rect,
-        placement_snapshot.pane_sizing,
-    )
-    .ok()?;
-    let proposed_source_tab_snapshot = match cross_tab_placement.source_tree.as_ref() {
-        Some(source_layout_tree) => build_proposed_placement_tab_snapshot(
-            source_tab_snapshot,
-            source_layout_tree,
-            &known_pane_ids,
-            &pane_snapshots,
-            placement_snapshot.pane_sizing,
-        )?,
-        None => build_empty_placement_tab_snapshot(source_tab_snapshot),
-    };
-    let proposed_destination_tab_snapshot = build_proposed_placement_tab_snapshot(
-        destination_tab_snapshot,
-        &cross_tab_placement.destination_tree,
-        &known_pane_ids,
-        &pane_snapshots,
-        placement_snapshot.pane_sizing,
-    )?;
-    let mut proposed_snapshot = placement_snapshot.clone();
-    proposed_snapshot.source_tab_snapshot = proposed_source_tab_snapshot;
-    proposed_snapshot.destination_tab_snapshot = Some(proposed_destination_tab_snapshot);
-    Some(proposed_snapshot)
-}
-
-/// Interpolate the pane rectangles of two local placement snapshots at
-/// `progress`, clamped to `0.0..=1.0`. Progress `0.0` returns `from_snapshot`
-/// and `1.0` returns `to_snapshot`. A destination tab that only one snapshot
-/// holds is shown unchanged until the end.
-pub(crate) fn interpolate_placement_snapshot(
-    from_snapshot: &PlacementSnapshot,
-    to_snapshot: &PlacementSnapshot,
-    progress: f32,
-) -> PlacementSnapshot {
-    let progress = progress.clamp(0.0, 1.0);
-    if progress == 0.0 {
-        return from_snapshot.clone();
-    }
-    if progress == 1.0 {
-        return to_snapshot.clone();
-    }
-    let mut animated_snapshot = to_snapshot.clone();
-    animated_snapshot.source_tab_snapshot = interpolate_placement_tab_snapshot(
-        &from_snapshot.source_tab_snapshot,
-        &to_snapshot.source_tab_snapshot,
-        progress,
-    );
-    animated_snapshot.destination_tab_snapshot = match (
-        from_snapshot.destination_tab_snapshot.as_ref(),
-        to_snapshot.destination_tab_snapshot.as_ref(),
-    ) {
-        (Some(from_tab_snapshot), Some(to_tab_snapshot)) => Some(
-            interpolate_placement_tab_snapshot(from_tab_snapshot, to_tab_snapshot, progress),
-        ),
-        (Some(from_tab_snapshot), None) => Some(from_tab_snapshot.clone()),
-        (None, Some(to_tab_snapshot)) => Some(to_tab_snapshot.clone()),
-        (None, None) => None,
-    };
-    animated_snapshot
-}
-
-/// Interpolate one placement tab at `progress`, strictly between `0.0` and
-/// `1.0`.
+/// Interpolate one placement tab at `progress`, clamped to `0.0..=1.0`.
+/// Progress `0.0` returns `from_tab_snapshot` and `1.0` returns
+/// `to_tab_snapshot`. Two tabs solved at different tab sizes give
+/// `to_tab_snapshot` unchanged.
 ///
 /// - Every pane slot of either tab is kept, `to_tab_snapshot` order first. Its
 ///   rectangles move from the `from_tab_snapshot` rect to the
@@ -579,13 +394,21 @@ pub(crate) fn interpolate_placement_snapshot(
 ///   `is_every_pane_suppressed` come from `from_tab_snapshot` below progress
 ///   `0.5`, then from `to_tab_snapshot`. A pane in only one tab keeps its own
 ///   `is_suppressed`.
-/// - The pane content is every pane snapshot of `to_tab_snapshot`, then each
-///   pane snapshot of `from_tab_snapshot` whose pane is not in it.
-fn interpolate_placement_tab_snapshot(
+/// - The tree and the focus history come from `to_tab_snapshot`.
+pub(crate) fn interpolate_placement_tab_snapshot(
     from_tab_snapshot: &PlacementTabSnapshot,
     to_tab_snapshot: &PlacementTabSnapshot,
     progress: f32,
 ) -> PlacementTabSnapshot {
+    let progress = progress.clamp(0.0, 1.0);
+    if progress == 0.0 {
+        return from_tab_snapshot.clone();
+    }
+    if progress == 1.0
+        || from_tab_snapshot.tab_snapshot.tab_size != to_tab_snapshot.tab_snapshot.tab_size
+    {
+        return to_tab_snapshot.clone();
+    }
     let to_pane_ids = to_tab_snapshot
         .tab_snapshot
         .pane_slots
@@ -650,18 +473,6 @@ fn interpolate_placement_tab_snapshot(
     animated_tab_snapshot.tab_snapshot.layout_mode = nearer_tab_snapshot.layout_mode;
     animated_tab_snapshot.tab_snapshot.is_every_pane_suppressed =
         nearer_tab_snapshot.is_every_pane_suppressed;
-    let to_pane_snapshot_ids = to_tab_snapshot
-        .pane_snapshots
-        .iter()
-        .map(|pane_snapshot| pane_snapshot.pane_id)
-        .collect::<Vec<_>>();
-    animated_tab_snapshot.pane_snapshots.extend(
-        from_tab_snapshot
-            .pane_snapshots
-            .iter()
-            .filter(|pane_snapshot| !to_pane_snapshot_ids.contains(&pane_snapshot.pane_id))
-            .cloned(),
-    );
     animated_tab_snapshot
 }
 
@@ -779,80 +590,6 @@ fn interpolate_coordinate(from_coordinate: u16, to_coordinate: u16, progress: f3
     (from_coordinate + (to_coordinate - from_coordinate) * progress)
         .round()
         .clamp(0.0, f32::from(u16::MAX)) as u16
-}
-
-/// Build a solved tab snapshot for one proposed layout tree. Returns `None` when a
-/// pane of `layout_tree` is not in `known_pane_ids` or has no entry in
-/// `pane_snapshots`.
-fn build_proposed_placement_tab_snapshot(
-    base_tab_snapshot: &PlacementTabSnapshot,
-    layout_tree: &koshi_layout::tree::LayoutNode,
-    known_pane_ids: &HashSet<PaneId>,
-    pane_snapshots: &[PlacementPaneSnapshot],
-    pane_sizing: koshi_layout::solver::PaneSizing,
-) -> Option<PlacementTabSnapshot> {
-    let layout_solve = solve_layout_with_mode(
-        layout_tree,
-        LayoutMode::Tiled,
-        CoreRect::from_size_at_origin(base_tab_snapshot.tab_snapshot.tab_size),
-        pane_sizing,
-    );
-    let content_rect_by_pane_id = list_content_rects(&layout_solve)
-        .into_iter()
-        .collect::<HashMap<_, _>>();
-    let suppressed_pane_ids = layout_solve
-        .suppressed_pane_ids
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let pane_slots = layout_solve
-        .pane_rects
-        .iter()
-        .map(|(pane_id, outer_rect)| {
-            if !known_pane_ids.contains(pane_id) {
-                return None;
-            }
-            let content_rect = content_rect_by_pane_id.get(pane_id).copied().flatten();
-            Some(PaneSlot {
-                pane_id: *pane_id,
-                outer_rect: *outer_rect,
-                content_rect,
-                is_visible: content_rect.is_some(),
-                is_suppressed: suppressed_pane_ids.contains(pane_id),
-            })
-        })
-        .collect::<Option<Vec<_>>>()?;
-    let proposed_pane_snapshots = pane_slots
-        .iter()
-        .map(|pane_slot| {
-            pane_snapshots
-                .iter()
-                .find(|pane_snapshot| pane_snapshot.pane_id == pane_slot.pane_id)
-                .cloned()
-        })
-        .collect::<Option<Vec<_>>>()?;
-    let mut proposed_tab_snapshot = base_tab_snapshot.clone();
-    proposed_tab_snapshot.layout_tree = layout_tree.clone();
-    proposed_tab_snapshot.tab_snapshot.pane_slots = pane_slots;
-    proposed_tab_snapshot.tab_snapshot.stack_headers = layout_solve.stack_headers;
-    proposed_tab_snapshot.tab_snapshot.layout_mode = LayoutMode::Tiled;
-    proposed_tab_snapshot.tab_snapshot.is_every_pane_suppressed =
-        layout_solve.is_every_pane_suppressed;
-    proposed_tab_snapshot.pane_snapshots = proposed_pane_snapshots;
-    Some(proposed_tab_snapshot)
-}
-
-/// Build the source view after its only pane leaves a different tab.
-fn build_empty_placement_tab_snapshot(
-    base_tab_snapshot: &PlacementTabSnapshot,
-) -> PlacementTabSnapshot {
-    let mut empty_tab_snapshot = base_tab_snapshot.clone();
-    empty_tab_snapshot.tab_snapshot.pane_slots.clear();
-    empty_tab_snapshot.tab_snapshot.stack_headers.clear();
-    empty_tab_snapshot.tab_snapshot.is_every_pane_suppressed = false;
-    empty_tab_snapshot.tab_snapshot.layout_mode = LayoutMode::Tiled;
-    empty_tab_snapshot.pane_snapshots.clear();
-    empty_tab_snapshot
 }
 
 /// Project a core cell rectangle into one ratatui screen rectangle.
@@ -1172,7 +909,8 @@ pub(crate) struct TerminalOwner {
     is_shutdown_requested: Arc<AtomicBool>,
     /// Whether this attachment enabled application-level terminal modes.
     has_active_application_modes: Arc<AtomicBool>,
-    /// Ensures one path cancels Kitty transfers and deletes this attachment's images.
+    /// `true` once one cleanup has written the Kitty abort and delete-all for
+    /// this attachment. Every cleanup after that one skips both.
     is_image_cleanup_claimed: Arc<AtomicBool>,
     /// The input thread started after Attach succeeds.
     input_thread: Option<thread::JoinHandle<()>>,
@@ -2051,9 +1789,12 @@ impl FrameInputs {
 ///
 /// The frame is drawn at `client`'s viewport size, the size of the last resize
 /// event: no terminal size is read. The theme comes from `client`, and so does
-/// the hint bar, built for the client's active base or placement input mode
-/// and `frame_paint.is_mouse_selection_enabled`. The hovered pane, the tab
-/// strip's position and the open key sequence come from `frame_paint`.
+/// the hint bar, built for `frame_paint.lock_mode`,
+/// `frame_paint.is_mouse_selection_enabled`, and whether `displayed_snapshot`
+/// focuses a floating pane
+/// ([`KeymapHintCatalog::build_frame_hints`](koshi_config::hints::KeymapHintCatalog::build_frame_hints)).
+/// The hovered pane, the tab strip's position and the open key sequence come
+/// from `frame_paint`.
 /// `committed_regions` is the geometry shared by the painter and cursor
 /// placement for this frame.
 ///
@@ -2106,13 +1847,13 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
     last_window_title: &mut String,
     last_cursor_style: &mut Option<CursorStyle>,
     placement_snapshot: Option<&PlacementSnapshot>,
-    placement_display_snapshot: Option<&PlacementSnapshot>,
+    placement_display_tab_snapshot: Option<&PlacementTabSnapshot>,
 ) -> Result<(), PaintError<B::Error>> {
     let window_title_text = build_window_title(displayed_snapshot);
     let is_window_title_changed = window_title_text != *last_window_title;
     let cursor_style = get_cursor_style(displayed_snapshot);
     let is_cursor_style_changed = cursor_style != *last_cursor_style;
-    let keymap_hints = client.build_frame_hints(
+    let keymap_hints = client.keymap_catalog.build_frame_hints(
         frame_paint.lock_mode,
         frame_paint.is_mouse_selection_enabled,
         is_focused_pane_floating(
@@ -2205,7 +1946,7 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
             .to_vec(),
         terminal_size,
         has_placement_state: placement_snapshot.is_some()
-            || placement_display_snapshot.is_some()
+            || placement_display_tab_snapshot.is_some()
             || frame_paint.placement_target.is_some()
             || frame_paint.placement_presentation.is_some(),
     };
@@ -2239,7 +1980,7 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
                         unavailable_image_placement_keys: &frame_inputs
                             .unavailable_image_placement_keys,
                         placement_snapshot,
-                        placement_display_snapshot,
+                        placement_display_tab_snapshot,
                         placement_target: frame_paint.placement_target.as_ref(),
                         placement_presentation: frame_paint.placement_presentation.as_ref(),
                         drawn_rows,

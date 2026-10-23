@@ -1,6 +1,7 @@
 //! Session state model: the aggregate root a server process owns for each
 //! running session.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
@@ -8,28 +9,40 @@ use koshi_core::{
     constant::{
         FLOATING_PANE_CHROME_SIZE, MAX_FLOATING_PANES_PER_SESSION, MAX_TAB_FOCUS_MRU_ENTRY_COUNT,
     },
+    event::Event,
     geometry::{
         compute_percent_cell_count, FloatingPaneDimension, FloatingPaneSize, PixelCellSize, Rect,
         Size,
     },
     ids::{ClientId, PaneId, SessionId, TabId},
 };
-use koshi_layout::tree::LayoutNode;
+use koshi_layout::{
+    mode::LayoutMode,
+    solver::{solve_layout_with_mode, solve_layout_with_sizing, LayoutSolve, PaneSizing},
+    tree::LayoutNode,
+};
 use koshi_pane::registry::PaneRegistry;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    client::{place_floating_pane, Client, ClientRegistry},
+    client::{
+        compute_floating_pane_size_cap, place_floating_pane, Client, ClientRegistry,
+        FloatingPanePosition,
+    },
     error::{FloatingSetError, InvalidTransition, SessionConsistencyError},
+    session::cascade::hand_off_suppressed_focus,
+    session::focus::{build_pane_focused_event, build_pane_minimized_changed_events},
     session::lifecycle::{SessionLifecycle, SessionLifecycleEvent},
 };
 
-/// One tab: its name, bar position, layout tree, and the panes it focused,
-/// most-recent first.
+/// One tab: its name, bar position, layout tree, the tiled solve of that
+/// tree, and the panes it focused, most-recent first.
 ///
 /// A tab holds no layout mode. Zoom is a client property: it lives on
 /// [`crate::client::Client`] as `zoomed_pane_id_by_tab_id`, and two clients on this tab can
-/// hold different zoom. The tab holds the tree that every client solves.
+/// hold different zoom. The tab holds the tree and its tiled solve, and each
+/// client's own view comes from that tree, its zoom and its focus history
+/// ([`Session::compute_client_solve`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tab {
     tab_id: TabId,
@@ -38,29 +51,42 @@ pub struct Tab {
     layout: LayoutNode,
     /// Panes this tab has focused, most-recent first, with at most one entry
     /// per pane — re-focusing moves a pane to the front instead of adding a
-    /// duplicate. Capped at [`MAX_TAB_FOCUS_MRU_ENTRY_COUNT`]; focus recovery walks
-    /// it newest-first to pick the inheriting pane when the focused one
-    /// disappears.
+    /// duplicate. Capped at [`MAX_TAB_FOCUS_MRU_ENTRY_COUNT`]. The first pane
+    /// is this tab's most-recently-focused pane.
     focus_mru: Vec<PaneId>,
+    /// The tab size `layout_solve` is solved at.
+    solved_tab_size: Size,
+    /// The tiled solve of `layout` over a `solved_tab_size` rect at `(0, 0)`
+    /// with the session's pane sizing ([`Session::get_pane_sizing`]). The
+    /// resume file does not carry it: a tab read from one holds the solve of
+    /// no pane until [`Session::update_pane_sizing`] solves it again.
+    #[serde(skip)]
+    layout_solve: LayoutSolve,
 }
 
 impl Tab {
-    /// A freshly created tab showing a single pane, with no focus recorded
-    /// yet; `root_pane_id` is its only layout leaf.
+    /// A tab holding `layout_tree`, with no focus recorded yet, solved at
+    /// `tab_size` with `pane_sizing`.
     #[must_use]
-    pub fn from_root_pane(
+    pub fn from_layout_tree(
         tab_id: TabId,
         tab_name: String,
         tab_index: usize,
-        root_pane_id: PaneId,
+        layout_tree: LayoutNode,
+        tab_size: Size,
+        pane_sizing: PaneSizing,
     ) -> Self {
-        Self {
+        let mut tab = Self {
             tab_id,
             tab_name,
             tab_index,
-            layout: LayoutNode::Pane(root_pane_id),
+            layout: layout_tree,
             focus_mru: Vec::new(),
-        }
+            solved_tab_size: tab_size,
+            layout_solve: LayoutSolve::default(),
+        };
+        let _ = tab.update_layout_solve(pane_sizing);
+        tab
     }
 
     /// This tab's stable id, matching its key in [`Session::tabs`].
@@ -88,15 +114,34 @@ impl Tab {
         &self.layout
     }
 
-    /// Set this tab's display position. Callers keep positions a dense `0..n`
-    /// across the session's tabs.
-    pub fn update_tab_index(&mut self, tab_index: usize) {
-        self.tab_index = tab_index;
+    /// Set this tab's display position. Returns whether the position
+    /// changed.
+    fn update_tab_index(&mut self, tab_index: usize) -> bool {
+        std::mem::replace(&mut self.tab_index, tab_index) != tab_index
     }
 
-    /// Replace this tab's layout tree.
-    pub fn update_layout(&mut self, layout: LayoutNode) {
-        self.layout = layout;
+    /// The tiled solve of this tab's tree at [`Tab::get_solved_tab_size`].
+    #[must_use]
+    pub fn get_layout_solve(&self) -> &LayoutSolve {
+        &self.layout_solve
+    }
+
+    /// The tab size this tab's tree is solved at.
+    #[must_use]
+    pub fn get_solved_tab_size(&self) -> Size {
+        self.solved_tab_size
+    }
+
+    /// Solve this tab's tree over a `solved_tab_size` rect at `(0, 0)` with
+    /// `pane_sizing` ([`solve_layout_with_sizing`]), and hold that solve.
+    /// Returns the solve the tab held before.
+    fn update_layout_solve(&mut self, pane_sizing: PaneSizing) -> LayoutSolve {
+        let layout_solve = solve_layout_with_sizing(
+            &self.layout,
+            Rect::from_size_at_origin(self.solved_tab_size),
+            pane_sizing,
+        );
+        std::mem::replace(&mut self.layout_solve, layout_solve)
     }
 
     /// Records `pane_id` as the most-recently focused: moves it to the front,
@@ -138,12 +183,13 @@ pub struct FloatingMember {
     pub solved_size: Size,
 }
 
-/// The floating panes of one session, in creation order: a new member is
-/// appended, and a removal keeps the order of the rest.
+/// The floating panes of one session, in the order the panes became floating:
+/// a new member is appended, and a removal keeps the order of the rest.
 ///
-/// [`FloatingSet::add_member`] holds each pane once and at most
-/// [`MAX_FLOATING_PANES_PER_SESSION`] members.
-/// [`FloatingSet::update_member_sizes`] writes each member's solved size.
+/// The set holds each pane once and at most
+/// [`MAX_FLOATING_PANES_PER_SESSION`] members, which
+/// [`Session::add_floating_member`] adds.
+/// `FloatingSet::update_member_sizes` writes each member's solved size.
 /// [`Session::remove_floating_member`] removes a member and every client's
 /// view of it.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,14 +198,23 @@ pub struct FloatingSet {
 }
 
 impl FloatingSet {
-    /// Every member, in creation order.
+    /// Every member, in the order the panes became floating.
     #[must_use]
     pub fn list_members(&self) -> &[FloatingMember] {
         &self.members
     }
 
-    /// The member holding `pane_id`, with its index in creation order: its
-    /// cascade index ([`place_floating_pane`]).
+    /// Every member's pane id, in the order the panes became floating.
+    #[must_use]
+    pub fn list_pane_ids(&self) -> Vec<PaneId> {
+        self.members
+            .iter()
+            .map(|floating_member| floating_member.pane_id)
+            .collect()
+    }
+
+    /// The member holding `pane_id`, with its index in the order the panes
+    /// became floating: its cascade index ([`place_floating_pane`]).
     /// `None` when no member holds `pane_id`. With members `[a, b]`, `b` →
     /// `Some((1, b))`.
     #[must_use]
@@ -178,7 +233,7 @@ impl FloatingSet {
     }
 
     /// Whether the set holds [`MAX_FLOATING_PANES_PER_SESSION`] members or
-    /// more, so [`FloatingSet::add_member`] refuses a new one.
+    /// more, so [`Session::add_floating_member`] refuses a new one.
     #[must_use]
     pub fn is_full(&self) -> bool {
         self.members.len() >= MAX_FLOATING_PANES_PER_SESSION
@@ -191,7 +246,10 @@ impl FloatingSet {
     /// [`FloatingSetError::DuplicatePane`] when the set already holds
     /// `floating_member.pane_id`, else [`FloatingSetError::TooManyPanes`] when
     /// [`FloatingSet::is_full`]. The set does not change on an error.
-    pub fn add_member(&mut self, floating_member: FloatingMember) -> Result<(), FloatingSetError> {
+    pub(crate) fn add_member(
+        &mut self,
+        floating_member: FloatingMember,
+    ) -> Result<(), FloatingSetError> {
         if self.has_pane(floating_member.pane_id) {
             return Err(FloatingSetError::DuplicatePane {
                 pane_id: floating_member.pane_id,
@@ -205,19 +263,28 @@ impl FloatingSet {
     }
 
     /// Solve every member's outer size against `shared_floating_viewport`
-    /// with [`solve_floating_pane_size`]. Writes only `solved_size`.
-    pub fn update_member_sizes(&mut self, shared_floating_viewport: Size, pane_minimum_size: Size) {
+    /// with [`solve_floating_pane_size`]. Writes only `solved_size`. Returns
+    /// whether a member's solved size changed.
+    fn update_member_sizes(
+        &mut self,
+        shared_floating_viewport: Size,
+        pane_minimum_size: Size,
+    ) -> bool {
+        let mut has_solved_size_changed = false;
         for floating_member in &mut self.members {
-            floating_member.solved_size = solve_floating_pane_size(
+            let solved_size = solve_floating_pane_size(
                 floating_member.desired_size,
                 shared_floating_viewport,
                 pane_minimum_size,
             );
+            has_solved_size_changed |= floating_member.solved_size != solved_size;
+            floating_member.solved_size = solved_size;
         }
+        has_solved_size_changed
     }
 
     /// Set the desired size of the member holding `pane_id`. Its solved size
-    /// changes at the next [`FloatingSet::update_member_sizes`]. Returns
+    /// changes at the next `FloatingSet::update_member_sizes`. Returns
     /// `false`, changing nothing, when no member holds `pane_id`.
     pub fn update_member_desired_size(
         &mut self,
@@ -253,10 +320,12 @@ pub fn compute_floating_pane_minimum_size(pane_minimum_size: Size) -> Size {
 ///
 /// Each axis of `desired_size` resolves to cells against the same axis of
 /// `shared_floating_viewport`, a percent rounding down, then is raised to the
-/// floating minimum ([`compute_floating_pane_minimum_size`]) and cut to that
-/// axis. On an axis shorter than the floating minimum, the pane takes the
-/// whole axis. `Percent(60)` by `Percent(60)` on `80x22` → `48x13`; with a
-/// `20x6` pane minimum on `40x9` → `24x9`.
+/// floating minimum ([`compute_floating_pane_minimum_size`]) and cut to the
+/// floating cap of that axis ([`compute_floating_pane_size_cap`], 90% rounded
+/// down). On an axis whose cap is shorter than the floating minimum, the pane
+/// takes the cap. `Percent(60)` by `Percent(60)` on `80x22` → `48x13`;
+/// `Percent(100)` by `Percent(100)` on `80x22` → `72x19`; with a `20x6` pane
+/// minimum on `40x9` → `24x8`.
 #[must_use]
 pub fn solve_floating_pane_size(
     desired_size: FloatingPaneSize,
@@ -264,30 +333,35 @@ pub fn solve_floating_pane_size(
     pane_minimum_size: Size,
 ) -> Size {
     let floating_pane_minimum_size = compute_floating_pane_minimum_size(pane_minimum_size);
+    let floating_pane_size_cap = compute_floating_pane_size_cap(shared_floating_viewport);
     Size {
         column_count: solve_floating_pane_axis(
             desired_size.width,
             shared_floating_viewport.column_count,
             floating_pane_minimum_size.column_count,
+            floating_pane_size_cap.column_count,
         ),
         row_count: solve_floating_pane_axis(
             desired_size.height,
             shared_floating_viewport.row_count,
             floating_pane_minimum_size.row_count,
+            floating_pane_size_cap.row_count,
         ),
     }
 }
 
 /// The cells `floating_pane_dimension` takes on an axis `axis_cell_count`
-/// cells long, given a floating minimum of `minimum_cell_count` on that axis:
-/// the cell count, or the percent of the axis rounded down, raised to
-/// `minimum_cell_count`, then cut to `axis_cell_count`. `Percent(60)` of `22`
-/// with a minimum of `5` → `13`; `Percent(60)` of `9` with a minimum of `10` →
-/// `9`.
+/// cells long, given a floating minimum of `minimum_cell_count` and a cap of
+/// `cap_cell_count` on that axis: the cell count, or the percent of the axis
+/// rounded down, raised to `minimum_cell_count`, then cut to
+/// `cap_cell_count`. `Percent(60)` of `22` with a minimum of `5` and a cap of
+/// `19` → `13`; `Percent(60)` of `9` with a minimum of `10` and a cap of `8` →
+/// `8`.
 fn solve_floating_pane_axis(
     floating_pane_dimension: FloatingPaneDimension,
     axis_cell_count: u16,
     minimum_cell_count: u16,
+    cap_cell_count: u16,
 ) -> u16 {
     let requested_cell_count = match floating_pane_dimension {
         FloatingPaneDimension::Cells(cell_count) => cell_count.get(),
@@ -297,7 +371,42 @@ fn solve_floating_pane_axis(
     };
     requested_cell_count
         .max(minimum_cell_count)
-        .min(axis_cell_count)
+        .min(cap_cell_count)
+}
+
+/// What changed in one session since the last
+/// [`Session::take_view_changes`]: the state that frames and placement
+/// previews read. [`SessionViewChanges::default`] when nothing changed.
+///
+/// A split of the only pane of tab `7`, seen by client `1`, gives
+/// `layout_changed_tab_ids: {7}` and `changed_client_ids: {1}`: the tree
+/// changed, and the client's focus moved to the new pane.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionViewChanges {
+    /// The tabs whose layout tree, solved size, or solve changed, in id
+    /// order. A tab closed after its change stays listed.
+    pub layout_changed_tab_ids: BTreeSet<TabId>,
+    /// The clients whose own view changed, that attached, or that detached,
+    /// in id order (`ClientRegistry::take_changed_client_ids`).
+    pub changed_client_ids: BTreeSet<ClientId>,
+    /// A tab was added, removed, or moved in the tab bar.
+    pub is_tab_bar_changed: bool,
+    /// A floating pane was added or removed, or a floating pane's solved size
+    /// changed.
+    pub is_floating_set_changed: bool,
+    /// The pane sizing changed ([`Session::update_pane_sizing`]).
+    pub is_pane_sizing_changed: bool,
+    /// The recovery notice was shown or cleared
+    /// ([`Session::set_recovery_notice_visible`]).
+    pub is_recovery_notice_changed: bool,
+}
+
+impl SessionViewChanges {
+    /// Whether nothing changed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// One running session: the aggregate root owning the tabs, the floating
@@ -319,10 +428,12 @@ pub struct Session {
     pub created_at: SystemTime,
     /// The session's tabs, keyed by id. Display order is not the map order: it
     /// lives on each tab as its display index, and reordering tabs moves no map
-    /// entry.
+    /// entry. [`Session::add_tab`], [`Session::remove_tab`] and
+    /// [`Session::update_tab_index`] change the tab bar and record the change
+    /// ([`SessionViewChanges::is_tab_bar_changed`]).
     pub tabs: BTreeMap<TabId, Tab>,
-    /// The session's floating panes, in creation order. Each attached client
-    /// holds its own view of each one.
+    /// The session's floating panes, in the order the panes became floating.
+    /// Each attached client holds its own view of each one.
     pub floating_set: FloatingSet,
     /// Runtime metadata for every pane in every tab and every floating pane.
     /// Layout trees and the floating set name each pane by its id.
@@ -339,12 +450,21 @@ pub struct Session {
     /// A restart seeded a new shell after the carried session could not be
     /// restored. The statusline shows the notice until input reaches a pane.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_recovery_notice_visible: bool,
+    is_recovery_notice_visible: bool,
 
-    /// Generation of committed layout, membership, and shared sizing inputs.
-    placement_revision: u64,
+    /// The pane sizing every tab is solved with ([`Session::get_pane_sizing`]).
+    /// The resume file does not carry it.
+    #[serde(skip)]
+    pane_sizing: PaneSizing,
 
     lifecycle: SessionLifecycle,
+
+    /// The changes to tabs, the tab bar, the floating set, the pane sizing and
+    /// the recovery notice since the last [`Session::take_view_changes`]. The
+    /// clients' changes live on [`Session::clients`]. The resume file does not
+    /// carry it.
+    #[serde(skip)]
+    view_changes: SessionViewChanges,
 }
 
 impl Session {
@@ -369,9 +489,73 @@ impl Session {
             clients: client_registry,
             should_start_locked: false,
             is_recovery_notice_visible: false,
-            placement_revision: 0,
+            pane_sizing: PaneSizing::default(),
             lifecycle: SessionLifecycle::Starting,
+            view_changes: SessionViewChanges::default(),
         }
+    }
+
+    /// Whether the recovery notice shows: a restart seeded a new shell after
+    /// the carried session could not be restored.
+    #[must_use]
+    pub fn is_recovery_notice_visible(&self) -> bool {
+        self.is_recovery_notice_visible
+    }
+
+    /// Show or clear the recovery notice. A change records
+    /// [`SessionViewChanges::is_recovery_notice_changed`].
+    pub fn set_recovery_notice_visible(&mut self, is_recovery_notice_visible: bool) {
+        self.view_changes.is_recovery_notice_changed |=
+            self.is_recovery_notice_visible != is_recovery_notice_visible;
+        self.is_recovery_notice_visible = is_recovery_notice_visible;
+    }
+
+    /// Add `tab` under its own id, replacing a tab of that id, and record a
+    /// tab bar change. Returns the replaced tab, else `None`.
+    pub fn add_tab(&mut self, tab: Tab) -> Option<Tab> {
+        self.view_changes.is_tab_bar_changed = true;
+        self.tabs.insert(tab.tab_id, tab)
+    }
+
+    /// Remove the tab `tab_id` and record a tab bar change. Returns the
+    /// removed tab, or `None`, changing nothing, when the session holds no
+    /// `tab_id`.
+    pub fn remove_tab(&mut self, tab_id: TabId) -> Option<Tab> {
+        let removed_tab = self.tabs.remove(&tab_id)?;
+        self.view_changes.is_tab_bar_changed = true;
+        Some(removed_tab)
+    }
+
+    /// Set the display position of the tab `tab_id` to `tab_index`, and record
+    /// a tab bar change when the position changed. Callers keep positions a
+    /// dense `0..n` across the session's tabs. A tab id the session does not
+    /// hold changes nothing.
+    pub fn update_tab_index(&mut self, tab_id: TabId, tab_index: usize) {
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            self.view_changes.is_tab_bar_changed |= tab.update_tab_index(tab_index);
+        }
+    }
+
+    /// Solve every floating pane's outer size against
+    /// `shared_floating_viewport` ([`solve_floating_pane_size`]), and record a
+    /// floating set change when a solved size changed.
+    pub fn update_floating_member_sizes(
+        &mut self,
+        shared_floating_viewport: Size,
+        pane_minimum_size: Size,
+    ) {
+        self.view_changes.is_floating_set_changed |= self
+            .floating_set
+            .update_member_sizes(shared_floating_viewport, pane_minimum_size);
+    }
+
+    /// Everything frames and placement previews read that changed since the
+    /// last call: the session's own record and the clients' changes
+    /// (`ClientRegistry::take_changed_client_ids`). Clears both.
+    pub fn take_view_changes(&mut self) -> SessionViewChanges {
+        let mut view_changes = std::mem::take(&mut self.view_changes);
+        view_changes.changed_client_ids = self.clients.take_changed_client_ids();
+        view_changes
     }
 
     /// Whether this attach must start in
@@ -387,27 +571,6 @@ impl Session {
     /// The session's current lifecycle state.
     pub fn get_lifecycle(&self) -> &SessionLifecycle {
         &self.lifecycle
-    }
-
-    /// The generation of this session's committed placement inputs.
-    #[must_use]
-    pub fn get_placement_revision(&self) -> u64 {
-        self.placement_revision
-    }
-
-    /// Whether the session revision can advance without wrapping.
-    #[must_use]
-    pub fn can_advance_placement_revision(&self) -> bool {
-        self.placement_revision < u64::MAX
-    }
-
-    /// Advance the session revision once. Returns `false` at the maximum value.
-    pub fn advance_placement_revision(&mut self) -> bool {
-        let Some(next_revision) = self.placement_revision.checked_add(1) else {
-            return false;
-        };
-        self.placement_revision = next_revision;
-        true
     }
 
     /// Apply a `lifecycle_event`, advancing the session's state, or return
@@ -433,7 +596,14 @@ impl Session {
     /// session to `Running`; from `Starting`, `Running`, `Stopping` or
     /// `Stopped` it is rejected and the lifecycle stays as it was. The client
     /// is registered either way.
-    pub fn attach_client(&mut self, client: Client) -> Option<Client> {
+    ///
+    /// Before it is registered, `client` takes a minimized view at the default
+    /// placement of every floating pane it holds no view of
+    /// ([`Client::add_floating_pane_view`]): an attach shows no floating pane.
+    pub fn attach_client(&mut self, mut client: Client) -> Option<Client> {
+        for floating_member in self.floating_set.list_members() {
+            client.add_floating_pane_view(floating_member.pane_id, FloatingPanePosition::Default);
+        }
         let displaced_client = self.clients.attach_client(client);
         let _ = self.update_lifecycle(SessionLifecycleEvent::ClientAttached);
         displaced_client
@@ -481,30 +651,304 @@ impl Session {
             .reduce(Size::compute_minimum_axes)
     }
 
-    /// The rect at the origin that focus repair solves `tab_id` in when a
-    /// pane leaves the tab. Its size is [`Session::get_tab_size`], else the
-    /// per-axis minimum of every attached client's [`Client::get_pane_area`],
-    /// else `80x24`. Only focus repair reads it: no PTY is spawned or resized
-    /// from it.
-    ///
-    /// A tab viewed by an `80x22` and a `100x30` pane area → `(0, 0)` `80x22`;
-    /// a tab no client views, with one `120x40` client attached elsewhere →
-    /// `(0, 0)` `120x40`; no client reporting a pane area → `(0, 0)` `80x24`.
+    /// The pane sizing every tab of this session is solved with.
+    /// [`PaneSizing::default`] until [`Session::update_pane_sizing`] sets it.
     #[must_use]
-    pub fn compute_focus_repair_tab_rect(&self, tab_id: TabId) -> Rect {
-        let tab_size = self
-            .get_tab_size(tab_id)
-            .or_else(|| {
-                self.clients
-                    .list_attached_clients()
-                    .filter_map(Client::get_pane_area)
-                    .reduce(Size::compute_minimum_axes)
+    pub fn get_pane_sizing(&self) -> PaneSizing {
+        self.pane_sizing
+    }
+
+    /// Set the pane sizing to `pane_sizing` and solve every tab again with
+    /// it at its solve size ([`Session::resolve_tab_solve_size`]), in tab id
+    /// order, each followed by step 1 of [`Session::update_tab_layout`]. After
+    /// the last tab, step 2 runs once. Every tab is solved, whether or not
+    /// `pane_sizing` or its solve size changed.
+    ///
+    /// Returns the events of those checks.
+    #[must_use]
+    pub fn update_pane_sizing(&mut self, pane_sizing: PaneSizing) -> Vec<Event> {
+        self.view_changes.is_pane_sizing_changed |= self.pane_sizing != pane_sizing;
+        self.pane_sizing = pane_sizing;
+        let tab_ids: Vec<TabId> = self.tabs.keys().copied().collect();
+        let mut emitted_events = Vec::new();
+        for tab_id in tab_ids {
+            let Some(tab_size) = self.resolve_tab_solve_size(tab_id) else {
+                continue;
+            };
+            let Some(tab) = self.tabs.get_mut(&tab_id) else {
+                continue;
+            };
+            let is_tab_size_changed = tab.solved_tab_size != tab_size;
+            tab.solved_tab_size = tab_size;
+            let previous_layout_solve = tab.update_layout_solve(pane_sizing);
+            if is_tab_size_changed || previous_layout_solve != tab.layout_solve {
+                self.view_changes.layout_changed_tab_ids.insert(tab_id);
+            }
+            self.clients.clear_own_active_tab_solves(tab_id);
+            emitted_events.extend(hand_off_suppressed_focus(
+                self,
+                tab_id,
+                Some(&previous_layout_solve),
+            ));
+        }
+        emitted_events.extend(self.minimize_undrawable_floating_panes());
+        emitted_events
+    }
+
+    /// The tab size `tab_id` is solved at: [`Session::get_tab_size`] while an
+    /// attached client views the tab, `0x0` while every client viewing it
+    /// reports [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving),
+    /// and the tab size the tab holds ([`Tab::get_solved_tab_size`]) while no
+    /// client views it. `None` when the session holds no `tab_id`.
+    ///
+    /// A tab viewed by an `80x22` and a `100x30` pane area → `80x22`; a tab
+    /// solved at `120x40` that no client views → `120x40`.
+    #[must_use]
+    pub fn resolve_tab_solve_size(&self, tab_id: TabId) -> Option<Size> {
+        let tab = self.tabs.get(&tab_id)?;
+        let is_tab_viewed = self
+            .clients
+            .list_attached_clients()
+            .any(|client| client.get_active_tab_id() == tab_id);
+        if !is_tab_viewed {
+            return Some(tab.solved_tab_size);
+        }
+        Some(self.get_tab_size(tab_id).unwrap_or(Size {
+            column_count: 0,
+            row_count: 0,
+        }))
+    }
+
+    /// Solve `tab_id` again at [`Session::resolve_tab_solve_size`] when that
+    /// size differs from the one the tab is solved at. Then, whether or not
+    /// the tab was solved again, run the focus and floating checks of
+    /// [`Session::update_tab_layout`]: a client that switched to the tab with
+    /// its focus on a suppressed pane moves.
+    ///
+    /// Returns the events of those checks. A tab id the session does not hold
+    /// changes nothing and returns none.
+    #[must_use]
+    pub fn update_tab_solve(&mut self, tab_id: TabId) -> Vec<Event> {
+        let Some(tab_size) = self.resolve_tab_solve_size(tab_id) else {
+            return Vec::new();
+        };
+        let pane_sizing = self.pane_sizing;
+        let Some(tab) = self.tabs.get_mut(&tab_id) else {
+            return Vec::new();
+        };
+        let previous_layout_solve = if tab.solved_tab_size == tab_size {
+            None
+        } else {
+            tab.solved_tab_size = tab_size;
+            let previous_layout_solve = tab.update_layout_solve(pane_sizing);
+            self.view_changes.layout_changed_tab_ids.insert(tab_id);
+            self.clients.clear_own_active_tab_solves(tab_id);
+            Some(previous_layout_solve)
+        };
+        self.apply_tab_solve_change(tab_id, previous_layout_solve.as_ref())
+    }
+
+    /// Replace `tab_id`'s layout tree with `layout_tree` and solve it again at
+    /// the tab size the tab is solved at, with [`Session::get_pane_sizing`].
+    /// Then:
+    /// 1. every attached client that views the tab tiled, and whose focused
+    ///    pane in it the new solve suppresses, focuses the pane that
+    ///    inherits the focus, ranked against that pane's rect in the previous
+    ///    solve, as a closed pane's focus is handed on;
+    /// 2. every attached client that cannot draw floating panes
+    ///    ([`Session::can_client_draw_floating_panes`]) minimizes the
+    ///    floating panes it shows.
+    ///
+    /// Returns the events of steps 1 and 2. A tab id the session does not hold
+    /// changes nothing and returns none.
+    #[must_use]
+    pub fn update_tab_layout(&mut self, tab_id: TabId, layout_tree: LayoutNode) -> Vec<Event> {
+        let pane_sizing = self.pane_sizing;
+        let Some(tab) = self.tabs.get_mut(&tab_id) else {
+            return Vec::new();
+        };
+        let is_layout_tree_changed = tab.layout != layout_tree;
+        tab.layout = layout_tree;
+        let previous_layout_solve = tab.update_layout_solve(pane_sizing);
+        if is_layout_tree_changed || previous_layout_solve != tab.layout_solve {
+            self.view_changes.layout_changed_tab_ids.insert(tab_id);
+        }
+        self.clients.clear_own_active_tab_solves(tab_id);
+        self.apply_tab_solve_change(tab_id, Some(&previous_layout_solve))
+    }
+
+    /// Steps 1 and 2 of [`Session::update_tab_layout`] for `tab_id`, with
+    /// `previous_layout_solve` as the solve the tab held before its last
+    /// solve. `None` ranks each suppressed pane against its rect in the
+    /// tab's current solve.
+    fn apply_tab_solve_change(
+        &mut self,
+        tab_id: TabId,
+        previous_layout_solve: Option<&LayoutSolve>,
+    ) -> Vec<Event> {
+        let mut emitted_events = hand_off_suppressed_focus(self, tab_id, previous_layout_solve);
+        emitted_events.extend(self.minimize_undrawable_floating_panes());
+        emitted_events
+    }
+
+    /// The solve `client` draws `tab_id` with, at the tab's solved size. A
+    /// client that views the tab tiled sees each stack show the member holding
+    /// its newest pane of that stack in its focus history
+    /// ([`Client::list_focus_history`]); a stack with no pane in that history
+    /// shows its active member ([`LayoutNode::build_shown_layout_tree`]). A
+    /// client zoomed in the tab draws the zoom's solve
+    /// ([`Session::compute_layout_mode_solve`]). `None` when the session holds
+    /// no `tab_id`.
+    ///
+    /// For the client's active tab, the first call after a change to the
+    /// tab's solve, or to the client's active tab, focus history or zoom,
+    /// builds the client's own solve and keeps it on the client. Each call
+    /// after it returns the kept solve and solves nothing. Another tab is
+    /// solved on every call.
+    ///
+    /// The stack `[vim, htop]` with `htop` active: a tiled client whose focus
+    /// history is `[vim]` sees `vim` open and `htop` on its header, and a
+    /// tiled client whose history is `[htop, vim]` gets the tab's solve with
+    /// no copy.
+    #[must_use]
+    pub fn compute_client_solve<'a>(
+        &'a self,
+        client: &'a Client,
+        tab_id: TabId,
+    ) -> Option<Cow<'a, LayoutSolve>> {
+        let tab = self.tabs.get(&tab_id)?;
+        let own_client_solve = if tab_id == client.get_active_tab_id() {
+            client
+                .get_own_active_tab_solve(|| self.build_own_client_solve(client, tab))
+                .map(Cow::Borrowed)
+        } else {
+            self.build_own_client_solve(client, tab).map(Cow::Owned)
+        };
+        Some(own_client_solve.unwrap_or(Cow::Borrowed(&tab.layout_solve)))
+    }
+
+    /// The solve `client` draws `tab` with when it is not the tab's own solve
+    /// ([`Tab::get_layout_solve`]): the zoom's solve
+    /// ([`Session::build_zoomed_tab_solve`]) for a client zoomed in the tab,
+    /// else the solve of the tree with each stack showing the member
+    /// [`LayoutNode::build_shown_layout_tree`] gives for the client's focus
+    /// history in the tab. `None` when the client draws the tab's own solve:
+    /// a tiled client whose every stack shows its active member, or a zoom on
+    /// a pane the tab's tree does not hold.
+    fn build_own_client_solve(&self, client: &Client, tab: &Tab) -> Option<LayoutSolve> {
+        match client.get_layout_mode(tab.tab_id) {
+            LayoutMode::Fullscreen { focused_pane_id } => {
+                self.build_zoomed_tab_solve(tab, focused_pane_id)
+            }
+            LayoutMode::Tiled => {
+                let shown_layout_tree = tab
+                    .layout
+                    .build_shown_layout_tree(client.list_focus_history(tab.tab_id))?;
+                Some(solve_layout_with_sizing(
+                    &shown_layout_tree,
+                    Rect::from_size_at_origin(tab.solved_tab_size),
+                    self.pane_sizing,
+                ))
+            }
+        }
+    }
+
+    /// The solve of `tab_id` in `layout_mode`, with each stack showing its
+    /// active member. `Tiled` is the tab's own solve
+    /// ([`Tab::get_layout_solve`]). `Fullscreen` on a leaf of the tab's tree
+    /// gives that pane the whole tab and every other pane zero area at the
+    /// tab's solved size, and suppresses the pane when that size is below its
+    /// border-inclusive floor ([`solve_layout_with_mode`]). `Fullscreen` on a
+    /// pane the tree does not hold is the tab's own solve. `None` when the
+    /// session holds no `tab_id`.
+    ///
+    /// `Tiled` on an `80x22` tab gives the tab's solve with no copy.
+    #[must_use]
+    pub fn compute_layout_mode_solve(
+        &self,
+        tab_id: TabId,
+        layout_mode: LayoutMode,
+    ) -> Option<Cow<'_, LayoutSolve>> {
+        let tab = self.tabs.get(&tab_id)?;
+        let zoomed_tab_solve = match layout_mode {
+            LayoutMode::Fullscreen { focused_pane_id } => {
+                self.build_zoomed_tab_solve(tab, focused_pane_id)
+            }
+            LayoutMode::Tiled => None,
+        };
+        Some(zoomed_tab_solve.map_or(Cow::Borrowed(&tab.layout_solve), Cow::Owned))
+    }
+
+    /// The solve of `tab` zoomed on `zoomed_pane_id` at the tab's solved size,
+    /// as [`Session::compute_layout_mode_solve`] states it for `Fullscreen`.
+    /// `None` when the tab's tree does not hold `zoomed_pane_id`.
+    fn build_zoomed_tab_solve(&self, tab: &Tab, zoomed_pane_id: PaneId) -> Option<LayoutSolve> {
+        if !tab.layout.has_pane(zoomed_pane_id) {
+            return None;
+        }
+        Some(solve_layout_with_mode(
+            &tab.layout,
+            LayoutMode::Fullscreen {
+                focused_pane_id: zoomed_pane_id,
+            },
+            Rect::from_size_at_origin(tab.solved_tab_size),
+            self.pane_sizing,
+        ))
+    }
+
+    /// Whether `client` can draw floating panes: it has a floating viewport
+    /// ([`Client::get_floating_viewport`], a pane area of at least `5x6`), and
+    /// its own view of its active tab ([`Session::compute_client_solve`])
+    /// has a pane that is not suppressed. A client whose active tab the
+    /// session does not hold can draw floating panes while it has a floating
+    /// viewport.
+    ///
+    /// A `4x6` pane area → `false`. An `80x22` pane area on a tab that a
+    /// client with a `4x2` pane area also views → `false`: the tab is solved
+    /// at `4x2`, and every pane is suppressed.
+    #[must_use]
+    pub fn can_client_draw_floating_panes(&self, client: &Client) -> bool {
+        if client.get_floating_viewport().is_none() {
+            return false;
+        }
+        self.compute_client_solve(client, client.get_active_tab_id())
+            .is_none_or(|client_solve| !client_solve.is_every_pane_suppressed)
+    }
+
+    /// Minimize every floating pane shown by each attached client that cannot
+    /// draw floating panes ([`Session::can_client_draw_floating_panes`]), in
+    /// client id order. Each such client minimizes all the floating panes it
+    /// shows ([`Client::minimize_shown_floating_panes`]), and its input goes
+    /// to its active tab's focused pane. No other client's view changes.
+    ///
+    /// Returns, per changed client, one [`Event::PaneMinimizedChanged`] with
+    /// `is_minimized: true` per pane, oldest shown first, then the
+    /// [`Event::PaneFocused`] of its input ([`build_pane_focused_event`]).
+    fn minimize_undrawable_floating_panes(&mut self) -> Vec<Event> {
+        let minimizing_client_ids: Vec<ClientId> = self
+            .clients
+            .list_attached_clients()
+            .filter(|client| {
+                !client.list_shown_floating_pane_ids().is_empty()
+                    && !self.can_client_draw_floating_panes(client)
             })
-            .unwrap_or(Size {
-                column_count: 80,
-                row_count: 24,
-            });
-        Rect::from_size_at_origin(tab_size)
+            .map(Client::get_client_id)
+            .collect();
+        let mut emitted_events = Vec::new();
+        for client_id in minimizing_client_ids {
+            let Some(client) = self.clients.get_client_mut_by_id(client_id) else {
+                continue;
+            };
+            let previous_focused_pane_id = client.get_active_focused_pane_id();
+            let minimized_pane_ids = client.minimize_shown_floating_panes();
+            emitted_events.extend(build_pane_minimized_changed_events(
+                client_id,
+                &minimized_pane_ids,
+                true,
+            ));
+            emitted_events.extend(build_pane_focused_event(client, previous_focused_pane_id));
+        }
+        emitted_events
     }
 
     /// The cell size of the earliest-attached client viewing `tab_id` that
@@ -526,12 +970,10 @@ impl Session {
     /// Each attached client contributes its [`Client::get_floating_viewport`];
     /// a client that reports
     /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving), or a
-    /// pane area smaller than
-    /// [`MIN_FLOATING_PANE_SIZE`](crate::client::MIN_FLOATING_PANE_SIZE) on
-    /// either axis, contributes nothing. Returns `None` when no attached client
-    /// contributes a size. A `120x40` client viewing tab `db` and an `80x22`
-    /// client viewing tab `web` → `80x22`; a third client with a `3x40` pane
-    /// area keeps `80x22`.
+    /// pane area smaller than `5x6` on either axis, contributes nothing.
+    /// Returns `None` when no attached client contributes a size. A `120x40`
+    /// client viewing tab `db` and an `80x22` client viewing tab `web` →
+    /// `80x22`; a third client with a `4x40` pane area keeps `80x22`.
     #[must_use]
     pub fn get_shared_floating_viewport(&self) -> Option<Size> {
         self.clients
@@ -567,7 +1009,8 @@ impl Session {
     /// index, on the client's floating viewport
     /// ([`Client::get_floating_viewport`]). The client's minimized state is
     /// not read. `None` when `pane_id` is no floating member of this session,
-    /// or the client has no floating viewport.
+    /// the client holds no view of it, or the client has no floating
+    /// viewport.
     ///
     /// A `40x12` pane pinned at `(20, 5)`, on a client whose floating viewport
     /// is `50x22` → `(10, 5)` `40x12`.
@@ -576,7 +1019,7 @@ impl Session {
         let floating_viewport = client.get_floating_viewport()?;
         let (cascade_index, floating_member) = self.floating_set.find_member(pane_id)?;
         Some(place_floating_pane(
-            client.get_floating_pane_view(pane_id).position,
+            client.get_floating_pane_view(pane_id)?.position,
             floating_member.solved_size,
             cascade_index,
             floating_viewport,
@@ -592,16 +1035,45 @@ impl Session {
         find_earliest_reported_cell_size(self.clients.list_attached_clients())
     }
 
+    /// Add `floating_member` to the floating set as its newest member, and a
+    /// minimized view of it to every attached client
+    /// ([`Client::add_floating_pane_view`]): at the position that
+    /// `client_positions` pairs with the client, and at the default placement
+    /// for a client it does not list.
+    ///
+    /// # Errors
+    ///
+    /// [`FloatingSetError::DuplicatePane`] when the set already holds
+    /// `floating_member.pane_id`, else [`FloatingSetError::TooManyPanes`] when
+    /// [`FloatingSet::is_full`]. The session does not change.
+    pub fn add_floating_member(
+        &mut self,
+        floating_member: FloatingMember,
+        client_positions: &[(ClientId, FloatingPanePosition)],
+    ) -> Result<(), FloatingSetError> {
+        self.floating_set.add_member(floating_member)?;
+        self.view_changes.is_floating_set_changed = true;
+        for client in self.clients.list_attached_clients_mut() {
+            let position = client_positions
+                .iter()
+                .find(|&&(client_id, _)| client_id == client.get_client_id())
+                .map_or(FloatingPanePosition::Default, |&(_, position)| position);
+            client.add_floating_pane_view(floating_member.pane_id, position);
+        }
+        Ok(())
+    }
+
     /// Remove `pane_id` from the floating set, keeping the order of the other
-    /// members, and from every attached client's floating view: its stored
-    /// view and its floating focus order entry. A client whose floating focus
-    /// was on `pane_id` focuses the floating pane it focused or restored most
-    /// recently among those it still shows, else no floating pane.
+    /// members, and from every attached client's floating view: its view and
+    /// its shown floating pane entry. A client whose floating focus was on
+    /// `pane_id` focuses the newest floating pane it still shows, else no
+    /// floating pane.
     /// Returns the removed member, or `None`, changing nothing, when `pane_id`
     /// is not floating.
     pub fn remove_floating_member(&mut self, pane_id: PaneId) -> Option<FloatingMember> {
         let (member_index, _) = self.floating_set.find_member(pane_id)?;
         let floating_member = self.floating_set.members.remove(member_index);
+        self.view_changes.is_floating_set_changed = true;
         for client in self.clients.list_attached_clients_mut() {
             client.remove_floating_pane_view(pane_id);
         }
@@ -630,19 +1102,24 @@ impl Session {
     /// The checks run in this order:
     ///
     /// 1. Each tab's map key, then each of its layout leaves against the pane
-    ///    registry, tab by tab.
+    ///    registry, then its stored solve against a fresh solve of its tree,
+    ///    then the tab size it is solved at against
+    ///    [`Session::resolve_tab_solve_size`], tab by tab.
     /// 2. Each bar index that two tabs claim.
     /// 3. Each pane that two layouts hold.
     /// 4. The number of floating members against
     ///    [`MAX_FLOATING_PANES_PER_SESSION`], then each floating member against
     ///    the pane registry, the other members and the layouts.
     /// 5. Each registry record against the layouts and the floating members.
-    /// 6. Each attached client's session id, active tab, focus, zoom, floating
-    ///    views, floating focus order and floating focus.
+    /// 6. Each attached client's session id, active tab, focus, zoom,
+    ///    floating views, shown floating panes, floating focus, floating panes
+    ///    shown while it cannot draw them, and a focus on a pane its tiled view
+    ///    suppresses.
     ///
     /// See [`SessionConsistencyError`] for the individual checks. Each check
-    /// walks its subjects by id, by bar index, or in floating focus order: one
-    /// session reports the same list on every call.
+    /// walks its subjects by id, by bar index, in the order the panes became
+    /// floating, or in shown order: one session reports the same list on every
+    /// call.
     pub fn validate_session_consistency(&self) -> Result<(), Vec<SessionConsistencyError>> {
         let mut consistency_violations = vec![];
         // Pane id -> the tabs whose layout holds it as a leaf, in pane id
@@ -673,6 +1150,25 @@ impl Session {
                     consistency_violations.push(SessionConsistencyError::PaneNotInRegistry {
                         tab_id: tab.tab_id,
                         pane_id,
+                    });
+                }
+            }
+
+            let fresh_layout_solve = solve_layout_with_sizing(
+                &tab.layout,
+                Rect::from_size_at_origin(tab.solved_tab_size),
+                self.pane_sizing,
+            );
+            if fresh_layout_solve != tab.layout_solve {
+                consistency_violations
+                    .push(SessionConsistencyError::TabSolveStale { tab_id: *tab_id });
+            }
+            if let Some(tab_size) = self.resolve_tab_solve_size(*tab_id) {
+                if tab_size != tab.solved_tab_size {
+                    consistency_violations.push(SessionConsistencyError::TabSolveSizeStale {
+                        tab_id: *tab_id,
+                        solved_tab_size: tab.solved_tab_size,
+                        tab_size,
                     });
                 }
             }
@@ -764,34 +1260,37 @@ impl Session {
                 });
             }
 
-            // Each remembered focus must point at a real pane that is a leaf of
-            // the tab it was focused in.
-            for (&tab_id, &focused_pane_id) in client
-                .list_focused_pane_ids()
+            // Each pane of a focus history must be a real pane that is a leaf
+            // of the tab it was focused in.
+            for (&tab_id, focus_history) in client
+                .list_focus_histories()
                 .iter()
                 .collect::<BTreeMap<_, _>>()
             {
-                if self.panes.get_pane_record_by_id(focused_pane_id).is_none() {
-                    consistency_violations.push(SessionConsistencyError::FocusPaneNotInRegistry {
-                        client_id: client.get_client_id(),
-                        tab_id,
-                        pane_id: focused_pane_id,
-                    });
-                }
-
-                match self.tabs.get(&tab_id) {
-                    None => consistency_violations.push(SessionConsistencyError::FocusTabMissing {
-                        client_id: client.get_client_id(),
-                        tab_id,
-                    }),
-                    Some(tab) if !tab.layout.has_pane(focused_pane_id) => {
+                let tab = self.tabs.get(&tab_id);
+                for &history_pane_id in focus_history {
+                    if self.panes.get_pane_record_by_id(history_pane_id).is_none() {
+                        consistency_violations.push(
+                            SessionConsistencyError::FocusPaneNotInRegistry {
+                                client_id: client.get_client_id(),
+                                tab_id,
+                                pane_id: history_pane_id,
+                            },
+                        );
+                    }
+                    if tab.is_some_and(|tab| !tab.layout.has_pane(history_pane_id)) {
                         consistency_violations.push(SessionConsistencyError::FocusTargetMissing {
                             client_id: client.get_client_id(),
                             tab_id,
-                            pane_id: focused_pane_id,
+                            pane_id: history_pane_id,
                         });
                     }
-                    Some(_) => {}
+                }
+                if tab.is_none() {
+                    consistency_violations.push(SessionConsistencyError::FocusTabMissing {
+                        client_id: client.get_client_id(),
+                        tab_id,
+                    });
                 }
             }
 
@@ -817,12 +1316,13 @@ impl Session {
                 }
             }
 
-            // Each stored floating view must name a floating member, and a
-            // minimized one must be in the floating focus order.
-            for (&viewed_pane_id, floating_pane_view) in client
+            // The client holds a floating view of each floating member and of
+            // nothing else, and a view says minimized exactly when the shown
+            // floating panes do not list its pane.
+            for &viewed_pane_id in client
                 .list_floating_pane_views()
-                .iter()
-                .collect::<BTreeMap<_, _>>()
+                .keys()
+                .collect::<BTreeSet<_>>()
             {
                 if !floating_member_count_by_pane_id.contains_key(&viewed_pane_id) {
                     consistency_violations.push(
@@ -832,71 +1332,91 @@ impl Session {
                         },
                     );
                 }
-                if floating_pane_view.is_minimized
-                    && !client
-                        .list_floating_pane_focus_order()
-                        .contains(&viewed_pane_id)
-                {
+            }
+            for floating_member in self.floating_set.list_members() {
+                let pane_id = floating_member.pane_id;
+                let Some(floating_pane_view) = client.get_floating_pane_view(pane_id) else {
+                    consistency_violations.push(SessionConsistencyError::FloatingViewMissing {
+                        client_id: client.get_client_id(),
+                        pane_id,
+                    });
+                    continue;
+                };
+                let is_listed_shown = client.list_shown_floating_pane_ids().contains(&pane_id);
+                if floating_pane_view.is_minimized == is_listed_shown {
                     consistency_violations.push(
-                        SessionConsistencyError::MinimizedFloatingPaneNotInFocusOrder {
+                        SessionConsistencyError::FloatingPaneShownStateMismatch {
                             client_id: client.get_client_id(),
-                            pane_id: viewed_pane_id,
+                            pane_id,
+                            is_minimized: floating_pane_view.is_minimized,
                         },
                     );
                 }
             }
 
-            // Each floating focus order entry must name a floating member, once.
-            let mut listed_pane_ids: BTreeSet<PaneId> = BTreeSet::new();
-            for &ordered_pane_id in client.list_floating_pane_focus_order() {
-                if !floating_member_count_by_pane_id.contains_key(&ordered_pane_id) {
+            // Each shown floating pane is a floating member, listed once.
+            let mut shown_pane_ids: BTreeSet<PaneId> = BTreeSet::new();
+            for &shown_pane_id in client.list_shown_floating_pane_ids() {
+                if !floating_member_count_by_pane_id.contains_key(&shown_pane_id) {
                     consistency_violations.push(
-                        SessionConsistencyError::FloatingFocusOrderTargetMissing {
+                        SessionConsistencyError::ShownFloatingPaneMissing {
                             client_id: client.get_client_id(),
-                            pane_id: ordered_pane_id,
+                            pane_id: shown_pane_id,
                         },
                     );
                 }
-                if !listed_pane_ids.insert(ordered_pane_id) {
+                if !shown_pane_ids.insert(shown_pane_id) {
                     consistency_violations.push(
-                        SessionConsistencyError::DuplicateFloatingFocusOrderEntry {
+                        SessionConsistencyError::DuplicateShownFloatingPane {
                             client_id: client.get_client_id(),
-                            pane_id: ordered_pane_id,
+                            pane_id: shown_pane_id,
                         },
                     );
                 }
             }
 
-            // The floating focus must name a floating member that is last in
-            // the floating focus order and that this client has not minimized.
-            if let Some(focused_floating_pane_id) = client.get_focused_floating_pane_id() {
-                if !floating_member_count_by_pane_id.contains_key(&focused_floating_pane_id) {
+            // The floating focus is the newest shown floating pane, and no
+            // focus means none is shown.
+            let newest_shown_pane_id = client.list_shown_floating_pane_ids().last().copied();
+            if client.get_focused_floating_pane_id() != newest_shown_pane_id {
+                consistency_violations.push(SessionConsistencyError::FloatingFocusNotNewestShown {
+                    client_id: client.get_client_id(),
+                    focused_pane_id: client.get_focused_floating_pane_id(),
+                    newest_shown_pane_id,
+                });
+            }
+
+            // A client that cannot draw floating panes shows none.
+            if !self.can_client_draw_floating_panes(client) {
+                for &shown_pane_id in client.list_shown_floating_pane_ids() {
                     consistency_violations.push(
-                        SessionConsistencyError::FocusedFloatingPaneMissing {
+                        SessionConsistencyError::UndrawableFloatingPaneShown {
                             client_id: client.get_client_id(),
-                            pane_id: focused_floating_pane_id,
+                            pane_id: shown_pane_id,
                         },
                     );
                 }
-                if client.list_floating_pane_focus_order().last() != Some(&focused_floating_pane_id)
+            }
+
+            // A client that views its active tab tiled focuses no pane that
+            // the tab's solve suppresses, while any pane of the tab is drawn.
+            let active_tab_id = client.get_active_tab_id();
+            if let (LayoutMode::Tiled, Some(tab), Some(focused_pane_id)) = (
+                client.get_layout_mode(active_tab_id),
+                self.tabs.get(&active_tab_id),
+                client.get_focused_pane_id(active_tab_id),
+            ) {
+                if !tab.layout_solve.is_every_pane_suppressed
+                    && tab
+                        .layout_solve
+                        .suppressed_pane_ids
+                        .contains(&focused_pane_id)
                 {
-                    consistency_violations.push(
-                        SessionConsistencyError::FocusedFloatingPaneNotOnTop {
-                            client_id: client.get_client_id(),
-                            pane_id: focused_floating_pane_id,
-                        },
-                    );
-                }
-                if client
-                    .get_floating_pane_view(focused_floating_pane_id)
-                    .is_minimized
-                {
-                    consistency_violations.push(
-                        SessionConsistencyError::FocusedFloatingPaneMinimized {
-                            client_id: client.get_client_id(),
-                            pane_id: focused_floating_pane_id,
-                        },
-                    );
+                    consistency_violations.push(SessionConsistencyError::SuppressedPaneFocused {
+                        client_id: client.get_client_id(),
+                        tab_id: active_tab_id,
+                        pane_id: focused_pane_id,
+                    });
                 }
             }
         }
