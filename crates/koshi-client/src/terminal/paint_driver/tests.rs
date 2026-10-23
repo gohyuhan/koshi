@@ -638,6 +638,68 @@ fn after_a_failed_frame_the_next_frame_clears_the_screen_and_draws_every_cell() 
 }
 
 #[test]
+fn a_frame_erases_the_screen_exactly_when_the_driver_says_it_needs_an_erase() {
+    let driver_sink = RecordingSink::default();
+    let mut paint_driver = PaintDriver::from_backend(
+        CrosstermBackend::new(driver_sink.clone()),
+        build_terminal_size(80, 24),
+    );
+    let render_frame = |frame_buffer: &mut Buffer, _drawn_rows: DrawnRows<'_>| {
+        frame_buffer[(1, 1)].set_symbol("k");
+        None
+    };
+
+    for (step_name, terminal_size, expected_erase_bytes) in [
+        ("the built size", build_terminal_size(80, 24), &b""[..]),
+        ("the same size again", build_terminal_size(80, 24), &b""[..]),
+        (
+            "a wider size",
+            build_terminal_size(100, 30),
+            &b"\x1b[2J"[..],
+        ),
+        (
+            "a narrower size",
+            build_terminal_size(60, 20),
+            &b"\x1b[2J\x1b[2J"[..],
+        ),
+        (
+            "an unknown screen",
+            build_terminal_size(60, 20),
+            &b"\x1b[2J"[..],
+        ),
+        ("cleared cells", build_terminal_size(60, 20), &b""[..]),
+    ] {
+        match step_name {
+            "an unknown screen" => paint_driver.mark_shown_screen_unknown(),
+            "cleared cells" => paint_driver.clear_shown_cells(),
+            _ => {}
+        }
+        let needs_screen_erase = paint_driver.needs_screen_erase(terminal_size);
+
+        paint_driver
+            .draw_frame(terminal_size, None, render_frame)
+            .expect("the frame draws");
+
+        let frame_bytes = driver_sink.take_recorded_bytes();
+        assert_eq!(
+            needs_screen_erase,
+            !expected_erase_bytes.is_empty(),
+            "{step_name}"
+        );
+        assert!(
+            frame_bytes.starts_with(expected_erase_bytes)
+                && !frame_bytes[expected_erase_bytes.len()..].starts_with(b"\x1b[2J"),
+            "{step_name}: {}",
+            String::from_utf8_lossy(&frame_bytes)
+        );
+        assert!(
+            !paint_driver.needs_screen_erase(terminal_size),
+            "{step_name}: the drawn frame still needs an erase"
+        );
+    }
+}
+
+#[test]
 fn a_frame_after_a_marked_unknown_screen_clears_it_and_after_cleared_cells_does_not() {
     let terminal_size = build_terminal_size(10, 2);
     let mut paint_driver = PaintDriver::from_backend(TestBackend::new(10, 2), terminal_size);

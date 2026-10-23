@@ -422,10 +422,10 @@ impl<B: Backend> PaintDriver<B> {
     /// Any other frame draws every row. `render_frame` gets a blank buffer of
     /// `terminal_size` and [`DrawnRows::Every`], and the backend gets:
     ///
-    /// 1. When `terminal_size` differs from the last frame's size, a clear of
-    ///    the whole screen, two when the terminal is narrower. When the shown
-    ///    screen is unknown ([`Self::mark_shown_screen_unknown`]), one clear.
-    ///    After a clear, every cell that is not blank is drawn.
+    /// 1. When [`Self::needs_screen_erase`] is `true` for `terminal_size`, a
+    ///    clear of the whole screen, two when the terminal is narrower than
+    ///    the last frame. After a clear, every cell that is not blank is
+    ///    drawn.
     /// 2. Every cell that differs from the shown cells ([`Backend::draw`]).
     /// 3. `hide_cursor`, or `show_cursor` then `set_cursor_position`.
     /// 4. `flush`.
@@ -476,7 +476,7 @@ impl<B: Backend> PaintDriver<B> {
         self.next_buffer.resize(frame_area);
         self.next_buffer.reset();
         let cursor_position = render_frame(&mut self.next_buffer, DrawnRows::Every);
-        if let Err(backend_error) = self.write_frame(frame_area, cursor_position) {
+        if let Err(backend_error) = self.write_frame(terminal_size, cursor_position) {
             self.shown_screen = ShownScreen::Unknown;
             return Err(backend_error);
         }
@@ -485,23 +485,35 @@ impl<B: Backend> PaintDriver<B> {
         Ok(())
     }
 
+    /// Return whether the next frame of `terminal_size` that draws every row
+    /// clears the whole screen first: `terminal_size` differs from the size
+    /// of the last frame this driver drew, or of the blank terminal it was
+    /// built for, or the shown screen is unknown
+    /// ([`Self::mark_shown_screen_unknown`]). A frame that would draw listed
+    /// rows draws every row when this is `true`.
+    ///
+    /// Example: after a frame of 80×24, a frame of 100×30 clears the screen,
+    /// and the next frame of 100×30 does not.
+    pub(crate) fn needs_screen_erase(&self, terminal_size: Size) -> bool {
+        let frame_area = Rect::new(0, 0, terminal_size.column_count, terminal_size.row_count);
+        frame_area != self.shown_buffer.area || self.shown_screen == ShownScreen::Unknown
+    }
+
     /// Write the clears, the changed cells of `self.next_buffer`, the cursor
     /// at `cursor_position` and the flush that [`Self::draw_frame`] lists for
-    /// a frame that draws every row.
+    /// a frame of `terminal_size` that draws every row.
     fn write_frame(
         &mut self,
-        frame_area: Rect,
+        terminal_size: Size,
         cursor_position: Option<Position>,
     ) -> Result<(), B::Error> {
-        if frame_area != self.shown_buffer.area {
+        if self.needs_screen_erase(terminal_size) {
+            let frame_area = Rect::new(0, 0, terminal_size.column_count, terminal_size.row_count);
             if frame_area.width < self.shown_buffer.area.width {
                 self.backend.clear_region(ClearType::All)?;
             }
             self.backend.clear_region(ClearType::All)?;
             self.shown_buffer.resize(frame_area);
-            self.shown_buffer.reset();
-        } else if self.shown_screen == ShownScreen::Unknown {
-            self.backend.clear_region(ClearType::All)?;
             self.shown_buffer.reset();
         }
         self.backend

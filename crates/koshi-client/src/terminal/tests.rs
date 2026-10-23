@@ -87,9 +87,9 @@ use ratatui::layout::{Position, Rect};
 use koshi_config::layer::{PartialColorPalette, PartialKeybindingsConfig, PartialThemeConfig};
 use koshi_config::types::RgbColor;
 use koshi_core::command::{
-    ClearSelectionArgs, Command, CommandEnvelope, CommandSource, FocusPaneArgs, FocusTarget,
-    NewPaneArgs, NewPanePlacement, PanePlacementAnchor, ScrollPaneArgs, SetSelectionArgs,
-    TiledPlacementTarget, VisualCommand,
+    ClearSelectionArgs, ClosePaneArgs, Command, CommandEnvelope, CommandSource, FocusPaneArgs,
+    FocusTabArgs, FocusTarget, NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor,
+    ScrollPaneArgs, SetSelectionArgs, TabTarget, TiledPlacementTarget, VisualCommand,
 };
 use koshi_core::geometry::{Direction, Rect as CoreRect, Size, SplitDirection};
 use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
@@ -442,13 +442,21 @@ fn build_two_image_input(graphics_protocol: GraphicsProtocol) -> Vec<u8> {
     terminal_input_bytes
 }
 
-fn build_source_image_pixel_map(render_snapshot: &RenderSnapshot) -> BTreeMap<(u16, u16), [u8; 4]> {
+/// The RGBA pixel each image paint of `render_snapshot` draws in each cell
+/// it covers, by `(row, column)`, on a viewport of `viewport_size` drawn with
+/// `viewer_chrome`. Where two paints cover one cell, the paint drawn last
+/// gives the pixel.
+fn build_source_image_pixel_map(
+    render_snapshot: &RenderSnapshot,
+    viewport_size: Size,
+    viewer_chrome: ViewerChrome,
+) -> BTreeMap<(u16, u16), [u8; 4]> {
     let mut image_pixel_by_position = BTreeMap::new();
     for image_paint in build_image_paints(
         render_snapshot,
-        &build_committed_regions(TEST_VIEWPORT_SIZE),
-        ViewerChrome::default(),
-        Rect::new(0, 0, 80, 24),
+        &build_committed_regions(viewport_size),
+        viewer_chrome,
+        Rect::new(0, 0, viewport_size.column_count, viewport_size.row_count),
     ) {
         for target_row_offset in 0..image_paint.target_area.height {
             for target_column_offset in 0..image_paint.target_area.width {
@@ -1007,7 +1015,13 @@ fn two_images_survive_partial_full_and_reverse_scrolling_for_every_protocol_pair
 
         let expected_frame_pixel_maps = render_snapshots
             .iter()
-            .map(build_source_image_pixel_map)
+            .map(|render_snapshot| {
+                build_source_image_pixel_map(
+                    render_snapshot,
+                    TEST_VIEWPORT_SIZE,
+                    ViewerChrome::default(),
+                )
+            })
             .collect::<Vec<_>>();
         assert!(
             build_image_paints(
@@ -4974,5 +4988,650 @@ fn a_floating_source_preview_shows_the_pane_in_the_destination_tab_with_its_fram
             PaneSnapshot::from_empty_pane(left_pane_id),
             PaneSnapshot::from_empty_pane(right_pane_id),
         ]
+    );
+}
+
+/// One client's outer terminal as these tests see it: the paint state a
+/// running client keeps from frame to frame, and a koshi terminal engine with
+/// one-pixel cells that plays the outer terminal.
+struct EmulatedOuterTerminal {
+    frame_writer: ImageTraceWriter,
+    paint_driver: PaintDriver<ImageTraceBackend>,
+    image_output_state: ImageOutputState,
+    image_cache: crate::attach::paint::ImageCache,
+    image_wire_content_ids: ImageWireContentIds,
+    terminal_engine: TerminalEngine,
+    shown_frame_inputs: Option<FrameInputs>,
+    last_window_title: String,
+    last_cursor_style: Option<CursorStyle>,
+    graphics_support: GraphicsSupport,
+}
+
+impl EmulatedOuterTerminal {
+    /// An outer terminal of [`TEST_VIEWPORT_SIZE`] on its alternate screen,
+    /// painted with the output protocol of `graphics_support`.
+    fn from_graphics_support(graphics_support: GraphicsSupport) -> Self {
+        let frame_writer = ImageTraceWriter::default();
+        let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
+            column_count: TEST_VIEWPORT_SIZE.column_count,
+            row_count: TEST_VIEWPORT_SIZE.row_count,
+        });
+        terminal_engine.set_cell_size(build_one_pixel_cell_size());
+        let _ = terminal_engine.process_pty_output(b"\x1b[?1049h");
+        Self {
+            paint_driver: PaintDriver::from_backend(
+                ImageTraceBackend(ratatui::backend::CrosstermBackend::new(
+                    frame_writer.clone(),
+                )),
+                TEST_VIEWPORT_SIZE,
+            ),
+            frame_writer,
+            image_output_state: ImageOutputState::from_output_kind(
+                ImageOutputKind::from_support(graphics_support),
+                Arc::new(|| {}),
+            ),
+            image_cache: crate::attach::paint::ImageCache::new(),
+            image_wire_content_ids: ImageWireContentIds::default(),
+            terminal_engine,
+            shown_frame_inputs: None,
+            last_window_title: String::new(),
+            last_cursor_style: None,
+            graphics_support,
+        }
+    }
+
+    /// Resize this outer terminal and `client` to `viewport_size`, and report
+    /// the resize of `client_id` to `server`.
+    fn resize(
+        &mut self,
+        server: &mut Server,
+        client: &mut Client,
+        client_id: ClientId,
+        viewport_size: Size,
+    ) {
+        self.terminal_engine.resize_terminal_state(PtySize {
+            column_count: viewport_size.column_count,
+            row_count: viewport_size.row_count,
+        });
+        let _ = server.handle_runtime_event(RuntimeEvent::Resize {
+            client_id,
+            viewport_size,
+            pane_area: None,
+            cell_size: None,
+        });
+        client.set_viewport_size(viewport_size);
+    }
+
+    /// The frame `server` composes for `client_id`, applied to `client` and
+    /// passed through the wire the way a client with native images receives
+    /// it.
+    fn receive_frame(
+        &mut self,
+        server: &Server,
+        client: &mut Client,
+        client_id: ClientId,
+    ) -> RenderSnapshot {
+        let render_snapshot = build_render_snapshot(server, client_id);
+        client.apply_render_snapshot(&render_snapshot);
+        round_trip_image_frame_through_wire(
+            &render_snapshot,
+            &mut self.image_cache,
+            &mut self.image_wire_content_ids,
+        )
+    }
+
+    /// Paint `render_snapshot` once at the viewport of `client`, write its
+    /// bytes to this outer terminal, and return them.
+    fn paint_frame(&mut self, client: &Client, render_snapshot: &RenderSnapshot) -> Vec<u8> {
+        paint_frame_with_writer(
+            &mut self.frame_writer,
+            &mut self.paint_driver,
+            client,
+            render_snapshot,
+            &build_committed_regions(client.get_viewport_size()),
+            &ViewerPaint::from_client(
+                client,
+                render_snapshot.client_snapshot.active_tab_id,
+                render_snapshot,
+            ),
+            self.graphics_support.get_image_render_mode(),
+            &mut self.image_output_state,
+            Some(build_one_pixel_cell_size()),
+            &mut self.shown_frame_inputs,
+            &mut self.last_window_title,
+            &mut self.last_cursor_style,
+            None,
+            None,
+        )
+        .expect("the frame paints");
+        let frame_bytes = std::mem::take(&mut *self.frame_writer.0.lock().expect("trace lock"));
+        let _ = self.terminal_engine.process_pty_output(&frame_bytes);
+        frame_bytes
+    }
+
+    /// Paint `render_snapshot` until no image work waits, and return the
+    /// bytes of each painted frame, in order.
+    fn paint_until_settled(
+        &mut self,
+        client: &Client,
+        render_snapshot: &RenderSnapshot,
+    ) -> Vec<Vec<u8>> {
+        let settle_deadline = Instant::now() + Duration::from_secs(5);
+        let mut painted_frames = vec![self.paint_frame(client, render_snapshot)];
+        while self.image_output_state.is_work_pending() {
+            assert!(
+                Instant::now() < settle_deadline,
+                "{:?} did not settle",
+                self.graphics_support
+            );
+            std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
+            painted_frames.push(self.paint_frame(client, render_snapshot));
+        }
+        painted_frames
+    }
+
+    /// The pixel this outer terminal shows in each image cell, by
+    /// `(row, column)`.
+    fn list_shown_image_pixels(&self) -> BTreeMap<(u16, u16), [u8; 4]> {
+        build_terminal_image_pixel_map(&self.terminal_engine)
+    }
+}
+
+/// A cell of one pixel by one pixel.
+fn build_one_pixel_cell_size() -> PixelCellSize {
+    PixelCellSize::from_pixel_dimensions(1, 1).expect("a nonzero cell")
+}
+
+/// The pixel each image of `render_snapshot` draws in each cell, by
+/// `(row, column)`, at the viewport of `client`.
+fn build_expected_image_pixels(
+    client: &Client,
+    render_snapshot: &RenderSnapshot,
+) -> BTreeMap<(u16, u16), [u8; 4]> {
+    build_source_image_pixel_map(
+        render_snapshot,
+        client.get_viewport_size(),
+        ViewerPaint::from_client(
+            client,
+            render_snapshot.client_snapshot.active_tab_id,
+            render_snapshot,
+        )
+        .chrome,
+    )
+}
+
+/// How many times `searched_bytes` occurs in `frame_bytes`, overlaps
+/// included.
+fn count_byte_sequence(frame_bytes: &[u8], searched_bytes: &[u8]) -> usize {
+    frame_bytes
+        .windows(searched_bytes.len())
+        .filter(|candidate_bytes| *candidate_bytes == searched_bytes)
+        .count()
+}
+
+/// The three output protocols of a terminal that shows images.
+fn list_native_graphics_supports() -> [GraphicsSupport; 3] {
+    [
+        GraphicsSupport::Kitty,
+        GraphicsSupport::Iterm,
+        GraphicsSupport::Sixel {
+            palette_color_count: 256,
+            maximum_pixel_width: None,
+            maximum_pixel_height: None,
+        },
+    ]
+}
+
+#[test]
+fn a_host_resize_writes_every_iterm_and_sixel_image_again_in_the_frame_that_erases_the_screen() {
+    for (graphics_support, image_introducer_bytes) in [
+        (GraphicsSupport::Iterm, &b"\x1b]1337;"[..]),
+        (
+            GraphicsSupport::Sixel {
+                palette_color_count: 256,
+                maximum_pixel_width: None,
+                maximum_pixel_height: None,
+            },
+            &b"\x1bP"[..],
+        ),
+    ] {
+        let (mut server, client_id, pane_id) = build_test_server_with_pane();
+        let _ = server.handle_runtime_event(RuntimeEvent::CellSize {
+            client_id,
+            cell_size: build_one_pixel_cell_size(),
+        });
+        server.handle_pty_output(pane_id, &build_opaque_image_input(GraphicsProtocol::Kitty));
+        let mut client = build_launch_client(client_id);
+        let mut outer_terminal = EmulatedOuterTerminal::from_graphics_support(graphics_support);
+        let render_snapshot = outer_terminal.receive_frame(&server, &mut client, client_id);
+        outer_terminal.paint_until_settled(&client, &render_snapshot);
+
+        for (viewport_size, expected_erase_count) in [
+            (
+                Size {
+                    column_count: 100,
+                    row_count: 30,
+                },
+                1,
+            ),
+            (
+                Size {
+                    column_count: 60,
+                    row_count: 20,
+                },
+                2,
+            ),
+        ] {
+            let check_name = format!("{graphics_support:?} at {viewport_size:?}");
+            outer_terminal.resize(&mut server, &mut client, client_id, viewport_size);
+            let render_snapshot = outer_terminal.receive_frame(&server, &mut client, client_id);
+
+            let frame_bytes = outer_terminal.paint_frame(&client, &render_snapshot);
+
+            assert_eq!(
+                count_byte_sequence(&frame_bytes, b"\x1b[2J"),
+                expected_erase_count,
+                "{check_name}"
+            );
+            let last_erase_index = frame_bytes
+                .windows(4)
+                .rposition(|candidate_bytes| candidate_bytes == b"\x1b[2J")
+                .expect("the frame erases the screen");
+            let image_start_index = frame_bytes
+                .windows(image_introducer_bytes.len())
+                .position(|candidate_bytes| candidate_bytes == image_introducer_bytes)
+                .unwrap_or_else(|| panic!("{check_name}: the frame wrote no image"));
+            assert!(
+                last_erase_index < image_start_index,
+                "{check_name}: the image came before the erase"
+            );
+            assert!(
+                frame_bytes.starts_with(b"\x1b[?2026h") && frame_bytes.ends_with(b"\x1b[?2026l"),
+                "{check_name}: the frame is not one synchronized update"
+            );
+            assert!(
+                !outer_terminal.image_output_state.is_work_pending(),
+                "{check_name}: the redraw waited for an encode"
+            );
+            let expected_image_pixels = build_expected_image_pixels(&client, &render_snapshot);
+            assert_eq!(expected_image_pixels.len(), 16, "{check_name}");
+            assert_eq!(
+                outer_terminal.list_shown_image_pixels(),
+                expected_image_pixels,
+                "{check_name}"
+            );
+        }
+    }
+}
+
+/// One change to a session that shows an image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageSessionChange {
+    /// Open a new tab, which the client then views.
+    OpenTab,
+    /// View the first tab again.
+    FocusFirstTab,
+    /// Resize the outer terminal.
+    ResizeOuterTerminal(Size),
+    /// Split the image pane to the right.
+    SplitImagePane,
+    /// Focus the image pane.
+    FocusImagePane,
+    /// Toggle fullscreen for the focused pane.
+    ToggleFullscreen,
+    /// Close the image pane at once.
+    CloseImagePane,
+    /// The program in the image pane enters the alternate screen.
+    EnterAlternateScreen,
+    /// The program in the image pane leaves the alternate screen.
+    LeaveAlternateScreen,
+}
+
+/// Make `session_change` on `server` for the client `client_id`, whose image
+/// pane is `image_pane_id` and whose outer terminal is `outer_terminal`.
+fn apply_image_session_change(
+    session_change: ImageSessionChange,
+    server: &mut Server,
+    client: &mut Client,
+    client_id: ClientId,
+    image_pane_id: PaneId,
+    outer_terminal: &mut EmulatedOuterTerminal,
+) {
+    match session_change {
+        ImageSessionChange::OpenTab => submit_client_command(
+            server,
+            client_id,
+            Command::NewTab(NewTabArgs {
+                working_directory: None,
+                client_id: None,
+            }),
+        ),
+        ImageSessionChange::FocusFirstTab => submit_client_command(
+            server,
+            client_id,
+            Command::FocusTab(FocusTabArgs {
+                focus_target: TabTarget::Index(0),
+                client_id: None,
+            }),
+        ),
+        ImageSessionChange::ResizeOuterTerminal(viewport_size) => {
+            outer_terminal.resize(server, client, client_id, viewport_size);
+        }
+        ImageSessionChange::SplitImagePane => submit_client_command(
+            server,
+            client_id,
+            Command::NewPane(NewPaneArgs {
+                placement: NewPanePlacement::Split {
+                    source_pane_id: Some(image_pane_id),
+                    tab_id: None,
+                    direction: Direction::Right,
+                },
+                working_directory: None,
+                spawn_spec: None,
+                client_id: None,
+            }),
+        ),
+        ImageSessionChange::FocusImagePane => submit_client_command(
+            server,
+            client_id,
+            Command::FocusPane(FocusPaneArgs {
+                focus_target: FocusTarget::Pane(image_pane_id),
+                client_id: None,
+            }),
+        ),
+        ImageSessionChange::ToggleFullscreen => {
+            submit_client_command(server, client_id, Command::TogglePaneFullscreen);
+        }
+        ImageSessionChange::CloseImagePane => submit_client_command(
+            server,
+            client_id,
+            Command::ClosePane(ClosePaneArgs {
+                pane_id: Some(image_pane_id),
+                should_force_close: true,
+                should_kill_process_tree: false,
+            }),
+        ),
+        ImageSessionChange::EnterAlternateScreen => {
+            server.handle_pty_output(image_pane_id, b"\x1b[?1049h");
+        }
+        ImageSessionChange::LeaveAlternateScreen => {
+            server.handle_pty_output(image_pane_id, b"\x1b[?1049l");
+        }
+    }
+}
+
+#[test]
+fn every_layout_change_leaves_the_outer_terminal_showing_exactly_the_frame_image_cells() {
+    let content_variants: [(&str, Vec<u8>); 7] = [
+        (
+            "a kitty image at the origin",
+            build_opaque_image_input(GraphicsProtocol::Kitty),
+        ),
+        (
+            "a sixel image at the origin",
+            build_opaque_image_input(GraphicsProtocol::Sixel),
+        ),
+        (
+            "an iterm2 image at the origin",
+            build_opaque_image_input(GraphicsProtocol::Iterm2),
+        ),
+        (
+            "a kitty image under a 70-column line",
+            [
+                b"x".repeat(70),
+                b"\r\n".to_vec(),
+                build_opaque_image_input(GraphicsProtocol::Kitty),
+            ]
+            .concat(),
+        ),
+        (
+            "a kitty image at column 36",
+            [
+                b"\x1b[3;37H".to_vec(),
+                build_opaque_image_input(GraphicsProtocol::Kitty),
+            ]
+            .concat(),
+        ),
+        (
+            "a sixel image at column 36",
+            [
+                b"\x1b[3;37H".to_vec(),
+                build_opaque_image_input(GraphicsProtocol::Sixel),
+            ]
+            .concat(),
+        ),
+        (
+            "two overlapping kitty images",
+            build_two_image_input(GraphicsProtocol::Kitty),
+        ),
+    ];
+    let change_sequences: [(&str, Vec<ImageSessionChange>); 6] = [
+        (
+            "tab away and back",
+            vec![
+                ImageSessionChange::OpenTab,
+                ImageSessionChange::FocusFirstTab,
+            ],
+        ),
+        (
+            "outer terminal resize",
+            vec![
+                ImageSessionChange::ResizeOuterTerminal(Size {
+                    column_count: 100,
+                    row_count: 30,
+                }),
+                ImageSessionChange::ResizeOuterTerminal(Size {
+                    column_count: 60,
+                    row_count: 20,
+                }),
+                ImageSessionChange::ResizeOuterTerminal(Size {
+                    column_count: 38,
+                    row_count: 20,
+                }),
+            ],
+        ),
+        ("split", vec![ImageSessionChange::SplitImagePane]),
+        (
+            "fullscreen on and off",
+            vec![
+                ImageSessionChange::SplitImagePane,
+                ImageSessionChange::FocusImagePane,
+                ImageSessionChange::ToggleFullscreen,
+                ImageSessionChange::ToggleFullscreen,
+            ],
+        ),
+        (
+            "image pane closed",
+            vec![
+                ImageSessionChange::SplitImagePane,
+                ImageSessionChange::CloseImagePane,
+            ],
+        ),
+        (
+            "alternate screen",
+            vec![
+                ImageSessionChange::EnterAlternateScreen,
+                ImageSessionChange::LeaveAlternateScreen,
+            ],
+        ),
+    ];
+    for graphics_support in list_native_graphics_supports() {
+        for (content_name, content_bytes) in &content_variants {
+            for (sequence_name, session_changes) in &change_sequences {
+                let (mut server, client_id, image_pane_id) = build_test_server_with_pane();
+                let _ = server.handle_runtime_event(RuntimeEvent::CellSize {
+                    client_id,
+                    cell_size: build_one_pixel_cell_size(),
+                });
+                server.handle_pty_output(image_pane_id, content_bytes);
+                server.handle_pty_output(image_pane_id, b"\r\nprompt$ ");
+                let mut client = build_launch_client(client_id);
+                let mut outer_terminal =
+                    EmulatedOuterTerminal::from_graphics_support(graphics_support);
+                let render_snapshot = outer_terminal.receive_frame(&server, &mut client, client_id);
+                outer_terminal.paint_until_settled(&client, &render_snapshot);
+                let first_image_pixels = build_expected_image_pixels(&client, &render_snapshot);
+                let check_name = format!("{graphics_support:?}, {content_name}, {sequence_name}");
+                assert!(
+                    !first_image_pixels.is_empty(),
+                    "{check_name}: the session shows no image"
+                );
+                assert_eq!(
+                    outer_terminal.list_shown_image_pixels(),
+                    first_image_pixels,
+                    "{check_name}, first frame"
+                );
+
+                for session_change in session_changes {
+                    apply_image_session_change(
+                        *session_change,
+                        &mut server,
+                        &mut client,
+                        client_id,
+                        image_pane_id,
+                        &mut outer_terminal,
+                    );
+                    let render_snapshot =
+                        outer_terminal.receive_frame(&server, &mut client, client_id);
+                    let painted_frames =
+                        outer_terminal.paint_until_settled(&client, &render_snapshot);
+
+                    let expected_image_pixels =
+                        build_expected_image_pixels(&client, &render_snapshot);
+                    match session_change {
+                        ImageSessionChange::OpenTab
+                        | ImageSessionChange::CloseImagePane
+                        | ImageSessionChange::EnterAlternateScreen => assert_eq!(
+                            expected_image_pixels,
+                            BTreeMap::new(),
+                            "{check_name}, {session_change:?}: the image stays in the frame"
+                        ),
+                        ImageSessionChange::FocusFirstTab
+                        | ImageSessionChange::LeaveAlternateScreen => assert_eq!(
+                            expected_image_pixels, first_image_pixels,
+                            "{check_name}, {session_change:?}: the image does not come back"
+                        ),
+                        ImageSessionChange::ResizeOuterTerminal(_)
+                        | ImageSessionChange::SplitImagePane
+                        | ImageSessionChange::FocusImagePane
+                        | ImageSessionChange::ToggleFullscreen => {}
+                    }
+                    if *session_change == ImageSessionChange::CloseImagePane {
+                        assert!(
+                            render_snapshot
+                                .pane_snapshots
+                                .iter()
+                                .all(|pane_snapshot| pane_snapshot.pane_id != image_pane_id),
+                            "{check_name}: the image pane did not close"
+                        );
+                    }
+                    assert_eq!(
+                        outer_terminal.list_shown_image_pixels(),
+                        expected_image_pixels,
+                        "{check_name}, {session_change:?}, stream {:?}",
+                        painted_frames
+                            .iter()
+                            .map(|frame_bytes| String::from_utf8_lossy(frame_bytes).into_owned())
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_host_resize_of_one_client_redraws_its_images_and_writes_no_image_to_another_client() {
+    let (mut server, sixel_client_id, pane_id) = build_test_server_with_pane();
+    let _ = server.handle_runtime_event(RuntimeEvent::CellSize {
+        client_id: sixel_client_id,
+        cell_size: build_one_pixel_cell_size(),
+    });
+    let sixel_client_frame = build_render_snapshot(&server, sixel_client_id);
+    let kitty_client_id = ClientId::new();
+    let _ = server.handle_client_attach(
+        sixel_client_frame.session_snapshot.session_id,
+        kitty_client_id,
+        TEST_VIEWPORT_SIZE,
+        None,
+        sixel_client_frame.client_snapshot.active_tab_id,
+        Some(build_one_pixel_cell_size()),
+        SystemTime::UNIX_EPOCH,
+        false,
+    );
+    server.handle_pty_output(pane_id, &build_opaque_image_input(GraphicsProtocol::Kitty));
+    let mut sixel_client = build_launch_client(sixel_client_id);
+    let mut kitty_client = build_launch_client(kitty_client_id);
+    let mut sixel_outer_terminal =
+        EmulatedOuterTerminal::from_graphics_support(GraphicsSupport::Sixel {
+            palette_color_count: 256,
+            maximum_pixel_width: None,
+            maximum_pixel_height: None,
+        });
+    let mut kitty_outer_terminal =
+        EmulatedOuterTerminal::from_graphics_support(GraphicsSupport::Kitty);
+    let mut first_image_pixels = Vec::new();
+    for (outer_terminal, client, client_id) in [
+        (
+            &mut sixel_outer_terminal,
+            &mut sixel_client,
+            sixel_client_id,
+        ),
+        (
+            &mut kitty_outer_terminal,
+            &mut kitty_client,
+            kitty_client_id,
+        ),
+    ] {
+        let render_snapshot = outer_terminal.receive_frame(&server, client, client_id);
+        outer_terminal.paint_until_settled(client, &render_snapshot);
+        let shown_image_pixels = outer_terminal.list_shown_image_pixels();
+        assert_eq!(
+            shown_image_pixels,
+            build_expected_image_pixels(client, &render_snapshot),
+            "{:?} first frame",
+            outer_terminal.graphics_support
+        );
+        assert_eq!(shown_image_pixels.len(), 16);
+        first_image_pixels.push(shown_image_pixels);
+    }
+
+    sixel_outer_terminal.resize(
+        &mut server,
+        &mut sixel_client,
+        sixel_client_id,
+        Size {
+            column_count: 81,
+            row_count: 25,
+        },
+    );
+    let sixel_render_snapshot =
+        sixel_outer_terminal.receive_frame(&server, &mut sixel_client, sixel_client_id);
+    sixel_outer_terminal.paint_until_settled(&sixel_client, &sixel_render_snapshot);
+    let kitty_render_snapshot =
+        kitty_outer_terminal.receive_frame(&server, &mut kitty_client, kitty_client_id);
+    let kitty_frames =
+        kitty_outer_terminal.paint_until_settled(&kitty_client, &kitty_render_snapshot);
+
+    let sixel_expected_image_pixels =
+        build_expected_image_pixels(&sixel_client, &sixel_render_snapshot);
+    assert_eq!(
+        sixel_expected_image_pixels, first_image_pixels[0],
+        "the tab of the smaller client keeps the image at its cells"
+    );
+    assert_eq!(
+        sixel_outer_terminal.list_shown_image_pixels(),
+        sixel_expected_image_pixels
+    );
+    for frame_bytes in &kitty_frames {
+        assert_eq!(count_byte_sequence(frame_bytes, b"\x1b[2J"), 0);
+        assert_eq!(count_byte_sequence(frame_bytes, b"\x1b_G"), 0);
+    }
+    let kitty_expected_image_pixels =
+        build_expected_image_pixels(&kitty_client, &kitty_render_snapshot);
+    assert_eq!(kitty_expected_image_pixels, first_image_pixels[1]);
+    assert_eq!(
+        kitty_outer_terminal.list_shown_image_pixels(),
+        kitty_expected_image_pixels
     );
 }
