@@ -282,6 +282,10 @@ impl reader::EventSource for EventSource {
             }
         }
     }
+
+    fn remove_next_parsed_event(&mut self) -> Option<Event> {
+        self.pop_parsed_terminal_event()
+    }
 }
 
 impl Drop for EventSource {

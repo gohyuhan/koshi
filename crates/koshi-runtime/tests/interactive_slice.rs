@@ -103,8 +103,10 @@ fn typed_keys_write_to_the_focused_pane() {
         let key_chord = KeyChord::from_parts(BindingModifierFlags::NONE, key);
         match viewer.resolve_key(key_chord, Instant::now()) {
             KeyOutcome::PassThrough(passthrough_key_chord) => {
-                server
-                    .handle_key_input(client_id, &build_key_input_for_chord(passthrough_key_chord));
+                server.handle_key_inputs(
+                    client_id,
+                    &[build_key_input_for_chord(passthrough_key_chord)],
+                );
             }
             unexpected_key_outcome => panic!(
                 "`{key_chord}` binds nothing and passes through; got {unexpected_key_outcome:?}"

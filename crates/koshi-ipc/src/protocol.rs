@@ -468,15 +468,20 @@ pub enum IpcRequestKind {
         /// after it carry the target's preview. `None` names no target.
         placement_preview_target: Option<PanePlacementPreviewTarget>,
     },
-    /// One keyboard event an attached client sends for the pane it is typing
-    /// into: its keymap bound nothing to the event, or no chord could name it.
+    /// The keyboard events an attached client sends for the pane it is typing
+    /// into, from one read of its terminal: its keymap bound nothing to each
+    /// event, or no chord could name it.
     ///
-    /// Carries every field the client's terminal reported, a release and a key
-    /// no keybinding can name included. The session decides what reaches the
-    /// pane.
+    /// Each event carries every field the client's terminal reported, a
+    /// release and a key no keybinding can name included. The session decides
+    /// what reaches the pane, and writes the bytes of every event to the pane
+    /// in one write, or writes none of them. Typing `é` and `-` in one read
+    /// sends both events in one request, and the pane reads `C3 A9 2D` from
+    /// one write.
     Keyboard {
-        /// The keyboard event the client read from its terminal.
-        key_input: KeyInput,
+        /// The keyboard events the client read from its terminal, oldest
+        /// first.
+        key_inputs: Vec<KeyInput>,
     },
     /// The attached client's terminal changed size.
     Resize {

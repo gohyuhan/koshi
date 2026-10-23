@@ -312,7 +312,7 @@ pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
             placement_preview_target: None,
         },
         IpcRequestKind::Keyboard {
-            key_input: build_control_c_key_input(),
+            key_inputs: vec![build_control_c_key_input()],
         },
         IpcRequestKind::Resize {
             viewport_size: Size {
@@ -1652,11 +1652,28 @@ fn keyboard_request_round_trips() {
     let ipc_request = IpcRequest {
         request_id: 5,
         request_kind: IpcRequestKind::Keyboard {
-            key_input: build_control_c_key_input(),
+            key_inputs: vec![build_control_c_key_input(), build_control_c_key_input()],
         },
     };
 
     assert_eq!(round_trip_wire_message(&ipc_request), ipc_request);
+}
+
+#[test]
+fn a_keyboard_request_names_its_events_key_inputs_on_the_wire() {
+    let request_kind = IpcRequestKind::Keyboard {
+        key_inputs: vec![build_control_c_key_input()],
+    };
+
+    assert_eq!(
+        serde_json::to_value(&request_kind).expect("request encodes"),
+        json!({
+            "Keyboard": {
+                "key_inputs": [serde_json::to_value(build_control_c_key_input())
+                    .expect("key input encodes")]
+            }
+        })
+    );
 }
 
 #[test]
@@ -1665,14 +1682,14 @@ fn a_keyboard_request_carries_every_reported_field() {
     let ipc_request = IpcRequest {
         request_id: 5,
         request_kind: IpcRequestKind::Keyboard {
-            key_input: KeyInput {
+            key_inputs: vec![KeyInput {
                 key: KeyIdentity::Key(Key::Char('1')),
                 key_event_kind: KeyEventKind::Release,
                 shifted_key: Some('!'),
                 base_layout_key: Some('q'),
                 associated_text: "e\u{301}".to_string(),
                 modifier_flags: all_modifier_flags,
-            },
+            }],
         },
     };
 
