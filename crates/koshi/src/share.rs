@@ -498,9 +498,10 @@ fn resolve_remote_access_ready(
 /// The addresses of this machine a client on another machine can connect to
 /// when the remote listener serves on `remote_listen_address`.
 ///
-/// `0.0.0.0` gives the IPv4 entries of `list_machine_addresses()` and `[::]`
-/// its IPv6 entries, in the order it gives them. Every other address gives
-/// none and does not call `list_machine_addresses`. The command passes
+/// `0.0.0.0` and `[::ffff:0.0.0.0]` give the IPv4 entries of
+/// `list_machine_addresses()`, and `[::]` its IPv6 entries, in the order it
+/// gives them. Every other address gives none and does not call
+/// `list_machine_addresses`. The command passes
 /// [`host_addresses::list_host_addresses`].
 ///
 /// Example: `0.0.0.0:7654` on a machine with `192.0.2.20` and `2001:db8::20`
@@ -509,12 +510,13 @@ fn list_host_addresses_for_listen_address(
     remote_listen_address: SocketAddr,
     list_machine_addresses: impl FnOnce() -> Vec<HostAddress>,
 ) -> Vec<HostAddress> {
-    if !remote_listen_address.ip().is_unspecified() {
+    let listen_ip_address = remote_listen_address.ip().to_canonical();
+    if !listen_ip_address.is_unspecified() {
         return Vec::new();
     }
     list_machine_addresses()
         .into_iter()
-        .filter(|host_address| host_address.ip_address.is_ipv4() == remote_listen_address.is_ipv4())
+        .filter(|host_address| host_address.ip_address.is_ipv4() == listen_ip_address.is_ipv4())
         .collect()
 }
 

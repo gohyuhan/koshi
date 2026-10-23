@@ -910,10 +910,9 @@ turn it on and open 0.0.0.0:7654? [y/N]
 
 A typed `y` opens the port, and it opens again on every start after that. Any
 other answer leaves it shut and still prints the token. With no address in
-`koshi.kdl` there is nothing to offer, and the grant says the token cannot be
-used to connect yet.
+`koshi.kdl` there is nothing to offer, and the grant says to add one.
 
-With the port open, the grant prints the command that connects from another
+With the port open, the grant prints the command that connects to this
 machine. Each command carries `--certificate-fingerprint` with the fingerprint
 of the certificate this machine's listener presents: the sha256 of it, as 64
 lowercase hex characters. The address in that command depends on
@@ -928,8 +927,13 @@ lowercase hex characters. The address in that command depends on
 - One address of this machine, such as `192.0.2.20:7654`, gives one command
   with that address. A line then says that this machine accepts connections on
   that address only.
-- A loopback address, such as `127.0.0.1:7654`, gives no command. A line says
-  that no other machine can connect to it.
+- A loopback address, such as `127.0.0.1:7654`, gives one command with that
+  address, under `connect from this machine:`. A line then says that no other
+  machine can connect to it, and names `0.0.0.0:7654` as a `remote-listen`
+  value that lets another machine connect.
+
+An IPv4-mapped IPv6 address counts as its IPv4 form: `[::ffff:192.0.2.20]:7654`
+gives the same command as `192.0.2.20:7654`.
 
 ```text
 connect from another machine, at the address of this one it can reach:

@@ -33,9 +33,11 @@ pub enum RemoteReady {
         /// The IP address and port remote clients are served on.
         remote_listen_address: SocketAddr,
         /// The addresses of this machine in the family of
-        /// `remote_listen_address` when it is `0.0.0.0` or `[::]`, in the
-        /// order [`list_host_addresses`](koshi_host::host_addresses::list_host_addresses)
-        /// gives. Empty for every other address.
+        /// `remote_listen_address` when it is `0.0.0.0`, `[::ffff:0.0.0.0]` or
+        /// `[::]`, in the order
+        /// [`list_host_addresses`](koshi_host::host_addresses::list_host_addresses)
+        /// gives. `[::ffff:0.0.0.0]` gives the IPv4 addresses. Empty for every
+        /// other address.
         host_addresses: Vec<HostAddress>,
         /// The fingerprint of the certificate the remote listener presents,
         /// as 64 lowercase hex characters.
@@ -78,9 +80,10 @@ pub fn render_share_grant(
 #[must_use]
 pub fn render_remote_ready(token_identity: &str, remote_ready: &RemoteReady) -> String {
     match remote_ready {
-        RemoteReady::NoAddress => "no remote listen address is set; add \
-             `remote-listen \"<ip>:<port>\"` to koshi.kdl, then run `koshi share grant` again.\n"
-            .to_string(),
+        RemoteReady::NoAddress => {
+            "no remote listen address is set; add `remote-listen \"<ip>:<port>\"` to koshi.kdl.\n"
+                .to_string()
+        }
         RemoteReady::Off => {
             "remote access stays off; this token cannot be used to connect yet.\n".to_string()
         }
@@ -117,13 +120,17 @@ const REMOTE_SECRET_LINE: &str =
 /// `remote_listen_address`. Each command carries
 /// `--certificate-fingerprint {certificate_fingerprint}`, and
 /// `--save-as {token_identity}` when `token_identity` is one word without the
-/// `host:port` shape.
+/// `host:port` shape. An IPv4-mapped IPv6 address, such as
+/// `[::ffff:192.0.2.20]`, is read as its IPv4 form, `192.0.2.20`, and a
+/// command names that form.
 ///
 /// - `0.0.0.0` or `[::]`: one command per entry of `host_addresses`, each
 ///   ending in `# <interface name>`. No entry gives one command with
 ///   `<this machine's address>` in place of the address.
-/// - A loopback address, such as `127.0.0.1:7654`: no command, and a line
-///   saying that no other machine can connect to it.
+/// - A loopback address, such as `127.0.0.1:7654`: one command with it,
+///   under `connect from this machine:`, and a line saying that no other
+///   machine can connect to it and naming `0.0.0.0:<port>` as a
+///   `remote-listen` value that lets another machine connect.
 /// - Any other address, such as `192.0.2.20:7654`: one command with it, and
 ///   a line saying this machine accepts connections on that address only.
 ///
@@ -141,19 +148,26 @@ fn render_connect_commands(
         " --certificate-fingerprint {certificate_fingerprint}{}",
         build_save_as_option(token_identity)
     );
-    let listen_ip_address = remote_listen_address.ip();
+    let listen_ip_address = remote_listen_address.ip().to_canonical();
     let listen_port = remote_listen_address.port();
-    if listen_ip_address.is_loopback() {
-        return format!(
-            "remote-listen in koshi.kdl is {remote_listen_address}, a loopback address, so no \
-             other machine can connect to it. Set it to an address of this machine, such as \
-             0.0.0.0:{listen_port}, then run `koshi share grant` again.\n"
-        );
-    }
     if !listen_ip_address.is_unspecified() {
+        let connect_command = format!(
+            "  koshi attach --remote {}{connect_options} [SESSION]\n",
+            SocketAddr::new(listen_ip_address, listen_port)
+        );
+        if listen_ip_address.is_loopback() {
+            return format!(
+                "connect from this machine:\n\
+                 {connect_command}\
+                 {REMOTE_SECRET_LINE}\
+                 remote-listen is {remote_listen_address}, a loopback address, so no other \
+                 machine can connect to it. To let another machine connect, set remote-listen in \
+                 koshi.kdl to an address of this machine, such as 0.0.0.0:{listen_port}.\n"
+            );
+        }
         return format!(
-            "connect from another machine:\n  \
-             koshi attach --remote {remote_listen_address}{connect_options} [SESSION]\n\
+            "connect from another machine:\n\
+             {connect_command}\
              {REMOTE_SECRET_LINE}\
              this machine accepts connections on {listen_ip_address} only (remote-listen in \
              koshi.kdl); the other machine must connect to that address.\n"
