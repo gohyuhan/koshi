@@ -817,10 +817,18 @@ the shortcuts in your `keybinding.kdl`. `--scope default` lists the built-in
 shortcuts. It also lists each built-in shortcut that your file rebinds or
 removes, with the source `defaults (unbound)`.
 
-`keys describe` on a key that starts longer shortcuts explains each of them.
-For example, `koshi keys describe "<C-t>"` explains `<C-t> n` (`core:new-tab`)
-and `<C-t> x` (`core:close-tab`). A key that is no shortcut and starts none
-exits 2.
+`keys describe` explains each row that `keys list` prints for the key, and for
+each longer key that starts with it. For example, `koshi keys describe "<C-t>"`
+explains `<C-t> n` (`core:new-tab`) and `<C-t> x` (`core:close-tab`).
+
+If your `keybinding.kdl` rebinds or removes a built-in shortcut, `keys
+describe` also explains that built-in shortcut, with the source
+`defaults (unbound)`. Its `displaced_by` field names what replaced it:
+`user bind` or `user remove`. For example, with `remove "<A-f>"` in the
+`normal` block, `koshi keys describe "<A-f>"` explains
+`core:toggle-pane-fullscreen` with `displaced_by: user remove`, and exits 0.
+Each other shortcut shows `displaced_by: -` in a table and `null` in JSON. A
+key that has no row and starts none exits 2.
 
 `keys conflicts` checks the `keybinding.kdl` in the config directory, and
 `keys validate` checks the file at `PATH`. Each one checks the file the way a

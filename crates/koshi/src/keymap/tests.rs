@@ -13,6 +13,7 @@ use koshi_core::key::{BindingModifierFlags, KeySequence};
 use super::*;
 
 use koshi_config::conflict::LayerOrigin;
+use koshi_config::keymap_merge::{DefaultDisplacement, UnboundDefaultBinding};
 use koshi_config::types::build_default_mode_bindings;
 
 /// Parse `key_sequence_text` with the default leader and a depth of 8.
@@ -162,9 +163,16 @@ fn a_steal_moves_the_default_to_unbound() {
         .contains_key(&parse_test_key_sequence("<A-f>")));
     assert_eq!(
         normal_mode_bindings.unbound_default_bindings_by_key_sequence
-            [&parse_test_key_sequence("<A-f>")]
-            .action_reference,
-        ActionReference::from_core_action_name("toggle-pane-fullscreen").unwrap()
+            [&parse_test_key_sequence("<A-f>")],
+        UnboundDefaultBinding {
+            bound_action: BoundAction {
+                action_reference: ActionReference::from_core_action_name("toggle-pane-fullscreen")
+                    .unwrap(),
+            },
+            default_displacement: DefaultDisplacement::Rebound {
+                layer_origin: LayerOrigin::User,
+            },
+        }
     );
 }
 

@@ -333,7 +333,12 @@ fn user_binding_steals_a_defaulted_key() {
     );
     assert_eq!(
         normal_mode_keymap.unbound_default_bindings_by_key_sequence[&key_sequence],
-        build_bound_action("toggle-pane-fullscreen")
+        UnboundDefaultBinding {
+            bound_action: build_bound_action("toggle-pane-fullscreen"),
+            default_displacement: DefaultDisplacement::Rebound {
+                layer_origin: LayerOrigin::User,
+            },
+        }
     );
     // The other defaults stay.
     let mut surviving_default_bound_actions = list_default_bound_actions("normal");
@@ -395,7 +400,12 @@ fn remove_clears_a_default_and_records_both_sides() {
     );
     assert_eq!(
         normal_mode_keymap.unbound_default_bindings_by_key_sequence[&key_sequence],
-        build_bound_action("toggle-pane-fullscreen")
+        UnboundDefaultBinding {
+            bound_action: build_bound_action("toggle-pane-fullscreen"),
+            default_displacement: DefaultDisplacement::Removed {
+                layer_origin: LayerOrigin::User,
+            },
+        }
     );
     assert_eq!(
         normal_mode_keymap.removed_key_sequences,
@@ -487,7 +497,7 @@ fn remove_below_does_not_void_a_higher_binding() {
 fn remove_and_rebind_of_a_defaulted_key_in_one_layer_records_both_sides() {
     // `<A-f>` is a shipped default. One user layer clears it and takes it:
     // the user entry wins the key, and the displaced default surfaces as
-    // unbound.
+    // unbound, displaced by the `remove`.
     let key_sequence = build_default_fullscreen_key_sequence();
     let merged_keymap = merge_test_keymaps(&[
         build_default_keymap_layer(),
@@ -515,7 +525,12 @@ fn remove_and_rebind_of_a_defaulted_key_in_one_layer_records_both_sides() {
     );
     assert_eq!(
         normal_mode_keymap.unbound_default_bindings_by_key_sequence[&key_sequence],
-        build_bound_action("toggle-pane-fullscreen")
+        UnboundDefaultBinding {
+            bound_action: build_bound_action("toggle-pane-fullscreen"),
+            default_displacement: DefaultDisplacement::Removed {
+                layer_origin: LayerOrigin::User,
+            },
+        }
     );
     assert_eq!(
         normal_mode_keymap.removed_key_sequences,
@@ -1015,7 +1030,12 @@ fn sequences_merge_per_key_like_single_chords() {
     );
     assert_eq!(
         normal_mode_keymap.unbound_default_bindings_by_key_sequence[&close_pane_tree_key_sequence],
-        build_bound_action("close-pane-tree")
+        UnboundDefaultBinding {
+            bound_action: build_bound_action("close-pane-tree"),
+            default_displacement: DefaultDisplacement::Rebound {
+                layer_origin: LayerOrigin::User,
+            },
+        }
     );
     assert_eq!(
         normal_mode_keymap.default_bindings_by_key_sequence[&new_pane_key_sequence],
