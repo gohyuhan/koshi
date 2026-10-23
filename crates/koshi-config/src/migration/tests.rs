@@ -249,7 +249,7 @@ fn bad_kdl_is_rejected_before_migration() {
 
     assert_eq!(
         migration_error.to_string(),
-        "config parse error in koshi.kdl: No closing '}' for child block"
+        "config parse error in koshi.kdl: line 2, column 6: No closing '}' for child block"
     );
 }
 

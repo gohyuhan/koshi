@@ -1088,20 +1088,27 @@ fn keys_conflicts_renders_the_verdict_and_findings() {
 }
 
 #[test]
-fn keys_conflicts_carries_an_ignored_file_on_both_formats() {
+fn keys_conflicts_rejects_an_ignored_file_on_both_formats() {
     // A file that did not parse leaves the defaults running. Both formats
-    // name the ignored file's error.
-    let keymap_view = build_keymap_view_from_partial(None, None, Some("boom".to_string()));
-    let rendered_table_text = render_keys_conflicts(&keymap_view, OutputFormat::Table);
-    assert_eq!(
-        rendered_table_text,
-        "file: ignored (boom)\nverdict: apply\n"
+    // name the ignored file's error and the verdict `reject`.
+    let keymap_view = build_keymap_view_from_partial(
+        None,
+        Some(PathBuf::from("/home/user/.config/koshi/keybinding.kdl")),
+        Some("boom".to_string()),
     );
-    let json_document: serde_json::Value =
-        serde_json::from_str(&render_keys_conflicts(&keymap_view, OutputFormat::Json))
-            .expect("valid JSON");
-    assert_eq!(json_document["file_error"], serde_json::json!("boom"));
-    assert_eq!(json_document["verdict"], serde_json::json!("apply"));
+    assert_eq!(
+        render_keys_conflicts(&keymap_view, OutputFormat::Table),
+        "file: ignored (boom)\nverdict: reject\n"
+    );
+    assert_eq!(
+        render_keys_conflicts(&keymap_view, OutputFormat::Json),
+        r#"{
+  "verdict": "reject",
+  "file_error": "boom",
+  "conflict_findings": []
+}
+"#
+    );
 }
 
 #[test]
@@ -1126,13 +1133,10 @@ fn keys_validate_renders_both_outcome_shapes() {
     );
 
     let clean_keymap_view = build_keymap_view_from_partial(None, None, None);
-    let checked_outcome = KeymapValidationOutcome::Checked {
-        conflict_report: clean_keymap_view.conflict_report,
-        is_applicable: true,
-    };
+    let checked_outcome = KeymapValidationOutcome::Checked(clean_keymap_view.conflict_report);
     assert_eq!(
         render_keys_validate(&checked_outcome, OutputFormat::Table),
-        "valid: a reload would apply this file\n"
+        "valid: koshi would apply this file as keybinding.kdl\n"
     );
     assert!(is_validation_applicable(&checked_outcome));
     assert!(!is_validation_applicable(&parse_failed_outcome));
@@ -1172,6 +1176,42 @@ fn keys_conflicts_reports_a_reject_verdict_and_a_fatal_finding() {
     {
       "severity": "fatal",
       "finding_message": "locked mode has no binding from `u` to `core:unlock`; the unlock escape would be unreachable"
+    }
+  ]
+}
+"#
+    );
+}
+
+#[test]
+fn keys_validate_refuses_a_file_with_a_fatal_finding() {
+    // Removing the locked-mode `<C-l>` leaves no unlock key: a fatal finding,
+    // so koshi refuses the file and the answer is not applicable.
+    let partial_keybindings_config = koshi_config::keybinding::parse_keybindings(
+        std::path::Path::new("keybinding.kdl"),
+        "version 2\nmode \"locked\" {\n    remove \"<C-l>\"\n}\n",
+    )
+    .expect("the file parses");
+    let keymap_view = build_keymap_view_from_partial(Some(partial_keybindings_config), None, None);
+    let checked_outcome = KeymapValidationOutcome::Checked(keymap_view.conflict_report);
+    assert!(!is_validation_applicable(&checked_outcome));
+    assert_eq!(
+        render_keys_validate(&checked_outcome, OutputFormat::Table),
+        "invalid: koshi would refuse this file as keybinding.kdl
+severity  finding
+fatal     locked mode has no binding from `<C-l>` to `core:unlock`; the unlock escape would be unreachable
+"
+    );
+    assert_eq!(
+        render_keys_validate(&checked_outcome, OutputFormat::Json),
+        r#"{
+  "is_valid": true,
+  "is_applicable": false,
+  "parse_errors": [],
+  "conflict_findings": [
+    {
+      "severity": "fatal",
+      "finding_message": "locked mode has no binding from `<C-l>` to `core:unlock`; the unlock escape would be unreachable"
     }
   ]
 }
@@ -1321,11 +1361,7 @@ fn keys_validate_checked_carries_the_conflict_findings() {
     // A binding on an unregistered action is an orphan warning; the file still
     // applies, and the answer carries the finding on both formats.
     let keymap_view = build_test_keymap_view_with_binding("<C-y>", "core:not-a-real-action");
-    let is_applicable = !keymap_view.is_reverted_to_defaults;
-    let checked_outcome = KeymapValidationOutcome::Checked {
-        conflict_report: keymap_view.conflict_report,
-        is_applicable,
-    };
+    let checked_outcome = KeymapValidationOutcome::Checked(keymap_view.conflict_report);
     let json_document: serde_json::Value =
         serde_json::from_str(&render_keys_validate(&checked_outcome, OutputFormat::Json))
             .expect("valid JSON");
@@ -1343,7 +1379,7 @@ fn keys_validate_checked_carries_the_conflict_findings() {
 
     assert_eq!(
         render_keys_validate(&checked_outcome, OutputFormat::Table),
-        r#"valid: a reload would apply this file
+        r#"valid: koshi would apply this file as keybinding.kdl
 severity  finding
 warning   `<C-y>` in mode `normal` (user) names unknown action `core:not-a-real-action`; the binding is inactive until the action is registered
 "#

@@ -811,6 +811,24 @@ Example: terminals `client-1a2b…` and `client-3c4d…` both watch session
 | `koshi keys conflicts` | Report clashes, dead shortcuts, and warnings |
 | `koshi keys validate <PATH>` | Check a shortcut file without applying it |
 
+`keys conflicts` checks the `keybinding.kdl` in the config directory, and
+`keys validate` checks the file at `PATH`. Each one checks the file the way a
+client checks its own `keybinding.kdl` when it attaches. Each one prints the
+whole answer, then exits 0 when a client applies the file and 2 when a client
+refuses it. A client refuses a file that it cannot read, a file that does not
+parse, and a file with a `fatal` finding. It then uses the built-in shortcuts.
+
+For example, a `keybinding.kdl` that sets `unlock_alternative "<A-u>"` makes
+`koshi keys conflicts` print this answer and exit 2:
+
+```text
+file: ignored (unknown key `unlock_alternative`; did you mean `unlock-alternative`?)
+verdict: reject
+```
+
+With no `keybinding.kdl`, `koshi keys conflicts` prints `verdict: apply` and
+exits 0.
+
 ## Remote access
 
 | Command | Result |

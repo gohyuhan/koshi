@@ -65,6 +65,27 @@ pub enum KeybindingParseError {
     },
 }
 
+impl KeybindingParseError {
+    /// One message per problem, in file order. A syntax error gives the one
+    /// [`ConfigError::Parse`](crate::error::ConfigError::Parse) message, such as
+    /// `config parse error in keybinding.kdl: line 2, column 15: No closing '}'
+    /// for child block`. A schema error gives each diagnostic's message, such
+    /// as ``unknown key `unlock_alternative`; did you mean
+    /// `unlock-alternative`?``.
+    #[must_use]
+    pub fn list_problem_messages(&self) -> Vec<String> {
+        match self {
+            Self::Syntax(parse_diagnostic) => {
+                vec![parse_diagnostic.build_config_error().to_string()]
+            }
+            Self::Invalid { diagnostics, .. } => diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.get_diagnostic_message().to_string())
+                .collect(),
+        }
+    }
+}
+
 /// One schema violation in a keybinding file, rendered with a caret at the
 /// offending node or argument.
 #[derive(Debug, Error, Diagnostic)]

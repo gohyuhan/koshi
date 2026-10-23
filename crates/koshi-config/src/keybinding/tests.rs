@@ -379,6 +379,35 @@ fn invalid_kdl_syntax_is_a_syntax_error() {
 }
 
 #[test]
+fn a_syntax_error_lists_one_message_naming_its_line_and_column() {
+    // The helper puts `version 1` on line 1: the unclosed `{` sits at line 2,
+    // column 15.
+    let parse_error = parse_keybinding_text("mode \"normal\" {").expect_err("unclosed block");
+    assert_eq!(
+        parse_error.list_problem_messages(),
+        vec![
+            "config parse error in keybinding.kdl: line 2, column 15: No closing '}' for child block"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn schema_errors_list_one_message_each_in_file_order() {
+    let parse_error = parse_keybinding_text(
+        "mode \"normal\" {\n    bind \"<C-\" \"core:new-tab\"\n    bind \"<A-\" \"core:quit\"\n}\n",
+    )
+    .expect_err("both key strings are invalid");
+    assert_eq!(
+        parse_error.list_problem_messages(),
+        vec![
+            "invalid key `<C-`: missing closing `>`".to_string(),
+            "invalid key `<A-`: missing closing `>`".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn every_diagnostic_of_one_file_shares_one_source_text() {
     let keybinding_text = "version 1\nchord-timeout-ms \"x\"\nleader \"<C-\"\n";
     let diagnostics = match parse_keybindings(Path::new("keybinding.kdl"), keybinding_text) {

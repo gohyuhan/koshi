@@ -17,8 +17,9 @@
 //! the built-in defaults in place. `koshi.kdl` and the theme file are
 //! field-partial: a single bad field is skipped and the rest of the file still
 //! applies. `keybinding.kdl` is all-or-nothing: any parse error drops the whole
-//! file to defaults. A conflict in a `keybinding.kdl` that *parses* is caught
-//! where the runtime applies it, not here.
+//! file to defaults. [`load_keybinding_file`] reads and parses that file alone
+//! and names why a file gives no layer. A conflict in a `keybinding.kdl` that
+//! *parses* is caught where the viewer applies it, not here.
 //!
 //! `load_config_files` writes no log line of its own. It runs before the
 //! tracing subscriber is installed, and returns each skip reason as a string
@@ -31,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use koshi_config::app_config::{parse_app_config, AppConfigFile};
-use koshi_config::keybinding::parse_keybindings;
+use koshi_config::keybinding::{parse_keybindings, KeybindingParseError};
 use koshi_config::layer::{
     merge_client, merge_server, PartialKeybindingsConfig, PartialKoshiConfig, PartialThemeConfig,
 };
@@ -348,17 +349,32 @@ pub fn resolve_client_config(app_config_layer: Option<PartialKoshiConfig>) -> Cl
 /// other than an absent file, such as a permission error, is recorded in
 /// `config_warnings`.
 fn load_config_file(config_path: &Path, config_warnings: &mut Vec<String>) -> Option<String> {
+    read_config_file(config_path).unwrap_or_else(|read_error| {
+        config_warnings.push(format_config_read_warning(config_path, &read_error));
+        None
+    })
+}
+
+/// The file's text, or `Ok(None)` when the file is absent.
+///
+/// # Errors
+/// The read error of a file that exists and cannot be read, such as for a
+/// permission error or for bytes that are not UTF-8.
+fn read_config_file(config_path: &Path) -> io::Result<Option<String>> {
     match fs::read_to_string(config_path) {
-        Ok(config_source_text) => Some(config_source_text),
-        Err(read_error) if read_error.kind() == io::ErrorKind::NotFound => None,
-        Err(read_error) => {
-            config_warnings.push(format!(
-                "could not read config file {}: {read_error}",
-                config_path.display()
-            ));
-            None
-        }
+        Ok(config_source_text) => Ok(Some(config_source_text)),
+        Err(read_error) if read_error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(read_error) => Err(read_error),
     }
+}
+
+/// The warning for a config file that exists and cannot be read:
+/// `could not read config file <path>: <read error>`.
+fn format_config_read_warning(config_path: &Path, read_error: &io::Error) -> String {
+    format!(
+        "could not read config file {}: {read_error}",
+        config_path.display()
+    )
 }
 
 /// Parses `koshi.kdl` into its override layer and the theme it names,
@@ -466,19 +482,56 @@ fn resolve_default_theme_fallback(
     None
 }
 
-/// Parses `keybinding.kdl` all-or-nothing: any parse error drops the whole
-/// file.
+/// Why a `keybinding.kdl` that exists gives no keybinding layer.
+#[derive(Debug)]
+pub enum KeybindingFileError {
+    /// The file exists and cannot be read, such as for a permission error or
+    /// for bytes that are not UTF-8.
+    Unreadable(io::Error),
+    /// The file does not parse. Any parse error refuses the whole file.
+    Unparseable(KeybindingParseError),
+}
+
+/// Read and parse the `keybinding.kdl` at `keybinding_file_path`
+/// all-or-nothing. Returns `Ok(None)` when the file is absent.
+///
+/// # Errors
+/// [`KeybindingFileError::Unreadable`] when the file exists and cannot be
+/// read; [`KeybindingFileError::Unparseable`] when it does not parse.
+pub fn load_keybinding_file(
+    keybinding_file_path: &Path,
+) -> Result<Option<PartialKeybindingsConfig>, KeybindingFileError> {
+    let keybinding_source_text = match read_config_file(keybinding_file_path) {
+        Ok(Some(keybinding_source_text)) => keybinding_source_text,
+        Ok(None) => return Ok(None),
+        Err(read_error) => return Err(KeybindingFileError::Unreadable(read_error)),
+    };
+    parse_keybindings(keybinding_file_path, &keybinding_source_text)
+        .map(Some)
+        .map_err(KeybindingFileError::Unparseable)
+}
+
+/// The [`load_keybinding_file`] layer, or `None` when the file is absent or
+/// gives no layer. A file that gives no layer records one warning in
+/// `config_warnings`. The warning for a file that does not parse names every
+/// problem, joined by `; `, such as ``keybinding.kdl not applied (<path>):
+/// unknown key `unlock_alternative`; did you mean `unlock-alternative`?; using
+/// defaults``.
 fn load_keybindings_config(
     config_path: &Path,
     config_warnings: &mut Vec<String>,
 ) -> Option<PartialKeybindingsConfig> {
-    let config_source_text = load_config_file(config_path, config_warnings)?;
-    match parse_keybindings(config_path, &config_source_text) {
-        Ok(keybindings_config_layer) => Some(keybindings_config_layer),
-        Err(parse_error) => {
+    match load_keybinding_file(config_path) {
+        Ok(keybindings_config_layer) => keybindings_config_layer,
+        Err(KeybindingFileError::Unreadable(read_error)) => {
+            config_warnings.push(format_config_read_warning(config_path, &read_error));
+            None
+        }
+        Err(KeybindingFileError::Unparseable(parse_error)) => {
             config_warnings.push(format!(
-                "keybinding.kdl not applied ({}): {parse_error}; using defaults",
-                config_path.display()
+                "keybinding.kdl not applied ({}): {}; using defaults",
+                config_path.display(),
+                parse_error.list_problem_messages().join("; ")
             ));
             None
         }
@@ -500,7 +553,8 @@ fn append_config_field_warnings(
 /// Read and parse `profile/<profile_name>.kdl` from `config_directory`. A
 /// `config_directory` of `None` returns `None`. A missing, unreadable, or
 /// invalid profile is logged and returns `None`; the caller then starts a
-/// single shell. Profiles are all-or-nothing: any schema violation drops the
+/// single shell. The log line of an invalid profile names every problem,
+/// joined by `; `. Profiles are all-or-nothing: any schema violation drops the
 /// whole file, and no pane of a broken profile starts.
 #[must_use]
 pub fn load_profile_template(
@@ -534,7 +588,8 @@ pub fn load_profile_template(
     match parse_profile(&profile_path, &config_source_text) {
         Ok(profile_template) => Some(profile_template),
         Err(profile_error) => {
-            tracing::warn!(path = %profile_path.display(), %profile_error, "profile `{profile_name}` not applied; starting a single shell");
+            let profile_problems = profile_error.list_problem_messages().join("; ");
+            tracing::warn!(path = %profile_path.display(), %profile_problems, "profile `{profile_name}` not applied; starting a single shell");
             None
         }
     }

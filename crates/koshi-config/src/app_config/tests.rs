@@ -4,8 +4,6 @@ use super::*;
 
 use std::net::Ipv6Addr;
 
-use kdl::KdlDocument;
-
 use crate::types::ClientConfig;
 
 /// Parses `config_source_text` as `koshi.kdl`, panicking on error, and drops
@@ -26,18 +24,6 @@ fn parse_file(config_source_text: &str) -> AppConfigFile {
     let config_source_text_with_version = add_config_version(config_source_text);
     parse_app_config(Path::new("koshi.kdl"), &config_source_text_with_version)
         .expect("valid config")
-}
-
-/// The message a [`ConfigError::Parse`] carries for `config_source_text`: the
-/// first sub-diagnostic of the raw KDL parse error.
-fn get_kdl_first_diagnostic(config_source_text: &str) -> String {
-    config_source_text
-        .parse::<KdlDocument>()
-        .expect_err("source is invalid KDL")
-        .diagnostics
-        .first()
-        .expect("kdl reports a diagnostic")
-        .to_string()
 }
 
 /// Asserts `validation_error` is [`ConfigError::Validation`] with exactly this
@@ -713,7 +699,7 @@ fn syntax_error_is_a_parse_error() {
     assert_eq!(config_path, "koshi.kdl");
     assert_eq!(
         parse_error_detail,
-        get_kdl_first_diagnostic(invalid_config_text)
+        "line 1, column 8: No closing '}' for child block"
     );
 }
 
@@ -1568,7 +1554,7 @@ fn an_unterminated_quote_is_a_parse_error_not_a_panic() {
     assert_eq!(config_path, "koshi.kdl");
     assert_eq!(
         parse_error_detail,
-        get_kdl_first_diagnostic(invalid_config_text)
+        "line 2, column 10: Unexpected newline in single-line quoted string"
     );
 }
 

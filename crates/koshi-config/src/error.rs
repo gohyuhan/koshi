@@ -26,8 +26,8 @@ pub enum ConfigError {
     Parse {
         /// The path of the config file that failed to parse.
         config_path: String,
-        /// The message of the first KDL sub-diagnostic, or the KDL error's own
-        /// message when it has none.
+        /// The first KDL sub-diagnostic as `line <L>, column <C>: <message>`,
+        /// or the KDL error's own message when it has none.
         parse_error_detail: String,
     },
     /// The config parsed but failed schema validation.
@@ -71,6 +71,58 @@ impl ConfigParseDiagnostic {
             kdl_parse_error,
         }
     }
+
+    /// The plain [`ConfigError::Parse`] for this diagnostic. Its detail is the
+    /// first KDL sub-diagnostic as `line <L>, column <C>: <message>`, at the
+    /// start of that sub-diagnostic's span, or the KDL error's own message
+    /// ("Failed to parse KDL document") when it reported none.
+    ///
+    /// Example — `version 1\npane {` in `koshi.kdl` gives `config parse error
+    /// in koshi.kdl: line 2, column 6: No closing '}' for child block`.
+    #[must_use]
+    pub fn build_config_error(&self) -> ConfigError {
+        let parse_error_detail = match self.kdl_parse_error.diagnostics.first() {
+            Some(kdl_diagnostic) => {
+                let (line_number, column_number) = compute_line_and_column(
+                    &self.kdl_parse_error.input,
+                    kdl_diagnostic.span.offset(),
+                );
+                format!("line {line_number}, column {column_number}: {kdl_diagnostic}")
+            }
+            None => self.kdl_parse_error.to_string(),
+        };
+        ConfigError::Parse {
+            config_path: self.config_path.clone(),
+            parse_error_detail,
+        }
+    }
+}
+
+/// The 1-based line and column of the character that starts at byte
+/// `byte_offset` of `source_text`. `\n`, `\r`, and `\r\n` each end one line,
+/// and the column counts characters, not bytes.
+///
+/// Example — in `a\nnode "é" {`, the `{` starts at byte 12 and sits at line
+/// 2, column 10.
+fn compute_line_and_column(source_text: &str, byte_offset: usize) -> (usize, usize) {
+    let mut line_number = 1;
+    let mut column_number = 1;
+    let mut previous_character = None;
+    for (character_byte_offset, character) in source_text.char_indices() {
+        if character_byte_offset >= byte_offset {
+            break;
+        }
+        match character {
+            '\n' if previous_character == Some('\r') => {}
+            '\n' | '\r' => {
+                line_number += 1;
+                column_number = 1;
+            }
+            _ => column_number += 1,
+        }
+        previous_character = Some(character);
+    }
+    (line_number, column_number)
 }
 
 impl Diagnostic for ConfigParseDiagnostic {
@@ -92,16 +144,7 @@ impl Diagnostic for ConfigParseDiagnostic {
 
 impl From<ConfigParseDiagnostic> for ConfigError {
     fn from(parse_diagnostic: ConfigParseDiagnostic) -> Self {
-        // `parse_error_detail` is the first sub-diagnostic's message, or the kdl error's
-        // own Display ("Failed to parse KDL document") when it reported none.
-        let parse_error_detail = match parse_diagnostic.kdl_parse_error.diagnostics.first() {
-            Some(kdl_diagnostic) => kdl_diagnostic.to_string(),
-            None => parse_diagnostic.kdl_parse_error.to_string(),
-        };
-        ConfigError::Parse {
-            config_path: parse_diagnostic.config_path,
-            parse_error_detail,
-        }
+        parse_diagnostic.build_config_error()
     }
 }
 

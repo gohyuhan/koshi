@@ -79,8 +79,9 @@ fn a_configured_leader_moves_the_offline_defaults_off_ctrl() {
         None,
         None,
     );
-    assert!(
-        !alt_keymap_view.is_reverted_to_defaults,
+    assert_eq!(
+        alt_keymap_view.keymap_verdict,
+        KeymapVerdict::Apply,
         "a leader-only file has no conflicts to revert"
     );
 
@@ -102,7 +103,7 @@ fn a_configured_leader_moves_the_offline_defaults_off_ctrl() {
 #[test]
 fn defaults_only_view_is_not_reverted_and_lists_the_shipped_bindings() {
     let keymap_view = build_keymap_view_from_partial(None, None, None);
-    assert!(!keymap_view.is_reverted_to_defaults);
+    assert_eq!(keymap_view.keymap_verdict, KeymapVerdict::Apply);
     assert_eq!(keymap_view.keybindings_config, KeybindingsConfig::default());
     let normal_mode_bindings =
         &keymap_view.merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
@@ -126,7 +127,7 @@ fn an_admitted_user_layer_appears_as_user_set() {
         None,
         None,
     );
-    assert!(!keymap_view.is_reverted_to_defaults);
+    assert_eq!(keymap_view.keymap_verdict, KeymapVerdict::Apply);
     let normal_mode_bindings =
         &keymap_view.merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
     let user_binding =
@@ -192,7 +193,7 @@ fn a_rejected_user_layer_reverts_its_bindings_and_folded_fields_to_defaults() {
         None,
     );
 
-    assert!(keymap_view.is_reverted_to_defaults);
+    assert_eq!(keymap_view.keymap_verdict, KeymapVerdict::Reject);
     assert_eq!(
         keymap_view.conflict_report.get_verdict(),
         KeymapVerdict::Reject
@@ -208,12 +209,26 @@ fn a_rejected_user_layer_reverts_its_bindings_and_folded_fields_to_defaults() {
 }
 
 #[test]
-fn a_file_error_reverts_the_view_and_carries_the_reason() {
-    let keymap_view = build_keymap_view_from_partial(None, None, Some("boom".to_string()));
-    assert!(keymap_view.is_reverted_to_defaults);
+fn a_file_error_rejects_the_view_and_carries_the_reason() {
+    // The file never reaches detection: the report covers the defaults alone
+    // and applies, and the view's verdict still rejects the file.
+    let keymap_view = build_keymap_view_from_partial(
+        None,
+        Some(PathBuf::from("/home/user/.config/koshi/keybinding.kdl")),
+        Some("boom".to_string()),
+    );
+    assert_eq!(keymap_view.keymap_verdict, KeymapVerdict::Reject);
+    assert_eq!(
+        keymap_view.conflict_report.get_verdict(),
+        KeymapVerdict::Apply
+    );
     assert_eq!(
         keymap_view.keybinding_file_error_message.as_deref(),
         Some("boom")
+    );
+    assert_eq!(
+        keymap_view.user_keybinding_file_path,
+        Some(PathBuf::from("/home/user/.config/koshi/keybinding.kdl"))
     );
     assert_eq!(keymap_view.keybindings_config, KeybindingsConfig::default());
 }
@@ -232,28 +247,10 @@ fn an_admitted_user_layer_folds_its_timeout_and_depth_fields_onto_the_defaults()
         None,
         None,
     );
-    assert!(!keymap_view.is_reverted_to_defaults);
+    assert_eq!(keymap_view.keymap_verdict, KeymapVerdict::Apply);
     assert_eq!(keymap_view.keybindings_config.chord_timeout_ms, 750);
     assert_eq!(keymap_view.keybindings_config.which_key_delay_ms, 250);
     assert_eq!(keymap_view.keybindings_config.maximum_chord_depth, 6);
-}
-
-#[test]
-fn a_syntax_error_lists_as_one_line() {
-    // An unbalanced brace is a KDL syntax error: the parser returns the
-    // `Syntax` variant, and it lists as exactly one line.
-    let keybinding_parse_error =
-        parse_keybindings(Path::new("keybinding.kdl"), "mode \"normal\" {")
-            .expect_err("unbalanced brace is a syntax error");
-    match &keybinding_parse_error {
-        KeybindingParseError::Syntax(syntax_error) => {
-            assert_eq!(
-                list_parse_error_lines(&keybinding_parse_error),
-                vec![syntax_error.to_string()]
-            );
-        }
-        other_parse_error => panic!("expected a syntax error, got {other_parse_error:?}"),
-    }
 }
 
 #[test]
@@ -274,11 +271,7 @@ fn validate_keybinding_file_reports_parse_failures_and_accepts_clean_files() {
     .expect("write");
 
     match validate_keybinding_file(&valid_keybinding_file_path).expect("readable") {
-        KeymapValidationOutcome::Checked {
-            is_applicable,
-            conflict_report,
-        } => {
-            assert!(is_applicable);
+        KeymapValidationOutcome::Checked(conflict_report) => {
             assert_eq!(conflict_report.get_verdict(), KeymapVerdict::Apply);
         }
         KeymapValidationOutcome::ParseFailed(keybinding_parse_error_messages) => {
@@ -292,7 +285,7 @@ fn validate_keybinding_file_reports_parse_failures_and_accepts_clean_files() {
                 vec!["invalid key `<C-`: missing closing `>`".to_string()]
             );
         }
-        KeymapValidationOutcome::Checked { .. } => panic!("expected a parse failure"),
+        KeymapValidationOutcome::Checked(_) => panic!("expected a parse failure"),
     }
 }
 
@@ -310,21 +303,4 @@ fn validate_keybinding_file_returns_not_found_for_a_missing_path() {
         }
         Ok(_) => panic!("expected a read error"),
     }
-}
-
-#[test]
-fn two_invalid_binds_list_as_two_lines_in_file_order() {
-    let keybinding_parse_error = parse_keybindings(
-        Path::new("keybinding.kdl"),
-        "version 1\nmode \"normal\" {\n    bind \"<C-\" \"core:new-tab\"\n    bind \"<A-\" \"core:quit\"\n}\n",
-    )
-    .expect_err("both key strings are invalid");
-
-    assert_eq!(
-        list_parse_error_lines(&keybinding_parse_error),
-        vec![
-            "invalid key `<C-`: missing closing `>`".to_string(),
-            "invalid key `<A-`: missing closing `>`".to_string(),
-        ]
-    );
 }

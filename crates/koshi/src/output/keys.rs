@@ -81,11 +81,12 @@ struct ConflictFinding {
 /// A whole `keys conflicts` answer.
 #[derive(Serialize)]
 struct KeysConflicts {
-    /// What a loader would do with the user keymap.
+    /// What a client does with the user keybinding file when it attaches:
+    /// `apply`, `revert-to-defaults`, or `reject`. `apply` when no file
+    /// exists.
     verdict: String,
     /// Why the user keybinding file was ignored (it could not be read or
-    /// parsed), `null` when it loaded. When set, the verdict and findings
-    /// describe the built-in defaults, not the file.
+    /// parsed), `null` when it loaded. When set, the verdict is `reject`.
     file_error: Option<String>,
     /// Every finding, warnings included.
     conflict_findings: Vec<ConflictFinding>,
@@ -96,7 +97,7 @@ struct KeysConflicts {
 struct KeysValidation {
     /// True when the file parsed as valid keybinding KDL.
     is_valid: bool,
-    /// True when a reload would apply the file.
+    /// True when a client would apply the file as its `keybinding.kdl`.
     is_applicable: bool,
     /// Parse problems, one per line, when the file did not parse.
     parse_errors: Vec<String>,
@@ -157,7 +158,7 @@ pub fn render_keys_list(
     });
     match output_format {
         OutputFormat::Json => render_json(&KeysList {
-            is_reverted: keymap_view.is_reverted_to_defaults,
+            is_reverted: keymap_view.keymap_verdict != koshi_config::conflict::KeymapVerdict::Apply,
             key_bindings,
         }),
         OutputFormat::Table => render_table(
@@ -247,10 +248,11 @@ pub fn render_keys_describe(
     }))
 }
 
-/// Render a `koshi keys conflicts` answer from the offline keymap view. An
-/// ignored user file (unreadable or unparseable) is part of the answer on
-/// both formats, so a consumer reading only stdout never mistakes a
-/// defaults-only "apply" for a clean file.
+/// Render a `koshi keys conflicts` answer from the offline keymap view: the
+/// view's [`keymap_verdict`](crate::keymap::KeymapView::keymap_verdict) and
+/// every finding. A user file that cannot be read or parsed adds its error on
+/// both formats: the table opens with `file: ignored (<error>)`, and the
+/// verdict reads `reject`.
 #[must_use]
 pub fn render_keys_conflicts(
     keymap_view: &crate::keymap::KeymapView,
@@ -258,7 +260,7 @@ pub fn render_keys_conflicts(
 ) -> String {
     let conflict_findings = build_conflict_findings(&keymap_view.conflict_report);
     let conflicts_answer = KeysConflicts {
-        verdict: format_keymap_verdict_label(keymap_view.conflict_report.get_verdict()).to_string(),
+        verdict: format_keymap_verdict_label(keymap_view.keymap_verdict).to_string(),
         file_error: keymap_view.keybinding_file_error_message.clone(),
         conflict_findings,
     };
@@ -291,12 +293,9 @@ pub fn render_keys_validate(
             parse_errors: parse_errors.clone(),
             conflict_findings: Vec::new(),
         },
-        crate::keymap::KeymapValidationOutcome::Checked {
-            conflict_report,
-            is_applicable,
-        } => KeysValidation {
+        crate::keymap::KeymapValidationOutcome::Checked(conflict_report) => KeysValidation {
             is_valid: true,
-            is_applicable: *is_applicable,
+            is_applicable: is_validation_applicable(validation_outcome),
             parse_errors: Vec::new(),
             conflict_findings: build_conflict_findings(conflict_report),
         },
@@ -307,9 +306,9 @@ pub fn render_keys_validate(
             let mut rendered_output = String::new();
             if validation_answer.is_valid {
                 rendered_output.push_str(if validation_answer.is_applicable {
-                    "valid: a reload would apply this file\n"
+                    "valid: koshi would apply this file as keybinding.kdl\n"
                 } else {
-                    "invalid: a reload would keep the running keymap\n"
+                    "invalid: koshi would refuse this file as keybinding.kdl\n"
                 });
                 append_conflict_table(&mut rendered_output, &validation_answer.conflict_findings);
             } else {
@@ -325,14 +324,17 @@ pub fn render_keys_validate(
     }
 }
 
-/// Whether a rendered validation answer reports a file a reload would apply.
+/// Whether a client would apply the validated file as its `keybinding.kdl`:
+/// the file parsed and its conflict verdict is `apply`.
 #[must_use]
 pub fn is_validation_applicable(
     validation_outcome: &crate::keymap::KeymapValidationOutcome,
 ) -> bool {
     match validation_outcome {
         crate::keymap::KeymapValidationOutcome::ParseFailed(_) => false,
-        crate::keymap::KeymapValidationOutcome::Checked { is_applicable, .. } => *is_applicable,
+        crate::keymap::KeymapValidationOutcome::Checked(conflict_report) => {
+            conflict_report.get_verdict() == koshi_config::conflict::KeymapVerdict::Apply
+        }
     }
 }
 

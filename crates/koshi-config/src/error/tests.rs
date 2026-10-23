@@ -139,6 +139,40 @@ fn parse_conversion_without_sub_diagnostics_uses_the_kdl_display() {
 }
 
 #[test]
+fn parse_conversion_names_the_line_and_column_of_the_first_sub_diagnostic() {
+    // `é` is two bytes and one column: the unclosed `{` starts at byte 12 and
+    // sits at column 10 of line 2.
+    let parse_diagnostic = crate::parser::parse_kdl(Path::new("koshi.kdl"), "a\nnode \"é\" {")
+        .expect_err("the block is not closed");
+    assert_eq!(
+        parse_diagnostic.build_config_error().to_string(),
+        "config parse error in koshi.kdl: line 2, column 10: No closing '}' for child block"
+    );
+}
+
+#[test]
+fn line_and_column_count_every_line_break_and_characters_not_bytes() {
+    // (source text, byte offset, expected line and column)
+    let line_and_column_cases = [
+        ("pane {", 0, (1, 1)),
+        ("pane {", 5, (1, 6)),
+        ("a\nb", 2, (2, 1)),
+        ("a\r\nb", 3, (2, 1)),
+        ("a\rb", 2, (2, 1)),
+        ("a\n\nb", 3, (3, 1)),
+        ("éé {", 5, (1, 4)),
+        ("ab", 2, (1, 3)),
+    ];
+    for (source_text, byte_offset, expected_line_and_column) in line_and_column_cases {
+        assert_eq!(
+            compute_line_and_column(source_text, byte_offset),
+            expected_line_and_column,
+            "byte {byte_offset} of {source_text:?}"
+        );
+    }
+}
+
+#[test]
 fn color_bad_length_reports_the_digit_count() {
     let color_error = ColorParseError::BadLength { character_count: 5 };
     assert_eq!(
