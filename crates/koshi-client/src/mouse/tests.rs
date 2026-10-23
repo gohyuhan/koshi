@@ -37,9 +37,9 @@ use koshi_test_support::fixtures::build_cell_rect;
 
 use crate::input::KeyOutcome;
 use crate::tests::{
-    build_core_bound_action, build_expected_confirm_placement, build_test_client,
-    build_test_placement_snapshot, float_placement_source_pane, get_source_tab_snapshot_mut,
-    hold_placement_snapshot, NO_ROOM_TAB_SIZE, TEST_VIEWPORT_SIZE,
+    apply_frame_keeping_view, build_core_bound_action, build_expected_confirm_placement,
+    build_test_client, build_test_placement_snapshot, float_placement_source_pane,
+    get_source_tab_snapshot_mut, hold_placement_snapshot, NO_ROOM_TAB_SIZE, TEST_VIEWPORT_SIZE,
 };
 use crate::{
     Client, DockUndockMode, PlacementDrag, PlacementMode, PlacementModeLifetime, TiledPaneSelection,
@@ -2982,6 +2982,185 @@ fn a_tiled_handle_drag_while_locked_opens_pane_placement_and_keeps_the_client_lo
     assert_eq!(client.get_active_input_mode(), LockMode::Locked);
 }
 
+/// Drag the upper pane `source_pane_id` of the two-pane `mouse_frame` onto the
+/// lower pane `target_pane_id` and release it there. The drag starts with a
+/// left press at `press_position` that returns `expected_press_action`, and
+/// right after the press `client` holds the preview of the tab
+/// `[source_pane_id / target_pane_id]`. Returns the id of the swap the release
+/// confirmed.
+fn drop_upper_pane_on_lower_pane(
+    client: &mut Client,
+    mouse_frame: &MouseFrame,
+    source_pane_id: PaneId,
+    target_pane_id: PaneId,
+    press_position: Point,
+    expected_press_action: PlacementInputAction,
+) -> CommandId {
+    let current_time = Instant::now();
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_press(press_position),
+            mouse_frame,
+            current_time,
+        ),
+        Some(expected_press_action)
+    );
+    hold_placement_snapshot(
+        client,
+        build_mouse_placement_snapshot(
+            mouse_frame,
+            source_pane_id,
+            build_two_band_layout_tree(source_pane_id, target_pane_id),
+        ),
+    );
+    // Screen `(20, 16)` is inside the lower pane's content.
+    let target_position = Point {
+        column: 20,
+        row: 16,
+    };
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_drag(target_position),
+            mouse_frame,
+            current_time,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    let release_action = client.handle_placement_mouse(
+        build_left_mouse_release(target_position),
+        mouse_frame,
+        current_time,
+    );
+    assert_eq!(
+        release_action,
+        Some(build_expected_confirm_placement(
+            client,
+            source_pane_id,
+            TiledPlacementTarget::Swap { target_pane_id },
+        ))
+    );
+    client
+        .get_pending_placement_command_id()
+        .expect("the release confirmed a placement")
+}
+
+#[test]
+fn a_handle_drag_drop_the_session_accepts_leaves_the_client_in_its_base_mode() {
+    let typed_key_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('e'));
+    for base_lock_mode in [LockMode::Normal, LockMode::Locked] {
+        let [source_pane_id, target_pane_id] = [PaneId::new(), PaneId::new()];
+        let mouse_frame = build_mouse_frame(
+            &[
+                build_plain_mouse_pane(source_pane_id),
+                build_plain_mouse_pane(target_pane_id),
+            ],
+            Some(source_pane_id),
+        );
+        let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+        let mut client = build_test_client();
+        assert!(
+            client
+                .client_config
+                .should_stay_in_pane_placement_mode_after_placement
+        );
+        client.set_frame_view(
+            active_tab_id,
+            Some(source_pane_id),
+            Some(source_pane_id),
+            vec![active_tab_id],
+        );
+        client.set_lock_mode(base_lock_mode);
+        client.placement_handle_pane_id = Some(source_pane_id);
+        let mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
+        let handle_position = Point { column: 1, row: 1 };
+        assert_eq!(
+            resolve_hit_region(mouse_frame.build_frame_layout(), handle_position),
+            HitRegion::PlacementHandle {
+                pane_id: source_pane_id
+            }
+        );
+
+        let command_id = drop_upper_pane_on_lower_pane(
+            &mut client,
+            &mouse_frame,
+            source_pane_id,
+            target_pane_id,
+            handle_position,
+            PlacementInputAction::FocusPane {
+                pane_id: source_pane_id,
+            },
+        );
+        assert_eq!(client.get_active_input_mode(), base_lock_mode);
+        apply_frame_keeping_view(&mut client, Some(CommandId::new()), None);
+        assert!(client.is_pending_placement_command(command_id));
+        assert_eq!(client.get_active_input_mode(), base_lock_mode);
+
+        apply_frame_keeping_view(&mut client, Some(command_id), None);
+
+        assert_eq!(
+            client.placement_state.placement_mode, None,
+            "base mode {base_lock_mode:?}"
+        );
+        assert_eq!(client.get_lock_mode(), base_lock_mode);
+        assert_eq!(client.get_active_input_mode(), base_lock_mode);
+        assert_eq!(
+            client.resolve_key(typed_key_chord, Instant::now()),
+            KeyOutcome::PassThrough(typed_key_chord)
+        );
+    }
+}
+
+#[test]
+fn a_mouse_drop_the_session_accepts_keeps_pane_placement_mode_opened_by_a_key() {
+    let [source_pane_id, target_pane_id] = [PaneId::new(), PaneId::new()];
+    let mouse_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(source_pane_id),
+            build_plain_mouse_pane(target_pane_id),
+        ],
+        Some(source_pane_id),
+    );
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let mut client = build_test_client();
+    assert!(
+        client
+            .client_config
+            .should_stay_in_pane_placement_mode_after_placement
+    );
+    client.set_frame_view(
+        active_tab_id,
+        Some(source_pane_id),
+        Some(source_pane_id),
+        vec![active_tab_id],
+    );
+    assert!(client.begin_placement_mode());
+
+    // Screen `(20, 5)` is inside the upper pane's content.
+    let command_id = drop_upper_pane_on_lower_pane(
+        &mut client,
+        &mouse_frame,
+        source_pane_id,
+        target_pane_id,
+        Point { column: 20, row: 5 },
+        PlacementInputAction::Consumed,
+    );
+    apply_frame_keeping_view(&mut client, Some(command_id), None);
+
+    assert!(client.is_placement_mode_active());
+    assert_eq!(
+        client.placement_state.placement_mode_lifetime,
+        PlacementModeLifetime::UntilCancelled
+    );
+    assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
+    assert_eq!(client.get_placement_target(), None);
+    assert!(!client.is_placement_confirmation_pending());
+    let typed_key_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('e'));
+    assert_eq!(
+        client.resolve_key(typed_key_chord, Instant::now()),
+        KeyOutcome::Discard
+    );
+}
+
 #[test]
 fn submitted_mouse_placement_consumes_mouse_input_until_the_frame_reconciles() {
     let pane_id = PaneId::new();
@@ -4154,6 +4333,118 @@ fn shifted_drag_across_a_tab_submits_insertion_when_drop_matches_press_position(
             placement_target
         ))
     );
+}
+
+#[test]
+fn a_handle_drag_dropped_on_a_pane_of_a_hovered_tab_returns_to_the_base_mode_once_accepted() {
+    let source_pane_id = PaneId::new();
+    let destination_first_pane_id = PaneId::new();
+    let destination_second_pane_id = PaneId::new();
+    let source_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(source_pane_id),
+            build_plain_mouse_pane(PaneId::new()),
+        ],
+        Some(source_pane_id),
+    );
+    let source_tab_id = source_frame.client_snapshot.active_tab_id;
+    let destination_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(destination_first_pane_id),
+            build_plain_mouse_pane(destination_second_pane_id),
+        ],
+        Some(destination_first_pane_id),
+    );
+    let destination_tab_id = destination_frame.client_snapshot.active_tab_id;
+    let placement_snapshot = build_cross_tab_mouse_placement_snapshot(
+        &source_frame,
+        source_pane_id,
+        destination_tab_id,
+        [destination_first_pane_id, destination_second_pane_id],
+    );
+    let destination_point = get_content_cell(&destination_frame, 1);
+    let hover_started_at = Instant::now();
+    let mut client = build_test_client();
+    client.set_frame_view(
+        source_tab_id,
+        Some(source_pane_id),
+        Some(source_pane_id),
+        vec![source_tab_id, destination_tab_id],
+    );
+    client.placement_handle_pane_id = Some(source_pane_id);
+    let source_frame = repaint_mouse_frame(&client, &source_frame);
+    let handle_position = Point { column: 1, row: 1 };
+    assert_eq!(
+        resolve_hit_region(source_frame.build_frame_layout(), handle_position),
+        HitRegion::PlacementHandle {
+            pane_id: source_pane_id
+        }
+    );
+
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_press(handle_position),
+            &source_frame,
+            hover_started_at,
+        ),
+        Some(PlacementInputAction::FocusPane {
+            pane_id: source_pane_id
+        })
+    );
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_drag(Point { column: 2, row: 0 }),
+            &source_frame,
+            hover_started_at,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    client.update_placement_tab_hover(Some(destination_tab_id), hover_started_at);
+    client.expire_placement_tab_hover(hover_started_at + crate::PLACEMENT_TAB_HOVER_DELAY_DURATION);
+    assert_eq!(
+        client.find_placement_preview_target(),
+        Some(PanePlacementPreviewTarget {
+            source_pane_id,
+            destination_tab_id,
+        })
+    );
+    hold_placement_snapshot(&mut client, placement_snapshot);
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_drag(destination_point),
+            &destination_frame,
+            hover_started_at,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    let placement_target = TiledPlacementTarget::Swap {
+        target_pane_id: destination_second_pane_id,
+    };
+    assert_eq!(
+        client.get_placement_target().cloned(),
+        Some(placement_target.clone())
+    );
+    let release_action = client.handle_placement_mouse(
+        build_left_mouse_release(destination_point),
+        &destination_frame,
+        hover_started_at,
+    );
+    assert_eq!(
+        release_action,
+        Some(build_expected_confirm_placement(
+            &client,
+            source_pane_id,
+            placement_target
+        ))
+    );
+    let command_id = client
+        .get_pending_placement_command_id()
+        .expect("the release confirmed a placement");
+
+    apply_frame_keeping_view(&mut client, Some(command_id), None);
+
+    assert_eq!(client.placement_state.placement_mode, None);
+    assert_eq!(client.get_active_input_mode(), LockMode::Normal);
 }
 
 #[test]

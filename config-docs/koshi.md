@@ -639,8 +639,8 @@ Example: another viewer swaps panes `A` and `B` in the tab you watch. With
 
 ## `stay-in-pane-placement-mode-after-placement`
 
-Controls what pane placement mode does after the session accepts a placement.
-Each terminal reads this for itself.
+Controls what pane placement mode opened with a key, such as `<C-p> m`, does
+after the session accepts a placement. Each terminal reads this for itself.
 
 - `#true`: pane placement mode stays on, so you can place the next pane. This
   holds after Enter and after a mouse drop. For example, `<C-p> m`, Right, Enter
@@ -650,8 +650,14 @@ Each terminal reads this for itself.
   swap the panes, and the tab bar returns to `BASE`.
 
 A placement the session rejects, such as one built on a layout that changed
-before it arrived, leaves pane placement mode as it was. Pane placement mode
-opened with `<C-p> m` stays on, and a drag started on a pane's grab handle ends.
+before it arrived, leaves that mode on.
+
+The setting does not apply to a drag started on a pane's grab handle outside
+pane placement mode. That drag ends with its drop, and the tab bar shows the
+mode you were in before the drag, such as `BASE` or `LOCK`, whether the session
+accepts or rejects the placement. For example, in normal mode, a drag of the
+left pane's grab handle onto the right pane swaps the two panes, and the keys
+you type next go to the focused pane.
 
 The setting also covers floating pane move mode (`MOVE FLOAT`). `#true` keeps
 the mode on after the session runs a floating pane move sent with Enter or a
@@ -662,7 +668,7 @@ still shows `MOVE FLOAT`.
 
 | Setting | Meaning | Default | Since |
 |---|---|---|---|
-| `stay-in-pane-placement-mode-after-placement` | boolean — keep pane placement mode on after a placement is accepted, and floating pane move mode on after a move is run (≥ 0.6.0) | `#true` | ≥ 0.5.0 |
+| `stay-in-pane-placement-mode-after-placement` | boolean — keep pane placement mode opened with a key on after a placement is accepted, and floating pane move mode on after a move is run (≥ 0.6.0) | `#true` | ≥ 0.5.0 |
 
 ## `auto-close-session`
 

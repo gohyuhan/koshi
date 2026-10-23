@@ -165,12 +165,13 @@ pub struct ClientConfig {
     /// viewer's accepted placement at its committed rectangles, and a pane
     /// this viewer undocks at its floating rectangle, at once.
     pub should_reduce_motion: bool,
-    /// Whether pane placement mode stays on after the session accepts a
-    /// placement confirmed with Enter or a mouse drop. `true` keeps the mode on,
-    /// until Esc, for the next placement. `false` ends the mode once the
-    /// accepted layout arrives. A placement the session rejects leaves the mode
-    /// as it was: a mode that lasts until Esc stays on, and a mode that lasts
-    /// until its pane-handle drag ends is closed.
+    /// Whether pane placement mode opened by a key, such as `<C-p> m`, stays
+    /// on after the session accepts a placement confirmed with Enter or a
+    /// mouse drop. `true` keeps the mode on, until Esc, for the next
+    /// placement. `false` ends the mode once the accepted layout arrives. A
+    /// placement the session rejects leaves that mode on. Pane placement mode
+    /// opened by a pane-handle drag ends once the session accepts or rejects
+    /// its drop, whatever this says.
     ///
     /// It also governs floating pane move mode: `true` keeps the mode on after
     /// the session runs a floating pane move sent with Enter or a mouse
