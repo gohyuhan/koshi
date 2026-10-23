@@ -61,11 +61,11 @@ mod tests;
 /// The read times of this terminal's input events, shared by its input thread
 /// and the attach loop under one lock.
 ///
-/// The input thread stamps each event it reads, a key, a mouse event, a paste,
-/// a resize or a focus loss ([`stamp_input_read`](Self::stamp_input_read)), and
-/// the loop records each event it takes off its channel
-/// ([`note_input_taken`](Self::note_input_taken)). An event stamped and not yet
-/// taken is on its way to the loop.
+/// The input thread stamps the events of each read of the terminal it sends,
+/// keys, mouse events, a paste, a resize or a focus loss
+/// ([`stamp_input_read`](Self::stamp_input_read)), and the loop records each
+/// read it takes off its channel ([`note_input_taken`](Self::note_input_taken)).
+/// A read stamped and not yet taken is on its way to the loop.
 ///
 /// Example: the input thread reads `a` 400 ms after `<C-y>` opened a sequence
 /// whose deadline is 500 ms out, and the loop is still drawing a frame at
@@ -76,8 +76,8 @@ pub(crate) struct InputReadClock {
     input_read_times: Mutex<InputReadTimes>,
 }
 
-/// The stamp of the last input event the input thread read, and of the last
-/// one the loop took. `None` before the first one.
+/// The stamp of the last read the input thread sent, and of the last one the
+/// loop took. `None` before the first one.
 #[derive(Debug, Default)]
 struct InputReadTimes {
     last_read_at: Option<Instant>,
@@ -97,10 +97,10 @@ impl InputReadTimes {
 }
 
 impl InputReadClock {
-    /// Stamp an input event the input thread read at `current_time`, and
-    /// return the stamp: `current_time`, or one nanosecond past the previous
-    /// stamp when `current_time` is at or before it. Each stamp is greater
-    /// than the one before it. Example: two events read at the same clock
+    /// Stamp the events of one read the input thread made at `current_time`,
+    /// and return the stamp: `current_time`, or one nanosecond past the
+    /// previous stamp when `current_time` is at or before it. Each stamp is
+    /// greater than the one before it. Example: two reads at the same clock
     /// reading `t` get `t` and `t + 1 ns`.
     pub(crate) fn stamp_input_read(&self, current_time: Instant) -> Instant {
         let mut input_read_times = self.lock_input_read_times();
@@ -114,8 +114,8 @@ impl InputReadClock {
         read_at
     }
 
-    /// Record that the loop took the input event stamped `read_at` off its
-    /// channel. Input events reach the loop in the order they were read.
+    /// Record that the loop took the read stamped `read_at` off its channel.
+    /// Reads reach the loop in the order they were made.
     pub(crate) fn note_input_taken(&self, read_at: Instant) {
         self.lock_input_read_times().last_taken_read_at = Some(read_at);
     }

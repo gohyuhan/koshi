@@ -121,6 +121,9 @@ pub struct Surface {
 ///   `link_timeout_ms` below `1000` with the `RequestFailed` code. `Leaving`
 ///   carries `is_returning`; 4 sent a bare `Leaving`. The `Ping` request and
 ///   the `Pong` event exist in 5 only.
+/// - A `Keyboard` request carries `key_inputs`: the keys of one read of the
+///   client's terminal that go to the pane, oldest first, which the session
+///   writes to the pane in one write. 4 carried one key in `key_input`.
 /// - A mouse round's `Forward` carries the event's `mouse_kind`, its
 ///   `modifier_flags` and `pane_local_cell`, the cell in the pane's content
 ///   that the client resolved; 4 carried the client's screen cell in

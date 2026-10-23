@@ -144,6 +144,10 @@ impl reader::EventSource for ProbeSource {
     fn try_read_event(&mut self, _timeout_duration: Option<Duration>) -> io::Result<Option<Event>> {
         Ok(self.pending_events.pop_front())
     }
+
+    fn remove_next_parsed_event(&mut self) -> Option<Event> {
+        None
+    }
 }
 
 fn build_probe_reader(probe_events: impl IntoIterator<Item = Event>) -> InputReader<ProbeSource> {
@@ -152,17 +156,40 @@ fn build_probe_reader(probe_events: impl IntoIterator<Item = Event>) -> InputRea
     })
 }
 
-/// A terminal whose input reads `pending_events` in order, then fails.
+/// A terminal whose input returns `pending_reads` in order, the events of one
+/// read at a time, then fails.
 struct ScriptedInputSource {
-    pending_events: VecDeque<Event>,
+    pending_reads: VecDeque<Vec<Event>>,
+    parsed_events: VecDeque<Event>,
+}
+
+impl ScriptedInputSource {
+    /// A terminal that returns the events of each of `pending_reads` from one
+    /// read.
+    fn from_reads(pending_reads: impl IntoIterator<Item = Vec<Event>>) -> Self {
+        Self {
+            pending_reads: pending_reads.into_iter().collect(),
+            parsed_events: VecDeque::new(),
+        }
+    }
 }
 
 impl reader::EventSource for ScriptedInputSource {
     fn try_read_event(&mut self, _timeout_duration: Option<Duration>) -> io::Result<Option<Event>> {
-        match self.pending_events.pop_front() {
-            Some(terminal_event) => Ok(Some(terminal_event)),
+        if let Some(parsed_event) = self.parsed_events.pop_front() {
+            return Ok(Some(parsed_event));
+        }
+        match self.pending_reads.pop_front() {
+            Some(read_events) => {
+                self.parsed_events = read_events.into();
+                Ok(self.parsed_events.pop_front())
+            }
             None => Err(io::Error::other("the scripted terminal closed")),
         }
+    }
+
+    fn remove_next_parsed_event(&mut self) -> Option<Event> {
+        self.parsed_events.pop_front()
     }
 }
 
@@ -3000,16 +3027,106 @@ fn terminal_cleanup_skips_image_commands_before_application_modes_are_active() {
 }
 
 #[test]
-fn the_input_thread_sends_each_event_with_a_stamp_greater_than_the_one_before() {
+fn a_reader_returns_the_events_of_one_read_together_and_a_buffered_event_alone() {
+    let key_a = Event::Key(KeyCode::Char('a').into());
+    let key_b = Event::Key(KeyCode::Char('b').into());
+    let key_c = Event::Key(KeyCode::Char('c').into());
+    let key_e_acute = Event::Key(KeyCode::Char('é').into());
+    let mut input_reader = InputReader::from_event_source(ScriptedInputSource::from_reads([
+        vec![key_a.clone(), Event::FocusIn, key_b.clone()],
+        vec![key_c.clone(), key_e_acute.clone()],
+    ]));
+
+    assert!(input_reader
+        .wait_for_event(Some(Duration::from_millis(1)), |terminal_event| {
+            *terminal_event == Event::FocusIn
+        })
+        .expect("the wait reads the first read"));
+
+    let mut terminal_reads = Vec::new();
+    for _ in 0..4 {
+        terminal_reads.push(
+            input_reader
+                .read_events_of_next_terminal_read()
+                .expect("a scripted read"),
+        );
+    }
+    assert_eq!(
+        terminal_reads,
+        vec![
+            vec![key_a],
+            vec![Event::FocusIn],
+            vec![key_b],
+            vec![key_c, key_e_acute],
+        ]
+    );
+}
+
+#[test]
+fn the_input_thread_sends_the_events_of_one_read_as_one_input() {
     let client_id = ClientId::new();
-    let mut input_reader = InputReader::from_event_source(ScriptedInputSource {
-        pending_events: VecDeque::from([
+    let mut input_reader = InputReader::from_event_source(ScriptedInputSource::from_reads([
+        vec![
             Event::Key(KeyCode::Char('a').into()),
+            Event::Key(KeyCode::Char('é').into()),
             Event::FocusIn,
             Event::Paste(String::from("p")),
-            Event::FocusOut,
-        ]),
-    });
+        ],
+        vec![Event::FocusIn],
+        vec![Event::Key(KeyCode::Char('b').into())],
+    ]));
+    let (terminal_input_sender, terminal_input_receiver) = mpsc::sync_channel(16);
+
+    run_terminal_input(
+        &mut input_reader,
+        &terminal_input_sender,
+        client_id,
+        &InputReadClock::default(),
+        &AtomicBool::new(false),
+    );
+
+    let terminal_inputs: Vec<TerminalInput> = terminal_input_receiver.try_iter().collect();
+    let [first_read_input, second_key_read_input, quit_input] = terminal_inputs.as_slice() else {
+        panic!("expected two reads with events and a hangup, got {terminal_inputs:?}");
+    };
+    let [RuntimeEvent::KeyInput {
+        key_input: a_key_input,
+        ..
+    }, RuntimeEvent::KeyInput {
+        key_input: e_acute_key_input,
+        ..
+    }, RuntimeEvent::HostPaste { pasted_text, .. }] = first_read_input.runtime_events.as_slice()
+    else {
+        panic!("the first read holds two keys and the paste, got {first_read_input:?}");
+    };
+    assert_eq!(*a_key_input, decode_key_event(KeyCode::Char('a').into()));
+    assert_eq!(
+        *e_acute_key_input,
+        decode_key_event(KeyCode::Char('é').into())
+    );
+    assert_eq!(pasted_text, "p");
+    let [RuntimeEvent::KeyInput {
+        key_input: b_key_input,
+        ..
+    }] = second_key_read_input.runtime_events.as_slice()
+    else {
+        panic!("the read of focus alone sends nothing, got {second_key_read_input:?}");
+    };
+    assert_eq!(*b_key_input, decode_key_event(KeyCode::Char('b').into()));
+    let [RuntimeEvent::Quit] = quit_input.runtime_events.as_slice() else {
+        panic!("the failed read is the hangup, got {quit_input:?}");
+    };
+}
+
+#[test]
+fn the_input_thread_sends_each_read_with_a_stamp_greater_than_the_one_before() {
+    let client_id = ClientId::new();
+    let mut input_reader = InputReader::from_event_source(ScriptedInputSource::from_reads([
+        vec![Event::Key(KeyCode::Char('a').into())],
+        vec![Event::FocusIn],
+        vec![Event::Paste(String::from("p"))],
+        vec![Event::FocusOut],
+    ]));
     let (terminal_input_sender, terminal_input_receiver) = mpsc::sync_channel(16);
     let input_read_clock = InputReadClock::default();
 
@@ -3025,31 +3142,31 @@ fn the_input_thread_sends_each_event_with_a_stamp_greater_than_the_one_before() 
     let [key_input, paste_input, focus_lost_input, quit_input] = terminal_inputs.as_slice() else {
         panic!("expected a key, a paste, a focus loss and a hangup, got {terminal_inputs:?}");
     };
-    let RuntimeEvent::KeyInput {
+    let [RuntimeEvent::KeyInput {
         client_id: key_client_id,
         ..
-    } = key_input.runtime_event
+    }] = key_input.runtime_events.as_slice()
     else {
-        panic!("the first event is the key, got {key_input:?}");
+        panic!("the first read is the key, got {key_input:?}");
     };
-    assert_eq!(key_client_id, client_id);
-    let RuntimeEvent::HostPaste {
+    assert_eq!(*key_client_id, client_id);
+    let [RuntimeEvent::HostPaste {
         client_id: paste_client_id,
-        ref pasted_text,
-    } = paste_input.runtime_event
+        pasted_text,
+    }] = paste_input.runtime_events.as_slice()
     else {
-        panic!("the second event is the paste, got {paste_input:?}");
+        panic!("the third read is the paste, got {paste_input:?}");
     };
-    assert_eq!(paste_client_id, client_id);
+    assert_eq!(*paste_client_id, client_id);
     assert_eq!(pasted_text, "p");
-    let RuntimeEvent::OuterTerminalFocusLost {
+    let [RuntimeEvent::OuterTerminalFocusLost {
         client_id: focus_client_id,
-    } = focus_lost_input.runtime_event
+    }] = focus_lost_input.runtime_events.as_slice()
     else {
-        panic!("the third event is the focus loss, got {focus_lost_input:?}");
+        panic!("the fourth read is the focus loss, got {focus_lost_input:?}");
     };
-    assert_eq!(focus_client_id, client_id);
-    let RuntimeEvent::Quit = quit_input.runtime_event else {
+    assert_eq!(*focus_client_id, client_id);
+    let [RuntimeEvent::Quit] = quit_input.runtime_events.as_slice() else {
         panic!("the failed read is the hangup, got {quit_input:?}");
     };
     assert!(key_input.read_at < paste_input.read_at);

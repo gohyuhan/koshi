@@ -67,9 +67,12 @@ fn recovery_notice_clears_only_after_pane_input_succeeds() {
     );
 
     fake_pty_backend.fail_writes_on(pane_id, PtyError::UnknownPane { pane_id });
-    server.handle_key_input(
+    server.handle_key_inputs(
         client_id,
-        &build_key_input_for_chord(build_key_chord(BindingModifierFlags::NONE, 'x')),
+        &[build_key_input_for_chord(build_key_chord(
+            BindingModifierFlags::NONE,
+            'x',
+        ))],
     );
     assert!(
         server
@@ -84,9 +87,12 @@ fn recovery_notice_clears_only_after_pane_input_succeeds() {
         .expect("attached session")
         .session_id;
     server.show_session_recovery_notice(session_id);
-    server.handle_key_input(
+    server.handle_key_inputs(
         client_id,
-        &build_key_input_for_chord(build_key_chord(BindingModifierFlags::NONE, 'x')),
+        &[build_key_input_for_chord(build_key_chord(
+            BindingModifierFlags::NONE,
+            'x',
+        ))],
     );
     assert!(
         !server
@@ -263,7 +269,10 @@ fn apply_key_press(
             server.handle_bound_action(client_id, bound_action, new_pane_direction);
         }
         KeyOutcome::PassThrough(passthrough_key_chord) => {
-            server.handle_key_input(client_id, &build_key_input_for_chord(passthrough_key_chord));
+            server.handle_key_inputs(
+                client_id,
+                &[build_key_input_for_chord(passthrough_key_chord)],
+            );
         }
         KeyOutcome::Pending | KeyOutcome::Discard => {}
     }
@@ -1614,9 +1623,12 @@ fn a_key_from_an_unknown_client_writes_nothing() {
 
     // A press arriving for a client the session does not know resolves to no
     // pane and writes nothing.
-    server.handle_key_input(
+    server.handle_key_inputs(
         ClientId::new(),
-        &build_key_input_for_chord(build_key_chord(BindingModifierFlags::NONE, 'x')),
+        &[build_key_input_for_chord(build_key_chord(
+            BindingModifierFlags::NONE,
+            'x',
+        ))],
     );
 
     assert_eq!(
@@ -2864,7 +2876,7 @@ fn default_sends_legacy_shift_enter_to_pane_without_keyboard_flags() {
     let (mut server, fake_pty_backend, client_id, _viewer) = build_test_server();
     let pane_id = get_only_pane_id(&server);
 
-    server.handle_key_input(client_id, &build_shift_enter_press());
+    server.handle_key_inputs(client_id, &[build_shift_enter_press()]);
 
     assert_eq!(
         get_pane_write_bytes(&fake_pty_backend, pane_id),
@@ -2879,7 +2891,7 @@ fn a_pane_that_pushed_flag_eight_reads_shift_enter_as_a_csi_u_report() {
 
     // The program in the pane asks for every key as an escape code.
     server.handle_pty_output(pane_id, b"\x1b[>8u");
-    server.handle_key_input(client_id, &build_shift_enter_press());
+    server.handle_key_inputs(client_id, &[build_shift_enter_press()]);
 
     assert_eq!(
         get_pane_write_bytes(&fake_pty_backend, pane_id),
@@ -2895,7 +2907,7 @@ fn a_pane_reads_the_flags_of_the_screen_it_is_on_at_the_write() {
     // The program pushes flag 8 on the primary screen, then enters the
     // alternate screen, whose own stack is empty.
     server.handle_pty_output(pane_id, b"\x1b[>8u\x1b[?1049h");
-    server.handle_key_input(client_id, &build_shift_enter_press());
+    server.handle_key_inputs(client_id, &[build_shift_enter_press()]);
     assert_eq!(
         get_pane_write_bytes(&fake_pty_backend, pane_id),
         b"\r".to_vec()
@@ -2903,7 +2915,7 @@ fn a_pane_reads_the_flags_of_the_screen_it_is_on_at_the_write() {
 
     // Back on the primary screen its own stack still holds flag 8.
     server.handle_pty_output(pane_id, b"\x1b[?1049l");
-    server.handle_key_input(client_id, &build_shift_enter_press());
+    server.handle_key_inputs(client_id, &[build_shift_enter_press()]);
     assert_eq!(
         get_pane_write_bytes(&fake_pty_backend, pane_id),
         b"\r\x1b[13;2u".to_vec()
@@ -2916,7 +2928,7 @@ fn always_sends_distinct_shift_enter_to_pane_without_keyboard_flags() {
     let pane_id = get_only_pane_id(&server);
     server.config.terminal.extended_keys_mode = ExtendedKeysMode::Always;
 
-    server.handle_key_input(client_id, &build_shift_enter_press());
+    server.handle_key_inputs(client_id, &[build_shift_enter_press()]);
 
     assert_eq!(
         get_pane_write_bytes(&fake_pty_backend, pane_id),
@@ -2932,16 +2944,137 @@ fn a_release_reaches_a_pane_only_when_that_pane_asked_for_event_kinds() {
         build_key_input_for_chord(build_key_chord(BindingModifierFlags::NONE, 'a'));
     a_key_release_input.key_event_kind = KeyEventKind::Release;
 
-    server.handle_key_input(client_id, &a_key_release_input);
+    server.handle_key_inputs(client_id, std::slice::from_ref(&a_key_release_input));
     assert_eq!(
         get_pane_write_bytes(&fake_pty_backend, pane_id),
         Vec::<u8>::new()
     );
 
     server.handle_pty_output(pane_id, b"\x1b[>10u");
-    server.handle_key_input(client_id, &a_key_release_input);
+    server.handle_key_inputs(client_id, std::slice::from_ref(&a_key_release_input));
     assert_eq!(
         get_pane_write_bytes(&fake_pty_backend, pane_id),
         b"\x1b[97;1:3u".to_vec()
+    );
+}
+
+// ------------------------------- the keys of one read go in one write ----
+
+/// The unmodified presses that type `typed_text`, one key per character, as
+/// the viewer reads them.
+fn build_presses_for_text(typed_text: &str) -> Vec<KeyInput> {
+    typed_text
+        .chars()
+        .map(|typed_character| {
+            build_key_input_for_chord(build_key_chord(BindingModifierFlags::NONE, typed_character))
+        })
+        .collect()
+}
+
+#[test]
+fn the_keys_of_one_read_reach_the_pane_in_one_write() {
+    let (mut server, fake_pty_backend, client_id, _viewer) = build_test_server();
+    let pane_id = get_only_pane_id(&server);
+    let mut key_inputs = build_presses_for_text("echo 1 é-ü-ñ-ç");
+    key_inputs.push(build_key_input_for_chord(build_named_key_chord(
+        NamedKey::Enter,
+    )));
+
+    server.handle_key_inputs(client_id, &key_inputs);
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec!["echo 1 é-ü-ñ-ç\r".as_bytes().to_vec()]
+    );
+}
+
+#[test]
+fn a_release_in_one_read_adds_no_bytes_to_the_write_of_its_read() {
+    let (mut server, fake_pty_backend, client_id, _viewer) = build_test_server();
+    let pane_id = get_only_pane_id(&server);
+    let mut a_key_release_input =
+        build_key_input_for_chord(build_key_chord(BindingModifierFlags::NONE, 'a'));
+    a_key_release_input.key_event_kind = KeyEventKind::Release;
+    let key_inputs = [
+        build_key_input_for_chord(build_key_chord(BindingModifierFlags::NONE, 'a')),
+        a_key_release_input,
+        build_key_input_for_chord(build_key_chord(BindingModifierFlags::NONE, 'b')),
+    ];
+
+    server.handle_key_inputs(client_id, &key_inputs);
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![b"ab".to_vec()]
+    );
+}
+
+#[test]
+fn the_keys_of_one_read_are_each_encoded_for_the_pane_flags_in_one_write() {
+    let (mut server, fake_pty_backend, client_id, _viewer) = build_test_server();
+    let pane_id = get_only_pane_id(&server);
+    // The program in the pane asks for every key as an escape code.
+    server.handle_pty_output(pane_id, b"\x1b[>8u");
+
+    server.handle_key_inputs(client_id, &build_presses_for_text("ab"));
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![b"\x1b[97u\x1b[98u".to_vec()]
+    );
+}
+
+#[test]
+fn a_read_whose_write_the_backend_refuses_writes_none_of_its_keys() {
+    let (mut server, fake_pty_backend, client_id, _viewer) = build_test_server();
+    let pane_id = get_only_pane_id(&server);
+    let session_id = server
+        .get_session_for_client(client_id)
+        .expect("attached session")
+        .session_id;
+    server.show_session_recovery_notice(session_id);
+    fake_pty_backend.fail_writes_on(
+        pane_id,
+        PtyError::InputQueueFull {
+            pane_id,
+            queued_byte_count: koshi_pty::backend::state::MAX_QUEUED_PANE_INPUT_BYTE_COUNT,
+        },
+    );
+
+    server.handle_key_inputs(client_id, &build_presses_for_text("abc"));
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert!(
+        server
+            .build_snapshot(client_id)
+            .expect("painted snapshot")
+            .is_recovery_notice_visible,
+        "a refused write leaves the view as it is"
+    );
+}
+
+#[test]
+fn a_keyboard_event_with_no_keys_writes_nothing() {
+    let (mut server, fake_pty_backend, client_id, _viewer) = build_test_server();
+    let pane_id = get_only_pane_id(&server);
+
+    server.handle_key_inputs(client_id, &[]);
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
     );
 }

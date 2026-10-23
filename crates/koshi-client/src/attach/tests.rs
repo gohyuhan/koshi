@@ -51,6 +51,8 @@ use koshi_core::key::{
 };
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseButton, MouseKind, MouseTracking, ScrollDirection};
+use koshi_input::host::{Event, Parser};
+use koshi_input::keyboard::decode_key_event;
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::{compute_socket_address, EndpointFile};
 use koshi_ipc::frame::{
@@ -71,6 +73,7 @@ use koshi_ipc::transport::{
 };
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::{LayoutNode, SplitNode};
+use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPaneMoveDraft, FloatingPaneSlot,
     GridView, ImagePlacementSnapshot, MousePane, PaneSlot, PaneSnapshot, PlacementSnapshot,
@@ -94,6 +97,9 @@ use crate::{
     DockUndockMode, FloatingPaneMoveSelection, PaneMoveMode, PlacementMode, PlacementModeLifetime,
 };
 use koshi_runtime::runtime::painted_update::{PaintedUpdateSender, ReceivedPaintedFrame};
+use koshi_runtime::runtime::pty_inbox::InboxSink;
+use koshi_runtime::server::Server;
+use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::{
     build_accepted_hello_result, build_image_chunk_frame, build_restarting_refusal,
     build_test_runtime_directory, connect_test_socket_pair,
@@ -186,7 +192,7 @@ fn process_runtime_input(
             &mut cell_size_query,
             None,
             TerminalInput {
-                runtime_event,
+                runtime_events: vec![runtime_event],
                 read_at,
             },
             &mut Vec::new(),
@@ -200,7 +206,7 @@ fn process_runtime_input(
 /// at `read_at`.
 fn build_input_incoming(runtime_event: RuntimeEvent, read_at: Instant) -> Incoming {
     Incoming::Input(Box::new(TerminalInput {
-        runtime_event,
+        runtime_events: vec![runtime_event],
         read_at,
     }))
 }
@@ -3559,7 +3565,7 @@ fn a_click_then_a_key_in_one_pass_reach_the_session_in_that_order() {
                 &mut cell_size_query,
                 Some(&mouse_frame),
                 TerminalInput {
-                    runtime_event,
+                    runtime_events: vec![runtime_event],
                     read_at: Instant::now(),
                 },
                 &mut sent_border_moves,
@@ -3648,10 +3654,10 @@ fn held_mouse_actions_leave_before_the_requests_of_a_placement_handle_press() {
             &mut cell_size_query,
             Some(&mouse_frame),
             TerminalInput {
-                runtime_event: RuntimeEvent::MouseInput {
+                runtime_events: vec![RuntimeEvent::MouseInput {
                     client_id,
                     mouse_input: build_mouse_press(handle_cell),
-                },
+                }],
                 read_at: Instant::now(),
             },
             &mut sent_border_moves,
@@ -4928,10 +4934,9 @@ fn a_key_the_keymap_does_not_bind_goes_up_the_connection_whole() {
         IpcRequest {
             request_id: FIRST_POST_ATTACH_REQUEST_ID,
             request_kind: IpcRequestKind::Keyboard {
-                key_input: crate::tests::build_key_input_for_chord(KeyChord::from_parts(
-                    BindingModifierFlags::NONE,
-                    Key::Char('a'),
-                )),
+                key_inputs: vec![crate::tests::build_key_input_for_chord(
+                    KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('a'),)
+                )],
             },
         }
     );
@@ -5003,7 +5008,7 @@ fn a_key_release_goes_up_the_connection_and_leaves_an_open_sequence_open() {
         IpcRequest {
             request_id: FIRST_POST_ATTACH_REQUEST_ID,
             request_kind: IpcRequestKind::Keyboard {
-                key_input: released_key_input
+                key_inputs: vec![released_key_input]
             },
         }
     );
@@ -5046,7 +5051,7 @@ fn a_key_no_binding_can_name_goes_up_the_connection_whole() {
         IpcRequest {
             request_id: FIRST_POST_ATTACH_REQUEST_ID,
             request_kind: IpcRequestKind::Keyboard {
-                key_input: left_shift_key_input
+                key_inputs: vec![left_shift_key_input]
             },
         }
     );
@@ -5090,7 +5095,7 @@ fn a_text_only_event_goes_up_the_connection_whole() {
         IpcRequest {
             request_id: FIRST_POST_ATTACH_REQUEST_ID,
             request_kind: IpcRequestKind::Keyboard {
-                key_input: text_only_key_input
+                key_inputs: vec![text_only_key_input]
             },
         }
     );
@@ -5314,6 +5319,7 @@ fn a_terminal_resize_reports_its_measured_cell_size() {
                 cell_size: Some(measured_cell_size),
             },
             Instant::now(),
+            &mut Vec::new(),
         ),
         ControlFlow::Continue(())
     );
@@ -6774,10 +6780,10 @@ fn mouse_pickup_previews_and_focuses_the_dragged_pane() {
             &mut cell_size_query,
             Some(&mouse_frame),
             TerminalInput {
-                runtime_event: RuntimeEvent::MouseInput {
+                runtime_events: vec![RuntimeEvent::MouseInput {
                     client_id,
                     mouse_input: build_mouse_press(placement_handle_position),
-                },
+                }],
                 read_at: Instant::now(),
             },
             &mut Vec::new(),
@@ -8667,13 +8673,13 @@ fn redials_go_out_on_the_widening_schedule_and_stop_inside_the_window() {
 fn a_restart_hold_takes_inputs_up_to_its_count_and_paste_caps() {
     let mut input_hold = InputHold::default();
     for _ in 0..MAX_HELD_INPUT_COUNT {
-        assert!(input_hold.hold_input(HeldInput::Keyboard(
+        assert!(input_hold.hold_input(HeldInput::Keyboard(vec![
             crate::tests::build_key_input_for_chord(build_plain_chord('a'))
-        )));
+        ])));
     }
-    assert!(!input_hold.hold_input(HeldInput::Keyboard(
+    assert!(!input_hold.hold_input(HeldInput::Keyboard(vec![
         crate::tests::build_key_input_for_chord(build_plain_chord('b'))
-    )));
+    ])));
     assert_eq!(input_hold.held_inputs.len(), MAX_HELD_INPUT_COUNT);
 
     let mut paste_hold = InputHold::default();
@@ -8699,9 +8705,9 @@ fn an_overflowing_restart_hold_drops_everything_typed_during_that_restart() {
     for _ in 0..=MAX_HELD_INPUT_COUNT {
         link_recovery.hold_input(
             &mut client,
-            HeldInput::Keyboard(crate::tests::build_key_input_for_chord(build_plain_chord(
-                'a',
-            ))),
+            HeldInput::Keyboard(vec![crate::tests::build_key_input_for_chord(
+                build_plain_chord('a'),
+            )]),
         );
     }
     link_recovery.hold_input(&mut client, HeldInput::Paste(String::from("after")));
@@ -9295,13 +9301,13 @@ fn keys_and_pastes_during_a_restart_are_held_in_order_for_the_restarted_session(
     assert_eq!(
         held_inputs,
         vec![
-            HeldInput::Keyboard(crate::tests::build_key_input_for_chord(build_plain_chord(
-                'a'
-            ))),
+            HeldInput::Keyboard(vec![crate::tests::build_key_input_for_chord(
+                build_plain_chord('a')
+            )]),
             HeldInput::Paste(String::from("pasted")),
-            HeldInput::Keyboard(crate::tests::build_key_input_for_chord(build_plain_chord(
-                'b'
-            ))),
+            HeldInput::Keyboard(vec![crate::tests::build_key_input_for_chord(
+                build_plain_chord('b')
+            )]),
         ]
     );
 }
@@ -9316,9 +9322,9 @@ fn held_inputs_go_up_in_the_order_they_were_typed() {
         &mut client,
         &mut uplink,
         vec![
-            HeldInput::Keyboard(crate::tests::build_key_input_for_chord(build_plain_chord(
-                'a',
-            ))),
+            HeldInput::Keyboard(vec![crate::tests::build_key_input_for_chord(
+                build_plain_chord('a'),
+            )]),
             HeldInput::DispatchPlan(DispatchPlan::Command(Box::new(Command::NewTab(
                 NewTabArgs::default(),
             )))),
@@ -9331,7 +9337,9 @@ fn held_inputs_go_up_in_the_order_they_were_typed() {
     assert_eq!(
         sent_requests[0].request_kind,
         IpcRequestKind::Keyboard {
-            key_input: crate::tests::build_key_input_for_chord(build_plain_chord('a')),
+            key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
+                'a'
+            ))],
         }
     );
     let IpcRequestKind::SubmitCommand(command_envelope) = &sent_requests[1].request_kind else {
@@ -9438,7 +9446,7 @@ fn keys_typed_after_the_lock_key_resolve_in_locked_mode_before_the_session_answe
     assert_eq!(
         *tab_request_kind,
         IpcRequestKind::Keyboard {
-            key_input: crate::tests::build_key_input_for_chord(build_tab_chord()),
+            key_inputs: vec![crate::tests::build_key_input_for_chord(build_tab_chord())],
         }
     );
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
@@ -9485,7 +9493,7 @@ fn a_quit_key_bound_in_normal_mode_alone_reaches_the_pane_right_after_the_lock_k
     assert_eq!(
         *quit_key_request_kind,
         IpcRequestKind::Keyboard {
-            key_input: crate::tests::build_key_input_for_chord(quit_chord),
+            key_inputs: vec![crate::tests::build_key_input_for_chord(quit_chord)],
         }
     );
 }
@@ -9565,7 +9573,7 @@ fn lock_keys_during_a_restart_switch_the_mode_the_next_key_resolves_in() {
     let [HeldInput::LockCommand {
         lock_command_id: first_lock_command_id,
         lock_mode: LockMode::Locked,
-    }, HeldInput::Keyboard(locked_tab_key_input), HeldInput::LockCommand {
+    }, HeldInput::Keyboard(locked_tab_key_inputs), HeldInput::LockCommand {
         lock_command_id: second_lock_command_id,
         lock_mode: LockMode::Normal,
     }, HeldInput::DispatchPlan(next_tab_plan)] = held_inputs.as_slice()
@@ -9574,8 +9582,8 @@ fn lock_keys_during_a_restart_switch_the_mode_the_next_key_resolves_in() {
     };
     assert_ne!(first_lock_command_id, second_lock_command_id);
     assert_eq!(
-        *locked_tab_key_input,
-        crate::tests::build_key_input_for_chord(build_tab_chord())
+        *locked_tab_key_inputs,
+        vec![crate::tests::build_key_input_for_chord(build_tab_chord())]
     );
     assert_eq!(
         *next_tab_plan,
@@ -9681,9 +9689,9 @@ fn an_overflowing_hold_puts_back_the_lock_mode_from_before_its_first_lock_comman
     for _ in 0..MAX_HELD_INPUT_COUNT - 1 {
         link_recovery.hold_input(
             &mut client,
-            HeldInput::Keyboard(crate::tests::build_key_input_for_chord(build_plain_chord(
-                'a',
-            ))),
+            HeldInput::Keyboard(vec![crate::tests::build_key_input_for_chord(
+                build_plain_chord('a'),
+            )]),
         );
     }
 
@@ -9720,7 +9728,9 @@ fn held_lock_commands_go_up_under_their_own_ids_and_leave_the_mode_and_open_sequ
                 lock_command_id: first_lock_command_id,
                 lock_mode: LockMode::Locked,
             },
-            HeldInput::Keyboard(crate::tests::build_key_input_for_chord(build_tab_chord())),
+            HeldInput::Keyboard(vec![crate::tests::build_key_input_for_chord(
+                build_tab_chord(),
+            )]),
             HeldInput::LockCommand {
                 lock_command_id: second_lock_command_id,
                 lock_mode: LockMode::Normal,
@@ -9744,7 +9754,7 @@ fn held_lock_commands_go_up_under_their_own_ids_and_leave_the_mode_and_open_sequ
     assert_eq!(
         tab_request.request_kind,
         IpcRequestKind::Keyboard {
-            key_input: crate::tests::build_key_input_for_chord(build_tab_chord()),
+            key_inputs: vec![crate::tests::build_key_input_for_chord(build_tab_chord())],
         }
     );
     let IpcRequestKind::SubmitCommand(second_lock_envelope) = &second_lock_request.request_kind
@@ -9807,11 +9817,12 @@ fn a_join_read_before_a_quit_hands_the_quit_to_the_new_link() {
     let Ok(Incoming::Input(terminal_input)) = viewer.incoming_receiver.try_recv() else {
         panic!("the quit stays on the channel for the linked loop");
     };
-    let RuntimeEvent::KeyInput { key_input, .. } = terminal_input.runtime_event else {
+    let [RuntimeEvent::KeyInput { key_input, .. }] = terminal_input.runtime_events.as_slice()
+    else {
         panic!("the quit stays a key");
     };
     assert_eq!(
-        key_input,
+        *key_input,
         crate::tests::build_key_input_for_chord(build_quit_chord())
     );
 }
@@ -9962,6 +9973,7 @@ fn quitting_with_a_link_writes_the_quit_and_leaves_without_the_sessions_answer()
                 key_input: crate::tests::build_key_input_for_chord(build_quit_chord()),
             },
             Instant::now(),
+            &mut Vec::new(),
         ),
         ControlFlow::Break(())
     );
@@ -10258,9 +10270,11 @@ fn incoming_batch_leaves_events_past_the_per_pass_limit_queued() {
         let Incoming::Input(terminal_input) = incoming_event else {
             panic!("the batch contained a session event");
         };
-        match terminal_input.runtime_event {
-            RuntimeEvent::Quit => {}
-            unexpected_runtime_event => panic!("the batch contained {unexpected_runtime_event:?}"),
+        match terminal_input.runtime_events.as_slice() {
+            [RuntimeEvent::Quit] => {}
+            unexpected_runtime_events => {
+                panic!("the batch contained {unexpected_runtime_events:?}")
+            }
         }
     }
     let remaining_incoming_event = incoming_receiver
@@ -10269,25 +10283,27 @@ fn incoming_batch_leaves_events_past_the_per_pass_limit_queued() {
     let Incoming::Input(terminal_input) = remaining_incoming_event else {
         panic!("the remaining event came from the session");
     };
-    match terminal_input.runtime_event {
-        RuntimeEvent::Resize {
+    match terminal_input.runtime_events.as_slice() {
+        [RuntimeEvent::Resize {
             client_id: actual_client_id,
             viewport_size,
             pane_area,
             cell_size,
-        } => {
-            assert_eq!(actual_client_id, client_id);
+        }] => {
+            assert_eq!(*actual_client_id, client_id);
             assert_eq!(
-                viewport_size,
+                *viewport_size,
                 Size {
                     column_count: 90,
                     row_count: 30
                 }
             );
-            assert_eq!(pane_area, None);
-            assert_eq!(cell_size, None);
+            assert_eq!(*pane_area, None);
+            assert_eq!(*cell_size, None);
         }
-        unexpected_runtime_event => panic!("the remaining event was {unexpected_runtime_event:?}"),
+        unexpected_runtime_events => {
+            panic!("the remaining events were {unexpected_runtime_events:?}")
+        }
     }
     assert_eq!(
         incoming_receiver.try_recv().err(),
@@ -10322,25 +10338,25 @@ fn incoming_queue_stops_producers_at_its_fixed_capacity() {
     else {
         panic!("the event past the queue limit was not returned as full");
     };
-    let RuntimeEvent::Resize {
+    let [RuntimeEvent::Resize {
         client_id: actual_client_id,
         viewport_size,
         pane_area,
         cell_size,
-    } = terminal_input.runtime_event
+    }] = terminal_input.runtime_events.as_slice()
     else {
         panic!("the full queue returned another event");
     };
-    assert_eq!(actual_client_id, client_id);
+    assert_eq!(*actual_client_id, client_id);
     assert_eq!(
-        viewport_size,
+        *viewport_size,
         Size {
             column_count: 90,
             row_count: 30
         }
     );
-    assert_eq!(pane_area, None);
-    assert_eq!(cell_size, None);
+    assert_eq!(*pane_area, None);
+    assert_eq!(*cell_size, None);
     for _ in 0..INCOMING_QUEUE_CAPACITY {
         let Incoming::Input(terminal_input) = incoming_receiver
             .try_recv()
@@ -10348,7 +10364,7 @@ fn incoming_queue_stops_producers_at_its_fixed_capacity() {
         else {
             panic!("the queue contained a session event");
         };
-        let RuntimeEvent::Quit = terminal_input.runtime_event else {
+        let [RuntimeEvent::Quit] = terminal_input.runtime_events.as_slice() else {
             panic!("the queue contained another input event");
         };
     }
@@ -10366,7 +10382,7 @@ fn terminal_input_queue_stops_the_reader_at_its_fixed_capacity() {
     for _ in 0..INCOMING_QUEUE_CAPACITY {
         input_sender
             .try_send(TerminalInput {
-                runtime_event: RuntimeEvent::Quit,
+                runtime_events: vec![RuntimeEvent::Quit],
                 read_at,
             })
             .expect("an input event inside the queue limit fits");
@@ -10377,38 +10393,43 @@ fn terminal_input_queue_stops_the_reader_at_its_fixed_capacity() {
         row_count: 30,
     };
     let rejected_send_result = input_sender.try_send(TerminalInput {
-        runtime_event: RuntimeEvent::Resize {
+        runtime_events: vec![RuntimeEvent::Resize {
             client_id,
             viewport_size: resized_viewport_size,
             pane_area: None,
             cell_size: None,
-        },
+        }],
         read_at,
     });
 
     let Err(mpsc::TrySendError::Full(TerminalInput {
-        runtime_event:
-            RuntimeEvent::Resize {
-                client_id: actual_client_id,
-                viewport_size,
-                pane_area,
-                cell_size,
-            },
+        runtime_events: rejected_runtime_events,
         read_at: rejected_read_at,
     })) = rejected_send_result
     else {
         panic!("the input event past the queue limit was not returned as full");
     };
-    assert_eq!(actual_client_id, client_id);
-    assert_eq!(viewport_size, resized_viewport_size);
-    assert_eq!(pane_area, None);
-    assert_eq!(cell_size, None);
+    let [RuntimeEvent::Resize {
+        client_id: actual_client_id,
+        viewport_size,
+        pane_area,
+        cell_size,
+    }] = rejected_runtime_events.as_slice()
+    else {
+        panic!(
+            "the input past the queue limit holds its one resize, not {rejected_runtime_events:?}"
+        );
+    };
+    assert_eq!(*actual_client_id, client_id);
+    assert_eq!(*viewport_size, resized_viewport_size);
+    assert_eq!(*pane_area, None);
+    assert_eq!(*cell_size, None);
     assert_eq!(rejected_read_at, read_at);
     for _ in 0..INCOMING_QUEUE_CAPACITY {
         let terminal_input = input_receiver
             .try_recv()
             .expect("each accepted input remains queued");
-        let RuntimeEvent::Quit = terminal_input.runtime_event else {
+        let [RuntimeEvent::Quit] = terminal_input.runtime_events.as_slice() else {
             panic!("the input queue contained another event");
         };
         assert_eq!(terminal_input.read_at, read_at);
@@ -12215,7 +12236,7 @@ fn receive_signal_quit(incoming_receiver: &mpsc::Receiver<Incoming>) {
     else {
         panic!("the channel contained a session event");
     };
-    let RuntimeEvent::Quit = terminal_input.runtime_event else {
+    let [RuntimeEvent::Quit] = terminal_input.runtime_events.as_slice() else {
         panic!("the channel contained another input event");
     };
 }
@@ -12451,7 +12472,9 @@ fn a_key_read_after_the_ambiguity_deadline_fires_the_open_binding_and_then_resol
     assert_eq!(
         sent_requests[1].request_kind,
         IpcRequestKind::Keyboard {
-            key_input: crate::tests::build_key_input_for_chord(build_plain_chord('a')),
+            key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
+                'a'
+            ))],
         },
         "`a` no longer continues the sequence and goes to the pane"
     );
@@ -12847,7 +12870,7 @@ fn a_mouse_event_read_after_the_ambiguity_deadline_sends_the_earlier_round_then_
                 &mut cell_size_query,
                 Some(&mouse_frame),
                 TerminalInput {
-                    runtime_event,
+                    runtime_events: vec![runtime_event],
                     read_at,
                 },
                 &mut sent_border_moves,
@@ -12919,10 +12942,10 @@ fn an_edge_scroll_step_due_before_a_key_was_read_goes_up_before_the_key() {
             &mut cell_size_query,
             Some(&mouse_frame),
             TerminalInput {
-                runtime_event: RuntimeEvent::KeyInput {
+                runtime_events: vec![RuntimeEvent::KeyInput {
                     client_id,
                     key_input: crate::tests::build_key_input_for_chord(build_plain_chord('x')),
-                },
+                }],
                 read_at: scroll_due_time,
             },
             &mut Vec::new(),
@@ -12944,7 +12967,9 @@ fn an_edge_scroll_step_due_before_a_key_was_read_goes_up_before_the_key() {
                 scroll_line_count: 1,
             }]),
             IpcRequestKind::Keyboard {
-                key_input: crate::tests::build_key_input_for_chord(build_plain_chord('x')),
+                key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
+                    'x'
+                ))],
             },
         ]
     );
@@ -13095,14 +13120,14 @@ fn a_tab_hover_in_placement_mode_starts_when_the_pointer_was_read_over_the_tab()
             &mut cell_size_query,
             Some(&mouse_frame),
             TerminalInput {
-                runtime_event: RuntimeEvent::MouseInput {
+                runtime_events: vec![RuntimeEvent::MouseInput {
                     client_id,
                     mouse_input: MouseInput {
                         mouse_kind: MouseKind::Motion,
                         position: tab_cell,
                         modifier_flags: BindingModifierFlags::NONE,
                     },
-                },
+                }],
                 read_at: motion_read_at,
             },
             &mut Vec::new(),
@@ -13140,10 +13165,10 @@ fn two_presses_read_further_apart_than_a_double_click_stay_single_clicks_however
                 &mut cell_size_query,
                 Some(&mouse_frame),
                 TerminalInput {
-                    runtime_event: RuntimeEvent::MouseInput {
+                    runtime_events: vec![RuntimeEvent::MouseInput {
                         client_id,
                         mouse_input: build_mouse_press(get_content_cell(&mouse_frame, 0)),
-                    },
+                    }],
                     read_at: press_read_at,
                 },
                 &mut sent_border_moves,
@@ -13773,4 +13798,323 @@ fn a_placement_preview_ends_running_undock_slides() {
         ),
         None
     );
+}
+
+// ---------------------------- the keys of one read go up in one request ----
+
+/// The press of `key_chord` on `client`'s terminal, as one event of a read.
+fn build_key_press_runtime_event(client: &Client, key_chord: KeyChord) -> RuntimeEvent {
+    RuntimeEvent::KeyInput {
+        client_id: client.get_client_id(),
+        key_input: crate::tests::build_key_input_for_chord(key_chord),
+    }
+}
+
+/// Every request [`handle_terminal_input_event`] sends for `runtime_events`,
+/// the events of one read, oldest first, with a fresh terminal query state, no
+/// painted frame and no held mouse actions.
+fn list_requests_for_one_read(
+    client: &mut Client,
+    runtime_events: Vec<RuntimeEvent>,
+) -> Vec<IpcRequestKind> {
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+    assert_eq!(
+        handle_terminal_input_event(
+            client,
+            &mut uplink,
+            &mut cell_size_query,
+            None,
+            TerminalInput {
+                runtime_events,
+                read_at: Instant::now(),
+            },
+            &mut Vec::new(),
+            &mut Vec::new(),
+        ),
+        ControlFlow::Continue(())
+    );
+    request_receiver
+        .try_iter()
+        .map(|sent_request| sent_request.request_kind)
+        .collect()
+}
+
+/// The presses of `typed_text`, one unmodified key per character.
+fn build_key_inputs_for_text(typed_text: &str) -> Vec<KeyInput> {
+    typed_text
+        .chars()
+        .map(|typed_character| {
+            crate::tests::build_key_input_for_chord(build_plain_chord(typed_character))
+        })
+        .collect()
+}
+
+#[test]
+fn the_keys_of_one_read_that_go_to_the_pane_go_up_in_one_request() {
+    let mut client = build_test_client();
+    let runtime_events = "é-a"
+        .chars()
+        .map(|typed_character| {
+            build_key_press_runtime_event(&client, build_plain_chord(typed_character))
+        })
+        .collect();
+
+    assert_eq!(
+        list_requests_for_one_read(&mut client, runtime_events),
+        vec![IpcRequestKind::Keyboard {
+            key_inputs: build_key_inputs_for_text("é-a"),
+        }]
+    );
+}
+
+#[test]
+fn a_bound_key_in_a_read_goes_up_between_the_keys_before_and_after_it() {
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let runtime_events = vec![
+        build_key_press_runtime_event(&client, build_plain_chord('a')),
+        build_key_press_runtime_event(&client, build_plain_chord('b')),
+        build_key_press_runtime_event(&client, build_lock_chord()),
+        build_key_press_runtime_event(&client, build_plain_chord('c')),
+        build_key_press_runtime_event(&client, build_plain_chord('d')),
+    ];
+
+    let sent_request_kinds = list_requests_for_one_read(&mut client, runtime_events);
+
+    let [keys_before_request_kind, IpcRequestKind::SubmitCommand(lock_command_envelope), keys_after_request_kind] =
+        sent_request_kinds.as_slice()
+    else {
+        panic!("the keys, the lock, then the keys go up, not {sent_request_kinds:?}");
+    };
+    assert_eq!(
+        *keys_before_request_kind,
+        IpcRequestKind::Keyboard {
+            key_inputs: build_key_inputs_for_text("ab"),
+        }
+    );
+    assert_eq!(
+        lock_command_envelope.command,
+        build_expected_lock_command(true)
+    );
+    assert_eq!(
+        lock_command_envelope.command_source,
+        CommandSource::from_key_binding(client_id)
+    );
+    assert_eq!(
+        *keys_after_request_kind,
+        IpcRequestKind::Keyboard {
+            key_inputs: build_key_inputs_for_text("cd"),
+        }
+    );
+}
+
+#[test]
+fn a_key_an_open_sequence_takes_ends_the_request_of_the_keys_before_it() {
+    let mut client = build_test_client();
+    // `<C-p>` is the default pane prefix: it opens a sequence, and `Esc`
+    // leaves it.
+    let runtime_events = vec![
+        build_key_press_runtime_event(&client, build_plain_chord('a')),
+        build_key_press_runtime_event(
+            &client,
+            KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
+        ),
+        build_key_press_runtime_event(
+            &client,
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Esc)),
+        ),
+        build_key_press_runtime_event(&client, build_plain_chord('b')),
+    ];
+
+    assert_eq!(
+        list_requests_for_one_read(&mut client, runtime_events),
+        vec![
+            IpcRequestKind::Keyboard {
+                key_inputs: build_key_inputs_for_text("a"),
+            },
+            IpcRequestKind::Keyboard {
+                key_inputs: build_key_inputs_for_text("b"),
+            },
+        ]
+    );
+    assert_eq!(client.get_pending_key_sequence(), None);
+}
+
+#[test]
+fn a_key_release_in_a_read_goes_up_in_the_request_of_its_read() {
+    let mut client = build_test_client();
+    let a_key_release_input = build_key_release_for_chord(build_plain_chord('a'));
+    let runtime_events = vec![
+        build_key_press_runtime_event(&client, build_plain_chord('a')),
+        RuntimeEvent::KeyInput {
+            client_id: client.get_client_id(),
+            key_input: a_key_release_input.clone(),
+        },
+    ];
+
+    assert_eq!(
+        list_requests_for_one_read(&mut client, runtime_events),
+        vec![IpcRequestKind::Keyboard {
+            key_inputs: vec![
+                crate::tests::build_key_input_for_chord(build_plain_chord('a')),
+                a_key_release_input,
+            ],
+        }]
+    );
+}
+
+#[test]
+fn a_paste_in_a_read_goes_up_between_the_keys_before_and_after_it() {
+    let mut client = build_test_client();
+    let runtime_events = vec![
+        build_key_press_runtime_event(&client, build_plain_chord('a')),
+        RuntimeEvent::HostPaste {
+            client_id: client.get_client_id(),
+            pasted_text: String::from("pasted"),
+        },
+        build_key_press_runtime_event(&client, build_plain_chord('b')),
+    ];
+
+    assert_eq!(
+        list_requests_for_one_read(&mut client, runtime_events),
+        vec![
+            IpcRequestKind::Keyboard {
+                key_inputs: build_key_inputs_for_text("a"),
+            },
+            IpcRequestKind::Paste {
+                pasted_text: String::from("pasted"),
+            },
+            IpcRequestKind::Keyboard {
+                key_inputs: build_key_inputs_for_text("b"),
+            },
+        ]
+    );
+}
+
+#[test]
+fn each_read_of_keys_for_the_pane_reaches_it_in_one_write_at_every_split() {
+    let typed_bytes = "echo 1 é-ü-ñ-ç\r".as_bytes();
+    for split_index in 0..=typed_bytes.len() {
+        let (event_sender, event_receiver) = mpsc::channel();
+        let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+            InboxSink::from_event_sender(event_sender),
+        )));
+        let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
+        let mut server = Server::from_runtime_parts(pty_backend, event_receiver);
+        let server_client_id = server
+            .bootstrap_local(SessionId::new(), TEST_VIEWPORT_SIZE, SystemTime::now())
+            .expect("bootstrap");
+        let pane_id = fake_pty_backend.list_spawned_pane_ids()[0];
+        let mut client = build_test_client();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let mut uplink = build_test_uplink(request_sender);
+        let mut cell_size_query =
+            terminal::CellSizeQuery::from_current_measurement(None, false, false);
+        let mut terminal_input_parser = Parser::default();
+        let mut key_read_count = 0;
+
+        for read_bytes in [&typed_bytes[..split_index], &typed_bytes[split_index..]] {
+            terminal_input_parser.process_input_bytes(read_bytes);
+            let mut runtime_events = Vec::new();
+            while let Some(terminal_event) = terminal_input_parser.remove_next_pending_event() {
+                let Event::Key(host_key_event) = terminal_event else {
+                    panic!("typed text parses to keys only, not {terminal_event:?}");
+                };
+                runtime_events.push(RuntimeEvent::KeyInput {
+                    client_id: client.get_client_id(),
+                    key_input: decode_key_event(host_key_event),
+                });
+            }
+            if runtime_events.is_empty() {
+                continue;
+            }
+            key_read_count += 1;
+            assert_eq!(
+                handle_terminal_input_event(
+                    &mut client,
+                    &mut uplink,
+                    &mut cell_size_query,
+                    None,
+                    TerminalInput {
+                        runtime_events,
+                        read_at: Instant::now(),
+                    },
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                ),
+                ControlFlow::Continue(())
+            );
+        }
+        for sent_request in request_receiver.try_iter() {
+            let IpcRequestKind::Keyboard { key_inputs } = sent_request.request_kind else {
+                panic!("typed text sends keys only, not {sent_request:?}");
+            };
+            server.handle_key_inputs(server_client_id, &key_inputs);
+        }
+
+        let pane_writes = fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes");
+        assert_eq!(pane_writes.len(), key_read_count, "split at {split_index}");
+        assert_eq!(pane_writes.concat(), typed_bytes, "split at {split_index}");
+    }
+}
+
+#[test]
+fn a_restart_holds_the_pane_keys_of_one_read_as_one_input() {
+    let mut viewer = TestViewerWithoutLink::new();
+    let client_id = viewer.client.get_client_id();
+    let runtime_events = vec![
+        build_key_press_runtime_event(&viewer.client, build_plain_chord('a')),
+        build_key_press_runtime_event(&viewer.client, build_plain_chord('b')),
+        RuntimeEvent::HostPaste {
+            client_id,
+            pasted_text: String::from("pasted"),
+        },
+        build_key_press_runtime_event(&viewer.client, build_plain_chord('c')),
+    ];
+    viewer.queue_incoming_event(Incoming::Input(Box::new(TerminalInput {
+        runtime_events,
+        read_at: Instant::now(),
+    })));
+    let (joined_answer, _session_connection) = build_joined_answer(client_id);
+    viewer.queue_incoming_event(joined_answer);
+    let (attempt_rejoin, _attempt_start_receiver, _attempt_release_sender) =
+        build_blocked_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::RestartRejoin {
+            input_hold: Some(InputHold::default()),
+        },
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    let Ok((_joined_session, held_inputs)) = stretch_result else {
+        panic!("the queued join ends the stretch");
+    };
+    assert_eq!(
+        held_inputs,
+        vec![
+            HeldInput::Keyboard(build_key_inputs_for_text("ab")),
+            HeldInput::Paste(String::from("pasted")),
+            HeldInput::Keyboard(build_key_inputs_for_text("c")),
+        ]
+    );
+}
+
+#[test]
+fn a_restart_hold_counts_each_key_of_a_read() {
+    let mut input_hold = InputHold::default();
+    for _ in 0..MAX_HELD_INPUT_COUNT - 1 {
+        assert!(input_hold.hold_input(HeldInput::Paste(String::from("p"))));
+    }
+
+    assert!(!input_hold.hold_input(HeldInput::Keyboard(build_key_inputs_for_text("ab"))));
+    assert_eq!(input_hold.held_input_count, MAX_HELD_INPUT_COUNT - 1);
+    assert!(input_hold.hold_input(HeldInput::Keyboard(build_key_inputs_for_text("a"))));
+    assert_eq!(input_hold.held_input_count, MAX_HELD_INPUT_COUNT);
+    assert_eq!(input_hold.held_inputs.len(), MAX_HELD_INPUT_COUNT);
 }

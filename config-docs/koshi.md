@@ -373,6 +373,46 @@ report for the Shift key alone, such as `^[[57441;2u`. A terminal that does not
 report Shift+Enter prints `^M`. The command restores your terminal before it
 exits.
 
+### Non-ASCII typing in a pane with no UTF-8 locale
+
+Koshi writes the keys of one read of your terminal to the pane in one write,
+in the order you typed them. Typing `é` writes the two bytes `C3 A9`.
+
+Bash, and every other program that uses GNU readline, can read these bytes as
+Meta keys. Readline does this when the pane's locale is `C` or `POSIX`, which
+is the locale when `LC_ALL`, `LC_CTYPE` and `LANG` are all unset. Servers and
+containers often have no locale set. In that locale, readline's `convert-meta`
+setting is on: a byte of `0x80` or more that readline reads as the first byte
+after its input queue is empty becomes `ESC` and the byte with its top bit
+cleared. A byte of `0x80` or more that is already queued behind a typed
+character goes into the line as it is.
+
+Example: typing `echo é-ü` one key at a time gives this:
+
+| Key | Bytes | Readline reads | Result |
+|---|---|---|---|
+| `é` | `C3 A9` | `M-C`, then `M-)` | `M-C` runs `capitalize-word`; `M-)` is unbound, and the `é` is lost |
+| `-` | `2D` | `-` | `-` goes into the line |
+| `ü` | `C3 BC` | `M-C`, then `M-<` | `M-<` puts the oldest history line on the command line |
+
+When `echo é-ü` arrives in one write, such as from `koshi input`, every byte
+after the `e` is queued, and the line reads `echo é-ü`. Typing one key at a
+time gives readline the same bytes in every terminal and in tmux.
+
+To type non-ASCII text in such a pane, do one of these:
+
+1. Set a UTF-8 locale for the shell in the pane, such as
+   `export LANG=C.UTF-8`. `locale -a` lists the locales the system has.
+2. Add these lines to `~/.inputrc`, then start a new shell:
+
+   ```
+   set convert-meta off
+   set output-meta on
+   ```
+
+   `convert-meta off` keeps every byte as text. `output-meta on` shows `é` on
+   the command line in place of `\303\251`.
+
 ## `logging`
 
 Neither side owns these: every koshi process reads them for its own log file.

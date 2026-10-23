@@ -402,6 +402,10 @@ impl reader::EventSource for EventSource {
             }
         }
     }
+
+    fn remove_next_parsed_event(&mut self) -> Option<Event> {
+        self.terminal_input_parser.remove_next_pending_event()
+    }
 }
 
 /// A cloneable interruption handle for one Windows input source.

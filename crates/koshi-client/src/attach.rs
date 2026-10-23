@@ -1747,9 +1747,9 @@ enum Incoming {
         /// The chunk.
         image_chunk_frame: ImageChunkFrame,
     },
-    /// One event from this terminal and the instant it was read: an event the
-    /// input thread read, or this terminal hanging up as a termination signal
-    /// or a console close reports it, boxed.
+    /// The events of one read of this terminal and the instant it was read,
+    /// or this terminal hanging up as a termination signal or a console close
+    /// reports it, boxed.
     Input(Box<TerminalInput>),
     /// What one attempt to get the link back ended with, boxed. Only
     /// [`run_without_link`] starts an attempt, one at a time.
@@ -3047,7 +3047,10 @@ fn run_attachment<B: Backend, W: Write>(
                 // read, so its hangup is this terminal going away while the
                 // session runs on.
                 Incoming::Input(terminal_input)
-                    if matches!(terminal_input.runtime_event, RuntimeEvent::Quit) =>
+                    if matches!(
+                        terminal_input.runtime_events.as_slice(),
+                        [RuntimeEvent::Quit]
+                    ) =>
                 {
                     attachment_ending = Some(AttachmentEnding::TerminalGone);
                     break;
@@ -3961,9 +3964,9 @@ impl LinkRecovery {
     /// Hold `held_input` for a restarted session, oldest first. A redial drops
     /// it, and so does a rejoin while dock/undock mode, pane placement mode,
     /// the move chooser, or floating pane move mode is on for `client`. An
-    /// input past [`MAX_HELD_INPUT_COUNT`] inputs or past
-    /// [`MAX_FRAME_BYTE_COUNT`] bytes of paste text drops everything held, and
-    /// everything typed after it during this rejoin.
+    /// input past [`MAX_HELD_INPUT_COUNT`] keys, fired bindings and pastes, or
+    /// past [`MAX_FRAME_BYTE_COUNT`] bytes of paste text, drops everything
+    /// held, and everything typed after it during this rejoin.
     ///
     /// A held [`HeldInput::LockCommand`] also switches `client` to its lock
     /// mode, as [`Client::apply_lock_command`] says. A lock command that is
@@ -4015,8 +4018,12 @@ impl LinkRecovery {
 /// they were typed.
 #[derive(Debug, Default)]
 struct InputHold {
-    /// The held input, oldest first. At most [`MAX_HELD_INPUT_COUNT`].
+    /// The held input, oldest first.
     held_inputs: Vec<HeldInput>,
+    /// The keys, fired bindings and pastes in `held_inputs`: a
+    /// [`HeldInput::Keyboard`] counts each of its keys. At most
+    /// [`MAX_HELD_INPUT_COUNT`].
+    held_input_count: usize,
     /// The bytes of paste text in `held_inputs`. At most
     /// [`MAX_FRAME_BYTE_COUNT`].
     held_paste_byte_count: usize,
@@ -4029,21 +4036,23 @@ struct InputHold {
 impl InputHold {
     /// Add `held_input` after the inputs already held and return `true`.
     /// Returns `false`, holding nothing more, when the hold would then carry
-    /// more than [`MAX_HELD_INPUT_COUNT`] inputs or more than
-    /// [`MAX_FRAME_BYTE_COUNT`] bytes of paste text.
+    /// more than [`MAX_HELD_INPUT_COUNT`] keys, fired bindings and pastes, or
+    /// more than [`MAX_FRAME_BYTE_COUNT`] bytes of paste text. A
+    /// [`HeldInput::Keyboard`] of 2 keys added to 1023 held inputs is refused.
     fn hold_input(&mut self, held_input: HeldInput) -> bool {
-        let paste_byte_count = match &held_input {
-            HeldInput::Paste(pasted_text) => pasted_text.len(),
-            HeldInput::Keyboard(_) | HeldInput::DispatchPlan(_) | HeldInput::LockCommand { .. } => {
-                0
-            }
+        let (added_input_count, paste_byte_count) = match &held_input {
+            HeldInput::Keyboard(key_inputs) => (key_inputs.len(), 0),
+            HeldInput::Paste(pasted_text) => (1, pasted_text.len()),
+            HeldInput::DispatchPlan(_) | HeldInput::LockCommand { .. } => (1, 0),
         };
+        let held_input_count = self.held_input_count.saturating_add(added_input_count);
         let held_paste_byte_count = self.held_paste_byte_count.saturating_add(paste_byte_count);
-        if self.held_inputs.len() >= MAX_HELD_INPUT_COUNT
+        if held_input_count > MAX_HELD_INPUT_COUNT
             || held_paste_byte_count > MAX_FRAME_BYTE_COUNT as usize
         {
             return false;
         }
+        self.held_input_count = held_input_count;
         self.held_paste_byte_count = held_paste_byte_count;
         self.held_inputs.push(held_input);
         true
@@ -4054,9 +4063,9 @@ impl InputHold {
 /// joins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HeldInput {
-    /// A key the base keymap passed through, or a key release. Sent as
-    /// [`IpcRequestKind::Keyboard`].
-    Keyboard(KeyInput),
+    /// The keys of one read the base keymap passed through, and the key
+    /// releases, oldest first. Sent as one [`IpcRequestKind::Keyboard`].
+    Keyboard(Vec<KeyInput>),
     /// The plan of a binding the base keymap fired, other than the quit
     /// binding and a lock binding. Run as [`Uplink::run_dispatch_plan`] runs
     /// it.
@@ -4093,7 +4102,9 @@ enum HeldInput {
 /// the channel then sends `Leaving { is_returning: true }` when the channel is
 /// dropped, as [`JoinedSessionGuard`] states. Every other key and paste is held
 /// through [`LinkRecovery::hold_input`] for a restart rejoin, and dropped for a
-/// redial, as [`hold_fired_binding`] says for a binding; a key that opens a
+/// redial, as [`hold_fired_binding`] says for a binding. The keys of one read
+/// that go to the pane are held as one [`HeldInput::Keyboard`], which ends at
+/// any event or key outcome that is not such a key; a key that opens a
 /// sequence keeps its breadcrumb. A held lock binding switches the lock mode
 /// the next key resolves in: `<C-l>` then `<C-l>` holds `SetLockMode` for
 /// `Locked`, then for `Normal`. Each input event is judged at the instant the
@@ -4136,7 +4147,7 @@ fn run_without_link<B: Backend>(
         spawn_rejoin_attempt(Arc::clone(attempt_rejoin), incoming_sender.clone());
     }
     let mut leftover_events = leftover_events.into_iter();
-    let rejoin_result = loop {
+    let rejoin_result = 'stretch: loop {
         let current_time = Instant::now();
         let link_status = match &mut link_recovery {
             LinkRecovery::Redial(redial_schedule) => {
@@ -4222,15 +4233,15 @@ fn run_without_link<B: Backend>(
             },
             Incoming::Input(terminal_input) => {
                 let TerminalInput {
-                    runtime_event,
+                    runtime_events,
                     read_at,
                 } = *terminal_input;
-                if matches!(runtime_event, RuntimeEvent::Quit) {
+                if matches!(runtime_events.as_slice(), [RuntimeEvent::Quit]) {
                     break Err(AttachmentEnding::TerminalGone);
                 }
                 client.get_input_read_clock().note_input_taken(read_at);
-                // A sequence whose deadline passed before this event was read
-                // fires first, and the event is handled after it.
+                // A sequence whose deadline passed before this read fires
+                // first, and the read's events are handled after it.
                 if let Some(expired_bound_action) = client.expire_key_sequence(read_at) {
                     if hold_fired_binding(&mut link_recovery, client, uplink, expired_bound_action)
                         .is_break()
@@ -4238,44 +4249,66 @@ fn run_without_link<B: Backend>(
                         break Err(AttachmentEnding::LeftWhileReconnecting);
                     }
                 }
-                match runtime_event {
-                    RuntimeEvent::KeyInput { key_input, .. } => {
-                        let Some(chord) = key_input.to_binding_chord() else {
-                            link_recovery.hold_input(client, HeldInput::Keyboard(key_input));
-                            continue;
-                        };
-                        match client.resolve_key(chord, read_at) {
-                            KeyOutcome::Fire(bound_action) => {
-                                if hold_fired_binding(
-                                    &mut link_recovery,
-                                    client,
-                                    uplink,
-                                    bound_action,
-                                )
-                                .is_break()
-                                {
-                                    break Err(AttachmentEnding::LeftWhileReconnecting);
+                // The keys of this read bound for the pane, held as one input
+                // when an event that is not such a key comes, and at the end
+                // of the read.
+                let mut pane_key_inputs = Vec::new();
+                for runtime_event in runtime_events {
+                    if !matches!(runtime_event, RuntimeEvent::KeyInput { .. }) {
+                        hold_pane_key_inputs(&mut link_recovery, client, &mut pane_key_inputs);
+                    }
+                    match runtime_event {
+                        RuntimeEvent::KeyInput { key_input, .. } => {
+                            let Some(chord) = key_input.to_binding_chord() else {
+                                pane_key_inputs.push(key_input);
+                                continue;
+                            };
+                            match client.resolve_key(chord, read_at) {
+                                KeyOutcome::Fire(bound_action) => {
+                                    hold_pane_key_inputs(
+                                        &mut link_recovery,
+                                        client,
+                                        &mut pane_key_inputs,
+                                    );
+                                    if hold_fired_binding(
+                                        &mut link_recovery,
+                                        client,
+                                        uplink,
+                                        bound_action,
+                                    )
+                                    .is_break()
+                                    {
+                                        break 'stretch Err(
+                                            AttachmentEnding::LeftWhileReconnecting,
+                                        );
+                                    }
+                                }
+                                KeyOutcome::PassThrough(_) => pane_key_inputs.push(key_input),
+                                KeyOutcome::Pending | KeyOutcome::Discard => {
+                                    hold_pane_key_inputs(
+                                        &mut link_recovery,
+                                        client,
+                                        &mut pane_key_inputs,
+                                    );
                                 }
                             }
-                            KeyOutcome::PassThrough(_) => {
-                                link_recovery.hold_input(client, HeldInput::Keyboard(key_input));
-                            }
-                            KeyOutcome::Pending | KeyOutcome::Discard => {}
                         }
+                        RuntimeEvent::HostPaste { pasted_text, .. } => {
+                            link_recovery.hold_input(client, HeldInput::Paste(pasted_text));
+                        }
+                        RuntimeEvent::CellSize { cell_size, .. } => {
+                            let _ = cell_size_query.accept_cell_size_reply(cell_size);
+                        }
+                        RuntimeEvent::OuterTerminalFocusLost { .. } => {
+                            client.handle_outer_terminal_focus_lost();
+                        }
+                        // A resize and a mouse event are dropped and not
+                        // recorded; the new link reads the terminal's size
+                        // itself.
+                        _ => {}
                     }
-                    RuntimeEvent::HostPaste { pasted_text, .. } => {
-                        link_recovery.hold_input(client, HeldInput::Paste(pasted_text));
-                    }
-                    RuntimeEvent::CellSize { cell_size, .. } => {
-                        let _ = cell_size_query.accept_cell_size_reply(cell_size);
-                    }
-                    RuntimeEvent::OuterTerminalFocusLost { .. } => {
-                        client.handle_outer_terminal_focus_lost();
-                    }
-                    // A resize and a mouse event are dropped and not recorded; the
-                    // new link reads the terminal's size itself.
-                    _ => {}
                 }
+                hold_pane_key_inputs(&mut link_recovery, client, &mut pane_key_inputs);
             }
         }
     };
@@ -4339,6 +4372,20 @@ fn build_redial_answer(dial_result: Result<JoinedSession, DialError>) -> RejoinA
     }
 }
 
+/// Hold `pane_key_inputs`, the keys of one read that go to the pane, as one
+/// [`HeldInput::Keyboard`] through [`LinkRecovery::hold_input`], and leave it
+/// empty. Holds nothing when it has no key.
+fn hold_pane_key_inputs(
+    link_recovery: &mut LinkRecovery,
+    client: &mut Client,
+    pane_key_inputs: &mut Vec<KeyInput>,
+) {
+    if pane_key_inputs.is_empty() {
+        return;
+    }
+    link_recovery.hold_input(client, HeldInput::Keyboard(take(pane_key_inputs)));
+}
+
 /// Answer one binding that fired while this viewer has no link, against the
 /// action table. Returns [`ControlFlow::Break`] for the quit binding, holding
 /// nothing, and [`ControlFlow::Continue`] for every other binding.
@@ -4371,8 +4418,8 @@ fn hold_fired_binding(
     ControlFlow::Continue(())
 }
 
-/// Send what a restart rejoin held up a new connection, oldest first: a key as
-/// [`IpcRequestKind::Keyboard`], a binding's plan through
+/// Send what a restart rejoin held up a new connection, oldest first: the keys
+/// of one read as one [`IpcRequestKind::Keyboard`], a binding's plan through
 /// [`Uplink::run_dispatch_plan`] with no painted frame, a lock command as `SetLockMode` under its
 /// own command id, and a paste as [`IpcRequestKind::Paste`].
 ///
@@ -4385,8 +4432,8 @@ fn send_held_inputs(client: &mut Client, uplink: &mut Uplink, held_inputs: Vec<H
     client.set_pending_lock_command_id(None);
     for held_input in held_inputs {
         match held_input {
-            HeldInput::Keyboard(key_input) => {
-                uplink.send_request(IpcRequestKind::Keyboard { key_input });
+            HeldInput::Keyboard(key_inputs) => {
+                uplink.send_request(IpcRequestKind::Keyboard { key_inputs });
             }
             HeldInput::DispatchPlan(dispatch_plan) => {
                 uplink.run_dispatch_plan(client, dispatch_plan, None);
@@ -5234,7 +5281,7 @@ impl TerminalCloseWatch {
                     for _ in termination_signals.forever() {
                         should_run_default_action.store(true, Ordering::SeqCst);
                         let _ = incoming_sender.send(Incoming::Input(Box::new(TerminalInput {
-                            runtime_event: RuntimeEvent::Quit,
+                            runtime_events: vec![RuntimeEvent::Quit],
                             read_at: Instant::now(),
                         })));
                     }
@@ -5377,7 +5424,7 @@ unsafe extern "system" fn handle_console_control(control_type: u32) -> windows_s
     }
     let is_quit_sent = incoming_sender
         .send(Incoming::Input(Box::new(TerminalInput {
-            runtime_event: RuntimeEvent::Quit,
+            runtime_events: vec![RuntimeEvent::Quit],
             read_at: Instant::now(),
         })))
         .is_ok();
@@ -5415,7 +5462,12 @@ fn build_input_channel() -> (
 /// instant the input thread read it: a key that opens a sequence that is both a
 /// binding and a longer one's prefix sets that sequence's ambiguity deadline
 /// one chord timeout after `read_at`. A press that goes to the pane's program
-/// also ends the selection gesture under way. A resize records the viewport and
+/// also ends the selection gesture under way. A key that goes to the pane is
+/// added to `pane_key_inputs`, and sends nothing. Every other key outcome
+/// first sends `pane_key_inputs` as one [`IpcRequestKind::Keyboard`]
+/// ([`send_pane_key_inputs`]): a fired binding, a key a sequence holds, and a
+/// discarded key. The caller sends `pane_key_inputs` before any other event,
+/// and at the end of the read. A resize records the viewport and
 /// pane area and sends both to the session. Pasted text goes up whole and ends
 /// the gesture too; the session writes it into the pane, bracketing it when
 /// that pane asked for bracketed paste. A paste of more text than one frame
@@ -5440,6 +5492,7 @@ fn process_runtime_input_with_cell_size(
     mouse_frame: Option<&MouseFrame>,
     runtime_event: RuntimeEvent,
     read_at: Instant,
+    pane_key_inputs: &mut Vec<KeyInput>,
 ) -> ControlFlow<()> {
     match runtime_event {
         RuntimeEvent::CellSize { cell_size, .. } => {
@@ -5460,26 +5513,29 @@ fn process_runtime_input_with_cell_size(
             // while on; every other release goes to the focused pane.
             let Some(chord) = key_input.to_binding_chord() else {
                 if client.find_viewer_local_input_mode().is_none() {
-                    uplink.send_request(IpcRequestKind::Keyboard { key_input });
+                    pane_key_inputs.push(key_input);
                 }
                 return ControlFlow::Continue(());
             };
             match client.resolve_key(chord, read_at) {
                 KeyOutcome::Fire(bound_action) => {
+                    send_pane_key_inputs(uplink, pane_key_inputs);
                     return uplink.submit_bound_action(client, bound_action, mouse_frame);
                 }
                 KeyOutcome::PassThrough(_) => {
                     // The key belongs to the program in the pane, so a
                     // selection gesture over it is over.
                     client.end_mouse_selection();
-                    uplink.send_request(IpcRequestKind::Keyboard { key_input });
+                    pane_key_inputs.push(key_input);
                 }
-                // Held or dropped: nothing reaches the session. A chord that
-                // opens or closes a sequence moves the breadcrumb the hint
-                // bar draws. An `Esc` that ends a grab-handle drag clears the
-                // breadcrumb, and the floating pane is drawn where the frame
-                // places it. Any other discard draws nothing.
-                KeyOutcome::Pending | KeyOutcome::Discard => {}
+                // Held or dropped: nothing more reaches the session. A chord
+                // that opens or closes a sequence moves the breadcrumb the
+                // hint bar draws. An `Esc` that ends a grab-handle drag clears
+                // the breadcrumb, and the floating pane is drawn where the
+                // frame places it. Any other discard draws nothing.
+                KeyOutcome::Pending | KeyOutcome::Discard => {
+                    send_pane_key_inputs(uplink, pane_key_inputs);
+                }
             }
         }
         RuntimeEvent::Resize {
@@ -5562,17 +5618,25 @@ fn expire_input_timers(
     ControlFlow::Continue(())
 }
 
-/// Answer one input event read from this terminal, other than its hangup,
-/// against `mouse_frame`, the frame this terminal last painted. Requests leave
-/// `uplink` in the order of the inputs that caused them.
+/// Answer the events of one read of this terminal, other than its hangup,
+/// oldest first, against `mouse_frame`, the frame this terminal last painted.
+/// Requests leave `uplink` in the order of the inputs that caused them.
 ///
-/// The event is judged at `terminal_input.read_at`, the instant the input
-/// thread read it. The loop records that it took the event
+/// The events are judged at `terminal_input.read_at`, the instant the input
+/// thread read them. The loop records that it took the read
 /// ([`InputReadClock::note_input_taken`]), and every input timer due at that
 /// instant runs first ([`expire_input_timers`]). Example: `<C-y>` binds
 /// `core:new-tab` and opens `<C-y> a`, the chord timeout is 500 ms, and a paste
 /// is read 600 ms after `<C-y>`: the `NewTab` command goes up, then the paste.
-/// Then:
+///
+/// The keys of the read that go to the pane go up as one
+/// [`IpcRequestKind::Keyboard`]. Any event that is not a key, and any key
+/// outcome that does not go to the pane, sends the keys collected before it
+/// first, so the keys after it go up as a second request. Example: `ab<C-t>cd`
+/// in one read, with `<C-t>` bound to `core:new-tab`, sends `Keyboard` for `a`
+/// and `b`, then `NewTab`, then `Keyboard` for `c` and `d`.
+///
+/// Each event, in turn:
 ///
 /// - A mouse event that pane placement takes
 ///   ([`Client::handle_placement_mouse`]) writes the held mouse actions as one
@@ -5583,7 +5647,8 @@ fn expire_input_timers(
 ///   its end. Before the first paint, `mouse_frame` is `None`, and a mouse
 ///   event changes nothing.
 /// - A loss of the outer terminal's focus ends what
-///   [`Client::handle_outer_terminal_focus_lost`] names, and sends nothing.
+///   [`Client::handle_outer_terminal_focus_lost`] names, and sends nothing of
+///   its own.
 /// - Every other event writes the held mouse actions as one round, then sends
 ///   its own requests
 ///   ([`process_runtime_input_with_cell_size`]).
@@ -5593,8 +5658,8 @@ fn expire_input_timers(
 /// `FocusPane` that `Tab` sends.
 ///
 /// Returns [`ControlFlow::Break`] when a key, or a sequence whose deadline
-/// passed before the event was read, fired the quit binding, and
-/// [`ControlFlow::Continue`] otherwise.
+/// passed before the events were read, fired the quit binding, handling none
+/// of the read's events after it, and [`ControlFlow::Continue`] otherwise.
 fn handle_terminal_input_event(
     client: &mut Client,
     uplink: &mut Uplink,
@@ -5605,7 +5670,7 @@ fn handle_terminal_input_event(
     pending_mouse_actions: &mut Vec<MouseAction>,
 ) -> ControlFlow<()> {
     let TerminalInput {
-        runtime_event,
+        runtime_events,
         read_at,
     } = terminal_input;
     client.get_input_read_clock().note_input_taken(read_at);
@@ -5621,42 +5686,65 @@ fn handle_terminal_input_event(
     {
         return ControlFlow::Break(());
     }
-    match runtime_event {
-        RuntimeEvent::MouseInput { mouse_input, .. } => {
-            let Some(mouse_frame) = mouse_frame else {
-                return ControlFlow::Continue(());
-            };
-            match client.handle_placement_mouse(mouse_input, mouse_frame, read_at) {
-                Some(placement_input_action) => {
-                    flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);
-                    uplink.submit_placement_input_action(client, placement_input_action);
+    let mut pane_key_inputs = Vec::new();
+    for runtime_event in runtime_events {
+        if !matches!(runtime_event, RuntimeEvent::KeyInput { .. }) {
+            send_pane_key_inputs(uplink, &mut pane_key_inputs);
+        }
+        match runtime_event {
+            RuntimeEvent::MouseInput { mouse_input, .. } => {
+                let Some(mouse_frame) = mouse_frame else {
+                    continue;
+                };
+                match client.handle_placement_mouse(mouse_input, mouse_frame, read_at) {
+                    Some(placement_input_action) => {
+                        flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);
+                        uplink.submit_placement_input_action(client, placement_input_action);
+                    }
+                    None => handle_mouse_event(
+                        client,
+                        mouse_frame,
+                        mouse_input,
+                        read_at,
+                        pending_mouse_actions,
+                    ),
                 }
-                None => handle_mouse_event(
-                    client,
-                    mouse_frame,
-                    mouse_input,
-                    read_at,
-                    pending_mouse_actions,
-                ),
             }
-            ControlFlow::Continue(())
-        }
-        RuntimeEvent::OuterTerminalFocusLost { .. } => {
-            client.handle_outer_terminal_focus_lost();
-            ControlFlow::Continue(())
-        }
-        other_runtime_event => {
-            flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);
-            process_runtime_input_with_cell_size(
-                client,
-                uplink,
-                cell_size_query,
-                mouse_frame,
-                other_runtime_event,
-                read_at,
-            )
+            RuntimeEvent::OuterTerminalFocusLost { .. } => {
+                client.handle_outer_terminal_focus_lost();
+            }
+            other_runtime_event => {
+                flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);
+                if process_runtime_input_with_cell_size(
+                    client,
+                    uplink,
+                    cell_size_query,
+                    mouse_frame,
+                    other_runtime_event,
+                    read_at,
+                    &mut pane_key_inputs,
+                )
+                .is_break()
+                {
+                    return ControlFlow::Break(());
+                }
+            }
         }
     }
+    send_pane_key_inputs(uplink, &mut pane_key_inputs);
+    ControlFlow::Continue(())
+}
+
+/// Send `pane_key_inputs`, keys of one read that go to the pane, as one
+/// [`IpcRequestKind::Keyboard`] request, and leave it empty. Sends nothing
+/// when it has no key.
+fn send_pane_key_inputs(uplink: &mut Uplink, pane_key_inputs: &mut Vec<KeyInput>) {
+    if pane_key_inputs.is_empty() {
+        return;
+    }
+    uplink.send_request(IpcRequestKind::Keyboard {
+        key_inputs: take(pane_key_inputs),
+    });
 }
 
 /// Draw `render_snapshot`, a painted frame whose image records are complete,

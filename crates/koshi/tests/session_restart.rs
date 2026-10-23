@@ -2384,14 +2384,14 @@ fn a_resume_file_whose_header_does_not_read_comes_back_as_one_fresh_shell_showin
     attached_client_stream.send_session_request(
         3,
         IpcRequestKind::Keyboard {
-            key_input: KeyInput {
+            key_inputs: vec![KeyInput {
                 key: KeyIdentity::Key(Key::Char('x')),
                 key_event_kind: KeyEventKind::Press,
                 shifted_key: None,
                 base_layout_key: None,
                 associated_text: String::new(),
                 modifier_flags: KeyModifierFlags::NONE,
-            },
+            }],
         },
     );
     let cleared_frame = attached_client_stream.receive_painted_frame_when(|painted_frame| {

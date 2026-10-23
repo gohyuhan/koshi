@@ -147,16 +147,16 @@ impl Server {
             RuntimeEvent::KeyInput { client_id, .. } => {
                 tracing::debug!(%client_id, "dropping a key no attached viewer resolved");
             }
-            // An attached client's viewer already read this event: its keymap
-            // bound nothing to it, or no chord could name it. The pane write
-            // reads the whole event: the receiving pane's keyboard flags decide
-            // which of its fields reach that pane.
+            // An attached client's viewer already read these events: its
+            // keymap bound nothing to them, or no chord could name them. The
+            // pane write reads each whole event: the receiving pane's keyboard
+            // flags decide which of its fields reach that pane.
             RuntimeEvent::ClientKeyboard {
                 client_id,
-                key_input,
+                key_inputs,
             } => {
                 self.allow_client_frame_now(client_id);
-                self.handle_key_input(client_id, &key_input);
+                self.handle_key_inputs(client_id, &key_inputs);
             }
             // An attached client's viewer already read this mouse event against
             // the frame it painted: the round names every pane it touches. The

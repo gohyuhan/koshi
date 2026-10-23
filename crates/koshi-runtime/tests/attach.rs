@@ -1216,7 +1216,7 @@ fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
                 .send(&IpcRequest {
                     request_id: 4,
                     request_kind: IpcRequestKind::Keyboard {
-                        key_input: build_key_input_for_chord(TYPED_KEY_CHORD),
+                        key_inputs: vec![build_key_input_for_chord(TYPED_KEY_CHORD)],
                     },
                 })
                 .expect("send key press");

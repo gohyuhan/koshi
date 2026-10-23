@@ -108,16 +108,18 @@ pub enum RuntimeEvent {
         /// The complete key event the client's terminal reported.
         key_input: KeyInput,
     },
-    /// One keyboard event an attached client sent for the pane it is typing
-    /// into: its keymap bound nothing to the event, or no chord could name it.
+    /// The keyboard events an attached client sent for the pane it is typing
+    /// into, from one read of its terminal: its keymap bound nothing to each
+    /// event, or no chord could name it.
     ///
-    /// Carries every field the client's terminal reported, a release and a key
-    /// no keybinding can name included.
+    /// Each event carries every field the client's terminal reported, a
+    /// release and a key no keybinding can name included.
     ClientKeyboard {
-        /// Client whose keymap left the event unbound.
+        /// Client whose keymap left the events unbound.
         client_id: ClientId,
-        /// The keyboard event the client read from its terminal.
-        key_input: KeyInput,
+        /// The keyboard events the client read from its terminal, oldest
+        /// first.
+        key_inputs: Vec<KeyInput>,
     },
     /// One round of mouse actions an attached client's viewer decided for one
     /// host mouse event, in the order the session must run them.

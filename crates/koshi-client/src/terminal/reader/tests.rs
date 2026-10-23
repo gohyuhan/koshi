@@ -14,6 +14,10 @@ impl EventSource for ProbeEventSource {
             .pop_front()
             .unwrap_or(Ok(None))
     }
+
+    fn remove_next_parsed_event(&mut self) -> Option<Event> {
+        None
+    }
 }
 
 fn build_terminal_key_event(character: char) -> Event {
